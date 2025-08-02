@@ -1,0 +1,12 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "module": "commonjs",
+    "outDir": "../../dist/packages/core",
+    "declaration": true,
+    "types": ["node"],
+    "rootDir": "../.."
+  },
+  "include": ["src/**/*", "../shared/src/**/*"],
+  "exclude": ["jest.config.ts", "src/**/*.spec.ts", "src/**/*.test.ts"]
+}

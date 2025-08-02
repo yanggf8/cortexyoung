@@ -1,0 +1,24 @@
+Compiling TypeScript files for project "core"...
+[1m[31m[96mpackages/core/src/chunker.ts[0m:[93m1[0m:[93m38[0m - [91merror[0m[90m TS6059: [0mFile '/home/yanggf/a/cortexyoung/packages/shared/src/index.ts' is not under 'rootDir' '/home/yanggf/a/cortexyoung/packages/core'. 'rootDir' is expected to contain all source files.[39m[22m
+[1m[31m  The file is in the program because:[39m[22m
+[1m[31m    Imported via '@cortexyoung/shared' from file '/home/yanggf/a/cortexyoung/packages/core/src/chunker.ts'[39m[22m
+[1m[31m    Imported via '@cortexyoung/shared' from file '/home/yanggf/a/cortexyoung/packages/core/src/indexer.ts'[39m[22m
+[1m[31m    Imported via '@cortexyoung/shared' from file '/home/yanggf/a/cortexyoung/packages/core/src/searcher.ts'[39m[22m
+[1m[31m    Imported via '@cortexyoung/shared' from file '/home/yanggf/a/cortexyoung/packages/core/src/vector-store.ts'[39m[22m
+[1m[31m[39m[22m
+[1m[31m[7m1[0m import { CodeChunk, ChunkType } from '@cortexyoung/shared';[39m[22m
+[1m[31m[7m [0m [91m                                     ~~~~~~~~~~~~~~~~~~~~~[0m[39m[22m
+[1m[31m[39m[22m
+[1m[31m  [96mpackages/core/src/indexer.ts[0m:[93m1[0m:[93m56[0m[39m[22m
+[1m[31m    [7m1[0m import { CodeChunk, IndexRequest, IndexResponse } from '@cortexyoung/shared';[39m[22m
+[1m[31m    [7m [0m [96m                                                       ~~~~~~~~~~~~~~~~~~~~~[0m[39m[22m
+[1m[31m    File is included via import here.[39m[22m
+[1m[31m  [96mpackages/core/src/searcher.ts[0m:[93m1[0m:[93m56[0m[39m[22m
+[1m[31m    [7m1[0m import { QueryRequest, QueryResponse, CodeChunk } from '@cortexyoung/shared';[39m[22m
+[1m[31m    [7m [0m [96m                                                       ~~~~~~~~~~~~~~~~~~~~~[0m[39m[22m
+[1m[31m    File is included via import here.[39m[22m
+[1m[31m  [96mpackages/core/src/vector-store.ts[0m:[93m1[0m:[93m27[0m[39m[22m
+[1m[31m    [7m1[0m import { CodeChunk } from '@cortexyoung/shared';[39m[22m
+[1m[31m    [7m [0m [96m                          ~~~~~~~~~~~~~~~~~~~~~[0m[39m[22m
+[1m[31m    File is included via import here.[39m[22m
+[1m[31m[39m[22m

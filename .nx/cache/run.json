@@ -1,0 +1,21 @@
+{
+  "run": {
+    "command": "nx build core",
+    "startTime": "2025-08-02T10:02:25.111Z",
+    "endTime": "2025-08-02T10:02:25.969Z",
+    "inner": false
+  },
+  "tasks": [
+    {
+      "taskId": "core:build",
+      "target": "build",
+      "projectName": "core",
+      "hash": "7530407268871848189",
+      "startTime": "2025-08-02T10:02:25.118Z",
+      "endTime": "2025-08-02T10:02:25.965Z",
+      "params": "",
+      "cacheStatus": "cache-miss",
+      "status": 1
+    }
+  ]
+}
