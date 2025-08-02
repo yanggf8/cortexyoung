@@ -1,8 +1,8 @@
 {
   "run": {
-    "command": "nx build core",
-    "startTime": "2025-08-02T10:02:25.111Z",
-    "endTime": "2025-08-02T10:02:25.969Z",
+    "command": "nx run core:build",
+    "startTime": "2025-08-02T19:30:11.377Z",
+    "endTime": "2025-08-02T19:30:12.358Z",
     "inner": false
   },
   "tasks": [
@@ -10,9 +10,9 @@
       "taskId": "core:build",
       "target": "build",
       "projectName": "core",
-      "hash": "7530407268871848189",
-      "startTime": "2025-08-02T10:02:25.118Z",
-      "endTime": "2025-08-02T10:02:25.965Z",
+      "hash": "4247581195689231870",
+      "startTime": "2025-08-02T19:30:11.384Z",
+      "endTime": "2025-08-02T19:30:12.355Z",
       "params": "",
       "cacheStatus": "cache-miss",
       "status": 1

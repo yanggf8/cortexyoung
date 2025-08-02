@@ -1,263 +1,115 @@
 {
   "version": "6.0",
   "nxVersion": "21.3.11",
-  "pathMappings": {
-    "@cortexyoung/core": [
-      "packages/core/src/index.ts"
-    ],
-    "@cortexyoung/mcp-server": [
-      "packages/mcp-server/src/index.ts"
-    ],
-    "@cortexyoung/cli": [
-      "packages/cli/src/index.ts"
-    ],
-    "@cortexyoung/shared": [
-      "packages/shared/src/index.ts"
-    ]
-  },
+  "pathMappings": {},
   "nxJsonPlugins": [],
   "fileMap": {
     "nonProjectFiles": [
       {
-        "file": ".nx/workspace-data/file-map.json",
-        "hash": "2349248559644986897"
+        "file": "src/vector-store.ts",
+        "hash": "17998839130537720622"
       },
       {
-        "file": "architecture-analysis.md",
-        "hash": "11029164456030180530"
+        "file": ".gitignore",
+        "hash": "7695474770344713862"
       },
       {
-        "file": ".eslintrc.json",
-        "hash": "14839753491958496737"
-      },
-      {
-        "file": ".nx/cache/terminalOutputs/813818666392105067",
-        "hash": "11897535806356595575"
-      },
-      {
-        "file": ".nx/cache/terminalOutputs/7530407268871848189",
-        "hash": "8623456888656530810"
+        "file": "package-lock.json",
+        "hash": "13073440413498874367"
       },
       {
         "file": ".prettierrc",
         "hash": "14709292361538282662"
       },
       {
-        "file": ".nx/cache/terminalOutputs/7632373066439630254",
-        "hash": "13419756855223366061"
+        "file": "src/embedder.ts",
+        "hash": "1915174266424006594"
       },
       {
-        "file": "development-plan.md",
-        "hash": "16707194247106860714"
+        "file": ".claude/settings.local.json",
+        "hash": "17529469421134666202"
       },
       {
-        "file": "package.json",
-        "hash": "1126065029640640275"
+        "file": "src/types.ts",
+        "hash": "14884782576563834337"
       },
       {
-        "file": "dist/packages/shared/package.json",
-        "hash": "10022531722348484096"
+        "file": "src/mcp-handlers.ts",
+        "hash": "8217019329537699932"
       },
       {
-        "file": "jest.preset.js",
-        "hash": "13737983450217408137"
-      },
-      {
-        "file": ".nx/workspace-data/3a5c72e0dcf44b3fbf1bb4c82e6ec1af.db-wal",
-        "hash": "10925317566858106113"
-      },
-      {
-        "file": ".nx/workspace-data/project-graph.json",
-        "hash": "2858179248278620523"
-      },
-      {
-        "file": ".nx/workspace-data/3a5c72e0dcf44b3fbf1bb4c82e6ec1af.db",
-        "hash": "6240709564311096908"
-      },
-      {
-        "file": "jest.config.ts",
-        "hash": "17753521213950642849"
-      },
-      {
-        "file": "dist/packages/shared/src/index.d.ts",
-        "hash": "12428069362609943014"
-      },
-      {
-        "file": "dist/packages/shared/src/index.js.map",
-        "hash": "2469586882959678637"
-      },
-      {
-        "file": "tmp/packages/core/build/tsconfig.generated.601776e6-c998-4b88-a324-f1d1878e388d.json",
-        "hash": "13943893673966678489"
-      },
-      {
-        "file": ".nx/cache/terminalOutputs/9512138007407204742",
-        "hash": "13419756855223366061"
-      },
-      {
-        "file": "package-lock.json",
-        "hash": "13002212537917429979"
-      },
-      {
-        "file": "dist/packages/core/package.json",
-        "hash": "1387598469014787884"
-      },
-      {
-        "file": ".nx/cache/run.json",
-        "hash": "15811969561544583511"
-      },
-      {
-        "file": ".nx/workspace-data/lockfile.hash",
-        "hash": "4775295201050041772"
-      },
-      {
-        "file": ".nx/workspace-data/source-maps.json",
-        "hash": "18293491113748120308"
-      },
-      {
-        "file": "nx.json",
-        "hash": "3196650736655931604"
-      },
-      {
-        "file": "tmp/packages/core/build/tsconfig.generated.553d0521-dfef-4212-8754-c178801fd0ad.json",
-        "hash": "13943893673966678489"
-      },
-      {
-        "file": ".nx/workspace-data/parsed-lock-file.json",
-        "hash": "14281054602381663742"
-      },
-      {
-        "file": ".nx/cache/terminalOutputs/2558183249710191732",
-        "hash": "11897535806356595575"
-      },
-      {
-        "file": "dist/packages/shared/src/index.js",
-        "hash": "7667089259731763863"
-      },
-      {
-        "file": ".nx/workspace-data/d/daemon.log",
-        "hash": "8368272030818098918"
-      },
-      {
-        "file": "tsconfig.base.json",
-        "hash": "16499735908698693915"
-      },
-      {
-        "file": "cortex-v2-spec.md",
-        "hash": "992374420546526782"
+        "file": "architecture-analysis.md",
+        "hash": "11029164456030180530"
       },
       {
         "file": "claude-code-cortex-integration.md",
         "hash": "16428858316696136924"
       },
       {
-        "file": ".nx/cache/terminalOutputs/6661243465893217500",
-        "hash": "13419756855223366061"
+        "file": "python-service/requirements.txt",
+        "hash": "7902831396138277476"
       },
       {
-        "file": ".nx/workspace-data/3a5c72e0dcf44b3fbf1bb4c82e6ec1af.db-shm",
-        "hash": "7935551645173703493"
+        "file": "src/index.ts",
+        "hash": "18343411082625531988"
+      },
+      {
+        "file": "src/indexer.ts",
+        "hash": "7399074283904968013"
+      },
+      {
+        "file": "tsconfig.json",
+        "hash": "2615774631025256397"
+      },
+      {
+        "file": "python-service/start.sh",
+        "hash": "7512464807765709435"
+      },
+      {
+        "file": "README.md",
+        "hash": "18382548031275530139"
+      },
+      {
+        "file": "src/mcp-tools.ts",
+        "hash": "1443955980616229051"
+      },
+      {
+        "file": "src/searcher.ts",
+        "hash": "10508703976767093154"
+      },
+      {
+        "file": "src/server.ts",
+        "hash": "1538540680029225570"
+      },
+      {
+        "file": "cortex-v2-spec.md",
+        "hash": "16180844634145807168"
+      },
+      {
+        "file": "package.json",
+        "hash": "4106297279413667767"
+      },
+      {
+        "file": "python-service/embedding_service.py",
+        "hash": "2774358860813556866"
+      },
+      {
+        "file": "src/git-scanner.ts",
+        "hash": "9402636959051935154"
+      },
+      {
+        "file": "development-plan.md",
+        "hash": "16707194247106860714"
+      },
+      {
+        "file": "src/chunker.ts",
+        "hash": "9238403593329016191"
+      },
+      {
+        "file": "docs/bge-vectorize-integration.md",
+        "hash": "546190657835604852"
       }
     ],
-    "projectFileMap": {
-      "mcp-server": [
-        {
-          "file": "packages/mcp-server/project.json",
-          "hash": "8959216572073854009"
-        },
-        {
-          "file": "packages/mcp-server/src/handlers.ts",
-          "hash": "6050746550209913459",
-          "deps": [
-            "shared",
-            "core"
-          ]
-        },
-        {
-          "file": "packages/mcp-server/src/index.ts",
-          "hash": "15642808189086937053"
-        },
-        {
-          "file": "packages/mcp-server/src/server.ts",
-          "hash": "6751902765893003209",
-          "deps": [
-            "shared",
-            "core"
-          ]
-        },
-        {
-          "file": "packages/mcp-server/src/tools.ts",
-          "hash": "1443955980616229051"
-        },
-        {
-          "file": "packages/mcp-server/tsconfig.lib.json",
-          "hash": "11575945044050359288"
-        }
-      ],
-      "core": [
-        {
-          "file": "packages/core/project.json",
-          "hash": "1931055858079261148"
-        },
-        {
-          "file": "packages/core/src/chunker.ts",
-          "hash": "9831549879295256862",
-          "deps": [
-            "shared"
-          ]
-        },
-        {
-          "file": "packages/core/src/embedder.ts",
-          "hash": "11450510727114127974"
-        },
-        {
-          "file": "packages/core/src/index.ts",
-          "hash": "6086266110281536781"
-        },
-        {
-          "file": "packages/core/src/indexer.ts",
-          "hash": "6269816419680335680",
-          "deps": [
-            "shared"
-          ]
-        },
-        {
-          "file": "packages/core/src/searcher.ts",
-          "hash": "13797849438082114128",
-          "deps": [
-            "shared"
-          ]
-        },
-        {
-          "file": "packages/core/src/vector-store.ts",
-          "hash": "474953452918812483",
-          "deps": [
-            "shared"
-          ]
-        },
-        {
-          "file": "packages/core/tsconfig.lib.json",
-          "hash": "6162211236369344271"
-        }
-      ],
-      "shared": [
-        {
-          "file": "packages/shared/jest.config.ts",
-          "hash": "598552700420964041"
-        },
-        {
-          "file": "packages/shared/project.json",
-          "hash": "3496124439168367229"
-        },
-        {
-          "file": "packages/shared/src/index.ts",
-          "hash": "14884782576563834337"
-        },
-        {
-          "file": "packages/shared/tsconfig.lib.json",
-          "hash": "5616547794576540049"
-        }
-      ]
-    }
+    "projectFileMap": {}
   }
 }

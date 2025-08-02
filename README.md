@@ -37,15 +37,21 @@ User Query → Git Scanner/Chunker → Local Embeddings → Vector DB
 
 ```
 cortexyoung/
-├── packages/
-│   ├── shared/          # Shared types and interfaces  
-│   ├── core/           # Indexing, chunking, embeddings
-│   ├── mcp-server/     # MCP protocol implementation
-│   └── cli/            # Command-line interface
-├── apps/
-│   └── demo/           # Demo application
-├── .fastembed_cache/   # Local ML model cache
-└── docs/               # Documentation
+├── src/                 # Unified source code
+│   ├── types.ts         # Shared types and interfaces
+│   ├── git-scanner.ts   # Git repository scanning
+│   ├── chunker.ts       # Smart code chunking
+│   ├── embedder.ts      # BGE embedding generation
+│   ├── vector-store.ts  # Vector storage and retrieval
+│   ├── indexer.ts       # Main indexing logic
+│   ├── searcher.ts      # Semantic search implementation
+│   ├── mcp-handlers.ts  # MCP request handlers
+│   ├── mcp-tools.ts     # MCP tool definitions
+│   ├── server.ts        # MCP server implementation
+│   └── index.ts         # CLI entry point
+├── dist/                # Compiled JavaScript output
+├── .fastembed_cache/    # Local ML model cache
+└── docs/                # Documentation
 ```
 
 ## Development Status
