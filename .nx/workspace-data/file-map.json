@@ -6,16 +6,96 @@
   "fileMap": {
     "nonProjectFiles": [
       {
+        "file": ".claude/settings.local.json",
+        "hash": "1193861631690274820"
+      },
+      {
+        "file": "claude-code-cortex-integration.md",
+        "hash": "16428858316696136924"
+      },
+      {
         "file": "src/vector-store.ts",
         "hash": "17998839130537720622"
+      },
+      {
+        "file": "src/mcp-handlers.ts",
+        "hash": "8217019329537699932"
+      },
+      {
+        "file": "python-service/requirements.txt",
+        "hash": "7902831396138277476"
+      },
+      {
+        "file": "tsconfig.json",
+        "hash": "2615774631025256397"
+      },
+      {
+        "file": "src/searcher.ts",
+        "hash": "10508703976767093154"
+      },
+      {
+        "file": "architecture-analysis.md",
+        "hash": "11029164456030180530"
+      },
+      {
+        "file": "src/chunker.ts",
+        "hash": "9238403593329016191"
+      },
+      {
+        "file": "python-service/embedding_service.py",
+        "hash": "2774358860813556866"
+      },
+      {
+        "file": "python-service/start.sh",
+        "hash": "7512464807765709435"
+      },
+      {
+        "file": "src/server.ts",
+        "hash": "17104676246828654110"
+      },
+      {
+        "file": "src/indexer.ts",
+        "hash": "7399074283904968013"
+      },
+      {
+        "file": "package.json",
+        "hash": "4106297279413667767"
+      },
+      {
+        "file": "docs/bge-vectorize-integration.md",
+        "hash": "546190657835604852"
+      },
+      {
+        "file": "src/mcp-tools.ts",
+        "hash": "1443955980616229051"
+      },
+      {
+        "file": "README.md",
+        "hash": "6154456922036865303"
       },
       {
         "file": ".gitignore",
         "hash": "7695474770344713862"
       },
       {
+        "file": "development-plan.md",
+        "hash": "16707194247106860714"
+      },
+      {
+        "file": "src/git-scanner.ts",
+        "hash": "9402636959051935154"
+      },
+      {
+        "file": "cortex-v2-spec.md",
+        "hash": "16180844634145807168"
+      },
+      {
         "file": "package-lock.json",
         "hash": "13073440413498874367"
+      },
+      {
+        "file": "src/index.ts",
+        "hash": "18343411082625531988"
       },
       {
         "file": ".prettierrc",
@@ -26,88 +106,8 @@
         "hash": "1915174266424006594"
       },
       {
-        "file": ".claude/settings.local.json",
-        "hash": "17529469421134666202"
-      },
-      {
         "file": "src/types.ts",
         "hash": "14884782576563834337"
-      },
-      {
-        "file": "src/mcp-handlers.ts",
-        "hash": "8217019329537699932"
-      },
-      {
-        "file": "architecture-analysis.md",
-        "hash": "11029164456030180530"
-      },
-      {
-        "file": "claude-code-cortex-integration.md",
-        "hash": "16428858316696136924"
-      },
-      {
-        "file": "python-service/requirements.txt",
-        "hash": "7902831396138277476"
-      },
-      {
-        "file": "src/index.ts",
-        "hash": "18343411082625531988"
-      },
-      {
-        "file": "src/indexer.ts",
-        "hash": "7399074283904968013"
-      },
-      {
-        "file": "tsconfig.json",
-        "hash": "2615774631025256397"
-      },
-      {
-        "file": "python-service/start.sh",
-        "hash": "7512464807765709435"
-      },
-      {
-        "file": "README.md",
-        "hash": "18382548031275530139"
-      },
-      {
-        "file": "src/mcp-tools.ts",
-        "hash": "1443955980616229051"
-      },
-      {
-        "file": "src/searcher.ts",
-        "hash": "10508703976767093154"
-      },
-      {
-        "file": "src/server.ts",
-        "hash": "1538540680029225570"
-      },
-      {
-        "file": "cortex-v2-spec.md",
-        "hash": "16180844634145807168"
-      },
-      {
-        "file": "package.json",
-        "hash": "4106297279413667767"
-      },
-      {
-        "file": "python-service/embedding_service.py",
-        "hash": "2774358860813556866"
-      },
-      {
-        "file": "src/git-scanner.ts",
-        "hash": "9402636959051935154"
-      },
-      {
-        "file": "development-plan.md",
-        "hash": "16707194247106860714"
-      },
-      {
-        "file": "src/chunker.ts",
-        "hash": "9238403593329016191"
-      },
-      {
-        "file": "docs/bge-vectorize-integration.md",
-        "hash": "546190657835604852"
       }
     ],
     "projectFileMap": {}

@@ -95,10 +95,24 @@ npm run demo
 ## Available Scripts
 
 - `npm run demo` - Run indexing demo with real embeddings
-- `npm run search` - Run semantic search demo
 - `npm run server` - Start MCP server for Claude Code integration
-- `npm run dev` - Alias for demo
-- `npm run build` - Build all packages
+- `npm run build` - Build TypeScript to JavaScript
+- `npm run start` - Run compiled server from dist/
+
+## Configuration
+
+### Environment Variables
+
+- `PORT` - Server port (default: 8765)
+- `LOG_FILE` - Custom log file path (default: logs/cortex-server.log)
+- `DEBUG` - Enable debug logging (set to 'true')
+
+### Log Files
+
+All server activity is logged to both console and file:
+- **Default location**: `logs/cortex-server.log`
+- **Custom location**: Set `LOG_FILE` environment variable
+- **Format**: JSON structured logs with timestamps
 
 ## Performance
 

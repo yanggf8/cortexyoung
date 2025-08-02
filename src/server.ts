@@ -2,20 +2,85 @@ import { MCPToolRequest, MCPToolResponse } from './types';
 import { CodebaseIndexer } from './indexer';
 import { SemanticSearcher } from './searcher';
 import { SemanticSearchHandler, ContextualReadHandler, CodeIntelligenceHandler } from './mcp-handlers';
+import * as fs from 'fs';
+import * as path from 'path';
+
+// Logger class for file and console logging
+class Logger {
+  private logFile: string;
+  private logStream: fs.WriteStream;
+
+  constructor(logFile?: string) {
+    this.logFile = logFile || path.join(process.cwd(), 'logs', 'cortex-server.log');
+    
+    // Ensure log directory exists
+    const logDir = path.dirname(this.logFile);
+    if (!fs.existsSync(logDir)) {
+      fs.mkdirSync(logDir, { recursive: true });
+    }
+    
+    // Create write stream for log file
+    this.logStream = fs.createWriteStream(this.logFile, { flags: 'a' });
+    
+    this.info('Logger initialized', { logFile: this.logFile });
+  }
+
+  private formatMessage(level: string, message: string, data?: any): string {
+    const timestamp = new Date().toISOString();
+    const dataStr = data ? ` | ${JSON.stringify(data)}` : '';
+    return `[${timestamp}] [${level}] ${message}${dataStr}`;
+  }
+
+  private writeLog(level: string, message: string, data?: any): void {
+    const formatted = this.formatMessage(level, message, data);
+    
+    // Write to console
+    console.log(formatted);
+    
+    // Write to file
+    this.logStream.write(formatted + '\n');
+  }
+
+  info(message: string, data?: any): void {
+    this.writeLog('INFO', message, data);
+  }
+
+  error(message: string, data?: any): void {
+    this.writeLog('ERROR', message, data);
+  }
+
+  warn(message: string, data?: any): void {
+    this.writeLog('WARN', message, data);
+  }
+
+  debug(message: string, data?: any): void {
+    if (process.env.DEBUG === 'true') {
+      this.writeLog('DEBUG', message, data);
+    }
+  }
+
+  close(): void {
+    this.logStream.end();
+  }
+}
 
 export class CortexMCPServer {
   private indexer: CodebaseIndexer;
   private searcher: SemanticSearcher;
   private handlers: Map<string, any> = new Map();
   private server: any;
+  private logger: Logger;
 
   constructor(
     indexer: CodebaseIndexer,
-    searcher: SemanticSearcher
+    searcher: SemanticSearcher,
+    logFile?: string
   ) {
     this.indexer = indexer;
     this.searcher = searcher;
+    this.logger = new Logger(logFile);
     this.setupHandlers();
+    this.logger.info('CortexMCPServer initialized');
   }
 
   private setupHandlers(): void {
@@ -25,10 +90,18 @@ export class CortexMCPServer {
   }
 
   async handleToolCall(request: MCPToolRequest): Promise<MCPToolResponse> {
+    const startTime = Date.now();
+    this.logger.info('Received tool call', { 
+      method: request.method, 
+      id: request.id,
+      params: request.params ? Object.keys(request.params) : []
+    });
+
     try {
       const handler = this.handlers.get(request.method);
       
       if (!handler) {
+        this.logger.warn('Method not found', { method: request.method, id: request.id });
         return {
           error: {
             code: -32601,
@@ -39,12 +112,28 @@ export class CortexMCPServer {
       }
 
       const result = await handler.handle(request.params);
+      const duration = Date.now() - startTime;
+      
+      this.logger.info('Tool call completed', { 
+        method: request.method, 
+        id: request.id, 
+        duration: `${duration}ms`,
+        success: true
+      });
       
       return {
         result,
         id: request.id
       };
     } catch (error) {
+      const duration = Date.now() - startTime;
+      this.logger.error('Tool call failed', { 
+        method: request.method, 
+        id: request.id, 
+        duration: `${duration}ms`,
+        error: error instanceof Error ? error.message : 'Unknown error'
+      });
+      
       return {
         error: {
           code: -32603,
@@ -120,10 +209,13 @@ export class CortexMCPServer {
     
     await new Promise<void>((resolve) => {
       server.listen(port, () => {
-        console.log(`🚀 Cortex MCP Server listening on port ${port}`);
-        console.log(`📋 Available endpoints:`);
-        console.log(`   GET  http://localhost:${port}/tools - List available tools`);
-        console.log(`   POST http://localhost:${port}/call  - Execute tool calls`);
+        this.logger.info('MCP Server started', { 
+          port,
+          endpoints: {
+            tools: `GET http://localhost:${port}/tools`,
+            call: `POST http://localhost:${port}/call`
+          }
+        });
         resolve();
       });
     });
@@ -132,15 +224,16 @@ export class CortexMCPServer {
   }
 
   async stop(): Promise<void> {
-    console.log('Cortex MCP Server stopping');
+    this.logger.info('Stopping MCP Server');
     if (this.server) {
       await new Promise<void>((resolve) => {
         this.server.close(() => {
-          console.log('✅ Server stopped');
+          this.logger.info('MCP Server stopped successfully');
           resolve();
         });
       });
     }
+    this.logger.close();
   }
 
   getAvailableTools(): any[] {
@@ -194,14 +287,16 @@ export class CortexMCPServer {
 async function main() {
   const repoPath = process.argv[2] || process.cwd();
   const port = parseInt(process.env.PORT || '8765');
+  const logFile = process.env.LOG_FILE;
   
-  console.log(`🔧 Initializing Cortex MCP Server...`);
-  console.log(`📁 Repository: ${repoPath}`);
-  console.log(`🌐 Port: ${port}`);
+  // Create main logger
+  const logger = new Logger(logFile);
+  
+  logger.info('Initializing Cortex MCP Server', { repoPath, port });
   
   try {
     // Initialize indexer and searcher
-    console.log(`📊 Indexing repository...`);
+    logger.info('Starting repository indexing');
     const indexer = new CodebaseIndexer(repoPath);
     
     const indexResponse = await indexer.indexRepository({
@@ -209,32 +304,35 @@ async function main() {
       mode: 'full'
     });
     
-    console.log(`✅ Indexing complete: ${indexResponse.chunks_processed} chunks processed`);
+    logger.info('Repository indexing completed', { 
+      chunksProcessed: indexResponse.chunks_processed,
+      timeMs: indexResponse.time_taken_ms
+    });
     
     // Get searcher from indexer
     const searcher = (indexer as any).searcher; // Access the searcher instance
     
     // Create and start MCP server
-    const mcpServer = new CortexMCPServer(indexer, searcher);
+    const mcpServer = new CortexMCPServer(indexer, searcher, logFile);
     
-    console.log(`🚀 Starting MCP server...`);
+    logger.info('Starting MCP server');
     await mcpServer.start(port);
     
     // Handle graceful shutdown
     process.on('SIGINT', async () => {
-      console.log(`\n🛑 Received SIGINT, shutting down gracefully...`);
+      logger.info('Received SIGINT, initiating graceful shutdown');
       await mcpServer.stop();
       process.exit(0);
     });
     
     process.on('SIGTERM', async () => {
-      console.log(`\n🛑 Received SIGTERM, shutting down gracefully...`);
+      logger.info('Received SIGTERM, initiating graceful shutdown');
       await mcpServer.stop();
       process.exit(0);
     });
     
   } catch (error) {
-    console.error('❌ Failed to start Cortex MCP Server:', error);
+    logger.error('Failed to start Cortex MCP Server', { error: error instanceof Error ? error.message : error });
     process.exit(1);
   }
 }
