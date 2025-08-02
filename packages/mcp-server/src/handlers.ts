@@ -1,5 +1,5 @@
-import { QueryRequest, QueryResponse } from '@cortexyoung/shared';
-import { SemanticSearcher } from '@cortexyoung/core';
+import { QueryRequest, QueryResponse } from '../../shared/src/index';
+import { SemanticSearcher } from '../../core/src/searcher';
 
 export abstract class BaseHandler {
   abstract handle(params: any): Promise<any>;

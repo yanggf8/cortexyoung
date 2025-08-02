@@ -1,11 +1,13 @@
-import { MCPToolRequest, MCPToolResponse } from '@cortexyoung/shared';
-import { CodebaseIndexer, SemanticSearcher } from '@cortexyoung/core';
+import { MCPToolRequest, MCPToolResponse } from '../../shared/src/index';
+import { CodebaseIndexer } from '../../core/src/indexer';
+import { SemanticSearcher } from '../../core/src/searcher';
 import { SemanticSearchHandler, ContextualReadHandler, CodeIntelligenceHandler } from './handlers';
 
 export class CortexMCPServer {
   private indexer: CodebaseIndexer;
   private searcher: SemanticSearcher;
   private handlers: Map<string, any> = new Map();
+  private server: any;
 
   constructor(
     indexer: CodebaseIndexer,
@@ -55,12 +57,90 @@ export class CortexMCPServer {
   }
 
   async start(port: number = 3001): Promise<void> {
-    // TODO: Implement HTTP/WebSocket server for MCP protocol
-    console.log(`Cortex MCP Server starting on port ${port}`);
+    // For now, implement a simple JSON-RPC over HTTP server
+    // In a full implementation, this would use the MCP protocol specification
+    const http = require('http');
+    
+    const server = http.createServer(async (req: any, res: any) => {
+      // Enable CORS
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+      
+      if (req.method === 'OPTIONS') {
+        res.writeHead(200);
+        res.end();
+        return;
+      }
+      
+      if (req.method === 'GET' && req.url === '/tools') {
+        // Return available tools
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          tools: this.getAvailableTools()
+        }));
+        return;
+      }
+      
+      if (req.method === 'POST' && req.url === '/call') {
+        let body = '';
+        req.on('data', (chunk: any) => {
+          body += chunk.toString();
+        });
+        
+        req.on('end', async () => {
+          try {
+            const request = JSON.parse(body);
+            const response = await this.handleToolCall(request);
+            
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(response));
+          } catch (error) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+              error: {
+                code: -32700,
+                message: 'Parse error'
+              }
+            }));
+          }
+        });
+        return;
+      }
+      
+      // Default response
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        error: {
+          code: -32404,
+          message: 'Endpoint not found'
+        }
+      }));
+    });
+    
+    await new Promise<void>((resolve) => {
+      server.listen(port, () => {
+        console.log(`🚀 Cortex MCP Server listening on port ${port}`);
+        console.log(`📋 Available endpoints:`);
+        console.log(`   GET  http://localhost:${port}/tools - List available tools`);
+        console.log(`   POST http://localhost:${port}/call  - Execute tool calls`);
+        resolve();
+      });
+    });
+    
+    this.server = server;
   }
 
   async stop(): Promise<void> {
     console.log('Cortex MCP Server stopping');
+    if (this.server) {
+      await new Promise<void>((resolve) => {
+        this.server.close(() => {
+          console.log('✅ Server stopped');
+          resolve();
+        });
+      });
+    }
   }
 
   getAvailableTools(): any[] {
