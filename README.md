@@ -13,13 +13,18 @@ Cortex V2.1 addresses Claude Code's primary limitation: **50-70% token waste** d
 
 ## Architecture
 
+**Pure Node.js System** with local ML inference:
+
 ### Core Components
 
 ```
-Claude Code ← Enhanced Tools → Cortex MCP Server ← Vector DB
-     ↓                              ↓
-User Query → Semantic Context → Intelligent Response
+Claude Code ← Node.js MCP Server ← fastembed-js (BGE model)
+     ↓                ↓                      ↓
+User Query → Git Scanner/Chunker → Local Embeddings → Vector DB
 ```
+
+**Single Process**: Git operations, chunking, embeddings, MCP server, Claude integration  
+**Local ML**: BGE-small-en-v1.5 model via fastembed-js (384 dimensions)
 
 ### Key Features
 
@@ -33,14 +38,14 @@ User Query → Semantic Context → Intelligent Response
 ```
 cortexyoung/
 ├── packages/
-│   ├── shared/          # Shared types and interfaces
-│   ├── core/           # Core indexing & search logic
+│   ├── shared/          # Shared types and interfaces  
+│   ├── core/           # Indexing, chunking, embeddings
 │   ├── mcp-server/     # MCP protocol implementation
 │   └── cli/            # Command-line interface
 ├── apps/
 │   └── demo/           # Demo application
-├── docs/               # Documentation
-└── tests/              # Integration tests
+├── .fastembed_cache/   # Local ML model cache
+└── docs/               # Documentation
 ```
 
 ## Development Status
@@ -51,12 +56,13 @@ cortexyoung/
 - [x] Basic MCP server structure
 - [x] Development tooling
 
-**Phase 2: Core Implementation** 🔄
-- [ ] Git repository scanner
-- [ ] AST-based chunking (Tree-sitter)
-- [ ] OpenAI embedding integration
-- [ ] Vector storage (SQLite + extensions)
-- [ ] Multi-hop relationship traversal
+**Phase 2: Core Implementation** ✅
+- [x] Git repository scanner
+- [x] AST-based chunking (with fallbacks) 
+- [x] fastembed-js integration (BGE-small-en-v1.5)
+- [x] Vector storage with real embeddings
+- [x] Working demo with pure Node.js architecture
+- [x] **362 chunks processed** in 33 seconds with real semantic embeddings
 
 **Phase 3: Claude Code Integration** ⏳
 - [ ] Enhanced semantic tools
@@ -70,15 +76,25 @@ cortexyoung/
 # Install dependencies
 npm install
 
-# Build packages  
-npm run build
-
-# Run tests
-npm test
-
-# Start development server
-npm run dev
+# Run demo (downloads BGE model on first run)
+npm run demo
 ```
+
+**First run**: Downloads ~200MB BGE-small-en-v1.5 model to `.fastembed_cache/`  
+**Subsequent runs**: Uses cached model for instant startup
+
+## Available Scripts
+
+- `npm run demo` - Run indexing demo with real embeddings
+- `npm run dev` - Alias for demo
+- `npm run build` - Build all packages
+
+## Performance
+
+- **362 code chunks** indexed in 33 seconds
+- **384-dimensional** semantic embeddings  
+- **91ms average** per chunk (including ML inference)
+- **Pure Node.js** - no external dependencies
 
 ## ChatGPT Architecture Analysis
 

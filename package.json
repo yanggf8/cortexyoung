@@ -3,7 +3,10 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "build": "npx nx run-many --target=build --all",
+    "demo": "npx ts-node apps/demo/index.ts",
+    "dev": "npm run demo"
   },
   "keywords": [],
   "author": "",
@@ -21,6 +24,11 @@
     "nx": "^21.3.11",
     "prettier": "^3.6.2",
     "ts-jest": "^29.4.0",
+    "ts-node": "^10.9.2",
     "typescript": "^5.9.2"
+  },
+  "dependencies": {
+    "fastembed": "^1.14.4",
+    "simple-git": "^3.28.0"
   }
 }

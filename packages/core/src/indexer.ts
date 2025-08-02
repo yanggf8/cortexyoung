@@ -1,36 +1,77 @@
 import { CodeChunk, IndexRequest, IndexResponse } from '../../shared/src/index';
+import { GitScanner } from './git-scanner';
+import { SmartChunker } from './chunker';
+import { EmbeddingGenerator } from './embedder';
+import { VectorStore } from './vector-store';
 
 export class CodebaseIndexer {
-  constructor(
-    private chunker: any, // Will implement chunker
-    private embedder: any, // Will implement embedder
-    private vectorStore: any // Will implement vector store
-  ) {}
+  private gitScanner: GitScanner;
+  private chunker: SmartChunker;
+  private embedder: EmbeddingGenerator;
+  private vectorStore: VectorStore;
+
+  constructor(repositoryPath: string) {
+    this.gitScanner = new GitScanner(repositoryPath);
+    this.chunker = new SmartChunker();
+    this.embedder = new EmbeddingGenerator();
+    this.vectorStore = new VectorStore();
+  }
 
   async indexRepository(request: IndexRequest): Promise<IndexResponse> {
     const startTime = Date.now();
     
     try {
-      // TODO: Implement Git scanning
-      const files = await this.scanRepository(request);
+      console.log(`Starting ${request.mode} indexing of ${request.repository_path}`);
       
-      // TODO: Implement chunking
-      const chunks = await this.chunkFiles(files);
+      // Scan repository for files
+      const scanResult = await this.gitScanner.scanRepository(request.mode, request.since_commit);
+      console.log(`Found ${scanResult.totalFiles} files to process`);
       
-      // TODO: Implement embedding generation
-      const embeddedChunks = await this.generateEmbeddings(chunks);
+      // Get file changes metadata
+      const fileChanges = await this.gitScanner.getFileChanges(scanResult.files);
       
-      // TODO: Implement vector storage
+      // Process files in chunks
+      const allChunks: CodeChunk[] = [];
+      let processedFiles = 0;
+      
+      for (const filePath of scanResult.files) {
+        try {
+          const content = await this.gitScanner.readFile(filePath);
+          const fileChange = fileChanges.find(fc => fc.filePath === filePath);
+          const coChangeFiles = await this.gitScanner.getCoChangeFiles(filePath);
+          
+          const chunks = await this.chunker.chunkFile(filePath, content, fileChange, coChangeFiles);
+          allChunks.push(...chunks);
+          
+          processedFiles++;
+          if (processedFiles % 10 === 0) {
+            console.log(`Processed ${processedFiles}/${scanResult.files.length} files`);
+          }
+        } catch (error) {
+          console.warn(`Failed to process file ${filePath}:`, error);
+        }
+      }
+      
+      console.log(`Generated ${allChunks.length} code chunks`);
+      
+      // Generate embeddings in batches
+      console.log('Generating embeddings...');
+      const embeddedChunks = await this.generateEmbeddings(allChunks);
+      
+      // Store in vector database
+      console.log('Storing chunks in vector database...');
       await this.vectorStore.upsertChunks(embeddedChunks);
       
       const timeTaken = Date.now() - startTime;
+      console.log(`Indexing completed in ${timeTaken}ms`);
       
       return {
         status: 'success',
-        chunks_processed: chunks.length,
+        chunks_processed: embeddedChunks.length,
         time_taken_ms: timeTaken
       };
     } catch (error) {
+      console.error('Indexing failed:', error);
       return {
         status: 'error',
         chunks_processed: 0,
@@ -40,21 +81,78 @@ export class CodebaseIndexer {
     }
   }
 
-  private async scanRepository(request: IndexRequest): Promise<string[]> {
-    // TODO: Implement Git repository scanning
-    // For now, return empty array
-    return [];
-  }
-
-  private async chunkFiles(files: string[]): Promise<CodeChunk[]> {
-    // TODO: Implement file chunking using AST parsing
-    // For now, return empty array
-    return [];
-  }
-
   private async generateEmbeddings(chunks: CodeChunk[]): Promise<CodeChunk[]> {
-    // TODO: Implement embedding generation
-    // For now, return chunks unchanged
-    return chunks;
+    const batchSize = 50; // Process embeddings in smaller batches
+    const embeddedChunks: CodeChunk[] = [];
+    
+    for (let i = 0; i < chunks.length; i += batchSize) {
+      const batch = chunks.slice(i, i + batchSize);
+      const texts = batch.map(chunk => this.createEmbeddingText(chunk));
+      
+      try {
+        const embeddings = await this.embedder.embedBatch(texts);
+        
+        for (let j = 0; j < batch.length; j++) {
+          embeddedChunks.push({
+            ...batch[j],
+            embedding: embeddings[j] || []
+          });
+        }
+        
+        console.log(`Generated embeddings for batch ${Math.floor(i / batchSize) + 1}/${Math.ceil(chunks.length / batchSize)}`);
+      } catch (error) {
+        console.warn(`Failed to generate embeddings for batch starting at ${i}:`, error);
+        // Add chunks without embeddings
+        embeddedChunks.push(...batch);
+      }
+    }
+    
+    return embeddedChunks;
+  }
+
+  private createEmbeddingText(chunk: CodeChunk): string {
+    // Create rich text for embedding that includes context
+    const parts = [];
+    
+    // Add file path context
+    parts.push(`File: ${chunk.file_path}`);
+    
+    // Add symbol name if available
+    if (chunk.symbol_name) {
+      parts.push(`Symbol: ${chunk.symbol_name}`);
+    }
+    
+    // Add chunk type
+    parts.push(`Type: ${chunk.chunk_type}`);
+    
+    // Add language context
+    parts.push(`Language: ${chunk.language_metadata.language}`);
+    
+    // Add the actual content
+    parts.push(`Content: ${chunk.content}`);
+    
+    // Add import/export information
+    if (chunk.relationships.imports.length > 0) {
+      parts.push(`Imports: ${chunk.relationships.imports.join(', ')}`);
+    }
+    
+    if (chunk.relationships.exports.length > 0) {
+      parts.push(`Exports: ${chunk.relationships.exports.join(', ')}`);
+    }
+    
+    return parts.join('\n');
+  }
+
+  async getIndexStats(): Promise<{ total_chunks: number; last_indexed?: string }> {
+    const stats = await this.vectorStore.getStats();
+    return {
+      total_chunks: stats.total_chunks,
+      last_indexed: new Date().toISOString() // TODO: Store actual last indexed time
+    };
+  }
+
+  // Helper method to clear the index
+  async clearIndex(): Promise<void> {
+    await this.vectorStore.clear();
   }
 }
