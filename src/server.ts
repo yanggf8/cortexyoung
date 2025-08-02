@@ -189,3 +189,57 @@ export class CortexMCPServer {
     ];
   }
 }
+
+// Main startup function
+async function main() {
+  const repoPath = process.argv[2] || process.cwd();
+  const port = parseInt(process.env.PORT || '8765');
+  
+  console.log(`🔧 Initializing Cortex MCP Server...`);
+  console.log(`📁 Repository: ${repoPath}`);
+  console.log(`🌐 Port: ${port}`);
+  
+  try {
+    // Initialize indexer and searcher
+    console.log(`📊 Indexing repository...`);
+    const indexer = new CodebaseIndexer(repoPath);
+    
+    const indexResponse = await indexer.indexRepository({
+      repository_path: repoPath,
+      mode: 'full'
+    });
+    
+    console.log(`✅ Indexing complete: ${indexResponse.chunks_processed} chunks processed`);
+    
+    // Get searcher from indexer
+    const searcher = (indexer as any).searcher; // Access the searcher instance
+    
+    // Create and start MCP server
+    const mcpServer = new CortexMCPServer(indexer, searcher);
+    
+    console.log(`🚀 Starting MCP server...`);
+    await mcpServer.start(port);
+    
+    // Handle graceful shutdown
+    process.on('SIGINT', async () => {
+      console.log(`\n🛑 Received SIGINT, shutting down gracefully...`);
+      await mcpServer.stop();
+      process.exit(0);
+    });
+    
+    process.on('SIGTERM', async () => {
+      console.log(`\n🛑 Received SIGTERM, shutting down gracefully...`);
+      await mcpServer.stop();
+      process.exit(0);
+    });
+    
+  } catch (error) {
+    console.error('❌ Failed to start Cortex MCP Server:', error);
+    process.exit(1);
+  }
+}
+
+// Start server if this file is run directly
+if (require.main === module) {
+  main().catch(console.error);
+}
