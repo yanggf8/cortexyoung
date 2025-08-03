@@ -1,7 +1,7 @@
 import { CodeChunk } from './types';
 
 export class VectorStore {
-  private chunks: Map<string, CodeChunk> = new Map();
+  protected chunks: Map<string, CodeChunk> = new Map();
 
   async upsertChunks(chunks: CodeChunk[]): Promise<void> {
     for (const chunk of chunks) {
@@ -45,7 +45,7 @@ export class VectorStore {
     this.chunks.clear();
   }
 
-  async getStats(): Promise<{ total_chunks: number }> {
+  async getStats(): Promise<{ total_chunks: number; [key: string]: any }> {
     return { total_chunks: this.chunks.size };
   }
 

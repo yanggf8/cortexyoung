@@ -8,7 +8,14 @@
     "demo": "ts-node src/index.ts",
     "server": "ts-node src/server.ts",
     "start": "node dist/server.js",
-    "clean": "rm -rf dist"
+    "start:full": "INDEX_MODE=full npm start",
+    "start:incremental": "INDEX_MODE=incremental npm start",
+    "clean": "rm -rf dist",
+    "cache:stats": "node scripts/manage-embeddings.js stats",
+    "cache:clear": "node scripts/manage-embeddings.js clear",
+    "cache:validate": "node scripts/manage-embeddings.js validate",
+    "cache:backup": "node scripts/manage-embeddings.js backup",
+    "test:mcp": "node test-mcp.js"
   },
   "keywords": [],
   "author": "",

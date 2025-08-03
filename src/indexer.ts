@@ -3,20 +3,23 @@ import { GitScanner } from './git-scanner';
 import { SmartChunker } from './chunker';
 import { EmbeddingGenerator } from './embedder';
 import { VectorStore } from './vector-store';
+import { PersistentVectorStore } from './persistent-vector-store';
 import { SemanticSearcher } from './searcher';
 
 export class CodebaseIndexer {
   private gitScanner: GitScanner;
   private chunker: SmartChunker;
   private embedder: EmbeddingGenerator;
-  private vectorStore: VectorStore;
+  private vectorStore: PersistentVectorStore;
   private searcher: SemanticSearcher;
+  private repositoryPath: string;
 
   constructor(repositoryPath: string) {
+    this.repositoryPath = repositoryPath;
     this.gitScanner = new GitScanner(repositoryPath);
     this.chunker = new SmartChunker();
     this.embedder = new EmbeddingGenerator();
-    this.vectorStore = new VectorStore();
+    this.vectorStore = new PersistentVectorStore(repositoryPath);
     this.searcher = new SemanticSearcher(this.vectorStore, this.embedder);
   }
 
@@ -24,55 +27,23 @@ export class CodebaseIndexer {
     const startTime = Date.now();
     
     try {
-      console.log(`Starting ${request.mode} indexing of ${request.repository_path}`);
+      // Initialize persistent vector store
+      await this.vectorStore.initialize();
       
-      // Scan repository for files
-      const scanResult = await this.gitScanner.scanRepository(request.mode, request.since_commit);
-      console.log(`Found ${scanResult.totalFiles} files to process`);
+      // Check if we can load existing embeddings
+      const hasExistingIndex = await this.vectorStore.indexExists();
       
-      // Get file changes metadata
-      const fileChanges = await this.gitScanner.getFileChanges(scanResult.files);
-      
-      // Process files in chunks
-      const allChunks: CodeChunk[] = [];
-      let processedFiles = 0;
-      
-      for (const filePath of scanResult.files) {
-        try {
-          const content = await this.gitScanner.readFile(filePath);
-          const fileChange = fileChanges.find(fc => fc.filePath === filePath);
-          const coChangeFiles = await this.gitScanner.getCoChangeFiles(filePath);
-          
-          const chunks = await this.chunker.chunkFile(filePath, content, fileChange, coChangeFiles);
-          allChunks.push(...chunks);
-          
-          processedFiles++;
-          if (processedFiles % 10 === 0) {
-            console.log(`Processed ${processedFiles}/${scanResult.files.length} files`);
-          }
-        } catch (error) {
-          console.warn(`Failed to process file ${filePath}:`, error);
-        }
+      if (hasExistingIndex && request.mode === 'incremental') {
+        console.log('📂 Loading existing embeddings and performing incremental update...');
+        return await this.performIncrementalIndex(request, startTime);
+      } else if (hasExistingIndex && request.mode === 'full') {
+        console.log('🔄 Existing index found, but performing full reindex...');
+        await this.vectorStore.clearIndex();
+      } else {
+        console.log('🆕 No existing index found, performing full index...');
       }
       
-      console.log(`Generated ${allChunks.length} code chunks`);
-      
-      // Generate embeddings in batches
-      console.log('Generating embeddings...');
-      const embeddedChunks = await this.generateEmbeddings(allChunks);
-      
-      // Store in vector database
-      console.log('Storing chunks in vector database...');
-      await this.vectorStore.upsertChunks(embeddedChunks);
-      
-      const timeTaken = Date.now() - startTime;
-      console.log(`Indexing completed in ${timeTaken}ms`);
-      
-      return {
-        status: 'success',
-        chunks_processed: embeddedChunks.length,
-        time_taken_ms: timeTaken
-      };
+      return await this.performFullIndex(request, startTime);
     } catch (error) {
       console.error('Indexing failed:', error);
       return {
@@ -82,6 +53,127 @@ export class CodebaseIndexer {
         error_message: error instanceof Error ? error.message : 'Unknown error'
       };
     }
+  }
+
+  private async performIncrementalIndex(request: IndexRequest, startTime: number): Promise<IndexResponse> {
+    console.log(`Starting incremental indexing of ${request.repository_path}`);
+    
+    // Scan repository for all files
+    const scanResult = await this.gitScanner.scanRepository('full'); // Get all files to compare
+    console.log(`Found ${scanResult.totalFiles} total files`);
+    
+    // Calculate what has changed
+    const delta = await this.vectorStore.calculateFileDelta(scanResult.files);
+    const changedFiles = [...delta.fileChanges.added, ...delta.fileChanges.modified];
+    
+    console.log(`📊 Delta analysis: +${delta.fileChanges.added.length} ~${delta.fileChanges.modified.length} -${delta.fileChanges.deleted.length} files`);
+    
+    if (changedFiles.length === 0 && delta.fileChanges.deleted.length === 0) {
+      console.log('✅ No changes detected, index is up to date');
+      const timeTaken = Date.now() - startTime;
+      return {
+        status: 'success',
+        chunks_processed: 0,
+        time_taken_ms: timeTaken
+      };
+    }
+    
+    // Process only changed files
+    const newChunks: CodeChunk[] = [];
+    const fileChanges = await this.gitScanner.getFileChanges(changedFiles);
+    
+    for (const filePath of changedFiles) {
+      try {
+        const content = await this.gitScanner.readFile(filePath);
+        const fileChange = fileChanges.find(fc => fc.filePath === filePath);
+        const coChangeFiles = await this.gitScanner.getCoChangeFiles(filePath);
+        
+        const chunks = await this.chunker.chunkFile(filePath, content, fileChange, coChangeFiles);
+        newChunks.push(...chunks);
+      } catch (error) {
+        console.warn(`Failed to process file ${filePath}:`, error);
+      }
+    }
+    
+    console.log(`Generated ${newChunks.length} new code chunks`);
+    
+    // Generate embeddings only for new/changed chunks
+    if (newChunks.length > 0) {
+      console.log('Generating embeddings for changed content...');
+      const embeddedChunks = await this.generateEmbeddings(newChunks);
+      delta.added.push(...embeddedChunks);
+    }
+    
+    // Apply delta to vector store
+    console.log('Applying changes to vector database...');
+    await this.vectorStore.applyDelta(delta);
+    
+    // Save updated index
+    await this.vectorStore.savePersistedIndex();
+    
+    const timeTaken = Date.now() - startTime;
+    console.log(`✅ Incremental indexing completed in ${timeTaken}ms`);
+    
+    return {
+      status: 'success',
+      chunks_processed: newChunks.length,
+      time_taken_ms: timeTaken
+    };
+  }
+
+  private async performFullIndex(request: IndexRequest, startTime: number): Promise<IndexResponse> {
+    console.log(`Starting full indexing of ${request.repository_path}`);
+    
+    // Scan repository for files
+    const scanResult = await this.gitScanner.scanRepository(request.mode, request.since_commit);
+    console.log(`Found ${scanResult.totalFiles} files to process`);
+    
+    // Get file changes metadata
+    const fileChanges = await this.gitScanner.getFileChanges(scanResult.files);
+    
+    // Process files in chunks
+    const allChunks: CodeChunk[] = [];
+    let processedFiles = 0;
+    
+    for (const filePath of scanResult.files) {
+      try {
+        const content = await this.gitScanner.readFile(filePath);
+        const fileChange = fileChanges.find(fc => fc.filePath === filePath);
+        const coChangeFiles = await this.gitScanner.getCoChangeFiles(filePath);
+        
+        const chunks = await this.chunker.chunkFile(filePath, content, fileChange, coChangeFiles);
+        allChunks.push(...chunks);
+        
+        processedFiles++;
+        if (processedFiles % 10 === 0) {
+          console.log(`Processed ${processedFiles}/${scanResult.files.length} files`);
+        }
+      } catch (error) {
+        console.warn(`Failed to process file ${filePath}:`, error);
+      }
+    }
+    
+    console.log(`Generated ${allChunks.length} code chunks`);
+    
+    // Generate embeddings in batches
+    console.log('Generating embeddings...');
+    const embeddedChunks = await this.generateEmbeddings(allChunks);
+    
+    // Store in vector database
+    console.log('Storing chunks in vector database...');
+    await this.vectorStore.upsertChunks(embeddedChunks);
+    
+    // Save persistent index
+    await this.vectorStore.savePersistedIndex();
+    
+    const timeTaken = Date.now() - startTime;
+    console.log(`Indexing completed in ${timeTaken}ms`);
+    
+    return {
+      status: 'success',
+      chunks_processed: embeddedChunks.length,
+      time_taken_ms: timeTaken
+    };
   }
 
   private async generateEmbeddings(chunks: CodeChunk[]): Promise<CodeChunk[]> {
