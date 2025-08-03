@@ -20,7 +20,13 @@
     "typescript": "^5.9.2"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.17.1",
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.3",
+    "cors": "^2.8.5",
+    "express": "^5.1.0",
     "fastembed": "^1.14.4",
-    "simple-git": "^3.28.0"
+    "simple-git": "^3.28.0",
+    "zod": "^3.25.76"
   }
 }

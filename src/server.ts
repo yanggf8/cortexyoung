@@ -1,4 +1,8 @@
-import { MCPToolRequest, MCPToolResponse } from './types';
+// Import MCP SDK types for reference but use simpler implementation
+// import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+// import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import express, { Request, Response } from 'express';
+import cors from 'cors';
 import { CodebaseIndexer } from './indexer';
 import { SemanticSearcher } from './searcher';
 import { SemanticSearchHandler, ContextualReadHandler, CodeIntelligenceHandler } from './mcp-handlers';
@@ -68,7 +72,7 @@ export class CortexMCPServer {
   private indexer: CodebaseIndexer;
   private searcher: SemanticSearcher;
   private handlers: Map<string, any> = new Map();
-  private server: any;
+  private httpServer: any;
   private logger: Logger;
 
   constructor(
@@ -89,154 +93,7 @@ export class CortexMCPServer {
     this.handlers.set('code_intelligence', new CodeIntelligenceHandler(this.searcher));
   }
 
-  async handleToolCall(request: MCPToolRequest): Promise<MCPToolResponse> {
-    const startTime = Date.now();
-    this.logger.info('Received tool call', { 
-      method: request.method, 
-      id: request.id,
-      params: request.params ? Object.keys(request.params) : []
-    });
-
-    try {
-      const handler = this.handlers.get(request.method);
-      
-      if (!handler) {
-        this.logger.warn('Method not found', { method: request.method, id: request.id });
-        return {
-          error: {
-            code: -32601,
-            message: `Method not found: ${request.method}`
-          },
-          id: request.id
-        };
-      }
-
-      const result = await handler.handle(request.params);
-      const duration = Date.now() - startTime;
-      
-      this.logger.info('Tool call completed', { 
-        method: request.method, 
-        id: request.id, 
-        duration: `${duration}ms`,
-        success: true
-      });
-      
-      return {
-        result,
-        id: request.id
-      };
-    } catch (error) {
-      const duration = Date.now() - startTime;
-      this.logger.error('Tool call failed', { 
-        method: request.method, 
-        id: request.id, 
-        duration: `${duration}ms`,
-        error: error instanceof Error ? error.message : 'Unknown error'
-      });
-      
-      return {
-        error: {
-          code: -32603,
-          message: error instanceof Error ? error.message : 'Internal error',
-          data: error
-        },
-        id: request.id
-      };
-    }
-  }
-
-  async start(port: number = 3001): Promise<void> {
-    // For now, implement a simple JSON-RPC over HTTP server
-    // In a full implementation, this would use the MCP protocol specification
-    const http = require('http');
-    
-    const server = http.createServer(async (req: any, res: any) => {
-      // Enable CORS
-      res.setHeader('Access-Control-Allow-Origin', '*');
-      res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
-      res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-      
-      if (req.method === 'OPTIONS') {
-        res.writeHead(200);
-        res.end();
-        return;
-      }
-      
-      if (req.method === 'GET' && req.url === '/tools') {
-        // Return available tools
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({
-          tools: this.getAvailableTools()
-        }));
-        return;
-      }
-      
-      if (req.method === 'POST' && req.url === '/call') {
-        let body = '';
-        req.on('data', (chunk: any) => {
-          body += chunk.toString();
-        });
-        
-        req.on('end', async () => {
-          try {
-            const request = JSON.parse(body);
-            const response = await this.handleToolCall(request);
-            
-            res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify(response));
-          } catch (error) {
-            res.writeHead(400, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({
-              error: {
-                code: -32700,
-                message: 'Parse error'
-              }
-            }));
-          }
-        });
-        return;
-      }
-      
-      // Default response
-      res.writeHead(404, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({
-        error: {
-          code: -32404,
-          message: 'Endpoint not found'
-        }
-      }));
-    });
-    
-    await new Promise<void>((resolve) => {
-      server.listen(port, () => {
-        this.logger.info('MCP Server started', { 
-          port,
-          endpoints: {
-            tools: `GET http://localhost:${port}/tools`,
-            call: `POST http://localhost:${port}/call`
-          }
-        });
-        resolve();
-      });
-    });
-    
-    this.server = server;
-  }
-
-  async stop(): Promise<void> {
-    this.logger.info('Stopping MCP Server');
-    if (this.server) {
-      await new Promise<void>((resolve) => {
-        this.server.close(() => {
-          this.logger.info('MCP Server stopped successfully');
-          resolve();
-        });
-      });
-    }
-    this.logger.close();
-  }
-
-  getAvailableTools(): any[] {
+  private getAvailableTools() {
     return [
       {
         name: 'semantic_search',
@@ -281,6 +138,184 @@ export class CortexMCPServer {
       }
     ];
   }
+
+  async startHttp(port: number = 3001): Promise<void> {
+    this.logger.info('Starting MCP Server with HTTP transport', { port });
+    
+    const app = express();
+    app.use(express.json());
+    app.use(cors({
+      origin: '*',
+      methods: ['GET', 'POST', 'OPTIONS'],
+      allowedHeaders: ['Content-Type', 'Authorization'],
+      credentials: false
+    }));
+
+    // Health check endpoint
+    app.get('/health', (req: Request, res: Response) => {
+      res.json({ status: 'healthy', server: 'cortex-mcp-server', version: '2.1.0' });
+    });
+
+    // MCP endpoint for JSON-RPC communication
+    app.post('/mcp', async (req: Request, res: Response) => {
+      try {
+        this.logger.info('Received MCP request', { 
+          method: req.body?.method,
+          id: req.body?.id 
+        });
+
+        // Handle JSON-RPC requests manually for now
+        // In a full implementation, this would use StreamableHTTPServerTransport
+        const { method, params, id } = req.body;
+        
+        let response: any;
+        
+        if (method === 'initialize') {
+          response = {
+            jsonrpc: '2.0',
+            result: {
+              protocolVersion: '2025-01-07',
+              capabilities: {
+                tools: {}
+              },
+              serverInfo: {
+                name: 'cortex-mcp-server',
+                version: '2.1.0'
+              }
+            },
+            id
+          };
+        } else if (method === 'tools/list') {
+          // Return available tools directly
+          response = {
+            jsonrpc: '2.0',
+            result: {
+              tools: this.getAvailableTools()
+            },
+            id
+          };
+        } else if (method === 'tools/call') {
+          try {
+            // Handle tool call directly
+            const { name, arguments: args } = params;
+            let toolResponse;
+            
+            switch (name) {
+              case 'semantic_search': {
+                const handler = this.handlers.get('semantic_search');
+                const result = await handler.handle(args);
+                toolResponse = {
+                  content: [
+                    {
+                      type: 'text',
+                      text: JSON.stringify(result, null, 2)
+                    }
+                  ]
+                };
+                break;
+              }
+              case 'contextual_read': {
+                const handler = this.handlers.get('contextual_read');
+                const result = await handler.handle(args);
+                toolResponse = {
+                  content: [
+                    {
+                      type: 'text',
+                      text: JSON.stringify(result, null, 2)
+                    }
+                  ]
+                };
+                break;
+              }
+              case 'code_intelligence': {
+                const handler = this.handlers.get('code_intelligence');
+                const result = await handler.handle(args);
+                toolResponse = {
+                  content: [
+                    {
+                      type: 'text',
+                      text: JSON.stringify(result, null, 2)
+                    }
+                  ]
+                };
+                break;
+              }
+              default:
+                throw new Error(`Unknown tool: ${name}`);
+            }
+            
+            response = {
+              jsonrpc: '2.0',
+              result: toolResponse,
+              id
+            };
+          } catch (error) {
+            response = {
+              jsonrpc: '2.0',
+              error: {
+                code: -32603,
+                message: error instanceof Error ? error.message : 'Internal error'
+              },
+              id
+            };
+          }
+        } else {
+          response = {
+            jsonrpc: '2.0',
+            error: {
+              code: -32601,
+              message: `Method not found: ${method}`
+            },
+            id
+          };
+        }
+
+        this.logger.info('Sending MCP response', { 
+          method,
+          id,
+          success: !response.error 
+        });
+        
+        res.json(response);
+      } catch (error) {
+        this.logger.error('MCP request failed', { error: error instanceof Error ? error.message : 'Unknown error' });
+        res.status(500).json({
+          jsonrpc: '2.0',
+          error: {
+            code: -32603,
+            message: 'Internal error'
+          },
+          id: req.body?.id || null
+        });
+      }
+    });
+
+    await new Promise<void>((resolve) => {
+      this.httpServer = app.listen(port, () => {
+        this.logger.info('MCP HTTP Server started', { 
+          port,
+          endpoints: {
+            health: `GET http://localhost:${port}/health`,
+            mcp: `POST http://localhost:${port}/mcp`
+          }
+        });
+        resolve();
+      });
+    });
+  }
+
+  async stop(): Promise<void> {
+    this.logger.info('Stopping MCP Server');
+    if (this.httpServer) {
+      await new Promise<void>((resolve) => {
+        this.httpServer.close(() => {
+          this.logger.info('MCP HTTP Server stopped successfully');
+          resolve();
+        });
+      });
+    }
+    this.logger.close();
+  }
 }
 
 // Main startup function
@@ -315,8 +350,8 @@ async function main() {
     // Create and start MCP server
     const mcpServer = new CortexMCPServer(indexer, searcher, logFile);
     
-    logger.info('Starting MCP server');
-    await mcpServer.start(port);
+    logger.info('Starting MCP server with HTTP transport', { port });
+    await mcpServer.startHttp(port);
     
     // Handle graceful shutdown
     process.on('SIGINT', async () => {
