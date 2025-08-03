@@ -5,9 +5,10 @@ import express, { Request, Response } from 'express';
 import cors from 'cors';
 import { CodebaseIndexer } from './indexer';
 import { SemanticSearcher } from './searcher';
-import { SemanticSearchHandler, ContextualReadHandler, CodeIntelligenceHandler } from './mcp-handlers';
+import { SemanticSearchHandler, ContextualReadHandler, CodeIntelligenceHandler, RelationshipAnalysisHandler, TraceExecutionPathHandler, FindCodePatternsHandler } from './mcp-handlers';
 import { IndexHealthChecker } from './index-health-checker';
 import { StartupStageTracker } from './startup-stages';
+import { CORTEX_TOOLS } from './mcp-tools';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -96,52 +97,13 @@ export class CortexMCPServer {
     this.handlers.set('semantic_search', new SemanticSearchHandler(this.searcher));
     this.handlers.set('contextual_read', new ContextualReadHandler(this.searcher));
     this.handlers.set('code_intelligence', new CodeIntelligenceHandler(this.searcher));
+    this.handlers.set('relationship_analysis', new RelationshipAnalysisHandler(this.searcher));
+    this.handlers.set('trace_execution_path', new TraceExecutionPathHandler(this.searcher));
+    this.handlers.set('find_code_patterns', new FindCodePatternsHandler(this.searcher));
   }
 
   private getAvailableTools() {
-    return [
-      {
-        name: 'semantic_search',
-        description: 'Semantic code search using vector embeddings',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            query: { type: 'string', description: 'Natural language search query' },
-            max_chunks: { type: 'number', default: 20 },
-            file_filters: { type: 'array', items: { type: 'string' } },
-            include_related: { type: 'boolean', default: true }
-          },
-          required: ['query']
-        }
-      },
-      {
-        name: 'contextual_read',
-        description: 'Read files with semantic context awareness',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            file_path: { type: 'string' },
-            semantic_context: { type: 'string' },
-            max_context_tokens: { type: 'number', default: 2000 }
-          },
-          required: ['file_path']
-        }
-      },
-      {
-        name: 'code_intelligence',
-        description: 'High-level semantic codebase analysis',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            task: { type: 'string' },
-            focus_areas: { type: 'array', items: { type: 'string' } },
-            recency_weight: { type: 'number', default: 0.3 },
-            max_context_tokens: { type: 'number', default: 4000 }
-          },
-          required: ['task']
-        }
-      }
-    ];
+    return Object.values(CORTEX_TOOLS);
   }
 
   async startHttp(port: number = 3001): Promise<void> {
@@ -281,49 +243,21 @@ export class CortexMCPServer {
             const { name, arguments: args } = params;
             let toolResponse;
             
-            switch (name) {
-              case 'semantic_search': {
-                const handler = this.handlers.get('semantic_search');
-                const result = await handler.handle(args);
-                toolResponse = {
-                  content: [
-                    {
-                      type: 'text',
-                      text: JSON.stringify(result, null, 2)
-                    }
-                  ]
-                };
-                break;
-              }
-              case 'contextual_read': {
-                const handler = this.handlers.get('contextual_read');
-                const result = await handler.handle(args);
-                toolResponse = {
-                  content: [
-                    {
-                      type: 'text',
-                      text: JSON.stringify(result, null, 2)
-                    }
-                  ]
-                };
-                break;
-              }
-              case 'code_intelligence': {
-                const handler = this.handlers.get('code_intelligence');
-                const result = await handler.handle(args);
-                toolResponse = {
-                  content: [
-                    {
-                      type: 'text',
-                      text: JSON.stringify(result, null, 2)
-                    }
-                  ]
-                };
-                break;
-              }
-              default:
-                throw new Error(`Unknown tool: ${name}`);
+            // Dynamic tool handling - get handler from registry
+            const handler = this.handlers.get(name);
+            if (!handler) {
+              throw new Error(`Unknown tool: ${name}`);
             }
+
+            const result = await handler.handle(args);
+            toolResponse = {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify(result, null, 2)
+                }
+              ]
+            };
             
             response = {
               jsonrpc: '2.0',

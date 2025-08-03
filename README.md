@@ -37,21 +37,26 @@ User Query → Git Scanner/Chunker → Local Embeddings → Vector DB
 
 ```
 cortexyoung/
-├── src/                 # Unified source code
-│   ├── types.ts         # Shared types and interfaces
-│   ├── git-scanner.ts   # Git repository scanning
-│   ├── chunker.ts       # Smart code chunking
-│   ├── embedder.ts      # BGE embedding generation
-│   ├── vector-store.ts  # Vector storage and retrieval
-│   ├── indexer.ts       # Main indexing logic
-│   ├── searcher.ts      # Semantic search implementation
-│   ├── mcp-handlers.ts  # MCP request handlers
-│   ├── mcp-tools.ts     # MCP tool definitions
-│   ├── server.ts        # MCP server implementation
-│   └── index.ts         # CLI entry point
-├── dist/                # Compiled JavaScript output
-├── .fastembed_cache/    # Local ML model cache
-└── docs/                # Documentation
+├── src/                          # Unified source code
+│   ├── types.ts                  # Shared types and interfaces
+│   ├── git-scanner.ts            # Git repository scanning
+│   ├── chunker.ts                # Smart code chunking
+│   ├── embedder.ts               # BGE embedding generation
+│   ├── vector-store.ts           # In-memory vector storage
+│   ├── persistent-vector-store.ts # File system persistence
+│   ├── indexer.ts                # Main indexing logic
+│   ├── searcher.ts               # Semantic search implementation
+│   ├── mcp-handlers.ts           # MCP request handlers
+│   ├── mcp-tools.ts              # MCP tool definitions
+│   ├── server.ts                 # MCP server implementation
+│   └── index.ts                  # CLI entry point
+├── dist/                         # Compiled JavaScript output
+├── .cortex/                      # Local embedding storage
+├── .fastembed_cache/             # Local ML model cache
+├── logs/                         # Server logs
+├── scripts/                      # Management scripts
+│   └── manage-embeddings.js      # Embedding sync utilities
+└── docs/                         # Documentation
 ```
 
 ## Development Status
@@ -85,19 +90,44 @@ cortexyoung/
 # Install dependencies
 npm install
 
-# Run demo (downloads BGE model on first run)
-npm run demo
+# Start the MCP server (intelligent mode - auto-detects indexing)
+npm run server
 ```
 
-**First run**: Downloads ~200MB BGE-small-en-v1.5 model to `.fastembed_cache/`  
-**Subsequent runs**: Uses cached model for instant startup
+**First run**: Downloads ~200MB BGE-small-en-v1.5 model and performs full indexing  
+**Subsequent runs**: Uses cached model and intelligently chooses incremental updates or full rebuilds
 
 ## Available Scripts
 
-- `npm run demo` - Run indexing demo with real embeddings
+### Build and Run
+- `npm run build` - Compile TypeScript to JavaScript in dist/
+- `npm run dev` - Run development server with ts-node
+- `npm run demo` - Run indexing demo with real embeddings (downloads BGE model on first run)
 - `npm run server` - Start MCP server for Claude Code integration
-- `npm run build` - Build TypeScript to JavaScript
-- `npm run start` - Run compiled server from dist/
+- `npm start` - Run compiled server from dist/
+
+### Server Modes
+- `npm run server` - **Default**: Intelligent mode (auto-detects best indexing strategy)
+- `npm run server:rebuild` - Force complete rebuild with fresh embeddings
+- `npm run rebuild` - Clear cache + force rebuild (comprehensive reset)
+- `npm run start:full` - Force full repository indexing mode
+- `npm run start:incremental` - Force incremental indexing mode
+
+### Cache Management
+- `npm run cache:stats` - Show embedding cache statistics (both local and global)
+- `npm run cache:clear` - Clear embedding cache (both storages)
+- `npm run cache:validate` - Validate cache integrity
+- `npm run cache:backup` - Backup embedding cache
+- `npm run cache:sync-global` - Sync local embeddings to global storage (~/.claude)
+- `npm run cache:sync-local` - Sync global embeddings to local storage (.cortex)
+- `npm run cache:info` - Show storage paths and modification times
+
+### Health Checks
+- `npm run health` - Comprehensive health report (corruption, staleness, performance)
+- `npm run health:check` - Quick check if rebuild is recommended (exit code based)
+
+### Testing
+- `npm run test:mcp` - Test MCP server functionality
 
 ## Configuration
 
@@ -106,6 +136,8 @@ npm run demo
 - `PORT` - Server port (default: 8765)
 - `LOG_FILE` - Custom log file path (default: logs/cortex-server.log)
 - `DEBUG` - Enable debug logging (set to 'true')
+- `INDEX_MODE` - Override intelligent mode: 'full' or 'incremental'
+- `FORCE_REBUILD` - Force complete rebuild: 'true' (clears existing embeddings)
 
 ### Log Files
 
@@ -114,13 +146,48 @@ All server activity is logged to both console and file:
 - **Custom location**: Set `LOG_FILE` environment variable
 - **Format**: JSON structured logs with timestamps
 
+## Dual Storage System
+
+Cortex uses a dual storage approach for embeddings to optimize both performance and synchronization:
+
+### Local Storage (`.cortex/`)
+- **Purpose**: Fast access, immediate availability
+- **Location**: `{repo}/.cortex/index.json`
+- **Benefits**: No network latency, always available with repo
+- **Git**: Gitignored, doesn't sync with repository
+
+### Global Storage (`~/.claude/`)
+- **Purpose**: Cross-environment synchronization
+- **Location**: `~/.claude/cortex-embeddings/{repo-hash}/index.json`
+- **Benefits**: Syncs across your dev environments, persistent across repo moves
+- **Hash**: Uses repo name + path hash for unique identification
+
+### Automatic Sync Behavior
+- **On startup**: Prefers global storage if available, syncs to local
+- **On save**: Saves to both local and global simultaneously
+- **Conflict resolution**: Newer timestamp wins
+
+### Manual Sync Commands
+```bash
+# Push local embeddings to global storage
+node scripts/manage-embeddings.js sync-to-global
+
+# Pull global embeddings to local storage  
+node scripts/manage-embeddings.js sync-to-local
+
+# Show storage status and paths
+node scripts/manage-embeddings.js info
+```
+
 ## Performance
 
-- **408 code chunks** indexed with real embeddings
+- **408+ code chunks** indexed with real embeddings
 - **384-dimensional** semantic embeddings via BGE-small-en-v1.5
-- **Sub-100ms** query response times achieved
+- **Sub-100ms** query response times
 - **Pure Node.js** - no external dependencies
-- **MCP server ready** for production Claude Code integration
+- **Incremental indexing** for large repositories
+- **Memory-efficient** vector operations with file persistence
+- **Dual storage system** for optimal performance and synchronization
 
 ## ChatGPT Architecture Analysis
 
@@ -163,9 +230,79 @@ Cortex provides semantic tools via MCP server:
 }
 ```
 
-2. Start Cortex server: `npm run server`
+2. Start Cortex server: `npm run server` (automatically handles indexing)
 3. Restart Claude Code
 4. Test with: `/mcp cortex semantic_search query="your query"`
+
+**Intelligent Indexing**: The server automatically detects if persistent embeddings exist and chooses the optimal indexing strategy - no manual configuration needed! Use `npm run rebuild` when you need a fresh start.
+
+## Indexing Modes Explained
+
+### 🧠 Intelligent Mode (Default)
+- **Command**: `npm run server`  
+- **Behavior**: Automatically chooses the best strategy with health checks:
+  - First run or no embeddings → Full indexing
+  - Existing embeddings found → Health check → Incremental or full based on analysis
+  - Detects corruption, staleness, or performance issues → Automatic appropriate rebuild
+  - **Health checks include**: Embedding validation, git branch changes, dependency updates, build config changes, index age
+
+### 🔄 Force Rebuild
+- **Command**: `npm run rebuild` or `npm run server:rebuild`
+- **Use when**: 
+  - Embeddings seem corrupted or outdated
+  - Major codebase restructuring
+  - Want to ensure completely fresh embeddings
+- **Behavior**: Clears all cached embeddings and rebuilds from scratch
+
+### ⚙️ Manual Override  
+- **Commands**: `INDEX_MODE=full npm run server` or `INDEX_MODE=incremental npm run server`
+- **Use when**: You want to force a specific mode regardless of existing state
+
+## Smart Health Detection
+
+Cortex automatically detects when rebuilds are needed through comprehensive health checks:
+
+### 🔍 Corruption Detection
+- **Embedding validation**: Checks for invalid/missing embeddings, dimension mismatches
+- **Data integrity**: Detects duplicate chunk IDs, orphaned chunks for deleted files
+- **Index consistency**: Validates chunk counts and file mappings
+
+### 📅 Staleness Detection  
+- **Git changes**: Branch switches, major commit divergence (>20 commits behind)
+- **Dependency updates**: Changes to package.json, requirements.txt, Cargo.toml, go.mod
+- **Build config changes**: tsconfig.json, webpack.config.js, babel configs (triggers full rebuild)
+- **Index age**: Warns when index is >7 days old
+
+### ⚡ Performance Issues
+- **File coverage**: Low percentage of repository files indexed (<80%)
+- **Missing embeddings**: Chunks without generated embeddings
+- **Search quality**: Degraded semantic search performance
+
+### 🩺 Health Check Commands
+```bash
+# Get comprehensive health report
+npm run health
+
+# Check if rebuild is recommended (CI/CD friendly)
+npm run health:check
+echo $?  # 0=healthy, 1=degraded, 2=critical
+```
+
+**Example Health Report**:
+```
+✅ Overall Health: HEALTHY
+
+📊 Index Statistics:
+  Total chunks: 412
+  Total files: 89
+  Last indexed: 2025-01-15 10:30:00
+  Index age: 2 days
+  Embedding model: BGE-small-en-v1.5
+  Schema version: 1.0.0
+
+💡 Recommendations:
+  • Index is healthy, no action needed
+```
 
 ## Contributing
 

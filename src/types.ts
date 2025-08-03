@@ -16,6 +16,8 @@ export interface CodeChunk {
   usage_patterns: UsagePatterns;
   last_modified: string;
   relevance_score?: number;
+  similarity_score?: number;
+  function_name?: string;
 }
 
 export type ChunkType = 'function' | 'class' | 'method' | 'documentation' | 'config';
@@ -64,9 +66,20 @@ export interface MultiHopConfig {
   max_hops: number;
   relationship_types: RelationshipType[];
   hop_decay: number;
+  focus_symbols?: string[];
+  include_paths?: boolean;
+  traversal_direction?: 'forward' | 'backward';
+  min_strength?: number;
 }
 
-export type RelationshipType = 'calls' | 'imports' | 'data_flow' | 'co_change';
+export type RelationshipType =
+  | 'calls'
+  | 'imports'
+  | 'data_flow'
+  | 'co_change'
+  | 'throws'
+  | 'extends'
+  | 'implements';
 export type ContextMode = 'minimal' | 'structured' | 'adaptive';
 
 export interface QueryResponse {
@@ -83,6 +96,7 @@ export interface SearchResponse {
   relationship_paths?: any[];
   efficiency_score?: number;
   metadata: QueryMetadata;
+  context_chunks?: CodeChunk[];
 }
 
 export interface ContextPackage {
@@ -108,6 +122,8 @@ export interface QueryMetadata {
   chunks_returned: number;
   token_estimate: number;
   efficiency_score: number;
+  relationship_paths?: any[];
+  confidence_scores?: number[];
 }
 
 export interface IndexRequest {
