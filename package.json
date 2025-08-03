@@ -7,7 +7,9 @@
     "dev": "ts-node src/index.ts",
     "demo": "ts-node src/index.ts",
     "server": "ts-node src/server.ts",
+    "server:rebuild": "FORCE_REBUILD=true ts-node src/server.ts",
     "start": "node dist/server.js",
+    "start:rebuild": "FORCE_REBUILD=true npm start",
     "start:full": "INDEX_MODE=full npm start",
     "start:incremental": "INDEX_MODE=incremental npm start",
     "clean": "rm -rf dist",
@@ -15,6 +17,12 @@
     "cache:clear": "node scripts/manage-embeddings.js clear",
     "cache:validate": "node scripts/manage-embeddings.js validate",
     "cache:backup": "node scripts/manage-embeddings.js backup",
+    "cache:sync-global": "node scripts/manage-embeddings.js sync-to-global",
+    "cache:sync-local": "node scripts/manage-embeddings.js sync-to-local",
+    "cache:info": "node scripts/manage-embeddings.js info",
+    "rebuild": "npm run cache:clear && npm run server:rebuild",
+    "health": "ts-node src/health-check-cli.ts . check",
+    "health:check": "ts-node src/health-check-cli.ts . should-rebuild",
     "test:mcp": "node test-mcp.js"
   },
   "keywords": [],
@@ -34,6 +42,9 @@
     "express": "^5.1.0",
     "fastembed": "^1.14.4",
     "simple-git": "^3.28.0",
+    "tree-sitter": "^0.21.1",
+    "tree-sitter-javascript": "^0.23.1",
+    "tree-sitter-typescript": "^0.23.2",
     "zod": "^3.25.76"
   }
 }

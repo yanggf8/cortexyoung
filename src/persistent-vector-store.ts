@@ -3,6 +3,7 @@ import { VectorStore } from './vector-store';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as crypto from 'crypto';
+import * as os from 'os';
 
 interface PersistedIndex {
   version: string;
@@ -31,26 +32,58 @@ interface IndexDelta {
 export class PersistentVectorStore extends VectorStore {
   private fileHashes: Map<string, string> = new Map();
   private repositoryPath: string;
-  private indexPath: string;
+  private localIndexPath: string;
+  private globalIndexPath: string;
   private metadataPath: string;
+  private globalMetadataPath: string;
   private deltaPath: string;
+  private globalDeltaPath: string;
 
   constructor(repositoryPath: string, indexDir: string = '.cortex') {
     super(); // Call parent constructor
     this.repositoryPath = repositoryPath;
-    this.indexPath = path.join(repositoryPath, indexDir);
-    this.metadataPath = path.join(this.indexPath, 'index.json');
-    this.deltaPath = path.join(this.indexPath, 'deltas');
+    
+    // Local storage (in repo)
+    this.localIndexPath = path.join(repositoryPath, indexDir);
+    this.metadataPath = path.join(this.localIndexPath, 'index.json');
+    this.deltaPath = path.join(this.localIndexPath, 'deltas');
+    
+    // Global storage (in ~/.claude)
+    const repoHash = this.getRepositoryHash(repositoryPath);
+    const claudeDir = path.join(os.homedir(), '.claude', 'cortex-embeddings');
+    this.globalIndexPath = path.join(claudeDir, repoHash);
+    this.globalMetadataPath = path.join(this.globalIndexPath, 'index.json');
+    this.globalDeltaPath = path.join(this.globalIndexPath, 'deltas');
+  }
+
+  private getRepositoryHash(repoPath: string): string {
+    // Create a consistent hash based on absolute path
+    const absolutePath = path.resolve(repoPath);
+    const hash = crypto.createHash('sha256').update(absolutePath).digest('hex');
+    
+    // Use first 16 chars + repo name for readability
+    const repoName = path.basename(absolutePath);
+    return `${repoName}-${hash.substring(0, 16)}`;
   }
 
   async initialize(): Promise<void> {
-    // Ensure index directory exists
-    await fs.mkdir(this.indexPath, { recursive: true });
+    // Ensure both index directories exist
+    await fs.mkdir(this.localIndexPath, { recursive: true });
     await fs.mkdir(this.deltaPath, { recursive: true });
+    await fs.mkdir(this.globalIndexPath, { recursive: true });
+    await fs.mkdir(this.globalDeltaPath, { recursive: true });
     
-    // Try to load existing index
-    if (await this.indexExists()) {
-      await this.loadPersistedIndex();
+    // Try to load existing index (prefer global, fallback to local)
+    if (await this.globalIndexExists()) {
+      console.log('🌐 Loading from global storage (~/.claude)');
+      await this.loadPersistedIndex(true);
+      // Sync to local if local is outdated
+      await this.syncToLocal();
+    } else if (await this.indexExists()) {
+      console.log('📁 Loading from local storage (.cortex)');
+      await this.loadPersistedIndex(false);
+      // Sync to global
+      await this.syncToGlobal();
     }
   }
 
@@ -63,12 +96,24 @@ export class PersistentVectorStore extends VectorStore {
     }
   }
 
-  async loadPersistedIndex(): Promise<boolean> {
+  async globalIndexExists(): Promise<boolean> {
     try {
-      console.log('🔄 Loading persisted embeddings...');
+      await fs.access(this.globalMetadataPath);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async loadPersistedIndex(useGlobal: boolean = false): Promise<boolean> {
+    try {
+      const indexPath = useGlobal ? this.globalMetadataPath : this.metadataPath;
+      const source = useGlobal ? 'global (~/.claude)' : 'local (.cortex)';
+      
+      console.log(`🔄 Loading persisted embeddings from ${source}...`);
       const startTime = Date.now();
       
-      const indexData = await fs.readFile(this.metadataPath, 'utf-8');
+      const indexData = await fs.readFile(indexPath, 'utf-8');
       const persistedIndex: PersistedIndex = JSON.parse(indexData);
       
       // Load chunks
@@ -81,7 +126,7 @@ export class PersistentVectorStore extends VectorStore {
       this.fileHashes = new Map(Object.entries(persistedIndex.fileHashes as any));
       
       const loadTime = Date.now() - startTime;
-      console.log(`✅ Loaded ${persistedIndex.chunks.length} chunks in ${loadTime}ms`);
+      console.log(`✅ Loaded ${persistedIndex.chunks.length} chunks from ${source} in ${loadTime}ms`);
       console.log(`📊 Index metadata:`, persistedIndex.metadata);
       
       return true;
@@ -93,7 +138,7 @@ export class PersistentVectorStore extends VectorStore {
 
   async savePersistedIndex(): Promise<void> {
     try {
-      console.log('💾 Saving embeddings to disk...');
+      console.log('💾 Saving embeddings to both local and global storage...');
       const startTime = Date.now();
       
       const persistedIndex: PersistedIndex = {
@@ -109,13 +154,22 @@ export class PersistentVectorStore extends VectorStore {
         }
       };
       
-      // Write to temporary file first, then atomic rename
-      const tempPath = this.metadataPath + '.tmp';
-      await fs.writeFile(tempPath, JSON.stringify(persistedIndex, null, 2));
-      await fs.rename(tempPath, this.metadataPath);
+      const indexData = JSON.stringify(persistedIndex, null, 2);
+      
+      // Save to local storage
+      const localTempPath = this.metadataPath + '.tmp';
+      await fs.writeFile(localTempPath, indexData);
+      await fs.rename(localTempPath, this.metadataPath);
+      
+      // Save to global storage
+      const globalTempPath = this.globalMetadataPath + '.tmp';
+      await fs.writeFile(globalTempPath, indexData);
+      await fs.rename(globalTempPath, this.globalMetadataPath);
       
       const saveTime = Date.now() - startTime;
-      console.log(`✅ Saved ${persistedIndex.chunks.length} chunks in ${saveTime}ms`);
+      console.log(`✅ Saved ${persistedIndex.chunks.length} chunks to both storages in ${saveTime}ms`);
+      console.log(`📁 Local: ${this.metadataPath}`);
+      console.log(`🌐 Global: ${this.globalMetadataPath}`);
     } catch (error) {
       console.error('❌ Failed to save persisted index:', error instanceof Error ? error.message : error);
       throw error;
@@ -197,6 +251,84 @@ export class PersistentVectorStore extends VectorStore {
     console.log(`📊 Applied delta: +${delta.added.length} ~${delta.updated.length} -${delta.removed.length} chunks`);
   }
 
+  async syncToGlobal(): Promise<void> {
+    try {
+      if (await this.indexExists()) {
+        console.log('🔄 Syncing local embeddings to global storage...');
+        const indexData = await fs.readFile(this.metadataPath, 'utf-8');
+        const globalTempPath = this.globalMetadataPath + '.tmp';
+        await fs.writeFile(globalTempPath, indexData);
+        await fs.rename(globalTempPath, this.globalMetadataPath);
+        console.log('✅ Synced to global storage');
+      }
+    } catch (error) {
+      console.warn('⚠️ Failed to sync to global storage:', error instanceof Error ? error.message : error);
+    }
+  }
+
+  async syncToLocal(): Promise<void> {
+    try {
+      if (await this.globalIndexExists()) {
+        // Check if local is outdated
+        const localExists = await this.indexExists();
+        let shouldSync = true;
+        
+        if (localExists) {
+          const [localStats, globalStats] = await Promise.all([
+            fs.stat(this.metadataPath),
+            fs.stat(this.globalMetadataPath)
+          ]);
+          
+          // Only sync if global is newer
+          shouldSync = globalStats.mtime > localStats.mtime;
+        }
+        
+        if (shouldSync) {
+          console.log('🔄 Syncing global embeddings to local storage...');
+          const indexData = await fs.readFile(this.globalMetadataPath, 'utf-8');
+          const localTempPath = this.metadataPath + '.tmp';
+          await fs.writeFile(localTempPath, indexData);
+          await fs.rename(localTempPath, this.metadataPath);
+          console.log('✅ Synced to local storage');
+        } else {
+          console.log('📋 Local storage is up to date');
+        }
+      }
+    } catch (error) {
+      console.warn('⚠️ Failed to sync to local storage:', error instanceof Error ? error.message : error);
+    }
+  }
+
+  async getStorageInfo(): Promise<{
+    local: { exists: boolean; path: string; lastModified?: Date };
+    global: { exists: boolean; path: string; lastModified?: Date };
+  }> {
+    const [localExists, globalExists] = await Promise.all([
+      this.indexExists(),
+      this.globalIndexExists()
+    ]);
+
+    const info: {
+      local: { exists: boolean; path: string; lastModified?: Date };
+      global: { exists: boolean; path: string; lastModified?: Date };
+    } = {
+      local: { exists: localExists, path: this.metadataPath },
+      global: { exists: globalExists, path: this.globalMetadataPath }
+    };
+
+    if (localExists) {
+      const localStats = await fs.stat(this.metadataPath);
+      info.local.lastModified = localStats.mtime;
+    }
+
+    if (globalExists) {
+      const globalStats = await fs.stat(this.globalMetadataPath);
+      info.global.lastModified = globalStats.mtime;
+    }
+
+    return info;
+  }
+
   // Override upsertChunks to ensure persistence
   async upsertChunks(chunks: CodeChunk[]): Promise<void> {
     await super.upsertChunks(chunks);
@@ -226,8 +358,8 @@ export class PersistentVectorStore extends VectorStore {
     this.fileHashes.clear();
     
     try {
-      await fs.rm(this.indexPath, { recursive: true, force: true });
-      await fs.mkdir(this.indexPath, { recursive: true });
+      await fs.rm(this.localIndexPath, { recursive: true, force: true });
+      await fs.mkdir(this.localIndexPath, { recursive: true });
       await fs.mkdir(this.deltaPath, { recursive: true });
     } catch (error) {
       console.warn('⚠️ Failed to clear index directory:', error instanceof Error ? error.message : error);
@@ -244,5 +376,35 @@ export class PersistentVectorStore extends VectorStore {
 
   getAllChunks(): CodeChunk[] {
     return Array.from(this.chunks.values());
+  }
+
+  async getMetadata(): Promise<any> {
+    try {
+      if (await this.indexExists()) {
+        const indexData = JSON.parse(await fs.readFile(this.metadataPath, 'utf-8'));
+        return indexData.metadata || {};
+      }
+    } catch (error) {
+      console.warn('Could not load metadata:', error instanceof Error ? error.message : error);
+    }
+    return null;
+  }
+
+  async updateMetadata(metadata: any): Promise<void> {
+    try {
+      let indexData: any = { chunks: [], fileHashes: {}, metadata: {} };
+      
+      if (await this.indexExists()) {
+        indexData = JSON.parse(await fs.readFile(this.metadataPath, 'utf-8'));
+      }
+      
+      indexData.metadata = { ...indexData.metadata, ...metadata };
+      
+      const tempPath = this.metadataPath + '.tmp';
+      await fs.writeFile(tempPath, JSON.stringify(indexData, null, 2));
+      await fs.rename(tempPath, this.metadataPath);
+    } catch (error) {
+      console.warn('Could not update metadata:', error instanceof Error ? error.message : error);
+    }
   }
 }

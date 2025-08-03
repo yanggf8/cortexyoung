@@ -6,6 +6,8 @@ import cors from 'cors';
 import { CodebaseIndexer } from './indexer';
 import { SemanticSearcher } from './searcher';
 import { SemanticSearchHandler, ContextualReadHandler, CodeIntelligenceHandler } from './mcp-handlers';
+import { IndexHealthChecker } from './index-health-checker';
+import { StartupStageTracker } from './startup-stages';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -74,15 +76,18 @@ export class CortexMCPServer {
   private handlers: Map<string, any> = new Map();
   private httpServer: any;
   private logger: Logger;
+  private stageTracker: StartupStageTracker;
 
   constructor(
     indexer: CodebaseIndexer,
     searcher: SemanticSearcher,
-    logFile?: string
+    logFile?: string,
+    stageTracker?: StartupStageTracker
   ) {
     this.indexer = indexer;
     this.searcher = searcher;
     this.logger = new Logger(logFile);
+    this.stageTracker = stageTracker || new StartupStageTracker();
     this.setupHandlers();
     this.logger.info('CortexMCPServer initialized');
   }
@@ -151,9 +156,85 @@ export class CortexMCPServer {
       credentials: false
     }));
 
-    // Health check endpoint
+    // Enhanced health check endpoint with startup stage info
     app.get('/health', (req: Request, res: Response) => {
-      res.json({ status: 'healthy', server: 'cortex-mcp-server', version: '2.1.0' });
+      const progress = this.stageTracker.getProgress();
+      const currentStage = this.stageTracker.getCurrentStage();
+      const isReady = this.stageTracker.isReady();
+      const stats = this.stageTracker.getStageStats();
+      
+      // Determine health status based on startup progress
+      let healthStatus: 'healthy' | 'starting' | 'indexing' | 'error';
+      
+      if (isReady) {
+        healthStatus = 'healthy';
+      } else if (progress.overallStatus === 'failed') {
+        healthStatus = 'error';
+      } else if (progress.overallStatus === 'indexing') {
+        healthStatus = 'indexing';
+      } else {
+        healthStatus = 'starting';
+      }
+      
+      const response: any = {
+        status: healthStatus,
+        server: 'cortex-mcp-server',
+        version: '2.1.0',
+        ready: isReady,
+        timestamp: Date.now()
+      };
+      
+      // Add startup progress info if not fully ready
+      if (!isReady) {
+        response.startup = {
+          stage: currentStage?.name || 'Unknown',
+          progress: Math.round(progress.overallProgress),
+          eta: progress.estimatedTimeRemaining ? Math.round(progress.estimatedTimeRemaining / 1000) : null,
+          completed: stats.completed,
+          total: stats.total,
+          details: currentStage?.details
+        };
+      }
+      
+      // Add any failed stages
+      if (stats.failed > 0) {
+        const failedStages = progress.stages
+          .filter(stage => stage.status === 'failed')
+          .map(stage => ({ name: stage.name, error: stage.error }));
+        response.errors = failedStages;
+      }
+      
+      res.json(response);
+    });
+
+    // Startup progress endpoint
+    app.get('/progress', (req: Request, res: Response) => {
+      const progress = this.stageTracker.getProgress();
+      res.json({
+        ...progress,
+        server: 'cortex-mcp-server',
+        version: '2.1.0',
+        timestamp: Date.now()
+      });
+    });
+
+    // Current stage endpoint (for quick status checks)
+    app.get('/status', (req: Request, res: Response) => {
+      const progress = this.stageTracker.getProgress();
+      const currentStage = this.stageTracker.getCurrentStage();
+      const stats = this.stageTracker.getStageStats();
+      
+      res.json({
+        status: progress.overallStatus,
+        ready: this.stageTracker.isReady(),
+        progress: progress.overallProgress,
+        currentStage: currentStage?.name,
+        stageProgress: currentStage?.progress,
+        stages: `${stats.completed}/${stats.total}`,
+        eta: progress.estimatedTimeRemaining ? Math.round(progress.estimatedTimeRemaining / 1000) : null,
+        server: 'cortex-mcp-server',
+        timestamp: Date.now()
+      });
     });
 
     // MCP endpoint for JSON-RPC communication
@@ -318,26 +399,95 @@ export class CortexMCPServer {
   }
 }
 
+// Helper function for intelligent indexing mode detection with health checks
+async function getIntelligentIndexMode(indexer: CodebaseIndexer, logger: Logger): Promise<'full' | 'incremental'> {
+  try {
+    // Access the vector store to check if index exists
+    const vectorStore = (indexer as any).vectorStore;
+    await vectorStore.initialize();
+    
+    const hasExistingIndex = await vectorStore.indexExists();
+    
+    if (!hasExistingIndex) {
+      logger.info('🧠 Intelligent mode: No existing embeddings found, using full indexing');
+      return 'full';
+    }
+
+    // Perform health check to determine if rebuild is needed
+    logger.info('🩺 Running health check on existing index...');
+    const healthChecker = new IndexHealthChecker(process.cwd(), vectorStore);
+    const healthResult = await healthChecker.shouldRebuild();
+    
+    if (healthResult.shouldRebuild) {
+      logger.info(`🧠 Intelligent mode: ${healthResult.reason}, using ${healthResult.mode} indexing`);
+      return healthResult.mode;
+    } else {
+      logger.info('🧠 Intelligent mode: Index is healthy, using incremental indexing');
+      return 'incremental';
+    }
+  } catch (error) {
+    logger.warn('Error in intelligent mode detection, defaulting to full indexing', { 
+      error: error instanceof Error ? error.message : error 
+    });
+    return 'full';
+  }
+}
+
 // Main startup function
 async function main() {
   const repoPath = process.argv[2] || process.cwd();
   const port = parseInt(process.env.PORT || '8765');
   const logFile = process.env.LOG_FILE;
   
-  // Create main logger
+  // Create stage tracker and main logger
+  const stageTracker = new StartupStageTracker();
   const logger = new Logger(logFile);
   
+  stageTracker.startStage('server_init', `Repository: ${repoPath}, Port: ${port}`);
   logger.info('Initializing Cortex MCP Server', { repoPath, port });
   
   try {
+    stageTracker.completeStage('server_init');
+    stageTracker.startStage('cache_check', 'Checking for existing embeddings cache');
+    
     // Initialize indexer and searcher
     logger.info('Starting repository indexing');
     const indexer = new CodebaseIndexer(repoPath);
     
+    // Use intelligent mode by default, or explicit mode if specified
+    let indexMode: 'full' | 'incremental';
+    
+    if (process.env.INDEX_MODE) {
+      indexMode = process.env.INDEX_MODE as 'full' | 'incremental';
+      logger.info('Using explicit indexing mode', { mode: indexMode });
+      stageTracker.updateStageProgress('cache_check', 100, `Using explicit mode: ${indexMode}`);
+    } else if (process.env.FORCE_REBUILD === 'true') {
+      indexMode = 'full';
+      logger.info('🔄 Force rebuild requested, using full indexing');
+      stageTracker.updateStageProgress('cache_check', 50, 'Force rebuild requested');
+      // Clear existing index to ensure complete rebuild
+      const vectorStore = (indexer as any).vectorStore;
+      await vectorStore.initialize();
+      if (await vectorStore.indexExists()) {
+        await vectorStore.clearIndex();
+        logger.info('Cleared existing index for force rebuild');
+      }
+      stageTracker.updateStageProgress('cache_check', 100, 'Cleared existing cache');
+    } else {
+      indexMode = await getIntelligentIndexMode(indexer, logger);
+      stageTracker.updateStageProgress('cache_check', 100, `Intelligent mode selected: ${indexMode}`);
+    }
+    
+    stageTracker.completeStage('cache_check');
+    stageTracker.startStage('file_scan', 'Scanning repository for code files');
+    stageTracker.updateStageProgress('file_scan', 50, 'Analyzing repository structure');
+    
     const indexResponse = await indexer.indexRepository({
       repository_path: repoPath,
-      mode: 'full'
+      mode: indexMode
     });
+    
+    stageTracker.completeStage('vector_storage', `Indexed ${indexResponse.chunks_processed} chunks`);
     
     logger.info('Repository indexing completed', { 
       chunksProcessed: indexResponse.chunks_processed,
@@ -347,11 +497,15 @@ async function main() {
     // Get searcher from indexer
     const searcher = (indexer as any).searcher; // Access the searcher instance
     
+    stageTracker.startStage('mcp_ready', 'Starting MCP server');
+    
     // Create and start MCP server
-    const mcpServer = new CortexMCPServer(indexer, searcher, logFile);
+    const mcpServer = new CortexMCPServer(indexer, searcher, logFile, stageTracker);
     
     logger.info('Starting MCP server with HTTP transport', { port });
     await mcpServer.startHttp(port);
+    
+    stageTracker.completeStage('mcp_ready', 'MCP server ready to accept requests');
     
     // Handle graceful shutdown
     process.on('SIGINT', async () => {

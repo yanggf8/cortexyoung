@@ -154,4 +154,34 @@ export class GitScanner {
     const fullPath = path.join(this.repositoryPath, filePath);
     return await fs.readFile(fullPath, 'utf-8');
   }
+
+  async getCurrentBranch(): Promise<string> {
+    try {
+      const branch = await this.git.branchLocal();
+      return branch.current;
+    } catch (error) {
+      console.warn('Could not get current branch:', error);
+      return 'unknown';
+    }
+  }
+
+  async getLatestCommit(): Promise<string> {
+    try {
+      const log = await this.git.log({ maxCount: 1 });
+      return log.latest?.hash || 'unknown';
+    } catch (error) {
+      console.warn('Could not get latest commit:', error);
+      return 'unknown';
+    }
+  }
+
+  async getCommitDistance(fromCommit: string, toCommit: string): Promise<number> {
+    try {
+      const result = await this.git.raw(['rev-list', '--count', `${fromCommit}..${toCommit}`]);
+      return parseInt(result.trim()) || 0;
+    } catch (error) {
+      console.warn(`Could not get commit distance from ${fromCommit} to ${toCommit}:`, error);
+      return 0;
+    }
+  }
 }

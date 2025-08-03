@@ -74,10 +74,24 @@ export interface QueryResponse {
   metadata: QueryMetadata;
 }
 
+export interface SearchResponse {
+  status?: 'success' | 'error';
+  chunks?: CodeChunk[];
+  context_package: ContextPackage;
+  query_time_ms: number;
+  total_chunks_considered: number;
+  relationship_paths?: any[];
+  efficiency_score?: number;
+  metadata: QueryMetadata;
+}
+
 export interface ContextPackage {
   summary: string;
   groups: ContextGroup[];
   related_files: string[];
+  total_tokens?: number;
+  token_efficiency?: number;
+  relationship_insights?: any;
 }
 
 export interface ContextGroup {
@@ -85,6 +99,7 @@ export interface ContextGroup {
   description: string;
   chunks: CodeChunk[];
   importance_score: number;
+  relationship_paths?: any[];
 }
 
 export interface QueryMetadata {
