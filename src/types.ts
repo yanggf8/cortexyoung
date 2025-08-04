@@ -22,6 +22,25 @@ export interface CodeChunk {
 
 export type ChunkType = 'function' | 'class' | 'method' | 'documentation' | 'config';
 
+// Schema version tracking
+export const CORTEX_SCHEMA_VERSION = '2.1.0';
+export const SUPPORTED_SCHEMA_VERSIONS = ['2.0.0', '2.1.0'];
+
+export interface SchemaInfo {
+  version: string;
+  compatible: boolean;
+  requiresMigration: boolean;
+  migrationPath?: string[];
+}
+
+export interface ModelInfo {
+  name: string;
+  version: string;
+  hash?: string;
+  dimension: number;
+  isLoaded: boolean;
+}
+
 export interface CodeRelationships {
   calls: string[];
   called_by: string[];
@@ -128,8 +147,9 @@ export interface QueryMetadata {
 
 export interface IndexRequest {
   repository_path: string;
-  mode: 'full' | 'incremental';
+  mode: 'full' | 'incremental' | 'reindex';
   since_commit?: string;
+  force_rebuild?: boolean; // For reindex mode
 }
 
 export interface IndexResponse {

@@ -389,24 +389,16 @@ async function main() {
     const indexer = new CodebaseIndexer(repoPath);
     
     // Use intelligent mode by default, or explicit mode if specified
-    let indexMode: 'full' | 'incremental';
+    let indexMode: 'full' | 'incremental' | 'reindex';
     
-    if (process.env.INDEX_MODE) {
+    if (process.env.INDEX_MODE === 'reindex' || process.env.FORCE_REBUILD === 'true') {
+      indexMode = 'reindex';
+      logger.info('🔄 Force rebuild requested, using reindex mode');
+      stageTracker.updateStageProgress('cache_check', 50, 'Force rebuild requested (reindex mode)');
+    } else if (process.env.INDEX_MODE) {
       indexMode = process.env.INDEX_MODE as 'full' | 'incremental';
       logger.info('Using explicit indexing mode', { mode: indexMode });
       stageTracker.updateStageProgress('cache_check', 100, `Using explicit mode: ${indexMode}`);
-    } else if (process.env.FORCE_REBUILD === 'true') {
-      indexMode = 'full';
-      logger.info('🔄 Force rebuild requested, using full indexing');
-      stageTracker.updateStageProgress('cache_check', 50, 'Force rebuild requested');
-      // Clear existing index to ensure complete rebuild
-      const vectorStore = (indexer as any).vectorStore;
-      await vectorStore.initialize();
-      if (await vectorStore.indexExists()) {
-        await vectorStore.clearIndex();
-        logger.info('Cleared existing index for force rebuild');
-      }
-      stageTracker.updateStageProgress('cache_check', 100, 'Cleared existing cache');
     } else {
       indexMode = await getIntelligentIndexMode(indexer, logger);
       stageTracker.updateStageProgress('cache_check', 100, `Intelligent mode selected: ${indexMode}`);

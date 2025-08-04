@@ -19,9 +19,9 @@ export class SemanticSearcher {
 
   async initializeRelationshipEngine(files: Map<string, string>): Promise<void> {
     if (this.relationshipEngine) {
-      console.log('🔗 Initializing relationship engine...');
+      console.log('🔗 Initializing relationship engine with persistent storage...');
       await this.relationshipEngine.buildRelationshipGraph(files);
-      console.log('✅ Relationship engine ready');
+      console.log('✅ Relationship engine ready with persistent cache support');
     }
   }
 

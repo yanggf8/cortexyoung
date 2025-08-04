@@ -5,6 +5,9 @@ import { EmbeddingGenerator } from './embedder';
 import { VectorStore } from './vector-store';
 import { PersistentVectorStore } from './persistent-vector-store';
 import { SemanticSearcher } from './searcher';
+import { StartupStageTracker } from './startup-stages';
+import { ReindexAdvisor } from './reindex-advisor';
+import { UnifiedStorageCoordinator } from './unified-storage-coordinator';
 
 export class CodebaseIndexer {
   private gitScanner: GitScanner;
@@ -13,31 +16,55 @@ export class CodebaseIndexer {
   private vectorStore: PersistentVectorStore;
   private searcher: SemanticSearcher;
   private repositoryPath: string;
+  private stageTracker?: StartupStageTracker;
+  private reindexAdvisor: ReindexAdvisor;
+  private storageCoordinator: UnifiedStorageCoordinator;
 
-  constructor(repositoryPath: string) {
+  constructor(repositoryPath: string, stageTracker?: StartupStageTracker) {
     this.repositoryPath = repositoryPath;
     this.gitScanner = new GitScanner(repositoryPath);
     this.chunker = new SmartChunker();
     this.embedder = new EmbeddingGenerator();
-    this.vectorStore = new PersistentVectorStore(repositoryPath);
-    this.searcher = new SemanticSearcher(this.vectorStore, this.embedder);
+    this.storageCoordinator = new UnifiedStorageCoordinator(repositoryPath);
+    this.vectorStore = this.storageCoordinator.getVectorStore();
+    this.searcher = new SemanticSearcher(this.vectorStore, this.embedder, repositoryPath);
+    this.stageTracker = stageTracker;
+    this.reindexAdvisor = new ReindexAdvisor(this.embedder);
   }
 
   async indexRepository(request: IndexRequest): Promise<IndexResponse> {
     const startTime = Date.now();
     
     try {
-      // Initialize persistent vector store
-      await this.vectorStore.initialize();
+      // Initialize unified storage coordinator
+      this.stageTracker?.startStage('Cache Detection', 'Checking for existing embeddings and relationships');
+      await this.storageCoordinator.initialize();
+      this.stageTracker?.updateStageProgress('Cache Detection', 100);
       
       // Check if we can load existing embeddings
       const hasExistingIndex = await this.vectorStore.indexExists();
       
       if (hasExistingIndex && request.mode === 'incremental') {
+        // Analyze if reindex is recommended
+        const recommendation = await this.reindexAdvisor.getReindexRecommendation(
+          this.vectorStore, 
+          this.repositoryPath
+        );
+        
+        if (recommendation.shouldReindex && recommendation.mode === 'reindex') {
+          console.log('🤖 Automatic reindex recommended:', recommendation.primaryReason);
+          console.log('🔄 Switching from incremental to full reindex...');
+          await this.vectorStore.clearIndex();
+          return await this.performFullIndex({ ...request, mode: 'reindex' }, startTime);
+        } else if (recommendation.allRecommendations.length > 0) {
+          console.log('💡 Index analysis:', recommendation.primaryReason);
+        }
+        
         console.log('📂 Loading existing embeddings and performing incremental update...');
         return await this.performIncrementalIndex(request, startTime);
-      } else if (hasExistingIndex && request.mode === 'full') {
-        console.log('🔄 Existing index found, but performing full reindex...');
+      } else if (hasExistingIndex && (request.mode === 'full' || request.mode === 'reindex')) {
+        const reason = request.mode === 'reindex' ? 'forced rebuild requested' : 'full mode specified';
+        console.log(`🔄 Existing index found, but performing full reindex (${reason})...`);
         await this.vectorStore.clearIndex();
       } else {
         console.log('🆕 No existing index found, performing full index...');
@@ -125,7 +152,9 @@ export class CodebaseIndexer {
     console.log(`Starting full indexing of ${request.repository_path}`);
     
     // Scan repository for files
-    const scanResult = await this.gitScanner.scanRepository(request.mode, request.since_commit);
+    // Map reindex mode to full for git scanner
+    const scanMode = request.mode === 'reindex' ? 'full' : request.mode;
+    const scanResult = await this.gitScanner.scanRepository(scanMode, request.since_commit);
     console.log(`Found ${scanResult.totalFiles} files to process`);
     
     // Get file changes metadata
@@ -163,8 +192,9 @@ export class CodebaseIndexer {
     console.log('Storing chunks in vector database...');
     await this.vectorStore.upsertChunks(embeddedChunks);
     
-    // Save persistent index
-    await this.vectorStore.savePersistedIndex();
+    // Save persistent index with model information
+    const modelInfo = await this.embedder.getModelInfo();
+    await this.vectorStore.savePersistedIndex(modelInfo);
     
     const timeTaken = Date.now() - startTime;
     console.log(`Indexing completed in ${timeTaken}ms`);
@@ -177,10 +207,23 @@ export class CodebaseIndexer {
   }
 
   private async generateEmbeddings(chunks: CodeChunk[]): Promise<CodeChunk[]> {
-    const batchSize = 50; // Process embeddings in smaller batches
+    // Start model loading stage
+    this.stageTracker?.startStage('model_load', 'Initializing BGE-small-en-v1.5 embedding model');
+    const modelInfo = await this.embedder.getModelInfo();
+    this.stageTracker?.completeStage('model_load', `Model ready: ${modelInfo.name} (${modelInfo.dimension}D)`);
+    
+    // Start embedding generation stage
+    this.stageTracker?.startStage('embedding_generation', `Processing ${chunks.length} code chunks for embeddings`);
+    
+    // Optimize batch size for better performance
+    const batchSize = 100; // Increased batch size for better throughput
     const embeddedChunks: CodeChunk[] = [];
+    const totalBatches = Math.ceil(chunks.length / batchSize);
+    
+    console.log(`📊 Processing ${chunks.length} chunks in ${totalBatches} batches of ${batchSize}...`);
     
     for (let i = 0; i < chunks.length; i += batchSize) {
+      const batchStartTime = Date.now();
       const batch = chunks.slice(i, i + batchSize);
       const texts = batch.map(chunk => this.createEmbeddingText(chunk));
       
@@ -194,7 +237,15 @@ export class CodebaseIndexer {
           });
         }
         
-        console.log(`Generated embeddings for batch ${Math.floor(i / batchSize) + 1}/${Math.ceil(chunks.length / batchSize)}`);
+        const batchTime = Date.now() - batchStartTime;
+        const currentBatch = Math.floor(i / batchSize) + 1;
+        const progress = ((currentBatch / totalBatches) * 100);
+        const avgTimePerBatch = batchTime;
+        const estimatedTimeRemaining = Math.round(((totalBatches - currentBatch) * avgTimePerBatch) / 1000);
+        
+        // Update stage progress
+        this.stageTracker?.updateStageProgress('embedding_generation', progress, 
+          `batch ${currentBatch}/${totalBatches} (${batchTime}ms, ~${estimatedTimeRemaining}s remaining)`);
       } catch (error) {
         console.warn(`Failed to generate embeddings for batch starting at ${i}:`, error);
         // Add chunks without embeddings
@@ -202,6 +253,7 @@ export class CodebaseIndexer {
       }
     }
     
+    this.stageTracker?.completeStage('embedding_generation', `Generated embeddings for ${embeddedChunks.length} chunks`);
     return embeddedChunks;
   }
 

@@ -1,5 +1,6 @@
-import { CodeChunk } from './types';
+import { CodeChunk, CORTEX_SCHEMA_VERSION, ModelInfo } from './types';
 import { VectorStore } from './vector-store';
+import { SchemaValidator } from './schema-validator';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as crypto from 'crypto';
@@ -7,6 +8,7 @@ import * as os from 'os';
 
 interface PersistedIndex {
   version: string;
+  schemaVersion: string;
   timestamp: number;
   repositoryPath: string;
   chunks: CodeChunk[];
@@ -15,6 +17,7 @@ interface PersistedIndex {
     totalChunks: number;
     lastIndexed: number;
     embeddingModel: string;
+    modelInfo?: ModelInfo;
   };
 }
 
@@ -136,13 +139,14 @@ export class PersistentVectorStore extends VectorStore {
     }
   }
 
-  async savePersistedIndex(): Promise<void> {
+  async savePersistedIndex(modelInfo?: ModelInfo): Promise<void> {
     try {
       console.log('💾 Saving embeddings to both local and global storage...');
       const startTime = Date.now();
       
       const persistedIndex: PersistedIndex = {
-        version: '1.0.0',
+        version: '1.0.0', // Legacy version field
+        schemaVersion: CORTEX_SCHEMA_VERSION,
         timestamp: Date.now(),
         repositoryPath: this.repositoryPath,
         chunks: Array.from(this.chunks.values()),
@@ -150,7 +154,8 @@ export class PersistentVectorStore extends VectorStore {
         metadata: {
           totalChunks: this.chunks.size,
           lastIndexed: Date.now(),
-          embeddingModel: 'BGE-small-en-v1.5'
+          embeddingModel: modelInfo?.name || 'BGE-small-en-v1.5',
+          modelInfo
         }
       };
       

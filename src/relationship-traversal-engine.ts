@@ -15,19 +15,28 @@ import {
 import { CallGraphAnalyzer } from './call-graph-analyzer';
 import { DependencyMapper } from './dependency-mapper';
 import { DataFlowAnalyzer } from './data-flow-analyzer';
+import { PersistentRelationshipStore } from './persistent-relationship-store';
+import Parser from 'tree-sitter';
+import JavaScript from 'tree-sitter-javascript';
+import TypeScript from 'tree-sitter-typescript';
+import * as path from 'path';
 
 export class RelationshipTraversalEngine {
   private graph: RelationshipGraph;
   private callGraphAnalyzer: CallGraphAnalyzer;
   private dependencyMapper: DependencyMapper;
   private dataFlowAnalyzer: DataFlowAnalyzer;
+  private jsParser: Parser;
+  private tsParser: Parser;
   private repositoryPath: string;
+  private persistentStore: PersistentRelationshipStore;
 
   constructor(repositoryPath: string) {
     this.repositoryPath = repositoryPath;
     this.callGraphAnalyzer = new CallGraphAnalyzer();
     this.dependencyMapper = new DependencyMapper(repositoryPath);
     this.dataFlowAnalyzer = new DataFlowAnalyzer();
+    this.persistentStore = new PersistentRelationshipStore(repositoryPath);
     
     this.graph = {
       symbols: new Map(),
@@ -38,56 +47,125 @@ export class RelationshipTraversalEngine {
       outgoingRelationships: new Map(),
       incomingRelationships: new Map()
     };
+    
+    // Initialize parsers
+    this.jsParser = new Parser();
+    this.jsParser.setLanguage(JavaScript);
+    
+    this.tsParser = new Parser();
+    this.tsParser.setLanguage(TypeScript.typescript);
   }
 
   async buildRelationshipGraph(files: Map<string, string>): Promise<void> {
     console.log(`🔗 Building comprehensive relationship graph for ${files.size} files...`);
     const startTime = Date.now();
 
-    // Phase 1: Build dependency map
-    await this.dependencyMapper.buildDependencyMap(files);
+    // Initialize persistent store
+    await this.persistentStore.initialize();
 
-    // Phase 2: Analyze individual files for call graphs and data flow
-    const allSymbols: CodeSymbol[] = [];
-    const allRelationships: CodeRelationship[] = [];
-
-    for (const [filePath, content] of files) {
-      try {
-        // Call graph analysis
-        const callAnalysis = await this.callGraphAnalyzer.analyzeFile(filePath, content);
-        allSymbols.push(...callAnalysis.symbols);
-        allRelationships.push(...callAnalysis.relationships);
-
-        // Data flow analysis
-        const tree = this.parseFile(content, filePath);
-        if (tree) {
-          const dataFlowAnalysis = this.dataFlowAnalyzer.analyzeDataFlow(tree, content, filePath);
-          allRelationships.push(...dataFlowAnalysis.relationships);
-        }
-
-      } catch (error) {
-        console.warn(`Failed to analyze relationships in ${filePath}:`, error);
+    // Try to load cached relationship graph (prefer global, fallback to local)
+    let loadedFromCache = false;
+    if (await this.persistentStore.globalRelationshipGraphExists()) {
+      console.log('🌐 Loading relationship graph from global storage...');
+      const cachedGraph = await this.persistentStore.loadPersistedRelationshipGraph(true);
+      if (cachedGraph) {
+        this.graph = cachedGraph;
+        loadedFromCache = true;
+        console.log(`✅ Loaded cached relationship graph: ${this.graph.symbols.size} symbols, ${this.graph.relationships.size} relationships`);
+        
+        // Sync to local if needed
+        await this.persistentStore.syncToLocal();
+      }
+    } else if (await this.persistentStore.relationshipGraphExists()) {
+      console.log('📁 Loading relationship graph from local storage...');
+      const cachedGraph = await this.persistentStore.loadPersistedRelationshipGraph(false);
+      if (cachedGraph) {
+        this.graph = cachedGraph;
+        loadedFromCache = true;
+        console.log(`✅ Loaded cached relationship graph: ${this.graph.symbols.size} symbols, ${this.graph.relationships.size} relationships`);
+        
+        // Sync to global
+        await this.persistentStore.syncToGlobal();
       }
     }
 
-    // Phase 3: Add dependency relationships
-    const dependencyRelationships = this.dependencyMapper.generateDependencyRelationships();
-    allRelationships.push(...dependencyRelationships);
+    // If no cache available or cache is invalid, build from scratch
+    if (!loadedFromCache) {
+      console.log('🔄 Building relationship graph from scratch...');
+      
+      // Phase 1: Build dependency map
+      await this.dependencyMapper.buildDependencyMap(files);
 
-    // Phase 4: Build graph structure
-    this.populateGraph(allSymbols, allRelationships);
+      // Phase 2: Analyze individual files for call graphs and data flow
+      const allSymbols: CodeSymbol[] = [];
+      const allRelationships: CodeRelationship[] = [];
 
-    // Phase 5: Build indices for fast lookup
-    this.buildGraphIndices();
+      for (const [filePath, content] of files) {
+        try {
+          // Call graph analysis
+          const callAnalysis = await this.callGraphAnalyzer.analyzeFile(filePath, content);
+          allSymbols.push(...callAnalysis.symbols);
+          allRelationships.push(...callAnalysis.relationships);
+
+          // Data flow analysis
+          const tree = this.parseFile(content, filePath);
+          if (tree) {
+            const dataFlowAnalysis = this.dataFlowAnalyzer.analyzeDataFlow(tree, content, filePath);
+            allRelationships.push(...dataFlowAnalysis.relationships);
+          }
+
+        } catch (error) {
+          console.warn(`Failed to analyze relationships in ${filePath}:`, error);
+        }
+      }
+
+      // Phase 3: Add dependency relationships
+      const dependencyRelationships = this.dependencyMapper.generateDependencyRelationships();
+      allRelationships.push(...dependencyRelationships);
+
+      // Phase 4: Build graph structure
+      this.populateGraph(allSymbols, allRelationships);
+
+      // Phase 5: Build indices for fast lookup
+      this.buildGraphIndices();
+
+      // Phase 6: Save to persistent storage
+      await this.persistentStore.savePersistedRelationshipGraph(this.graph);
+    }
 
     const timeMs = Date.now() - startTime;
-    console.log(`✅ Relationship graph built in ${timeMs}ms: ${this.graph.symbols.size} symbols, ${this.graph.relationships.size} relationships`);
+    const action = loadedFromCache ? 'loaded from cache' : 'built from scratch';
+    console.log(`✅ Relationship graph ${action} in ${timeMs}ms: ${this.graph.symbols.size} symbols, ${this.graph.relationships.size} relationships`);
   }
 
-  private parseFile(content: string, filePath: string) {
-    // This would use the appropriate parser based on file extension
-    // For now, return null to avoid tree-sitter import issues in this example
-    return null;
+  private parseFile(content: string, filePath: string): Parser.Tree | null {
+    try {
+      const ext = path.extname(filePath).toLowerCase();
+      
+      // Select appropriate parser based on file extension
+      let parser: Parser;
+      if (ext === '.ts' || ext === '.tsx') {
+        parser = this.tsParser;
+      } else if (ext === '.js' || ext === '.jsx' || ext === '.mjs') {
+        parser = this.jsParser;
+      } else {
+        // Unsupported file type
+        return null;
+      }
+      
+      // Parse the content
+      const tree = parser.parse(content);
+      
+      // Verify parse was successful
+      if (tree.rootNode.hasError) {
+        console.warn(`⚠️ Parse errors in ${filePath}, partial AST analysis may be incomplete`);
+      }
+      
+      return tree;
+    } catch (error) {
+      console.warn(`❌ Failed to parse ${filePath}:`, error instanceof Error ? error.message : error);
+      return null;
+    }
   }
 
   private populateGraph(symbols: CodeSymbol[], relationships: CodeRelationship[]): void {
