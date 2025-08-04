@@ -208,7 +208,7 @@ Cortex uses an external process pool architecture to achieve true multi-core par
 
 ```
 Main Process:
-└── Single FastQ Queue (consumer count = CPU cores / 4)
+└── Single FastQ Queue (consumer count = CPU cores - 2)
     ├── Consumer 1 → External Node.js Process 1 → Own FastEmbedding
     ├── Consumer 2 → External Node.js Process 2 → Own FastEmbedding  
     ├── Consumer 3 → External Node.js Process 3 → Own FastEmbedding
@@ -221,12 +221,12 @@ Main Process:
 2. **No Shared Memory**: Zero shared resources between processes eliminates thread safety issues
 3. **JSON IPC Communication**: Clean stdin/stdout communication between main and child processes
 4. **Order Preservation**: `originalIndex` mapping ensures correct chunk merging after parallel processing
-5. **Conservative Scaling**: Uses CPU cores / 4 processes to avoid resource contention
+5. **Optimal Scaling**: Uses CPU cores - 2 processes for maximum performance while reserving system resources
 6. **Timestamp Versioning**: Simple `indexed_at` field for incremental indexing support
 
 ### 📊 **Performance Optimizations**:
 
-- **Process Count**: Conservative scaling (CPU cores / 4) for stability
+- **Process Count**: Optimal scaling (CPU cores - 2) for maximum performance
 - **Embedding Text**: Reduced verbose preprocessing:
   - **Before**: `"File: src/test.ts Symbol: testFunction Type: function Language: typescript Content: ..."`
   - **After**: `"testFunction function function testFunction() { return 'hello'; } fs path"`

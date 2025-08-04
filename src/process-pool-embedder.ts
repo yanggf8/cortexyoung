@@ -37,12 +37,12 @@ export class ProcessPoolEmbedder {
   private isInitialized = false;
 
   constructor() {
-    // Conservative process count - external processes are heavier than threads
+    // Calculate optimal process count - reserve cores for system
     const totalCores = os.cpus().length;
-    // Use fewer processes since each is a full Node.js instance
-    this.processCount = Math.min(3, Math.max(1, Math.floor(totalCores / 4)));
+    // Use most cores but reserve 2 for system processes
+    this.processCount = Math.max(1, totalCores - 2);
     
-    console.log(`🏭 Process Pool: ${this.processCount} external Node.js processes (${totalCores} CPU cores)`);
+    console.log(`🏭 Process Pool: ${this.processCount} external Node.js processes (${totalCores} CPU cores, reserved 2 for system)`);
     console.log(`✅ Strategy: Complete process isolation - no ONNX Runtime thread safety issues`);
     
     // Create fastq queue - consumer count matches process count
