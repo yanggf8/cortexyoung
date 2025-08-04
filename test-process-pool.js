@@ -86,20 +86,20 @@ async function testProcessPool() {
   }
 }
 
-// Performance comparison test
+// Performance comparison test with larger dataset
 async function performanceComparison() {
   console.log('\n🏁 PERFORMANCE COMPARISON');
   console.log('='.repeat(50));
   
-  // Create larger test dataset
+  // Create larger test dataset to better demonstrate batching
   const largeTestChunks = [];
-  for (let i = 0; i < 20; i++) {
+  for (let i = 0; i < 100; i++) {
     largeTestChunks.push({
       id: `chunk${i}`,
       file_path: `src/file${i}.ts`,
       symbol_name: `function${i}`,
       chunk_type: 'function',
-      content: `function function${i}() { return ${i}; }`.repeat(5), // Moderate content
+      content: `function function${i}() { return ${i}; }`.repeat(3), // Moderate content
       relationships: { imports: ['fs', 'path', 'util'], exports: [] },
       language_metadata: { language: 'typescript' },
       start_line: 1,
@@ -123,6 +123,7 @@ async function performanceComparison() {
     console.log(`  Chunks per second: ${chunksPerSecond}`);
     console.log(`  Average per chunk: ${Math.round(duration / largeTestChunks.length)}ms`);
     console.log(`  All embeddings valid: ${results.every(r => r.embedding && r.embedding.length === 384)}`);
+    console.log(`  Order preserved: ${results.every((r, i) => r.id === largeTestChunks[i].id)}`);
     
   } catch (error) {
     console.error('❌ Performance test failed:', error);

@@ -5,8 +5,9 @@ import * as os from 'os';
 import { CodeChunk } from './types';
 
 interface EmbeddingTask {
-  chunk: CodeChunk;
-  originalIndex: number;
+  chunks: CodeChunk[];
+  originalIndices: number[]; // Track original indices for each chunk
+  batchIndex: number;
   timestamp: number;
 }
 
@@ -28,11 +29,12 @@ interface ProcessInstance {
   isAvailable: boolean;
   lastUsed: number;
   pendingRequests: Map<string, { resolve: Function; reject: Function; timeout: NodeJS.Timeout }>;
+  messageBuffer: string; // Buffer for incomplete JSON messages
 }
 
 export class ProcessPoolEmbedder {
   private processes: ProcessInstance[] = [];
-  private queue: fastq.queueAsPromised<EmbeddingTask, EmbeddingResult>;
+  private queue: fastq.queueAsPromised<EmbeddingTask, EmbeddingResult[]>;
   private processCount: number;
   private isInitialized = false;
 
@@ -82,19 +84,32 @@ export class ProcessPoolEmbedder {
         isReady: false,
         isAvailable: true,
         lastUsed: 0,
-        pendingRequests: new Map()
+        pendingRequests: new Map(),
+        messageBuffer: '' // Initialize message buffer
       };
 
-      // Handle process stdout (responses)
+      // Handle process stdout (responses) with proper JSON parsing
       childProcess.stdout?.on('data', (data) => {
-        const lines = data.toString().split('\n').filter((line: string) => line.trim());
+        // Append to buffer
+        processInstance.messageBuffer += data.toString();
         
+        // Try to parse complete JSON messages
+        let lines = processInstance.messageBuffer.split('\n');
+        
+        // Keep the last incomplete line in buffer
+        processInstance.messageBuffer = lines.pop() || '';
+        
+        // Process complete lines
         for (const line of lines) {
-          try {
-            const message = JSON.parse(line);
-            this.handleProcessMessage(processInstance, message);
-          } catch (error) {
-            console.error(`❌ Failed to parse message from process ${i}:`, line);
+          if (line.trim()) {
+            try {
+              const message = JSON.parse(line);
+              this.handleProcessMessage(processInstance, message);
+            } catch (error) {
+              const errorMessage = error instanceof Error ? error.message : String(error);
+              console.error(`❌ Failed to parse JSON from process ${i}:`, errorMessage);
+              console.error(`❌ Problematic line: ${line.substring(0, 200)}...`);
+            }
           }
         }
       });
@@ -190,8 +205,8 @@ export class ProcessPoolEmbedder {
     throw new Error(`Timeout: Only ${this.processes.filter(p => p.isReady).length}/${this.processCount} processes ready`);
   }
 
-  // FastQ consumer function - processes one chunk per task
-  private async processEmbeddingTask(task: EmbeddingTask): Promise<EmbeddingResult> {
+  // FastQ consumer function - processes a batch of chunks per task
+  private async processEmbeddingTask(task: EmbeddingTask): Promise<EmbeddingResult[]> {
     // Find available process (round-robin style)
     const availableProcess = this.processes
       .filter(p => p.isReady && p.isAvailable)
@@ -206,40 +221,47 @@ export class ProcessPoolEmbedder {
     availableProcess.lastUsed = Date.now();
 
     try {
-      // Create optimized embedding text
-      const embeddingText = this.createOptimizedEmbeddingText(task.chunk);
+      // Create optimized embedding texts for the entire batch
+      const embeddingTexts = task.chunks.map(chunk => this.createOptimizedEmbeddingText(chunk));
       
-      console.log(`🔄 Process ${availableProcess.id} processing chunk ${task.originalIndex} (${embeddingText.length} chars)`);
+      console.log(`🔄 Process ${availableProcess.id} processing batch ${task.batchIndex} (${task.chunks.length} chunks)`);
       
-      // Send task to external process
-      const batchId = `chunk-${task.originalIndex}-${Date.now()}`;
+      // Send entire batch to external process
+      const batchId = `batch-${task.batchIndex}-${Date.now()}`;
       const result = await new Promise<any>((resolve, reject) => {
         const timeout = setTimeout(() => {
           availableProcess.pendingRequests.delete(batchId);
           reject(new Error(`Process ${availableProcess.id} timeout`));
-        }, 60000); // 60 second timeout per chunk
+        }, 120000); // 2 minute timeout for batch processing
 
         availableProcess.pendingRequests.set(batchId, { resolve, reject, timeout });
 
         this.sendToProcess(availableProcess, {
           type: 'embed_batch',
           batchId,
-          data: { texts: [embeddingText] }
+          data: { texts: embeddingTexts }
         });
       });
 
-      console.log(`✅ Process ${availableProcess.id} completed chunk ${task.originalIndex} in ${result.stats.duration}ms`);
+      console.log(`✅ Process ${availableProcess.id} completed batch ${task.batchIndex} (${task.chunks.length} chunks) in ${result.stats.duration}ms`);
       
-      return {
-        embedding: result.embeddings[0], // Single chunk = single embedding
-        originalIndex: task.originalIndex,
-        timestamp: task.timestamp,
-        stats: {
-          duration: result.stats.duration,
-          memoryDelta: result.stats.memoryDelta,
-          processId: availableProcess.id
-        }
-      };
+      // Map results back to individual chunks with original indices
+      const batchResults: EmbeddingResult[] = [];
+      
+      for (let i = 0; i < task.chunks.length; i++) {
+        batchResults.push({
+          embedding: result.embeddings[i],
+          originalIndex: task.originalIndices[i], // Use tracked original index
+          timestamp: task.timestamp,
+          stats: {
+            duration: result.stats.duration,
+            memoryDelta: result.stats.memoryDelta,
+            processId: availableProcess.id
+          }
+        });
+      }
+
+      return batchResults;
 
     } finally {
       // Mark process as available again
@@ -247,7 +269,7 @@ export class ProcessPoolEmbedder {
     }
   }
 
-  // Main method: Process all chunks using process pool
+  // Main method: Process all chunks using process pool with batching
   async processAllEmbeddings(chunks: CodeChunk[]): Promise<CodeChunk[]> {
     // Initialize process pool first
     await this.initialize();
@@ -256,35 +278,63 @@ export class ProcessPoolEmbedder {
     
     const currentTimestamp = Date.now();
     
-    // Create tasks for each chunk with original index preservation
-    const tasks: Promise<EmbeddingResult>[] = [];
+    // Calculate batch size: distribute chunks evenly across processes
+    // But limit batch size to prevent overly large JSON messages
+    const idealBatchSize = Math.ceil(chunks.length / this.processCount);
+    const maxBatchSize = 50; // Limit to prevent JSON parsing issues
+    const batchSize = Math.min(idealBatchSize, maxBatchSize);
     
-    for (let i = 0; i < chunks.length; i++) {
+    console.log(`📦 Batch size: ${batchSize} chunks per batch (ideal: ${idealBatchSize}, max: ${maxBatchSize})`);
+    
+    // Create batches for each process with original index tracking
+    const batches: { chunks: CodeChunk[]; originalIndices: number[] }[] = [];
+    for (let i = 0; i < chunks.length; i += batchSize) {
+      const batchChunks = chunks.slice(i, i + batchSize);
+      const batchIndices = Array.from({ length: batchChunks.length }, (_, idx) => i + idx);
+      batches.push({
+        chunks: batchChunks,
+        originalIndices: batchIndices
+      });
+    }
+    
+    console.log(`🔄 Created ${batches.length} batches for ${this.processCount} processes`);
+    
+    // Create tasks for each batch
+    const tasks: Promise<EmbeddingResult[]>[] = [];
+    
+    for (let i = 0; i < batches.length; i++) {
+      const batch = batches[i];
       const taskPromise = this.queue.push({
-        chunk: chunks[i],
-        originalIndex: i,
+        chunks: batch.chunks,
+        originalIndices: batch.originalIndices,
+        batchIndex: i,
         timestamp: currentTimestamp
       });
       
       tasks.push(taskPromise);
     }
 
-    console.log(`⏳ Processing ${tasks.length} tasks with process pool...`);
+    console.log(`⏳ Processing ${tasks.length} batches with process pool...`);
     
     // Wait for all tasks to complete
-    const results = await Promise.all(tasks);
+    const batchResults = await Promise.all(tasks);
     
-    // Sort results by original index to maintain order
-    results.sort((a, b) => a.originalIndex - b.originalIndex);
+    // Flatten and sort results by original index to maintain order
+    const allResults: EmbeddingResult[] = [];
+    batchResults.forEach(batchResult => {
+      allResults.push(...batchResult);
+    });
+    
+    allResults.sort((a, b) => a.originalIndex - b.originalIndex);
     
     // Merge embeddings back with original chunks
-    const embeddedChunks: CodeChunk[] = results.map(result => ({
+    const embeddedChunks: CodeChunk[] = allResults.map(result => ({
       ...chunks[result.originalIndex],
       embedding: result.embedding,
       indexed_at: result.timestamp
     }));
 
-    this.printStats(results);
+    this.printBatchStats(batchResults);
     return embeddedChunks;
   }
 
@@ -306,32 +356,53 @@ export class ProcessPoolEmbedder {
     return parts.join(' ');
   }
 
-  private printStats(results: EmbeddingResult[]): void {
+  private printBatchStats(batchResults: EmbeddingResult[][]): void {
     console.log('\n📊 Process Pool Statistics:');
     console.log('━'.repeat(50));
     
+    // Flatten results for analysis
+    const allResults = batchResults.flat();
+    
     // Process usage stats
     const processUsage = new Map<number, number>();
-    results.forEach(result => {
-      const count = processUsage.get(result.stats.processId) || 0;
-      processUsage.set(result.stats.processId, count + 1);
+    const batchSizes = new Map<number, number>();
+    
+    batchResults.forEach((batch, batchIndex) => {
+      if (batch.length > 0) {
+        const processId = batch[0].stats.processId;
+        processUsage.set(processId, (processUsage.get(processId) || 0) + 1);
+        batchSizes.set(batchIndex, batch.length);
+      }
     });
     
-    console.log('Process Usage:');
-    processUsage.forEach((count, processId) => {
-      console.log(`  Process ${processId}: ${count} chunks`);
+    console.log('Process Usage (batches):');
+    processUsage.forEach((batchCount, processId) => {
+      const totalChunks = allResults.filter(r => r.stats.processId === processId).length;
+      console.log(`  Process ${processId}: ${batchCount} batch(es), ${totalChunks} chunks`);
+    });
+    
+    console.log('\nBatch Sizes:');
+    batchSizes.forEach((size, batchIndex) => {
+      console.log(`  Batch ${batchIndex}: ${size} chunks`);
     });
     
     // Performance stats
-    const totalDuration = results.reduce((sum, r) => sum + r.stats.duration, 0);
-    const avgDuration = Math.round(totalDuration / results.length);
-    const maxDuration = Math.max(...results.map(r => r.stats.duration));
-    const minDuration = Math.min(...results.map(r => r.stats.duration));
+    const batchDurations = batchResults.map(batch => 
+      batch.length > 0 ? batch[0].stats.duration : 0
+    ).filter(d => d > 0);
     
-    console.log(`Queue: ${this.queue.length()} pending, ${this.queue.running()} running`);
-    console.log(`Performance: ${avgDuration}ms avg (${minDuration}-${maxDuration}ms range)`);
-    console.log(`Processes: ${this.processes.length} total, ${this.processes.filter(p => p.isReady).length} ready`);
-    console.log(`Total chunks: ${results.length}, Timestamp: ${results[0]?.timestamp}`);
+    if (batchDurations.length > 0) {
+      const avgDuration = Math.round(batchDurations.reduce((sum, d) => sum + d, 0) / batchDurations.length);
+      const maxDuration = Math.max(...batchDurations);
+      const minDuration = Math.min(...batchDurations);
+      
+      console.log(`\nPerformance:`);
+      console.log(`  Batch duration: ${avgDuration}ms avg (${minDuration}-${maxDuration}ms range)`);
+      console.log(`  Total chunks: ${allResults.length}`);
+      console.log(`  Total batches: ${batchResults.length}`);
+      console.log(`  Processes used: ${processUsage.size}/${this.processes.length}`);
+    }
+    
     console.log('━'.repeat(50));
   }
 
