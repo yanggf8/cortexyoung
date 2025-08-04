@@ -36,12 +36,13 @@ export class WorkerPoolEmbedder {
   private isInitialized = false;
 
   constructor() {
-    // Calculate optimal worker count - reserve cores for system
+    // Calculate optimal worker count - be much more conservative
     const totalCores = os.cpus().length;
-    this.workerCount = Math.max(1, totalCores - 2);
+    // ONNX Runtime has issues with high concurrency - limit to 2-3 workers max
+    this.workerCount = Math.min(3, Math.max(1, Math.floor(totalCores / 4)));
     
-    console.log(`🏊 Worker Pool: ${this.workerCount} workers (${totalCores} CPU cores, reserved 2 for system)`);
-    console.log(`✅ Strategy: One worker per consumer, each with isolated FastEmbedding + Mutex`);
+    console.log(`🏊 Worker Pool: ${this.workerCount} workers (${totalCores} CPU cores, conservative for ONNX safety)`);
+    console.log(`✅ Strategy: Limited workers to avoid ONNX Runtime concurrency issues`);
     
     // Create fastq queue - consumer count matches worker count
     this.queue = fastq.promise(this.processEmbeddingTask.bind(this), this.workerCount);
@@ -103,13 +104,13 @@ export class WorkerPoolEmbedder {
 
       this.workers.push(workerInstance);
 
-      // Initialize worker with staggered timing to avoid conflicts
+      // Initialize worker with longer staggered timing to avoid ONNX conflicts
       setTimeout(() => {
         worker.postMessage({
           type: 'init',
           data: { workerId: i }
         });
-      }, i * 1000); // 1 second delay between each worker
+      }, i * 2000); // 2 second delay between each worker (was 1 second)
     }
   }
 

@@ -9,6 +9,7 @@ import { StartupStageTracker } from './startup-stages';
 import { ReindexAdvisor } from './reindex-advisor';
 import { UnifiedStorageCoordinator } from './unified-storage-coordinator';
 import { FastQEmbedder } from './fastq-embedder';
+import { ProcessPoolEmbedder } from './process-pool-embedder';
 import * as os from 'os';
 
 export class CodebaseIndexer {
@@ -266,22 +267,22 @@ export class CodebaseIndexer {
 
   private async generateEmbeddings(chunks: CodeChunk[]): Promise<CodeChunk[]> {
     // Start embedding generation stage
-    this.stageTracker?.startStage('embedding_generation', `Processing ${chunks.length} chunks with fastq`);
+    this.stageTracker?.startStage('embedding_generation', `Processing ${chunks.length} chunks with process pool`);
     
-    // Use fastq - battle-tested, simple, and efficient
-    const fastqEmbedder = new FastQEmbedder();
+    // Use ProcessPoolEmbedder - external Node.js processes for complete ONNX isolation
+    const processPoolEmbedder = new ProcessPoolEmbedder();
     
     try {
-      const embeddedChunks = await fastqEmbedder.processAllEmbeddings(chunks);
+      const embeddedChunks = await processPoolEmbedder.processAllEmbeddings(chunks);
       
       this.stageTracker?.completeStage('embedding_generation', 
-        `Generated embeddings for ${embeddedChunks.length} chunks using fastq`);
+        `Generated embeddings for ${embeddedChunks.length} chunks using process pool`);
       
       return embeddedChunks;
       
     } finally {
       // Clean shutdown
-      await fastqEmbedder.shutdown();
+      await processPoolEmbedder.shutdown();
     }
   }
 

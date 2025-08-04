@@ -1,10 +1,10 @@
-const { WorkerPoolEmbedder } = require('./dist/worker-pool-embedder');
+const { ProcessPoolEmbedder } = require('./dist/process-pool-embedder');
 
-async function testWorkerPool() {
-  console.log('🧪 WORKER POOL EMBEDDER TEST');
+async function testProcessPool() {
+  console.log('🧪 PROCESS POOL EMBEDDER TEST');
   console.log('='.repeat(50));
 
-  const embedder = new WorkerPoolEmbedder();
+  const embedder = new ProcessPoolEmbedder();
   
   try {
     // Create test chunks
@@ -75,30 +75,14 @@ async function testWorkerPool() {
     console.log('\n🔍 Pool status after processing:');
     console.log(embedder.getPoolStatus());
     
-    // Test optimized embedding text generation
-    console.log('\n📝 Optimized embedding text examples:');
-    testChunks.forEach((chunk, i) => {
-      // Simulate the optimized text generation
-      const parts = [];
-      if (chunk.symbol_name) parts.push(chunk.symbol_name);
-      parts.push(chunk.chunk_type);
-      parts.push(chunk.content);
-      if (chunk.relationships.imports.length > 0) {
-        parts.push(chunk.relationships.imports.slice(0, 3).join(' '));
-      }
-      const optimizedText = parts.join(' ');
-      
-      console.log(`  Chunk ${i}: "${optimizedText.substring(0, 100)}${optimizedText.length > 100 ? '...' : ''}"`);
-    });
-    
-    console.log('\n🎉 Worker pool test completed successfully!');
+    console.log('\n🎉 Process pool test completed successfully!');
     
   } catch (error) {
-    console.error('\n❌ Worker pool test failed:', error);
+    console.error('\n❌ Process pool test failed:', error);
   } finally {
     // Clean shutdown
     await embedder.shutdown();
-    console.log('\n🛑 Worker pool shut down');
+    console.log('\n🛑 Process pool shut down');
   }
 }
 
@@ -109,13 +93,13 @@ async function performanceComparison() {
   
   // Create larger test dataset
   const largeTestChunks = [];
-  for (let i = 0; i < 50; i++) {
+  for (let i = 0; i < 20; i++) {
     largeTestChunks.push({
       id: `chunk${i}`,
       file_path: `src/file${i}.ts`,
       symbol_name: `function${i}`,
       chunk_type: 'function',
-      content: `function function${i}() { return ${i}; }`.repeat(10), // Longer content
+      content: `function function${i}() { return ${i}; }`.repeat(5), // Moderate content
       relationships: { imports: ['fs', 'path', 'util'], exports: [] },
       language_metadata: { language: 'typescript' },
       start_line: 1,
@@ -125,7 +109,7 @@ async function performanceComparison() {
   
   console.log(`📊 Performance test with ${largeTestChunks.length} chunks...`);
   
-  const embedder = new WorkerPoolEmbedder();
+  const embedder = new ProcessPoolEmbedder();
   
   try {
     const startTime = Date.now();
@@ -150,7 +134,7 @@ async function performanceComparison() {
 // Run tests
 async function runAllTests() {
   try {
-    await testWorkerPool();
+    await testProcessPool();
     await performanceComparison();
   } catch (error) {
     console.error('❌ Test suite failed:', error);
@@ -162,4 +146,4 @@ if (require.main === module) {
   runAllTests();
 }
 
-module.exports = { testWorkerPool, performanceComparison };
+module.exports = { testProcessPool, performanceComparison };
