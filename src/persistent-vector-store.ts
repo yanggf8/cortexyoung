@@ -35,6 +35,7 @@ interface IndexDelta {
 export class PersistentVectorStore extends VectorStore {
   private fileHashes: Map<string, string> = new Map();
   private repositoryPath: string;
+  private indexDir: string;
   private localIndexPath: string;
   private globalIndexPath: string;
   private metadataPath: string;
@@ -45,6 +46,7 @@ export class PersistentVectorStore extends VectorStore {
   constructor(repositoryPath: string, indexDir: string = '.cortex') {
     super(); // Call parent constructor
     this.repositoryPath = repositoryPath;
+    this.indexDir = indexDir;
     
     // Local storage (in repo)
     this.localIndexPath = path.join(repositoryPath, indexDir);
@@ -69,7 +71,24 @@ export class PersistentVectorStore extends VectorStore {
     return `${repoName}-${hash.substring(0, 16)}`;
   }
 
+  private static initializedPaths: Set<string> = new Set();
+  private initialized: boolean = false;
+
   async initialize(): Promise<void> {
+    // Prevent duplicate initialization across all instances for the same path
+    const key = `${this.repositoryPath}:${this.indexDir}`;
+    
+    if (this.initialized) {
+      console.log('📋 Vector store already initialized, skipping...');
+      return;
+    }
+
+    if (PersistentVectorStore.initializedPaths.has(key)) {
+      console.log('📋 Vector store for this path already initialized by another instance, skipping load...');
+      this.initialized = true;
+      return;
+    }
+
     // Ensure both index directories exist
     await fs.mkdir(this.localIndexPath, { recursive: true });
     await fs.mkdir(this.deltaPath, { recursive: true });
@@ -88,6 +107,9 @@ export class PersistentVectorStore extends VectorStore {
       // Sync to global
       await this.syncToGlobal();
     }
+
+    this.initialized = true;
+    PersistentVectorStore.initializedPaths.add(key);
   }
 
   async indexExists(): Promise<boolean> {

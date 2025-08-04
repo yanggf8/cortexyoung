@@ -60,9 +60,10 @@ Cortex V2.1 is a semantic code intelligence MCP server designed to enhance Claud
 - `npm run test:mcp` - Test MCP server functionality
 
 ### Monitoring and Progress
-- **Health Check**: `curl http://localhost:8765/health` - Server health with startup progress
-- **Status**: `curl http://localhost:8765/status` - Quick status overview  
-- **Progress**: `curl http://localhost:8765/progress` - Detailed startup stage information
+- **Health Check**: `curl http://localhost:8765/health` - Server health with detailed startup progress (Step X/10 format)
+- **Status**: `curl http://localhost:8765/status` - Quick status overview with timing information
+- **Progress**: `curl http://localhost:8765/progress` - Detailed startup stage information with step counters and durations
+- **Enhanced Logging**: All startup stages now show `[Step X/10]` format with timing (ms/s) in console output
 
 ## Architecture Overview
 
@@ -395,14 +396,31 @@ The system automatically discovers and follows relationships between code elemen
 ## Performance Characteristics
 
 - **🚀 MAJOR FIX**: Relationship graphs now load from cache instantly (350ms vs 25s rebuild)
+- **⚡ DUPLICATE LOADING ELIMINATED**: Fixed redundant file loading during startup (3x 24.68MB → 1x load)
+- **📊 ENHANCED PROGRESS TRACKING**: Step-by-step startup with `[Step X/10]` format and timing information
+- **🔧 MODULAR ENDPOINTS**: Refactored health/status/progress endpoints to use shared utility functions
 - **Sub-100ms** query response times with persistent relationship graphs
-- **1,602+ code chunks** indexed with real embeddings
+- **1,630+ code chunks** indexed with real embeddings
 - **Pure Node.js** - no external dependencies  
 - **Incremental indexing** for large repositories
-- **Memory-efficient** vector operations
+- **Memory-efficient** vector operations with deduplication guards
 - **Multi-hop expansion**: 5-67x context discovery from initial matches
 - **Follow-up query reduction**: 85% fewer queries needed
 - **85%+ startup acceleration** after first run through complete persistence
+
+## Recent Improvements (v2.1)
+
+### 🔧 Code Quality & Architecture (August 2025)
+- **Eliminated Code Duplication**: Refactored `/health`, `/status`, and `/progress` endpoints to use shared utility functions
+- **Enhanced Progress Tracking**: Added `[Step X/10]` format with timing to all startup stages and endpoint responses
+- **Performance Optimization**: Fixed duplicate file loading during startup (eliminated 3x redundant 24.68MB loads)
+- **Singleton Pattern**: Added initialization guards to prevent multiple instances from loading the same data
+
+### 📊 Monitoring Improvements
+- **Step Counters**: All console output now shows clear step progression (`[Step 1/10]`, `[Step 2/10]`, etc.)
+- **Timing Information**: Stages show duration in appropriate units (ms for <1s, s for ≥1s)
+- **Endpoint Enhancement**: Health, status, and progress endpoints include step information and elapsed time
+- **Deduplication Logging**: Clear messages when skipping redundant initialization (`📋 Vector store already initialized, skipping...`)
 
 ## Development Notes
 
@@ -412,3 +430,4 @@ The system automatically discovers and follows relationships between code elemen
 - No external database dependencies - uses in-memory + file persistence
 - Graceful shutdown handling for SIGINT/SIGTERM
 - Comprehensive error handling and logging throughout
+- Shared utility functions for consistent endpoint behavior

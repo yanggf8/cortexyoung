@@ -120,83 +120,17 @@ export class CortexMCPServer {
 
     // Enhanced health check endpoint with startup stage info
     app.get('/health', (req: Request, res: Response) => {
-      const progress = this.stageTracker.getProgress();
-      const currentStage = this.stageTracker.getCurrentStage();
-      const isReady = this.stageTracker.isReady();
-      const stats = this.stageTracker.getStageStats();
-      
-      // Determine health status based on startup progress
-      let healthStatus: 'healthy' | 'starting' | 'indexing' | 'error';
-      
-      if (isReady) {
-        healthStatus = 'healthy';
-      } else if (progress.overallStatus === 'failed') {
-        healthStatus = 'error';
-      } else if (progress.overallStatus === 'indexing') {
-        healthStatus = 'indexing';
-      } else {
-        healthStatus = 'starting';
-      }
-      
-      const response: any = {
-        status: healthStatus,
-        server: 'cortex-mcp-server',
-        version: '2.1.0',
-        ready: isReady,
-        timestamp: Date.now()
-      };
-      
-      // Add startup progress info if not fully ready
-      if (!isReady) {
-        response.startup = {
-          stage: currentStage?.name || 'Unknown',
-          progress: Math.round(progress.overallProgress),
-          eta: progress.estimatedTimeRemaining ? Math.round(progress.estimatedTimeRemaining / 1000) : null,
-          completed: stats.completed,
-          total: stats.total,
-          details: currentStage?.details
-        };
-      }
-      
-      // Add any failed stages
-      if (stats.failed > 0) {
-        const failedStages = progress.stages
-          .filter(stage => stage.status === 'failed')
-          .map(stage => ({ name: stage.name, error: stage.error }));
-        response.errors = failedStages;
-      }
-      
-      res.json(response);
+      res.json(this.stageTracker.getHealthData());
     });
 
     // Startup progress endpoint
     app.get('/progress', (req: Request, res: Response) => {
-      const progress = this.stageTracker.getProgress();
-      res.json({
-        ...progress,
-        server: 'cortex-mcp-server',
-        version: '2.1.0',
-        timestamp: Date.now()
-      });
+      res.json(this.stageTracker.getProgressData());
     });
 
     // Current stage endpoint (for quick status checks)
     app.get('/status', (req: Request, res: Response) => {
-      const progress = this.stageTracker.getProgress();
-      const currentStage = this.stageTracker.getCurrentStage();
-      const stats = this.stageTracker.getStageStats();
-      
-      res.json({
-        status: progress.overallStatus,
-        ready: this.stageTracker.isReady(),
-        progress: progress.overallProgress,
-        currentStage: currentStage?.name,
-        stageProgress: currentStage?.progress,
-        stages: `${stats.completed}/${stats.total}`,
-        eta: progress.estimatedTimeRemaining ? Math.round(progress.estimatedTimeRemaining / 1000) : null,
-        server: 'cortex-mcp-server',
-        timestamp: Date.now()
-      });
+      res.json(this.stageTracker.getStatusData());
     });
 
     // MCP endpoint for JSON-RPC communication
