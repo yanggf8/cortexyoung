@@ -1,83 +1,21 @@
-import { CORTEX_SCHEMA_VERSION, SUPPORTED_SCHEMA_VERSIONS, SchemaInfo } from './types';
-import * as semver from 'semver';
+import { COMPATIBLE_SCHEMA_VERSIONS, SchemaInfo } from './types';
 
 export class SchemaValidator {
   
   /**
-   * Validates schema compatibility and determines if migration is needed
+   * Simple compatibility check: Program 2.1 is compatible with Schema 1.x
    */
-  static validateSchema(indexVersion: string): SchemaInfo {
-    const currentVersion = CORTEX_SCHEMA_VERSION;
-    
-    // Check if version is supported
-    const compatible = SUPPORTED_SCHEMA_VERSIONS.includes(indexVersion);
-    
-    // Determine if migration is needed
-    const requiresMigration = !compatible && semver.lt(indexVersion, currentVersion);
-    
-    // Generate migration path if needed
-    let migrationPath: string[] | undefined;
-    if (requiresMigration) {
-      migrationPath = this.generateMigrationPath(indexVersion, currentVersion);
-    }
+  static validateSchema(schemaVersion: string): SchemaInfo {
+    const compatible = COMPATIBLE_SCHEMA_VERSIONS.includes(schemaVersion);
     
     return {
-      version: indexVersion,
+      version: schemaVersion,
       compatible,
-      requiresMigration,
-      migrationPath
+      requiresMigration: false, // No migration needed for compatible schemas
+      migrationPath: undefined
     };
   }
   
-  /**
-   * Generates migration path between versions
-   */
-  private static generateMigrationPath(from: string, to: string): string[] {
-    const path: string[] = [];
-    
-    // Define migration steps
-    if (semver.lt(from, '2.0.0')) {
-      path.push('1.x-to-2.0.0');
-    }
-    if (semver.lt(from, '2.1.0') && semver.gte(to, '2.1.0')) {
-      path.push('2.0.0-to-2.1.0');
-    }
-    
-    return path;
-  }
-  
-  /**
-   * Checks if a reindex is recommended based on schema changes
-   */
-  static shouldRecommendReindex(indexVersion: string): {
-    recommend: boolean;
-    reason: string;
-    severity: 'low' | 'medium' | 'high';
-  } {
-    const schemaInfo = this.validateSchema(indexVersion);
-    
-    if (!schemaInfo.compatible) {
-      return {
-        recommend: true,
-        reason: `Schema version ${indexVersion} is incompatible with current version ${CORTEX_SCHEMA_VERSION}. A reindex is required to update data structures.`,
-        severity: 'high'
-      };
-    }
-    
-    if (schemaInfo.requiresMigration) {
-      return {
-        recommend: true,
-        reason: `Schema migration needed from ${indexVersion} to ${CORTEX_SCHEMA_VERSION}. Reindex recommended for optimal performance.`,
-        severity: 'medium'
-      };
-    }
-    
-    return {
-      recommend: false,
-      reason: `Schema version ${indexVersion} is compatible with current version ${CORTEX_SCHEMA_VERSION}.`,
-      severity: 'low'
-    };
-  }
   
   /**
    * Validates the structure of a persisted index
