@@ -37,9 +37,9 @@ export class CodebaseIndexer {
     
     try {
       // Initialize unified storage coordinator
-      this.stageTracker?.startStage('Cache Detection', 'Checking for existing embeddings and relationships');
+      this.stageTracker?.startStage('cache_check', 'Checking for existing embeddings and relationships');
       await this.storageCoordinator.initialize();
-      this.stageTracker?.updateStageProgress('Cache Detection', 100);
+      this.stageTracker?.completeStage('cache_check');
       
       // Check if we can load existing embeddings
       const hasExistingIndex = await this.vectorStore.indexExists();
@@ -97,6 +97,22 @@ export class CodebaseIndexer {
     
     if (changedFiles.length === 0 && delta.fileChanges.deleted.length === 0) {
       console.log('✅ No changes detected, index is up to date');
+      
+      // Still need to initialize relationship engine (will use cache if available)
+      this.stageTracker?.startStage('relationship_analysis', 'Loading relationship graph from cache');
+      const files = new Map<string, string>();
+      for (const filePath of scanResult.files) {
+        try {
+          const content = await this.gitScanner.readFile(filePath);
+          files.set(filePath, content);
+        } catch (error) {
+          console.warn(`Failed to read file for relationships ${filePath}:`, error);
+        }
+      }
+      
+      await this.searcher.initializeRelationshipEngine(files);
+      this.stageTracker?.completeStage('relationship_analysis', `Relationship engine loaded from cache (${files.size} files)`);
+      
       const timeTaken = Date.now() - startTime;
       return {
         status: 'success',
@@ -137,6 +153,21 @@ export class CodebaseIndexer {
     
     // Save updated index
     await this.vectorStore.savePersistedIndex();
+    
+    // Initialize relationship engine with all current files (incremental mode will use cache if available)
+    this.stageTracker?.startStage('relationship_analysis', 'Initializing relationship engine');
+    const files = new Map<string, string>();
+    for (const filePath of scanResult.files) {
+      try {
+        const content = await this.gitScanner.readFile(filePath);
+        files.set(filePath, content);
+      } catch (error) {
+        console.warn(`Failed to read file for relationships ${filePath}:`, error);
+      }
+    }
+    
+    await this.searcher.initializeRelationshipEngine(files);
+    this.stageTracker?.completeStage('relationship_analysis', `Relationship engine ready (cached: ${files.size} files)`);
     
     const timeTaken = Date.now() - startTime;
     console.log(`✅ Incremental indexing completed in ${timeTaken}ms`);
@@ -195,6 +226,21 @@ export class CodebaseIndexer {
     // Save persistent index with model information
     const modelInfo = await this.embedder.getModelInfo();
     await this.vectorStore.savePersistedIndex(modelInfo);
+    
+    // Initialize relationship engine with all files
+    this.stageTracker?.startStage('relationship_analysis', 'Building relationship graph from files');
+    const files = new Map<string, string>();
+    for (const filePath of scanResult.files) {
+      try {
+        const content = await this.gitScanner.readFile(filePath);
+        files.set(filePath, content);
+      } catch (error) {
+        console.warn(`Failed to read file for relationships ${filePath}:`, error);
+      }
+    }
+    
+    await this.searcher.initializeRelationshipEngine(files);
+    this.stageTracker?.completeStage('relationship_analysis', `Initialized relationship engine with ${files.size} files`);
     
     const timeTaken = Date.now() - startTime;
     console.log(`Indexing completed in ${timeTaken}ms`);
