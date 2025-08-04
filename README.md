@@ -10,6 +10,7 @@ Cortex V2.1 addresses Claude Code's primary limitation: **50-70% token waste** d
 - **Multi-hop relationship traversal** for complete context discovery  
 - **MCP server architecture** for seamless Claude Code integration
 - **Adaptive context modes** balancing structure vs flexibility
+- **59% faster indexing** with intelligent process pool batching
 
 ## Architecture
 
@@ -196,10 +197,24 @@ node scripts/manage-embeddings.js info
 - **External process pool** - Multi-core embedding generation with complete ONNX isolation
 - **Thread-safe processing** - Each process has own BGE instance with zero shared memory
 - **Intelligent batching** - Up to 50 chunks per batch for optimal throughput
-- **Reduced IPC overhead** - 90% reduction in process communication through batching
+- **Reduced IPC overhead** - 98% reduction in process communication through batching
 - **Incremental indexing** for large repositories
 - **Memory-efficient** vector operations with file persistence
 - **Dual storage system** for optimal performance and synchronization
+
+### 🚀 **Startup Performance**
+
+**Real-World Indexing Performance** (1856 chunks):
+- **Total startup time**: 4m3s for complete indexing
+- **Embedding generation**: 228s (94% of total time)
+- **Throughput**: 7.6 chunks per second with full CPU utilization
+- **Batch efficiency**: 38 batches of 50 chunks each (98% reduction in process calls)
+- **Per-chunk average**: 131ms (59% improvement from previous architecture)
+
+**Scalability**:
+- **Perfect load balancing**: All 10 processes utilized simultaneously
+- **Intelligent batching**: Adapts batch size based on dataset and process count
+- **Zero ONNX conflicts**: Complete process isolation eliminates thread safety issues
 
 ## Concurrent Embedding Architecture
 
@@ -243,9 +258,10 @@ npm run test:process-pool  # Comprehensive process pool validation
 - **Zero ONNX Runtime errors**: Complete elimination of `HandleScope` thread safety issues
 - **Perfect concurrency**: 10 processes handling chunks simultaneously with intelligent batching
 - **100% success rate**: All embeddings generated correctly with 384D vectors
-- **~207ms average** per chunk with optimized batching (36% improvement from previous 323ms)
-- **5 chunks per second** throughput with full CPU utilization
-- **90% reduction in IPC overhead** through intelligent batch processing
+- **~131ms average** per chunk in real-world scenarios (59% improvement from previous 323ms)
+- **7.6 chunks per second** throughput with full CPU utilization
+- **98% reduction in IPC overhead** through intelligent batch processing (38 batches vs 1856 individual calls)
+- **4m3s total indexing time** for 1856 chunks (realistic codebase)
 
 ## ChatGPT Architecture Analysis
 
