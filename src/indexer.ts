@@ -287,36 +287,27 @@ export class CodebaseIndexer {
 
 
   private createEmbeddingText(chunk: CodeChunk): string {
-    // Create rich text for embedding that includes context
+    // Optimized embedding text generation - consistent across all embedding generation
+    // Reduces verbose preprocessing for better performance and token efficiency
     const parts = [];
     
-    // Add file path context
-    parts.push(`File: ${chunk.file_path}`);
-    
-    // Add symbol name if available
+    // Add symbol name if available (most important for semantic search)
     if (chunk.symbol_name) {
-      parts.push(`Symbol: ${chunk.symbol_name}`);
+      parts.push(chunk.symbol_name);
     }
     
-    // Add chunk type
-    parts.push(`Type: ${chunk.chunk_type}`);
+    // Add chunk type for context
+    parts.push(chunk.chunk_type);
     
-    // Add language context
-    parts.push(`Language: ${chunk.language_metadata.language}`);
+    // Add main content
+    parts.push(chunk.content);
     
-    // Add the actual content
-    parts.push(`Content: ${chunk.content}`);
-    
-    // Add import/export information
+    // Add limited import context (top 3 most relevant)
     if (chunk.relationships.imports.length > 0) {
-      parts.push(`Imports: ${chunk.relationships.imports.join(', ')}`);
+      parts.push(chunk.relationships.imports.slice(0, 3).join(' '));
     }
     
-    if (chunk.relationships.exports.length > 0) {
-      parts.push(`Exports: ${chunk.relationships.exports.join(', ')}`);
-    }
-    
-    return parts.join('\n');
+    return parts.join(' ');
   }
 
   async getIndexStats(): Promise<{ total_chunks: number; last_indexed?: string }> {

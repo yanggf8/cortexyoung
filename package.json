@@ -36,7 +36,8 @@
     "rebuild": "npm run cache:clear && npm run server:rebuild",
     "health": "ts-node src/health-check-cli.ts . check",
     "health:check": "ts-node src/health-check-cli.ts . should-rebuild",
-    "test:mcp": "node test-mcp.js"
+    "test:mcp": "node test-mcp.js",
+    "test:worker-pool": "npm run build && node test-worker-pool.js"
   },
   "keywords": [],
   "author": "",
