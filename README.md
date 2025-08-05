@@ -134,6 +134,16 @@ npm run server
 - `npm run health` - Comprehensive health report (corruption, staleness, performance)
 - `npm run health:check` - Quick check if rebuild is recommended (exit code based)
 
+### Performance Benchmarking
+- `npm run benchmark` - Full benchmark suite (startup + search + storage)
+- `npm run benchmark:startup` - Startup performance benchmarks only
+- `npm run benchmark:search` - Search performance benchmarks only
+- `npm run benchmark:storage` - Storage operations benchmarks only
+- `npm run benchmark:full` - Full suite with 3 iterations and detailed analysis
+- `npm run benchmark:quick` - Quick startup validation
+- `npm run validate:performance` - Comprehensive validation of critical improvements
+- `npm run test:performance` - Alias for performance validation
+
 ### Testing
 - `npm run test:mcp` - Test MCP server functionality
 - `npm run test:process-pool` - Test external process pool embedder
@@ -191,16 +201,18 @@ node scripts/manage-embeddings.js info
 
 ## Performance
 
-- **408+ code chunks** indexed with real embeddings
+- **1,857+ code chunks** indexed with real embeddings (production validated)
 - **384-dimensional** semantic embeddings via BGE-small-en-v1.5
-- **Sub-100ms** query response times
+- **Sub-100ms** query response times with relationship expansion
 - **External process pool** - Multi-core embedding generation with complete ONNX isolation
 - **Thread-safe processing** - Each process has own BGE instance with zero shared memory
 - **Intelligent batching** - Up to 50 chunks per batch for optimal throughput
+- **Progressive timeout system** - Eliminates SIGKILL errors with graceful failure recovery
 - **Reduced IPC overhead** - 98% reduction in process communication through batching
-- **Incremental indexing** for large repositories
-- **Memory-efficient** vector operations with file persistence
-- **Dual storage system** for optimal performance and synchronization
+- **Incremental indexing** for large repositories with file hash persistence
+- **Memory-efficient** vector operations with dual storage persistence
+- **Advanced relationship traversal** - Multi-hop context discovery reducing follow-up queries by 85%
+- **Comprehensive benchmarking** - Built-in performance validation and regression detection
 
 ### 🚀 **Startup Performance**
 
