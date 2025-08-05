@@ -8,6 +8,9 @@ import { SemanticSearcher } from './searcher';
 import { StartupStageTracker } from './startup-stages';
 import { ReindexAdvisor } from './reindex-advisor';
 import { UnifiedStorageCoordinator } from './unified-storage-coordinator';
+import { FastQEmbedder } from './fastq-embedder';
+import { ProcessPoolEmbedder } from './process-pool-embedder';
+import * as os from 'os';
 
 export class CodebaseIndexer {
   private gitScanner: GitScanner;
@@ -36,10 +39,16 @@ export class CodebaseIndexer {
     const startTime = Date.now();
     
     try {
+      // Start model loading early to overlap with storage initialization
+      const modelLoadPromise = this.embedder.getModelInfo();
+      
       // Initialize unified storage coordinator
       this.stageTracker?.startStage('cache_check', 'Checking for existing embeddings and relationships');
       await this.storageCoordinator.initialize();
       this.stageTracker?.completeStage('cache_check');
+      
+      // Ensure model is loaded before we need it
+      await modelLoadPromise;
       
       // Check if we can load existing embeddings
       const hasExistingIndex = await this.vectorStore.indexExists();
@@ -191,27 +200,31 @@ export class CodebaseIndexer {
     // Get file changes metadata
     const fileChanges = await this.gitScanner.getFileChanges(scanResult.files);
     
-    // Process files in chunks
-    const allChunks: CodeChunk[] = [];
-    let processedFiles = 0;
+    // Process files in parallel for better performance
+    console.log(`🚀 Processing ${scanResult.files.length} files in parallel...`);
     
-    for (const filePath of scanResult.files) {
+    const chunkingPromises = scanResult.files.map(async (filePath, index) => {
       try {
         const content = await this.gitScanner.readFile(filePath);
         const fileChange = fileChanges.find(fc => fc.filePath === filePath);
         const coChangeFiles = await this.gitScanner.getCoChangeFiles(filePath);
         
         const chunks = await this.chunker.chunkFile(filePath, content, fileChange, coChangeFiles);
-        allChunks.push(...chunks);
         
-        processedFiles++;
-        if (processedFiles % 10 === 0) {
-          console.log(`Processed ${processedFiles}/${scanResult.files.length} files`);
+        // Progress reporting for parallel processing
+        if ((index + 1) % 10 === 0) {
+          console.log(`📊 Processed ${index + 1}/${scanResult.files.length} files`);
         }
+        
+        return chunks;
       } catch (error) {
         console.warn(`Failed to process file ${filePath}:`, error);
+        return [];
       }
-    }
+    });
+    
+    const chunkArrays = await Promise.all(chunkingPromises);
+    const allChunks: CodeChunk[] = chunkArrays.flat();
     
     console.log(`Generated ${allChunks.length} code chunks`);
     
@@ -253,87 +266,49 @@ export class CodebaseIndexer {
   }
 
   private async generateEmbeddings(chunks: CodeChunk[]): Promise<CodeChunk[]> {
-    // Start model loading stage
-    this.stageTracker?.startStage('model_load', 'Initializing BGE-small-en-v1.5 embedding model');
-    const modelInfo = await this.embedder.getModelInfo();
-    this.stageTracker?.completeStage('model_load', `Model ready: ${modelInfo.name} (${modelInfo.dimension}D)`);
-    
     // Start embedding generation stage
-    this.stageTracker?.startStage('embedding_generation', `Processing ${chunks.length} code chunks for embeddings`);
+    this.stageTracker?.startStage('embedding_generation', `Processing ${chunks.length} chunks with process pool`);
     
-    // Optimize batch size for better performance
-    const batchSize = 100; // Increased batch size for better throughput
-    const embeddedChunks: CodeChunk[] = [];
-    const totalBatches = Math.ceil(chunks.length / batchSize);
+    // Use ProcessPoolEmbedder - external Node.js processes for complete ONNX isolation
+    const processPoolEmbedder = new ProcessPoolEmbedder();
     
-    console.log(`📊 Processing ${chunks.length} chunks in ${totalBatches} batches of ${batchSize}...`);
-    
-    for (let i = 0; i < chunks.length; i += batchSize) {
-      const batchStartTime = Date.now();
-      const batch = chunks.slice(i, i + batchSize);
-      const texts = batch.map(chunk => this.createEmbeddingText(chunk));
+    try {
+      const embeddedChunks = await processPoolEmbedder.processAllEmbeddings(chunks);
       
-      try {
-        const embeddings = await this.embedder.embedBatch(texts);
-        
-        for (let j = 0; j < batch.length; j++) {
-          embeddedChunks.push({
-            ...batch[j],
-            embedding: embeddings[j] || []
-          });
-        }
-        
-        const batchTime = Date.now() - batchStartTime;
-        const currentBatch = Math.floor(i / batchSize) + 1;
-        const progress = ((currentBatch / totalBatches) * 100);
-        const avgTimePerBatch = batchTime;
-        const estimatedTimeRemaining = Math.round(((totalBatches - currentBatch) * avgTimePerBatch) / 1000);
-        
-        // Update stage progress
-        this.stageTracker?.updateStageProgress('embedding_generation', progress, 
-          `batch ${currentBatch}/${totalBatches} (${batchTime}ms, ~${estimatedTimeRemaining}s remaining)`);
-      } catch (error) {
-        console.warn(`Failed to generate embeddings for batch starting at ${i}:`, error);
-        // Add chunks without embeddings
-        embeddedChunks.push(...batch);
-      }
+      this.stageTracker?.completeStage('embedding_generation', 
+        `Generated embeddings for ${embeddedChunks.length} chunks using process pool`);
+      
+      return embeddedChunks;
+      
+    } finally {
+      // Clean shutdown
+      await processPoolEmbedder.shutdown();
     }
-    
-    this.stageTracker?.completeStage('embedding_generation', `Generated embeddings for ${embeddedChunks.length} chunks`);
-    return embeddedChunks;
   }
 
+
   private createEmbeddingText(chunk: CodeChunk): string {
-    // Create rich text for embedding that includes context
+    // Optimized embedding text generation - consistent across all embedding generation
+    // Reduces verbose preprocessing for better performance and token efficiency
     const parts = [];
     
-    // Add file path context
-    parts.push(`File: ${chunk.file_path}`);
-    
-    // Add symbol name if available
+    // Add symbol name if available (most important for semantic search)
     if (chunk.symbol_name) {
-      parts.push(`Symbol: ${chunk.symbol_name}`);
+      parts.push(chunk.symbol_name);
     }
     
-    // Add chunk type
-    parts.push(`Type: ${chunk.chunk_type}`);
+    // Add chunk type for context
+    parts.push(chunk.chunk_type);
     
-    // Add language context
-    parts.push(`Language: ${chunk.language_metadata.language}`);
+    // Add main content
+    parts.push(chunk.content);
     
-    // Add the actual content
-    parts.push(`Content: ${chunk.content}`);
-    
-    // Add import/export information
+    // Add limited import context (top 3 most relevant)
     if (chunk.relationships.imports.length > 0) {
-      parts.push(`Imports: ${chunk.relationships.imports.join(', ')}`);
+      parts.push(chunk.relationships.imports.slice(0, 3).join(' '));
     }
     
-    if (chunk.relationships.exports.length > 0) {
-      parts.push(`Exports: ${chunk.relationships.exports.join(', ')}`);
-    }
-    
-    return parts.join('\n');
+    return parts.join(' ');
   }
 
   async getIndexStats(): Promise<{ total_chunks: number; last_indexed?: string }> {

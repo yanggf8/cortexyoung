@@ -10,21 +10,23 @@ Cortex V2.1 addresses Claude Code's primary limitation: **50-70% token waste** d
 - **Multi-hop relationship traversal** for complete context discovery  
 - **MCP server architecture** for seamless Claude Code integration
 - **Adaptive context modes** balancing structure vs flexibility
+- **59% faster indexing** with intelligent process pool batching
 
 ## Architecture
 
-**Pure Node.js System** with local ML inference:
+**Pure Node.js System** with external process embedding:
 
 ### Core Components
 
 ```
-Claude Code ← Node.js MCP Server ← fastembed-js (BGE model)
+Claude Code ← Node.js MCP Server ← Process Pool Embedder
      ↓                ↓                      ↓
-User Query → Git Scanner/Chunker → Local Embeddings → Vector DB
+User Query → Git Scanner/Chunker → External Node.js Processes → Vector DB
 ```
 
-**Single Process**: Git operations, chunking, embeddings, MCP server, Claude integration  
-**Local ML**: BGE-small-en-v1.5 model via fastembed-js (384 dimensions)
+**External Process Pool**: Multi-process embedding generation with complete ONNX isolation  
+**Local ML**: BGE-small-en-v1.5 model via fastembed-js (384 dimensions)  
+**Complete Isolation**: Each process runs in separate Node.js instance for thread safety
 
 ### Key Features
 
@@ -32,6 +34,7 @@ User Query → Git Scanner/Chunker → Local Embeddings → Vector DB
 - **Multi-hop Retrieval**: Follow calls → imports → data flow → co-change patterns
 - **Adaptive Orchestration**: Minimal | Structured | Adaptive context modes
 - **Token Efficiency**: Pre-filtered, relevant code chunks
+- **Concurrent Embedding**: Multi-core BGE processing with worker pool isolation
 
 ## Project Structure
 
@@ -42,6 +45,11 @@ cortexyoung/
 │   ├── git-scanner.ts            # Git repository scanning
 │   ├── chunker.ts                # Smart code chunking
 │   ├── embedder.ts               # BGE embedding generation
+│   ├── process-pool-embedder.ts  # External Node.js process pool embedder
+│   ├── external-embedding-process.js # External Node.js process for embeddings
+│   ├── worker-pool-embedder.ts   # Multi-core worker pool embedder (deprecated)
+│   ├── isolated-embedding-worker.js # Worker thread with isolated BGE instance (deprecated)
+│   ├── fastq-embedder.ts         # FastQ-based concurrent embedder (experimental)
 │   ├── vector-store.ts           # In-memory vector storage
 │   ├── persistent-vector-store.ts # File system persistence
 │   ├── indexer.ts                # Main indexing logic
@@ -128,6 +136,8 @@ npm run server
 
 ### Testing
 - `npm run test:mcp` - Test MCP server functionality
+- `npm run test:process-pool` - Test external process pool embedder
+- `npm run test:worker-pool` - Test concurrent worker pool embedder (deprecated)
 
 ## Configuration
 
@@ -184,10 +194,74 @@ node scripts/manage-embeddings.js info
 - **408+ code chunks** indexed with real embeddings
 - **384-dimensional** semantic embeddings via BGE-small-en-v1.5
 - **Sub-100ms** query response times
-- **Pure Node.js** - no external dependencies
+- **External process pool** - Multi-core embedding generation with complete ONNX isolation
+- **Thread-safe processing** - Each process has own BGE instance with zero shared memory
+- **Intelligent batching** - Up to 50 chunks per batch for optimal throughput
+- **Reduced IPC overhead** - 98% reduction in process communication through batching
 - **Incremental indexing** for large repositories
 - **Memory-efficient** vector operations with file persistence
 - **Dual storage system** for optimal performance and synchronization
+
+### 🚀 **Startup Performance**
+
+**Real-World Indexing Performance** (1856 chunks):
+- **Total startup time**: 4m3s for complete indexing
+- **Embedding generation**: 228s (94% of total time)
+- **Throughput**: 7.6 chunks per second with full CPU utilization
+- **Batch efficiency**: 38 batches of 50 chunks each (98% reduction in process calls)
+- **Per-chunk average**: 131ms (59% improvement from previous architecture)
+
+**Scalability**:
+- **Perfect load balancing**: All 10 processes utilized simultaneously
+- **Intelligent batching**: Adapts batch size based on dataset and process count
+- **Zero ONNX conflicts**: Complete process isolation eliminates thread safety issues
+
+## Concurrent Embedding Architecture
+
+### 🚀 **External Process Pool Pattern**
+Cortex uses an external process pool architecture to achieve true multi-core parallelism while completely avoiding ONNX Runtime thread safety issues:
+
+```
+Main Process:
+└── Single FastQ Queue (consumer count = CPU cores - 2)
+    ├── Consumer 1 → External Node.js Process 1 → Own FastEmbedding
+    ├── Consumer 2 → External Node.js Process 2 → Own FastEmbedding  
+    ├── Consumer 3 → External Node.js Process 3 → Own FastEmbedding
+    └── Consumer N → External Node.js Process N → Own FastEmbedding
+```
+
+### 🔧 **Key Design Principles**:
+
+1. **Complete Process Isolation**: Each process is a separate Node.js instance with own V8 isolate
+2. **No Shared Memory**: Zero shared resources between processes eliminates thread safety issues
+3. **JSON IPC Communication**: Clean stdin/stdout communication between main and child processes
+4. **Order Preservation**: `originalIndex` mapping ensures correct chunk merging after parallel processing
+5. **Optimal Scaling**: Uses CPU cores - 2 processes for maximum performance while reserving system resources
+6. **Timestamp Versioning**: Simple `indexed_at` field for incremental indexing support
+
+### 📊 **Performance Optimizations**:
+
+- **Process Count**: Optimal scaling (CPU cores - 2) for maximum performance
+- **Embedding Text**: Reduced verbose preprocessing:
+  - **Before**: `"File: src/test.ts Symbol: testFunction Type: function Language: typescript Content: ..."`
+  - **After**: `"testFunction function function testFunction() { return 'hello'; } fs path"`
+- **Memory Efficiency**: Shared model cache (`.fastembed_cache/`), separate ONNX sessions per process
+- **Fault Tolerance**: Process crashes don't affect main process or other child processes
+- **Graceful Shutdown**: Proper process termination and cleanup
+
+### 🧪 **Testing & Validation**:
+```bash
+npm run test:process-pool  # Comprehensive process pool validation
+```
+
+### ✅ **Proven Results**:
+- **Zero ONNX Runtime errors**: Complete elimination of `HandleScope` thread safety issues
+- **Perfect concurrency**: 10 processes handling chunks simultaneously with intelligent batching
+- **100% success rate**: All embeddings generated correctly with 384D vectors
+- **~131ms average** per chunk in real-world scenarios (59% improvement from previous 323ms)
+- **7.6 chunks per second** throughput with full CPU utilization
+- **98% reduction in IPC overhead** through intelligent batch processing (38 batches vs 1856 individual calls)
+- **4m3s total indexing time** for 1856 chunks (realistic codebase)
 
 ## ChatGPT Architecture Analysis
 

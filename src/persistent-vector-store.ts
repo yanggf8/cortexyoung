@@ -1,4 +1,4 @@
-import { CodeChunk, CORTEX_SCHEMA_VERSION, ModelInfo } from './types';
+import { CodeChunk, CORTEX_PROGRAM_VERSION, CORTEX_SCHEMA_VERSION, ModelInfo } from './types';
 import { VectorStore } from './vector-store';
 import { SchemaValidator } from './schema-validator';
 import * as fs from 'fs/promises';
@@ -12,7 +12,7 @@ interface PersistedIndex {
   timestamp: number;
   repositoryPath: string;
   chunks: CodeChunk[];
-  fileHashes: Map<string, string>;
+  fileHashes: { [key: string]: string } | Map<string, string>;
   metadata: {
     totalChunks: number;
     lastIndexed: number;
@@ -35,6 +35,7 @@ interface IndexDelta {
 export class PersistentVectorStore extends VectorStore {
   private fileHashes: Map<string, string> = new Map();
   private repositoryPath: string;
+  private indexDir: string;
   private localIndexPath: string;
   private globalIndexPath: string;
   private metadataPath: string;
@@ -45,6 +46,7 @@ export class PersistentVectorStore extends VectorStore {
   constructor(repositoryPath: string, indexDir: string = '.cortex') {
     super(); // Call parent constructor
     this.repositoryPath = repositoryPath;
+    this.indexDir = indexDir;
     
     // Local storage (in repo)
     this.localIndexPath = path.join(repositoryPath, indexDir);
@@ -69,7 +71,24 @@ export class PersistentVectorStore extends VectorStore {
     return `${repoName}-${hash.substring(0, 16)}`;
   }
 
+  private static initializedPaths: Set<string> = new Set();
+  private initialized: boolean = false;
+
   async initialize(): Promise<void> {
+    // Prevent duplicate initialization across all instances for the same path
+    const key = `${this.repositoryPath}:${this.indexDir}`;
+    
+    if (this.initialized) {
+      console.log('📋 Vector store already initialized, skipping...');
+      return;
+    }
+
+    if (PersistentVectorStore.initializedPaths.has(key)) {
+      console.log('📋 Vector store for this path already initialized by another instance, skipping load...');
+      this.initialized = true;
+      return;
+    }
+
     // Ensure both index directories exist
     await fs.mkdir(this.localIndexPath, { recursive: true });
     await fs.mkdir(this.deltaPath, { recursive: true });
@@ -88,6 +107,9 @@ export class PersistentVectorStore extends VectorStore {
       // Sync to global
       await this.syncToGlobal();
     }
+
+    this.initialized = true;
+    PersistentVectorStore.initializedPaths.add(key);
   }
 
   async indexExists(): Promise<boolean> {
@@ -125,8 +147,13 @@ export class PersistentVectorStore extends VectorStore {
         this.chunks.set(chunk.chunk_id, chunk);
       }
       
-      // Load file hashes
-      this.fileHashes = new Map(Object.entries(persistedIndex.fileHashes as any));
+      // Load file hashes - handle both Map and object formats
+      if (persistedIndex.fileHashes instanceof Map) {
+        this.fileHashes = persistedIndex.fileHashes;
+      } else {
+        // Convert from serialized object format back to Map
+        this.fileHashes = new Map(Object.entries(persistedIndex.fileHashes || {}));
+      }
       
       const loadTime = Date.now() - startTime;
       console.log(`✅ Loaded ${persistedIndex.chunks.length} chunks from ${source} in ${loadTime}ms`);
@@ -150,7 +177,7 @@ export class PersistentVectorStore extends VectorStore {
         timestamp: Date.now(),
         repositoryPath: this.repositoryPath,
         chunks: Array.from(this.chunks.values()),
-        fileHashes: this.fileHashes as any,
+        fileHashes: Object.fromEntries(this.fileHashes),
         metadata: {
           totalChunks: this.chunks.size,
           lastIndexed: Date.now(),
@@ -161,15 +188,21 @@ export class PersistentVectorStore extends VectorStore {
       
       const indexData = JSON.stringify(persistedIndex, null, 2);
       
-      // Save to local storage
-      const localTempPath = this.metadataPath + '.tmp';
-      await fs.writeFile(localTempPath, indexData);
-      await fs.rename(localTempPath, this.metadataPath);
+      // Save to both storages in parallel for better performance
+      const saveLocal = async () => {
+        const localTempPath = this.metadataPath + '.tmp';
+        await fs.writeFile(localTempPath, indexData);
+        await fs.rename(localTempPath, this.metadataPath);
+      };
+
+      const saveGlobal = async () => {
+        const globalTempPath = this.globalMetadataPath + '.tmp';
+        await fs.writeFile(globalTempPath, indexData);
+        await fs.rename(globalTempPath, this.globalMetadataPath);
+      };
       
-      // Save to global storage
-      const globalTempPath = this.globalMetadataPath + '.tmp';
-      await fs.writeFile(globalTempPath, indexData);
-      await fs.rename(globalTempPath, this.globalMetadataPath);
+      // Execute storage operations in parallel
+      await Promise.all([saveLocal(), saveGlobal()]);
       
       const saveTime = Date.now() - startTime;
       console.log(`✅ Saved ${persistedIndex.chunks.length} chunks to both storages in ${saveTime}ms`);

@@ -44,13 +44,22 @@ export class UnifiedStorageCoordinator {
     this.relationshipStore = new PersistentRelationshipStore(repositoryPath, indexDir);
   }
 
+  private initialized: boolean = false;
+
   async initialize(): Promise<void> {
+    // Prevent duplicate initialization
+    if (this.initialized) {
+      console.log('📋 Unified storage coordinator already initialized, skipping...');
+      return;
+    }
+
     console.log('🔄 Initializing unified storage coordinator...');
     await Promise.all([
       this.vectorStore.initialize(),
       this.relationshipStore.initialize()
     ]);
     console.log('✅ Unified storage coordinator ready');
+    this.initialized = true;
   }
 
   async getStorageStatus(): Promise<StorageStatus> {

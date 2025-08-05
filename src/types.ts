@@ -22,9 +22,12 @@ export interface CodeChunk {
 
 export type ChunkType = 'function' | 'class' | 'method' | 'documentation' | 'config';
 
-// Schema version tracking
-export const CORTEX_SCHEMA_VERSION = '2.1.0';
-export const SUPPORTED_SCHEMA_VERSIONS = ['2.0.0', '2.1.0'];
+// Simple version compatibility
+export const CORTEX_PROGRAM_VERSION = '2.1.0';
+export const CORTEX_SCHEMA_VERSION = '1.0.0';  // We use schema v1, program v2.1
+
+// Program 2.1 is compatible with schema 1.x
+export const COMPATIBLE_SCHEMA_VERSIONS = ['1.0.0', '1.1.0'];
 
 export interface SchemaInfo {
   version: string;

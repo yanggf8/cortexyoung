@@ -114,7 +114,12 @@ export class StartupStageTracker {
     
     this.currentStageId = stageId;
     
-    console.log(`🚀 [Stage] ${stage.name}: ${stage.description}`);
+    // Get step number for display
+    const stageArray = Array.from(this.stages.values());
+    const currentStepIndex = stageArray.findIndex(s => s.id === stageId) + 1;
+    const totalSteps = stageArray.length;
+    
+    console.log(`🚀 [Step ${currentStepIndex}/${totalSteps}] ${stage.name}: ${stage.description}`);
     if (details) console.log(`   Details: ${details}`);
   }
 
@@ -125,7 +130,16 @@ export class StartupStageTracker {
     stage.progress = Math.min(100, Math.max(0, progress));
     if (details) stage.details = details;
 
-    console.log(`📊 [Progress] ${stage.name}: ${progress.toFixed(1)}%${details ? ` - ${details}` : ''}`);
+    // Get step number for display
+    const stageArray = Array.from(this.stages.values());
+    const currentStepIndex = stageArray.findIndex(s => s.id === stageId) + 1;
+    const totalSteps = stageArray.length;
+    
+    // Calculate elapsed time for this stage
+    const elapsedMs = stage.startTime ? Date.now() - stage.startTime : 0;
+    const elapsedSeconds = (elapsedMs / 1000).toFixed(1);
+
+    console.log(`📊 [Step ${currentStepIndex}/${totalSteps}] ${stage.name}: ${progress.toFixed(1)}% (${elapsedSeconds}s)${details ? ` - ${details}` : ''}`);
   }
 
   completeStage(stageId: string, details?: string): void {
@@ -140,7 +154,18 @@ export class StartupStageTracker {
     }
     if (details) stage.details = details;
 
-    console.log(`✅ [Complete] ${stage.name} (${stage.duration}ms)`);
+    // Get step number for display
+    const stageArray = Array.from(this.stages.values());
+    const currentStepIndex = stageArray.findIndex(s => s.id === stageId) + 1;
+    const totalSteps = stageArray.length;
+    
+    // Format duration nicely
+    const durationMs = stage.duration || 0;
+    const durationFormatted = durationMs >= 1000 
+      ? `${(durationMs / 1000).toFixed(1)}s` 
+      : `${durationMs}ms`;
+
+    console.log(`✅ [Step ${currentStepIndex}/${totalSteps}] ${stage.name} completed (${durationFormatted})`);
   }
 
   failStage(stageId: string, error: string): void {
@@ -154,7 +179,18 @@ export class StartupStageTracker {
       stage.duration = stage.endTime - stage.startTime;
     }
 
-    console.error(`❌ [Failed] ${stage.name}: ${error}`);
+    // Get step number for display
+    const stageArray = Array.from(this.stages.values());
+    const currentStepIndex = stageArray.findIndex(s => s.id === stageId) + 1;
+    const totalSteps = stageArray.length;
+    
+    // Format duration nicely
+    const durationMs = stage.duration || 0;
+    const durationFormatted = durationMs >= 1000 
+      ? `${(durationMs / 1000).toFixed(1)}s` 
+      : `${durationMs}ms`;
+
+    console.error(`❌ [Step ${currentStepIndex}/${totalSteps}] ${stage.name} failed (${durationFormatted}): ${error}`);
   }
 
   getProgress(): StartupProgress {
@@ -218,12 +254,21 @@ export class StartupStageTracker {
     const currentStage = this.getCurrentStage();
     
     let summary = `[${progress.overallStatus.toUpperCase()}] ${progress.overallProgress.toFixed(1)}% `;
-    summary += `(${stats.completed}/${stats.total} stages)`;
+    summary += `(Step ${stats.completed + 1}/${stats.total})`;
     
     if (currentStage) {
       summary += ` - ${currentStage.name}`;
       if (currentStage.progress !== undefined && currentStage.progress > 0) {
         summary += ` ${currentStage.progress.toFixed(1)}%`;
+      }
+      
+      // Add elapsed time for current stage
+      if (currentStage.startTime) {
+        const elapsedMs = Date.now() - currentStage.startTime;
+        const elapsedFormatted = elapsedMs >= 1000 
+          ? `${(elapsedMs / 1000).toFixed(1)}s` 
+          : `${elapsedMs}ms`;
+        summary += ` (${elapsedFormatted})`;
       }
     }
 
@@ -233,5 +278,156 @@ export class StartupStageTracker {
     }
 
     return summary;
+  }
+
+  // Utility functions for endpoints
+  getCurrentStepIndex(): number {
+    const currentStage = this.getCurrentStage();
+    const progress = this.getProgress();
+    const stats = this.getStageStats();
+    
+    return currentStage ? 
+      progress.stages.findIndex(s => s.id === currentStage.id) + 1 : 
+      stats.completed + 1;
+  }
+
+  getCurrentStepString(): string {
+    const stats = this.getStageStats();
+    const currentStepIndex = this.getCurrentStepIndex();
+    return `${currentStepIndex}/${stats.total}`;
+  }
+
+  formatDuration(durationMs: number): string {
+    return durationMs >= 1000 
+      ? `${(durationMs / 1000).toFixed(1)}s` 
+      : `${durationMs}ms`;
+  }
+
+  getCurrentStageElapsed(): string | null {
+    const currentStage = this.getCurrentStage();
+    if (!currentStage?.startTime) return null;
+    
+    const elapsedMs = Date.now() - currentStage.startTime;
+    return this.formatDuration(elapsedMs);
+  }
+
+  // Enhanced progress with step numbers and formatted timing
+  getEnhancedProgress() {
+    const progress = this.getProgress();
+    const stats = this.getStageStats();
+    const currentStepIndex = this.getCurrentStepIndex();
+    
+    const enhancedStages = progress.stages.map((stage, index) => {
+      const stepNumber = index + 1;
+      let durationFormatted: string | null = null;
+      
+      if (stage.duration) {
+        durationFormatted = this.formatDuration(stage.duration);
+      } else if (stage.startTime && stage.status === 'in_progress') {
+        const elapsedMs = Date.now() - stage.startTime;
+        durationFormatted = this.formatDuration(elapsedMs);
+      }
+      
+      return {
+        ...stage,
+        step: `${stepNumber}/${stats.total}`,
+        durationFormatted
+      };
+    });
+    
+    return {
+      ...progress,
+      stages: enhancedStages,
+      currentStep: `${currentStepIndex}/${stats.total}`,
+      summary: this.getProgressSummary()
+    };
+  }
+
+  // Health endpoint data
+  getHealthData() {
+    const progress = this.getProgress();
+    const currentStage = this.getCurrentStage();
+    const isReady = this.isReady();
+    const stats = this.getStageStats();
+    
+    // Determine health status
+    let healthStatus: 'healthy' | 'starting' | 'indexing' | 'error';
+    if (isReady) {
+      healthStatus = 'healthy';
+    } else if (progress.overallStatus === 'failed') {
+      healthStatus = 'error';
+    } else if (progress.overallStatus === 'indexing') {
+      healthStatus = 'indexing';
+    } else {
+      healthStatus = 'starting';
+    }
+    
+    const response: any = {
+      status: healthStatus,
+      server: 'cortex-mcp-server',
+      version: '2.1.0',
+      ready: isReady,
+      timestamp: Date.now()
+    };
+    
+    // Add startup progress info if not fully ready
+    if (!isReady) {
+      response.startup = {
+        stage: currentStage?.name || 'Unknown',
+        step: this.getCurrentStepString(),
+        progress: Math.round(progress.overallProgress),
+        stageProgress: currentStage?.progress ? Math.round(currentStage.progress) : 0,
+        elapsed: this.getCurrentStageElapsed(),
+        eta: progress.estimatedTimeRemaining ? Math.round(progress.estimatedTimeRemaining / 1000) : null,
+        completed: stats.completed,
+        total: stats.total,
+        details: currentStage?.details,
+        summary: this.getProgressSummary()
+      };
+    }
+    
+    // Add any failed stages
+    if (stats.failed > 0) {
+      const failedStages = progress.stages
+        .filter(stage => stage.status === 'failed')
+        .map(stage => ({ name: stage.name, error: stage.error }));
+      response.errors = failedStages;
+    }
+    
+    return response;
+  }
+
+  // Status endpoint data
+  getStatusData() {
+    const progress = this.getProgress();
+    const currentStage = this.getCurrentStage();
+    const stats = this.getStageStats();
+    
+    return {
+      status: progress.overallStatus,
+      ready: this.isReady(),
+      progress: progress.overallProgress,
+      currentStage: currentStage?.name,
+      step: this.getCurrentStepString(),
+      stageProgress: currentStage?.progress,
+      elapsed: this.getCurrentStageElapsed(),
+      stages: `${stats.completed}/${stats.total}`,
+      eta: progress.estimatedTimeRemaining ? Math.round(progress.estimatedTimeRemaining / 1000) : null,
+      summary: this.getProgressSummary(),
+      server: 'cortex-mcp-server',
+      timestamp: Date.now()
+    };
+  }
+
+  // Progress endpoint data
+  getProgressData() {
+    const enhancedProgress = this.getEnhancedProgress();
+    
+    return {
+      ...enhancedProgress,
+      server: 'cortex-mcp-server',
+      version: '2.1.0',
+      timestamp: Date.now()
+    };
   }
 }

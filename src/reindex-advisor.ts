@@ -106,18 +106,21 @@ export class ReindexAdvisor {
       const metadata = await vectorStore.getMetadata();
       if (!metadata) return null;
 
-      const indexVersion = metadata.version || '1.0.0';
-      const recommendation = SchemaValidator.shouldRecommendReindex(indexVersion);
-
-      if (recommendation.recommend) {
+      const schemaVersion = metadata.schemaVersion || '1.0.0';
+      const schemaInfo = SchemaValidator.validateSchema(schemaVersion);
+      
+      if (!schemaInfo.compatible) {
         return {
           recommend: true,
-          reason: recommendation.reason,
-          severity: recommendation.severity,
+          reason: `Schema version ${schemaVersion} is incompatible with program version 2.1.0. Compatible schemas: ${['1.0.0', '1.1.0'].join(', ')}`,
+          severity: 'high',
           category: 'schema',
-          autoReindex: recommendation.severity === 'high'
+          autoReindex: true
         };
       }
+
+      // Schema is compatible, no reindex needed
+      return null;
     } catch (error) {
       console.warn('Failed to check schema compatibility:', error);
     }
