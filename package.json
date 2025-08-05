@@ -36,7 +36,15 @@
     "rebuild": "npm run cache:clear && npm run server:rebuild",
     "health": "ts-node src/health-check-cli.ts . check",
     "health:check": "ts-node src/health-check-cli.ts . should-rebuild",
-    "test:mcp": "node test-mcp.js"
+    "test:mcp": "node test-mcp.js",
+    "benchmark": "ts-node src/benchmark-cli.ts",
+    "benchmark:startup": "ts-node src/benchmark-cli.ts --category startup",
+    "benchmark:search": "ts-node src/benchmark-cli.ts --category search",
+    "benchmark:storage": "ts-node src/benchmark-cli.ts --category storage",
+    "benchmark:full": "ts-node src/benchmark-cli.ts --category all --iterations 3",
+    "benchmark:quick": "ts-node src/benchmark-cli.ts --category startup",
+    "validate:performance": "node validate-performance.js",
+    "test:performance": "npm run validate:performance"
   },
   "keywords": [],
   "author": "",
