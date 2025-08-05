@@ -13,12 +13,14 @@ Cortex V2.1 is a semantic code intelligence MCP server designed to enhance Claud
 - **🚀 ONNX Runtime Stability**: Implemented ProcessPoolEmbedder using external Node.js processes for complete ONNX Runtime isolation, eliminating all thread safety issues and crashes. Achieves true 10x parallelism with ~60s per 50-chunk batch processing.
 - **📊 File Hash Persistence**: Fixed incremental change detection to properly track file modifications, preventing unnecessary full rebuilds when files haven't changed.
 
-**🧪 Performance Validation Results**: Comprehensive benchmarking confirms all performance targets achieved:
-- ✅ **Storage operations**: 1-3ms (sub-10ms target exceeded)
-- ✅ **Cache detection**: 4ms (sub-5s target exceeded) 
-- ✅ **Memory efficiency**: 138MB peak (sub-1GB target exceeded)
-- ✅ **Architecture integration**: 100% test coverage for relationship initialization
-- ✅ **Dual storage**: Complete persistence for embeddings + relationship graphs
+**🚨 Performance Status**: Current performance analysis reveals significant degradation:
+- ❌ **ProcessPool throughput**: 0.5-1 chunks/s (vs expected 14-16 chunks/s) - 90% degradation
+- ❌ **Real startup timing**: 5+ minutes for 2,316 chunks (vs expected 2-3 minutes)
+- ⚠️  **Memory pressure**: 91% heap usage during embedding generation
+- ✅ **Storage operations**: 1-3ms (sub-10ms target still achieved)
+- ✅ **Cache detection**: 4ms (sub-5s target still achieved)
+
+**🔍 Performance Investigation**: Recent testing shows ProcessPool implementation has severe bottlenecks requiring architectural review. Synthetic benchmarks (200 chunks) show 3.69-5.57 chunks/s vs real startup performance of 0.5-1 chunks/s with 2,316 chunks.
 
 ## Development Commands
 
@@ -45,13 +47,14 @@ Cortex V2.1 is a semantic code intelligence MCP server designed to enhance Claud
 - `EMBEDDING_STRATEGY=process-pool` - Force external process parallelism
 - `EMBEDDING_PROCESS_COUNT=N` - Override worker count for ProcessPool
 
-**Performance Targets Achieved:**
-- ✅ **Cold start**: < 3 minutes (first run with model download)
-- ✅ **Warm start**: < 30 seconds (subsequent runs with cache)  
-- ✅ **Large datasets**: 14-16 chunks/second (ProcessPool on 16-core system)
-- ✅ **Medium datasets**: 5.2 chunks/second (Optimized Concurrent)
-- ✅ **Memory usage**: < 1GB peak, auto-throttling under pressure
-- ✅ **CPU utilization**: Reserves 2 cores for system stability
+**Performance Targets Status:**
+- ❌ **Cold start**: 5+ minutes (vs < 3 minutes target) - Performance regression
+- ❌ **ProcessPool**: 0.5-1 chunks/s (vs 14-16 chunks/s target) - Major degradation  
+- ⚠️  **Concurrent**: 5.57 chunks/s (vs 5.2 chunks/s target) - Meeting expectations
+- ❌ **Memory usage**: 91% heap pressure (vs < 1GB target) - Resource constraints
+- ✅ **CPU utilization**: Still reserves 2 cores for system stability
+
+**🚨 Critical Issue**: ProcessPool performance has degraded significantly from baseline. Investigation needed to identify root cause in recent feature branch changes.
 
 ### Embedding Strategy Selection (Legacy)
 **🎯 Choose between Original vs ProcessPool embedding approaches**
