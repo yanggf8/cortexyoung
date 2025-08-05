@@ -15,10 +15,40 @@ export class EmbeddingGenerator {
     // Model will be initialized on first use
   }
 
+  /**
+   * Configure ONNX Runtime for optimal concurrent performance
+   * Prevents thread contention in concurrent strategy
+   */
+  private configureONNXRuntime(): void {
+    try {
+      const os = require('os');
+      const cpuCount = os.cpus().length;
+      
+      // Configure ONNX Runtime environment for better concurrency
+      // Limit ONNX internal threads to prevent over-subscription
+      const maxOnnxThreads = Math.max(1, Math.floor(cpuCount / 4)); // Conservative threading
+      
+      // Set environment variables before model initialization
+      process.env.OMP_NUM_THREADS = maxOnnxThreads.toString();
+      process.env.ONNX_DISABLE_MULTI_THREADING = "0"; // Allow threading but controlled
+      
+      console.log(`🔧 ONNX Runtime configured: ${maxOnnxThreads} internal threads (${cpuCount} CPU cores)`);
+      console.log(`⚙️  Threading mode: Controlled concurrency for Promise.all optimization`);
+      
+    } catch (error) {
+      console.warn('⚠️  Failed to configure ONNX Runtime threading:', error);
+      // Continue with default settings
+    }
+  }
+
   private async ensureInitialized(): Promise<void> {
     if (!this.isInitialized) {
       try {
         console.log(`🔄 Initializing BGE-small-en-v1.5 embedding model...`);
+        
+        // Configure ONNX Runtime for optimal concurrent performance
+        this.configureONNXRuntime();
+        
         this.embedder = await FlagEmbedding.init({
           model: this.modelName,
           maxLength: 512,

@@ -10,6 +10,7 @@ import { ReindexAdvisor } from './reindex-advisor';
 import { UnifiedStorageCoordinator } from './unified-storage-coordinator';
 import { FastQEmbedder } from './fastq-embedder';
 import { ProcessPoolEmbedder } from './process-pool-embedder';
+import { EmbeddingStrategyManager, EmbeddingStrategyConfig } from './embedding-strategy';
 import * as os from 'os';
 
 export class CodebaseIndexer {
@@ -266,23 +267,27 @@ export class CodebaseIndexer {
   }
 
   private async generateEmbeddings(chunks: CodeChunk[]): Promise<CodeChunk[]> {
-    // Start embedding generation stage
-    this.stageTracker?.startStage('embedding_generation', `Processing ${chunks.length} chunks with process pool`);
+    // Get embedding strategy configuration
+    const config = EmbeddingStrategyManager.getConfigFromEnv();
+    console.log(`🎯 Embedding strategy: ${config.strategy} (${chunks.length} chunks)`);
     
-    // Use ProcessPoolEmbedder - external Node.js processes for complete ONNX isolation
-    const processPoolEmbedder = new ProcessPoolEmbedder();
+    // Create strategy manager
+    const strategyManager = new EmbeddingStrategyManager(this.stageTracker);
     
     try {
-      const embeddedChunks = await processPoolEmbedder.processAllEmbeddings(chunks);
+      const result = await strategyManager.generateEmbeddings(chunks, config);
       
-      this.stageTracker?.completeStage('embedding_generation', 
-        `Generated embeddings for ${embeddedChunks.length} chunks using process pool`);
+      // Log performance metrics
+      console.log(`✅ Embedding completed using ${result.strategy} strategy:`);
+      console.log(`   📊 Total time: ${(result.performance.totalTime / 1000).toFixed(1)}s`);
+      console.log(`   📊 Chunks/second: ${result.performance.chunksPerSecond.toFixed(1)}`);
+      console.log(`   📊 Peak memory: ${result.performance.peakMemoryMB.toFixed(1)}MB`);
+      console.log(`   📊 Average batch time: ${(result.performance.averageBatchTime / 1000).toFixed(1)}s`);
       
-      return embeddedChunks;
+      return result.chunks;
       
     } finally {
-      // Clean shutdown
-      await processPoolEmbedder.shutdown();
+      await strategyManager.cleanup();
     }
   }
 

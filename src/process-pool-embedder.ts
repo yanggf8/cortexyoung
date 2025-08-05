@@ -38,13 +38,25 @@ export class ProcessPoolEmbedder {
   private processCount: number;
   private isInitialized = false;
 
-  constructor() {
-    // Calculate optimal process count - reserve cores for system
+  constructor(processCount?: number) {
+    // Calculate optimal process count - reserve cores for system, or use provided count
     const totalCores = os.cpus().length;
-    // Use most cores but reserve 2 for system processes
-    this.processCount = Math.max(1, totalCores - 2);
     
-    console.log(`🏭 Process Pool: ${this.processCount} external Node.js processes (${totalCores} CPU cores, reserved 2 for system)`);
+    if (processCount) {
+      // Use provided count
+      this.processCount = processCount;
+    } else {
+      // Auto-calculate: reserve 2 cores for system work
+      if (totalCores <= 2) {
+        this.processCount = 1;
+        console.warn(`⚠️  WARNING: Only ${totalCores} CPU core(s) detected. Using 1 worker process.`);
+        console.warn(`⚠️  System performance may be impacted. Recommend 4+ cores for optimal performance.`);
+      } else {
+        this.processCount = totalCores - 2; // Reserve 2 cores for system
+      }
+    }
+    
+    console.log(`🏭 Process Pool: ${this.processCount} external Node.js processes (${totalCores} CPU cores, ${totalCores <= 2 ? 'using all cores' : 'reserved 2 for system'})`);
     console.log(`✅ Strategy: Complete process isolation - no ONNX Runtime thread safety issues`);
     
     // Create fastq queue - consumer count matches process count
@@ -276,6 +288,8 @@ export class ProcessPoolEmbedder {
     
     console.log(`📊 Processing ${chunks.length} chunks using ${this.processCount} external processes`);
     
+    // Precise timing measurement
+    const startWallClockTime = process.hrtime.bigint();
     const currentTimestamp = Date.now();
     
     // Calculate batch size: distribute chunks evenly across processes
@@ -327,6 +341,10 @@ export class ProcessPoolEmbedder {
     
     allResults.sort((a, b) => a.originalIndex - b.originalIndex);
     
+    // Calculate precise wall-clock duration
+    const endWallClockTime = process.hrtime.bigint();
+    const wallClockDurationMs = Number(endWallClockTime - startWallClockTime) / 1_000_000;
+    
     // Merge embeddings back with original chunks
     const embeddedChunks: CodeChunk[] = allResults.map(result => ({
       ...chunks[result.originalIndex],
@@ -334,7 +352,7 @@ export class ProcessPoolEmbedder {
       indexed_at: result.timestamp
     }));
 
-    this.printBatchStats(batchResults);
+    this.printPreciseBenchmarkStats(batchResults, wallClockDurationMs, chunks.length);
     return embeddedChunks;
   }
 
@@ -356,54 +374,102 @@ export class ProcessPoolEmbedder {
     return parts.join(' ');
   }
 
-  private printBatchStats(batchResults: EmbeddingResult[][]): void {
-    console.log('\n📊 Process Pool Statistics:');
-    console.log('━'.repeat(50));
+  private printPreciseBenchmarkStats(batchResults: EmbeddingResult[][], wallClockDurationMs: number, totalChunks: number): void {
+    console.log('\n📊 ProcessPool Precise Benchmark Results:');
+    console.log('━'.repeat(60));
     
     // Flatten results for analysis
     const allResults = batchResults.flat();
     
-    // Process usage stats
-    const processUsage = new Map<number, number>();
-    const batchSizes = new Map<number, number>();
+    // Calculate real wall-clock throughput
+    const wallClockThroughput = totalChunks / (wallClockDurationMs / 1000);
+    
+    console.log('🕐 **REAL DURATION & THROUGHPUT**:');
+    console.log(`  Wall-clock duration: ${wallClockDurationMs.toFixed(0)}ms (${(wallClockDurationMs/1000).toFixed(1)}s)`);
+    console.log(`  Total throughput: ${wallClockThroughput.toFixed(2)} chunks/second`);
+    console.log(`  Total chunks processed: ${totalChunks}`);
+    console.log('');
+    
+    // Per-worker analysis
+    const workerStats = new Map<number, {
+      batches: number;
+      chunks: number;
+      totalProcessingTime: number;
+      avgBatchTime: number;
+      throughputPerWorker: number;
+    }>();
     
     batchResults.forEach((batch, batchIndex) => {
       if (batch.length > 0) {
         const processId = batch[0].stats.processId;
-        processUsage.set(processId, (processUsage.get(processId) || 0) + 1);
-        batchSizes.set(batchIndex, batch.length);
+        const batchDuration = batch[0].stats.duration;
+        const chunkCount = batch.length;
+        
+        if (!workerStats.has(processId)) {
+          workerStats.set(processId, {
+            batches: 0,
+            chunks: 0,
+            totalProcessingTime: 0,
+            avgBatchTime: 0,
+            throughputPerWorker: 0
+          });
+        }
+        
+        const stats = workerStats.get(processId)!;
+        stats.batches += 1;
+        stats.chunks += chunkCount;
+        stats.totalProcessingTime += batchDuration;
       }
     });
     
-    console.log('Process Usage (batches):');
-    processUsage.forEach((batchCount, processId) => {
-      const totalChunks = allResults.filter(r => r.stats.processId === processId).length;
-      console.log(`  Process ${processId}: ${batchCount} batch(es), ${totalChunks} chunks`);
+    // Calculate per-worker throughput
+    workerStats.forEach((stats, processId) => {
+      stats.avgBatchTime = stats.totalProcessingTime / stats.batches;
+      stats.throughputPerWorker = stats.chunks / (stats.totalProcessingTime / 1000);
     });
     
-    console.log('\nBatch Sizes:');
-    batchSizes.forEach((size, batchIndex) => {
-      console.log(`  Batch ${batchIndex}: ${size} chunks`);
+    console.log('👥 **PER-WORKER PERFORMANCE**:');
+    workerStats.forEach((stats, processId) => {
+      console.log(`  Process ${processId}:`);
+      console.log(`    • Chunks: ${stats.chunks}`);
+      console.log(`    • Batches: ${stats.batches}`);
+      console.log(`    • Processing time: ${stats.totalProcessingTime.toFixed(0)}ms`);
+      console.log(`    • Avg batch time: ${stats.avgBatchTime.toFixed(0)}ms`);
+      console.log(`    • Worker throughput: ${stats.throughputPerWorker.toFixed(2)} chunks/second`);
+      console.log('');
     });
     
-    // Performance stats
-    const batchDurations = batchResults.map(batch => 
-      batch.length > 0 ? batch[0].stats.duration : 0
-    ).filter(d => d > 0);
+    // Concurrency validation
+    const maxWorkerTime = Math.max(...Array.from(workerStats.values()).map(s => s.totalProcessingTime));
+    const totalWorkerTime = Array.from(workerStats.values()).reduce((sum, s) => sum + s.totalProcessingTime, 0);
+    const concurrencyEfficiency = (totalWorkerTime / wallClockDurationMs);
+    const theoreticalMaxConcurrency = Math.floor(concurrencyEfficiency);
     
-    if (batchDurations.length > 0) {
-      const avgDuration = Math.round(batchDurations.reduce((sum, d) => sum + d, 0) / batchDurations.length);
-      const maxDuration = Math.max(...batchDurations);
-      const minDuration = Math.min(...batchDurations);
-      
-      console.log(`\nPerformance:`);
-      console.log(`  Batch duration: ${avgDuration}ms avg (${minDuration}-${maxDuration}ms range)`);
-      console.log(`  Total chunks: ${allResults.length}`);
-      console.log(`  Total batches: ${batchResults.length}`);
-      console.log(`  Processes used: ${processUsage.size}/${this.processes.length}`);
+    console.log('🔄 **CONCURRENCY ANALYSIS**:');
+    console.log(`  Active workers: ${workerStats.size}/${this.processCount}`);
+    console.log(`  Max worker time: ${maxWorkerTime.toFixed(0)}ms`);
+    console.log(`  Total worker time: ${totalWorkerTime.toFixed(0)}ms`);
+    console.log(`  Concurrency efficiency: ${concurrencyEfficiency.toFixed(1)}x`);
+    console.log(`  Parallel speedup: ${(totalWorkerTime / wallClockDurationMs).toFixed(1)}x vs sequential`);
+    
+    if (concurrencyEfficiency < workerStats.size * 0.7) {  
+      console.log(`  ⚠️  Low concurrency efficiency - workers may be idle or contending`);
+    } else {
+      console.log(`  ✅ Good concurrency efficiency - workers running in parallel`);
     }
     
-    console.log('━'.repeat(50));
+    console.log('');
+    console.log('📈 **SUMMARY**:');
+    console.log(`  • Real wall-clock: ${wallClockThroughput.toFixed(2)} chunks/second`);
+    console.log(`  • Per-worker avg: ${(Array.from(workerStats.values()).reduce((sum, s) => sum + s.throughputPerWorker, 0) / workerStats.size).toFixed(2)} chunks/second`);
+    console.log(`  • Processes utilized: ${workerStats.size}/${this.processCount}`);
+    console.log(`  • Parallel efficiency: ${(concurrencyEfficiency / workerStats.size * 100).toFixed(1)}%`);
+    
+    console.log('━'.repeat(60));
+  }
+
+  getProcessCount(): number {
+    return this.processCount;
   }
 
   async shutdown(): Promise<void> {
