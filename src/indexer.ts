@@ -2,6 +2,7 @@ import { CodeChunk, IndexRequest, IndexResponse, QueryRequest, QueryResponse } f
 import { GitScanner } from './git-scanner';
 import { SmartChunker } from './chunker';
 import { EmbeddingGenerator } from './embedder';
+import { CachedEmbedder } from './cached-embedder';
 import { VectorStore } from './vector-store';
 import { PersistentVectorStore } from './persistent-vector-store';
 import { SemanticSearcher } from './searcher';
@@ -17,6 +18,7 @@ export class CodebaseIndexer {
   private gitScanner: GitScanner;
   private chunker: SmartChunker;
   private embedder: EmbeddingGenerator;
+  private cachedEmbedder: CachedEmbedder;
   private vectorStore: PersistentVectorStore;
   private searcher: SemanticSearcher;
   private repositoryPath: string;
@@ -29,6 +31,7 @@ export class CodebaseIndexer {
     this.gitScanner = new GitScanner(repositoryPath);
     this.chunker = new SmartChunker();
     this.embedder = new EmbeddingGenerator();
+    this.cachedEmbedder = new CachedEmbedder(repositoryPath);
     this.storageCoordinator = new UnifiedStorageCoordinator(repositoryPath);
     this.vectorStore = this.storageCoordinator.getVectorStore();
     this.searcher = new SemanticSearcher(this.vectorStore, this.embedder, repositoryPath);
@@ -267,27 +270,41 @@ export class CodebaseIndexer {
   }
 
   private async generateEmbeddings(chunks: CodeChunk[]): Promise<CodeChunk[]> {
-    // Get embedding strategy configuration
-    const config = EmbeddingStrategyManager.getConfigFromEnv();
-    console.log(`🎯 Embedding strategy: ${config.strategy} (${chunks.length} chunks)`);
+    // Initialize cached embedder if not already done
+    if (!this.cachedEmbedder) {
+      this.cachedEmbedder = new CachedEmbedder(this.repositoryPath);
+    }
     
-    // Create strategy manager
-    const strategyManager = new EmbeddingStrategyManager(this.stageTracker);
+    await this.cachedEmbedder.initialize();
+    
+    console.log(`🎯 Using cached embedding generation (${chunks.length} chunks)`);
     
     try {
-      const result = await strategyManager.generateEmbeddings(chunks, config);
+      const result = await this.cachedEmbedder.generateEmbeddings(chunks);
       
-      // Log performance metrics
-      console.log(`✅ Embedding completed using ${result.strategy} strategy:`);
-      console.log(`   📊 Total time: ${(result.performance.totalTime / 1000).toFixed(1)}s`);
-      console.log(`   📊 Chunks/second: ${result.performance.chunksPerSecond.toFixed(1)}`);
-      console.log(`   📊 Peak memory: ${result.performance.peakMemoryMB.toFixed(1)}MB`);
-      console.log(`   📊 Average batch time: ${(result.performance.averageBatchTime / 1000).toFixed(1)}s`);
+      // Log cache performance
+      const stats = await this.cachedEmbedder.getCacheStats();
+      console.log(`✅ Cached embedding completed:`);
+      console.log(`   📊 Cache hit rate: ${(stats.hit_rate * 100).toFixed(1)}%`);
+      console.log(`   📊 Total cache entries: ${stats.total_entries}`);
       
-      return result.chunks;
+      return result;
+    } catch (error) {
+      console.error('❌ Cached embedding failed:', error);
       
-    } finally {
-      await strategyManager.cleanup();
+      // Fallback to strategy manager for compatibility
+      const config = EmbeddingStrategyManager.getConfigFromEnv();
+      console.log(`🔄 Falling back to ${config.strategy} strategy...`);
+      
+      const strategyManager = new EmbeddingStrategyManager(this.stageTracker);
+      
+      try {
+        const fallbackResult = await strategyManager.generateEmbeddings(chunks, config);
+        console.log(`✅ Fallback embedding completed using ${fallbackResult.strategy} strategy`);
+        return fallbackResult.chunks;
+      } finally {
+        await strategyManager.cleanup();
+      }
     }
   }
 

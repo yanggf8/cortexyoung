@@ -24,6 +24,8 @@
     "clean": "rm -rf dist",
     "cache:stats": "node scripts/manage-embeddings.js stats",
     "cache:clear": "node scripts/manage-embeddings.js clear",
+    "cache:stats": "node -e \"const { CachedEmbedder } = require('./dist/cached-embedder'); const embedder = new CachedEmbedder(process.cwd()); embedder.initialize().then(() => embedder.getCacheStats()).then(stats => console.log(JSON.stringify(stats, null, 2)));\"",
+    "cache:clear": "node -e \"const { CachedEmbedder } = require('./dist/cached-embedder'); const embedder = new CachedEmbedder(process.cwd()); embedder.initialize().then(() => embedder.clearCache());\"",
     "cache:validate": "node scripts/manage-embeddings.js validate",
     "cache:backup": "node scripts/manage-embeddings.js backup",
     "cache:sync-global": "node scripts/manage-embeddings.js sync-to-global",
