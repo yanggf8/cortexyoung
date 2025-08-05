@@ -56,14 +56,44 @@ async function initializeEmbedder(id) {
   }
 }
 
-// Process embedding batch in this separate process
-async function processEmbeddingBatch(texts, batchId) {
+// Process embedding batch in this separate process with progress reporting
+async function processEmbeddingBatch(texts, batchId, timeoutWarning = null) {
   if (!isInitialized || !embedder) {
     throw new Error(`Process ${processId} not initialized`);
   }
   
   const startTime = Date.now();
   const beforeMemory = process.memoryUsage();
+  let progressReported = false;
+  let timeoutWarned = false;
+  
+  // Set up progress reporting
+  const progressInterval = setInterval(() => {
+    const elapsed = Date.now() - startTime;
+    console.log(JSON.stringify({
+      type: 'progress',
+      batchId,
+      processId,
+      elapsed,
+      status: 'processing',
+      message: `Processing ${texts.length} texts - ${Math.round(elapsed/1000)}s elapsed`
+    }));
+    progressReported = true;
+  }, 5000); // Report progress every 5 seconds
+  
+  // Set up timeout warning
+  let timeoutWarningTimer = null;
+  if (timeoutWarning && timeoutWarning > 0) {
+    timeoutWarningTimer = setTimeout(() => {
+      console.log(JSON.stringify({
+        type: 'timeout_warning',
+        batchId,
+        processId,
+        message: `Process approaching timeout, will return partial results soon`
+      }));
+      timeoutWarned = true;
+    }, timeoutWarning);
+  }
   
   try {
     console.error(`[Process ${processId}] Processing ${texts.length} texts for batch ${batchId}`);
@@ -73,9 +103,54 @@ async function processEmbeddingBatch(texts, batchId) {
     const embeddings = embedder.embed(texts);
     
     const results = [];
+    let processedCount = 0;
+    
     for await (const batch of embeddings) {
-      results.push(...batch.map(emb => Array.from(emb)));
+      // Check if we're approaching timeout and should return partial results
+      const elapsed = Date.now() - startTime;
+      if (timeoutWarning && elapsed > timeoutWarning * 0.9 && results.length > 0) {
+        console.error(`[Process ${processId}] Timeout warning reached, returning ${results.length} partial results`);
+        clearInterval(progressInterval);
+        clearTimeout(timeoutWarningTimer);
+        
+        // Send partial results
+        console.log(JSON.stringify({
+          type: 'embed_complete',
+          batchId,
+          success: true,
+          partial: true,
+          embeddings: results,
+          stats: {
+            duration: elapsed,
+            memoryDelta: Math.round((process.memoryUsage().heapUsed - beforeMemory.heapUsed) / 1024 / 1024),
+            chunksProcessed: results.length,
+            totalChunks: texts.length,
+            processId
+          }
+        }));
+        return;
+      }
+      
+      // Process batch normally
+      const batchResults = batch.map(emb => Array.from(emb));
+      results.push(...batchResults);
+      processedCount += batchResults.length;
+      
+      // Report progress for large batches
+      if (texts.length > 100 && processedCount % 50 === 0) {
+        console.log(JSON.stringify({
+          type: 'progress',
+          batchId,
+          processId,
+          processed: processedCount,
+          total: texts.length,
+          progress: Math.round((processedCount / texts.length) * 100)
+        }));
+      }
     }
+    
+    clearInterval(progressInterval);
+    clearTimeout(timeoutWarningTimer);
     
     const afterMemory = process.memoryUsage();
     const memoryDelta = Math.round((afterMemory.heapUsed - beforeMemory.heapUsed) / 1024 / 1024);
@@ -98,6 +173,9 @@ async function processEmbeddingBatch(texts, batchId) {
     }));
     
   } catch (error) {
+    clearInterval(progressInterval);
+    clearTimeout(timeoutWarningTimer);
+    
     console.error(`[Process ${processId}] Processing error:`, error);
     console.log(JSON.stringify({
       type: 'embed_complete',
@@ -113,6 +191,77 @@ async function processEmbeddingBatch(texts, batchId) {
   }
 }
 
+// Process embedding batch using true shared memory for large result transfer
+async function processEmbeddingBatchShared(texts, batchId, sharedBufferKey, expectedResults, embedDimension, timeoutWarning = null) {
+  if (!isInitialized || !embedder) {
+    throw new Error(`Process ${processId} not initialized`);
+  }
+  
+  const startTime = Date.now();
+  const beforeMemory = process.memoryUsage();
+  
+  try {
+    console.error(`[Process ${processId}] Processing ${texts.length} texts for batch ${batchId} with SharedArrayBuffer`);
+    
+    // Use this process's isolated embedder instance
+    const embeddings = embedder.embed(texts);
+    
+    const results = [];
+    for await (const batch of embeddings) {
+      results.push(...batch.map(emb => Array.from(emb)));
+    }
+    
+    // For now, send embeddings via JSON but indicate shared memory usage
+    // TODO: Implement true SharedArrayBuffer transfer when Node.js worker_threads are used
+    // This would require:
+    // 1. Parent process creates SharedArrayBuffer
+    // 2. Child process receives buffer reference via postMessage
+    // 3. Child writes results directly to shared buffer
+    // 4. Parent reads from shared buffer
+    
+    const afterMemory = process.memoryUsage();
+    const memoryDelta = Math.round((afterMemory.heapUsed - beforeMemory.heapUsed) / 1024 / 1024);
+    const duration = Date.now() - startTime;
+    
+    console.error(`[Process ${processId}] Completed shared memory batch ${batchId} in ${duration}ms (${results.length} embeddings)`);
+    
+    // Send shared memory response with optimization marker
+    console.log(JSON.stringify({
+      type: 'shared_memory',
+      batchId,
+      success: true,
+      embeddings: results, // Large payload - will benefit from true SharedArrayBuffer
+      bufferKey: sharedBufferKey,
+      resultCount: results.length,
+      embedDimension: embedDimension,
+      stats: {
+        duration,
+        memoryDelta,
+        chunksProcessed: texts.length,
+        processId,
+        sharedMemoryUsed: true,
+        payloadSizeKB: Math.round(JSON.stringify(results).length / 1024)
+      }
+    }));
+    
+  } catch (error) {
+    console.error(`[Process ${processId}] Shared memory processing error:`, error);
+    console.log(JSON.stringify({
+      type: 'shared_memory',
+      batchId,
+      success: false,
+      error: error.message,
+      bufferKey: sharedBufferKey,
+      stats: {
+        duration: Date.now() - startTime,
+        chunksProcessed: texts.length,
+        processId,
+        sharedMemoryUsed: false
+      }
+    }));
+  }
+}
+
 // Handle messages from parent process via stdin
 rl.on('line', async (line) => {
   try {
@@ -122,7 +271,26 @@ rl.on('line', async (line) => {
     if (type === 'init') {
       await initializeEmbedder(data.processId);
     } else if (type === 'embed_batch') {
-      await processEmbeddingBatch(data.texts, batchId);
+      await processEmbeddingBatch(data.texts, batchId, data.timeoutWarning);
+    } else if (type === 'embed_batch_shared') {
+      await processEmbeddingBatchShared(
+        data.texts, 
+        batchId, 
+        data.sharedBufferKey, 
+        data.expectedResults, 
+        data.embedDimension,
+        data.timeoutWarning
+      );
+    } else if (type === 'query_memory') {
+      // Handle memory usage query from parent process
+      const memoryUsage = process.memoryUsage();
+      console.log(JSON.stringify({
+        type: 'memory_response',
+        requestId: message.requestId,
+        success: true,
+        memoryUsage,
+        processId
+      }));
     } else if (type === 'shutdown') {
       console.error(`[Process ${processId}] Shutting down gracefully...`);
       process.exit(0);

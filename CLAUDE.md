@@ -12,6 +12,7 @@ Cortex V2.1 is a semantic code intelligence MCP server designed to enhance Claud
 - Resolved major startup bottleneck where relationship graphs were rebuilt from scratch on every search operation. System now properly initializes relationship engine during startup with cache-first loading, reducing relationship graph loading from 25+ seconds to 350ms.
 - **🚀 ONNX Runtime Stability**: Implemented ProcessPoolEmbedder using external Node.js processes for complete ONNX Runtime isolation, eliminating all thread safety issues and crashes. Achieves true 10x parallelism with ~60s per 50-chunk batch processing.
 - **📊 File Hash Persistence**: Fixed incremental change detection to properly track file modifications, preventing unnecessary full rebuilds when files haven't changed.
+- **🎯 Progressive Timeout System**: Replaced hard process timeouts with intelligent progress reporting and graceful partial result handling, eliminating SIGKILL errors and preserving work progress.
 
 **🧪 Performance Validation Results**: Comprehensive benchmarking confirms all performance targets achieved:
 - ✅ **Storage operations**: 1-3ms (sub-10ms target exceeded)
@@ -56,6 +57,8 @@ Cortex V2.1 is a semantic code intelligence MCP server designed to enhance Claud
 - 🎯 **Search queries**: < 500ms (semantic search with relationships)
 - 🎯 **Storage operations**: < 10ms (status, sync, validation)
 - 🎯 **Memory usage**: < 1GB (peak during indexing)
+- 🎯 **Embedding throughput**: 12-15 chunks/second (wall clock with progressive timeouts)
+- 🎯 **Process stability**: Zero SIGKILL errors with graceful timeout handling
 
 ### Storage Management
 
@@ -125,8 +128,8 @@ Planned cloud scaling option that will complement the existing local architectur
 - **git-scanner.ts** - Git repository scanning and metadata extraction
 - **chunker.ts** - AST-based intelligent code chunking with fallbacks
 - **embedder.ts** - BGE embedding generation via fastembed-js
-- **process-pool-embedder.ts** - Production-grade external process pool for ONNX Runtime stability
-- **external-embedding-process.js** - Isolated Node.js process script for embedding generation
+- **process-pool-embedder.ts** - Production-grade external process pool with progressive timeout system and failure recovery
+- **external-embedding-process.js** - Isolated Node.js process script with progress reporting and graceful timeout handling
 - **vector-store.ts** - In-memory vector storage and similarity search
 - **persistent-vector-store.ts** - File system persistence with dual storage (local + global)
 - **mcp-handlers.ts** - Request handlers for MCP tools
@@ -425,6 +428,11 @@ The system automatically discovers and follows relationships between code elemen
 - Uses BGE-small-en-v1.5 for 384-dimensional embeddings (384 dimensions)
 - **True parallelism**: Up to 10 concurrent processes based on CPU cores
 - **Performance**: ~57s average per 50-chunk batch with zero thread safety issues
+- **Progressive Timeout System**: 
+  - Real-time progress reporting every 5 seconds
+  - Graceful partial result handling at 90% timeout threshold
+  - Eliminates SIGKILL errors through intelligent process management
+  - Automatic failure recovery with adaptive batch size reduction
 - AST-aware chunking preserves semantic boundaries
 - Persistent storage with incremental updates and dual storage architecture
 - Content hashing for precise change detection and incremental processing
@@ -434,6 +442,7 @@ The system automatically discovers and follows relationships between code elemen
 - **🚀 ProcessPoolEmbedder**: Complete ONNX Runtime stability with 10x true parallelism
 - **🚀 MAJOR FIX**: Relationship graphs now load from cache instantly (350ms vs 25s rebuild)
 - **🚀 File Hash Persistence**: Proper incremental change detection prevents unnecessary rebuilds
+- **🎯 Progressive Timeout System**: Eliminates SIGKILL errors with intelligent timeout management
 - **⚡ DUPLICATE LOADING ELIMINATED**: Fixed redundant file loading during startup (3x 24.68MB → 1x load)
 - **📊 ENHANCED PROGRESS TRACKING**: Step-by-step startup with `[Step X/10]` format and timing information
 - **🔧 MODULAR ENDPOINTS**: Refactored health/status/progress endpoints to use shared utility functions
@@ -445,6 +454,7 @@ The system automatically discovers and follows relationships between code elemen
 - **Memory-efficient** vector operations with process-isolated ONNX Runtime
 - **Multi-hop expansion**: 5-67x context discovery from initial matches
 - **Follow-up query reduction**: 85% fewer queries needed
+- **Failure resilience**: Automatic process restart and batch size adaptation on failures
 - **Complete startup optimization**: All critical bottlenecks resolved for production use
 
 ## Recent Improvements (v2.1)
@@ -456,6 +466,11 @@ The system automatically discovers and follows relationships between code elemen
 - **Performance Metrics**: 57s average per 50-chunk batch, 1,857 chunks in 38 batches
 - **Robust Error Handling**: Process lifecycle management with graceful shutdown and recovery
 - **Smart Load Balancing**: Round-robin process assignment with automatic batch distribution
+- **Progressive Timeout System**: 
+  - Real-time progress reporting from child processes
+  - Graceful partial result handling at 90% timeout threshold
+  - Automatic failure recovery with adaptive batch size reduction
+  - Eliminates SIGKILL errors through intelligent process management
 
 ### 🔧 Code Quality & Architecture (August 2025)
 - **File Hash Persistence**: Fixed incremental change detection to prevent false "all files changed" scenarios

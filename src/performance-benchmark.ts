@@ -16,6 +16,8 @@ interface BenchmarkResult {
   details?: any;
   error?: string;
   memoryUsage?: NodeJS.MemoryUsage;
+  chunksProcessed?: number;
+  throughputChunksPerSecond?: number;
 }
 
 interface PerformanceReport {
@@ -91,7 +93,11 @@ export class PerformanceBenchmark {
       };
       
       this.results.push(benchmark);
-      console.log(`✅ ${name}: ${benchmark.duration.toFixed(2)}ms`);
+      const durationText = `${benchmark.duration.toFixed(2)}ms`;
+      const throughputText = benchmark.throughputChunksPerSecond 
+        ? ` (${benchmark.chunksProcessed} chunks, ${benchmark.throughputChunksPerSecond.toFixed(2)} chunks/sec)`
+        : '';
+      console.log(`✅ ${name}: ${durationText}${throughputText}`);
       
       return { result, benchmark };
     } catch (error) {
@@ -125,33 +131,45 @@ export class PerformanceBenchmark {
       await coordinator.clearAll();
     });
     
-    const { benchmark: coldStart } = await this.runBenchmark('cold-start-full-index', async () => {
+    const { result: coldStartResult, benchmark: coldStart } = await this.runBenchmark('cold-start-full-index', async () => {
       const indexer = new CodebaseIndexer(this.repositoryPath, this.startupTracker);
       return await indexer.indexRepository({
         repository_path: this.repositoryPath,
         mode: 'full'
       });
     });
+    
+    // Calculate real throughput: chunks processed / wall clock seconds
+    coldStart.chunksProcessed = coldStartResult.chunks_processed;
+    coldStart.throughputChunksPerSecond = coldStart.chunksProcessed / (coldStart.duration / 1000);
     startupBenchmarks.push(coldStart);
     
     // 2. Warm start (with cache)
-    const { benchmark: warmStart } = await this.runBenchmark('warm-start-incremental', async () => {
+    const { result: warmStartResult, benchmark: warmStart } = await this.runBenchmark('warm-start-incremental', async () => {
       const indexer = new CodebaseIndexer(this.repositoryPath, this.startupTracker);
       return await indexer.indexRepository({
         repository_path: this.repositoryPath,
         mode: 'incremental'
       });
     });
+    
+    // Calculate real throughput for warm start
+    warmStart.chunksProcessed = warmStartResult.chunks_processed;
+    warmStart.throughputChunksPerSecond = warmStart.chunksProcessed / (warmStart.duration / 1000);
     startupBenchmarks.push(warmStart);
     
     // 3. Cache-only start (no changes)
-    const { benchmark: cacheStart } = await this.runBenchmark('cache-only-start', async () => {
+    const { result: cacheStartResult, benchmark: cacheStart } = await this.runBenchmark('cache-only-start', async () => {
       const indexer = new CodebaseIndexer(this.repositoryPath, this.startupTracker);
       return await indexer.indexRepository({
         repository_path: this.repositoryPath,
         mode: 'incremental'
       });
     });
+    
+    // Calculate real throughput for cache-only start
+    cacheStart.chunksProcessed = cacheStartResult.chunks_processed;
+    cacheStart.throughputChunksPerSecond = cacheStart.chunksProcessed / (cacheStart.duration / 1000);
     startupBenchmarks.push(cacheStart);
     
     return startupBenchmarks;
@@ -325,6 +343,24 @@ export class PerformanceBenchmark {
       recommendations.push('Some benchmarks failed, check error logs');
     }
     
+    // Check for timeout-related issues
+    const hasTimeoutIssues = this.results.some(r => r.error && r.error.includes('timeout'));
+    if (hasTimeoutIssues) {
+      recommendations.push('Timeout issues detected - progressive timeout system should prevent SIGKILL errors');
+    }
+    
+    // Check embedding throughput
+    const embeddingBenchmarks = this.results.filter(r => r.throughputChunksPerSecond && r.throughputChunksPerSecond > 0);
+    const avgThroughput = embeddingBenchmarks.length > 0 
+      ? embeddingBenchmarks.reduce((sum, r) => sum + (r.throughputChunksPerSecond || 0), 0) / embeddingBenchmarks.length
+      : 0;
+    
+    if (avgThroughput > 0 && avgThroughput < 10) {
+      recommendations.push('Embedding throughput below target - consider batch size optimization');
+    } else if (avgThroughput >= 12) {
+      recommendations.push('Excellent embedding throughput achieved');
+    }
+    
     return {
       timestamp: Date.now(),
       systemInfo: {
@@ -369,6 +405,15 @@ export class PerformanceBenchmark {
       console.log(`⏱️  Total Time: ${(overallDuration / 1000).toFixed(2)}s`);
       console.log(`✅ Success Rate: ${report.summary.successRate.toFixed(1)}%`);
       console.log(`🧠 Peak Memory: ${report.summary.memoryPeakMB.toFixed(1)}MB`);
+      
+      // Show throughput for startup benchmarks
+      const startupWithThroughput = report.benchmarks.startup.filter(b => b.throughputChunksPerSecond && b.throughputChunksPerSecond > 0);
+      if (startupWithThroughput.length > 0) {
+        console.log('\n🚀 Startup Throughput Summary:');
+        startupWithThroughput.forEach(b => {
+          console.log(`   ${b.name}: ${b.chunksProcessed} chunks in ${(b.duration/1000).toFixed(1)}s = ${b.throughputChunksPerSecond?.toFixed(2)} chunks/sec`);
+        });
+      }
       
       return report;
     } catch (error) {
