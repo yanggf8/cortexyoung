@@ -294,6 +294,24 @@ rl.on('line', async (line) => {
     } else if (type === 'shutdown') {
       console.error(`[Process ${processId}] Shutting down gracefully...`);
       process.exit(0);
+    } else if (type === 'abort') {
+      console.error(`[Process ${processId}] Received abort signal from parent: ${message.reason || 'Unknown reason'}`);
+      
+      // Send acknowledgment to parent
+      console.log(JSON.stringify({
+        type: 'abort_ack',
+        processId,
+        timestamp: Date.now(),
+        reason: 'Acknowledged abort from parent'
+      }));
+      
+      // Cleanup and exit gracefully
+      if (embedder) {
+        embedder = null;
+      }
+      
+      console.error(`[Process ${processId}] Aborting gracefully...`);
+      process.exit(0);
     } else {
       throw new Error(`Unknown message type: ${type}`);
     }
@@ -311,6 +329,21 @@ rl.on('line', async (line) => {
 // Handle process termination
 process.on('SIGTERM', () => {
   console.error(`[Process ${processId}] Received SIGTERM, shutting down...`);
+  
+  // Send acknowledgment to parent before exit (if possible)
+  try {
+    if (process.send) {
+      process.send({
+        type: 'abort_ack',
+        processId,
+        reason: 'SIGTERM received',
+        timestamp: Date.now()
+      });
+    }
+  } catch (error) {
+    // Ignore - parent might already be gone
+  }
+  
   if (embedder) {
     embedder = null;
   }
@@ -319,10 +352,54 @@ process.on('SIGTERM', () => {
 
 process.on('SIGINT', () => {
   console.error(`[Process ${processId}] Received SIGINT, shutting down...`);
+  
+  // Send acknowledgment to parent before exit (if possible)
+  try {
+    if (process.send) {
+      process.send({
+        type: 'abort_ack',
+        processId,
+        reason: 'SIGINT received',
+        timestamp: Date.now()
+      });
+    }
+  } catch (error) {
+    // Ignore - parent might already be gone
+  }
+  
   if (embedder) {
     embedder = null;
   }
   process.exit(0);
+});
+
+// Handle IPC messages from parent process
+process.on('message', (message) => {
+  try {
+    const { type, reason, timestamp } = message;
+    
+    if (type === 'abort') {
+      console.error(`[Process ${processId}] Received abort via IPC: ${reason || 'Unknown reason'}`);
+      
+      // Send acknowledgment via IPC
+      process.send?.({
+        type: 'abort_ack',
+        processId,
+        timestamp: Date.now(),
+        reason: 'Acknowledged abort from parent via IPC'
+      });
+      
+      // Cleanup and exit gracefully
+      if (embedder) {
+        embedder = null;
+      }
+      
+      console.error(`[Process ${processId}] Aborting gracefully via IPC...`);
+      process.exit(0);
+    }
+  } catch (error) {
+    console.error(`[Process ${processId}] IPC message handling error:`, error);
+  }
 });
 
 // Handle uncaught errors

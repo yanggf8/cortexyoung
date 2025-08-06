@@ -4,6 +4,57 @@ import { CodebaseIndexer } from './indexer';
 import { StartupStageTracker } from './startup-stages';
 import * as path from 'path';
 
+// Global cleanup handler
+let globalIndexer: CodebaseIndexer | null = null;
+let cleanupInProgress = false;
+
+async function cleanup(reason: string = 'unknown') {
+  if (globalIndexer && !cleanupInProgress) {
+    cleanupInProgress = true;
+    try {
+      console.log(`\n🧹 Cleaning up process pool (reason: ${reason})...`);
+      // Use the indexer's cleanup method
+      await globalIndexer.cleanup(reason);
+      console.log('✅ Process pool cleaned up successfully');
+    } catch (error) {
+      console.error('❌ Error during cleanup:', error);
+    } finally {
+      globalIndexer = null;
+      cleanupInProgress = false;
+    }
+  }
+}
+
+// Setup cleanup handlers
+process.on('SIGINT', async () => {
+  console.log('\n⚠️ Received SIGINT (Ctrl+C)');
+  await cleanup('SIGINT');
+  process.exit(0);
+});
+
+process.on('SIGTERM', async () => {
+  console.log('\n⚠️ Received SIGTERM');
+  await cleanup('SIGTERM');
+  process.exit(0);
+});
+
+process.on('exit', async () => {
+  await cleanup('exit');
+});
+
+// Handle uncaught exceptions
+process.on('uncaughtException', async (error) => {
+  console.error('❌ Uncaught Exception:', error);
+  await cleanup('uncaughtException');
+  process.exit(1);
+});
+
+process.on('unhandledRejection', async (reason, promise) => {
+  console.error('❌ Unhandled Rejection at:', promise, 'reason:', reason);
+  await cleanup('unhandledRejection');
+  process.exit(1);
+});
+
 async function main() {
   // Parse command line arguments
   const args = process.argv.slice(2);
@@ -18,6 +69,9 @@ async function main() {
   // Initialize stage tracker for progress monitoring
   const stageTracker = new StartupStageTracker();
   const indexer = new CodebaseIndexer(repoPath, stageTracker);
+  
+  // Store indexer globally for cleanup
+  globalIndexer = indexer;
   
   try {
     stageTracker.startStage('cache_check', 'Checking for existing embeddings cache');
@@ -57,6 +111,9 @@ async function main() {
     stageTracker.failStage(stageTracker.getCurrentStage()?.id || 'unknown', error instanceof Error ? error.message : String(error));
     console.error('❌ Indexing failed:', error);
     process.exit(1);
+  } finally {
+    // Ensure cleanup happens even if other cleanup calls missed
+    await cleanup('finally');
   }
 }
 

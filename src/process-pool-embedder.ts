@@ -90,6 +90,35 @@ interface AdaptiveBatchConfig {
   consecutiveFailures: number; // Track consecutive failures for recovery
 }
 
+interface SystemMemoryInfo {
+  totalMB: number;
+  usedMB: number;
+  availableMB: number;
+  usagePercent: number;
+  accurate: boolean; // Whether the reading is reliable
+}
+
+interface SystemCpuInfo {
+  usagePercent: number;
+  loadAverage1min: number;
+  coreCount: number;
+  accurate: boolean; // Whether the reading is reliable
+}
+
+interface AdaptivePoolConfig {
+  maxProcesses: number; // CPU-based max
+  currentProcesses: number; // Currently active
+  memoryStopThreshold: number; // Stop spawning at 78%
+  memoryResumeThreshold: number; // Resume spawning at 69%
+  cpuStopThreshold: number; // Stop spawning at 78%
+  cpuResumeThreshold: number; // Resume spawning at 69%
+  isMemoryConstrained: boolean; // Currently blocked by memory
+  isCpuConstrained: boolean; // Currently blocked by CPU
+  lastMemoryCheck: number; // Timestamp
+  lastCpuCheck: number; // Timestamp
+  growthPhase: 'starting' | 'gradual' | 'constrained' | 'cautious' | 'completed';
+}
+
 export class ProcessPoolEmbedder {
   private processes: ProcessInstance[] = [];
   private queue: fastq.queueAsPromised<EmbeddingTask, EmbeddingResult[]>;
@@ -99,24 +128,311 @@ export class ProcessPoolEmbedder {
   private cacheStats = { hits: 0, misses: 0, total: 0, evictions: 0 };
   private adaptiveBatch: AdaptiveBatchConfig;
   private systemMemoryMB: number;
+  private systemCpuCores: number;
   private isEvicting = false; // Prevent concurrent eviction operations
+  private adaptivePool: AdaptivePoolConfig;
+  private memoryMonitoringInterval?: NodeJS.Timeout;
+  private cpuMonitoringInterval?: NodeJS.Timeout;
+  private isShuttingDown = false;
+  private shutdownPromise?: Promise<void>;
   
   // Cache management configuration
   private static readonly MAX_CACHE_SIZE = 10000; // Maximum cache entries
   private static readonly CACHE_EVICTION_THRESHOLD = 0.8; // Trigger cleanup at 80% capacity
   private static readonly EVICTION_PERCENTAGE = 0.2; // Remove 20% when evicting
 
+  // Accurate system memory monitoring across platforms
+  private async getAccurateSystemMemory(): Promise<SystemMemoryInfo> {
+    const { spawn } = await import('child_process');
+    
+    return new Promise((resolve) => {
+      const platform = os.platform();
+      let command: string;
+      let args: string[];
+      
+      // Choose command based on platform
+      if (platform === 'linux') {
+        // Use free command on Linux/WSL2
+        command = 'free';
+        args = ['-m']; // Output in MB
+      } else if (platform === 'darwin') {
+        // Use vm_stat on macOS
+        command = 'vm_stat';
+        args = [];
+      } else if (platform === 'win32') {
+        // Use wmic on Windows
+        command = 'wmic';
+        args = ['OS', 'get', 'TotalVisibleMemorySize,FreePhysicalMemory', '/value'];
+      } else {
+        // Fallback to Node.js built-in (inaccurate but better than nothing)
+        const totalMB = Math.round(os.totalmem() / (1024 * 1024));
+        const freeMB = Math.round(os.freemem() / (1024 * 1024));
+        const usedMB = totalMB - freeMB;
+        return resolve({
+          totalMB,
+          usedMB,
+          availableMB: freeMB,
+          usagePercent: (usedMB / totalMB) * 100,
+          accurate: false
+        });
+      }
+      
+      const proc = spawn(command, args, { stdio: ['pipe', 'pipe', 'pipe'] });
+      let output = '';
+      
+      proc.stdout?.on('data', (data) => {
+        output += data.toString();
+      });
+      
+      proc.on('close', (code) => {
+        try {
+          let totalMB = 0;
+          let usedMB = 0;
+          let availableMB = 0;
+          
+          if (platform === 'linux') {
+            // Parse free command output
+            const lines = output.split('\n');
+            const memLine = lines.find(line => line.startsWith('Mem:'));
+            if (memLine) {
+              const parts = memLine.split(/\s+/);
+              totalMB = parseInt(parts[1], 10);
+              usedMB = parseInt(parts[2], 10);
+              availableMB = parseInt(parts[6] || parts[3], 10); // Use available if present, else free
+            }
+          } else if (platform === 'darwin') {
+            // Parse vm_stat output (more complex, simplified here)
+            const pageSize = 4096; // Default page size
+            const lines = output.split('\n');
+            let freePages = 0;
+            let inactivePages = 0;
+            
+            lines.forEach(line => {
+              if (line.includes('Pages free:')) {
+                freePages = parseInt(line.split(':')[1], 10);
+              } else if (line.includes('Pages inactive:')) {
+                inactivePages = parseInt(line.split(':')[1], 10);
+              }
+            });
+            
+            totalMB = Math.round(os.totalmem() / (1024 * 1024));
+            availableMB = Math.round((freePages + inactivePages) * pageSize / (1024 * 1024));
+            usedMB = totalMB - availableMB;
+          } else if (platform === 'win32') {
+            // Parse wmic output
+            const lines = output.split('\n');
+            lines.forEach(line => {
+              if (line.includes('TotalVisibleMemorySize=')) {
+                totalMB = Math.round(parseInt(line.split('=')[1], 10) / 1024);
+              } else if (line.includes('FreePhysicalMemory=')) {
+                availableMB = Math.round(parseInt(line.split('=')[1], 10) / 1024);
+              }
+            });
+            usedMB = totalMB - availableMB;
+          }
+          
+          // Validate results
+          if (totalMB > 0 && usedMB >= 0 && availableMB >= 0) {
+            resolve({
+              totalMB,
+              usedMB,
+              availableMB,
+              usagePercent: (usedMB / totalMB) * 100,
+              accurate: true
+            });
+          } else {
+            throw new Error('Invalid memory values');
+          }
+        } catch (error) {
+          // Fallback to Node.js built-in
+          const totalMB = Math.round(os.totalmem() / (1024 * 1024));
+          const freeMB = Math.round(os.freemem() / (1024 * 1024));
+          const usedMB = totalMB - freeMB;
+          resolve({
+            totalMB,
+            usedMB,
+            availableMB: freeMB,
+            usagePercent: (usedMB / totalMB) * 100,
+            accurate: false
+          });
+        }
+      });
+      
+      // Timeout after 5 seconds
+      setTimeout(() => {
+        proc.kill();
+        const totalMB = Math.round(os.totalmem() / (1024 * 1024));
+        const freeMB = Math.round(os.freemem() / (1024 * 1024));
+        const usedMB = totalMB - freeMB;
+        resolve({
+          totalMB,
+          usedMB,
+          availableMB: freeMB,
+          usagePercent: (usedMB / totalMB) * 100,
+          accurate: false
+        });
+      }, 5000);
+    });
+  }
+
+  // Accurate system CPU monitoring across platforms  
+  private async getAccurateSystemCpu(): Promise<SystemCpuInfo> {
+    const { spawn } = await import('child_process');
+    
+    return new Promise((resolve) => {
+      const platform = os.platform();
+      let command: string;
+      let args: string[];
+      const coreCount = os.cpus().length;
+      
+      // Choose command based on platform
+      if (platform === 'linux') {
+        // Use top command on Linux/WSL2 - get 1 snapshot
+        command = 'top';
+        args = ['-bn1']; // Batch mode, 1 iteration
+      } else if (platform === 'darwin') {
+        // Use top on macOS
+        command = 'top'; 
+        args = ['-l1', '-s0', '-n0']; // 1 sample, no delay
+      } else if (platform === 'win32') {
+        // Use wmic on Windows
+        command = 'wmic';
+        args = ['cpu', 'get', 'loadpercentage', '/value'];
+      } else {
+        // Fallback using load average (inaccurate but better than nothing)
+        const loadAvg = os.loadavg()[0]; // 1-minute load average
+        const usagePercent = Math.min((loadAvg / coreCount) * 100, 100);
+        return resolve({
+          usagePercent,
+          loadAverage1min: loadAvg,
+          coreCount,
+          accurate: false
+        });
+      }
+      
+      const proc = spawn(command, args, { stdio: ['pipe', 'pipe', 'pipe'] });
+      let output = '';
+      
+      proc.stdout?.on('data', (data) => {
+        output += data.toString();
+      });
+      
+      proc.on('close', (code) => {
+        try {
+          let usagePercent = 0;
+          const loadAverage1min = os.loadavg()[0];
+          
+          if (platform === 'linux') {
+            // Parse top output for CPU usage
+            const lines = output.split('\n');
+            const cpuLine = lines.find(line => line.includes('%Cpu(s)') || line.includes('Cpu(s)'));
+            if (cpuLine) {
+              // Extract idle percentage and calculate usage
+              // Format: %Cpu(s):  5.3 us,  2.1 sy,  0.0 ni, 92.3 id, ...
+              const idleMatch = cpuLine.match(/(\d+\.?\d*)\s*id/);
+              if (idleMatch) {
+                const idlePercent = parseFloat(idleMatch[1]);
+                usagePercent = Math.max(0, 100 - idlePercent);
+              }
+            }
+          } else if (platform === 'darwin') {
+            // Parse macOS top output
+            const lines = output.split('\n');
+            const cpuLine = lines.find(line => line.includes('CPU usage'));
+            if (cpuLine) {
+              // Format: CPU usage: 15.38% user, 7.69% sys, 76.92% idle
+              const idleMatch = cpuLine.match(/(\d+\.?\d*)%\s*idle/);
+              if (idleMatch) {
+                const idlePercent = parseFloat(idleMatch[1]);
+                usagePercent = Math.max(0, 100 - idlePercent);
+              }
+            }
+          } else if (platform === 'win32') {
+            // Parse Windows wmic output
+            const lines = output.split('\n');
+            const loadLine = lines.find(line => line.includes('LoadPercentage='));
+            if (loadLine) {
+              usagePercent = parseInt(loadLine.split('=')[1], 10) || 0;
+            }
+          }
+          
+          // Validate results
+          if (usagePercent >= 0 && usagePercent <= 100) {
+            resolve({
+              usagePercent,
+              loadAverage1min,
+              coreCount,
+              accurate: true
+            });
+          } else {
+            throw new Error('Invalid CPU values');
+          }
+        } catch (error) {
+          // Fallback to load average
+          const loadAvg = os.loadavg()[0];
+          const usagePercent = Math.min((loadAvg / coreCount) * 100, 100);
+          resolve({
+            usagePercent,
+            loadAverage1min: loadAvg,
+            coreCount,
+            accurate: false
+          });
+        }
+      });
+      
+      // Timeout after 5 seconds
+      setTimeout(() => {
+        proc.kill();
+        const loadAvg = os.loadavg()[0];
+        const usagePercent = Math.min((loadAvg / coreCount) * 100, 100);
+        resolve({
+          usagePercent,
+          loadAverage1min: loadAvg,
+          coreCount,
+          accurate: false
+        });
+      }, 5000);
+    });
+  }
+
   constructor() {
-    // Calculate optimal process count - use 69% of available cores
     const totalCores = os.cpus().length;
-    // Use 69% of cores for optimal performance
-    this.processCount = Math.max(1, Math.floor(totalCores * 0.69));
     
-    console.log(`🏭 Process Pool: ${this.processCount} external Node.js processes (${totalCores} CPU cores, using 69% (${this.processCount}/${totalCores} cores))`);
-    console.log(`✅ Strategy: Process isolation + shared memory cache for optimal performance`);
-    console.log(`🧠 Shared embedding cache: Content-based deduplication across all processes`);
+    // Calculate adaptive pool configuration
+    const maxProcessesByCPU = Math.max(1, Math.floor(totalCores * 0.69)); // Hard limit at 69% of cores
+    const startProcesses = Math.max(1, Math.floor(maxProcessesByCPU * 0.25)); // Start at 25% of target (conservative)
     
-    // Initialize adaptive batching system
+    // Initialize with starting process count (25% of target)
+    this.processCount = startProcesses;
+    
+    // Initialize system resources
+    this.systemCpuCores = totalCores;
+    
+    // Initialize adaptive pool configuration
+    this.adaptivePool = {
+      maxProcesses: maxProcessesByCPU,           // 69% of cores hard limit
+      currentProcesses: startProcesses,         // Start at 25% of target
+      memoryStopThreshold: 78,                  // Stop spawning at 78% memory usage
+      memoryResumeThreshold: 69,                // Resume spawning at 69% memory usage
+      cpuStopThreshold: 78,                     // Stop spawning at 78% CPU usage
+      cpuResumeThreshold: 69,                   // Resume spawning at 69% CPU usage
+      isMemoryConstrained: false,               // Initially not constrained
+      isCpuConstrained: false,                  // Initially not constrained
+      lastMemoryCheck: 0,                       // No checks yet
+      lastCpuCheck: 0,                          // No checks yet
+      growthPhase: 'starting'                   // Starting phase
+    };
+    
+    console.log(`🏭 Adaptive Process Pool Strategy:`);
+    console.log(`   CPU Cores: ${totalCores} total`);
+    console.log(`   Starting: ${startProcesses} processes (25% of target = ${Math.round(startProcesses/maxProcessesByCPU*100)}%)`);
+    console.log(`   Maximum: ${maxProcessesByCPU} processes (69% of cores)`);
+    console.log(`   Memory Thresholds: Stop at 78%, Resume at 69%`);
+    console.log(`   CPU Thresholds: Stop at 78%, Resume at 69%`);
+    console.log(`   Growth Strategy: Start conservative → Monitor memory + CPU → Scale based on both resources`);
+    console.log(`✅ Strategy: Adaptive process pool with real-time memory + CPU management`);
+    
+    // Initialize adaptive batching system (will be updated with accurate reading)
     this.systemMemoryMB = Math.round(os.totalmem() / (1024 * 1024));
     // Simple approach: Focus on Node.js heap hard limit
     // Grow batch sizes until we approach the heap limit for maximum efficiency
@@ -152,23 +468,409 @@ export class ProcessPoolEmbedder {
     
     console.log(`🎯 Adaptive Batching: Start=${this.adaptiveBatch.currentSize}, Range=${this.adaptiveBatch.minSize}-${this.adaptiveBatch.maxSize}, Threshold=${Math.round(this.adaptiveBatch.memoryThresholdMB)}MB`);
     
-    // Create fastq queue - consumer count matches process count
+    // Create fastq queue - consumer count matches initial process count
     this.queue = fastq.promise(this.processEmbeddingTask.bind(this), this.processCount);
+  }
+
+  // Adaptive process pool management with memory monitoring
+  private async checkResourcesAndAdjustPool(): Promise<void> {
+    try {
+      // Get both memory and CPU info in parallel for efficiency
+      const [memInfo, cpuInfo] = await Promise.all([
+        this.getAccurateSystemMemory(),
+        this.getAccurateSystemCpu()
+      ]);
+      
+      this.adaptivePool.lastMemoryCheck = Date.now();
+      this.adaptivePool.lastCpuCheck = Date.now();
+      
+      // Update system memory info with accurate reading
+      if (memInfo.accurate && memInfo.totalMB > this.systemMemoryMB) {
+        this.systemMemoryMB = memInfo.totalMB;
+        console.log(`📊 Updated system memory: ${memInfo.totalMB}MB (${memInfo.accurate ? 'accurate' : 'fallback'})`);
+      }
+      
+      // Display current resource status
+      const memoryStatusIcon = memInfo.usagePercent < 50 ? '🟢' : memInfo.usagePercent < 70 ? '🟡' : '🟠';
+      const cpuStatusIcon = cpuInfo.usagePercent < 50 ? '🟢' : cpuInfo.usagePercent < 70 ? '🟡' : '🟠';
+      
+      console.log(`${memoryStatusIcon} Memory: ${memInfo.usedMB}MB used / ${memInfo.totalMB}MB total (${memInfo.usagePercent.toFixed(1)}%)`);
+      console.log(`${cpuStatusIcon} CPU: ${cpuInfo.usagePercent.toFixed(1)}% used (${cpuInfo.coreCount} cores, load: ${cpuInfo.loadAverage1min.toFixed(2)})`);
+      
+      // Show resource projections
+      const currentProcesses = this.adaptivePool.currentProcesses;
+      const maxProcesses = this.adaptivePool.maxProcesses;
+      const memoryPerProcess = memInfo.usedMB / Math.max(currentProcesses, 1);
+      const projectedMemoryAtMax = memoryPerProcess * maxProcesses;
+      const projectedMemoryPercent = (projectedMemoryAtMax / memInfo.totalMB) * 100;
+      
+      console.log(`📊 Resource Projections:`);
+      console.log(`   Memory: ${currentProcesses} processes using ~${memoryPerProcess.toFixed(0)}MB each`);
+      console.log(`   At max (${maxProcesses} processes): ~${projectedMemoryAtMax.toFixed(0)}MB (${projectedMemoryPercent.toFixed(1)}%)`);
+      console.log(`   CPU cores available: ${Math.max(0, cpuInfo.coreCount - Math.floor(cpuInfo.coreCount * cpuInfo.usagePercent / 100))} of ${cpuInfo.coreCount}`);
+      
+      // Check memory constraints (same as before)
+      if (memInfo.usagePercent >= this.adaptivePool.memoryStopThreshold) {
+        if (!this.adaptivePool.isMemoryConstrained) {
+          console.log(`⚠️  Memory threshold reached (${memInfo.usagePercent.toFixed(1)}% ≥ ${this.adaptivePool.memoryStopThreshold}%) - Memory constrained`);
+          this.adaptivePool.isMemoryConstrained = true;
+          this.adaptivePool.growthPhase = 'constrained';
+        }
+      } else if (memInfo.usagePercent <= this.adaptivePool.memoryResumeThreshold && this.adaptivePool.isMemoryConstrained) {
+        console.log(`✅ Memory pressure relieved (${memInfo.usagePercent.toFixed(1)}% ≤ ${this.adaptivePool.memoryResumeThreshold}%)`);
+        this.adaptivePool.isMemoryConstrained = false;
+      }
+      
+      // Check CPU constraints (NEW - same thresholds as memory)
+      if (cpuInfo.usagePercent >= this.adaptivePool.cpuStopThreshold) {
+        if (!this.adaptivePool.isCpuConstrained) {
+          console.log(`⚠️  CPU threshold reached (${cpuInfo.usagePercent.toFixed(1)}% ≥ ${this.adaptivePool.cpuStopThreshold}%) - CPU constrained`);
+          this.adaptivePool.isCpuConstrained = true;
+          this.adaptivePool.growthPhase = 'constrained';
+        }
+      } else if (cpuInfo.usagePercent <= this.adaptivePool.cpuResumeThreshold && this.adaptivePool.isCpuConstrained) {
+        console.log(`✅ CPU pressure relieved (${cpuInfo.usagePercent.toFixed(1)}% ≤ ${this.adaptivePool.cpuResumeThreshold}%)`);
+        this.adaptivePool.isCpuConstrained = false;
+      }
+      
+      // Smart growth decision based on BOTH memory and CPU
+      const resourcesOK = !this.adaptivePool.isMemoryConstrained && !this.adaptivePool.isCpuConstrained;
+      const canGrow = resourcesOK && 
+                     this.adaptivePool.currentProcesses < this.adaptivePool.maxProcesses &&
+                     this.adaptivePool.growthPhase !== 'completed';
+      
+      if (canGrow) {
+        // Only grow if BOTH memory and CPU projections are reasonable
+        const memoryProjectionOK = projectedMemoryPercent < 75;
+        const cpuProjectionOK = cpuInfo.usagePercent < 60; // Conservative CPU check
+        
+        if (memoryProjectionOK && cpuProjectionOK) {
+          console.log(`📈 Resources safe (Mem: ${projectedMemoryPercent.toFixed(1)}%, CPU: ${cpuInfo.usagePercent.toFixed(1)}%) - Growing pool`);
+          await this.growProcessPool();
+        } else {
+          const reason = !memoryProjectionOK ? `Memory high (${projectedMemoryPercent.toFixed(1)}%)` : `CPU high (${cpuInfo.usagePercent.toFixed(1)}%)`;
+          console.log(`⚠️  ${reason} - Delaying growth`);
+          this.adaptivePool.growthPhase = 'cautious';
+        }
+      } else if (!resourcesOK) {
+        const constraints = [];
+        if (this.adaptivePool.isMemoryConstrained) constraints.push('Memory');
+        if (this.adaptivePool.isCpuConstrained) constraints.push('CPU');
+        console.log(`⏸️  Growth paused: ${constraints.join(' + ')} constrained`);
+      }
+      
+    } catch (error) {
+      console.warn(`⚠️  Resource check failed:`, error);
+    }
+  }
+  
+  private async growProcessPool(): Promise<void> {
+    const newProcessCount = Math.min(
+      this.adaptivePool.currentProcesses + 1, 
+      this.adaptivePool.maxProcesses
+    );
+    
+    console.log(`📈 Growing process pool: ${this.adaptivePool.currentProcesses} → ${newProcessCount} processes`);
+    
+    try {
+      // Create new process
+      const newProcess = await this.createSingleProcess(newProcessCount - 1);
+      this.processes.push(newProcess);
+      
+      // Update counts
+      this.adaptivePool.currentProcesses = newProcessCount;
+      this.processCount = newProcessCount;
+      
+      // Update queue concurrency
+      this.queue.concurrency = newProcessCount;
+      
+      console.log(`✅ Process pool grown to ${newProcessCount} processes`);
+      
+      // Check if we've reached maximum
+      if (newProcessCount >= this.adaptivePool.maxProcesses) {
+        this.adaptivePool.growthPhase = 'completed';
+        console.log(`🏁 Process pool growth completed - reached maximum of ${this.adaptivePool.maxProcesses} processes`);
+      }
+      
+    } catch (error) {
+      console.error(`❌ Failed to grow process pool:`, error);
+    }
+  }
+  
+  private async createSingleProcess(processId: number): Promise<ProcessInstance> {
+    const processScript = path.join(__dirname, 'external-embedding-process.js');
+    
+    console.log(`⏳ Spawning external process ${processId + 1}/${this.adaptivePool.maxProcesses}...`);
+    
+    const childProcess = spawn('node', [processScript], {
+      stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
+      env: { ...process.env, FORCE_COLOR: '0' }
+    });
+    
+    const processInstance: ProcessInstance = {
+      id: processId,
+      process: childProcess,
+      isAvailable: false,
+      isReady: false,
+      lastUsed: 0,
+      pendingRequests: new Map(),
+      messageBuffer: '',
+      sharedBuffers: new Map()
+    };
+    
+    // Set up process event handlers
+    this.setupProcessHandlers(processInstance);
+    
+    // Wait for process to be ready
+    await this.waitForSingleProcessReady(processInstance);
+    
+    return processInstance;
+  }
+  
+  private startResourceMonitoring(): void {
+    // Check both memory and CPU every 15 seconds during active processing
+    this.memoryMonitoringInterval = setInterval(async () => {
+      await this.checkResourcesAndAdjustPool();
+    }, 15000);
+    
+    console.log(`🔍 Started resource monitoring (memory + CPU, 15s intervals)`);
+  }
+  
+  private stopResourceMonitoring(): void {
+    if (this.memoryMonitoringInterval) {
+      clearInterval(this.memoryMonitoringInterval);
+      this.memoryMonitoringInterval = undefined;
+    }
+    if (this.cpuMonitoringInterval) {
+      clearInterval(this.cpuMonitoringInterval);
+      this.cpuMonitoringInterval = undefined;
+    }
+    console.log(`⏹️  Stopped resource monitoring`);
+  }
+
+  // Graceful shutdown methods
+  async shutdown(signal?: string): Promise<void> {
+    if (this.isShuttingDown) {
+      return this.shutdownPromise;
+    }
+
+    this.isShuttingDown = true;
+    console.log(`🔄 Graceful shutdown initiated${signal ? ` (${signal})` : ''}...`);
+
+    this.shutdownPromise = this.performShutdown();
+    return this.shutdownPromise;
+  }
+
+  private async performShutdown(): Promise<void> {
+    const startTime = Date.now();
+
+    // Stop memory monitoring
+    this.stopResourceMonitoring();
+
+    // Stop accepting new work
+    if (this.queue) {
+      console.log(`⏸️  Stopping queue (${this.queue.length()} pending tasks)...`);
+      this.queue.pause();
+    }
+
+    // Send abort signal to all child processes
+    const abortPromises = this.processes.map(proc => this.abortChildProcess(proc));
+    
+    try {
+      // Wait for all processes to acknowledge abort (with timeout)
+      await Promise.race([
+        Promise.all(abortPromises),
+        new Promise(resolve => setTimeout(resolve, 10000)) // 10s timeout
+      ]);
+      console.log(`✅ All child processes acknowledged shutdown`);
+    } catch (error) {
+      console.warn(`⚠️  Some processes didn't respond to shutdown signal:`, error);
+    }
+
+    // Force kill any remaining processes
+    const killPromises = this.processes.map(proc => this.forceKillProcess(proc));
+    await Promise.all(killPromises);
+
+    // Clear process list
+    this.processes = [];
+    this.isInitialized = false;
+
+    const shutdownTime = Date.now() - startTime;
+    console.log(`🏁 Graceful shutdown completed in ${shutdownTime}ms`);
+  }
+
+  private async abortChildProcess(processInstance: ProcessInstance): Promise<void> {
+    return new Promise((resolve) => {
+      if (!processInstance.process || processInstance.process.killed) {
+        resolve();
+        return;
+      }
+
+      console.log(`📤 Sending abort signal to process ${processInstance.id}...`);
+
+      // Send abort message via IPC first (for graceful shutdown)
+      const abortMessage = {
+        type: 'abort',
+        timestamp: Date.now(),
+        reason: 'Parent process shutting down'
+      };
+
+      try {
+        processInstance.process.send?.(abortMessage);
+      } catch (error) {
+        console.warn(`⚠️  Failed to send IPC abort to process ${processInstance.id}:`, error);
+      }
+
+      // Also send SIGTERM for OS-level signal (backup method)
+      setTimeout(() => {
+        try {
+          if (!processInstance.process.killed) {
+            processInstance.process.kill('SIGTERM');
+          }
+        } catch (error) {
+          console.warn(`⚠️  Failed to send SIGTERM to process ${processInstance.id}:`, error);
+        }
+      }, 1000); // Wait 1 second for IPC, then send SIGTERM
+
+      // Set up timeout for graceful shutdown
+      const timeout = setTimeout(() => {
+        console.warn(`⚠️  Process ${processInstance.id} didn't respond to abort signal within timeout`);
+        resolve();
+      }, 5000); // 5 second timeout per process
+
+      // Listen for acknowledgment (from either IPC abort or SIGTERM)
+      const onMessage = (message: any) => {
+        if (message?.type === 'abort_ack') {
+          console.log(`✅ Process ${processInstance.id} acknowledged abort: ${message.reason || 'IPC'}`);
+          clearTimeout(timeout);
+          processInstance.process.off('message', onMessage);
+          resolve();
+        }
+      };
+
+      processInstance.process.on('message', onMessage);
+
+      // Also resolve if process exits
+      const onExit = () => {
+        console.log(`✅ Process ${processInstance.id} exited gracefully`);
+        clearTimeout(timeout);
+        processInstance.process.off('message', onMessage);
+        resolve();
+      };
+
+      processInstance.process.once('exit', onExit);
+    });
+  }
+
+  private async forceKillProcess(processInstance: ProcessInstance): Promise<void> {
+    return new Promise((resolve) => {
+      if (!processInstance.process || processInstance.process.killed) {
+        resolve();
+        return;
+      }
+
+      console.log(`🔪 Force killing process ${processInstance.id}...`);
+
+      // Set timeout for force kill
+      const timeout = setTimeout(() => {
+        console.warn(`⚠️  Process ${processInstance.id} didn't exit after SIGTERM, using SIGKILL`);
+        try {
+          processInstance.process.kill('SIGKILL');
+        } catch (error) {
+          console.warn(`⚠️  SIGKILL failed for process ${processInstance.id}:`, error);
+        }
+        resolve();
+      }, 3000); // 3 second timeout
+
+      // Listen for exit
+      processInstance.process.once('exit', () => {
+        clearTimeout(timeout);
+        console.log(`✅ Process ${processInstance.id} exited`);
+        resolve();
+      });
+
+      // Send SIGTERM first
+      try {
+        processInstance.process.kill('SIGTERM');
+      } catch (error) {
+        console.warn(`⚠️  SIGTERM failed for process ${processInstance.id}:`, error);
+        clearTimeout(timeout);
+        resolve();
+      }
+    });
+  }
+
+  private setupGracefulShutdown(): void {
+    // Handle SIGINT (Ctrl+C)
+    process.on('SIGINT', async () => {
+      console.log('\n🛑 Received SIGINT (Ctrl+C)...');
+      await this.shutdown('SIGINT');
+      process.exit(0);
+    });
+
+    // Handle SIGTERM (process termination)
+    process.on('SIGTERM', async () => {
+      console.log('\n🛑 Received SIGTERM...');
+      await this.shutdown('SIGTERM');
+      process.exit(0);
+    });
+
+    // Handle uncaught exceptions
+    process.on('uncaughtException', async (error) => {
+      console.error('\n💥 Uncaught Exception:', error);
+      await this.shutdown('uncaughtException');
+      process.exit(1);
+    });
+
+    // Handle unhandled promise rejections
+    process.on('unhandledRejection', async (reason) => {
+      console.error('\n💥 Unhandled Rejection:', reason);
+      await this.shutdown('unhandledRejection');
+      process.exit(1);
+    });
+
+    // Emergency cleanup on process exit
+    process.on('exit', () => {
+      if (!this.isShuttingDown) {
+        console.log('\n⚠️  Emergency shutdown - killing child processes...');
+        this.processes.forEach(proc => {
+          try {
+            if (proc.process && !proc.process.killed) {
+              proc.process.kill('SIGKILL');
+            }
+          } catch (error) {
+            // Ignore errors during emergency cleanup
+          }
+        });
+      }
+    });
+
+    console.log(`🛡️  Graceful shutdown handlers registered`);
   }
 
   async initialize(): Promise<void> {
     if (this.isInitialized) return;
 
-    console.log(`🔧 Spawning ${this.processCount} external Node.js processes...`);
+    console.log(`🔧 Starting with ${this.processCount} external Node.js processes (25% of target, conservative approach)...`);
     
-    // Create processes
+    // Get initial accurate memory reading
+    await this.checkResourcesAndAdjustPool();
+    
+    // Create initial processes
     await this.createProcesses();
     
-    // Wait for all processes to be ready
+    // Wait for initial processes to be ready
     await this.waitForProcessesReady();
+    
+    // Start memory monitoring for adaptive growth
+    this.startResourceMonitoring();
+    
+    // Setup graceful shutdown handlers
+    this.setupGracefulShutdown();
     
     this.isInitialized = true;
     console.log(`🎉 Process pool initialized with ${this.processes.length} ready processes`);
+    console.log(`📈 Adaptive growth: Will scale up to ${this.adaptivePool.maxProcesses} processes based on memory availability`);
   }
 
   private async createProcesses(): Promise<void> {
@@ -333,6 +1035,9 @@ export class ProcessPoolEmbedder {
       }
     } else if (type === 'error') {
       console.error(`❌ Process ${processInstance.id} error:`, message.error);
+    } else if (type === 'abort_ack') {
+      console.log(`✅ Process ${processInstance.id} acknowledged abort: ${message.reason}`);
+      // This will be handled by the promise in abortChildProcess method
     }
   }
 
@@ -490,7 +1195,12 @@ export class ProcessPoolEmbedder {
         const subResults = subBatch.map((chunk, idx) => ({
           originalIndex: originalBatchIndex * this.adaptiveBatch.currentSize + i + idx,
           embedding: subBatchResult.embeddings[idx],
-          timestamp: Date.now()
+          timestamp: Date.now(),
+          stats: {
+            duration: 0,
+            memoryDelta: 0,
+            processId: -1
+          }
         }));
         
         results.push(...subResults);
@@ -502,7 +1212,12 @@ export class ProcessPoolEmbedder {
         const failedResults = subBatch.map((chunk, idx) => ({
           originalIndex: originalBatchIndex * this.adaptiveBatch.currentSize + i + idx,
           embedding: new Array(384).fill(0),
-          timestamp: Date.now()
+          timestamp: Date.now(),
+          stats: {
+            duration: 0,
+            memoryDelta: 0,
+            processId: -1
+          }
         }));
         results.push(...failedResults);
       }
@@ -534,6 +1249,67 @@ export class ProcessPoolEmbedder {
     }
     
     throw new Error(`Timeout: Only ${this.processes.filter(p => p.isReady).length}/${this.processCount} processes ready`);
+  }
+
+  // Helper method for setting up single process handlers
+  private setupProcessHandlers(processInstance: ProcessInstance): void {
+    const childProcess = processInstance.process;
+    
+    // Handle process output
+    childProcess.stdout?.on('data', (data) => {
+      const output = data.toString().trim();
+      if (output.includes('[Process') || output.includes('FastEmbedding')) {
+        console.log(output);
+      }
+    });
+    
+    childProcess.stderr?.on('data', (data) => {
+      console.error(`[Process ${processInstance.id} ERROR]: ${data.toString().trim()}`);
+    });
+    
+    // Handle process exit
+    childProcess.on('exit', (code, signal) => {
+      console.log(`[Process ${processInstance.id}] Exited with code ${code}, signal ${signal}`);
+      processInstance.isReady = false;
+      processInstance.isAvailable = false;
+    });
+    
+    // Handle process error
+    childProcess.on('error', (error) => {
+      console.error(`[Process ${processInstance.id} ERROR]:`, error);
+      processInstance.isReady = false;
+      processInstance.isAvailable = false;
+    });
+  }
+  
+  // Helper method for waiting for single process to be ready  
+  private async waitForSingleProcessReady(processInstance: ProcessInstance): Promise<void> {
+    const maxWaitTime = 60000; // 1 minute max wait per process
+    const startTime = Date.now();
+    
+    return new Promise((resolve, reject) => {
+      const checkReady = () => {
+        if (processInstance.isReady) {
+          console.log(`✅ Process ${processInstance.id} ready with isolated FastEmbedding`);
+          resolve();
+        } else if (Date.now() - startTime > maxWaitTime) {
+          reject(new Error(`Timeout: Process ${processInstance.id} not ready after ${maxWaitTime}ms`));
+        } else {
+          setTimeout(checkReady, 1000);
+        }
+      };
+      
+      // Listen for ready signal from process
+      processInstance.process.stdout?.on('data', (data) => {
+        const output = data.toString();
+        if (output.includes('FastEmbedding ready in separate process')) {
+          processInstance.isReady = true;
+          processInstance.isAvailable = true;
+        }
+      });
+      
+      checkReady();
+    });
   }
 
   // Generate content-based cache key for embedding
@@ -1126,8 +1902,6 @@ export class ProcessPoolEmbedder {
                 // This is handled by the caller in the main processing loop
               }
               
-              return processEmbeddings;
-              
             } catch (retryError) {
               console.error(`❌ Recovery failed for process ${availableProcess.id}:`, retryError);
               // Further reduce batch size for next attempt
@@ -1290,7 +2064,12 @@ export class ProcessPoolEmbedder {
         const emptyResults: EmbeddingResult[] = failedBatch.chunks.map((chunk, idx) => ({
           originalIndex: failedBatch.batchIndex * this.adaptiveBatch.currentSize + idx,
           embedding: new Array(384).fill(0), // Zero embedding as fallback
-          timestamp: Date.now()
+          timestamp: Date.now(),
+          stats: {
+            duration: 0,
+            memoryDelta: 0,
+            processId: -1
+          }
         }));
         successfulResults.push(emptyResults);
       }
@@ -1311,7 +2090,7 @@ export class ProcessPoolEmbedder {
       indexed_at: result.timestamp
     }));
 
-    this.printBatchStats(batchResults);
+    this.printBatchStats(successfulResults);
     return embeddedChunks;
   }
 
@@ -1413,46 +2192,6 @@ export class ProcessPoolEmbedder {
     console.log(`✅ Cache cleared successfully`);
   }
 
-  async shutdown(): Promise<void> {
-    console.log('🛑 Shutting down process pool...');
-    
-    // Wait for any ongoing eviction to complete
-    while (this.isEvicting) {
-      console.log('⏳ Waiting for cache eviction to complete...');
-      await new Promise(resolve => setTimeout(resolve, 100));
-    }
-    
-    // Wait for queue to drain
-    await this.queue.drained();
-    
-    // Clear cache to free memory
-    this.clearCache();
-    
-    // Terminate all processes
-    await Promise.all(this.processes.map(async (processInstance) => {
-      try {
-        // Send shutdown message
-        this.sendToProcess(processInstance, { type: 'shutdown' });
-        
-        // Wait a bit for graceful shutdown
-        await new Promise(resolve => setTimeout(resolve, 1000));
-        
-        // Force kill if still running
-        if (!processInstance.process.killed) {
-          processInstance.process.kill('SIGTERM');
-        }
-        
-        // Clean up shared buffers
-        processInstance.sharedBuffers.clear();
-        
-        console.log(`✅ Process ${processInstance.id} terminated`);
-      } catch (error) {
-        console.error(`❌ Error terminating process ${processInstance.id}:`, error);
-      }
-    }));
-    
-    console.log('✅ Process pool shut down');
-  }
 
   // Health check method
   getPoolStatus() {

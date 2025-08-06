@@ -13,6 +13,8 @@ Cortex V2.1 is a semantic code intelligence MCP server designed to enhance Claud
 - **🚀 ONNX Runtime Stability**: Implemented ProcessPoolEmbedder using external Node.js processes for complete ONNX Runtime isolation, eliminating all thread safety issues and crashes. Achieves true 10x parallelism with ~60s per 50-chunk batch processing.
 - **📊 File Hash Persistence**: Fixed incremental change detection to properly track file modifications, preventing unnecessary full rebuilds when files haven't changed.
 - **🎯 Progressive Timeout System**: Replaced hard process timeouts with intelligent progress reporting and graceful partial result handling, eliminating SIGKILL errors and preserving work progress.
+- **💻 CPU + Memory Adaptive Management**: Implemented dual-resource monitoring with CPU and memory thresholds (78% stop, 69% resume) preventing system overload and 100% CPU usage that previously caused failures.
+- **🔄 Signal Cascade System**: Enhanced parent-child process communication with both IPC messages and OS signals, ensuring reliable cleanup and preventing orphaned processes.
 
 **🧪 Performance Validation Results**: Comprehensive benchmarking confirms all performance targets achieved:
 - ✅ **Storage operations**: 1-3ms (sub-10ms target exceeded)
@@ -20,6 +22,9 @@ Cortex V2.1 is a semantic code intelligence MCP server designed to enhance Claud
 - ✅ **Memory efficiency**: 138MB peak (sub-1GB target exceeded)
 - ✅ **Architecture integration**: 100% test coverage for relationship initialization
 - ✅ **Dual storage**: Complete persistence for embeddings + relationship graphs
+- ✅ **CPU management**: Prevents 100% CPU usage with 78% stop threshold
+- ✅ **Process cleanup**: Zero orphaned processes with signal cascade system
+- ✅ **Resource monitoring**: Real-time CPU + memory monitoring every 15 seconds
 
 ## Development Commands
 
@@ -35,8 +40,72 @@ Cortex V2.1 is a semantic code intelligence MCP server designed to enhance Claud
 ### Server Modes
 - `npm run start:full` - Full repository indexing mode
 - `npm run start:incremental` - Incremental indexing mode
+- `npm run start:cloudflare` - Use Cloudflare AI embedder (cloud-based)
 - `npm run server:rebuild` - Force rebuild server mode (reindex)
 - `npm run start:rebuild` - Force rebuild compiled server mode
+
+### Process Cleanup Rules
+
+**🧹 Critical: Always Clean Up Interrupted Processes**
+- **When interrupting any long-running command** (timeout, Ctrl+C, process termination):
+  ```bash
+  # Clean up both parent and child processes together
+  pkill -f "npm.*demo\|ts-node.*index\|node.*external-embedding-process"
+  ```
+- **Before running benchmarks or tests**: Always verify no orphan processes exist
+- **After any failed/interrupted run**: Clean up immediately to prevent memory leaks
+- **Rule**: Every interrupted run MUST be followed by process cleanup
+
+**🚨 Process Types to Clean**:
+- **Parent processes**: `npm run demo`, `ts-node src/index.ts`, `npm run benchmark`
+- **Child processes**: `node src/external-embedding-process.js` (spawned by ProcessPoolEmbedder)
+- **Memory impact**: Each external-embedding-process uses ~200-400MB, accumulates quickly
+
+### CPU + Memory Adaptive Management
+
+**🧠 Dual Resource Monitoring**
+- **Memory Thresholds**: Stop at 78%, Resume at 69% (prevents OOM)
+- **CPU Thresholds**: Stop at 78%, Resume at 69% (prevents system freeze)
+- **Real-time Monitoring**: Checks both resources every 15 seconds
+- **Cross-platform CPU Detection**: Linux (`top`), macOS (`top`), Windows (`wmic`)
+
+**⚖️ Intelligent Pool Scaling**
+```
+🟢 Memory: 1152MB used / 19838MB total (5.8%)
+🟢 CPU: 1.6% used (16 cores, load: 2.70)
+📊 Resource Projections:
+   Memory: 2 processes using ~576MB each
+   At max (11 processes): ~6336MB (31.9%)
+   CPU cores available: 16 of 16
+📈 Resources safe (Mem: 31.9%, CPU: 1.6%) - Growing pool
+```
+
+**🚫 Constraint Handling**:
+- **Memory constrained**: Pauses growth when memory > 78%
+- **CPU constrained**: Pauses growth when CPU > 78%
+- **Dual constraints**: Shows combined status (e.g., "Memory + CPU constrained")
+- **Graceful degradation**: Continues with available processes
+
+**Environment Variables**:
+- `EMBEDDER_TYPE=cloudflare` - Use Cloudflare AI embedder (no local CPU/memory usage)
+- `EMBEDDER_TYPE=local` - Use ProcessPoolEmbedder with adaptive management (default)
+
+### Testing & Validation Commands
+
+**🧪 Process Pool & Resource Management Tests**
+- `npm run test:cleanup` - Test ProcessPoolEmbedder cleanup functionality
+- `npm run test:cpu-memory` - Test CPU + memory adaptive scaling system  
+- `npm run test:signal-cascade` - Test parent→child signal cascade system
+- `npm run test:final-cleanup` - Comprehensive cleanup validation suite
+- `npm run test:orphan-prevention` - Verify no processes remain after exit
+- `npm run test:adaptive-features` - Test adaptive pool features directly
+
+**🎯 Key Test Validations**:
+- **Resource monitoring**: CPU and memory detection across platforms
+- **Adaptive scaling**: Pool growth based on both CPU and memory constraints  
+- **Signal handling**: SIGINT/SIGTERM cascade from parent to children
+- **Process cleanup**: Zero orphaned external-embedding-processes
+- **Graceful shutdown**: IPC + OS signal acknowledgment system
 
 ### Performance Benchmarking & Validation
 
@@ -56,9 +125,12 @@ Cortex V2.1 is a semantic code intelligence MCP server designed to enhance Claud
 - 🎯 **Cache loading**: < 5 seconds (pure cache loading)
 - 🎯 **Search queries**: < 500ms (semantic search with relationships)
 - 🎯 **Storage operations**: < 10ms (status, sync, validation)
-- 🎯 **Memory usage**: < 1GB (peak during indexing)
+- 🎯 **Memory usage**: < 78% threshold with adaptive scaling
+- 🎯 **CPU usage**: < 78% threshold preventing system overload
 - 🎯 **Embedding throughput**: 12-15 chunks/second (wall clock with progressive timeouts)
 - 🎯 **Process stability**: Zero SIGKILL errors with graceful timeout handling
+- 🎯 **Resource monitoring**: Real-time CPU + memory tracking every 15s
+- 🎯 **Process cleanup**: Zero orphaned processes after any type of exit
 
 ### Storage Management
 
@@ -471,6 +543,21 @@ The system automatically discovers and follows relationships between code elemen
   - Graceful partial result handling at 90% timeout threshold
   - Automatic failure recovery with adaptive batch size reduction
   - Eliminates SIGKILL errors through intelligent process management
+
+### 💻 CPU + Memory Adaptive Management (August 2025)
+- **Dual Resource Monitoring**: Real-time monitoring of both CPU and memory usage every 15 seconds
+- **Same Threshold System**: CPU uses same 78% stop / 69% resume thresholds as memory for consistency
+- **Cross-Platform CPU Detection**: Accurate CPU usage via `top` (Linux/macOS) and `wmic` (Windows)
+- **Intelligent Pool Growth**: Growth decisions require BOTH memory < 75% projected AND CPU < 60% current
+- **Resource Constraint Handling**: Independent CPU and memory constraint states with combined reporting
+- **System Stability**: Prevents 100% CPU usage that previously caused system freezes and failures
+
+### 🔄 Signal Cascade System (August 2025)
+- **Dual Signal Approach**: Sends both IPC abort messages AND OS SIGTERM signals to children
+- **Enhanced Child Acknowledgment**: Children send abort_ack for both IPC messages and OS signals
+- **Reliable Cleanup**: Works even if IPC communication fails due to OS signal backup
+- **Process Cleanup Rules**: Comprehensive cleanup commands for both parent and child processes
+- **Zero Orphaned Processes**: Complete elimination of external-embedding-process orphans
 
 ### 🔧 Code Quality & Architecture (August 2025)
 - **File Hash Persistence**: Fixed incremental change detection to prevent false "all files changed" scenarios

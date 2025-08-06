@@ -1,4 +1,4 @@
-import { CodeChunk, IndexRequest, IndexResponse, QueryRequest, QueryResponse } from './types';
+'''import { CodeChunk, IndexRequest, IndexResponse, QueryRequest, QueryResponse } from './types';
 import { GitScanner } from './git-scanner';
 import { SmartChunker } from './chunker';
 import { EmbeddingGenerator } from './embedder';
@@ -10,12 +10,15 @@ import { ReindexAdvisor } from './reindex-advisor';
 import { UnifiedStorageCoordinator } from './unified-storage-coordinator';
 import { FastQEmbedder } from './fastq-embedder';
 import { ProcessPoolEmbedder } from './process-pool-embedder';
+import { CloudflareAIEmbedder } from './cloudflare-ai-embedder'; // Added import
 import * as os from 'os';
 
 export class CodebaseIndexer {
   private gitScanner: GitScanner;
   private chunker: SmartChunker;
   private embedder: EmbeddingGenerator;
+  private processPoolEmbedder?: ProcessPoolEmbedder;
+  private cloudflareEmbedder?: CloudflareAIEmbedder; // Added field
   private vectorStore: PersistentVectorStore;
   private searcher: SemanticSearcher;
   private repositoryPath: string;
@@ -33,6 +36,21 @@ export class CodebaseIndexer {
     this.searcher = new SemanticSearcher(this.vectorStore, this.embedder, repositoryPath);
     this.stageTracker = stageTracker;
     this.reindexAdvisor = new ReindexAdvisor(this.embedder);
+  }
+
+  /**
+   * Clean up resources, including process pool embedder
+   */
+  async cleanup(reason: string = 'cleanup'): Promise<void> {
+    if (this.processPoolEmbedder) {
+      console.log(`🧹 Cleaning up CodebaseIndexer process pool (reason: ${reason})...`);
+      await this.processPoolEmbedder.shutdown(reason);
+      this.processPoolEmbedder = undefined;
+    }
+    // Cloudflare embedder does not require cleanup, but we clear the instance
+    if (this.cloudflareEmbedder) {
+      this.cloudflareEmbedder = undefined;
+    }
   }
 
   async indexRepository(request: IndexRequest): Promise<IndexResponse> {
@@ -266,24 +284,34 @@ export class CodebaseIndexer {
   }
 
   private async generateEmbeddings(chunks: CodeChunk[]): Promise<CodeChunk[]> {
-    // Start embedding generation stage
-    this.stageTracker?.startStage('embedding_generation', `Processing ${chunks.length} chunks with process pool`);
-    
-    // Use ProcessPoolEmbedder - external Node.js processes for complete ONNX isolation
-    const processPoolEmbedder = new ProcessPoolEmbedder();
-    
-    try {
-      const embeddedChunks = await processPoolEmbedder.processAllEmbeddings(chunks);
-      
-      this.stageTracker?.completeStage('embedding_generation', 
-        `Generated embeddings for ${embeddedChunks.length} chunks using process pool`);
-      
-      return embeddedChunks;
-      
-    } finally {
-      // Clean shutdown
-      await processPoolEmbedder.shutdown();
+    const embedderType = process.env.EMBEDDER_TYPE || 'local';
+    this.stageTracker?.startStage('embedding_generation', `Processing ${chunks.length} chunks with ${embedderType} embedder`);
+
+    let embeddedChunks: CodeChunk[];
+
+    if (embedderType === 'cloudflare') {
+      if (!this.cloudflareEmbedder) {
+        this.cloudflareEmbedder = new CloudflareAIEmbedder();
+      }
+      const texts = chunks.map(chunk => this.createEmbeddingText(chunk));
+      const embeddings = await this.cloudflareEmbedder.embed(texts);
+      embeddedChunks = chunks.map((chunk, i) => ({ ...chunk, embedding: embeddings[i] }));
+      this.stageTracker?.completeStage('embedding_generation', `Generated embeddings for ${chunks.length} chunks using Cloudflare AI`);
+    } else {
+      // Default to local ProcessPoolEmbedder
+      if (!this.processPoolEmbedder) {
+        this.processPoolEmbedder = new ProcessPoolEmbedder();
+      }
+      try {
+        embeddedChunks = await this.processPoolEmbedder.processAllEmbeddings(chunks);
+        this.stageTracker?.completeStage('embedding_generation', `Generated embeddings for ${chunks.length} chunks using process pool`);
+      } finally {
+        await this.processPoolEmbedder.shutdown();
+        this.processPoolEmbedder = undefined;
+      }
     }
+
+    return embeddedChunks;
   }
 
 
@@ -329,3 +357,4 @@ export class CodebaseIndexer {
     return await this.searcher.search(query);
   }
 }
+'''
