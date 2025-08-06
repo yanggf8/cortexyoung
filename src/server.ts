@@ -90,6 +90,7 @@ export class CortexMCPServer {
     this.logger = new Logger(logFile);
     this.stageTracker = stageTracker || new StartupStageTracker();
     this.setupHandlers();
+    this.setupIPC();
     this.logger.info('CortexMCPServer initialized');
   }
 
@@ -100,6 +101,89 @@ export class CortexMCPServer {
     this.handlers.set('relationship_analysis', new RelationshipAnalysisHandler(this.searcher));
     this.handlers.set('trace_execution_path', new TraceExecutionPathHandler(this.searcher));
     this.handlers.set('find_code_patterns', new FindCodePatternsHandler(this.searcher));
+  }
+
+  private setupIPC(): void {
+    // Set up IPC communication for health checks and progress reporting
+    if (process.send) {
+      this.logger.info('IPC available, setting up message handlers');
+      
+      process.on('message', (message: any) => {
+        try {
+          this.handleIPCMessage(message);
+        } catch (error: any) {
+          this.logger.error('Error handling IPC message', { message, error: error?.message || 'Unknown error' });
+        }
+      });
+
+      // Send ready signal to parent process
+      process.send({
+        type: 'server_ready',
+        pid: process.pid,
+        timestamp: new Date().toISOString()
+      });
+    } else {
+      this.logger.info('No IPC available (running standalone)');
+    }
+  }
+
+  private handleIPCMessage(message: any): void {
+    const { type, requestId } = message;
+
+    switch (type) {
+      case 'health_check':
+        this.sendIPCResponse({
+          type: 'health_response',
+          requestId,
+          data: {
+            status: 'healthy',
+            uptime: process.uptime(),
+            memoryUsage: process.memoryUsage(),
+            pid: process.pid,
+            startup: this.stageTracker.getProgressSummary()
+          }
+        });
+        break;
+
+      case 'startup_progress':
+        this.sendIPCResponse({
+          type: 'progress_response', 
+          requestId,
+          data: this.stageTracker.getProgressSummary()
+        });
+        break;
+
+      case 'server_status':
+        this.sendIPCResponse({
+          type: 'status_response',
+          requestId,
+          data: {
+            serverRunning: !!this.httpServer,
+            port: process.env.PORT || 8765,
+            stages: this.stageTracker.getProgressData(),
+            currentStage: this.stageTracker.getCurrentStage(),
+            progress: this.stageTracker.getProgress()
+          }
+        });
+        break;
+
+      case 'ping':
+        this.sendIPCResponse({
+          type: 'pong',
+          requestId,
+          timestamp: new Date().toISOString()
+        });
+        break;
+
+      default:
+        this.logger.warn('Unknown IPC message type', { type, message });
+    }
+  }
+
+  private sendIPCResponse(response: any): void {
+    if (process.send) {
+      process.send(response);
+    }
   }
 
   private getAvailableTools() {
