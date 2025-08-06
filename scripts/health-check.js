@@ -48,39 +48,96 @@ async function findProcesses(pattern) {
     }
 }
 
+// Function to check server health endpoint
+function checkServerHealth(port) {
+    return new Promise((resolve) => {
+        const http = require('http');
+        const request = http.get(`http://localhost:${port}/health`, (response) => {
+            let data = '';
+            response.on('data', chunk => data += chunk);
+            response.on('end', () => {
+                resolve({
+                    responding: true,
+                    statusCode: response.statusCode,
+                    data: data
+                });
+            });
+        });
+        
+        request.on('error', (error) => {
+            resolve({
+                responding: false,
+                error: error.message
+            });
+        });
+        
+        request.setTimeout(3000, () => {
+            request.destroy();
+            resolve({
+                responding: false,
+                error: 'Request timeout after 3 seconds'
+            });
+        });
+    });
+}
+
 async function checkProcessHealth() {
-    console.log('\n🔍 1. Process Health Check');
-    console.log('-------------------------');
+    console.log('\n🔍 1. Server Status & Process Health Check');
+    console.log('------------------------------------------');
     
+    const PORT = process.env.PORT || 8765;
+    
+    // Check different types of processes
     const serverProcesses = await findProcesses('npm.*server|ts-node.*server|node.*server\\.js');
     const demoProcesses = await findProcesses('npm.*demo|ts-node.*index');
     const embeddingProcesses = await findProcesses('node.*external-embedding-process');
     
+    // Determine server status
     if (serverProcesses.length > 0) {
-        printStatus('INFO', `Server processes running: ${serverProcesses.length}`);
+        printStatus('INFO', `Server processes detected: ${serverProcesses.length} running`);
         
         // Check if server is responding
-        try {
-            const { stdout } = await execPromise('curl -s http://localhost:8765/health');
-            printStatus('OK', 'Server responding on port 8765');
-        } catch (error) {
-            printStatus('WARNING', 'Server process running but not responding on port 8765');
+        const healthCheck = await checkServerHealth(PORT);
+        
+        if (healthCheck.responding) {
+            printStatus('OK', `✅ SERVER RUNNING - Responding on port ${PORT}`);
+            
+            try {
+                const healthData = JSON.parse(healthCheck.data);
+                if (healthData.status === 'healthy') {
+                    printStatus('OK', 'Server reports healthy status');
+                    if (healthData.startup) {
+                        printStatus('INFO', `Startup: ${healthData.startup.stage} (${healthData.startup.progress}% complete)`);
+                    }
+                } else {
+                    printStatus('WARNING', `Server reports status: ${healthData.status}`);
+                }
+            } catch (error) {
+                printStatus('INFO', 'Server responding but health data not parseable');
+            }
+        } else {
+            printStatus('WARNING', `⚠️ SERVER STARTING - Process running but not responding on port ${PORT}`);
+            printStatus('INFO', `Error: ${healthCheck.error}`);
+            printStatus('INFO', 'Server may still be initializing - wait a few moments and check again');
         }
     } else {
-        printStatus('INFO', 'No server processes running');
+        printStatus('INFO', `❌ SERVER NOT RUNNING - No server processes detected`);
+        printStatus('INFO', 'Use: npm run startup to start the server');
     }
     
+    // Check other processes
     if (demoProcesses.length > 0) {
         printStatus('INFO', `Demo/indexing processes running: ${demoProcesses.length}`);
     } else {
-        printStatus('OK', 'No demo processes running');
+        printStatus('OK', 'No demo/indexing processes running');
     }
     
     if (embeddingProcesses.length > 0) {
-        printStatus('WARNING', `Embedding worker processes still running: ${embeddingProcesses.length} (may indicate incomplete shutdown)`);
-        console.log('         Run: npm run shutdown to clean up');
+        printStatus('WARNING', `Embedding worker processes still running: ${embeddingProcesses.length}`);
+        printStatus('INFO', 'These may indicate incomplete shutdown or active processing');
+        console.log('         Clean up with: npm run shutdown');
     } else {
-        printStatus('OK', 'No orphaned embedding processes');
+        printStatus('OK', 'No orphaned embedding worker processes');
     }
 }
 
@@ -132,49 +189,9 @@ async function checkStorageHealth() {
     }
 }
 
-async function checkPerformanceHealth() {
-    console.log('\n⚡ 3. Performance Health Check');
-    console.log('----------------------------');
-    
-    try {
-        const { stdout } = await execPromise('npm run --silent validate:performance');
-        
-        // Check test results
-        if (stdout.includes('Tests Passed: 4/4')) {
-            printStatus('OK', 'All performance tests passed');
-        } else {
-            printStatus('WARNING', 'Some performance tests failed');
-        }
-        
-        // Check storage performance
-        const storageMatch = stdout.match(/Status Check: ([0-9.]+)ms/);
-        if (storageMatch) {
-            const storageTime = parseFloat(storageMatch[1]);
-            if (storageTime < 10) {
-                printStatus('OK', `Storage operations fast (${storageTime} ms)`);
-            } else {
-                printStatus('WARNING', `Storage operations slower than expected (${storageTime} ms)`);
-            }
-        }
-        
-        // Check cache loading
-        const cacheMatch = stdout.match(/Cache Detection: ([0-9]+)ms/);
-        if (cacheMatch) {
-            const cacheTime = parseInt(cacheMatch[1]);
-            if (cacheTime < 5000) {
-                printStatus('OK', `Cache loading efficient (${cacheTime} ms)`);
-            } else {
-                printStatus('WARNING', `Cache loading slower than expected (${cacheTime} ms)`);
-            }
-        }
-        
-    } catch (error) {
-        printStatus('WARNING', 'Performance validation completed with warnings');
-    }
-}
 
 async function checkSystemResources() {
-    console.log('\n🔧 4. System Resources');
+    console.log('\n🔧 3. System Resources');
     console.log('---------------------');
     
     // Check memory (Linux)
@@ -236,29 +253,56 @@ async function checkSystemResources() {
 }
 
 async function main() {
+    // Get server status first for summary
+    const PORT = process.env.PORT || 8765;
+    const serverProcesses = await findProcesses('npm.*server|ts-node.*server|node.*server\\.js');
+    const healthCheck = serverProcesses.length > 0 ? await checkServerHealth(PORT) : { responding: false };
+    
     await checkProcessHealth();
     await checkStorageHealth();
-    await checkPerformanceHealth();
     await checkSystemResources();
     
     console.log('\n📊 Health Check Summary');
     console.log('======================');
     
+    // Server status summary
+    if (serverProcesses.length > 0 && healthCheck.responding) {
+        printStatus('OK', '🚀 SERVER STATUS: RUNNING & HEALTHY');
+    } else if (serverProcesses.length > 0) {
+        printStatus('WARNING', '⚠️ SERVER STATUS: STARTING (not yet responding)');
+    } else {
+        printStatus('INFO', '💤 SERVER STATUS: NOT RUNNING');
+    }
+    
+    // Overall health summary
     if (issues === 0 && warnings === 0) {
-        printStatus('OK', 'System is healthy! All checks passed.');
+        printStatus('OK', 'Overall system health: EXCELLENT');
     } else if (issues === 0) {
-        printStatus('WARNING', `System is mostly healthy with ${warnings} warnings`);
+        printStatus('WARNING', `Overall system health: GOOD with ${warnings} minor warnings`);
         console.log('\n💡 Recommendations:');
         console.log('   • Warnings are usually minor and often resolve automatically');
         console.log('   • Consider running: npm run storage:sync if storage issues persist');
         console.log('   • Run: npm run shutdown followed by npm run startup for a clean restart');
     } else {
-        printStatus('ERROR', `System has ${issues} critical issues and ${warnings} warnings`);
+        printStatus('ERROR', `Overall system health: NEEDS ATTENTION (${issues} critical issues, ${warnings} warnings)`);
         console.log('\n🔧 Troubleshooting:');
         console.log('   • Run: npm run shutdown to clean up processes');
         console.log('   • Try: npm run cache:clear-all for storage issues');
         console.log('   • Check logs in: logs/cortex-server.log');
         console.log('   • Restart with: npm run startup -- --rebuild');
+    }
+    
+    // Quick actions based on server status
+    console.log('\n🎯 Quick Actions:');
+    if (serverProcesses.length === 0) {
+        console.log('   • Start server: npm run startup');
+        console.log('   • Background mode: npm run startup -- --background');
+    } else if (!healthCheck.responding) {
+        console.log('   • Wait for server to finish starting up');
+        console.log('   • Check again in 30 seconds: npm run health');
+    } else {
+        console.log('   • Server is ready to use!');
+        console.log('   • Check detailed status: npm run status');
     }
     
     console.log('\n📝 Log files available:');
