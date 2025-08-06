@@ -56,7 +56,11 @@
     "test:final-cleanup": "node final-cleanup-test.js",
     "test:cpu-memory": "node test-cpu-memory-scaling.js",
     "test:signal-cascade": "node test-signal-cascade.js",
-    "test:auto-sync-staleness": "npm run build && node test-auto-sync-staleness.js"
+    "test:auto-sync-staleness": "npm run build && node test-auto-sync-staleness.js",
+    "shutdown": "node scripts/shutdown.js",
+    "startup": "node scripts/startup.js",
+    "health": "node scripts/health-check.js",
+    "status": "node scripts/check-server-status.js"
   },
   "keywords": [],
   "author": "",
