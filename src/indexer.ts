@@ -11,6 +11,7 @@ import { UnifiedStorageCoordinator } from './unified-storage-coordinator';
 import { FastQEmbedder } from './fastq-embedder';
 import { ProcessPoolEmbedder } from './process-pool-embedder';
 import { CloudflareAIEmbedder } from './cloudflare-ai-embedder'; // Added import
+import { DependencyMapper } from './dependency-mapper';
 import * as os from 'os';
 
 export class CodebaseIndexer {
@@ -21,6 +22,7 @@ export class CodebaseIndexer {
   private cloudflareEmbedder?: CloudflareAIEmbedder; // Added field
   private vectorStore: PersistentVectorStore;
   private searcher: SemanticSearcher;
+  private dependencyMapper: DependencyMapper;
   private repositoryPath: string;
   private stageTracker?: StartupStageTracker;
   private reindexAdvisor: ReindexAdvisor;
@@ -34,6 +36,7 @@ export class CodebaseIndexer {
     this.storageCoordinator = new UnifiedStorageCoordinator(repositoryPath);
     this.vectorStore = this.storageCoordinator.getVectorStore();
     this.searcher = new SemanticSearcher(this.vectorStore, this.embedder, repositoryPath);
+    this.dependencyMapper = new DependencyMapper(repositoryPath);
     this.stageTracker = stageTracker;
     this.reindexAdvisor = new ReindexAdvisor(this.embedder);
   }
@@ -181,8 +184,8 @@ export class CodebaseIndexer {
     // Save updated index
     await this.vectorStore.savePersistedIndex();
     
-    // Initialize relationship engine with all current files (incremental mode will use cache if available)
-    this.stageTracker?.startStage('relationship_analysis', 'Initializing relationship engine');
+    // Update relationship engine with incremental changes
+    this.stageTracker?.startStage('relationship_analysis', 'Updating relationship graph with changes');
     const files = new Map<string, string>();
     for (const filePath of scanResult.files) {
       try {
@@ -193,8 +196,19 @@ export class CodebaseIndexer {
       }
     }
     
+    // Update dependency relationships for changed files  
+    const modifiedFiles = [...delta.fileChanges.added, ...delta.fileChanges.modified];
+    if (modifiedFiles.length > 0) {
+      console.log(`🔗 Updating relationships for ${modifiedFiles.length} changed files...`);
+      await this.dependencyMapper.buildDependencyMap(files);
+      const relationships = this.dependencyMapper.generateDependencyRelationships();
+      
+      console.log(`✅ Updated ${relationships.length} dependency relationships`);
+    }
+    
+    // Initialize searcher's relationship engine with updated relationships
     await this.searcher.initializeRelationshipEngine(files);
-    this.stageTracker?.completeStage('relationship_analysis', `Relationship engine ready (cached: ${files.size} files)`);
+    this.stageTracker?.completeStage('relationship_analysis', `Updated relationships (${files.size} files processed)`);
     
     const timeTaken = Date.now() - startTime;
     console.log(`✅ Incremental indexing completed in ${timeTaken}ms`);
@@ -259,7 +273,7 @@ export class CodebaseIndexer {
     await this.vectorStore.savePersistedIndex(modelInfo);
     
     // Initialize relationship engine with all files
-    this.stageTracker?.startStage('relationship_analysis', 'Building relationship graph from files');
+    this.stageTracker?.startStage('relationship_analysis', 'Building comprehensive relationship graph');
     const files = new Map<string, string>();
     for (const filePath of scanResult.files) {
       try {
@@ -270,8 +284,17 @@ export class CodebaseIndexer {
       }
     }
     
+    // Build comprehensive dependency relationships
+    console.log(`🔗 Analyzing dependencies for ${files.size} files...`);
+    await this.dependencyMapper.buildDependencyMap(files);
+    const relationships = this.dependencyMapper.generateDependencyRelationships();
+    
+    console.log(`✅ Built ${relationships.length} dependency relationships`);
+    
+    // Initialize searcher's relationship engine with the built relationships
     await this.searcher.initializeRelationshipEngine(files);
-    this.stageTracker?.completeStage('relationship_analysis', `Initialized relationship engine with ${files.size} files`);
+    
+    this.stageTracker?.completeStage('relationship_analysis', `Built ${relationships.length} dependency relationships`);
     
     const timeTaken = Date.now() - startTime;
     console.log(`Indexing completed in ${timeTaken}ms`);
