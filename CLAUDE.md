@@ -601,6 +601,12 @@ The system automatically discovers and follows relationships between code elemen
 - **Endpoint Enhancement**: Health, status, and progress endpoints include step information and elapsed time
 - **Deduplication Logging**: Clear messages when skipping redundant initialization (`📋 Vector store already initialized, skipping...`)
 
+## Enhancement Roadmap
+
+**📋 Embedding System Enhancement Plan v2.2** - Comprehensive 4-phase roadmap to transform the current high-performance embedding system into an enterprise-grade platform. See [EMBEDDING-SYSTEM-ENHANCEMENT-PLAN.md](EMBEDDING-SYSTEM-ENHANCEMENT-PLAN.md) for detailed implementation strategy.
+
+**Strategic Approach**: "Enhance, Don't Replace" - builds incrementally on existing ProcessPoolEmbedder performance leadership while adding enterprise features like interface standardization, policy engines, circuit breakers, and enhanced observability.
+
 ## Recent Improvements (v2.1 - August 2025)
 
 ### 🔄 **HTTP-Based Health Check System** (Latest)
@@ -624,6 +630,19 @@ The system automatically discovers and follows relationships between code elemen
 - **Intelligent constraint handling**: Separate CPU and memory constraint states with combined reporting
 - **Cross-platform CPU detection**: Accurate CPU monitoring on Linux, macOS, and Windows
 - **System stability improvements**: Prevents 100% CPU usage that previously caused system freezes
+
+### 🔧 **ProcessPoolEmbedder Communication Fix** (Critical Resolution)
+- **Fixed external process message handling**: Resolved "Unknown message type: embed_batch_shared" error
+- **Synchronized compiled/source versions**: Updated dist/external-embedding-process.js with latest code
+- **SharedArrayBuffer support restored**: External processes now handle shared memory batches correctly
+- **Validation confirmed**: Core 2-process pool stable (8.7 chunks/s, 342ms response, 29MB memory)
+- **Production ready**: External embedding processes communicate properly with zero message errors
+
+### 📁 **Storage Synchronization Enhancement**
+- **Dual storage health**: Both embeddings and relationships available in local (.cortex) and global (~/.claude) storage
+- **Automatic sync resolution**: Fixed relationship storage synchronization issues
+- **Storage health monitoring**: Enhanced health checks show complete storage layer status
+- **Zero data loss**: Comprehensive storage validation and consistency checking
 
 ## Performance Benchmarking Framework
 
