@@ -65,7 +65,7 @@ Cortex V2.1 is a semantic code intelligence MCP server designed to enhance Claud
 
 **🧠 Dual Resource Monitoring**
 - **Memory Thresholds**: Stop at 78%, Resume at 69% (prevents OOM)
-- **CPU Thresholds**: Stop at 78%, Resume at 69% (prevents system freeze)
+- **CPU Thresholds**: Stop at 69%, Resume at 49% (prevents system freeze)
 - **Real-time Monitoring**: Checks both resources every 15 seconds
 - **Cross-platform CPU Detection**: Linux (`top`), macOS (`top`), Windows (`wmic`)
 
@@ -82,7 +82,7 @@ Cortex V2.1 is a semantic code intelligence MCP server designed to enhance Claud
 
 **🚫 Constraint Handling**:
 - **Memory constrained**: Pauses growth when memory > 78%
-- **CPU constrained**: Pauses growth when CPU > 78%
+- **CPU constrained**: Pauses growth when CPU > 69%
 - **Dual constraints**: Shows combined status (e.g., "Memory + CPU constrained")
 - **Graceful degradation**: Continues with available processes
 

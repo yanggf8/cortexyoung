@@ -110,8 +110,8 @@ interface AdaptivePoolConfig {
   currentProcesses: number; // Currently active
   memoryStopThreshold: number; // Stop spawning at 78%
   memoryResumeThreshold: number; // Resume spawning at 69%
-  cpuStopThreshold: number; // Stop spawning at 78%
-  cpuResumeThreshold: number; // Resume spawning at 69%
+  cpuStopThreshold: number; // Stop spawning at 69%
+  cpuResumeThreshold: number; // Resume spawning at 49%
   isMemoryConstrained: boolean; // Currently blocked by memory
   isCpuConstrained: boolean; // Currently blocked by CPU
   lastMemoryCheck: number; // Timestamp
@@ -414,8 +414,8 @@ export class ProcessPoolEmbedder {
       currentProcesses: startProcesses,         // Start at 25% of target
       memoryStopThreshold: 78,                  // Stop spawning at 78% memory usage
       memoryResumeThreshold: 69,                // Resume spawning at 69% memory usage
-      cpuStopThreshold: 78,                     // Stop spawning at 78% CPU usage
-      cpuResumeThreshold: 69,                   // Resume spawning at 69% CPU usage
+      cpuStopThreshold: 69,                     // Stop spawning at 69% CPU usage
+      cpuResumeThreshold: 49,                   // Resume spawning at 49% CPU usage
       isMemoryConstrained: false,               // Initially not constrained
       isCpuConstrained: false,                  // Initially not constrained
       lastMemoryCheck: 0,                       // No checks yet
@@ -428,7 +428,7 @@ export class ProcessPoolEmbedder {
     console.log(`   Starting: ${startProcesses} processes (25% of target = ${Math.round(startProcesses/maxProcessesByCPU*100)}%)`);
     console.log(`   Maximum: ${maxProcessesByCPU} processes (69% of cores)`);
     console.log(`   Memory Thresholds: Stop at 78%, Resume at 69%`);
-    console.log(`   CPU Thresholds: Stop at 78%, Resume at 69%`);
+    console.log(`   CPU Thresholds: Stop at 69%, Resume at 49%`);
     console.log(`   Growth Strategy: Start conservative → Monitor memory + CPU → Scale based on both resources`);
     console.log(`✅ Strategy: Adaptive process pool with real-time memory + CPU management`);
     
