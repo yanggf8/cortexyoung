@@ -292,7 +292,18 @@ async function checkProcessHealth() {
                 const healthData = healthCheck.data;
                 if (healthData) {
                     printStatus('OK', `Server status: ${healthData.status}`);
-                    printStatus('INFO', `Uptime: ${Math.round(healthData.uptime)}s, Memory: ${Math.round(healthData.memoryUsage.heapUsed / 1024 / 1024)}MB`);
+                    
+                    // Handle different health data formats
+                    if (healthData.uptime !== undefined) {
+                        const memoryInfo = healthData.memoryUsage && healthData.memoryUsage.heapUsed 
+                            ? `Memory: ${Math.round(healthData.memoryUsage.heapUsed / 1024 / 1024)}MB`
+                            : 'Memory: N/A';
+                        printStatus('INFO', `Uptime: ${Math.round(healthData.uptime)}s, ${memoryInfo}`);
+                    }
+                    
+                    if (healthData.version) {
+                        printStatus('INFO', `Server version: ${healthData.version}`);
+                    }
                     
                     if (healthData.startup) {
                         const startup = healthData.startup;

@@ -44,6 +44,13 @@ Cortex V2.1 is a semantic code intelligence MCP server designed to enhance Claud
 - `npm run server:rebuild` - Force rebuild server mode (reindex)
 - `npm run start:rebuild` - Force rebuild compiled server mode
 
+### Server Management & Health Monitoring
+- `npm run startup` - Start development server with health checks and intelligent mode detection
+- `npm run startup -- --background` - Start server in background mode for production use
+- `npm run shutdown` - Comprehensive process cleanup (parent + child processes)
+- `npm run health` - **HTTP-based system health check** with server status detection (RUNNING/STARTING/NOT RUNNING)
+- `npm run status` - Quick server status check via scripts
+
 ### Process Cleanup Rules
 
 **🧹 Critical: Always Clean Up Interrupted Processes**
@@ -165,6 +172,16 @@ Cortex V2.1 is a semantic code intelligence MCP server designed to enhance Claud
 - `npm run test:mcp` - Test MCP server functionality
 
 ### Monitoring and Progress
+
+**HTTP Health Check System** ✅
+- `npm run health` - **Complete system health check** with HTTP-based server communication
+  - **Server Status Detection**: RUNNING/STARTING/NOT RUNNING states
+  - **Real-time Progress**: Live startup stage information via HTTP endpoints
+  - **Storage Health**: Embeddings and relationships synchronization status
+  - **System Resources**: Memory, CPU, disk usage monitoring
+  - **Process Management**: Detection of orphaned workers and cleanup recommendations
+
+**Direct HTTP Endpoints** (for advanced users):
 - **Health Check**: `curl http://localhost:8765/health` - Server health with detailed startup progress (Step X/10 format)
 - **Status**: `curl http://localhost:8765/status` - Quick status overview with timing information
 - **Progress**: `curl http://localhost:8765/progress` - Detailed startup stage information with step counters and durations
@@ -583,6 +600,30 @@ The system automatically discovers and follows relationships between code elemen
 - **Timing Information**: Stages show duration in appropriate units (ms for <1s, s for ≥1s)
 - **Endpoint Enhancement**: Health, status, and progress endpoints include step information and elapsed time
 - **Deduplication Logging**: Clear messages when skipping redundant initialization (`📋 Vector store already initialized, skipping...`)
+
+## Recent Improvements (v2.1 - August 2025)
+
+### 🔄 **HTTP-Based Health Check System** (Latest)
+- **Replaced IPC with HTTP communication**: Fixed health check to properly communicate with background server processes
+- **Comprehensive server status detection**: Clear RUNNING/STARTING/NOT RUNNING states with detailed health information
+- **Real-time startup progress reporting**: Step-by-step progress monitoring via HTTP /progress endpoint  
+- **Cross-platform process management**: Enhanced process detection and cleanup for all server types
+- **Background server support**: Works seamlessly with `npm run startup --background` mode
+- **Enhanced health reporting**: Actionable recommendations and system resource monitoring
+
+### 🔗 **Relationship Building Fix** (Critical Bug Resolution)
+- **Fixed DependencyMapper integration**: Resolved critical issue where relationship analysis was not running during indexing
+- **Massive improvement in relationship detection**: From 5 symbols to 2,001 symbols and 8,143 relationships
+- **Complete code understanding**: Proper function calls, imports, exports, and data flow analysis
+- **Incremental relationship updates**: Relationship graphs now properly rebuild when code changes
+- **Dual storage persistence**: Relationships saved to both local (.cortex) and global (~/.claude) storage
+
+### 💻 **CPU + Memory Adaptive Management Enhancements**
+- **Optimized CPU thresholds**: Reduced from 78%/69% to 69%/49% to prevent system overload
+- **Real-time dual resource monitoring**: Monitors both CPU and memory usage every 15 seconds
+- **Intelligent constraint handling**: Separate CPU and memory constraint states with combined reporting
+- **Cross-platform CPU detection**: Accurate CPU monitoring on Linux, macOS, and Windows
+- **System stability improvements**: Prevents 100% CPU usage that previously caused system freezes
 
 ## Performance Benchmarking Framework
 
