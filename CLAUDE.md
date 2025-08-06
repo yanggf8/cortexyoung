@@ -461,7 +461,7 @@ The system automatically discovers and follows relationships between code elemen
 
 ### 🚀 ProcessPoolEmbedder Architecture (August 2025)
 - **Complete ONNX Isolation**: External Node.js processes eliminate all thread safety issues
-- **True Parallelism**: 10 concurrent processes (CPU cores - 2) with FastQ queue coordination
+- **True Parallelism**: Dynamic concurrent processes (69% of CPU cores) with FastQ queue coordination
 - **Production-Grade Stability**: Zero ONNX Runtime crashes with process-based isolation
 - **Performance Metrics**: 57s average per 50-chunk batch, 1,857 chunks in 38 batches
 - **Robust Error Handling**: Process lifecycle management with graceful shutdown and recovery

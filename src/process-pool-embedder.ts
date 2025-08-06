@@ -107,12 +107,12 @@ export class ProcessPoolEmbedder {
   private static readonly EVICTION_PERCENTAGE = 0.2; // Remove 20% when evicting
 
   constructor() {
-    // Calculate optimal process count - reserve cores for system
+    // Calculate optimal process count - use 69% of available cores
     const totalCores = os.cpus().length;
-    // Use most cores but reserve 2 for system processes
-    this.processCount = Math.max(1, totalCores - 2);
+    // Use 69% of cores for optimal performance
+    this.processCount = Math.max(1, Math.floor(totalCores * 0.69));
     
-    console.log(`🏭 Process Pool: ${this.processCount} external Node.js processes (${totalCores} CPU cores, reserved 2 for system)`);
+    console.log(`🏭 Process Pool: ${this.processCount} external Node.js processes (${totalCores} CPU cores, using 69% (${this.processCount}/${totalCores} cores))`);
     console.log(`✅ Strategy: Process isolation + shared memory cache for optimal performance`);
     console.log(`🧠 Shared embedding cache: Content-based deduplication across all processes`);
     
