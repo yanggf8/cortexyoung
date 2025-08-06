@@ -48,126 +48,138 @@ async function findProcesses(pattern) {
     }
 }
 
-// Function to check server health via IPC
-async function checkServerHealthIPC(serverPid) {
+// Function to check server health via HTTP
+async function checkServerHealthHTTP(port) {
+    const http = require('http');
+    
     return new Promise((resolve) => {
-        const { spawn } = require('child_process');
-        
-        // Create a child process to communicate with the server via IPC
-        const checker = spawn(process.execPath, ['-e', `
-            const requestId = Date.now().toString();
-            let timeout;
-            
-            process.on('message', (message) => {
-                if (message.type === 'health_response' && message.requestId === requestId) {
-                    clearTimeout(timeout);
-                    process.send({ success: true, data: message.data });
-                    process.exit(0);
-                }
+        const timeout = setTimeout(() => {
+            resolve({
+                responding: false,
+                method: 'HTTP',
+                error: 'HTTP timeout after 3 seconds'
             });
-            
-            timeout = setTimeout(() => {
-                process.send({ success: false, error: 'IPC timeout after 3 seconds' });
-                process.exit(1);
-            }, 3000);
-            
-            // Send health check request
-            process.send({
-                type: 'health_check',
-                requestId: requestId
-            });
-        `], { 
-            stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
-            env: { ...process.env, SERVER_PID: serverPid }
-        });
+        }, 3000);
         
-        checker.on('message', (message) => {
-            if (message.success) {
-                resolve({
-                    responding: true,
-                    method: 'IPC',
-                    data: message.data
+        const options = {
+            hostname: 'localhost',
+            port: port,
+            path: '/health',
+            method: 'GET',
+            timeout: 2500
+        };
+        
+        const req = http.request(options, (res) => {
+            clearTimeout(timeout);
+            
+            if (res.statusCode === 200) {
+                let data = '';
+                res.on('data', chunk => data += chunk);
+                res.on('end', () => {
+                    try {
+                        const healthData = JSON.parse(data);
+                        resolve({
+                            responding: true,
+                            method: 'HTTP',
+                            data: healthData
+                        });
+                    } catch (error) {
+                        resolve({
+                            responding: true,
+                            method: 'HTTP',
+                            data: { status: 'healthy', raw: data }
+                        });
+                    }
                 });
             } else {
                 resolve({
                     responding: false,
-                    method: 'IPC',
-                    error: message.error
+                    method: 'HTTP',
+                    error: `HTTP ${res.statusCode}`
                 });
             }
         });
         
-        checker.on('error', (error) => {
+        req.on('error', (error) => {
+            clearTimeout(timeout);
             resolve({
                 responding: false,
-                method: 'IPC',
+                method: 'HTTP',
                 error: error.message
             });
         });
         
-        checker.on('exit', (code) => {
-            if (code !== 0) {
-                resolve({
-                    responding: false,
-                    method: 'IPC',
-                    error: `Process exited with code ${code}`
+        req.on('timeout', () => {
+            clearTimeout(timeout);
+            req.destroy();
+            resolve({
+                responding: false,
+                method: 'HTTP',
+                error: 'Request timeout'
+            });
+        });
+        
+        req.end();
+    });
+}
+
+// Function to get startup progress via HTTP
+async function getStartupProgressHTTP(port) {
+    const http = require('http');
+    
+    return new Promise((resolve) => {
+        const timeout = setTimeout(() => resolve(null), 2000);
+        
+        const options = {
+            hostname: 'localhost',
+            port: port,
+            path: '/progress',
+            method: 'GET',
+            timeout: 1500
+        };
+        
+        const req = http.request(options, (res) => {
+            clearTimeout(timeout);
+            
+            if (res.statusCode === 200) {
+                let data = '';
+                res.on('data', chunk => data += chunk);
+                res.on('end', () => {
+                    try {
+                        resolve(JSON.parse(data));
+                    } catch (error) {
+                        resolve(null);
+                    }
                 });
+            } else {
+                resolve(null);
             }
         });
+        
+        req.on('error', () => {
+            clearTimeout(timeout);
+            resolve(null);
+        });
+        
+        req.on('timeout', () => {
+            clearTimeout(timeout);
+            req.destroy();
+            resolve(null);
+        });
+        
+        req.end();
     });
 }
 
-// Function to get startup progress via IPC
-async function getStartupProgressIPC(serverPid) {
-    return new Promise((resolve) => {
-        const { spawn } = require('child_process');
-        
-        const checker = spawn(process.execPath, ['-e', `
-            const requestId = Date.now().toString();
-            let timeout;
-            
-            process.on('message', (message) => {
-                if (message.type === 'progress_response' && message.requestId === requestId) {
-                    clearTimeout(timeout);
-                    process.send({ success: true, data: message.data });
-                    process.exit(0);
-                }
-            });
-            
-            timeout = setTimeout(() => {
-                process.send({ success: false, error: 'Progress query timeout' });
-                process.exit(1);
-            }, 2000);
-            
-            process.send({
-                type: 'startup_progress',
-                requestId: requestId
-            });
-        `], { 
-            stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
-            env: { ...process.env, SERVER_PID: serverPid }
-        });
-        
-        checker.on('message', (message) => {
-            resolve(message.success ? message.data : null);
-        });
-        
-        checker.on('error', () => resolve(null));
-        checker.on('exit', (code) => {
-            if (code !== 0) resolve(null);
-        });
-    });
-}
-
-// Function to show startup progress via IPC
-async function showStartupProgressIPC(serverPid) {
+// Function to show startup progress via HTTP
+async function showStartupProgressHTTP(port) {
     console.log('\n   📋 Startup Progress:');
     
-    // Try to get progress from the server via IPC
-    const progressData = await getStartupProgressIPC(serverPid);
+    // Try to get progress from the server via HTTP
+    const progressData = await getStartupProgressHTTP(port);
     
     if (progressData && progressData.stages) {
-        console.log('   🎯 Live Progress from Server (via IPC):');
+        console.log('   🎯 Live Progress from Server (via HTTP):');
         const stages = progressData.stages;
         let stepNum = 1;
         
@@ -271,8 +283,8 @@ async function checkProcessHealth() {
         const serverPid = mainServerPids.length > 0 ? mainServerPids[0] : null;
         
         if (serverPid) {
-            // Try IPC health check first
-            const healthCheck = await checkServerHealthIPC(serverPid);
+            // Try HTTP health check first
+            const healthCheck = await checkServerHealthHTTP(PORT);
             
             if (healthCheck.responding) {
                 printStatus('OK', `✅ SERVER RUNNING - Responding via ${healthCheck.method}`);
@@ -288,14 +300,14 @@ async function checkProcessHealth() {
                     }
                 }
             } else {
-                printStatus('WARNING', `⚠️ SERVER STARTING - Process running but not responding via IPC`);
-                printStatus('INFO', `IPC Error: ${healthCheck.error}`);
+                printStatus('WARNING', `⚠️ SERVER STARTING - Process running but not responding via HTTP`);
+                printStatus('INFO', `HTTP Error: ${healthCheck.error}`);
                 
                 // Show startup progress if available
-                await showStartupProgressIPC(serverPid);
+                await showStartupProgressHTTP(PORT);
             }
         } else {
-            printStatus('WARNING', '⚠️ Server process detected but cannot identify main PID for IPC');
+            printStatus('WARNING', '⚠️ Server process detected but cannot identify main PID');
         }
     } else {
         printStatus('INFO', `❌ SERVER NOT RUNNING - No server processes detected`);
@@ -433,7 +445,7 @@ async function main() {
     // Get server status first for summary
     const PORT = process.env.PORT || 8765;
     const serverProcesses = await findProcesses('npm.*server|ts-node.*server|node.*server\\.js');
-    const healthCheck = serverProcesses.length > 0 ? await checkServerHealth(PORT) : { responding: false };
+    const healthCheck = serverProcesses.length > 0 ? await checkServerHealthHTTP(PORT) : { responding: false };
     
     await checkProcessHealth();
     await checkStorageHealth();
@@ -448,13 +460,11 @@ async function main() {
     } else if (serverProcesses.length > 0) {
         printStatus('WARNING', '⚠️ SERVER STATUS: STARTING (not yet responding)');
         
-        // Show additional startup info in summary via IPC
-        const mainServerPids = await findProcesses('ts-node.*server|node.*server\\.js');
-        const serverPid = mainServerPids.length > 0 ? mainServerPids[0] : null;
+        // Show additional startup info in summary via HTTP
+        const progressData = await getStartupProgressHTTP(PORT);
         
-        if (serverPid) {
-            const progressData = await getStartupProgressIPC(serverPid);
-            if (progressData && progressData.currentStage) {
+        if (progressData) {
+            if (progressData.currentStage) {
                 printStatus('INFO', `Current Stage: ${progressData.currentStage} (${progressData.overallProgress || 0}% complete)`);
                 if (progressData.eta) {
                     printStatus('INFO', `Estimated completion: ${progressData.eta} seconds`);

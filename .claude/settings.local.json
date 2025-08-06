@@ -6,7 +6,11 @@
       "Bash(node:*)",
       "Bash(cp:*)",
       "Bash(timeout:*)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(npm run benchmark:*)",
+      "Bash(npm run storage:status:*)",
+      "Bash(npm run test:*)",
+      "Bash(pgrep:*)"
     ],
     "deny": []
   }

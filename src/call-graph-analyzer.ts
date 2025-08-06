@@ -115,7 +115,10 @@ export class CallGraphAnalyzer {
 
     // Recursively process child nodes
     for (let i = 0; i < node.childCount; i++) {
-      this.traverseNode(node.child(i)!, content, filePath, symbols, relationships, imports, exports, errors);
+      const child = node.child(i);
+      if (child) {
+        this.traverseNode(child, content, filePath, symbols, relationships, imports, exports, errors);
+      }
     }
   }
 
@@ -163,7 +166,7 @@ export class CallGraphAnalyzer {
     symbols: CodeSymbol[],
     relationships: CodeRelationship[]
   ): void {
-    const nameNode = this.findChildByType(node, 'identifier');
+    const nameNode = this.findChildByType(node, 'identifier') || this.findChildByType(node, 'type_identifier');
     if (!nameNode) return;
 
     const className = this.getNodeText(nameNode, content);
@@ -201,7 +204,10 @@ export class CallGraphAnalyzer {
     const callerContext = this.findContainingFunction(node);
     if (!callerContext) return;
 
-    const callerName = this.getNodeText(this.findChildByType(callerContext, 'identifier')!, content);
+    const callerNameNode = this.findChildByType(callerContext, 'identifier');
+    if (!callerNameNode) return;
+    
+    const callerName = this.getNodeText(callerNameNode, content);
     const callerLine = callerContext.startPosition.row + 1;
     const callerId = `${filePath}:${callerName}:${callerLine}`;
 
@@ -390,7 +396,10 @@ export class CallGraphAnalyzer {
     const containingFunction = this.findContainingFunction(node);
     if (!containingFunction) return;
 
-    const functionName = this.getNodeText(this.findChildByType(containingFunction, 'identifier')!, content);
+    const functionNameNode = this.findChildByType(containingFunction, 'identifier');
+    if (!functionNameNode) return;
+    
+    const functionName = this.getNodeText(functionNameNode, content);
     const functionId = `${filePath}:${functionName}:${containingFunction.startPosition.row + 1}`;
 
     // Extract error type from catch parameter
@@ -419,8 +428,8 @@ export class CallGraphAnalyzer {
   // Helper methods
   private findChildByType(node: Parser.SyntaxNode, type: string): Parser.SyntaxNode | null {
     for (let i = 0; i < node.childCount; i++) {
-      const child = node.child(i)!;
-      if (child.type === type) return child;
+      const child = node.child(i);
+      if (child && child.type === type) return child;
     }
     return null;
   }
@@ -428,8 +437,8 @@ export class CallGraphAnalyzer {
   private findChildrenByType(node: Parser.SyntaxNode, type: string): Parser.SyntaxNode[] {
     const children: Parser.SyntaxNode[] = [];
     for (let i = 0; i < node.childCount; i++) {
-      const child = node.child(i)!;
-      if (child.type === type) children.push(child);
+      const child = node.child(i);
+      if (child && child.type === type) children.push(child);
     }
     return children;
   }
@@ -610,8 +619,17 @@ export class CallGraphAnalyzer {
                        this.findChildByType(node, 'variable_declaration');
     
     if (declaration) {
-      const name = this.findChildByType(declaration, 'identifier');
+      const name = this.findChildByType(declaration, 'identifier') || this.findChildByType(declaration, 'type_identifier');
       if (name) return this.getNodeText(name, content);
+    }
+    
+    // Handle export clauses like "export { TestClass }"
+    const exportClause = this.findChildByType(node, 'export_clause');
+    if (exportClause) {
+      const specifier = this.findChildByType(exportClause, 'export_specifier');
+      if (specifier) {
+        return this.getNodeText(specifier, content);
+      }
     }
     
     return null;
