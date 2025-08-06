@@ -10,7 +10,8 @@
       "Bash(npm run benchmark:*)",
       "Bash(npm run storage:status:*)",
       "Bash(npm run test:*)",
-      "Bash(pgrep:*)"
+      "Bash(pgrep:*)",
+      "Bash(npm run:*)"
     ],
     "deny": []
   }
