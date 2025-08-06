@@ -1,4 +1,4 @@
-'''import { CodeChunk, IndexRequest, IndexResponse, QueryRequest, QueryResponse } from './types';
+import { CodeChunk, IndexRequest, IndexResponse, QueryRequest, QueryResponse } from './types';
 import { GitScanner } from './git-scanner';
 import { SmartChunker } from './chunker';
 import { EmbeddingGenerator } from './embedder';
@@ -357,4 +357,3 @@ export class CodebaseIndexer {
     return await this.searcher.search(query);
   }
 }
-'''

@@ -221,8 +221,9 @@ Cortex V2.1 has a sophisticated **10-stage startup process** that takes ~2.5 min
 - Create startup stage tracker
 
 #### **Stage 2: Cache Detection** (~500ms)
-- Initialize unified storage coordinator
+- Initialize unified storage coordinator with **automatic synchronization**
 - Check local storage (`.cortex/`) and global storage (`~/.claude/`)
+- **Auto-sync**: Automatically resolve missing data and staleness (>24h apart)
 - Determine full rebuild vs incremental update strategy
 
 #### **Stage 3: AI Model Loading** (3s cached / 45s first run)
@@ -437,7 +438,9 @@ Cortex V2.1 uses a comprehensive dual storage approach for both embeddings and r
 ### Unified Storage Features
 
 **Automatic Sync Behavior:**
-- **On startup**: Prefers global storage if available, syncs to local
+- **On startup**: **Auto-sync** resolves missing data and staleness (>24h apart) automatically
+- **Missing data**: Syncs from available location (global→local or local→global)
+- **Staleness detection**: Automatically chooses newer version when >24 hours apart
 - **On save**: Saves both embeddings and relationships to local and global simultaneously
 - **Conflict resolution**: Newer timestamp wins for each storage layer
 - **Consistency checking**: Validates synchronization between embeddings and relationships
@@ -448,10 +451,11 @@ Cortex V2.1 uses a comprehensive dual storage approach for both embeddings and r
 - **Cross-session persistence**: Relationship analysis survives server restarts
 
 ### Storage Management
-Use the unified storage commands for best results:
+**Auto-sync eliminates most manual commands:**
+- **Startup handles**: Missing data, staleness (>24h), and synchronization issues automatically
 - `npm run storage:status` - Complete status report across all layers
 - `npm run storage:validate` - Ensure consistency between embeddings and relationships
-- `npm run storage:sync` - Synchronize all storage layers
+- `npm run storage:sync` - Manual sync (rarely needed due to auto-sync)
 
 ## Logging System
 
@@ -530,6 +534,14 @@ The system automatically discovers and follows relationships between code elemen
 - **Complete startup optimization**: All critical bottlenecks resolved for production use
 
 ## Recent Improvements (v2.1)
+
+### 🚀 Intelligent Auto-Sync System (August 2025)
+- **Eliminates Manual Storage Commands**: Auto-sync during startup handles all synchronization issues
+- **Missing Data Resolution**: Automatically syncs from available location (global→local or local→global)
+- **Staleness Detection**: Detects when storage is >24 hours apart and chooses newer version
+- **Smart Conflict Resolution**: Uses timestamps to determine which version to sync
+- **Comprehensive Coverage**: Handles both embeddings and relationships synchronization
+- **Enhanced User Experience**: No more `npm run storage:sync` commands needed during normal operation
 
 ### 🚀 ProcessPoolEmbedder Architecture (August 2025)
 - **Complete ONNX Isolation**: External Node.js processes eliminate all thread safety issues

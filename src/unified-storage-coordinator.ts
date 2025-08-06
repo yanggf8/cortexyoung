@@ -58,6 +58,19 @@ export class UnifiedStorageCoordinator {
       this.vectorStore.initialize(),
       this.relationshipStore.initialize()
     ]);
+
+    // Check for synchronization issues and auto-sync if needed
+    console.log('🔍 Checking storage synchronization...');
+    const status = await this.getStorageStatus();
+    
+    if (!status.synchronized) {
+      console.log('⚠️ Storage synchronization issues detected, performing auto-sync...');
+      await this.performAutoSync(status);
+      console.log('✅ Auto-sync completed');
+    } else {
+      console.log('✅ Storage layers are synchronized');
+    }
+
     console.log('✅ Unified storage coordinator ready');
     this.initialized = true;
   }
@@ -91,19 +104,133 @@ export class UnifiedStorageCoordinator {
     const relationshipsExist = relationshipInfo.local.exists || relationshipInfo.global.exists;
 
     if (!embeddingsExist || !relationshipsExist) {
-      return false; // Not synchronized if either is missing
+      return false; // Not synchronized if either is missing completely
     }
 
-    // Check timestamp alignment (within 1 hour tolerance)
-    const embeddingTime = embeddingInfo.local.lastModified || embeddingInfo.global.lastModified;
-    const relationshipTime = relationshipInfo.local.lastModified || relationshipInfo.global.lastModified;
+    // Check if both embeddings and relationships exist in at least one matching location
+    const localPairExists = embeddingInfo.local.exists && relationshipInfo.local.exists;
+    const globalPairExists = embeddingInfo.global.exists && relationshipInfo.global.exists;
     
-    if (embeddingTime && relationshipTime) {
-      const timeDiff = Math.abs(embeddingTime.getTime() - relationshipTime.getTime());
-      return timeDiff < 60 * 60 * 1000; // 1 hour tolerance
+    if (!localPairExists && !globalPairExists) {
+      return false; // Not synchronized if no complete pair exists in same location
     }
 
-    return true; // Assume synchronized if we can't determine timestamps
+    // Check timestamp alignment (within 1 hour tolerance) for matching pairs
+    let synchronized = false;
+    
+    if (localPairExists) {
+      const localEmbeddingTime = embeddingInfo.local.lastModified;
+      const localRelationshipTime = relationshipInfo.local.lastModified;
+      if (localEmbeddingTime && localRelationshipTime) {
+        const timeDiff = Math.abs(localEmbeddingTime.getTime() - localRelationshipTime.getTime());
+        synchronized = synchronized || timeDiff < 60 * 60 * 1000;
+      } else {
+        synchronized = true; // Assume synchronized if we can't determine timestamps
+      }
+    }
+    
+    if (globalPairExists && !synchronized) {
+      const globalEmbeddingTime = embeddingInfo.global.lastModified;
+      const globalRelationshipTime = relationshipInfo.global.lastModified;
+      if (globalEmbeddingTime && globalRelationshipTime) {
+        const timeDiff = Math.abs(globalEmbeddingTime.getTime() - globalRelationshipTime.getTime());
+        synchronized = synchronized || timeDiff < 60 * 60 * 1000;
+      } else {
+        synchronized = true; // Assume synchronized if we can't determine timestamps
+      }
+    }
+
+    return synchronized;
+  }
+
+  private async performAutoSync(status: StorageStatus): Promise<void> {
+    const issues: string[] = [];
+    const actions: string[] = [];
+
+    // Get detailed storage info for staleness detection
+    const [embeddingInfo, relationshipInfo] = await Promise.all([
+      this.vectorStore.getStorageInfo(),
+      this.relationshipStore.getStorageInfo()
+    ]);
+
+    // Handle embeddings synchronization (missing cases)
+    if (status.embeddings.local && !status.embeddings.global) {
+      issues.push('Local embeddings exist but global embeddings are missing');
+      actions.push('Syncing local embeddings to global storage');
+      await this.vectorStore.syncToGlobal();
+    } else if (!status.embeddings.local && status.embeddings.global) {
+      issues.push('Global embeddings exist but local embeddings are missing');
+      actions.push('Syncing global embeddings to local storage');
+      await this.vectorStore.syncToLocal();
+    }
+    // Handle embeddings staleness (both exist but >24h apart)
+    else if (status.embeddings.local && status.embeddings.global && 
+             embeddingInfo.local.lastModified && embeddingInfo.global.lastModified) {
+      const timeDiff = Math.abs(embeddingInfo.local.lastModified.getTime() - embeddingInfo.global.lastModified.getTime());
+      const hoursApart = timeDiff / (60 * 60 * 1000);
+      
+      if (hoursApart > 24) {
+        const localIsNewer = embeddingInfo.local.lastModified > embeddingInfo.global.lastModified;
+        const olderHours = Math.floor(hoursApart);
+        
+        if (localIsNewer) {
+          issues.push(`Embeddings are ${olderHours} hours apart - local version is newer`);
+          actions.push('Auto-syncing newer local embeddings to global storage');
+          await this.vectorStore.syncToGlobal();
+        } else {
+          issues.push(`Embeddings are ${olderHours} hours apart - global version is newer`);
+          actions.push('Auto-syncing newer global embeddings to local storage');
+          await this.vectorStore.syncToLocal();
+        }
+      }
+    }
+
+    // Handle relationships synchronization (missing cases)
+    if (status.relationships.local && !status.relationships.global) {
+      issues.push('Local relationships exist but global relationships are missing');
+      actions.push('Syncing local relationships to global storage');
+      await this.relationshipStore.syncToGlobal();
+    } else if (!status.relationships.local && status.relationships.global) {
+      issues.push('Global relationships exist but local relationships are missing');
+      actions.push('Syncing global relationships to local storage');
+      await this.relationshipStore.syncToLocal();
+    }
+    // Handle relationships staleness (both exist but >24h apart)
+    else if (status.relationships.local && status.relationships.global && 
+             relationshipInfo.local.lastModified && relationshipInfo.global.lastModified) {
+      const timeDiff = Math.abs(relationshipInfo.local.lastModified.getTime() - relationshipInfo.global.lastModified.getTime());
+      const hoursApart = timeDiff / (60 * 60 * 1000);
+      
+      if (hoursApart > 24) {
+        const localIsNewer = relationshipInfo.local.lastModified > relationshipInfo.global.lastModified;
+        const olderHours = Math.floor(hoursApart);
+        
+        if (localIsNewer) {
+          issues.push(`Relationships are ${olderHours} hours apart - local version is newer`);
+          actions.push('Auto-syncing newer local relationships to global storage');
+          await this.relationshipStore.syncToGlobal();
+        } else {
+          issues.push(`Relationships are ${olderHours} hours apart - global version is newer`);
+          actions.push('Auto-syncing newer global relationships to local storage');
+          await this.relationshipStore.syncToLocal();
+        }
+      }
+    }
+
+    // Handle missing relationships when embeddings exist
+    if ((status.embeddings.local || status.embeddings.global) && 
+        (!status.relationships.local && !status.relationships.global)) {
+      issues.push('Embeddings exist but relationships are completely missing');
+      actions.push('Relationships will be regenerated during startup');
+    }
+
+    // Log what was found and what actions were taken
+    if (issues.length > 0) {
+      console.log('   Issues found:');
+      issues.forEach(issue => console.log(`   • ${issue}`));
+      console.log('   Actions taken:');
+      actions.forEach(action => console.log(`   • ${action}`));
+    }
   }
 
   async getStorageStats(): Promise<StorageStats> {
@@ -249,27 +376,37 @@ export class UnifiedStorageCoordinator {
     // Check if both storage types exist
     if (status.embeddings.local && !status.relationships.local) {
       issues.push('Local embeddings exist but local relationships are missing');
-      recommendations.push('Run the server to regenerate relationship graphs');
+      recommendations.push('Auto-sync will handle this during server startup');
     }
     
     if (status.embeddings.global && !status.relationships.global) {
       issues.push('Global embeddings exist but global relationships are missing');
-      recommendations.push('Run npm run relationships:sync-global after server startup');
+      recommendations.push('Auto-sync will handle this during server startup');
     }
     
     // Check synchronization
     if (!status.synchronized) {
       issues.push('Embeddings and relationships are not synchronized');
-      recommendations.push('Run npm run cache:clear-all and restart the server');
+      recommendations.push('Auto-sync will fix this during initialization');
     }
     
-    // Check for orphaned storages
+    // Check for staleness - embeddings
     if (status.embeddings.local && status.embeddings.global) {
       const embeddingInfo = await this.vectorStore.getStorageInfo();
       if (embeddingInfo.local.lastModified && embeddingInfo.global.lastModified &&
           Math.abs(embeddingInfo.local.lastModified.getTime() - embeddingInfo.global.lastModified.getTime()) > 24 * 60 * 60 * 1000) {
         issues.push('Local and global embeddings are more than 24 hours apart');
-        recommendations.push('Consider running npm run cache:sync-global or npm run cache:sync-local');
+        recommendations.push('Auto-sync handles this automatically during server startup');
+      }
+    }
+    
+    // Check for staleness - relationships
+    if (status.relationships.local && status.relationships.global) {
+      const relationshipInfo = await this.relationshipStore.getStorageInfo();
+      if (relationshipInfo.local.lastModified && relationshipInfo.global.lastModified &&
+          Math.abs(relationshipInfo.local.lastModified.getTime() - relationshipInfo.global.lastModified.getTime()) > 24 * 60 * 60 * 1000) {
+        issues.push('Local and global relationships are more than 24 hours apart');
+        recommendations.push('Auto-sync handles this automatically during server startup');
       }
     }
     

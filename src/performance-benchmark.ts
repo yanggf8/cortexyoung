@@ -141,7 +141,7 @@ export class PerformanceBenchmark {
     
     // Calculate real throughput: chunks processed / wall clock seconds
     coldStart.chunksProcessed = coldStartResult.chunks_processed;
-    coldStart.throughputChunksPerSecond = coldStart.chunksProcessed / (coldStart.duration / 1000);
+    coldStart.throughputChunksPerSecond = (coldStart.chunksProcessed || 0) / (coldStart.duration / 1000);
     startupBenchmarks.push(coldStart);
     
     // 2. Warm start (with cache)
@@ -155,7 +155,7 @@ export class PerformanceBenchmark {
     
     // Calculate real throughput for warm start
     warmStart.chunksProcessed = warmStartResult.chunks_processed;
-    warmStart.throughputChunksPerSecond = warmStart.chunksProcessed / (warmStart.duration / 1000);
+    warmStart.throughputChunksPerSecond = (warmStart.chunksProcessed || 0) / (warmStart.duration / 1000);
     startupBenchmarks.push(warmStart);
     
     // 3. Cache-only start (no changes)
@@ -169,7 +169,7 @@ export class PerformanceBenchmark {
     
     // Calculate real throughput for cache-only start
     cacheStart.chunksProcessed = cacheStartResult.chunks_processed;
-    cacheStart.throughputChunksPerSecond = cacheStart.chunksProcessed / (cacheStart.duration / 1000);
+    cacheStart.throughputChunksPerSecond = (cacheStart.chunksProcessed || 0) / (cacheStart.duration / 1000);
     startupBenchmarks.push(cacheStart);
     
     return startupBenchmarks;

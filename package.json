@@ -13,8 +13,8 @@
     "start": "node dist/server.js",
     "start:rebuild": "FORCE_REBUILD=true npm start",
     "start:full": "INDEX_MODE=full npm start",
-    '''    "start:incremental": "INDEX_MODE=incremental npm start",
-    "start:cloudflare": "EMBEDDER_TYPE=cloudflare npm start",'''
+    "start:incremental": "INDEX_MODE=incremental npm start",
+    "start:cloudflare": "EMBEDDER_TYPE=cloudflare npm start",
     "clean": "rm -rf dist",
     "cache:stats": "node scripts/manage-embeddings.js stats",
     "cache:clear": "node scripts/manage-embeddings.js clear",
@@ -55,7 +55,8 @@
     "test:orphan-prevention": "node test-orphan-prevention.js",
     "test:final-cleanup": "node final-cleanup-test.js",
     "test:cpu-memory": "node test-cpu-memory-scaling.js",
-    "test:signal-cascade": "node test-signal-cascade.js"
+    "test:signal-cascade": "node test-signal-cascade.js",
+    "test:auto-sync-staleness": "npm run build && node test-auto-sync-staleness.js"
   },
   "keywords": [],
   "author": "",
