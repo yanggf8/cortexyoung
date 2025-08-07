@@ -399,9 +399,9 @@ export class ProcessPoolEmbedder {
     
     // Calculate adaptive pool configuration
     const maxProcessesByCPU = Math.max(1, Math.floor(totalCores * 0.69)); // Hard limit at 69% of cores
-    const startProcesses = Math.max(1, Math.floor(maxProcessesByCPU * 0.25)); // Start at 25% of target (conservative)
+    const startProcesses = 1; // Start with single process - even 2 processes can saturate system
     
-    // Initialize with starting process count (25% of target)
+    // Initialize with single process (ultra-conservative)
     this.processCount = startProcesses;
     
     // Initialize system resources
@@ -410,7 +410,7 @@ export class ProcessPoolEmbedder {
     // Initialize adaptive pool configuration
     this.adaptivePool = {
       maxProcesses: maxProcessesByCPU,           // 69% of cores hard limit
-      currentProcesses: startProcesses,         // Start at 25% of target
+      currentProcesses: startProcesses,         // Start with single process
       memoryStopThreshold: 78,                  // Stop spawning at 78% memory usage
       memoryResumeThreshold: 69,                // Resume spawning at 69% memory usage
       cpuStopThreshold: 69,                     // Stop spawning at 69% CPU usage
@@ -424,11 +424,11 @@ export class ProcessPoolEmbedder {
     
     console.log(`🏭 Adaptive Process Pool Strategy:`);
     console.log(`   CPU Cores: ${totalCores} total`);
-    console.log(`   Starting: ${startProcesses} processes (25% of target = ${Math.round(startProcesses/maxProcessesByCPU*100)}%)`);
+    console.log(`   Starting: ${startProcesses} process (ultra-conservative - 2+ processes saturate system)`);
     console.log(`   Maximum: ${maxProcessesByCPU} processes (69% of cores)`);
     console.log(`   Memory Thresholds: Stop at 78%, Resume at 69%`);
     console.log(`   CPU Thresholds: Stop at 69%, Resume at 49%`);
-    console.log(`   Growth Strategy: Start conservative → Monitor memory + CPU → Scale based on both resources`);
+    console.log(`   Growth Strategy: Start minimal → Monitor resources → Scale only when safe`);
     console.log(`✅ Strategy: Adaptive process pool with real-time memory + CPU management`);
     
     // Initialize adaptive batching system (will be updated with accurate reading)
@@ -856,7 +856,7 @@ export class ProcessPoolEmbedder {
   async initialize(): Promise<void> {
     if (this.isInitialized) return;
 
-    console.log(`🔧 Starting with ${this.processCount} external Node.js processes (25% of target, conservative approach)...`);
+    console.log(`🔧 Starting with ${this.processCount} external Node.js process (ultra-conservative - 2+ saturate system)...`);
     
     // Get initial accurate memory reading
     await this.checkResourcesAndAdjustPool();
@@ -875,7 +875,7 @@ export class ProcessPoolEmbedder {
     
     this.isInitialized = true;
     console.log(`🎉 Process pool initialized with ${this.processes.length} ready processes`);
-    console.log(`📈 Adaptive growth: Will scale up to ${this.adaptivePool.maxProcesses} processes based on memory availability`);
+    console.log(`📈 Adaptive growth: Scales one-by-one up to ${this.adaptivePool.maxProcesses} processes based on CPU + memory constraints`);
   }
 
   private async createProcesses(): Promise<void> {
@@ -1287,29 +1287,72 @@ export class ProcessPoolEmbedder {
     });
   }
   
-  // Helper method for waiting for single process to be ready  
+  // Helper method for waiting for single process to be ready with detailed diagnostics
   private async waitForSingleProcessReady(processInstance: ProcessInstance): Promise<void> {
     const maxWaitTime = 60000; // 1 minute max wait per process
     const startTime = Date.now();
+    const diagnosticInterval = 10000; // Show diagnostics every 10 seconds
+    let lastDiagnostic = startTime;
+    let initMessageSeen = false;
+    let modelLoadingSeen = false;
     
     return new Promise((resolve, reject) => {
       const checkReady = () => {
+        const elapsed = Date.now() - startTime;
+        
         if (processInstance.isReady) {
           console.log(`✅ Process ${processInstance.id} ready with isolated FastEmbedding`);
           resolve();
-        } else if (Date.now() - startTime > maxWaitTime) {
-          reject(new Error(`Timeout: Process ${processInstance.id} not ready after ${maxWaitTime}ms`));
+        } else if (elapsed > maxWaitTime) {
+          // Enhanced timeout message with diagnostics
+          const diagnostics = [
+            `Process started ${Math.round(elapsed/1000)}s ago`,
+            `Init message seen: ${initMessageSeen ? '✅' : '❌'}`,
+            `Model loading seen: ${modelLoadingSeen ? '✅' : '❌'}`,
+            `Process alive: ${!processInstance.process.killed ? '✅' : '❌'}`,
+            `Process PID: ${processInstance.process.pid || 'unknown'}`
+          ];
+          const errorSection = errorOutput ? `\n📊 Error Output:\n${errorOutput}` : '\n📊 No error output captured';
+          reject(new Error(`Timeout: Process ${processInstance.id} not ready after ${maxWaitTime}ms\n📊 Diagnostics:\n  ${diagnostics.join('\n  ')}${errorSection}`));
         } else {
+          // Show periodic diagnostics during long waits
+          if (elapsed - lastDiagnostic >= diagnosticInterval) {
+            const phase = modelLoadingSeen ? 'Loading model' : initMessageSeen ? 'Starting' : 'Initializing';
+            console.log(`⏳ Process ${processInstance.id}: ${phase} (${Math.round(elapsed/1000)}s elapsed)...`);
+            lastDiagnostic = elapsed;
+          }
           setTimeout(checkReady, 1000);
         }
       };
       
-      // Listen for ready signal from process
+      // Listen for ready signal and track initialization phases
       processInstance.process.stdout?.on('data', (data) => {
         const output = data.toString();
+        
+        // Track initialization phases for better diagnostics
+        if (output.includes('Starting separate Node.js instance')) {
+          initMessageSeen = true;
+        }
+        if (output.includes('Creating isolated FastEmbedding instance')) {
+          modelLoadingSeen = true;
+        }
         if (output.includes('FastEmbedding ready in separate process')) {
           processInstance.isReady = true;
           processInstance.isAvailable = true;
+        }
+      });
+      
+      // Capture stderr for timeout diagnostics
+      let errorOutput = '';
+      processInstance.process.stderr?.on('data', (data) => {
+        errorOutput += data.toString();
+      });
+      
+      // Handle early exit during initialization
+      processInstance.process.on('exit', (code, signal) => {
+        if (!processInstance.isReady) {
+          const exitReason = signal ? `signal ${signal}` : `code ${code}`;
+          reject(new Error(`Process ${processInstance.id} exited during initialization (${exitReason})\n📊 Error Output:\n${errorOutput || '  No error output captured'}`));
         }
       });
       

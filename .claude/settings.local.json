@@ -11,7 +11,8 @@
       "Bash(npm run storage:status:*)",
       "Bash(npm run test:*)",
       "Bash(pgrep:*)",
-      "Bash(npm run:*)"
+      "Bash(npm run:*)",
+      "Bash(ls:*)"
     ],
     "deny": []
   }

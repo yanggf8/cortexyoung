@@ -95,16 +95,51 @@ export class PersistentVectorStore extends VectorStore {
     await fs.mkdir(this.globalIndexPath, { recursive: true });
     await fs.mkdir(this.globalDeltaPath, { recursive: true });
     
-    // Try to load existing index (prefer global, fallback to local)
-    if (await this.globalIndexExists()) {
-      console.log('🌐 Loading from global storage (~/.claude)');
+    // Try to load existing index with comparison details
+    const localExists = await this.indexExists();
+    const globalExists = await this.globalIndexExists();
+    
+    if (globalExists && localExists) {
+      // Both exist - compare and choose winner
+      const [localStats, globalStats] = await Promise.all([
+        fs.stat(this.metadataPath),
+        fs.stat(this.globalMetadataPath)
+      ]);
+      
+      // Get chunk counts for comparison
+      let localChunks = 0, globalChunks = 0;
+      try {
+        const localData = JSON.parse(await fs.readFile(this.metadataPath, 'utf-8'));
+        const globalData = JSON.parse(await fs.readFile(this.globalMetadataPath, 'utf-8'));
+        localChunks = localData.chunks?.length || 0;
+        globalChunks = globalData.chunks?.length || 0;
+      } catch (error) {
+        console.warn('⚠️ Could not read chunk counts for comparison');
+      }
+      
+      const localTime = localStats.mtime.toISOString();
+      const globalTime = globalStats.mtime.toISOString();
+      const globalIsNewer = globalStats.mtime > localStats.mtime;
+      
+      console.log('🔍 Storage Comparison:');
+      console.log(`📁 Local:  ${localChunks} chunks, modified ${localTime}`);
+      console.log(`🌐 Global: ${globalChunks} chunks, modified ${globalTime}`);
+      console.log(`🏆 Winner: ${globalIsNewer ? 'Global (newer)' : 'Local (newer)'} - Loading from ${globalIsNewer ? 'global' : 'local'}`);
+      
+      if (globalIsNewer) {
+        await this.loadPersistedIndex(true);
+        await this.syncToLocal();
+      } else {
+        await this.loadPersistedIndex(false);
+        await this.syncToGlobal();
+      }
+    } else if (globalExists) {
+      console.log('🌐 Loading from global storage (~/.claude) - local not found');
       await this.loadPersistedIndex(true);
-      // Sync to local if local is outdated
       await this.syncToLocal();
-    } else if (await this.indexExists()) {
-      console.log('📁 Loading from local storage (.cortex)');
+    } else if (localExists) {
+      console.log('📁 Loading from local storage (.cortex) - global not found');
       await this.loadPersistedIndex(false);
-      // Sync to global
       await this.syncToGlobal();
     }
 
@@ -322,12 +357,21 @@ export class PersistentVectorStore extends VectorStore {
         }
         
         if (shouldSync) {
-          console.log('🔄 Syncing global embeddings to local storage...');
+          // Get chunk count from global before syncing
+          let globalChunks = 0;
+          try {
+            const globalData = JSON.parse(await fs.readFile(this.globalMetadataPath, 'utf-8'));
+            globalChunks = globalData.chunks?.length || 0;
+          } catch (error) {
+            console.warn('⚠️ Could not read global chunk count');
+          }
+          
+          console.log(`🔄 Syncing global embeddings to local storage (${globalChunks} chunks)...`);
           const indexData = await fs.readFile(this.globalMetadataPath, 'utf-8');
           const localTempPath = this.metadataPath + '.tmp';
           await fs.writeFile(localTempPath, indexData);
           await fs.rename(localTempPath, this.metadataPath);
-          console.log('✅ Synced to local storage');
+          console.log(`✅ Synced ${globalChunks} chunks to local storage`);
         } else {
           console.log('📋 Local storage is up to date');
         }
