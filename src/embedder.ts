@@ -131,9 +131,9 @@ export class EmbeddingGenerator {
     
     if (!cachedModelInfo) {
       return {
-        compatible: false,
-        reason: 'No model information found in cached embeddings',
-        recommendation: 'reindex'
+        compatible: true, // Assume compatible if no metadata (older embeddings still work)
+        reason: 'No model information found in cached embeddings, assuming compatibility',
+        recommendation: 'none'
       };
     }
     
