@@ -411,6 +411,36 @@ export class PersistentVectorStore extends VectorStore {
     return info;
   }
 
+  getChunksByFile(filePath: string): CodeChunk[] {
+    return Array.from(this.chunks.values()).filter(chunk => chunk.file_path === filePath);
+  }
+
+  compareChunks(oldChunks: CodeChunk[], newChunks: CodeChunk[]): { toAdd: CodeChunk[], toKeep: CodeChunk[], toRemove: CodeChunk[] } {
+    const oldChunkMap = new Map(oldChunks.map(c => [c.content_hash, c]));
+    const newChunkMap = new Map(newChunks.map(c => [c.content_hash, c]));
+
+    const toAdd: CodeChunk[] = [];
+    const toKeep: CodeChunk[] = [];
+    const toRemove: CodeChunk[] = [];
+
+    for (const [hash, chunk] of newChunkMap.entries()) {
+      if (oldChunkMap.has(hash)) {
+        const oldChunk = oldChunkMap.get(hash)!;
+        // Preserve existing embedding
+        chunk.embedding = oldChunk.embedding;
+        toKeep.push(chunk);
+        oldChunkMap.delete(hash); // Remove from map to track remaining (deleted) chunks
+      } else {
+        toAdd.push(chunk);
+      }
+    }
+
+    // Any remaining chunks in oldChunkMap were removed
+    toRemove.push(...oldChunkMap.values());
+
+    return { toAdd, toKeep, toRemove };
+  }
+
   // Override upsertChunks to ensure persistence
   async upsertChunks(chunks: CodeChunk[]): Promise<void> {
     await super.upsertChunks(chunks);

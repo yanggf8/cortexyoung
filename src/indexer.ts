@@ -152,33 +152,51 @@ export class CodebaseIndexer {
     }
     
     // Process only changed files
-    const newChunks: CodeChunk[] = [];
+    const chunksToEmbed: CodeChunk[] = [];
+    const chunksToKeep: CodeChunk[] = [];
     const fileChanges = await this.gitScanner.getFileChanges(changedFiles);
-    
+
     for (const filePath of changedFiles) {
       try {
         const content = await this.gitScanner.readFile(filePath);
         const fileChange = fileChanges.find(fc => fc.filePath === filePath);
         const coChangeFiles = await this.gitScanner.getCoChangeFiles(filePath);
         
-        const chunks = await this.chunker.chunkFile(filePath, content, fileChange, coChangeFiles);
-        newChunks.push(...chunks);
+        const newChunks = await this.chunker.chunkFile(filePath, content, fileChange, coChangeFiles);
+        const oldChunks = this.vectorStore.getChunksByFile(filePath);
+
+        const { toAdd, toKeep, toRemove } = this.vectorStore.compareChunks(oldChunks, newChunks);
+        
+        chunksToEmbed.push(...toAdd);
+        chunksToKeep.push(...toKeep);
+        // Add the IDs of removed chunks to the main delta's removed list
+        delta.removed.push(...toRemove.map(c => c.chunk_id));
+
       } catch (error) {
         console.warn(`Failed to process file ${filePath}:`, error);
       }
     }
     
-    console.log(`Generated ${newChunks.length} new code chunks`);
-    
+    console.log(`💡 Analysis complete:`);
+    console.log(`  - ${chunksToEmbed.length} new or modified chunks to embed.`);
+    console.log(`  - ${chunksToKeep.length} unchanged chunks (cache hit).`);
+    console.log(`  - ${delta.removed.length} chunks to remove.`);
+
     // Generate embeddings only for new/changed chunks
-    if (newChunks.length > 0) {
-      console.log('Generating embeddings for changed content...');
-      const embeddedChunks = await this.generateEmbeddings(newChunks);
-      delta.added.push(...embeddedChunks);
+    if (chunksToEmbed.length > 0) {
+      console.log('🚀 Generating embeddings for new/modified content...');
+      const embeddedChunks = await this.generateEmbeddings(chunksToEmbed);
+      // These are the brand new or updated chunks
+      delta.added = embeddedChunks;
+    } else {
+      delta.added = [];
     }
     
-    // Apply delta to vector store
-    console.log('Applying changes to vector database...');
+    // These are the chunks that were unchanged and whose embeddings we are preserving
+    delta.updated = chunksToKeep;
+
+    // Apply the fine-grained delta to the vector store
+    console.log('💾 Applying changes to vector database...');
     await this.vectorStore.applyDelta(delta);
     
     // Save updated index
