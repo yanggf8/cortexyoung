@@ -180,3 +180,62 @@ export interface MCPError {
   message: string;
   data?: any;
 }
+
+// IEmbedder interface for standardizing embedding providers
+export interface IEmbedder {
+  readonly providerId: string;
+  readonly modelId: string; 
+  readonly dimensions: number;
+  readonly maxBatchSize: number;
+  readonly normalization: "l2" | "none";
+  
+  embedBatch(texts: string[], options?: EmbedOptions): Promise<EmbeddingResult>;
+  getHealth(): Promise<ProviderHealth>;
+  getMetrics(): Promise<ProviderMetrics>;
+}
+
+export interface EmbedOptions {
+  timeout?: number;
+  retryCount?: number;
+  priority?: "high" | "normal" | "low";
+  requestId?: string;
+}
+
+export interface EmbeddingResult {
+  embeddings: number[][];
+  metadata: EmbeddingMetadata;
+  performance: PerformanceStats;
+}
+
+export interface EmbeddingMetadata {
+  providerId: string;
+  modelId: string;
+  batchSize: number;
+  processedAt: number;
+  requestId?: string;
+}
+
+export interface PerformanceStats {
+  duration: number;
+  memoryDelta: number;
+  processId?: number;
+  cacheHits?: number;
+  retries?: number;
+}
+
+export interface ProviderHealth {
+  status: "healthy" | "degraded" | "unhealthy";
+  details: string;
+  lastCheck: number;
+  uptime?: number;
+  errorRate?: number;
+}
+
+export interface ProviderMetrics {
+  requestCount: number;
+  avgDuration: number;
+  errorRate: number;
+  lastSuccess: number;
+  totalEmbeddings: number;
+  cacheHitRate?: number;
+}

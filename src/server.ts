@@ -217,6 +217,20 @@ export class CortexMCPServer {
       res.json(this.stageTracker.getStatusData());
     });
 
+    // Enhanced metrics endpoint for embedding providers
+    app.get('/metrics/embeddings', async (req: Request, res: Response) => {
+      try {
+        const metrics = await this.getEmbeddingMetrics();
+        res.json(metrics);
+      } catch (error) {
+        this.logger.error('Error getting embedding metrics', { error: error instanceof Error ? error.message : String(error) });
+        res.status(500).json({ 
+          error: 'Failed to get embedding metrics',
+          message: error instanceof Error ? error.message : String(error)
+        });
+      }
+    });
+
     // MCP endpoint for JSON-RPC communication
     app.post('/mcp', async (req: Request, res: Response) => {
       try {
@@ -335,6 +349,127 @@ export class CortexMCPServer {
         resolve();
       });
     });
+  }
+
+  private async getEmbeddingMetrics() {
+    const metrics = {
+      timestamp: new Date().toISOString(),
+      providers: {} as any,
+      system: {
+        uptime: process.uptime(),
+        totalChunks: 0,
+        cacheHitRate: 0,
+        storageSync: {
+          lastLocalSync: null as string | null,
+          lastGlobalSync: null as string | null
+        }
+      },
+      performance: {
+        queryResponseTime: {
+          p50: 0,
+          p95: 0,
+          p99: 0
+        },
+        throughput: 0
+      }
+    };
+
+    try {
+      // Try to get metrics from the indexer's unified embedder if available
+      const unifiedEmbedder = (this.indexer as any).unifiedEmbedder;
+      
+      if (unifiedEmbedder) {
+        // Get basic provider metrics
+        const health = await unifiedEmbedder.getHealth();
+        const providerMetrics = await unifiedEmbedder.getMetrics();
+        
+        metrics.providers[unifiedEmbedder.providerId] = {
+          health: health.status,
+          details: health.details,
+          uptime: health.uptime,
+          errorRate: health.errorRate,
+          requestCount: providerMetrics.requestCount,
+          avgDuration: providerMetrics.avgDuration,
+          totalEmbeddings: providerMetrics.totalEmbeddings,
+          lastSuccess: new Date(providerMetrics.lastSuccess).toISOString()
+        };
+
+        // Add provider-specific metrics
+        if (unifiedEmbedder.providerId.includes('cloudflare')) {
+          // CloudflareAI specific metrics
+          try {
+            const circuitBreakerStats = unifiedEmbedder.getCircuitBreakerStats();
+            const rateLimiterStats = unifiedEmbedder.getRateLimiterStats();
+            
+            metrics.providers[unifiedEmbedder.providerId] = {
+              ...metrics.providers[unifiedEmbedder.providerId],
+              circuitBreakerState: circuitBreakerStats.state,
+              rateLimitRemaining: rateLimiterStats.available,
+              rateLimitCapacity: rateLimiterStats.capacity,
+              failures: circuitBreakerStats.failures,
+              isHealthy: circuitBreakerStats.isHealthy
+            };
+          } catch (error) {
+            this.logger.warn('Could not get Cloudflare-specific metrics', { error });
+          }
+        } else if (unifiedEmbedder.providerId.includes('process-pool')) {
+          // ProcessPool specific metrics
+          try {
+            const poolStatus = unifiedEmbedder.getPoolStatus();
+            const cacheStats = unifiedEmbedder.getCacheStats();
+            
+            metrics.providers[unifiedEmbedder.providerId] = {
+              ...metrics.providers[unifiedEmbedder.providerId],
+              activeProcesses: poolStatus.activeProcesses,
+              resourceUtilization: {
+                cpuConstrained: poolStatus.cpuConstrained,
+                memoryConstrained: poolStatus.memoryConstrained
+              },
+              cacheHitRate: cacheStats.hitRate,
+              cacheSize: cacheStats.size,
+              memoryUsage: cacheStats.memoryMB
+            };
+            
+            metrics.system.cacheHitRate = cacheStats.hitRate;
+          } catch (error) {
+            this.logger.warn('Could not get ProcessPool-specific metrics', { error });
+          }
+        }
+      }
+
+      // Get vector store information
+      try {
+        const vectorStore = (this.indexer as any).vectorStore;
+        if (vectorStore) {
+          metrics.system.totalChunks = vectorStore.getChunkCount ? vectorStore.getChunkCount() : 0;
+          
+          // Get storage sync information
+          const storageInfo = await vectorStore.getStorageInfo();
+          if (storageInfo) {
+            metrics.system.storageSync = {
+              lastLocalSync: storageInfo.local.lastModified?.toISOString() || null,
+              lastGlobalSync: storageInfo.global.lastModified?.toISOString() || null
+            };
+          }
+        }
+      } catch (error) {
+        this.logger.warn('Could not get vector store metrics', { error });
+      }
+
+      // Add startup stage information  
+      const currentStage = this.stageTracker.getCurrentStage();
+      const progress = this.stageTracker.getProgress();
+      
+      (metrics.system as any).startupStage = currentStage?.name || 'unknown';
+      (metrics.system as any).startupProgress = progress.overallProgress;
+      (metrics.system as any).isReady = this.stageTracker.isReady();
+
+    } catch (error) {
+      this.logger.error('Error collecting embedding metrics', { error });
+      throw error;
+    }
+
+    return metrics;
   }
 
   async stop(): Promise<void> {

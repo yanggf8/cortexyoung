@@ -3,7 +3,7 @@ import { spawn, ChildProcess } from 'child_process';
 import * as path from 'path';
 import * as os from 'os';
 import * as crypto from 'crypto';
-import { CodeChunk } from './types';
+import { CodeChunk, IEmbedder, EmbedOptions, EmbeddingResult as IEmbeddingResult, EmbeddingMetadata, PerformanceStats, ProviderHealth, ProviderMetrics } from './types';
 
 interface EmbeddingTask {
   chunks: CodeChunk[];
@@ -12,7 +12,8 @@ interface EmbeddingTask {
   timestamp: number;
 }
 
-interface EmbeddingResult {
+// Internal embedding result (renamed to avoid conflict with IEmbedder interface)
+interface ProcessEmbeddingResult {
   embedding: number[];
   originalIndex: number;
   timestamp: number;
@@ -118,9 +119,24 @@ interface AdaptivePoolConfig {
   growthPhase: 'starting' | 'gradual' | 'constrained' | 'cautious' | 'completed';
 }
 
-export class ProcessPoolEmbedder {
+export class ProcessPoolEmbedder implements IEmbedder {
+  public readonly providerId = "local.process-pool.bge-small-v1.5";
+  public readonly modelId = "@local/bge-small-en-v1.5";
+  public readonly dimensions = 384;
+  public readonly maxBatchSize = 800;
+  public readonly normalization = "l2" as const;
+  
+  // Internal metrics tracking for IEmbedder interface
+  private interfaceMetrics = {
+    requestCount: 0,
+    totalDuration: 0,
+    errorCount: 0,
+    lastSuccess: 0,
+    totalEmbeddings: 0,
+    startTime: Date.now()
+  };
   private processes: ProcessInstance[] = [];
-  private queue: fastq.queueAsPromised<EmbeddingTask, EmbeddingResult[]>;
+  private queue: fastq.queueAsPromised<EmbeddingTask, ProcessEmbeddingResult[]>;
   private processCount: number;
   private isInitialized = false;
   private embeddingCache: Map<string, CachedEmbedding> = new Map(); // Shared cache across all processes
@@ -1169,10 +1185,10 @@ export class ProcessPoolEmbedder {
     });
   }
 
-  private async retryFailedBatch(chunks: CodeChunk[], originalBatchIndex: number): Promise<EmbeddingResult[]> {
+  private async retryFailedBatch(chunks: CodeChunk[], originalBatchIndex: number): Promise<ProcessEmbeddingResult[]> {
     // Use recovery batch size for retry
     const retryBatchSize = this.adaptiveBatch.failureRecoverySize || 25;
-    const results: EmbeddingResult[] = [];
+    const results: ProcessEmbeddingResult[] = [];
     
     // Process in smaller sub-batches
     for (let i = 0; i < chunks.length; i += retryBatchSize) {
@@ -1814,7 +1830,7 @@ export class ProcessPoolEmbedder {
   }
 
   // FastQ consumer function - processes a batch of chunks per task
-  private async processEmbeddingTask(task: EmbeddingTask): Promise<EmbeddingResult[]> {
+  private async processEmbeddingTask(task: EmbeddingTask): Promise<ProcessEmbeddingResult[]> {
     // Check cache first - this is the key improvement!
     const { cached, uncachedIndices } = this.checkCache(task.chunks);
     const cacheHits = cached.filter(emb => emb !== null).length;
@@ -2012,7 +2028,7 @@ export class ProcessPoolEmbedder {
     }
     
     // Map results back to individual chunks with original indices
-    const batchResults: EmbeddingResult[] = [];
+    const batchResults: ProcessEmbeddingResult[] = [];
     
     for (let i = 0; i < task.chunks.length; i++) {
       batchResults.push({
@@ -2059,7 +2075,7 @@ export class ProcessPoolEmbedder {
     console.log(`🔄 Created ${batches.length} batches for ${this.processCount} processes`);
     
     // Create tasks for each batch
-    const tasks: Promise<EmbeddingResult[]>[] = [];
+    const tasks: Promise<ProcessEmbeddingResult[]>[] = [];
     
     for (let i = 0; i < batches.length; i++) {
       const batch = batches[i];
@@ -2079,7 +2095,7 @@ export class ProcessPoolEmbedder {
     const batchResults = await Promise.allSettled(tasks);
     
     // Handle failed batches by retrying with smaller chunks
-    const successfulResults: EmbeddingResult[][] = [];
+    const successfulResults: ProcessEmbeddingResult[][] = [];
     const failedBatches: { batchIndex: number, chunks: CodeChunk[], error: any }[] = [];
     
     batchResults.forEach((result, index) => {
@@ -2106,7 +2122,7 @@ export class ProcessPoolEmbedder {
       } catch (retryError) {
         console.error(`❌ Final retry failed for batch ${failedBatch.batchIndex}:`, retryError);
         // Add empty results to maintain indexing
-        const emptyResults: EmbeddingResult[] = failedBatch.chunks.map((chunk, idx) => ({
+        const emptyResults: ProcessEmbeddingResult[] = failedBatch.chunks.map((chunk, idx) => ({
           originalIndex: failedBatch.batchIndex * this.adaptiveBatch.currentSize + idx,
           embedding: new Array(384).fill(0), // Zero embedding as fallback
           timestamp: Date.now(),
@@ -2121,7 +2137,7 @@ export class ProcessPoolEmbedder {
     }
     
     // Flatten successful results
-    const allResults: EmbeddingResult[] = [];
+    const allResults: ProcessEmbeddingResult[] = [];
     successfulResults.forEach(batchResult => {
       allResults.push(...batchResult);
     });
@@ -2157,7 +2173,7 @@ export class ProcessPoolEmbedder {
     return parts.join(' ');
   }
 
-  private printBatchStats(batchResults: EmbeddingResult[][]): void {
+  private printBatchStats(batchResults: ProcessEmbeddingResult[][]): void {
     console.log('\n📊 Process Pool Statistics:');
     console.log('━'.repeat(50));
     
@@ -2372,6 +2388,149 @@ export class ProcessPoolEmbedder {
         memoryMB: m.memoryPeak,
         success: m.success
       }))
+    };
+  }
+
+  // IEmbedder interface implementation
+  async embedBatch(texts: string[], options?: EmbedOptions): Promise<IEmbeddingResult> {
+    const startTime = Date.now();
+    const startMemory = process.memoryUsage().heapUsed;
+    
+    this.interfaceMetrics.requestCount++;
+    
+    try {
+      // Convert texts to CodeChunk format for internal processing
+      const chunks: CodeChunk[] = texts.map((text, index) => ({
+        chunk_id: `embed_${Date.now()}_${index}`,
+        file_path: options?.requestId || 'batch_request',
+        content: text,
+        content_hash: crypto.createHash('sha256').update(text).digest('hex'),
+        chunk_type: 'function' as const,
+        start_line: 1,
+        end_line: 1,
+        embedding: [], // Will be filled by processAllEmbeddings
+        relationships: { calls: [], called_by: [], imports: [], exports: [], data_flow: [] },
+        git_metadata: {
+          last_modified_commit: '',
+          commit_author: '',
+          commit_message: '',
+          commit_date: '',
+          file_history_length: 0,
+          co_change_files: []
+        },
+        language_metadata: {
+          language: 'text',
+          complexity_score: 0,
+          dependencies: [],
+          exports: []
+        },
+        usage_patterns: {
+          access_frequency: 0,
+          task_contexts: []
+        },
+        last_modified: new Date().toISOString()
+      }));
+      
+      // Process using existing method
+      const processedChunks = await this.processAllEmbeddings(chunks);
+      const embeddings = processedChunks.map(chunk => chunk.embedding);
+      
+      const duration = Date.now() - startTime;
+      const memoryDelta = Math.round((process.memoryUsage().heapUsed - startMemory) / 1024 / 1024);
+      
+      this.interfaceMetrics.totalDuration += duration;
+      this.interfaceMetrics.lastSuccess = Date.now();
+      this.interfaceMetrics.totalEmbeddings += embeddings.length;
+      
+      return {
+        embeddings,
+        metadata: {
+          providerId: this.providerId,
+          modelId: this.modelId,
+          batchSize: texts.length,
+          processedAt: Date.now(),
+          requestId: options?.requestId
+        },
+        performance: {
+          duration,
+          memoryDelta,
+          processId: this.processes[0]?.id,
+          cacheHits: this.cacheStats.hits,
+          retries: 0
+        }
+      };
+      
+    } catch (error) {
+      this.interfaceMetrics.errorCount++;
+      console.error('Error in ProcessPoolEmbedder.embedBatch:', error);
+      throw error;
+    }
+  }
+  
+  async getHealth(): Promise<ProviderHealth> {
+    try {
+      const readyProcesses = this.processes.filter(p => p.isReady).length;
+      const totalProcesses = this.processes.length;
+      const errorRate = this.interfaceMetrics.requestCount > 0 
+        ? this.interfaceMetrics.errorCount / this.interfaceMetrics.requestCount 
+        : 0;
+      
+      let status: "healthy" | "degraded" | "unhealthy" = "healthy";
+      let details = `${readyProcesses}/${totalProcesses} processes ready`;
+      
+      if (!this.isInitialized) {
+        status = "unhealthy";
+        details = "Process pool not initialized";
+      } else if (readyProcesses === 0) {
+        status = "unhealthy"; 
+        details = "No ready processes available";
+      } else if (readyProcesses < totalProcesses * 0.5 || errorRate > 0.1) {
+        status = "degraded";
+        details = `${readyProcesses}/${totalProcesses} processes ready, ${(errorRate * 100).toFixed(1)}% error rate`;
+      } else if (errorRate > 0.3) {
+        status = "unhealthy";
+        details = `High error rate: ${(errorRate * 100).toFixed(1)}%`;
+      }
+      
+      return {
+        status,
+        details,
+        lastCheck: Date.now(),
+        uptime: Date.now() - this.interfaceMetrics.startTime,
+        errorRate
+      };
+      
+    } catch (error) {
+      return {
+        status: "unhealthy",
+        details: `Health check failed: ${error instanceof Error ? error.message : String(error)}`,
+        lastCheck: Date.now(),
+        uptime: Date.now() - this.interfaceMetrics.startTime,
+        errorRate: 1.0
+      };
+    }
+  }
+  
+  async getMetrics(): Promise<ProviderMetrics> {
+    const avgDuration = this.interfaceMetrics.requestCount > 0 
+      ? this.interfaceMetrics.totalDuration / this.interfaceMetrics.requestCount 
+      : 0;
+      
+    const errorRate = this.interfaceMetrics.requestCount > 0 
+      ? this.interfaceMetrics.errorCount / this.interfaceMetrics.requestCount 
+      : 0;
+
+    const cacheHitRate = this.cacheStats.total > 0 
+      ? this.cacheStats.hits / this.cacheStats.total 
+      : 0;
+    
+    return {
+      requestCount: this.interfaceMetrics.requestCount,
+      avgDuration,
+      errorRate,
+      lastSuccess: this.interfaceMetrics.lastSuccess,
+      totalEmbeddings: this.interfaceMetrics.totalEmbeddings,
+      cacheHitRate
     };
   }
 }

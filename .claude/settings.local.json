@@ -12,7 +12,8 @@
       "Bash(npm run test:*)",
       "Bash(pgrep:*)",
       "Bash(npm run:*)",
-      "Bash(ls:*)"
+      "Bash(ls:*)",
+      "Bash(grep:*)"
     ],
     "deny": []
   }

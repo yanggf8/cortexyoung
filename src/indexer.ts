@@ -1,4 +1,4 @@
-import { CodeChunk, IndexRequest, IndexResponse, QueryRequest, QueryResponse } from './types';
+import { CodeChunk, IndexRequest, IndexResponse, QueryRequest, QueryResponse, IEmbedder } from './types';
 import { GitScanner } from './git-scanner';
 import { SmartChunker } from './chunker';
 import { EmbeddingGenerator } from './embedder';
@@ -10,7 +10,7 @@ import { ReindexAdvisor } from './reindex-advisor';
 import { UnifiedStorageCoordinator } from './unified-storage-coordinator';
 import { FastQEmbedder } from './fastq-embedder';
 import { ProcessPoolEmbedder } from './process-pool-embedder';
-import { CloudflareAIEmbedder } from './cloudflare-ai-embedder'; // Added import
+import { CloudflareAIEmbedder } from './cloudflare-ai-embedder';
 import { DependencyMapper } from './dependency-mapper';
 import * as os from 'os';
 
@@ -18,8 +18,7 @@ export class CodebaseIndexer {
   private gitScanner: GitScanner;
   private chunker: SmartChunker;
   private embedder: EmbeddingGenerator;
-  private processPoolEmbedder?: ProcessPoolEmbedder;
-  private cloudflareEmbedder?: CloudflareAIEmbedder; // Added field
+  private unifiedEmbedder?: IEmbedder; // Unified interface for all embedding providers
   private vectorStore: PersistentVectorStore;
   private searcher: SemanticSearcher;
   private dependencyMapper: DependencyMapper;
@@ -42,17 +41,18 @@ export class CodebaseIndexer {
   }
 
   /**
-   * Clean up resources, including process pool embedder
+   * Clean up resources for unified embedder
    */
   async cleanup(reason: string = 'cleanup'): Promise<void> {
-    if (this.processPoolEmbedder) {
-      console.log(`🧹 Cleaning up CodebaseIndexer process pool (reason: ${reason})...`);
-      await this.processPoolEmbedder.shutdown(reason);
-      this.processPoolEmbedder = undefined;
-    }
-    // Cloudflare embedder does not require cleanup, but we clear the instance
-    if (this.cloudflareEmbedder) {
-      this.cloudflareEmbedder = undefined;
+    if (this.unifiedEmbedder) {
+      console.log(`🧹 Cleaning up unified embedder (${this.unifiedEmbedder.providerId}, reason: ${reason})...`);
+      
+      // Only ProcessPoolEmbedder requires shutdown
+      if (this.unifiedEmbedder instanceof ProcessPoolEmbedder) {
+        await this.unifiedEmbedder.shutdown(reason);
+      }
+      
+      this.unifiedEmbedder = undefined;
     }
   }
 
@@ -312,25 +312,36 @@ export class CodebaseIndexer {
 
     let embeddedChunks: CodeChunk[];
 
-    if (embedderType === 'cloudflare') {
-      if (!this.cloudflareEmbedder) {
-        this.cloudflareEmbedder = new CloudflareAIEmbedder();
+    // Initialize unified embedder based on type
+    if (!this.unifiedEmbedder) {
+      this.unifiedEmbedder = embedderType === 'cloudflare' 
+        ? new CloudflareAIEmbedder()
+        : new ProcessPoolEmbedder();
+      
+      console.log(`🤖 Using unified embedder: ${this.unifiedEmbedder.providerId}`);
+    }
+    
+    try {
+      if (embedderType === 'cloudflare') {
+        // Use IEmbedder interface for Cloudflare
+        const texts = chunks.map(chunk => this.createEmbeddingText(chunk));
+        const result = await this.unifiedEmbedder.embedBatch(texts, { 
+          requestId: `index_${Date.now()}`,
+          priority: 'normal'
+        });
+        embeddedChunks = chunks.map((chunk, i) => ({ ...chunk, embedding: result.embeddings[i] }));
+        this.stageTracker?.completeStage('embedding_generation', `Generated embeddings for ${chunks.length} chunks using ${this.unifiedEmbedder.providerId}`);
+      } else {
+        // Use ProcessPoolEmbedder's existing method for backward compatibility during transition
+        const processPoolEmbedder = this.unifiedEmbedder as ProcessPoolEmbedder;
+        embeddedChunks = await processPoolEmbedder.processAllEmbeddings(chunks);
+        this.stageTracker?.completeStage('embedding_generation', `Generated embeddings for ${chunks.length} chunks using ${this.unifiedEmbedder.providerId}`);
       }
-      const texts = chunks.map(chunk => this.createEmbeddingText(chunk));
-      const embeddings = await this.cloudflareEmbedder.embed(texts);
-      embeddedChunks = chunks.map((chunk, i) => ({ ...chunk, embedding: embeddings[i] }));
-      this.stageTracker?.completeStage('embedding_generation', `Generated embeddings for ${chunks.length} chunks using Cloudflare AI`);
-    } else {
-      // Default to local ProcessPoolEmbedder
-      if (!this.processPoolEmbedder) {
-        this.processPoolEmbedder = new ProcessPoolEmbedder();
-      }
-      try {
-        embeddedChunks = await this.processPoolEmbedder.processAllEmbeddings(chunks);
-        this.stageTracker?.completeStage('embedding_generation', `Generated embeddings for ${chunks.length} chunks using process pool`);
-      } finally {
-        await this.processPoolEmbedder.shutdown();
-        this.processPoolEmbedder = undefined;
+    } finally {
+      // Only shutdown ProcessPoolEmbedder after use
+      if (this.unifiedEmbedder instanceof ProcessPoolEmbedder) {
+        await this.unifiedEmbedder.shutdown();
+        this.unifiedEmbedder = undefined;
       }
     }
 
