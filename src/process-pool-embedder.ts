@@ -73,7 +73,6 @@ interface AdaptiveBatchConfig {
   minSize: number;
   maxSize: number;
   stepSize: number;
-  memoryThresholdMB: number;
   performanceHistory: BatchPerformanceMetrics[];
   isOptimizing: boolean;
   optimalSize?: number;
@@ -434,17 +433,12 @@ export class ProcessPoolEmbedder {
     
     // Initialize adaptive batching system (will be updated with accurate reading)
     this.systemMemoryMB = Math.round(os.totalmem() / (1024 * 1024));
-    // Simple approach: Focus on Node.js heap hard limit
-    // Grow batch sizes until we approach the heap limit for maximum efficiency
-    const nodeHeapLimitMB = 4096; // Node.js default heap limit (~4GB)
-    const heapThresholdMB = nodeHeapLimitMB * 0.85; // Use 85% of heap limit as threshold
     
     this.adaptiveBatch = {
       currentSize: 400,    // Start with large batch size for efficiency
       minSize: 200,        // Higher minimum for better throughput
       maxSize: 800,        // Cap at 800 chunks as requested
       stepSize: 100,       // Large steps to find optimal size quickly
-      memoryThresholdMB: heapThresholdMB, // 85% of Node.js heap limit
       performanceHistory: [],
       isOptimizing: true,
       lastAdjustment: Date.now(),
@@ -463,10 +457,9 @@ export class ProcessPoolEmbedder {
     console.log(`🚀 Optimized chunk sizing strategy:`);
     console.log(`  Starting batch size: ${this.adaptiveBatch.currentSize} chunks`);
     console.log(`  Max batch size: ${this.adaptiveBatch.maxSize} chunks`);
-    console.log(`  Memory threshold: ${heapThresholdMB}MB (85% of ${nodeHeapLimitMB}MB heap limit)`);
     console.log(`  Strategy: Start large, optimize between ${this.adaptiveBatch.minSize}-${this.adaptiveBatch.maxSize} chunks`);
     
-    console.log(`🎯 Adaptive Batching: Start=${this.adaptiveBatch.currentSize}, Range=${this.adaptiveBatch.minSize}-${this.adaptiveBatch.maxSize}, Threshold=${Math.round(this.adaptiveBatch.memoryThresholdMB)}MB`);
+    console.log(`🎯 Adaptive Batching: Start=${this.adaptiveBatch.currentSize}, Range=${this.adaptiveBatch.minSize}-${this.adaptiveBatch.maxSize} chunks`);
     
     // Create fastq queue - consumer count matches initial process count
     this.queue = fastq.promise(this.processEmbeddingTask.bind(this), this.processCount);
@@ -497,16 +490,24 @@ export class ProcessPoolEmbedder {
       console.log(`${memoryStatusIcon} Memory: ${memInfo.usedMB}MB used / ${memInfo.totalMB}MB total (${memInfo.usagePercent.toFixed(1)}%)`);
       console.log(`${cpuStatusIcon} CPU: ${cpuInfo.usagePercent.toFixed(1)}% used (${cpuInfo.coreCount} cores, load: ${cpuInfo.loadAverage1min.toFixed(2)})`);
       
-      // Show resource projections
+      // Show resource projections - look ahead 2 steps only for adaptive growth
       const currentProcesses = this.adaptivePool.currentProcesses;
       const maxProcesses = this.adaptivePool.maxProcesses;
       const memoryPerProcess = memInfo.usedMB / Math.max(currentProcesses, 1);
-      const projectedMemoryAtMax = memoryPerProcess * maxProcesses;
-      const projectedMemoryPercent = (projectedMemoryAtMax / memInfo.totalMB) * 100;
       
-      console.log(`📊 Resource Projections:`);
-      console.log(`   Memory: ${currentProcesses} processes using ~${memoryPerProcess.toFixed(0)}MB each`);
-      console.log(`   At max (${maxProcesses} processes): ~${projectedMemoryAtMax.toFixed(0)}MB (${projectedMemoryPercent.toFixed(1)}%)`);
+      // Project next 2 steps for intelligent growth decisions
+      const nextStep = Math.min(currentProcesses + 1, maxProcesses);
+      const nextStepMemory = memoryPerProcess * nextStep;
+      const nextStepMemoryPercent = (nextStepMemory / memInfo.totalMB) * 100;
+      
+      const twoSteps = Math.min(currentProcesses + 2, maxProcesses);
+      const twoStepsMemory = memoryPerProcess * twoSteps;
+      const twoStepsMemoryPercent = (twoStepsMemory / memInfo.totalMB) * 100;
+      
+      console.log(`📊 Resource Projections (adaptive lookahead):`);
+      console.log(`   Current: ${currentProcesses} processes using ~${memoryPerProcess.toFixed(0)}MB each (${memInfo.usagePercent.toFixed(1)}%)`);
+      console.log(`   Next step (${nextStep} processes): ~${nextStepMemory.toFixed(0)}MB (${nextStepMemoryPercent.toFixed(1)}%)`);
+      console.log(`   Two steps (${twoSteps} processes): ~${twoStepsMemory.toFixed(0)}MB (${twoStepsMemoryPercent.toFixed(1)}%)`);
       console.log(`   CPU cores available: ${Math.max(0, cpuInfo.coreCount - Math.floor(cpuInfo.coreCount * cpuInfo.usagePercent / 100))} of ${cpuInfo.coreCount}`);
       
       // Check memory constraints (same as before)
@@ -521,7 +522,7 @@ export class ProcessPoolEmbedder {
         this.adaptivePool.isMemoryConstrained = false;
       }
       
-      // Check CPU constraints (NEW - same thresholds as memory)
+      // Check CPU constraints (NEW - adaptive CPU thresholds 69%/49%)
       if (cpuInfo.usagePercent >= this.adaptivePool.cpuStopThreshold) {
         if (!this.adaptivePool.isCpuConstrained) {
           console.log(`⚠️  CPU threshold reached (${cpuInfo.usagePercent.toFixed(1)}% ≥ ${this.adaptivePool.cpuStopThreshold}%) - CPU constrained`);
@@ -540,16 +541,20 @@ export class ProcessPoolEmbedder {
                      this.adaptivePool.growthPhase !== 'completed';
       
       if (canGrow) {
-        // Only grow if BOTH memory and CPU projections are reasonable
-        const memoryProjectionOK = projectedMemoryPercent < 75;
-        const cpuProjectionOK = cpuInfo.usagePercent < 60; // Conservative CPU check
+        // Intelligent growth decision: Check next step + look ahead 2 steps for safety
+        const nextStepMemoryOK = nextStepMemoryPercent < this.adaptivePool.memoryStopThreshold; // Next step under 78%
+        const twoStepsMemorySafe = twoStepsMemoryPercent < this.adaptivePool.memoryStopThreshold * 0.9; // 2 steps under 70% for safety margin
+        const cpuProjectionOK = cpuInfo.usagePercent < this.adaptivePool.cpuStopThreshold * 0.8; // CPU under 55% for growth
         
-        if (memoryProjectionOK && cpuProjectionOK) {
-          console.log(`📈 Resources safe (Mem: ${projectedMemoryPercent.toFixed(1)}%, CPU: ${cpuInfo.usagePercent.toFixed(1)}%) - Growing pool`);
+        if (nextStepMemoryOK && twoStepsMemorySafe && cpuProjectionOK) {
+          console.log(`📈 Growth safe - Next: ${nextStepMemoryPercent.toFixed(1)}%, Two steps: ${twoStepsMemoryPercent.toFixed(1)}%, CPU: ${cpuInfo.usagePercent.toFixed(1)}%`);
           await this.growProcessPool();
         } else {
-          const reason = !memoryProjectionOK ? `Memory high (${projectedMemoryPercent.toFixed(1)}%)` : `CPU high (${cpuInfo.usagePercent.toFixed(1)}%)`;
-          console.log(`⚠️  ${reason} - Delaying growth`);
+          const reasons = [];
+          if (!nextStepMemoryOK) reasons.push(`Next step high (${nextStepMemoryPercent.toFixed(1)}%)`);
+          if (!twoStepsMemorySafe) reasons.push(`Two steps high (${twoStepsMemoryPercent.toFixed(1)}%)`);
+          if (!cpuProjectionOK) reasons.push(`CPU high (${cpuInfo.usagePercent.toFixed(1)}%)`);
+          console.log(`⚠️  ${reasons.join(', ')} - Delaying growth`);
           this.adaptivePool.growthPhase = 'cautious';
         }
       } else if (!resourcesOK) {
@@ -1632,11 +1637,9 @@ export class ProcessPoolEmbedder {
       return;
     }
     
-    // Memory pressure check using actual system-wide memory
-    // Account for the fact that each child process uses ~327MB RSS (not just 7MB heap)
-    const actualMemoryThreshold = config.memoryThresholdMB;
-    
-    if (latestMetrics.memoryPeak > actualMemoryThreshold) {
+    // Memory pressure check - use system memory percentage instead of absolute MB
+    // If system memory is constrained, reduce batch size to lower memory pressure
+    if (this.adaptivePool.isMemoryConstrained) {
       const reduction = Math.max(config.stepSize, Math.floor(config.currentSize * 0.2));
       const oldSize = config.currentSize;
       config.currentSize = Math.max(config.minSize, config.currentSize - reduction);
@@ -1644,8 +1647,7 @@ export class ProcessPoolEmbedder {
       config.lastAdjustment = Date.now();
       config.stableCount = 0; // Reset stability counter
       
-      console.log(`⚠️ Memory pressure detected!`);
-      console.log(`  System memory: ${latestMetrics.memoryPeak}MB / ${actualMemoryThreshold}MB threshold`);
+      console.log(`⚠️ Memory pressure detected - system memory constrained!`);
       console.log(`  Reducing batch size: ${oldSize} → ${config.currentSize} (-${reduction} chunks)`);
       return;
     }
@@ -2302,7 +2304,6 @@ export class ProcessPoolEmbedder {
       lastDirection: this.adaptiveBatch.lastDirection,
       minSize: this.adaptiveBatch.minSize,
       maxSize: this.adaptiveBatch.maxSize,
-      memoryThresholdMB: this.adaptiveBatch.memoryThresholdMB,
       performanceSamples: this.adaptiveBatch.performanceHistory.length,
       avgThroughput: avgThroughput.toFixed(1) + ' chunks/s',
       

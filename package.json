@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "main": "dist/index.js",
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && cp src/*.js dist/ 2>/dev/null || true",
     "dev": "ts-node src/index.ts",
     "demo": "ts-node src/index.ts",
     "demo:reindex": "ts-node src/index.ts --reindex",

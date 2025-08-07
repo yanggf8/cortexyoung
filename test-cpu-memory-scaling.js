@@ -25,7 +25,7 @@ async function testCpuMemoryScaling() {
     
     console.log('\n✅ CPU + Memory adaptive scaling test completed!');
     console.log('\n📋 Features tested:');
-    console.log('✅ CPU monitoring with same thresholds as memory (78% stop, 69% resume)');
+    console.log('✅ CPU monitoring with adaptive thresholds (69% stop, 49% resume)');
     console.log('✅ Memory monitoring with existing thresholds');
     console.log('✅ Dual resource constraint checking');
     console.log('✅ Pool growth decisions based on both CPU and memory');
