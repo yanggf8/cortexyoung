@@ -21,7 +21,7 @@ export class EmbeddingGenerator {
         console.log(`🔄 Initializing BGE-small-en-v1.5 embedding model...`);
         this.embedder = await FlagEmbedding.init({
           model: this.modelName,
-          maxLength: 512,
+          maxLength: 400,
           cacheDir: './.fastembed_cache'
         });
         

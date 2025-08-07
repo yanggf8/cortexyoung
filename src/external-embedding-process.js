@@ -30,7 +30,7 @@ async function initializeEmbedder(id) {
     // Each process gets its own complete BGE instance
     embedder = await FlagEmbedding.init({
       model: EmbeddingModel.BGESmallENV15,
-      maxLength: 512,
+      maxLength: 400,
       cacheDir: './.fastembed_cache'
     });
     

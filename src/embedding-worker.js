@@ -10,7 +10,7 @@ async function initializeEmbedder() {
     // Option 1: Each worker creates its own InferenceSession
     embedder = await FlagEmbedding.init({
       model: EmbeddingModel.BGESmallENV15,
-      maxLength: 512,
+      maxLength: 400,
       cacheDir: './.fastembed_cache'
     });
     console.log(`[Worker ${workerId}] Model ready with dedicated InferenceSession`);

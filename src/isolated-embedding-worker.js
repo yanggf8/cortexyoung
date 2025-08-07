@@ -26,7 +26,7 @@ async function createIsolatedEmbedder() {
     // This includes separate ONNX InferenceSession, avoiding thread safety issues
     const isolatedEmbedder = await FlagEmbedding.init({
       model: EmbeddingModel.BGESmallENV15,
-      maxLength: 512,
+      maxLength: 400,
       cacheDir: './.fastembed_cache'  // Shared cache for model files, separate sessions
     });
     
