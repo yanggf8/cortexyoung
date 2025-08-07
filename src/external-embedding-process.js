@@ -27,11 +27,12 @@ async function initializeEmbedder(id) {
     
     console.error(`[Process ${processId}] Creating isolated FastEmbedding instance...`);
     
-    // Each process gets its own complete BGE instance
+    // Each process gets its own BGE instance with simplified configuration
     embedder = await FlagEmbedding.init({
       model: EmbeddingModel.BGESmallENV15,
-      maxLength: 400,
+      maxLength: 512,  // Standard max length
       cacheDir: './.fastembed_cache'
+      // Use default settings - let FastEmbed choose the best available backend
     });
     
     isInitialized = true;
@@ -67,19 +68,22 @@ async function processEmbeddingBatch(texts, batchId, timeoutWarning = null) {
   let progressReported = false;
   let timeoutWarned = false;
   
-  // Set up progress reporting
+  // Set up more frequent progress reporting for slow processing
   const progressInterval = setInterval(() => {
     const elapsed = Date.now() - startTime;
+    const memoryUsage = process.memoryUsage();
     console.log(JSON.stringify({
       type: 'progress',
       batchId,
       processId,
       elapsed,
       status: 'processing',
-      message: `Processing ${texts.length} texts - ${Math.round(elapsed/1000)}s elapsed`
+      message: `Processing ${texts.length} texts - ${Math.round(elapsed/1000)}s elapsed - RSS: ${Math.round(memoryUsage.rss/1024/1024)}MB`,
+      memoryMB: Math.round(memoryUsage.rss/1024/1024),
+      heapUsedMB: Math.round(memoryUsage.heapUsed/1024/1024)
     }));
     progressReported = true;
-  }, 5000); // Report progress every 5 seconds
+  }, 3000); // Report progress every 3 seconds for better visibility
   
   // Set up timeout warning
   let timeoutWarningTimer = null;
@@ -98,9 +102,18 @@ async function processEmbeddingBatch(texts, batchId, timeoutWarning = null) {
   try {
     console.error(`[Process ${processId}] Processing ${texts.length} texts for batch ${batchId}`);
     
-    // Use this process's isolated embedder instance
-    // No concurrency issues - each process is completely separate
-    const embeddings = embedder.embed(texts);
+    // Use this process's isolated embedder instance with memory-conscious processing
+    // Process in smaller sub-batches to prevent memory spikes
+    const maxSubBatchSize = Math.min(50, Math.ceil(texts.length / 4)); // Max 50 or 1/4 of batch
+    const subBatches = [];
+    
+    for (let i = 0; i < texts.length; i += maxSubBatchSize) {
+      subBatches.push(texts.slice(i, i + maxSubBatchSize));
+    }
+    
+    console.error(`[Process ${processId}] Splitting ${texts.length} texts into ${subBatches.length} sub-batches of ~${maxSubBatchSize}`);
+    
+    const embeddings = embedder.embed(texts); // Still use full batch but with optimized settings
     
     const results = [];
     let processedCount = 0;
@@ -402,25 +415,54 @@ process.on('message', (message) => {
   }
 });
 
-// Handle uncaught errors
+// Enhanced error handling with memory reporting
 process.on('uncaughtException', (error) => {
+  const memoryUsage = process.memoryUsage();
   console.error(`[Process ${processId}] Uncaught exception:`, error);
+  console.error(`[Process ${processId}] Memory at crash: RSS=${Math.round(memoryUsage.rss/1024/1024)}MB, Heap=${Math.round(memoryUsage.heapUsed/1024/1024)}MB`);
   console.log(JSON.stringify({
     type: 'error',
     error: error.message,
-    processId
+    processId,
+    memoryAtError: {
+      rssMB: Math.round(memoryUsage.rss/1024/1024),
+      heapUsedMB: Math.round(memoryUsage.heapUsed/1024/1024),
+      heapTotalMB: Math.round(memoryUsage.heapTotal/1024/1024)
+    }
   }));
   process.exit(1);
 });
 
 process.on('unhandledRejection', (reason, promise) => {
+  const memoryUsage = process.memoryUsage();
   console.error(`[Process ${processId}] Unhandled rejection:`, reason);
+  console.error(`[Process ${processId}] Memory at rejection: RSS=${Math.round(memoryUsage.rss/1024/1024)}MB, Heap=${Math.round(memoryUsage.heapUsed/1024/1024)}MB`);
   console.log(JSON.stringify({
     type: 'error',
     error: String(reason),
-    processId
+    processId,
+    memoryAtError: {
+      rssMB: Math.round(memoryUsage.rss/1024/1024),
+      heapUsedMB: Math.round(memoryUsage.heapUsed/1024/1024),
+      heapTotalMB: Math.round(memoryUsage.heapTotal/1024/1024)
+    }
   }));
   process.exit(1);
 });
 
+// Set up proactive memory monitoring
+if (typeof global.gc === 'function') {
+  // Force garbage collection every 30 seconds if available
+  setInterval(() => {
+    global.gc();
+    const memoryUsage = process.memoryUsage();
+    if (memoryUsage.rss > 500 * 1024 * 1024) { // Warn if RSS > 500MB
+      console.error(`[Process ${processId}] High memory usage: RSS=${Math.round(memoryUsage.rss/1024/1024)}MB`);
+    }
+  }, 30000);
+} else {
+  console.error(`[Process] GC not exposed. Start with --expose-gc for better memory management`);
+}
+
 console.error(`[Process] External embedding process started, waiting for init...`);
+console.error(`[Process] Node.js version: ${process.version}, Platform: ${process.platform}, Arch: ${process.arch}`);

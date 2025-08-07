@@ -233,7 +233,7 @@ export class CodebaseIndexer {
     
     return {
       status: 'success',
-      chunks_processed: newChunks.length,
+      chunks_processed: delta.added.length,
       time_taken_ms: timeTaken
     };
   }

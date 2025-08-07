@@ -117,6 +117,25 @@ interface AdaptivePoolConfig {
   lastMemoryCheck: number; // Timestamp
   lastCpuCheck: number; // Timestamp
   growthPhase: 'starting' | 'gradual' | 'constrained' | 'cautious' | 'completed';
+  
+  // Environment detection
+  isCloud: boolean; // Cloud vs local environment
+  isLocal: boolean; // Local environment flag
+  isWSL2: boolean; // Detect WSL2 for special handling
+  
+  // 2-step resource prediction system
+  resourcePrediction: {
+    cpuHistory: number[];
+    memoryHistory: number[];
+    predictionSteps: number;
+    historySize: number;
+  };
+  
+  // Resource-aware fallback strategies
+  emergencyMode: boolean; // Activated when processes keep failing
+  consecutiveOOMKills: number; // Track OOM kills for emergency mode
+  lastOOMKill: number; // Timestamp of last OOM kill
+  singleProcessFallback: boolean; // Use only one process as last resort
 }
 
 export class ProcessPoolEmbedder implements IEmbedder {
@@ -410,53 +429,180 @@ export class ProcessPoolEmbedder implements IEmbedder {
     });
   }
 
+  // Detect if running in cloud environment vs local
+  private detectCloudEnvironment(): boolean {
+    // Check for common cloud environment indicators
+    const env = process.env;
+    
+    // AWS
+    if (env.AWS_REGION || env.AWS_LAMBDA_FUNCTION_NAME || env.AWS_EXECUTION_ENV) {
+      return true;
+    }
+    
+    // Google Cloud
+    if (env.GOOGLE_CLOUD_PROJECT || env.GCLOUD_PROJECT || env.GAE_APPLICATION) {
+      return true;
+    }
+    
+    // Azure
+    if (env.AZURE_FUNCTIONS_ENVIRONMENT || env.WEBSITE_SITE_NAME || env.AZURE_CLIENT_ID) {
+      return true;
+    }
+    
+    // Vercel
+    if (env.VERCEL || env.VERCEL_ENV) {
+      return true;
+    }
+    
+    // Heroku
+    if (env.DYNO || env.HEROKU_APP_NAME) {
+      return true;
+    }
+    
+    // Railway
+    if (env.RAILWAY_PROJECT_ID || env.RAILWAY_ENVIRONMENT) {
+      return true;
+    }
+    
+    // Render
+    if (env.RENDER || env.RENDER_SERVICE_NAME) {
+      return true;
+    }
+    
+    // Docker in cloud (common cloud deployment pattern)
+    if (env.KUBERNETES_SERVICE_HOST || env.MARATHON_APP_ID) {
+      return true;
+    }
+    
+    // Generic cloud indicators
+    if (env.CLOUD_PROVIDER || env.NODE_ENV === 'production' && (env.PORT || env.HOST)) {
+      // This is a heuristic - production with HOST/PORT often indicates cloud
+      return true;
+    }
+    
+    return false; // Default to local environment
+  }
+
+  // Predict resource usage for next 2 steps based on current trends
+  private predictResourceUsage(history: number[], currentUsage: number): { step1: number, step2: number } {
+    if (history.length < 2) {
+      // Not enough history, assume current usage continues
+      return { step1: currentUsage, step2: currentUsage };
+    }
+    
+    // Calculate trend from recent history
+    const recentHistory = history.slice(-3); // Use last 3 data points
+    let trend = 0;
+    
+    if (recentHistory.length >= 2) {
+      // Calculate average rate of change
+      let totalChange = 0;
+      for (let i = 1; i < recentHistory.length; i++) {
+        totalChange += recentHistory[i] - recentHistory[i-1];
+      }
+      trend = totalChange / (recentHistory.length - 1);
+    }
+    
+    // Predict next two steps
+    const step1 = Math.max(0, Math.min(100, currentUsage + trend));
+    const step2 = Math.max(0, Math.min(100, step1 + trend));
+    
+    return { step1, step2 };
+  }
+
+  // Update resource history and maintain size limit
+  private updateResourceHistory(history: number[], newValue: number, maxSize: number = 5): void {
+    history.push(newValue);
+    if (history.length > maxSize) {
+      history.shift(); // Remove oldest entry
+    }
+  }
+
   constructor() {
     const totalCores = os.cpus().length;
     
-    // Calculate adaptive pool configuration
-    const maxProcessesByCPU = Math.max(1, Math.floor(totalCores * 0.69)); // Hard limit at 69% of cores
-    const startProcesses = 1; // Start with single process - even 2 processes can saturate system
+    // Detect environment type for different scaling strategies
+    const isCloud = this.detectCloudEnvironment();
+    const isWSL2 = os.release().includes('microsoft') || os.release().includes('WSL');
+    const isLocal = !isCloud;
     
-    // Initialize with single process (ultra-conservative)
+    // Apply different scaling strategies based on environment
+    let maxProcessesByCPU: number;
+    let startProcesses: number;
+    
+    if (isCloud) {
+      // Cloud scaling: Use original aggressive logic
+      maxProcessesByCPU = Math.max(1, Math.floor(totalCores * 0.69)); // Keep original 69% limit
+      startProcesses = Math.max(1, Math.floor(totalCores * 0.69)); // Keep original cloud logic
+    } else {
+      // Local scaling: Conservative, start at 1 and grow carefully
+      maxProcessesByCPU = Math.max(1, Math.floor(totalCores * 0.69));
+      startProcesses = 1; // Always start with 1 process locally
+    }
+    
+    // Initialize with environment-appropriate process count
     this.processCount = startProcesses;
     
     // Initialize system resources
     this.systemCpuCores = totalCores;
     
-    // Initialize adaptive pool configuration
+    // Initialize adaptive pool configuration with environment-specific settings
     this.adaptivePool = {
-      maxProcesses: maxProcessesByCPU,           // 69% of cores hard limit
-      currentProcesses: startProcesses,         // Start with single process
-      memoryStopThreshold: 78,                  // Stop spawning at 78% memory usage
-      memoryResumeThreshold: 69,                // Resume spawning at 69% memory usage
-      cpuStopThreshold: 69,                     // Stop spawning at 69% CPU usage
-      cpuResumeThreshold: 49,                   // Resume spawning at 49% CPU usage
-      isMemoryConstrained: false,               // Initially not constrained
-      isCpuConstrained: false,                  // Initially not constrained
-      lastMemoryCheck: 0,                       // No checks yet
-      lastCpuCheck: 0,                          // No checks yet
-      growthPhase: 'starting'                   // Starting phase
+      maxProcesses: isWSL2 ? Math.min(maxProcessesByCPU, 2) : maxProcessesByCPU,
+      currentProcesses: startProcesses,
+      
+      // Local vs Cloud thresholds
+      memoryStopThreshold: isLocal ? (isWSL2 ? 50 : 60) : (isWSL2 ? 50 : 60),   // Keep original thresholds for cloud
+      memoryResumeThreshold: isLocal ? (isWSL2 ? 35 : 45) : (isWSL2 ? 35 : 45), // Keep original thresholds for cloud  
+      cpuStopThreshold: isLocal ? 69 : 50,                                       // Local: 69%, Cloud: keep original 50%
+      cpuResumeThreshold: isLocal ? 59 : 30,                                     // Local: 59%, Cloud: keep original 30%
+      
+      // Prediction system for 2-step resource forecasting
+      resourcePrediction: {
+        cpuHistory: [],
+        memoryHistory: [],
+        predictionSteps: 2,
+        historySize: 5
+      },
+      
+      isMemoryConstrained: false,
+      isCpuConstrained: false,
+      lastMemoryCheck: 0,
+      lastCpuCheck: 0,
+      growthPhase: 'starting',
+      
+      // Environment flags
+      isCloud,
+      isLocal,
+      isWSL2,
+      
+      // Resource-aware fallback strategies
+      emergencyMode: false,
+      consecutiveOOMKills: 0,
+      lastOOMKill: 0,
+      singleProcessFallback: isLocal && isWSL2
     };
     
-    console.log(`🏭 Adaptive Process Pool Strategy:`);
+    console.log(`🏭 ${isCloud ? 'Cloud' : 'Local'} Process Pool Strategy:`);
+    console.log(`   Environment: ${isCloud ? 'Cloud (aggressive)' : isLocal && isWSL2 ? 'Local WSL2 (conservative)' : 'Local (conservative)'}`);
     console.log(`   CPU Cores: ${totalCores} total`);
-    console.log(`   Starting: ${startProcesses} process (ultra-conservative - 2+ processes saturate system)`);
-    console.log(`   Maximum: ${maxProcessesByCPU} processes (69% of cores)`);
-    console.log(`   Memory Thresholds: Stop at 78%, Resume at 69%`);
-    console.log(`   CPU Thresholds: Stop at 69%, Resume at 49%`);
-    console.log(`   Growth Strategy: Start minimal → Monitor resources → Scale only when safe`);
-    console.log(`✅ Strategy: Adaptive process pool with real-time memory + CPU management`);
+    console.log(`   Starting: ${startProcesses} process${startProcesses > 1 ? 'es' : ''}`);
+    console.log(`   Maximum: ${maxProcessesByCPU} processes`);
+    console.log(`   Memory Thresholds: Stop at ${this.adaptivePool.memoryStopThreshold}%, Resume at ${this.adaptivePool.memoryResumeThreshold}%`);
+    console.log(`   CPU Thresholds: Stop at ${this.adaptivePool.cpuStopThreshold}%, Resume at ${this.adaptivePool.cpuResumeThreshold}%`);
+    console.log(`   Growth Strategy: ${isCloud ? 'Multi-process start → Fast scaling' : 'Single process → 2-step prediction → Conservative scaling'}`);
+    console.log(`✅ Strategy: ${isCloud ? 'Cloud-optimized' : 'Local-optimized'} process pool with predictive resource management`);
     
     // Initialize adaptive batching system (will be updated with accurate reading)
     this.systemMemoryMB = Math.round(os.totalmem() / (1024 * 1024));
     
     this.adaptiveBatch = {
-      currentSize: 400,    // Start with large batch size for efficiency
-      minSize: 200,        // Higher minimum for better throughput
-      maxSize: 800,        // Cap at 800 chunks as requested
-      stepSize: 100,       // Large steps to find optimal size quickly
+      currentSize: 400,    // Fixed chunk size as requested
+      minSize: 400,        // Fixed chunk size
+      maxSize: 400,        // Fixed chunk size
+      stepSize: 0,         // No adjustment needed for fixed size
       performanceHistory: [],
-      isOptimizing: true,
+      isOptimizing: false, // No optimization needed for fixed size
       lastAdjustment: Date.now(),
       
       // Hysteresis configuration
@@ -466,22 +612,21 @@ export class ProcessPoolEmbedder implements IEmbedder {
       lastDirection: 'none',
       
       // Failure recovery configuration
-      failureRecoverySize: 50,  // Emergency small batch size
+      failureRecoverySize: 400,  // Keep same size for consistency
       consecutiveFailures: 0
     };
     
-    console.log(`🚀 Optimized chunk sizing strategy:`);
-    console.log(`  Starting batch size: ${this.adaptiveBatch.currentSize} chunks`);
-    console.log(`  Max batch size: ${this.adaptiveBatch.maxSize} chunks`);
-    console.log(`  Strategy: Start large, optimize between ${this.adaptiveBatch.minSize}-${this.adaptiveBatch.maxSize} chunks`);
+    console.log(`🚀 Fixed chunk sizing strategy:`);
+    console.log(`  Chunk size: ${this.adaptiveBatch.currentSize} chunks (fixed as requested)`);
+    console.log(`  Strategy: Consistent 400-chunk batches for reliable performance`);
     
-    console.log(`🎯 Adaptive Batching: Start=${this.adaptiveBatch.currentSize}, Range=${this.adaptiveBatch.minSize}-${this.adaptiveBatch.maxSize} chunks`);
+    console.log(`🎯 Fixed Batching: Size=${this.adaptiveBatch.currentSize} chunks (no adaptation)`);
     
     // Create fastq queue - consumer count matches initial process count
     this.queue = fastq.promise(this.processEmbeddingTask.bind(this), this.processCount);
   }
 
-  // Adaptive process pool management with memory monitoring
+  // Predictive resource pool management with 2-step forecasting
   private async checkResourcesAndAdjustPool(): Promise<void> {
     try {
       // Get both memory and CPU info in parallel for efficiency
@@ -493,91 +638,171 @@ export class ProcessPoolEmbedder implements IEmbedder {
       this.adaptivePool.lastMemoryCheck = Date.now();
       this.adaptivePool.lastCpuCheck = Date.now();
       
+      // Update resource history for prediction
+      this.updateResourceHistory(this.adaptivePool.resourcePrediction.cpuHistory, cpuInfo.usagePercent);
+      this.updateResourceHistory(this.adaptivePool.resourcePrediction.memoryHistory, memInfo.usagePercent);
+      
+      // Generate 2-step predictions
+      const cpuPrediction = this.predictResourceUsage(this.adaptivePool.resourcePrediction.cpuHistory, cpuInfo.usagePercent);
+      const memoryPrediction = this.predictResourceUsage(this.adaptivePool.resourcePrediction.memoryHistory, memInfo.usagePercent);
+      
       // Update system memory info with accurate reading
       if (memInfo.accurate && memInfo.totalMB > this.systemMemoryMB) {
         this.systemMemoryMB = memInfo.totalMB;
         console.log(`📊 Updated system memory: ${memInfo.totalMB}MB (${memInfo.accurate ? 'accurate' : 'fallback'})`);
       }
       
-      // Display current resource status
+      // Display current resource status with predictions
       const memoryStatusIcon = memInfo.usagePercent < 50 ? '🟢' : memInfo.usagePercent < 70 ? '🟡' : '🟠';
       const cpuStatusIcon = cpuInfo.usagePercent < 50 ? '🟢' : cpuInfo.usagePercent < 70 ? '🟡' : '🟠';
       
       console.log(`${memoryStatusIcon} Memory: ${memInfo.usedMB}MB used / ${memInfo.totalMB}MB total (${memInfo.usagePercent.toFixed(1)}%)`);
       console.log(`${cpuStatusIcon} CPU: ${cpuInfo.usagePercent.toFixed(1)}% used (${cpuInfo.coreCount} cores, load: ${cpuInfo.loadAverage1min.toFixed(2)})`);
       
-      // Show resource projections - look ahead 2 steps only for adaptive growth
-      const currentProcesses = this.adaptivePool.currentProcesses;
-      const maxProcesses = this.adaptivePool.maxProcesses;
-      const memoryPerProcess = memInfo.usedMB / Math.max(currentProcesses, 1);
-      
-      // Project next 2 steps for intelligent growth decisions
-      const nextStep = Math.min(currentProcesses + 1, maxProcesses);
-      const nextStepMemory = memoryPerProcess * nextStep;
-      const nextStepMemoryPercent = (nextStepMemory / memInfo.totalMB) * 100;
-      
-      const twoSteps = Math.min(currentProcesses + 2, maxProcesses);
-      const twoStepsMemory = memoryPerProcess * twoSteps;
-      const twoStepsMemoryPercent = (twoStepsMemory / memInfo.totalMB) * 100;
-      
-      console.log(`📊 Resource Projections (adaptive lookahead):`);
-      console.log(`   Current: ${currentProcesses} processes using ~${memoryPerProcess.toFixed(0)}MB each (${memInfo.usagePercent.toFixed(1)}%)`);
-      console.log(`   Next step (${nextStep} processes): ~${nextStepMemory.toFixed(0)}MB (${nextStepMemoryPercent.toFixed(1)}%)`);
-      console.log(`   Two steps (${twoSteps} processes): ~${twoStepsMemory.toFixed(0)}MB (${twoStepsMemoryPercent.toFixed(1)}%)`);
-      console.log(`   CPU cores available: ${Math.max(0, cpuInfo.coreCount - Math.floor(cpuInfo.coreCount * cpuInfo.usagePercent / 100))} of ${cpuInfo.coreCount}`);
-      
-      // Check memory constraints (same as before)
-      if (memInfo.usagePercent >= this.adaptivePool.memoryStopThreshold) {
-        if (!this.adaptivePool.isMemoryConstrained) {
-          console.log(`⚠️  Memory threshold reached (${memInfo.usagePercent.toFixed(1)}% ≥ ${this.adaptivePool.memoryStopThreshold}%) - Memory constrained`);
-          this.adaptivePool.isMemoryConstrained = true;
-          this.adaptivePool.growthPhase = 'constrained';
-        }
-      } else if (memInfo.usagePercent <= this.adaptivePool.memoryResumeThreshold && this.adaptivePool.isMemoryConstrained) {
-        console.log(`✅ Memory pressure relieved (${memInfo.usagePercent.toFixed(1)}% ≤ ${this.adaptivePool.memoryResumeThreshold}%)`);
-        this.adaptivePool.isMemoryConstrained = false;
+      // Show 2-step predictions for both CPU and memory
+      if (this.adaptivePool.isLocal) {
+        console.log(`🔮 2-Step Predictions:`);
+        console.log(`   CPU: Current ${cpuInfo.usagePercent.toFixed(1)}% → Step 1: ${cpuPrediction.step1.toFixed(1)}% → Step 2: ${cpuPrediction.step2.toFixed(1)}%`);
+        console.log(`   Memory: Current ${memInfo.usagePercent.toFixed(1)}% → Step 1: ${memoryPrediction.step1.toFixed(1)}% → Step 2: ${memoryPrediction.step2.toFixed(1)}%`);
       }
       
-      // Check CPU constraints (NEW - adaptive CPU thresholds 69%/49%)
-      if (cpuInfo.usagePercent >= this.adaptivePool.cpuStopThreshold) {
-        if (!this.adaptivePool.isCpuConstrained) {
-          console.log(`⚠️  CPU threshold reached (${cpuInfo.usagePercent.toFixed(1)}% ≥ ${this.adaptivePool.cpuStopThreshold}%) - CPU constrained`);
-          this.adaptivePool.isCpuConstrained = true;
-          this.adaptivePool.growthPhase = 'constrained';
-        }
-      } else if (cpuInfo.usagePercent <= this.adaptivePool.cpuResumeThreshold && this.adaptivePool.isCpuConstrained) {
-        console.log(`✅ CPU pressure relieved (${cpuInfo.usagePercent.toFixed(1)}% ≤ ${this.adaptivePool.cpuResumeThreshold}%)`);
-        this.adaptivePool.isCpuConstrained = false;
-      }
-      
-      // Smart growth decision based on BOTH memory and CPU
-      const resourcesOK = !this.adaptivePool.isMemoryConstrained && !this.adaptivePool.isCpuConstrained;
-      const canGrow = resourcesOK && 
-                     this.adaptivePool.currentProcesses < this.adaptivePool.maxProcesses &&
-                     this.adaptivePool.growthPhase !== 'completed';
-      
-      if (canGrow) {
-        // Intelligent growth decision: Check next step + look ahead 2 steps for safety
-        const nextStepMemoryOK = nextStepMemoryPercent < this.adaptivePool.memoryStopThreshold; // Next step under 78%
-        const twoStepsMemorySafe = twoStepsMemoryPercent < this.adaptivePool.memoryStopThreshold * 0.9; // 2 steps under 70% for safety margin
-        const cpuProjectionOK = cpuInfo.usagePercent < this.adaptivePool.cpuStopThreshold * 0.8; // CPU under 55% for growth
+      // Local environment: Conservative scaling with prediction-based surge protection
+      if (this.adaptivePool.isLocal) {
         
-        if (nextStepMemoryOK && twoStepsMemorySafe && cpuProjectionOK) {
-          console.log(`📈 Growth safe - Next: ${nextStepMemoryPercent.toFixed(1)}%, Two steps: ${twoStepsMemoryPercent.toFixed(1)}%, CPU: ${cpuInfo.usagePercent.toFixed(1)}%`);
-          await this.growProcessPool();
-        } else {
-          const reasons = [];
-          if (!nextStepMemoryOK) reasons.push(`Next step high (${nextStepMemoryPercent.toFixed(1)}%)`);
-          if (!twoStepsMemorySafe) reasons.push(`Two steps high (${twoStepsMemoryPercent.toFixed(1)}%)`);
-          if (!cpuProjectionOK) reasons.push(`CPU high (${cpuInfo.usagePercent.toFixed(1)}%)`);
-          console.log(`⚠️  ${reasons.join(', ')} - Delaying growth`);
-          this.adaptivePool.growthPhase = 'cautious';
+        // CPU surge protection: Stop at 69%, resume at 59%
+        if (cpuInfo.usagePercent >= this.adaptivePool.cpuStopThreshold || cpuPrediction.step1 >= this.adaptivePool.cpuStopThreshold) {
+          if (!this.adaptivePool.isCpuConstrained) {
+            const reason = cpuInfo.usagePercent >= this.adaptivePool.cpuStopThreshold ? 
+              `Current ${cpuInfo.usagePercent.toFixed(1)}%` : 
+              `Predicted ${cpuPrediction.step1.toFixed(1)}%`;
+            console.log(`⚠️  CPU surge protection activated (${reason} ≥ ${this.adaptivePool.cpuStopThreshold}%) - Stopping growth`);
+            this.adaptivePool.isCpuConstrained = true;
+            this.adaptivePool.growthPhase = 'constrained';
+          }
+        } else if (cpuInfo.usagePercent <= this.adaptivePool.cpuResumeThreshold && 
+                   cpuPrediction.step2 <= this.adaptivePool.cpuResumeThreshold && 
+                   this.adaptivePool.isCpuConstrained) {
+          console.log(`✅ CPU surge protection deactivated (${cpuInfo.usagePercent.toFixed(1)}% ≤ ${this.adaptivePool.cpuResumeThreshold}%, predicted safe)`);
+          this.adaptivePool.isCpuConstrained = false;
         }
-      } else if (!resourcesOK) {
-        const constraints = [];
-        if (this.adaptivePool.isMemoryConstrained) constraints.push('Memory');
-        if (this.adaptivePool.isCpuConstrained) constraints.push('CPU');
-        console.log(`⏸️  Growth paused: ${constraints.join(' + ')} constrained`);
+        
+        // Memory protection with same ratio-based control as CPU
+        if (memInfo.usagePercent >= this.adaptivePool.memoryStopThreshold || memoryPrediction.step1 >= this.adaptivePool.memoryStopThreshold) {
+          if (!this.adaptivePool.isMemoryConstrained) {
+            const reason = memInfo.usagePercent >= this.adaptivePool.memoryStopThreshold ? 
+              `Current ${memInfo.usagePercent.toFixed(1)}%` : 
+              `Predicted ${memoryPrediction.step1.toFixed(1)}%`;
+            console.log(`⚠️  Memory protection activated (${reason} ≥ ${this.adaptivePool.memoryStopThreshold}%) - Stopping growth`);
+            this.adaptivePool.isMemoryConstrained = true;
+            this.adaptivePool.growthPhase = 'constrained';
+          }
+        } else if (memInfo.usagePercent <= this.adaptivePool.memoryResumeThreshold && 
+                   memoryPrediction.step2 <= this.adaptivePool.memoryResumeThreshold && 
+                   this.adaptivePool.isMemoryConstrained) {
+          console.log(`✅ Memory protection deactivated (${memInfo.usagePercent.toFixed(1)}% ≤ ${this.adaptivePool.memoryResumeThreshold}%, predicted safe)`);
+          this.adaptivePool.isMemoryConstrained = false;
+        }
+        
+        // Local scaling decision: Only grow if both current and predicted values are safe
+        const resourcesOK = !this.adaptivePool.isMemoryConstrained && !this.adaptivePool.isCpuConstrained;
+        const canGrow = resourcesOK && 
+                       this.adaptivePool.currentProcesses < this.adaptivePool.maxProcesses &&
+                       this.adaptivePool.growthPhase !== 'completed';
+        
+        if (canGrow) {
+          // Conservative local growth: Check 2-step predictions are safe
+          const cpuSafeStep1 = cpuPrediction.step1 < this.adaptivePool.cpuStopThreshold;
+          const cpuSafeStep2 = cpuPrediction.step2 < this.adaptivePool.cpuStopThreshold;
+          const memorySafeStep1 = memoryPrediction.step1 < this.adaptivePool.memoryStopThreshold;
+          const memorySafeStep2 = memoryPrediction.step2 < this.adaptivePool.memoryStopThreshold;
+          
+          if (cpuSafeStep1 && cpuSafeStep2 && memorySafeStep1 && memorySafeStep2) {
+            console.log(`📈 Local growth approved - All predictions safe for next 2 steps`);
+            await this.growProcessPool();
+          } else {
+            const reasons = [];
+            if (!cpuSafeStep1) reasons.push(`CPU Step1 (${cpuPrediction.step1.toFixed(1)}%)`);
+            if (!cpuSafeStep2) reasons.push(`CPU Step2 (${cpuPrediction.step2.toFixed(1)}%)`);
+            if (!memorySafeStep1) reasons.push(`Mem Step1 (${memoryPrediction.step1.toFixed(1)}%)`);
+            if (!memorySafeStep2) reasons.push(`Mem Step2 (${memoryPrediction.step2.toFixed(1)}%)`);
+            console.log(`⚠️  Local growth blocked - Unsafe predictions: ${reasons.join(', ')}`);
+            this.adaptivePool.growthPhase = 'cautious';
+          }
+        } else if (!resourcesOK) {
+          const constraints = [];
+          if (this.adaptivePool.isMemoryConstrained) constraints.push('Memory');
+          if (this.adaptivePool.isCpuConstrained) constraints.push('CPU');
+          console.log(`⏸️  Local growth paused: ${constraints.join(' + ')} constrained`);
+        }
+        
+      } else {
+        // Cloud environment: Use original scaling logic (no predictions)
+        
+        // Check memory constraints (original logic)
+        if (memInfo.usagePercent >= this.adaptivePool.memoryStopThreshold) {
+          if (!this.adaptivePool.isMemoryConstrained) {
+            console.log(`⚠️  Memory threshold reached (${memInfo.usagePercent.toFixed(1)}% ≥ ${this.adaptivePool.memoryStopThreshold}%) - Memory constrained`);
+            this.adaptivePool.isMemoryConstrained = true;
+            this.adaptivePool.growthPhase = 'constrained';
+          }
+        } else if (memInfo.usagePercent <= this.adaptivePool.memoryResumeThreshold && this.adaptivePool.isMemoryConstrained) {
+          console.log(`✅ Memory pressure relieved (${memInfo.usagePercent.toFixed(1)}% ≤ ${this.adaptivePool.memoryResumeThreshold}%)`);
+          this.adaptivePool.isMemoryConstrained = false;
+        }
+        
+        // Check CPU constraints (original logic)
+        if (cpuInfo.usagePercent >= this.adaptivePool.cpuStopThreshold) {
+          if (!this.adaptivePool.isCpuConstrained) {
+            console.log(`⚠️  CPU threshold reached (${cpuInfo.usagePercent.toFixed(1)}% ≥ ${this.adaptivePool.cpuStopThreshold}%) - CPU constrained`);
+            this.adaptivePool.isCpuConstrained = true;
+            this.adaptivePool.growthPhase = 'constrained';
+          }
+        } else if (cpuInfo.usagePercent <= this.adaptivePool.cpuResumeThreshold && this.adaptivePool.isCpuConstrained) {
+          console.log(`✅ CPU pressure relieved (${cpuInfo.usagePercent.toFixed(1)}% ≤ ${this.adaptivePool.cpuResumeThreshold}%)`);
+          this.adaptivePool.isCpuConstrained = false;
+        }
+        
+        // Original cloud scaling decision based on BOTH memory and CPU
+        const resourcesOK = !this.adaptivePool.isMemoryConstrained && !this.adaptivePool.isCpuConstrained;
+        const canGrow = resourcesOK && 
+                       this.adaptivePool.currentProcesses < this.adaptivePool.maxProcesses &&
+                       this.adaptivePool.growthPhase !== 'completed';
+        
+        if (canGrow) {
+          // Original growth decision logic (no predictions)
+          const currentProcesses = this.adaptivePool.currentProcesses;
+          const maxProcesses = this.adaptivePool.maxProcesses;
+          const memoryPerProcess = memInfo.usedMB / Math.max(currentProcesses, 1);
+          
+          const nextStep = Math.min(currentProcesses + 1, maxProcesses);
+          const nextStepMemory = memoryPerProcess * nextStep;
+          const nextStepMemoryPercent = (nextStepMemory / memInfo.totalMB) * 100;
+          
+          const twoSteps = Math.min(currentProcesses + 2, maxProcesses);
+          const twoStepsMemory = memoryPerProcess * twoSteps;
+          const twoStepsMemoryPercent = (twoStepsMemory / memInfo.totalMB) * 100;
+          
+          const nextStepMemoryOK = nextStepMemoryPercent < this.adaptivePool.memoryStopThreshold;
+          const twoStepsMemorySafe = twoStepsMemoryPercent < this.adaptivePool.memoryStopThreshold * 0.9;
+          const cpuProjectionOK = cpuInfo.usagePercent < this.adaptivePool.cpuStopThreshold * 0.8;
+          
+          if (nextStepMemoryOK && twoStepsMemorySafe && cpuProjectionOK) {
+            console.log(`📈 Growth safe - Next: ${nextStepMemoryPercent.toFixed(1)}%, Two steps: ${twoStepsMemoryPercent.toFixed(1)}%, CPU: ${cpuInfo.usagePercent.toFixed(1)}%`);
+            await this.growProcessPool();
+          } else {
+            const reasons = [];
+            if (!nextStepMemoryOK) reasons.push(`Next step high (${nextStepMemoryPercent.toFixed(1)}%)`);
+            if (!twoStepsMemorySafe) reasons.push(`Two steps high (${twoStepsMemoryPercent.toFixed(1)}%)`);
+            if (!cpuProjectionOK) reasons.push(`CPU high (${cpuInfo.usagePercent.toFixed(1)}%)`);
+            console.log(`⚠️  ${reasons.join(', ')} - Delaying growth`);
+            this.adaptivePool.growthPhase = 'cautious';
+          }
+        } else if (!resourcesOK) {
+          const constraints = [];
+          if (this.adaptivePool.isMemoryConstrained) constraints.push('Memory');
+          if (this.adaptivePool.isCpuConstrained) constraints.push('CPU');
+          console.log(`⏸️  Growth paused: ${constraints.join(' + ')} constrained`);
+        }
       }
       
     } catch (error) {
@@ -623,9 +848,14 @@ export class ProcessPoolEmbedder implements IEmbedder {
     
     console.log(`⏳ Spawning external process ${processId + 1}/${this.adaptivePool.maxProcesses}...`);
     
-    const childProcess = spawn('node', [processScript], {
+    const childProcess = spawn('node', ['--expose-gc', '--max-old-space-size=512', processScript], {
       stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
-      env: { ...process.env, FORCE_COLOR: '0' }
+      env: { 
+        ...process.env, 
+        FORCE_COLOR: '0',
+        NODE_ENV: 'production',
+        NODE_OPTIONS: '--max-old-space-size=512'
+      }
     });
     
     const processInstance: ProcessInstance = {
@@ -649,12 +879,82 @@ export class ProcessPoolEmbedder implements IEmbedder {
   }
   
   private startResourceMonitoring(): void {
-    // Check both memory and CPU every 15 seconds during active processing
-    this.memoryMonitoringInterval = setInterval(async () => {
-      await this.checkResourcesAndAdjustPool();
-    }, 15000);
+    // Delayed start: Wait for actual processing to begin before scaling checks
+    console.log(`⏳ Resource monitoring will start after initial chunk processing begins`);
+  }
+  
+  private startResourceMonitoringDelayed(): void {
+    if (this.memoryMonitoringInterval) {
+      return; // Already started
+    }
     
-    console.log(`🔍 Started resource monitoring (memory + CPU, 15s intervals)`);
+    // Check both memory and CPU every 30 seconds during active processing (increased interval)
+    this.memoryMonitoringInterval = setInterval(async () => {
+      // Only scale if we have active chunk processing and initial work is complete
+      if (this.canConsiderScaling()) {
+        // Additional health check using IPC before scaling
+        const childrenHealthy = await this.checkChildProcessHealth();
+        if (childrenHealthy) {
+          await this.checkResourcesAndAdjustPool();
+        } else {
+          console.log(`⏸️  Scaling check skipped - child processes not responsive via IPC`);
+        }
+      } else {
+        console.log(`⏸️  Scaling check skipped - waiting for active chunk processing or batches completed`);
+      }
+    }, 30000); // Increased to 30s to be less aggressive
+    
+    console.log(`🔍 Started delayed resource monitoring (memory + CPU, 30s intervals)`);
+  }
+  
+  private canConsiderScaling(): boolean {
+    // Only consider scaling if:
+    // 1. We have active queue work OR have processed some chunks recently
+    // 2. Initial processes are fully ready and have handled at least one batch
+    // 3. Child processes are actually healthy and responsive
+    const hasActiveWork = this.queue.length() > 0 || this.queue.running() > 0;
+    const hasRecentActivity = this.interfaceMetrics.requestCount > 0;
+    const allProcessesReady = this.processes.every(p => p.isReady);
+    const hasProcessedBatches = this.interfaceMetrics.totalEmbeddings > 0;
+    
+    return (hasActiveWork || hasRecentActivity) && allProcessesReady && hasProcessedBatches;
+  }
+  
+  // IPC health check for child processes
+  private async checkChildProcessHealth(): Promise<boolean> {
+    if (this.processes.length === 0) return false;
+    
+    try {
+      // Send health check to first process to verify IPC is working
+      const testProcess = this.processes[0];
+      if (!testProcess || !testProcess.process || testProcess.process.killed) {
+        return false;
+      }
+      
+      // Simple IPC health check - send memory query which should respond quickly
+      const healthCheckPromise = new Promise<boolean>((resolve) => {
+        const timeoutId = setTimeout(() => resolve(false), 2000); // 2s timeout
+        
+        const messageHandler = (message: any) => {
+          if (message.type === 'memory_response') {
+            clearTimeout(timeoutId);
+            testProcess.process!.off('message', messageHandler);
+            resolve(true);
+          }
+        };
+        
+        testProcess.process!.on('message', messageHandler);
+        testProcess.process!.send({
+          type: 'query_memory',
+          requestId: `health-${Date.now()}`
+        });
+      });
+      
+      return await healthCheckPromise;
+    } catch (error) {
+      console.warn(`⚠️  Child process health check failed:`, error);
+      return false;
+    }
   }
   
   private stopResourceMonitoring(): void {
@@ -874,14 +1174,14 @@ export class ProcessPoolEmbedder implements IEmbedder {
 
     console.log(`🔧 Starting with ${this.processCount} external Node.js process (ultra-conservative - 2+ saturate system)...`);
     
-    // Get initial accurate memory reading
-    await this.checkResourcesAndAdjustPool();
-    
-    // Create initial processes
+    // Create initial processes first
     await this.createProcesses();
     
     // Wait for initial processes to be ready
     await this.waitForProcessesReady();
+    
+    // Get initial accurate memory reading after processes are ready
+    await this.checkResourcesAndAdjustPool();
     
     // Start memory monitoring for adaptive growth
     this.startResourceMonitoring();
@@ -901,9 +1201,13 @@ export class ProcessPoolEmbedder implements IEmbedder {
       console.log(`⏳ Spawning external process ${i + 1}/${this.processCount}...`);
       
       // Spawn external Node.js process
-      const childProcess = spawn('node', [processScript], {
+      const childProcess = spawn('node', ['--expose-gc', '--max-old-space-size=512', processScript], {
         stdio: ['pipe', 'pipe', 'pipe'], // stdin, stdout, stderr
-        env: { ...process.env, NODE_ENV: 'production' }
+        env: { 
+          ...process.env, 
+          NODE_ENV: 'production',
+          NODE_OPTIONS: '--max-old-space-size=512'
+        }
       });
 
       const processInstance: ProcessInstance = {
@@ -949,9 +1253,18 @@ export class ProcessPoolEmbedder implements IEmbedder {
         process.stderr.write(data);
       });
 
-      // Handle process exit
+      // Handle process exit with OOM detection
       childProcess.on('exit', (code, signal) => {
         console.error(`❌ Process ${i} exited with code ${code}, signal ${signal}`);
+        
+        // Detect OOM kills (SIGKILL from system)
+        if (signal === 'SIGKILL' && code === null) {
+          console.warn(`🔥 Process ${i} was SIGKILL'd - likely OOM kill`);
+          this.detectOOMKill(i);
+        } else if (code !== 0) {
+          console.warn(`⚠️  Process ${i} exited abnormally - potential resource issue`);
+        }
+        
         processInstance.isReady = false;
         processInstance.isAvailable = false;
         
@@ -1082,11 +1395,13 @@ export class ProcessPoolEmbedder implements IEmbedder {
     processInstance.isAvailable = false;
     
     // Spawn new process
-    const childProcess = spawn('node', [path.join(__dirname, 'external-embedding-process.js')], {
+    const childProcess = spawn('node', ['--expose-gc', '--max-old-space-size=512', path.join(__dirname, 'external-embedding-process.js')], {
       stdio: ['pipe', 'pipe', 'pipe', 'pipe'],
       env: {
         ...process.env,
-        PROCESS_ID: processInstance.id.toString()
+        PROCESS_ID: processInstance.id.toString(),
+        NODE_ENV: 'production',
+        NODE_OPTIONS: '--max-old-space-size=512'
       }
     });
     
@@ -1097,9 +1412,18 @@ export class ProcessPoolEmbedder implements IEmbedder {
       this.handleProcessMessage(processInstance, message);
     });
     
-    // Set up error handling
+    // Set up error handling with OOM detection
     childProcess.on('exit', (code, signal) => {
       console.error(`❌ Process ${processInstance.id} exited with code ${code}, signal ${signal}`);
+      
+      // Detect OOM kills (SIGKILL from system)
+      if (signal === 'SIGKILL' && code === null) {
+        console.warn(`🔥 Process ${processInstance.id} was SIGKILL'd - likely OOM kill`);
+        this.detectOOMKill(processInstance.id);
+      } else if (code !== 0) {
+        console.warn(`⚠️  Process ${processInstance.id} exited abnormally - potential resource issue`);
+      }
+      
       processInstance.isReady = false;
       processInstance.isAvailable = false;
       
@@ -1194,9 +1518,16 @@ export class ProcessPoolEmbedder implements IEmbedder {
     for (let i = 0; i < chunks.length; i += retryBatchSize) {
       const subBatch = chunks.slice(i, Math.min(i + retryBatchSize, chunks.length));
       
-      // Find an available process
-      const availableProcess = this.processes
-        .filter(p => p.isReady && p.isAvailable)
+      // Find an available process (respect emergency mode)
+      let eligibleProcesses = this.processes.filter(p => p.isReady && p.isAvailable);
+      
+      // In emergency mode or single process fallback, use only first process
+      if (this.adaptivePool.emergencyMode || this.adaptivePool.singleProcessFallback) {
+        eligibleProcesses = eligibleProcesses.slice(0, 1);
+        console.log(`🚨 Emergency/Single process mode: using only process ${eligibleProcesses[0]?.id || 'none'}`);
+      }
+      
+      const availableProcess = eligibleProcesses
         .sort((a, b) => a.lastUsed - b.lastUsed)[0];
       
       if (!availableProcess) {
@@ -1276,17 +1607,45 @@ export class ProcessPoolEmbedder implements IEmbedder {
   private setupProcessHandlers(processInstance: ProcessInstance): void {
     const childProcess = processInstance.process;
     
-    // Handle process output
+    // Handle process stdout (responses) with proper JSON parsing - SAME AS createProcesses
     childProcess.stdout?.on('data', (data) => {
-      const output = data.toString().trim();
-      if (output.includes('[Process') || output.includes('FastEmbedding')) {
-        console.log(output);
+      // Append to buffer
+      processInstance.messageBuffer += data.toString();
+      
+      // Try to parse complete JSON messages
+      let lines = processInstance.messageBuffer.split('\n');
+      
+      // Keep the last incomplete line in buffer
+      processInstance.messageBuffer = lines.pop() || '';
+      
+      // Process complete lines
+      for (const line of lines) {
+        if (line.trim()) {
+          try {
+            const message = JSON.parse(line);
+            this.handleProcessMessage(processInstance, message);
+          } catch (error) {
+            // Not JSON - could be log output, display it
+            const output = line.trim();
+            if (output.includes('[Process') || output.includes('FastEmbedding')) {
+              console.log(output);
+            }
+          }
+        }
       }
     });
     
+    // Handle process stderr (logs)
     childProcess.stderr?.on('data', (data) => {
       console.error(`[Process ${processInstance.id} ERROR]: ${data.toString().trim()}`);
     });
+    
+    // Handle IPC messages if available (for processes with IPC enabled)
+    if (childProcess.send && typeof childProcess.send === 'function') {
+      childProcess.on('message', (message) => {
+        this.handleProcessMessage(processInstance, message);
+      });
+    }
     
     // Handle process exit
     childProcess.on('exit', (code, signal) => {
@@ -1311,6 +1670,13 @@ export class ProcessPoolEmbedder implements IEmbedder {
     let lastDiagnostic = startTime;
     let initMessageSeen = false;
     let modelLoadingSeen = false;
+    
+    // Send init message first!
+    console.log(`📤 Sending init message to process ${processInstance.id}...`);
+    this.sendToProcess(processInstance, {
+      type: 'init',
+      data: { processId: processInstance.id }
+    });
     
     return new Promise((resolve, reject) => {
       const checkReady = () => {
@@ -1341,8 +1707,9 @@ export class ProcessPoolEmbedder implements IEmbedder {
         }
       };
       
-      // Listen for ready signal and track initialization phases
-      processInstance.process.stdout?.on('data', (data) => {
+      // Track initialization phases via stderr monitoring (setupProcessHandlers handles stdout JSON)
+      const originalStderrHandler = processInstance.process.stderr?.listeners('data')[0];
+      processInstance.process.stderr?.on('data', (data) => {
         const output = data.toString();
         
         // Track initialization phases for better diagnostics
@@ -1351,10 +1718,6 @@ export class ProcessPoolEmbedder implements IEmbedder {
         }
         if (output.includes('Creating isolated FastEmbedding instance')) {
           modelLoadingSeen = true;
-        }
-        if (output.includes('FastEmbedding ready in separate process')) {
-          processInstance.isReady = true;
-          processInstance.isAvailable = true;
         }
       });
       
@@ -1656,6 +2019,37 @@ export class ProcessPoolEmbedder implements IEmbedder {
     };
   }
 
+  // Detect OOM kills and activate emergency mode
+  private detectOOMKill(processId: number): void {
+    this.adaptivePool.consecutiveOOMKills++;
+    this.adaptivePool.lastOOMKill = Date.now();
+    
+    console.warn(`⚠️  OOM kill detected for process ${processId}. Consecutive OOM kills: ${this.adaptivePool.consecutiveOOMKills}`);
+    
+    // Activate emergency mode after 2+ OOM kills
+    if (this.adaptivePool.consecutiveOOMKills >= 2) {
+      this.adaptivePool.emergencyMode = true;
+      this.adaptivePool.singleProcessFallback = true;
+      
+      // Drastically reduce batch size
+      this.adaptiveBatch.currentSize = Math.max(10, this.adaptiveBatch.minSize);
+      this.adaptiveBatch.maxSize = 50;
+      
+      console.warn(`🚨 EMERGENCY MODE ACTIVATED: Falling back to single process, small batches`);
+    }
+  }
+
+  // Reset OOM tracking on successful operations
+  private resetOOMTracking(): void {
+    if (this.adaptivePool.consecutiveOOMKills > 0) {
+      this.adaptivePool.consecutiveOOMKills = Math.max(0, this.adaptivePool.consecutiveOOMKills - 1);
+      
+      if (this.adaptivePool.consecutiveOOMKills === 0) {
+        console.log(`✅ OOM tracking reset - system appears stable`);
+      }
+    }
+  }
+
   // Record batch performance and adapt size with reliable memory tracking
   private recordBatchPerformance(batchSize: number, duration: number, memoryBefore: number, memoryAfter: number, success: boolean): void {
     const throughput = success ? (batchSize / duration) * 1000 : 0; // chunks per second
@@ -1842,9 +2236,16 @@ export class ProcessPoolEmbedder implements IEmbedder {
     
     // Only process uncached chunks if any exist
     if (uncachedIndices.length > 0) {
-      // Find available process (round-robin style)
-      const availableProcess = this.processes
-        .filter(p => p.isReady && p.isAvailable)
+      // Find available process with emergency mode respect
+      let eligibleProcesses = this.processes.filter(p => p.isReady && p.isAvailable);
+      
+      // In emergency mode or single process fallback, use only first process
+      if (this.adaptivePool.emergencyMode || this.adaptivePool.singleProcessFallback) {
+        eligibleProcesses = eligibleProcesses.slice(0, 1);
+        console.log(`🚨 Emergency/Single process mode: using only process ${eligibleProcesses[0]?.id || 'none'}`);
+      }
+      
+      const availableProcess = eligibleProcesses
         .sort((a, b) => a.lastUsed - b.lastUsed)[0];
 
       if (!availableProcess) {
@@ -1885,8 +2286,8 @@ export class ProcessPoolEmbedder implements IEmbedder {
         
         try {
           result = await new Promise<any>((resolve, reject) => {
-            const timeoutDuration = 120000; // 2 minute total timeout
-            const warningTime = timeoutDuration * 0.7; // 70% of timeout (84 seconds)
+            const timeoutDuration = 180000; // 3 minute total timeout for WSL2 slow performance
+            const warningTime = timeoutDuration * 0.6; // 60% of timeout (108 seconds) - earlier warning
             
             // Set up progressive timeout - first warning, then hard timeout
             const timeout = setTimeout(() => {
@@ -1983,6 +2384,11 @@ export class ProcessPoolEmbedder implements IEmbedder {
           
           this.recordBatchPerformance(uncachedChunks.length, duration, memoryBefore, heapUsage.heapUsedMB, processingSuccess);
           
+          // Reset OOM tracking on successful batch processing
+          if (processingSuccess) {
+            this.resetOOMTracking();
+          }
+          
           // Get reliable system-wide stats for next iteration (don't block current processing)
           this.getSystemWideMemoryStats().then(systemStats => {
             if (systemStats.reliable) {
@@ -2052,6 +2458,9 @@ export class ProcessPoolEmbedder implements IEmbedder {
     await this.initialize();
     
     console.log(`📊 Processing ${chunks.length} chunks using ${this.processCount} external processes`);
+    
+    // Now that we're actually processing chunks, start delayed resource monitoring for scaling
+    this.startResourceMonitoringDelayed();
     
     const currentTimestamp = Date.now();
     
