@@ -4,6 +4,8 @@
 
 This plan outlines a systematic approach to optimize CloudflareAI embedder throughput by 2-3x through controlled concurrency, intelligent rate limiting, and model-specific enhancements. Based on Gemini's audit feedback and chunk size analysis.
 
+**Strategy Separation**: CloudflareAI uses cloud-native controls (API throttling, circuit breakers, rate limiting) completely separate from ProcessPoolEmbedder's local resource management (CPU/memory thresholds).
+
 ## Current Performance Baseline
 
 **CloudflareAI Embedder Status:**

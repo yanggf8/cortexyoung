@@ -9,7 +9,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ### Key Achievements
 - **🎯 Advanced Relationship Traversal**: Multi-hop relationship discovery with complete context in single queries
 - **🚀 ONNX Runtime Stability**: External Node.js processes with complete isolation and 10x parallelism  
-- **💻 CPU + Memory Management**: Dual-resource monitoring preventing system overload (CPU: 69%/49%, Memory: 78%/69%)
+- **💻 Local Resource Management**: Global thresholds for ProcessPoolEmbedder (CPU: 69%/49%, Memory: 78%/69%)
+- **🌐 Cloud Strategy Separation**: CloudflareAI uses API controls (circuit breakers, rate limiting) vs local resource monitoring
 - **🔄 Signal Cascade System**: Reliable parent-child process cleanup with zero orphaned processes
 - **📊 Auto-sync Intelligence**: Eliminates manual storage commands with intelligent conflict resolution
 
@@ -57,14 +58,23 @@ npm run shutdown  # Comprehensive cleanup script
 - **Child processes**: `node src/external-embedding-process.js` (spawned by ProcessPoolEmbedder)
 - **Memory impact**: Each external-embedding-process uses ~200-400MB
 
-## CPU + Memory Adaptive Management
+## Embedding Strategy Architecture
 
-### Resource Thresholds
+### ProcessPoolEmbedder (Local Strategy)
+**Global Resource Thresholds** (`RESOURCE_THRESHOLDS` constants):
 - **Memory**: Stop at 78%, Resume at 69% (prevents OOM)
-- **CPU**: Stop at 69%, Resume at 49% (prevents system freeze)
+- **CPU**: Stop at 69%, Resume at 49% (prevents system freeze)  
 - **Real-time monitoring**: Every 15 seconds, cross-platform
+- **Process management**: External Node.js processes with complete ONNX isolation
 
-### 2-Step Adaptive Growth Algorithm
+### CloudflareAI Embedder (Cloud Strategy)
+**API-based Controls** (no local resource monitoring):
+- **Circuit Breaker**: 5 failures → 1min timeout → 2 successes to recover
+- **Rate Limiting**: TokenBucket 100 requests/minute
+- **Concurrency Control**: Managed through API throttling
+- **Strategy Selection**: `EMBEDDER_TYPE=cloudflare` vs `EMBEDDER_TYPE=local`
+
+### ProcessPool 2-Step Adaptive Growth Algorithm
 **Intelligent scaling that looks ahead 2 steps instead of projecting to theoretical maximum:**
 
 1. **Current State**: Monitor actual resource usage with running processes

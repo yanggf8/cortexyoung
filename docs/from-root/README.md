@@ -16,7 +16,7 @@ Cortex V2.1 addresses Claude Code's primary limitation: **50-70% token waste** d
 
 -   **Advanced Relationship Traversal**: Multi-hop relationship discovery with complete context in single queries.
 -   **ONNX Runtime Stability**: External Node.js processes with complete isolation and 10x parallelism.
--   **CPU + Memory Management**: Dual-resource monitoring preventing system overload (CPU: 69%/49%, Memory: 78%/69%).
+-   **Dual Embedding Strategies**: Local ProcessPool with resource thresholds (CPU: 69%/49%, Memory: 78%/69%) vs CloudflareAI with API controls.
 -   **Signal Cascade System**: Reliable parent-child process cleanup with zero orphaned processes.
 -   **Auto-sync Intelligence**: Eliminates manual storage commands with intelligent conflict resolution.
 

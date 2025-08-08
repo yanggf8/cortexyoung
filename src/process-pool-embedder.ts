@@ -5,6 +5,21 @@ import * as os from 'os';
 import * as crypto from 'crypto';
 import { CodeChunk, IEmbedder, EmbedOptions, EmbeddingResult as IEmbeddingResult, EmbeddingMetadata, PerformanceStats, ProviderHealth, ProviderMetrics } from './types';
 
+// Global Resource Management Thresholds (for ProcessPoolEmbedder local execution)
+export const RESOURCE_THRESHOLDS = {
+  // Memory thresholds (percentage of total system memory)
+  MEMORY: {
+    STOP: 78,    // Stop spawning processes at 78% memory usage
+    RESUME: 69   // Resume spawning processes at 69% memory usage
+  },
+  
+  // CPU thresholds (percentage of total CPU usage)
+  CPU: {
+    STOP: 69,    // Stop spawning processes at 69% CPU usage
+    RESUME: 49   // Resume spawning processes at 49% CPU usage
+  }
+} as const;
+
 interface EmbeddingTask {
   chunks: CodeChunk[];
   originalIndices: number[]; // Track original indices for each chunk
@@ -552,10 +567,10 @@ export class ProcessPoolEmbedder implements IEmbedder {
       currentProcesses: startProcesses,
       
       // Local vs Cloud thresholds
-      memoryStopThreshold: isLocal ? (isWSL2 ? 50 : 60) : (isWSL2 ? 50 : 60),   // Keep original thresholds for cloud
-      memoryResumeThreshold: isLocal ? (isWSL2 ? 35 : 45) : (isWSL2 ? 35 : 45), // Keep original thresholds for cloud  
-      cpuStopThreshold: isLocal ? 69 : 50,                                       // Local: 69%, Cloud: keep original 50%
-      cpuResumeThreshold: isLocal ? 59 : 30,                                     // Local: 59%, Cloud: keep original 30%
+      memoryStopThreshold: RESOURCE_THRESHOLDS.MEMORY.STOP,    // Global constant: 78%
+      memoryResumeThreshold: RESOURCE_THRESHOLDS.MEMORY.RESUME, // Global constant: 69%
+      cpuStopThreshold: RESOURCE_THRESHOLDS.CPU.STOP,          // Global constant: 69%
+      cpuResumeThreshold: RESOURCE_THRESHOLDS.CPU.RESUME,      // Global constant: 49%
       
       // Prediction system for 2-step resource forecasting
       resourcePrediction: {
