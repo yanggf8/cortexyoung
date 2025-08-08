@@ -13,6 +13,28 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **🌐 Cloud Strategy Separation**: CloudflareAI uses API controls (circuit breakers, rate limiting) vs local resource monitoring
 - **🔄 Signal Cascade System**: Reliable parent-child process cleanup with zero orphaned processes
 - **📊 Auto-sync Intelligence**: Eliminates manual storage commands with intelligent conflict resolution
+- **👀 Smart File Watching**: Real-time code intelligence updates with adaptive activity detection (PLANNED)
+
+### 🚀 **Upcoming: Smart File Watching System**
+**Status**: Implementation plan approved by expert review - ready for development
+
+**Phase A (MVP - Weeks 1-6)**:
+- Fixed debouncing file watcher with git-tracked filtering
+- File-level change coalescing and queue management  
+- Integration with existing ProcessPoolEmbedder and storage systems
+- Production-ready foundation with comprehensive error handling
+
+**Phase B (Advanced - Weeks 7-12)**:
+- Activity-based adaptive debouncing (idle: 2s, normal: 10s, heavy: 30s)
+- Intelligent resource management with predictive scaling
+- Advanced monitoring and circuit breaker patterns
+- Best-in-class developer experience with invisible intelligence
+
+**Benefits**:
+- ✅ **Real-time updates**: Index changes immediately during development
+- ✅ **Smart activity detection**: Adapts to coding patterns automatically  
+- ✅ **Git-aware**: Handles branch switching and mass file operations
+- ✅ **Resource-conscious**: Cooperative yielding during heavy coding sessions
 
 ## Quick Start Commands
 
@@ -37,6 +59,16 @@ npm run demo           # Run indexing demo
 npm run test:cpu-memory    # Test CPU + memory adaptive scaling
 npm run test:cleanup   # Test process cleanup
 npm run benchmark      # Performance benchmarking
+```
+
+### File Watching (Planned - Phase A MVP)
+```bash
+npm run watch:start    # Enable real-time file watching
+npm run watch:stop     # Disable file watching
+npm run watch:pause 300 # Pause watching for 5 minutes  
+npm run watch:status   # Show watcher status and activity
+npm run watch:process  # Manually trigger processing
+npm run dev:watch      # Start server with watching enabled
 ```
 
 ## Critical Process Management
@@ -109,12 +141,21 @@ EMBEDDER_TYPE=cloudflare  # Cloudflare AI embedder (no local resource usage)
 
 ## Performance Targets
 
+### Current System
 - 🎯 **Cold start**: < 3 minutes (first run with model download)
 - 🎯 **Warm start**: < 30 seconds (subsequent runs with cache)
 - 🎯 **Memory usage**: < 78% threshold with adaptive scaling
 - 🎯 **CPU usage**: < 69% threshold preventing system overload
 - 🎯 **Process cleanup**: Zero orphaned processes after any exit
 - 🎯 **Resource monitoring**: Real-time CPU + memory tracking every 15s
+
+### File Watching Targets (Phase A)
+- 🎯 **File change detection**: < 100ms response time for status queries
+- 🎯 **Debouncing**: 3-5 second fixed debounce (configurable, not hardcoded)
+- 🎯 **Queue management**: < 200 queued changes with coalescing by file path  
+- 🎯 **Git awareness**: Detect branch switching (>500 files in <10s) and pause
+- 🎯 **Cross-platform**: Windows/macOS/Linux file system compatibility
+- 🎯 **Memory overhead**: < 50MB additional memory for watcher system
 
 ## Architecture Overview
 
@@ -124,11 +165,18 @@ EMBEDDER_TYPE=cloudflare  # Cloudflare AI embedder (no local resource usage)
 - **Storage**: Dual persistence (local `.cortex/` + global `~/.claude/`)
 - **Auto-sync**: Intelligent conflict resolution and missing data recovery
 
-### Data Flow
+### Planned: File Watching Integration (Phase A)
+- **SmartFileWatcher**: chokidar-based with git-tracked file filtering
+- **Change coalescing**: Multiple changes to same file = single processing task
+- **Activity detection**: Fixed debouncing (3-5s) → Adaptive (Phase B)
+- **Queue management**: File-level coalescing with overflow protection (200 max)
+- **Git awareness**: Branch switch detection and pause-then-process strategy
+
+### Data Flow (With File Watching)
 ```
-Claude Code ← MCP Server ← Vector Store ← Dual Storage + Auto-sync
-     ↓             ↓              ↓              ↓
-User Query → ProcessPool → Embeddings → Local + Global Storage
+File Changes → SmartFileWatcher → Change Queue → Delta Analysis
+     ↓               ↓               ↓              ↓
+Claude Code ← MCP Server ← Vector Store ← ProcessPool → Incremental Updates
 ```
 
 ## Key Components
@@ -138,6 +186,12 @@ User Query → ProcessPool → Embeddings → Local + Global Storage
 - **indexer.ts** - Repository indexing with incremental support
 - **process-pool-embedder.ts** - CPU + memory adaptive embedding generation
 - **unified-storage-coordinator.ts** - Auto-sync dual storage management
+
+### File Watching System (Planned)
+- **smart-file-watcher.ts** - Main file watching orchestrator with chokidar
+- **activity-monitor.ts** - Coding pattern analysis and adaptive behavior (Phase B)
+- **adaptive-processor.ts** - Strategy selection and batch processing (Phase B)
+- **watcher-cli.ts** - Command-line interface for watcher control
 
 ### Resource Management
 - **CPU monitoring**: Cross-platform detection (Linux/macOS/Windows)
@@ -181,6 +235,11 @@ User Query → ProcessPool → Embeddings → Local + Global Storage
 4. **relationship_analysis** - Code relationship analysis and traversal
 5. **trace_execution_path** - Execution path tracing
 6. **find_code_patterns** - Complex code pattern discovery
+
+### Planned MCP Tools (Phase A File Watching)
+7. **file_watcher_status** - Get current file watcher status and activity levels
+8. **file_watcher_control** - Control file watcher (start/stop/pause/resume) from Claude Code
+9. **trigger_manual_processing** - Manually trigger processing of queued file changes
 
 ## Storage Management
 
@@ -236,3 +295,30 @@ All critical performance targets achieved:
 - ✅ **Storage efficiency**: 1-3ms operations with dual persistence
 
 **Status**: Production-ready with comprehensive CPU + memory management and reliable process cleanup! 🚀
+
+---
+
+## 🚀 Smart File Watching Implementation Plan
+
+**Status**: **APPROVED FOR IMPLEMENTATION** ✅  
+**Expert Review**: Gemini validated architecture, timeline, and risk mitigation  
+**Timeline**: 12 weeks (MVP-first approach)  
+**Documentation**: See `docs/file-watching-implementation-plan.md`
+
+### **Implementation Readiness Scorecard**
+- ✅ **Timeline Feasibility**: Realistic 12-week plan with proper phase allocation
+- ✅ **Technical Architecture**: Sound, modular design with scalable foundation  
+- ✅ **Risk Mitigation**: All critical risks identified and addressed
+- ✅ **MVP Strategy**: Delivers 80% value with 30% complexity
+- ✅ **Integration Plan**: Well-structured with existing system compatibility
+- ✅ **Production Readiness**: Phase A delivers stable, production-ready system
+
+**Overall Readiness: 9.3/10 - Ready for Phase A Development**
+
+### **Next Steps**
+1. **Begin Phase A Week 1**: Core SmartFileWatcher infrastructure
+2. **Set up development environment**: chokidar dependency and TypeScript configs  
+3. **Create file watching module structure**: `src/file-watching/` directory
+4. **Implement MVP configuration system**: Runtime configurable thresholds
+
+The file watching system will transform Cortex into a **real-time code intelligence platform**! 🎯
