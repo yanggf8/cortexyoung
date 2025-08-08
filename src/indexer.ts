@@ -115,6 +115,24 @@ export class CodebaseIndexer {
   private async performIncrementalIndex(request: IndexRequest, startTime: number): Promise<IndexResponse> {
     console.log(`Starting incremental indexing of ${request.repository_path}`);
     
+    // Critical fix: Validate vector store state before incremental indexing
+    const chunkCount = this.vectorStore.getChunkCount();
+    const fileHashCount = this.vectorStore.getFileHashCount();
+    
+    console.log(`📊 Vector store state validation:`);
+    console.log(`   - Chunks in memory: ${chunkCount}`);
+    console.log(`   - File hashes loaded: ${fileHashCount}`);
+    
+    if (chunkCount > 0 && fileHashCount === 0) {
+      console.warn('⚠️ CRITICAL: Chunks exist but no file hashes loaded - incremental indexing impossible');
+      console.warn('   - This would cause all files to be treated as new files');
+      console.warn('   - Switching to full rebuild mode to ensure data consistency');
+      
+      // Clear the existing chunks and switch to full indexing
+      await this.vectorStore.clearIndex();
+      return await this.performFullIndex({ ...request, mode: 'reindex' }, startTime);
+    }
+    
     // Scan repository for all files
     const scanResult = await this.gitScanner.scanRepository('full'); // Get all files to compare
     console.log(`Found ${scanResult.totalFiles} total files`);

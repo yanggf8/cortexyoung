@@ -190,6 +190,13 @@ export class PersistentVectorStore extends VectorStore {
         this.fileHashes = new Map(Object.entries(persistedIndex.fileHashes || {}));
       }
       
+      console.log(`📊 Loaded file hashes: ${this.fileHashes.size} files tracked`);
+      if (this.fileHashes.size === 0 && persistedIndex.chunks.length > 0) {
+        console.warn('⚠️ WARNING: Loaded chunks but no file hashes - this may cause delta calculation issues');
+        console.warn(`   - Chunks loaded: ${persistedIndex.chunks.length}`);
+        console.warn(`   - File hashes in storage: ${Object.keys(persistedIndex.fileHashes || {}).length}`);
+      }
+      
       const loadTime = Date.now() - startTime;
       console.log(`✅ Loaded ${persistedIndex.chunks.length} chunks from ${source} in ${loadTime}ms`);
       console.log(`📊 Index metadata:`, persistedIndex.metadata);
@@ -260,6 +267,25 @@ export class PersistentVectorStore extends VectorStore {
         deleted: []
       }
     };
+
+    // Critical fix: Ensure fileHashes are loaded before delta calculation
+    if (this.fileHashes.size === 0 && this.chunks.size > 0) {
+      console.warn('⚠️ CRITICAL: calculateFileDelta called with empty fileHashes but existing chunks detected!');
+      console.warn(`   - Chunks in memory: ${this.chunks.size}`);
+      console.warn(`   - File hashes loaded: ${this.fileHashes.size}`);
+      console.warn('   - This indicates a vector store initialization issue');
+      console.warn('   - Attempting to reload persisted index to recover file hashes...');
+      
+      // Attempt to reload the persisted index to recover file hashes
+      const reloadSuccess = await this.loadPersistedIndex();
+      if (reloadSuccess && this.fileHashes.size > 0) {
+        console.log(`✅ Recovered ${this.fileHashes.size} file hashes from storage`);
+      } else {
+        console.error('❌ Failed to recover file hashes - proceeding with full rebuild');
+        // Clear chunks to force full rebuild instead of incorrect incremental
+        this.chunks.clear();
+      }
+    }
 
     // Check each file for changes
     for (const filePath of files) {
@@ -488,6 +514,14 @@ export class PersistentVectorStore extends VectorStore {
 
   getAllChunks(): CodeChunk[] {
     return Array.from(this.chunks.values());
+  }
+
+  getFileHashCount(): number {
+    return this.fileHashes.size;
+  }
+
+  hasFileHashes(): boolean {
+    return this.fileHashes.size > 0;
   }
 
   async getMetadata(): Promise<any> {

@@ -13,7 +13,8 @@
       "Bash(pgrep:*)",
       "Bash(npm run:*)",
       "Bash(ls:*)",
-      "Bash(grep:*)"
+      "Bash(grep:*)",
+      "mcp__gemini-cli__ask-gemini"
     ],
     "deny": []
   }
