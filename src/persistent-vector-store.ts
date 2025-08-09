@@ -12,7 +12,6 @@ interface PersistedIndex {
   timestamp: number;
   repositoryPath: string;
   chunks: CodeChunk[];
-  fileHashes: { [key: string]: string } | Map<string, string>;
   metadata: {
     totalChunks: number;
     lastIndexed: number;
@@ -182,20 +181,8 @@ export class PersistentVectorStore extends VectorStore {
         this.chunks.set(chunk.chunk_id, chunk);
       }
       
-      // Load file hashes - handle both Map and object formats
-      if (persistedIndex.fileHashes instanceof Map) {
-        this.fileHashes = persistedIndex.fileHashes;
-      } else {
-        // Convert from serialized object format back to Map
-        this.fileHashes = new Map(Object.entries(persistedIndex.fileHashes || {}));
-      }
-      
-      console.log(`📊 Loaded file hashes: ${this.fileHashes.size} files tracked`);
-      if (this.fileHashes.size === 0 && persistedIndex.chunks.length > 0) {
-        console.warn('⚠️ WARNING: Loaded chunks but no file hashes - this may cause delta calculation issues');
-        console.warn(`   - Chunks loaded: ${persistedIndex.chunks.length}`);
-        console.warn(`   - File hashes in storage: ${Object.keys(persistedIndex.fileHashes || {}).length}`);
-      }
+      // File hashes are rebuilt on startup instead of being persisted
+      // This ensures they always reflect the current file state
       
       const loadTime = Date.now() - startTime;
       console.log(`✅ Loaded ${persistedIndex.chunks.length} chunks from ${source} in ${loadTime}ms`);
@@ -219,7 +206,6 @@ export class PersistentVectorStore extends VectorStore {
         timestamp: Date.now(),
         repositoryPath: this.repositoryPath,
         chunks: Array.from(this.chunks.values()),
-        fileHashes: Object.fromEntries(this.fileHashes),
         metadata: {
           totalChunks: this.chunks.size,
           lastIndexed: Date.now(),
@@ -268,24 +254,8 @@ export class PersistentVectorStore extends VectorStore {
       }
     };
 
-    // Critical fix: Ensure fileHashes are loaded before delta calculation
-    if (this.fileHashes.size === 0 && this.chunks.size > 0) {
-      console.warn('⚠️ CRITICAL: calculateFileDelta called with empty fileHashes but existing chunks detected!');
-      console.warn(`   - Chunks in memory: ${this.chunks.size}`);
-      console.warn(`   - File hashes loaded: ${this.fileHashes.size}`);
-      console.warn('   - This indicates a vector store initialization issue');
-      console.warn('   - Attempting to reload persisted index to recover file hashes...');
-      
-      // Attempt to reload the persisted index to recover file hashes
-      const reloadSuccess = await this.loadPersistedIndex();
-      if (reloadSuccess && this.fileHashes.size > 0) {
-        console.log(`✅ Recovered ${this.fileHashes.size} file hashes from storage`);
-      } else {
-        console.error('❌ Failed to recover file hashes - proceeding with full rebuild');
-        // Clear chunks to force full rebuild instead of incorrect incremental
-        this.chunks.clear();
-      }
-    }
+    // File hashes are always rebuilt from current files - no persistence needed
+    // This ensures accurate delta calculation that reflects the current file state
 
     // Check each file for changes
     for (const filePath of files) {

@@ -121,50 +121,7 @@ export class CodebaseIndexer {
   private async performIncrementalIndex(request: IndexRequest, startTime: number): Promise<IndexResponse> {
     console.log(`Starting incremental indexing of ${request.repository_path}`);
     
-    // Validate vector store state and attempt recovery for incremental indexing
-    const chunkCount = this.vectorStore.getChunkCount();
-    const fileHashCount = this.vectorStore.getFileHashCount();
-    
-    console.log(`📊 Vector store state validation:`);
-    console.log(`   - Chunks in memory: ${chunkCount}`);
-    console.log(`   - File hashes loaded: ${fileHashCount}`);
-    
-    if (chunkCount > 0 && fileHashCount === 0) {
-      console.warn('⚠️ WARNING: Chunks exist but no file hashes loaded');
-      console.log('   - Attempting to rebuild file hash cache from existing chunks...');
-      
-      try {
-        // Try to recover file hashes from existing chunk data
-        const chunks = await this.vectorStore.getAllChunks();
-        const fileHashes = new Map<string, string>();
-        
-        // Reconstruct file hashes by reading current files and matching with chunks
-        const uniqueFiles = [...new Set(chunks.map(c => c.file_path))];
-        for (const filePath of uniqueFiles) {
-          try {
-            const content = await this.gitScanner.readFile(filePath);
-            // Simple hash calculation using crypto
-            const crypto = require('crypto');
-            const hash = crypto.createHash('sha256').update(content).digest('hex');
-            fileHashes.set(filePath, hash);
-          } catch (error) {
-            // File might be deleted, will be handled in delta calculation
-            console.log(`     File ${filePath} no longer exists (will be cleaned up)`);
-          }
-        }
-        
-        // Update vector store with recovered hashes by accessing the private property directly
-        // This is a recovery operation for corrupted state
-        (this.vectorStore as any).fileHashes = fileHashes;
-        console.log(`   ✅ Recovered ${fileHashes.size} file hashes, proceeding with incremental mode`);
-        
-      } catch (error) {
-        console.error('   ❌ Failed to recover file hash cache:', error);
-        console.log('   🔄 Falling back to full rebuild due to unrecoverable state');
-        await this.vectorStore.clearIndex();
-        return await this.performFullIndex({ ...request, mode: 'reindex' }, startTime);
-      }
-    }
+    console.log(`📊 Loaded ${this.vectorStore.getChunkCount()} existing chunks for incremental processing`);
     
     // Scan repository for all files
     const scanResult = await this.gitScanner.scanRepository('full'); // Get all files to compare

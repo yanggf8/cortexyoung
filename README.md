@@ -101,6 +101,8 @@ npm run demo
 - Ensured incremental mode is always used except for: first time, user explicit request, or complete corruption
 - Fixed file hash population bug that prevented proper delta calculation
 - Improved embedding preservation - system now keeps 57.9% valid embeddings instead of reprocessing everything
+- Simplified file hash architecture - removed unnecessary validation and misleading warnings
+- File hashes are rebuilt on startup by design (fast & always accurate, no persistence complexity)
 
 **v2.1.1 - Indexing Robustness**
 - Fixed ENOENT errors when processing deleted files during incremental indexing
