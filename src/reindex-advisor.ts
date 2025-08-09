@@ -10,6 +10,7 @@ export interface ReindexRecommendation {
   severity: 'low' | 'medium' | 'high' | 'critical';
   category: 'schema' | 'model' | 'corruption' | 'performance' | 'staleness';
   autoReindex?: boolean; // Should we automatically trigger reindex?
+  details?: any; // Additional context for the recommendation
 }
 
 export class ReindexAdvisor {
@@ -51,7 +52,11 @@ export class ReindexAdvisor {
   }
 
   /**
-   * Provides a single consolidated recommendation
+   * Provides analysis recommendations without automatically deciding modes
+   * Mode switching should only happen for the three legitimate cases:
+   * 1. First time (no existing embeddings)
+   * 2. User explicit request (mode: 'full' or 'reindex')
+   * 3. Complete corruption (embedding files missing/unreadable)
    */
   async getReindexRecommendation(
     vectorStore: PersistentVectorStore,
@@ -61,6 +66,7 @@ export class ReindexAdvisor {
     mode: 'incremental' | 'reindex';
     primaryReason: string;
     allRecommendations: ReindexRecommendation[];
+    forcedRebuildRequired: boolean; // Only true for legitimate corruption cases
   }> {
     const recommendations = await this.analyzeReindexNeeds(vectorStore, repositoryPath);
     
@@ -70,6 +76,13 @@ export class ReindexAdvisor {
       return severityOrder[b.severity] - severityOrder[a.severity];
     });
 
+    // Only flag forced rebuild for TRUE corruption cases
+    const forcedRebuildRequired = recommendations.some(r => 
+      r.category === 'corruption' && 
+      r.severity === 'critical' &&
+      (r.reason.includes('duplicate chunk IDs') || r.reason.includes('Health check failed'))
+    );
+
     const criticalOrHigh = recommendations.filter(r => 
       r.recommend && (r.severity === 'critical' || r.severity === 'high')
     );
@@ -77,9 +90,10 @@ export class ReindexAdvisor {
     if (criticalOrHigh.length > 0) {
       return {
         shouldReindex: true,
-        mode: 'reindex',
+        mode: 'incremental', // Let user decide mode, don't override automatically
         primaryReason: criticalOrHigh[0].reason,
-        allRecommendations: recommendations
+        allRecommendations: recommendations,
+        forcedRebuildRequired
       };
     }
 
@@ -87,9 +101,10 @@ export class ReindexAdvisor {
     if (medium.length > 0) {
       return {
         shouldReindex: true,
-        mode: 'incremental', // Medium issues can often be resolved with incremental
+        mode: 'incremental',
         primaryReason: medium[0].reason,
-        allRecommendations: recommendations
+        allRecommendations: recommendations,
+        forcedRebuildRequired: false
       };
     }
 
@@ -97,7 +112,8 @@ export class ReindexAdvisor {
       shouldReindex: false,
       mode: 'incremental',
       primaryReason: 'Index is in good condition',
-      allRecommendations: recommendations
+      allRecommendations: recommendations,
+      forcedRebuildRequired: false
     };
   }
 
@@ -115,7 +131,7 @@ export class ReindexAdvisor {
           reason: `Schema version ${schemaVersion} is incompatible with program version 2.1.0. Compatible schemas: ${['1.0.0', '1.1.0'].join(', ')}`,
           severity: 'high',
           category: 'schema',
-          autoReindex: true
+          autoReindex: false // Never auto-reindex, let user decide
         };
       }
 
@@ -141,7 +157,7 @@ export class ReindexAdvisor {
           reason: compatibility.reason,
           severity: 'high',
           category: 'model',
-          autoReindex: true
+          autoReindex: false // Never auto-reindex, let user decide
         };
       }
     } catch (error) {
@@ -167,7 +183,7 @@ export class ReindexAdvisor {
           reason: `Critical index issues detected: ${criticalIssues.map(i => i.message).join(', ')}`,
           severity: 'critical',
           category: 'corruption',
-          autoReindex: true
+          autoReindex: false // Even corruption should not auto-reindex, let user decide
         };
       }
 

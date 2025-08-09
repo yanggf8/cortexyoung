@@ -467,9 +467,24 @@ export class PersistentVectorStore extends VectorStore {
     return { toAdd, toKeep, toRemove };
   }
 
-  // Override upsertChunks to ensure persistence
+  // Override upsertChunks to ensure persistence and populate file hashes
   async upsertChunks(chunks: CodeChunk[]): Promise<void> {
     await super.upsertChunks(chunks);
+    
+    // Populate file hashes for new chunks to enable proper delta calculation
+    for (const chunk of chunks) {
+      try {
+        // Only calculate hash if we don't already have it
+        if (!this.fileHashes.has(chunk.file_path)) {
+          const content = await fs.readFile(path.join(this.repositoryPath, chunk.file_path), 'utf-8');
+          const currentHash = crypto.createHash('sha256').update(content).digest('hex');
+          this.fileHashes.set(chunk.file_path, currentHash);
+        }
+      } catch (error) {
+        // File might not exist (e.g., during testing) - this is okay for file hash population
+        console.warn(`⚠️ Could not calculate file hash for ${chunk.file_path}:`, error instanceof Error ? error.message : error);
+      }
+    }
   }
 
   // Enhanced getStats with persistence information

@@ -75,19 +75,25 @@ export class CodebaseIndexer {
       const hasExistingIndex = await this.vectorStore.indexExists();
       
       if (hasExistingIndex && request.mode === 'incremental') {
-        // Analyze if reindex is recommended
+        // Analyze index health for informational purposes only
         const recommendation = await this.reindexAdvisor.getReindexRecommendation(
           this.vectorStore, 
           this.repositoryPath
         );
         
-        if (recommendation.shouldReindex && recommendation.mode === 'reindex') {
-          console.log('🤖 Automatic reindex recommended:', recommendation.primaryReason);
-          console.log('🔄 Switching from incremental to full reindex...');
+        // Only override user's mode in extreme corruption cases that prevent incremental processing
+        if (recommendation.forcedRebuildRequired) {
+          console.log('🚨 CRITICAL CORRUPTION DETECTED:', recommendation.primaryReason);
+          console.log('🔄 Cannot proceed with incremental mode due to severe index corruption');
+          console.log('   Switching to full rebuild to recover from corruption...');
           await this.vectorStore.clearIndex();
           return await this.performFullIndex({ ...request, mode: 'reindex' }, startTime);
-        } else if (recommendation.allRecommendations.length > 0) {
-          console.log('💡 Index analysis:', recommendation.primaryReason);
+        }
+        
+        // Provide informational feedback but respect user's incremental request
+        if (recommendation.allRecommendations.length > 0) {
+          console.log('💡 Index health analysis:', recommendation.primaryReason);
+          console.log('   (proceeding with incremental mode as requested)');
         }
         
         console.log('📂 Loading existing embeddings and performing incremental update...');
@@ -115,7 +121,7 @@ export class CodebaseIndexer {
   private async performIncrementalIndex(request: IndexRequest, startTime: number): Promise<IndexResponse> {
     console.log(`Starting incremental indexing of ${request.repository_path}`);
     
-    // Critical fix: Validate vector store state before incremental indexing
+    // Validate vector store state and attempt recovery for incremental indexing
     const chunkCount = this.vectorStore.getChunkCount();
     const fileHashCount = this.vectorStore.getFileHashCount();
     
@@ -124,13 +130,40 @@ export class CodebaseIndexer {
     console.log(`   - File hashes loaded: ${fileHashCount}`);
     
     if (chunkCount > 0 && fileHashCount === 0) {
-      console.warn('⚠️ CRITICAL: Chunks exist but no file hashes loaded - incremental indexing impossible');
-      console.warn('   - This would cause all files to be treated as new files');
-      console.warn('   - Switching to full rebuild mode to ensure data consistency');
+      console.warn('⚠️ WARNING: Chunks exist but no file hashes loaded');
+      console.log('   - Attempting to rebuild file hash cache from existing chunks...');
       
-      // Clear the existing chunks and switch to full indexing
-      await this.vectorStore.clearIndex();
-      return await this.performFullIndex({ ...request, mode: 'reindex' }, startTime);
+      try {
+        // Try to recover file hashes from existing chunk data
+        const chunks = await this.vectorStore.getAllChunks();
+        const fileHashes = new Map<string, string>();
+        
+        // Reconstruct file hashes by reading current files and matching with chunks
+        const uniqueFiles = [...new Set(chunks.map(c => c.file_path))];
+        for (const filePath of uniqueFiles) {
+          try {
+            const content = await this.gitScanner.readFile(filePath);
+            // Simple hash calculation using crypto
+            const crypto = require('crypto');
+            const hash = crypto.createHash('sha256').update(content).digest('hex');
+            fileHashes.set(filePath, hash);
+          } catch (error) {
+            // File might be deleted, will be handled in delta calculation
+            console.log(`     File ${filePath} no longer exists (will be cleaned up)`);
+          }
+        }
+        
+        // Update vector store with recovered hashes by accessing the private property directly
+        // This is a recovery operation for corrupted state
+        (this.vectorStore as any).fileHashes = fileHashes;
+        console.log(`   ✅ Recovered ${fileHashes.size} file hashes, proceeding with incremental mode`);
+        
+      } catch (error) {
+        console.error('   ❌ Failed to recover file hash cache:', error);
+        console.log('   🔄 Falling back to full rebuild due to unrecoverable state');
+        await this.vectorStore.clearIndex();
+        return await this.performFullIndex({ ...request, mode: 'reindex' }, startTime);
+      }
     }
     
     // Scan repository for all files
@@ -142,6 +175,16 @@ export class CodebaseIndexer {
     const changedFiles = [...delta.fileChanges.added, ...delta.fileChanges.modified];
     
     console.log(`📊 Delta analysis: +${delta.fileChanges.added.length} ~${delta.fileChanges.modified.length} -${delta.fileChanges.deleted.length} files`);
+    
+    // Handle deleted files first (clean up their chunks from the index)
+    if (delta.fileChanges.deleted.length > 0) {
+      console.log(`🗑️  Processing ${delta.fileChanges.deleted.length} deleted files...`);
+      for (const deletedFile of delta.fileChanges.deleted) {
+        const deletedChunks = this.vectorStore.getChunksByFile(deletedFile);
+        delta.removed.push(...deletedChunks.map(c => c.chunk_id));
+        console.log(`   Removed ${deletedChunks.length} chunks from deleted file: ${deletedFile}`);
+      }
+    }
     
     if (changedFiles.length === 0 && delta.fileChanges.deleted.length === 0) {
       console.log('✅ No changes detected, index is up to date');
@@ -169,10 +212,19 @@ export class CodebaseIndexer {
       };
     }
     
-    // Process only changed files
+    // Process added and modified files (deleted files already handled above)
     const chunksToEmbed: CodeChunk[] = [];
     const chunksToKeep: CodeChunk[] = [];
     const fileChanges = await this.gitScanner.getFileChanges(changedFiles);
+
+    // Process each file change type independently
+    console.log(`🔄 Processing file changes:`);
+    if (delta.fileChanges.added.length > 0) {
+      console.log(`   📁 Adding ${delta.fileChanges.added.length} new files`);
+    }
+    if (delta.fileChanges.modified.length > 0) {
+      console.log(`   📝 Updating ${delta.fileChanges.modified.length} modified files`);
+    }
 
     for (const filePath of changedFiles) {
       try {
@@ -199,10 +251,13 @@ export class CodebaseIndexer {
       }
     }
     
-    console.log(`💡 Analysis complete:`);
-    console.log(`  - ${chunksToEmbed.length} new or modified chunks to embed.`);
-    console.log(`  - ${chunksToKeep.length} unchanged chunks (cache hit).`);
-    console.log(`  - ${delta.removed.length} chunks to remove.`);
+    console.log(`💡 Processing summary by file change type:`);
+    console.log(`  - NEW FILES: ${delta.fileChanges.added.length} files`);
+    console.log(`  - MODIFIED FILES: ${delta.fileChanges.modified.length} files`);
+    console.log(`  - DELETED FILES: ${delta.fileChanges.deleted.length} files (${delta.removed.length - (chunksToEmbed.length > 0 ? delta.removed.filter(id => !chunksToEmbed.some(c => c.chunk_id === id)).length : delta.removed.length)} chunks removed)`);
+    console.log(`  - CHUNKS TO EMBED: ${chunksToEmbed.length} (new or modified)`);
+    console.log(`  - CHUNKS TO KEEP: ${chunksToKeep.length} (unchanged, cache hit)`);
+    console.log(`  - TOTAL CHUNKS REMOVED: ${delta.removed.length}`);
 
     // Generate embeddings only for new/changed chunks
     if (chunksToEmbed.length > 0) {

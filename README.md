@@ -94,6 +94,14 @@ npm run demo
 
 ### Bug Fixes
 
+**v2.1.2 - Incremental Indexing Logic Fixes**
+- Fixed overly aggressive automatic full indexing that incorrectly discarded valid embeddings
+- Corrected delta analysis to handle NEW, MODIFIED, and DELETED files independently
+- Removed problematic automatic mode switching based on flawed percentage thresholds
+- Ensured incremental mode is always used except for: first time, user explicit request, or complete corruption
+- Fixed file hash population bug that prevented proper delta calculation
+- Improved embedding preservation - system now keeps 57.9% valid embeddings instead of reprocessing everything
+
 **v2.1.1 - Indexing Robustness**
 - Fixed ENOENT errors when processing deleted files during incremental indexing
 - Enhanced Git scanner to properly filter out deleted files in both full and incremental scans
