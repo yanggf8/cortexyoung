@@ -20,12 +20,15 @@ const rl = readline.createInterface({
 async function initializeEmbedder(id) {
   try {
     processId = id;
-    console.error(`[Process ${processId}] Starting separate Node.js instance...`);
+    // Log to stderr for parent process to capture as debug info (not error)
+    process.stderr.write(`[Process] External embedding process started, waiting for init...\n`);
+    process.stderr.write(`[Process] Node.js version: ${process.version}, Platform: ${process.platform}, Arch: ${process.arch}\n`);
+    process.stderr.write(`[Process ${processId}] Starting separate Node.js instance...\n`);
     
     // Dynamic import in separate process - complete isolation
     const { FlagEmbedding, EmbeddingModel } = await import('fastembed');
     
-    console.error(`[Process ${processId}] Creating isolated FastEmbedding instance...`);
+    process.stderr.write(`[Process ${processId}] Creating isolated FastEmbedding instance...\n`);
     
     // Each process gets its own BGE instance with simplified configuration
     embedder = await FlagEmbedding.init({
@@ -36,7 +39,7 @@ async function initializeEmbedder(id) {
     });
     
     isInitialized = true;
-    console.error(`[Process ${processId}] FastEmbedding ready in separate process`);
+    process.stderr.write(`[Process ${processId}] FastEmbedding ready in separate process\n`);
     
     // Send success response
     console.log(JSON.stringify({
@@ -464,5 +467,5 @@ if (typeof global.gc === 'function') {
   console.error(`[Process] GC not exposed. Start with --expose-gc for better memory management`);
 }
 
-console.error(`[Process] External embedding process started, waiting for init...`);
-console.error(`[Process] Node.js version: ${process.version}, Platform: ${process.platform}, Arch: ${process.arch}`);
+process.stderr.write(`[Process] External embedding process started, waiting for init...\n`);
+process.stderr.write(`[Process] Node.js version: ${process.version}, Platform: ${process.platform}, Arch: ${process.arch}\n`);

@@ -1650,9 +1650,31 @@ export class ProcessPoolEmbedder implements IEmbedder {
       }
     });
     
-    // Handle process stderr (logs)
+    // Handle process stderr (logs and debug info)
     childProcess.stderr?.on('data', (data) => {
-      console.error(`[Process ${processInstance.id} ERROR]: ${data.toString().trim()}`);
+      const message = data.toString().trim();
+      // Distinguish between debug info and actual errors
+      if (message.includes('FastEmbedding ready') || 
+          message.includes('Starting separate Node.js instance') ||
+          message.includes('Creating isolated FastEmbedding instance') ||
+          message.includes('External embedding process started') ||
+          message.includes('Node.js version:') ||
+          message.includes('Processing ') && message.includes(' texts for batch') ||
+          message.includes('Completed batch ') || 
+          message.includes('Splitting ') && message.includes(' texts into')) {
+        // These are debug/info messages, not errors
+        console.log(`[Process ${processInstance.id} DEBUG]: ${message}`);
+      } else if (message.includes('Received abort') || 
+                 message.includes('Aborting gracefully') ||
+                 message.includes('Shutting down gracefully') ||
+                 message.includes('Received SIGTERM') ||
+                 message.includes('Received SIGINT')) {
+        // Shutdown messages are info, not errors
+        console.log(`[Process ${processInstance.id} INFO]: ${message}`);
+      } else {
+        // Actual errors
+        console.error(`[Process ${processInstance.id} ERROR]: ${message}`);
+      }
     });
     
     // Handle IPC messages if available (for processes with IPC enabled)
@@ -2254,9 +2276,10 @@ export class ProcessPoolEmbedder implements IEmbedder {
       // Find available process with emergency mode respect
       let eligibleProcesses = this.processes.filter(p => p.isReady && p.isAvailable);
       
-      // In emergency mode or single process fallback, use only first process
+      // In emergency mode or single process fallback, use only first ready process (ignore availability)
       if (this.adaptivePool.emergencyMode || this.adaptivePool.singleProcessFallback) {
-        eligibleProcesses = eligibleProcesses.slice(0, 1);
+        const readyProcesses = this.processes.filter(p => p.isReady);
+        eligibleProcesses = readyProcesses.slice(0, 1);
         console.log(`🚨 Emergency/Single process mode: using only process ${eligibleProcesses[0]?.id || 'none'}`);
       }
       
