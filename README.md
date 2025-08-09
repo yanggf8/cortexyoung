@@ -92,6 +92,14 @@ npm run demo
 **First run**: Downloads ~200MB BGE-small-en-v1.5 model to `.fastembed_cache/`  
 **Subsequent runs**: Uses cached model for instant startup
 
+### Bug Fixes
+
+**v2.1.1 - Indexing Robustness**
+- Fixed ENOENT errors when processing deleted files during incremental indexing
+- Enhanced Git scanner to properly filter out deleted files in both full and incremental scans
+- Improved error handling and logging for better debugging experience
+- Ensured consistent file existence validation across all scanning modes
+
 ## Available Scripts
 
 - `npm run demo` - Run indexing demo with real embeddings

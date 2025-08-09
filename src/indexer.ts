@@ -91,7 +91,11 @@ export class CodebaseIndexer {
         const chunks = await this.chunker.chunkFile(filePath, content, fileChange, coChangeFiles);
         newChunks.push(...chunks);
       } catch (error) {
-        console.warn(`Failed to process file ${filePath}:`, error);
+        if (error instanceof Error && error.message.includes('File not found')) {
+          console.warn(`Skipping deleted file: ${filePath}`);
+        } else {
+          console.warn(`Failed to process file ${filePath}:`, error);
+        }
       }
     }
     
@@ -149,7 +153,11 @@ export class CodebaseIndexer {
           console.log(`Processed ${processedFiles}/${scanResult.files.length} files`);
         }
       } catch (error) {
-        console.warn(`Failed to process file ${filePath}:`, error);
+        if (error instanceof Error && error.message.includes('File not found')) {
+          console.warn(`Skipping deleted file: ${filePath}`);
+        } else {
+          console.warn(`Failed to process file ${filePath}:`, error);
+        }
       }
     }
     

@@ -42,8 +42,10 @@ export class GitScanner {
       result.split('\n').filter(Boolean)
     );
 
-    // Filter for code and documentation files
-    const relevantFiles = files.filter(file => this.isRelevantFile(file));
+    // Filter for code and documentation files and check if files exist
+    const relevantFiles = await this.filterExistingFiles(
+      files.filter(file => this.isRelevantFile(file))
+    );
 
     // Get latest commit
     const log = await this.git.log({ maxCount: 1 });
@@ -61,8 +63,10 @@ export class GitScanner {
     const diff = await this.git.diffSummary([`${sinceCommit}..HEAD`]);
     const changedFiles = diff.files.map(file => file.file);
 
-    // Filter for relevant files
-    const relevantFiles = changedFiles.filter(file => this.isRelevantFile(file));
+    // Filter for relevant files and check if files exist
+    const relevantFiles = await this.filterExistingFiles(
+      changedFiles.filter(file => this.isRelevantFile(file))
+    );
 
     // Get latest commit
     const log = await this.git.log({ maxCount: 1 });
@@ -130,6 +134,26 @@ export class GitScanner {
     }
   }
 
+  private async filterExistingFiles(files: string[]): Promise<string[]> {
+    const existingFiles: string[] = [];
+    
+    for (const file of files) {
+      try {
+        const fullPath = path.join(this.repositoryPath, file);
+        await fs.access(fullPath, fs.constants.F_OK);
+        existingFiles.push(file);
+      } catch (error: any) {
+        if (error.code === 'ENOENT') {
+          console.warn(`Skipping deleted file: ${file}`);
+        } else {
+          console.warn(`Error checking file ${file}:`, error.message);
+        }
+      }
+    }
+    
+    return existingFiles;
+  }
+
   private isRelevantFile(filePath: string): boolean {
     const ext = path.extname(filePath).toLowerCase();
     const relevantExtensions = [
@@ -152,6 +176,13 @@ export class GitScanner {
 
   async readFile(filePath: string): Promise<string> {
     const fullPath = path.join(this.repositoryPath, filePath);
-    return await fs.readFile(fullPath, 'utf-8');
+    try {
+      return await fs.readFile(fullPath, 'utf-8');
+    } catch (error: any) {
+      if (error.code === 'ENOENT') {
+        throw new Error(`File not found: ${filePath} (may have been deleted but not committed)`);
+      }
+      throw error;
+    }
   }
 }
