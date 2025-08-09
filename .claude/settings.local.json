@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm run demo:*)",
+      "Bash(npm run build:*)",
+      "Bash(node:*)",
+      "Bash(cp:*)",
+      "Bash(timeout:*)",
+      "Bash(git add:*)",
+      "Bash(npm run benchmark:*)",
+      "Bash(npm run storage:status:*)",
+      "Bash(npm run test:*)",
+      "Bash(pgrep:*)",
+      "Bash(npm run:*)",
+      "Bash(ls:*)",
+      "Bash(grep:*)",
+      "mcp__gemini-cli__ask-gemini"
+    ],
+    "deny": []
+  }
+}

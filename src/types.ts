@@ -16,9 +16,33 @@ export interface CodeChunk {
   usage_patterns: UsagePatterns;
   last_modified: string;
   relevance_score?: number;
+  similarity_score?: number;
+  function_name?: string;
 }
 
 export type ChunkType = 'function' | 'class' | 'method' | 'documentation' | 'config';
+
+// Simple version compatibility
+export const CORTEX_PROGRAM_VERSION = '2.1.0';
+export const CORTEX_SCHEMA_VERSION = '1.0.0';  // We use schema v1, program v2.1
+
+// Program 2.1 is compatible with schema 1.x
+export const COMPATIBLE_SCHEMA_VERSIONS = ['1.0.0', '1.1.0'];
+
+export interface SchemaInfo {
+  version: string;
+  compatible: boolean;
+  requiresMigration: boolean;
+  migrationPath?: string[];
+}
+
+export interface ModelInfo {
+  name: string;
+  version: string;
+  hash?: string;
+  dimension: number;
+  isLoaded: boolean;
+}
 
 export interface CodeRelationships {
   calls: string[];
@@ -64,9 +88,20 @@ export interface MultiHopConfig {
   max_hops: number;
   relationship_types: RelationshipType[];
   hop_decay: number;
+  focus_symbols?: string[];
+  include_paths?: boolean;
+  traversal_direction?: 'forward' | 'backward';
+  min_strength?: number;
 }
 
-export type RelationshipType = 'calls' | 'imports' | 'data_flow' | 'co_change';
+export type RelationshipType =
+  | 'calls'
+  | 'imports'
+  | 'data_flow'
+  | 'co_change'
+  | 'throws'
+  | 'extends'
+  | 'implements';
 export type ContextMode = 'minimal' | 'structured' | 'adaptive';
 
 export interface QueryResponse {
@@ -74,10 +109,25 @@ export interface QueryResponse {
   metadata: QueryMetadata;
 }
 
+export interface SearchResponse {
+  status?: 'success' | 'error';
+  chunks?: CodeChunk[];
+  context_package: ContextPackage;
+  query_time_ms: number;
+  total_chunks_considered: number;
+  relationship_paths?: any[];
+  efficiency_score?: number;
+  metadata: QueryMetadata;
+  context_chunks?: CodeChunk[];
+}
+
 export interface ContextPackage {
   summary: string;
   groups: ContextGroup[];
   related_files: string[];
+  total_tokens?: number;
+  token_efficiency?: number;
+  relationship_insights?: any;
 }
 
 export interface ContextGroup {
@@ -85,6 +135,7 @@ export interface ContextGroup {
   description: string;
   chunks: CodeChunk[];
   importance_score: number;
+  relationship_paths?: any[];
 }
 
 export interface QueryMetadata {
@@ -93,12 +144,15 @@ export interface QueryMetadata {
   chunks_returned: number;
   token_estimate: number;
   efficiency_score: number;
+  relationship_paths?: any[];
+  confidence_scores?: number[];
 }
 
 export interface IndexRequest {
   repository_path: string;
-  mode: 'full' | 'incremental';
+  mode: 'full' | 'incremental' | 'reindex';
   since_commit?: string;
+  force_rebuild?: boolean; // For reindex mode
 }
 
 export interface IndexResponse {
@@ -125,4 +179,63 @@ export interface MCPError {
   code: number;
   message: string;
   data?: any;
+}
+
+// IEmbedder interface for standardizing embedding providers
+export interface IEmbedder {
+  readonly providerId: string;
+  readonly modelId: string; 
+  readonly dimensions: number;
+  readonly maxBatchSize: number;
+  readonly normalization: "l2" | "none";
+  
+  embedBatch(texts: string[], options?: EmbedOptions): Promise<EmbeddingResult>;
+  getHealth(): Promise<ProviderHealth>;
+  getMetrics(): Promise<ProviderMetrics>;
+}
+
+export interface EmbedOptions {
+  timeout?: number;
+  retryCount?: number;
+  priority?: "high" | "normal" | "low";
+  requestId?: string;
+}
+
+export interface EmbeddingResult {
+  embeddings: number[][];
+  metadata: EmbeddingMetadata;
+  performance: PerformanceStats;
+}
+
+export interface EmbeddingMetadata {
+  providerId: string;
+  modelId: string;
+  batchSize: number;
+  processedAt: number;
+  requestId?: string;
+}
+
+export interface PerformanceStats {
+  duration: number;
+  memoryDelta: number;
+  processId?: number;
+  cacheHits?: number;
+  retries?: number;
+}
+
+export interface ProviderHealth {
+  status: "healthy" | "degraded" | "unhealthy";
+  details: string;
+  lastCheck: number;
+  uptime?: number;
+  errorRate?: number;
+}
+
+export interface ProviderMetrics {
+  requestCount: number;
+  avgDuration: number;
+  errorRate: number;
+  lastSuccess: number;
+  totalEmbeddings: number;
+  cacheHitRate?: number;
 }

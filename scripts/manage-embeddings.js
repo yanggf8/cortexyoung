@@ -2,6 +2,8 @@
 
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
+const crypto = require('crypto');
 
 const CORTEX_DIR = '.cortex';
 const INDEX_FILE = 'index.json';
@@ -9,34 +11,79 @@ const INDEX_FILE = 'index.json';
 class EmbeddingManager {
   constructor(repoPath = process.cwd()) {
     this.repoPath = repoPath;
+    
+    // Local storage
     this.cortexPath = path.join(repoPath, CORTEX_DIR);
     this.indexPath = path.join(this.cortexPath, INDEX_FILE);
+    
+    // Global storage
+    const repoHash = this.getRepositoryHash(repoPath);
+    const claudeDir = path.join(os.homedir(), '.claude', 'cortex-embeddings');
+    this.globalCortexPath = path.join(claudeDir, repoHash);
+    this.globalIndexPath = path.join(this.globalCortexPath, INDEX_FILE);
+  }
+
+  getRepositoryHash(repoPath) {
+    const absolutePath = path.resolve(repoPath);
+    const hash = crypto.createHash('sha256').update(absolutePath).digest('hex');
+    const repoName = path.basename(absolutePath);
+    return `${repoName}-${hash.substring(0, 16)}`;
   }
 
   async getStats() {
     try {
-      if (!fs.existsSync(this.indexPath)) {
+      const localExists = fs.existsSync(this.indexPath);
+      const globalExists = fs.existsSync(this.globalIndexPath);
+      
+      if (!localExists && !globalExists) {
         return {
           exists: false,
-          message: 'No embedding index found'
+          message: 'No embedding index found in local or global storage'
         };
       }
 
-      const stats = fs.statSync(this.indexPath);
-      const indexData = JSON.parse(fs.readFileSync(this.indexPath, 'utf-8'));
-      
-      const cortexDirStats = this.getDirSize(this.cortexPath);
-
-      return {
-        exists: true,
-        totalChunks: indexData.chunks.length,
-        totalFiles: Object.keys(indexData.fileHashes || {}).length,
-        lastUpdated: new Date(indexData.timestamp).toLocaleString(),
-        indexSizeMB: (stats.size / 1024 / 1024).toFixed(2),
-        totalSizeMB: (cortexDirStats / 1024 / 1024).toFixed(2),
-        embeddingModel: indexData.metadata?.embeddingModel || 'Unknown',
-        version: indexData.version || 'Unknown'
+      const results = {
+        local: { exists: localExists },
+        global: { exists: globalExists }
       };
+
+      if (localExists) {
+        const stats = fs.statSync(this.indexPath);
+        const indexData = JSON.parse(fs.readFileSync(this.indexPath, 'utf-8'));
+        const cortexDirStats = this.getDirSize(this.cortexPath);
+
+        results.local = {
+          exists: true,
+          totalChunks: indexData.chunks.length,
+          totalFiles: Object.keys(indexData.fileHashes || {}).length,
+          lastUpdated: new Date(indexData.timestamp).toLocaleString(),
+          indexSizeMB: (stats.size / 1024 / 1024).toFixed(2),
+          totalSizeMB: (cortexDirStats / 1024 / 1024).toFixed(2),
+          embeddingModel: indexData.metadata?.embeddingModel || 'Unknown',
+          version: indexData.version || 'Unknown',
+          path: this.indexPath
+        };
+      }
+
+      if (globalExists) {
+        const stats = fs.statSync(this.globalIndexPath);
+        const indexData = JSON.parse(fs.readFileSync(this.globalIndexPath, 'utf-8'));
+        const cortexDirStats = this.getDirSize(this.globalCortexPath);
+
+        results.global = {
+          exists: true,
+          totalChunks: indexData.chunks.length,
+          totalFiles: Object.keys(indexData.fileHashes || {}).length,
+          lastUpdated: new Date(indexData.timestamp).toLocaleString(),
+          indexSizeMB: (stats.size / 1024 / 1024).toFixed(2),
+          totalSizeMB: (cortexDirStats / 1024 / 1024).toFixed(2),
+          embeddingModel: indexData.metadata?.embeddingModel || 'Unknown',
+          version: indexData.version || 'Unknown',
+          path: this.globalIndexPath
+        };
+      }
+
+      return results;
     } catch (error) {
       return {
         exists: false,
@@ -176,6 +223,80 @@ class EmbeddingManager {
       };
     }
   }
+
+  async syncToGlobal() {
+    try {
+      if (!fs.existsSync(this.indexPath)) {
+        return { success: false, message: 'No local cache to sync' };
+      }
+
+      // Ensure global directory exists
+      if (!fs.existsSync(this.globalCortexPath)) {
+        fs.mkdirSync(this.globalCortexPath, { recursive: true });
+      }
+
+      const indexData = fs.readFileSync(this.indexPath, 'utf-8');
+      fs.writeFileSync(this.globalIndexPath, indexData);
+
+      return {
+        success: true,
+        message: `Synced to global storage: ${this.globalIndexPath}`
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error.message
+      };
+    }
+  }
+
+  async syncToLocal() {
+    try {
+      if (!fs.existsSync(this.globalIndexPath)) {
+        return { success: false, message: 'No global cache to sync' };
+      }
+
+      // Ensure local directory exists
+      if (!fs.existsSync(this.cortexPath)) {
+        fs.mkdirSync(this.cortexPath, { recursive: true });
+      }
+
+      const indexData = fs.readFileSync(this.globalIndexPath, 'utf-8');
+      fs.writeFileSync(this.indexPath, indexData);
+
+      return {
+        success: true,
+        message: `Synced to local storage: ${this.indexPath}`
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error.message
+      };
+    }
+  }
+
+  async getStorageInfo() {
+    const localExists = fs.existsSync(this.indexPath);
+    const globalExists = fs.existsSync(this.globalIndexPath);
+
+    const info = {
+      local: { exists: localExists, path: this.indexPath },
+      global: { exists: globalExists, path: this.globalIndexPath }
+    };
+
+    if (localExists) {
+      const stats = fs.statSync(this.indexPath);
+      info.local.lastModified = stats.mtime;
+    }
+
+    if (globalExists) {
+      const stats = fs.statSync(this.globalIndexPath);
+      info.global.lastModified = stats.mtime;
+    }
+
+    return info;
+  }
 }
 
 // CLI Interface
@@ -187,17 +308,32 @@ async function main() {
     case 'stats':
     case 'status':
       const stats = await manager.getStats();
-      if (stats.exists) {
+      if (stats.local?.exists || stats.global?.exists) {
         console.log('📊 Embedding Cache Statistics:');
-        console.log(`   Total Chunks: ${stats.totalChunks.toLocaleString()}`);
-        console.log(`   Total Files: ${stats.totalFiles.toLocaleString()}`);
-        console.log(`   Last Updated: ${stats.lastUpdated}`);
-        console.log(`   Index Size: ${stats.indexSizeMB} MB`);
-        console.log(`   Total Size: ${stats.totalSizeMB} MB`);
-        console.log(`   Model: ${stats.embeddingModel}`);
-        console.log(`   Version: ${stats.version}`);
+        
+        if (stats.local?.exists) {
+          console.log('\n📁 Local Storage (.cortex/):');
+          console.log(`   Total Chunks: ${stats.local.totalChunks.toLocaleString()}`);
+          console.log(`   Total Files: ${stats.local.totalFiles.toLocaleString()}`);
+          console.log(`   Last Updated: ${stats.local.lastUpdated}`);
+          console.log(`   Index Size: ${stats.local.indexSizeMB} MB`);
+          console.log(`   Total Size: ${stats.local.totalSizeMB} MB`);
+          console.log(`   Model: ${stats.local.embeddingModel}`);
+          console.log(`   Path: ${stats.local.path}`);
+        }
+        
+        if (stats.global?.exists) {
+          console.log('\n🌐 Global Storage (~/.claude/):');
+          console.log(`   Total Chunks: ${stats.global.totalChunks.toLocaleString()}`);
+          console.log(`   Total Files: ${stats.global.totalFiles.toLocaleString()}`);
+          console.log(`   Last Updated: ${stats.global.lastUpdated}`);
+          console.log(`   Index Size: ${stats.global.indexSizeMB} MB`);
+          console.log(`   Total Size: ${stats.global.totalSizeMB} MB`);
+          console.log(`   Model: ${stats.global.embeddingModel}`);
+          console.log(`   Path: ${stats.global.path}`);
+        }
       } else {
-        console.log('❌ No embedding cache found');
+        console.log('❌ No embedding cache found in local or global storage');
         if (stats.error) console.log(`   Error: ${stats.error}`);
       }
       break;
@@ -261,6 +397,44 @@ async function main() {
       }
       break;
 
+    case 'sync-to-global':
+    case 'sync-global':
+      const syncGlobalResult = await manager.syncToGlobal();
+      if (syncGlobalResult.success) {
+        console.log(`✅ ${syncGlobalResult.message}`);
+      } else {
+        console.error(`❌ ${syncGlobalResult.error || syncGlobalResult.message}`);
+        process.exit(1);
+      }
+      break;
+
+    case 'sync-to-local':
+    case 'sync-local':
+      const syncLocalResult = await manager.syncToLocal();
+      if (syncLocalResult.success) {
+        console.log(`✅ ${syncLocalResult.message}`);
+      } else {
+        console.error(`❌ ${syncLocalResult.error || syncLocalResult.message}`);
+        process.exit(1);
+      }
+      break;
+
+    case 'info':
+    case 'storage-info':
+      const storageInfo = await manager.getStorageInfo();
+      console.log('🗄️ Storage Information:');
+      console.log(`📁 Local: ${storageInfo.local.exists ? '✅ Exists' : '❌ Missing'}`);
+      console.log(`   Path: ${storageInfo.local.path}`);
+      if (storageInfo.local.lastModified) {
+        console.log(`   Modified: ${storageInfo.local.lastModified.toLocaleString()}`);
+      }
+      console.log(`🌐 Global: ${storageInfo.global.exists ? '✅ Exists' : '❌ Missing'}`);
+      console.log(`   Path: ${storageInfo.global.path}`);
+      if (storageInfo.global.lastModified) {
+        console.log(`   Modified: ${storageInfo.global.lastModified.toLocaleString()}`);
+      }
+      break;
+
     case 'help':
     default:
       console.log('🔧 Cortex Embedding Cache Manager');
@@ -268,18 +442,26 @@ async function main() {
       console.log('Usage: node manage-embeddings.js <command>');
       console.log('');
       console.log('Commands:');
-      console.log('  stats     Show cache statistics');
-      console.log('  clear     Clear the embedding cache');
-      console.log('  validate  Validate index integrity');
-      console.log('  backup    Create a backup of the cache');
-      console.log('  restore   Restore from backup file');
-      console.log('  help      Show this help message');
+      console.log('  stats          Show cache statistics for both local and global storage');
+      console.log('  clear          Clear the embedding cache (both local and global)');
+      console.log('  validate       Validate index integrity');
+      console.log('  backup         Create a backup of the cache');
+      console.log('  restore        Restore from backup file');
+      console.log('  sync-to-global Sync local cache to global storage (~/.claude)');
+      console.log('  sync-to-local  Sync global cache to local storage (.cortex)');
+      console.log('  info           Show storage paths and modification times');
+      console.log('  help           Show this help message');
+      console.log('');
+      console.log('Dual Storage System:');
+      console.log('  📁 Local:  .cortex/ (fast access, stays with repo)');
+      console.log('  🌐 Global: ~/.claude/cortex-embeddings/ (synced across dev environments)');
       console.log('');
       console.log('Examples:');
       console.log('  node manage-embeddings.js stats');
+      console.log('  node manage-embeddings.js info');
+      console.log('  node manage-embeddings.js sync-to-global');
       console.log('  node manage-embeddings.js clear');
       console.log('  node manage-embeddings.js backup');
-      console.log('  node manage-embeddings.js restore cortex-backup-*.tar.gz');
       break;
   }
 }

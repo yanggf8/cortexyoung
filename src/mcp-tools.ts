@@ -30,16 +30,42 @@ export const CORTEX_TOOLS = {
         },
         multi_hop: {
           type: 'object',
-          description: 'Multi-hop relationship traversal configuration',
+          description: 'Advanced relationship traversal configuration',
           properties: {
             enabled: { type: 'boolean', default: true },
             max_hops: { type: 'number', default: 2, minimum: 1, maximum: 5 },
             relationship_types: {
               type: 'array',
-              items: { type: 'string', enum: ['calls', 'imports', 'data_flow', 'co_change'] },
-              default: ['calls']
+              items: { 
+                type: 'string', 
+                enum: ['calls', 'imports', 'exports', 'data_flow', 'co_change', 'extends', 'implements', 'throws', 'catches', 'depends_on'] 
+              },
+              default: ['calls', 'imports']
             },
-            hop_decay: { type: 'number', default: 0.8, minimum: 0.1, maximum: 1.0 }
+            hop_decay: { type: 'number', default: 0.8, minimum: 0.1, maximum: 1.0 },
+            focus_symbols: {
+              type: 'array',
+              description: 'Specific symbols to focus traversal on',
+              items: { type: 'string' }
+            },
+            traversal_direction: {
+              type: 'string',
+              enum: ['forward', 'backward', 'both'],
+              default: 'both',
+              description: 'Direction of relationship traversal'
+            },
+            min_strength: {
+              type: 'number',
+              default: 0.3,
+              minimum: 0.1,
+              maximum: 1.0,
+              description: 'Minimum relationship strength threshold'
+            },
+            include_paths: {
+              type: 'boolean',
+              default: true,
+              description: 'Include relationship paths in response'
+            }
           }
         }
       },
@@ -104,6 +130,161 @@ export const CORTEX_TOOLS = {
         }
       },
       required: ['task']
+    }
+  },
+
+  relationship_analysis: {
+    name: 'relationship_analysis',
+    description: 'Advanced code relationship analysis and traversal for understanding complex code interactions',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        analysis_type: {
+          type: 'string',
+          enum: ['call_graph', 'dependency_chain', 'data_flow', 'error_propagation', 'impact_analysis'],
+          description: 'Type of relationship analysis to perform'
+        },
+        starting_symbols: {
+          type: 'array',
+          description: 'Starting points for analysis (function names, class names, file paths)',
+          items: { type: 'string' },
+          minItems: 1
+        },
+        target_symbols: {
+          type: 'array',
+          description: 'Target symbols to find paths to (optional)',
+          items: { type: 'string' }
+        },
+        max_depth: {
+          type: 'number',
+          default: 3,
+          minimum: 1,
+          maximum: 10,
+          description: 'Maximum traversal depth'
+        },
+        relationship_filters: {
+          type: 'array',
+          description: 'Types of relationships to include in analysis',
+          items: { 
+            type: 'string', 
+            enum: ['calls', 'imports', 'exports', 'data_flow', 'extends', 'implements', 'throws', 'catches', 'depends_on'] 
+          },
+          default: ['calls', 'imports', 'data_flow']
+        },
+        include_strength_scores: {
+          type: 'boolean',
+          default: true,
+          description: 'Include relationship strength and confidence scores'
+        },
+        visualization_format: {
+          type: 'string',
+          enum: ['text', 'mermaid', 'json'],
+          default: 'text',
+          description: 'Format for relationship visualization'
+        },
+        context_radius: {
+          type: 'number',
+          default: 3,
+          minimum: 0,
+          maximum: 10,
+          description: 'Lines of code context around each discovered symbol'
+        }
+      },
+      required: ['analysis_type', 'starting_symbols']
+    }
+  },
+
+  trace_execution_path: {
+    name: 'trace_execution_path',
+    description: 'Trace execution paths through code to understand flow and dependencies',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        entry_point: {
+          type: 'string',
+          description: 'Starting function or method for tracing'
+        },
+        trace_type: {
+          type: 'string',
+          enum: ['forward_trace', 'backward_trace', 'bidirectional'],
+          default: 'forward_trace',
+          description: 'Direction of execution tracing'
+        },
+        include_data_flow: {
+          type: 'boolean',
+          default: true,
+          description: 'Include data flow analysis in trace'
+        },
+        include_error_paths: {
+          type: 'boolean',
+          default: true,
+          description: 'Include error handling and exception paths'
+        },
+        max_execution_depth: {
+          type: 'number',
+          default: 5,
+          minimum: 1,
+          maximum: 15,
+          description: 'Maximum depth of execution trace'
+        },
+        filter_by_files: {
+          type: 'array',
+          description: 'Limit trace to specific files or patterns',
+          items: { type: 'string' }
+        },
+        output_format: {
+          type: 'string',
+          enum: ['detailed', 'summary', 'flowchart'],
+          default: 'detailed',
+          description: 'Level of detail in trace output'
+        }
+      },
+      required: ['entry_point']
+    }
+  },
+
+  find_code_patterns: {
+    name: 'find_code_patterns',
+    description: 'Find complex code patterns and architectural relationships',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        pattern_type: {
+          type: 'string',
+          enum: ['design_pattern', 'anti_pattern', 'architectural_pattern', 'dependency_cycle', 'code_smell'],
+          description: 'Type of pattern to search for'
+        },
+        pattern_description: {
+          type: 'string',
+          description: 'Natural language description of the pattern to find'
+        },
+        scope: {
+          type: 'string',
+          enum: ['file', 'module', 'package', 'entire_codebase'],
+          default: 'entire_codebase',
+          description: 'Scope of pattern search'
+        },
+        confidence_threshold: {
+          type: 'number',
+          default: 0.7,
+          minimum: 0.1,
+          maximum: 1.0,
+          description: 'Minimum confidence for pattern matches'
+        },
+        include_examples: {
+          type: 'boolean',
+          default: true,
+          description: 'Include code examples of found patterns'
+        },
+        max_results: {
+          type: 'number',
+          default: 10,
+          minimum: 1,
+          maximum: 50,
+          description: 'Maximum number of pattern instances to return'
+        }
+      },
+      required: ['pattern_type']
     }
   }
 } as const;

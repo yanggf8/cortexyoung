@@ -5,7 +5,10 @@ import express, { Request, Response } from 'express';
 import cors from 'cors';
 import { CodebaseIndexer } from './indexer';
 import { SemanticSearcher } from './searcher';
-import { SemanticSearchHandler, ContextualReadHandler, CodeIntelligenceHandler } from './mcp-handlers';
+import { SemanticSearchHandler, ContextualReadHandler, CodeIntelligenceHandler, RelationshipAnalysisHandler, TraceExecutionPathHandler, FindCodePatternsHandler } from './mcp-handlers';
+import { IndexHealthChecker } from './index-health-checker';
+import { StartupStageTracker } from './startup-stages';
+import { CORTEX_TOOLS } from './mcp-tools';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -74,16 +77,20 @@ export class CortexMCPServer {
   private handlers: Map<string, any> = new Map();
   private httpServer: any;
   private logger: Logger;
+  private stageTracker: StartupStageTracker;
 
   constructor(
     indexer: CodebaseIndexer,
     searcher: SemanticSearcher,
-    logFile?: string
+    logFile?: string,
+    stageTracker?: StartupStageTracker
   ) {
     this.indexer = indexer;
     this.searcher = searcher;
     this.logger = new Logger(logFile);
+    this.stageTracker = stageTracker || new StartupStageTracker();
     this.setupHandlers();
+    this.setupIPC();
     this.logger.info('CortexMCPServer initialized');
   }
 
@@ -91,52 +98,96 @@ export class CortexMCPServer {
     this.handlers.set('semantic_search', new SemanticSearchHandler(this.searcher));
     this.handlers.set('contextual_read', new ContextualReadHandler(this.searcher));
     this.handlers.set('code_intelligence', new CodeIntelligenceHandler(this.searcher));
+    this.handlers.set('relationship_analysis', new RelationshipAnalysisHandler(this.searcher));
+    this.handlers.set('trace_execution_path', new TraceExecutionPathHandler(this.searcher));
+    this.handlers.set('find_code_patterns', new FindCodePatternsHandler(this.searcher));
+  }
+
+  private setupIPC(): void {
+    // Set up IPC communication for health checks and progress reporting
+    if (process.send) {
+      this.logger.info('IPC available, setting up message handlers');
+      
+      process.on('message', (message: any) => {
+        try {
+          this.handleIPCMessage(message);
+        } catch (error: any) {
+          this.logger.error('Error handling IPC message', { message, error: error?.message || 'Unknown error' });
+        }
+      });
+
+      // Send ready signal to parent process
+      process.send({
+        type: 'server_ready',
+        pid: process.pid,
+        timestamp: new Date().toISOString()
+      });
+    } else {
+      this.logger.info('No IPC available (running standalone)');
+    }
+  }
+
+  private handleIPCMessage(message: any): void {
+    const { type, requestId } = message;
+
+    switch (type) {
+      case 'health_check':
+        this.sendIPCResponse({
+          type: 'health_response',
+          requestId,
+          data: {
+            status: 'healthy',
+            uptime: process.uptime(),
+            memoryUsage: process.memoryUsage(),
+            pid: process.pid,
+            startup: this.stageTracker.getProgressSummary()
+          }
+        });
+        break;
+
+      case 'startup_progress':
+        this.sendIPCResponse({
+          type: 'progress_response', 
+          requestId,
+          data: this.stageTracker.getProgressSummary()
+        });
+        break;
+
+      case 'server_status':
+        this.sendIPCResponse({
+          type: 'status_response',
+          requestId,
+          data: {
+            serverRunning: !!this.httpServer,
+            port: process.env.PORT || 8765,
+            stages: this.stageTracker.getProgressData(),
+            currentStage: this.stageTracker.getCurrentStage(),
+            progress: this.stageTracker.getProgress()
+          }
+        });
+        break;
+
+      case 'ping':
+        this.sendIPCResponse({
+          type: 'pong',
+          requestId,
+          timestamp: new Date().toISOString()
+        });
+        break;
+
+      default:
+        this.logger.warn('Unknown IPC message type', { type, message });
+    }
+  }
+
+  private sendIPCResponse(response: any): void {
+    if (process.send) {
+      process.send(response);
+    }
   }
 
   private getAvailableTools() {
-    return [
-      {
-        name: 'semantic_search',
-        description: 'Semantic code search using vector embeddings',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            query: { type: 'string', description: 'Natural language search query' },
-            max_chunks: { type: 'number', default: 20 },
-            file_filters: { type: 'array', items: { type: 'string' } },
-            include_related: { type: 'boolean', default: true }
-          },
-          required: ['query']
-        }
-      },
-      {
-        name: 'contextual_read',
-        description: 'Read files with semantic context awareness',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            file_path: { type: 'string' },
-            semantic_context: { type: 'string' },
-            max_context_tokens: { type: 'number', default: 2000 }
-          },
-          required: ['file_path']
-        }
-      },
-      {
-        name: 'code_intelligence',
-        description: 'High-level semantic codebase analysis',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            task: { type: 'string' },
-            focus_areas: { type: 'array', items: { type: 'string' } },
-            recency_weight: { type: 'number', default: 0.3 },
-            max_context_tokens: { type: 'number', default: 4000 }
-          },
-          required: ['task']
-        }
-      }
-    ];
+    return Object.values(CORTEX_TOOLS);
   }
 
   async startHttp(port: number = 3001): Promise<void> {
@@ -151,9 +202,33 @@ export class CortexMCPServer {
       credentials: false
     }));
 
-    // Health check endpoint
+    // Enhanced health check endpoint with startup stage info
     app.get('/health', (req: Request, res: Response) => {
-      res.json({ status: 'healthy', server: 'cortex-mcp-server', version: '2.1.0' });
+      res.json(this.stageTracker.getHealthData());
+    });
+
+    // Startup progress endpoint
+    app.get('/progress', (req: Request, res: Response) => {
+      res.json(this.stageTracker.getProgressData());
+    });
+
+    // Current stage endpoint (for quick status checks)
+    app.get('/status', (req: Request, res: Response) => {
+      res.json(this.stageTracker.getStatusData());
+    });
+
+    // Enhanced metrics endpoint for embedding providers
+    app.get('/metrics/embeddings', async (req: Request, res: Response) => {
+      try {
+        const metrics = await this.getEmbeddingMetrics();
+        res.json(metrics);
+      } catch (error) {
+        this.logger.error('Error getting embedding metrics', { error: error instanceof Error ? error.message : String(error) });
+        res.status(500).json({ 
+          error: 'Failed to get embedding metrics',
+          message: error instanceof Error ? error.message : String(error)
+        });
+      }
     });
 
     // MCP endpoint for JSON-RPC communication
@@ -200,49 +275,21 @@ export class CortexMCPServer {
             const { name, arguments: args } = params;
             let toolResponse;
             
-            switch (name) {
-              case 'semantic_search': {
-                const handler = this.handlers.get('semantic_search');
-                const result = await handler.handle(args);
-                toolResponse = {
-                  content: [
-                    {
-                      type: 'text',
-                      text: JSON.stringify(result, null, 2)
-                    }
-                  ]
-                };
-                break;
-              }
-              case 'contextual_read': {
-                const handler = this.handlers.get('contextual_read');
-                const result = await handler.handle(args);
-                toolResponse = {
-                  content: [
-                    {
-                      type: 'text',
-                      text: JSON.stringify(result, null, 2)
-                    }
-                  ]
-                };
-                break;
-              }
-              case 'code_intelligence': {
-                const handler = this.handlers.get('code_intelligence');
-                const result = await handler.handle(args);
-                toolResponse = {
-                  content: [
-                    {
-                      type: 'text',
-                      text: JSON.stringify(result, null, 2)
-                    }
-                  ]
-                };
-                break;
-              }
-              default:
-                throw new Error(`Unknown tool: ${name}`);
+            // Dynamic tool handling - get handler from registry
+            const handler = this.handlers.get(name);
+            if (!handler) {
+              throw new Error(`Unknown tool: ${name}`);
             }
+
+            const result = await handler.handle(args);
+            toolResponse = {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify(result, null, 2)
+                }
+              ]
+            };
             
             response = {
               jsonrpc: '2.0',
@@ -304,6 +351,127 @@ export class CortexMCPServer {
     });
   }
 
+  private async getEmbeddingMetrics() {
+    const metrics = {
+      timestamp: new Date().toISOString(),
+      providers: {} as any,
+      system: {
+        uptime: process.uptime(),
+        totalChunks: 0,
+        cacheHitRate: 0,
+        storageSync: {
+          lastLocalSync: null as string | null,
+          lastGlobalSync: null as string | null
+        }
+      },
+      performance: {
+        queryResponseTime: {
+          p50: 0,
+          p95: 0,
+          p99: 0
+        },
+        throughput: 0
+      }
+    };
+
+    try {
+      // Try to get metrics from the indexer's unified embedder if available
+      const unifiedEmbedder = (this.indexer as any).unifiedEmbedder;
+      
+      if (unifiedEmbedder) {
+        // Get basic provider metrics
+        const health = await unifiedEmbedder.getHealth();
+        const providerMetrics = await unifiedEmbedder.getMetrics();
+        
+        metrics.providers[unifiedEmbedder.providerId] = {
+          health: health.status,
+          details: health.details,
+          uptime: health.uptime,
+          errorRate: health.errorRate,
+          requestCount: providerMetrics.requestCount,
+          avgDuration: providerMetrics.avgDuration,
+          totalEmbeddings: providerMetrics.totalEmbeddings,
+          lastSuccess: new Date(providerMetrics.lastSuccess).toISOString()
+        };
+
+        // Add provider-specific metrics
+        if (unifiedEmbedder.providerId.includes('cloudflare')) {
+          // CloudflareAI specific metrics
+          try {
+            const circuitBreakerStats = unifiedEmbedder.getCircuitBreakerStats();
+            const rateLimiterStats = unifiedEmbedder.getRateLimiterStats();
+            
+            metrics.providers[unifiedEmbedder.providerId] = {
+              ...metrics.providers[unifiedEmbedder.providerId],
+              circuitBreakerState: circuitBreakerStats.state,
+              rateLimitRemaining: rateLimiterStats.available,
+              rateLimitCapacity: rateLimiterStats.capacity,
+              failures: circuitBreakerStats.failures,
+              isHealthy: circuitBreakerStats.isHealthy
+            };
+          } catch (error) {
+            this.logger.warn('Could not get Cloudflare-specific metrics', { error });
+          }
+        } else if (unifiedEmbedder.providerId.includes('process-pool')) {
+          // ProcessPool specific metrics
+          try {
+            const poolStatus = unifiedEmbedder.getPoolStatus();
+            const cacheStats = unifiedEmbedder.getCacheStats();
+            
+            metrics.providers[unifiedEmbedder.providerId] = {
+              ...metrics.providers[unifiedEmbedder.providerId],
+              activeProcesses: poolStatus.activeProcesses,
+              resourceUtilization: {
+                cpuConstrained: poolStatus.cpuConstrained,
+                memoryConstrained: poolStatus.memoryConstrained
+              },
+              cacheHitRate: cacheStats.hitRate,
+              cacheSize: cacheStats.size,
+              memoryUsage: cacheStats.memoryMB
+            };
+            
+            metrics.system.cacheHitRate = cacheStats.hitRate;
+          } catch (error) {
+            this.logger.warn('Could not get ProcessPool-specific metrics', { error });
+          }
+        }
+      }
+
+      // Get vector store information
+      try {
+        const vectorStore = (this.indexer as any).vectorStore;
+        if (vectorStore) {
+          metrics.system.totalChunks = vectorStore.getChunkCount ? vectorStore.getChunkCount() : 0;
+          
+          // Get storage sync information
+          const storageInfo = await vectorStore.getStorageInfo();
+          if (storageInfo) {
+            metrics.system.storageSync = {
+              lastLocalSync: storageInfo.local.lastModified?.toISOString() || null,
+              lastGlobalSync: storageInfo.global.lastModified?.toISOString() || null
+            };
+          }
+        }
+      } catch (error) {
+        this.logger.warn('Could not get vector store metrics', { error });
+      }
+
+      // Add startup stage information  
+      const currentStage = this.stageTracker.getCurrentStage();
+      const progress = this.stageTracker.getProgress();
+      
+      (metrics.system as any).startupStage = currentStage?.name || 'unknown';
+      (metrics.system as any).startupProgress = progress.overallProgress;
+      (metrics.system as any).isReady = this.stageTracker.isReady();
+
+    } catch (error) {
+      this.logger.error('Error collecting embedding metrics', { error });
+      throw error;
+    }
+
+    return metrics;
+  }
+
   async stop(): Promise<void> {
     this.logger.info('Stopping MCP Server');
     if (this.httpServer) {
@@ -318,26 +486,87 @@ export class CortexMCPServer {
   }
 }
 
+// Helper function for intelligent indexing mode detection with health checks
+async function getIntelligentIndexMode(indexer: CodebaseIndexer, logger: Logger): Promise<'full' | 'incremental'> {
+  try {
+    // Access the vector store to check if index exists
+    const vectorStore = (indexer as any).vectorStore;
+    await vectorStore.initialize();
+    
+    const hasExistingIndex = await vectorStore.indexExists();
+    
+    if (!hasExistingIndex) {
+      logger.info('🧠 Intelligent mode: No existing embeddings found, using full indexing');
+      return 'full';
+    }
+
+    // Perform health check to determine if rebuild is needed
+    logger.info('🩺 Running health check on existing index...');
+    const healthChecker = new IndexHealthChecker(process.cwd(), vectorStore);
+    const healthResult = await healthChecker.shouldRebuild();
+    
+    if (healthResult.shouldRebuild) {
+      logger.info(`🧠 Intelligent mode: ${healthResult.reason}, using ${healthResult.mode} indexing`);
+      return healthResult.mode;
+    } else {
+      logger.info('🧠 Intelligent mode: Index is healthy, using incremental indexing');
+      return 'incremental';
+    }
+  } catch (error) {
+    logger.warn('Error in intelligent mode detection, defaulting to full indexing', { 
+      error: error instanceof Error ? error.message : error 
+    });
+    return 'full';
+  }
+}
+
 // Main startup function
 async function main() {
   const repoPath = process.argv[2] || process.cwd();
   const port = parseInt(process.env.PORT || '8765');
   const logFile = process.env.LOG_FILE;
   
-  // Create main logger
+  // Create stage tracker and main logger
+  const stageTracker = new StartupStageTracker();
   const logger = new Logger(logFile);
   
+  stageTracker.startStage('server_init', `Repository: ${repoPath}, Port: ${port}`);
   logger.info('Initializing Cortex MCP Server', { repoPath, port });
   
   try {
+    stageTracker.completeStage('server_init');
+    stageTracker.startStage('cache_check', 'Checking for existing embeddings cache');
+    
     // Initialize indexer and searcher
     logger.info('Starting repository indexing');
     const indexer = new CodebaseIndexer(repoPath);
     
+    // Use intelligent mode by default, or explicit mode if specified
+    let indexMode: 'full' | 'incremental' | 'reindex';
+    
+    if (process.env.INDEX_MODE === 'reindex' || process.env.FORCE_REBUILD === 'true') {
+      indexMode = 'reindex';
+      logger.info('🔄 Force rebuild requested, using reindex mode');
+      stageTracker.updateStageProgress('cache_check', 50, 'Force rebuild requested (reindex mode)');
+    } else if (process.env.INDEX_MODE) {
+      indexMode = process.env.INDEX_MODE as 'full' | 'incremental';
+      logger.info('Using explicit indexing mode', { mode: indexMode });
+      stageTracker.updateStageProgress('cache_check', 100, `Using explicit mode: ${indexMode}`);
+    } else {
+      indexMode = await getIntelligentIndexMode(indexer, logger);
+      stageTracker.updateStageProgress('cache_check', 100, `Intelligent mode selected: ${indexMode}`);
+    }
+    
+    stageTracker.completeStage('cache_check');
+    stageTracker.startStage('file_scan', 'Scanning repository for code files');
+    stageTracker.updateStageProgress('file_scan', 50, 'Analyzing repository structure');
+    
     const indexResponse = await indexer.indexRepository({
       repository_path: repoPath,
-      mode: 'full'
+      mode: indexMode
     });
+    
+    stageTracker.completeStage('vector_storage', `Indexed ${indexResponse.chunks_processed} chunks`);
     
     logger.info('Repository indexing completed', { 
       chunksProcessed: indexResponse.chunks_processed,
@@ -347,11 +576,15 @@ async function main() {
     // Get searcher from indexer
     const searcher = (indexer as any).searcher; // Access the searcher instance
     
+    stageTracker.startStage('mcp_ready', 'Starting MCP server');
+    
     // Create and start MCP server
-    const mcpServer = new CortexMCPServer(indexer, searcher, logFile);
+    const mcpServer = new CortexMCPServer(indexer, searcher, logFile, stageTracker);
     
     logger.info('Starting MCP server with HTTP transport', { port });
     await mcpServer.startHttp(port);
+    
+    stageTracker.completeStage('mcp_ready', 'MCP server ready to accept requests');
     
     // Handle graceful shutdown
     process.on('SIGINT', async () => {

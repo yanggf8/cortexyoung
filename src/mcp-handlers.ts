@@ -81,3 +81,123 @@ export class CodeIntelligenceHandler extends BaseHandler {
     return await this.searcher.search(query);
   }
 }
+
+export class RelationshipAnalysisHandler extends BaseHandler {
+  constructor(private searcher: SemanticSearcher) {
+    super();
+  }
+
+  async handle(params: any): Promise<any> {
+    const { analysis_type, starting_symbols, target_symbols, max_depth, relationship_filters } = params;
+    
+    // Create a specialized query for relationship analysis
+    const query: QueryRequest = {
+      task: `Analyze ${analysis_type} relationships starting from: ${starting_symbols.join(', ')}`,
+      max_chunks: 30,
+      multi_hop: {
+        enabled: true,
+        max_hops: max_depth || 3,
+        relationship_types: relationship_filters || ['calls', 'imports', 'data_flow'],
+        hop_decay: 0.9,
+        focus_symbols: starting_symbols,
+        include_paths: true
+      },
+      context_mode: 'structured'
+    };
+
+    const result = await this.searcher.search(query);
+    
+    return {
+      analysis_type,
+      starting_symbols,
+      target_symbols,
+      relationships_found: result.metadata.relationship_paths || [],
+      context: result.context_package,
+      visualization: `Analysis of ${analysis_type} for symbols: ${starting_symbols.join(', ')}`,
+      confidence_scores: result.metadata.confidence_scores
+    };
+  }
+}
+
+export class TraceExecutionPathHandler extends BaseHandler {
+  constructor(private searcher: SemanticSearcher) {
+    super();
+  }
+
+  async handle(params: any): Promise<any> {
+    const { entry_point, trace_type, include_data_flow, max_execution_depth } = params;
+    
+    const query: QueryRequest = {
+      task: `Trace execution path starting from ${entry_point}`,
+      max_chunks: 25,
+      multi_hop: {
+        enabled: true,
+        max_hops: max_execution_depth || 5,
+        relationship_types: include_data_flow ? ['calls', 'data_flow', 'throws'] : ['calls', 'throws'],
+        hop_decay: 0.8,
+        focus_symbols: [entry_point],
+        traversal_direction: trace_type === 'backward_trace' ? 'backward' : 'forward'
+      },
+      context_mode: 'adaptive'
+    };
+
+    const result = await this.searcher.search(query);
+    
+    return {
+      entry_point,
+      trace_type,
+      execution_path: result.metadata.relationship_paths || [],
+      data_flow_included: include_data_flow,
+      context: result.context_package,
+      execution_summary: `Execution trace from ${entry_point} with ${result.context_chunks?.length || 0} steps discovered`
+    };
+  }
+}
+
+export class FindCodePatternsHandler extends BaseHandler {
+  constructor(private searcher: SemanticSearcher) {
+    super();
+  }
+
+  async handle(params: any): Promise<any> {
+    const { pattern_type, pattern_description, scope, confidence_threshold, max_results } = params;
+    
+    const searchTask = pattern_description || 
+      `Find ${pattern_type} patterns in the codebase`;
+    
+    const query: QueryRequest = {
+      task: searchTask,
+      max_chunks: max_results || 10,
+      multi_hop: {
+        enabled: true,
+        max_hops: 2,
+        relationship_types: ['calls', 'imports', 'extends', 'implements'],
+        hop_decay: 0.9,
+        min_strength: confidence_threshold || 0.7
+      },
+      context_mode: 'structured'
+    };
+
+    // Adjust scope based on parameter
+    if (scope === 'file' || scope === 'module') {
+      query.max_chunks = Math.min(query.max_chunks || 10, 5);
+    }
+
+    const result = await this.searcher.search(query);
+    
+    return {
+      pattern_type,
+      pattern_description: searchTask,
+      scope,
+      patterns_found: (result.context_chunks || []).map((chunk, index) => ({
+        file: chunk.file_path,
+        line_range: `${chunk.start_line}-${chunk.end_line}`,
+        confidence: chunk.similarity_score,
+        description: `Pattern match ${index + 1}: ${chunk.function_name || 'code block'}`,
+        code_excerpt: chunk.content.substring(0, 200) + '...'
+      })),
+      total_matches: result.context_chunks?.length || 0,
+      confidence_scores: result.metadata.confidence_scores
+    };
+  }
+}
