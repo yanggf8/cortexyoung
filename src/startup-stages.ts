@@ -1,5 +1,9 @@
 // Startup stage tracking for MCP server initialization
 
+// Total stages constants based on execution mode
+const TOTAL_STAGES_FULL = 10;        // Full pipeline: server_init, cache_check, file_scan, model_load, delta_analysis, code_chunking, embedding_generation, relationship_analysis, vector_storage, mcp_ready
+const TOTAL_STAGES_INCREMENTAL = 7;  // Cache-only pipeline: server_init, cache_check, file_scan, model_load, delta_analysis, vector_storage, mcp_ready
+
 export interface StartupStage {
   id: string;
   name: string;
@@ -26,10 +30,17 @@ export class StartupStageTracker {
   private stages: Map<string, StartupStage> = new Map();
   private currentStageId?: string;
   private startTime: number;
+  private logger?: any; // Optional logger for output control
+  private totalStages: number = TOTAL_STAGES_FULL; // Default to full mode
 
-  constructor() {
+  constructor(logger?: any) {
     this.startTime = Date.now();
+    this.logger = logger;
     this.initializeStages();
+  }
+
+  setTotalStages(mode: 'full' | 'incremental'): void {
+    this.totalStages = mode === 'incremental' ? TOTAL_STAGES_INCREMENTAL : TOTAL_STAGES_FULL;
   }
 
   private initializeStages(): void {
@@ -98,7 +109,12 @@ export class StartupStageTracker {
   startStage(stageId: string, details?: string): void {
     const stage = this.stages.get(stageId);
     if (!stage) {
-      console.warn(`Unknown stage: ${stageId}`);
+      const message = `Unknown stage: ${stageId}`;
+      if (this.logger) {
+        this.logger.warn(message);
+      } else {
+        console.warn(message);
+      }
       return;
     }
 
@@ -114,13 +130,23 @@ export class StartupStageTracker {
     
     this.currentStageId = stageId;
     
-    // Get step number for display
+    // Get current step number based on stages that have been started
     const stageArray = Array.from(this.stages.values());
-    const currentStepIndex = stageArray.findIndex(s => s.id === stageId) + 1;
-    const totalSteps = stageArray.length;
+    const startedOrCompletedStages = stageArray.filter(s => s.status === 'in_progress' || s.status === 'completed');
+    const currentStepNumber = startedOrCompletedStages.length;
     
-    console.log(`🚀 [Step ${currentStepIndex}/${totalSteps}] ${stage.name}: ${stage.description}`);
-    if (details) console.log(`   Details: ${details}`);
+    // For total steps, we'll dynamically track as stages are added
+    const totalSteps = startedOrCompletedStages.length + 
+      (this.currentStageId === 'mcp_ready' ? 0 : Math.min(3, 10 - startedOrCompletedStages.length)); // Estimate remaining
+    
+    const message = `🚀 [Step ${currentStepNumber}/${this.totalStages}] ${stage.name}: ${stage.description}`;
+    if (this.logger) {
+      this.logger.info(message);
+      if (details) this.logger.info(`   Details: ${details}`);
+    } else {
+      console.log(message);
+      if (details) console.log(`   Details: ${details}`);
+    }
   }
 
   updateStageProgress(stageId: string, progress: number, details?: string): void {
@@ -130,21 +156,30 @@ export class StartupStageTracker {
     stage.progress = Math.min(100, Math.max(0, progress));
     if (details) stage.details = details;
 
-    // Get step number for display
+    // Get current step number based on stages that have been started
     const stageArray = Array.from(this.stages.values());
-    const currentStepIndex = stageArray.findIndex(s => s.id === stageId) + 1;
-    const totalSteps = stageArray.length;
+    const startedOrCompletedStages = stageArray.filter(s => s.status === 'in_progress' || s.status === 'completed');
+    const currentStepNumber = startedOrCompletedStages.length;
+    
+    // For total steps, we'll dynamically track as stages are added
+    const totalSteps = startedOrCompletedStages.length + 
+      (this.currentStageId === 'mcp_ready' ? 0 : Math.min(3, 10 - startedOrCompletedStages.length)); // Estimate remaining
     
     // Calculate elapsed time for this stage
     const elapsedMs = stage.startTime ? Date.now() - stage.startTime : 0;
     const elapsedSeconds = (elapsedMs / 1000).toFixed(1);
 
-    console.log(`📊 [Step ${currentStepIndex}/${totalSteps}] ${stage.name}: ${progress.toFixed(1)}% (${elapsedSeconds}s)${details ? ` - ${details}` : ''}`);
+    const message = `📊 [Step ${currentStepNumber}/${this.totalStages}] ${stage.name}: ${progress.toFixed(1)}% (${elapsedSeconds}s)${details ? ` - ${details}` : ''}`;
+    if (this.logger) {
+      this.logger.info(message);
+    } else {
+      console.log(message);
+    }
   }
 
   completeStage(stageId: string, details?: string): void {
     const stage = this.stages.get(stageId);
-    if (!stage) return;
+    if (!stage || stage.status === 'completed') return; // Prevent duplicate completion
 
     stage.status = 'completed';
     stage.endTime = Date.now();
@@ -154,10 +189,14 @@ export class StartupStageTracker {
     }
     if (details) stage.details = details;
 
-    // Get step number for display
+    // Get current step number based on completed stages
     const stageArray = Array.from(this.stages.values());
-    const currentStepIndex = stageArray.findIndex(s => s.id === stageId) + 1;
-    const totalSteps = stageArray.length;
+    const completedStages = stageArray.filter(s => s.status === 'completed');
+    const currentStepNumber = completedStages.length;
+    
+    // Total steps now includes completed plus any remaining that might execute
+    const totalSteps = currentStepNumber + 
+      (this.currentStageId === 'mcp_ready' ? 0 : Math.min(3, 10 - currentStepNumber));
     
     // Format duration nicely
     const durationMs = stage.duration || 0;
@@ -165,7 +204,12 @@ export class StartupStageTracker {
       ? `${(durationMs / 1000).toFixed(1)}s` 
       : `${durationMs}ms`;
 
-    console.log(`✅ [Step ${currentStepIndex}/${totalSteps}] ${stage.name} completed (${durationFormatted})`);
+    const message = `✅ [Step ${currentStepNumber}/${this.totalStages}] ${stage.name} completed (${durationFormatted})`;
+    if (this.logger) {
+      this.logger.info(message);
+    } else {
+      console.log(message);
+    }
   }
 
   failStage(stageId: string, error: string): void {
@@ -179,10 +223,14 @@ export class StartupStageTracker {
       stage.duration = stage.endTime - stage.startTime;
     }
 
-    // Get step number for display
+    // Get current step number based on stages that have been started
     const stageArray = Array.from(this.stages.values());
-    const currentStepIndex = stageArray.findIndex(s => s.id === stageId) + 1;
-    const totalSteps = stageArray.length;
+    const startedOrCompletedOrFailedStages = stageArray.filter(s => s.status !== 'pending');
+    const currentStepNumber = startedOrCompletedOrFailedStages.length;
+    
+    // Total steps includes current plus estimated remaining
+    const totalSteps = currentStepNumber + 
+      (this.currentStageId === 'mcp_ready' ? 0 : Math.min(3, 10 - currentStepNumber));
     
     // Format duration nicely
     const durationMs = stage.duration || 0;
@@ -190,7 +238,12 @@ export class StartupStageTracker {
       ? `${(durationMs / 1000).toFixed(1)}s` 
       : `${durationMs}ms`;
 
-    console.error(`❌ [Step ${currentStepIndex}/${totalSteps}] ${stage.name} failed (${durationFormatted}): ${error}`);
+    const message = `❌ [Step ${currentStepNumber}/${this.totalStages}] ${stage.name} failed (${durationFormatted}): ${error}`;
+    if (this.logger) {
+      this.logger.error(message);
+    } else {
+      console.error(message);
+    }
   }
 
   getProgress(): StartupProgress {
