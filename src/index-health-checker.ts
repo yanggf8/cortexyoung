@@ -136,16 +136,20 @@ export class IndexHealthChecker {
 
         if (invalidEmbeddings.length > 0) {
           const percentage = (invalidEmbeddings.length / chunks.length) * 100;
+          // Only suggest full rebuild for severe corruption (>50%), not moderate issues
+          const severity = percentage > 50 ? 'critical' : 'warning';
+          const suggestedAction = percentage > 50 ? 'full_rebuild' : 'incremental_update';
+          
           issues.push({
             type: 'corruption',
-            severity: percentage > 10 ? 'critical' : 'warning',
+            severity,
             message: `Found ${invalidEmbeddings.length} chunks with invalid embeddings (${percentage.toFixed(1)}%)`,
             details: { 
               invalidCount: invalidEmbeddings.length, 
               totalCount: chunks.length,
               expectedDimension 
             },
-            suggestedAction: percentage > 10 ? 'full_rebuild' : 'incremental_update'
+            suggestedAction
           });
         }
 
@@ -180,17 +184,18 @@ export class IndexHealthChecker {
 
         if (orphanedFiles.length > 0) {
           const orphanedChunks = chunks.filter(c => orphanedFiles.includes(c.file_path));
-          const percentage = (orphanedChunks.length / chunks.length) * 100;
           
+          // Deleted files should always be handled incrementally - remove orphaned chunks
           issues.push({
             type: 'corruption',
-            severity: percentage > 25 ? 'critical' : 'warning',
-            message: `Found ${orphanedChunks.length} chunks for deleted files (${percentage.toFixed(1)}%)`,
+            severity: 'warning', // Deleted files are normal maintenance, not critical
+            message: `Found ${orphanedChunks.length} chunks from ${orphanedFiles.length} deleted files that need cleanup`,
             details: { 
               orphanedFiles: orphanedFiles.slice(0, 10), // Show first 10
-              totalOrphaned: orphanedFiles.length 
+              totalOrphanedFiles: orphanedFiles.length,
+              totalOrphanedChunks: orphanedChunks.length
             },
-            suggestedAction: percentage > 25 ? 'full_rebuild' : 'incremental_update'
+            suggestedAction: 'incremental_update' // Always incremental for deleted files
           });
         }
       }
@@ -303,25 +308,59 @@ export class IndexHealthChecker {
     const issues: HealthIssue[] = [];
 
     try {
-      // Check file coverage
+      // Check file coverage - distinguish between missing new files vs deleted files
       const scanResult = await this.gitScanner.scanRepository('full');
       const chunks = await this.vectorStore.getAllChunks();
       const indexedFiles = new Set(chunks.map(c => c.file_path));
+      const currentFiles = new Set(scanResult.files);
       const totalFiles = scanResult.files.length;
       const coverage = (indexedFiles.size / totalFiles) * 100;
 
+      // Count files that exist but aren't indexed (missing from index)
+      const missingFromIndex = scanResult.files.filter(f => !indexedFiles.has(f));
+      
+      // Count files that are indexed but no longer exist (orphaned/deleted files)
+      const orphanedInIndex = Array.from(indexedFiles).filter(f => !currentFiles.has(f));
+      
       if (coverage < 80) {
-        issues.push({
-          type: 'performance',
-          severity: coverage < 50 ? 'critical' : 'warning',
-          message: `Low file coverage: ${coverage.toFixed(1)}% (${indexedFiles.size}/${totalFiles} files)`,
-          details: { 
-            coverage: coverage,
-            indexedFiles: indexedFiles.size,
-            totalFiles: totalFiles 
-          },
-          suggestedAction: 'incremental_update'
-        });
+        // Process each file change type independently instead of mixing them
+        
+        // Handle deleted files (always incremental cleanup)
+        if (orphanedInIndex.length > 0) {
+          issues.push({
+            type: 'performance',
+            severity: 'warning',
+            message: `Found ${orphanedInIndex.length} deleted files that need cleanup from index`,
+            details: {
+              coverage: coverage,
+              indexedFiles: indexedFiles.size,
+              totalFiles: totalFiles,
+              orphanedFiles: orphanedInIndex.length,
+              missingFiles: missingFromIndex.length
+            },
+            suggestedAction: 'incremental_update' // Deleted files always handled incrementally
+          });
+        }
+        
+        // Handle missing files (new files that need indexing)
+        if (missingFromIndex.length > 0) {
+          // Always treat missing files as incremental work, never force full rebuild
+          // Even if there are many missing files, incremental processing can handle them
+          issues.push({
+            type: 'performance', 
+            severity: 'warning', // Never escalate to critical just for missing files
+            message: `Found ${missingFromIndex.length} new files missing from index (${((missingFromIndex.length / totalFiles) * 100).toFixed(1)}% of total files)`,
+            details: {
+              coverage: coverage,
+              indexedFiles: indexedFiles.size,
+              totalFiles: totalFiles,
+              orphanedFiles: orphanedInIndex.length,
+              missingFiles: missingFromIndex.length,
+              missingFileRatio: missingFromIndex.length / totalFiles
+            },
+            suggestedAction: 'incremental_update' // Always incremental for missing files
+          });
+        }
       }
 
       // Check for missing embeddings
@@ -466,18 +505,28 @@ export class IndexHealthChecker {
     return recommendations;
   }
 
-  // Public method to check if rebuild is recommended
-  async shouldRebuild(): Promise<{ shouldRebuild: boolean; reason: string; mode: 'full' | 'incremental' }> {
+  // Public method to check if rebuild is recommended (informational only)
+  // DOES NOT automatically decide mode - user's requested mode should be respected
+  async shouldRebuild(): Promise<{ shouldRebuild: boolean; reason: string; mode: 'full' | 'incremental'; forcedRebuild: boolean }> {
     const report = await this.performHealthCheck();
     
     const criticalIssues = report.issues.filter(i => i.severity === 'critical');
     const needsFullRebuild = report.issues.some(i => i.suggestedAction === 'full_rebuild');
     
+    // Only force full rebuild for severe corruption cases
+    const forcedRebuild = criticalIssues.some(issue => 
+      issue.type === 'corruption' && 
+      (issue.message.includes('duplicate chunk IDs') || 
+       issue.message.includes('Health check failed') ||
+       (issue.message.includes('invalid embeddings') && issue.details?.invalidCount / issue.details?.totalCount > 0.5))
+    );
+    
     if (criticalIssues.length > 0) {
       return {
         shouldRebuild: true,
         reason: `Critical issues detected: ${criticalIssues.map(i => i.message).join('; ')}`,
-        mode: 'full'
+        mode: forcedRebuild ? 'full' : 'incremental', // Only suggest full if truly corrupted
+        forcedRebuild
       };
     }
     
@@ -485,7 +534,8 @@ export class IndexHealthChecker {
       return {
         shouldRebuild: true,
         reason: `Build configuration changes detected`,
-        mode: 'full'
+        mode: 'incremental', // Even build config changes can be handled incrementally
+        forcedRebuild: false
       };
     }
     
@@ -494,14 +544,16 @@ export class IndexHealthChecker {
       return {
         shouldRebuild: true,
         reason: `Code changes or staleness detected`,
-        mode: 'incremental'
+        mode: 'incremental',
+        forcedRebuild: false
       };
     }
     
     return {
       shouldRebuild: false,
       reason: 'Index is healthy',
-      mode: 'incremental'
+      mode: 'incremental',
+      forcedRebuild: false
     };
   }
 }
