@@ -5,13 +5,14 @@ import { EmbeddingGenerator } from './embedder';
 import { VectorStore } from './vector-store';
 import { PersistentVectorStore } from './persistent-vector-store';
 import { SemanticSearcher } from './searcher';
-import { StartupStageTracker } from './startup-stages';
+import { HierarchicalStageTracker } from './hierarchical-stages';
 import { ReindexAdvisor } from './reindex-advisor';
 import { UnifiedStorageCoordinator } from './unified-storage-coordinator';
 import { FastQEmbedder } from './fastq-embedder';
 import { ProcessPoolEmbedder } from './process-pool-embedder';
 import { CloudflareAIEmbedder } from './cloudflare-ai-embedder';
 import { DependencyMapper } from './dependency-mapper';
+import { log, warn, error } from './logging-utils';
 import * as os from 'os';
 
 export class CodebaseIndexer {
@@ -23,11 +24,11 @@ export class CodebaseIndexer {
   private searcher: SemanticSearcher;
   private dependencyMapper: DependencyMapper;
   private repositoryPath: string;
-  private stageTracker?: StartupStageTracker;
+  private stageTracker?: HierarchicalStageTracker;
   private reindexAdvisor: ReindexAdvisor;
   private storageCoordinator: UnifiedStorageCoordinator;
 
-  constructor(repositoryPath: string, stageTracker?: StartupStageTracker) {
+  constructor(repositoryPath: string, stageTracker?: HierarchicalStageTracker) {
     this.repositoryPath = repositoryPath;
     this.gitScanner = new GitScanner(repositoryPath);
     this.chunker = new SmartChunker();
@@ -45,7 +46,7 @@ export class CodebaseIndexer {
    */
   async cleanup(reason: string = 'cleanup'): Promise<void> {
     if (this.unifiedEmbedder) {
-      console.log(`🧹 Cleaning up unified embedder (${this.unifiedEmbedder.providerId}, reason: ${reason})...`);
+      log(`🧹 Cleaning up unified embedder (${this.unifiedEmbedder.providerId}, reason: ${reason})...`);
       
       // Only ProcessPoolEmbedder requires shutdown
       if (this.unifiedEmbedder instanceof ProcessPoolEmbedder) {
@@ -64,9 +65,7 @@ export class CodebaseIndexer {
       const modelLoadPromise = this.embedder.getModelInfo();
       
       // Initialize unified storage coordinator
-      this.stageTracker?.startStage('cache_check', 'Checking for existing embeddings and relationships');
       await this.storageCoordinator.initialize();
-      this.stageTracker?.completeStage('cache_check');
       
       // Ensure model is loaded before we need it
       await modelLoadPromise;
@@ -83,27 +82,27 @@ export class CodebaseIndexer {
         
         // Only override user's mode in extreme corruption cases that prevent incremental processing
         if (recommendation.forcedRebuildRequired) {
-          console.log('🚨 CRITICAL CORRUPTION DETECTED:', recommendation.primaryReason);
-          console.log('🔄 Cannot proceed with incremental mode due to severe index corruption');
-          console.log('   Switching to full rebuild to recover from corruption...');
+          log('🚨 CRITICAL CORRUPTION DETECTED: ' + recommendation.primaryReason);
+          log('🔄 Cannot proceed with incremental mode due to severe index corruption');
+          log('   Switching to full rebuild to recover from corruption...');
           await this.vectorStore.clearIndex();
           return await this.performFullIndex({ ...request, mode: 'reindex' }, startTime);
         }
         
         // Provide informational feedback but respect user's incremental request
         if (recommendation.allRecommendations.length > 0) {
-          console.log('💡 Index health analysis:', recommendation.primaryReason);
-          console.log('   (proceeding with incremental mode as requested)');
+          log('💡 Index health analysis: ' + recommendation.primaryReason);
+          log('   (proceeding with incremental mode as requested)');
         }
         
-        console.log('📂 Loading existing embeddings and performing incremental update...');
+        log('📂 Loading existing embeddings and performing incremental update...');
         return await this.performIncrementalIndex(request, startTime);
       } else if (hasExistingIndex && (request.mode === 'full' || request.mode === 'reindex')) {
         const reason = request.mode === 'reindex' ? 'forced rebuild requested' : 'full mode specified';
-        console.log(`🔄 Existing index found, but performing full reindex (${reason})...`);
+        log(`🔄 Existing index found, but performing full reindex (${reason})...`);
         await this.vectorStore.clearIndex();
       } else {
-        console.log('🆕 No existing index found, performing full index...');
+        log('🆕 No existing index found, performing full index...');
       }
       
       return await this.performFullIndex(request, startTime);
@@ -119,47 +118,47 @@ export class CodebaseIndexer {
   }
 
   private async performIncrementalIndex(request: IndexRequest, startTime: number): Promise<IndexResponse> {
-    console.log(`Starting incremental indexing of ${request.repository_path}`);
+    log(`Starting incremental indexing of ${request.repository_path}`);
     
-    console.log(`📊 Loaded ${this.vectorStore.getChunkCount()} existing chunks for incremental processing`);
+    log(`📊 Loaded ${this.vectorStore.getChunkCount()} existing chunks for incremental processing`);
     
     // Scan repository for all files
     const scanResult = await this.gitScanner.scanRepository('full'); // Get all files to compare
-    console.log(`Found ${scanResult.totalFiles} total files`);
+    log(`Found ${scanResult.totalFiles} total files`);
     
     // Calculate what has changed
     const delta = await this.vectorStore.calculateFileDelta(scanResult.files);
     const changedFiles = [...delta.fileChanges.added, ...delta.fileChanges.modified];
     
-    console.log(`📊 Delta analysis: +${delta.fileChanges.added.length} ~${delta.fileChanges.modified.length} -${delta.fileChanges.deleted.length} files`);
+    log(`📊 Delta analysis: +${delta.fileChanges.added.length} ~${delta.fileChanges.modified.length} -${delta.fileChanges.deleted.length} files`);
     
     // Handle deleted files first (clean up their chunks from the index)
     if (delta.fileChanges.deleted.length > 0) {
-      console.log(`🗑️  Processing ${delta.fileChanges.deleted.length} deleted files...`);
+      log(`🗑️  Processing ${delta.fileChanges.deleted.length} deleted files...`);
       for (const deletedFile of delta.fileChanges.deleted) {
         const deletedChunks = this.vectorStore.getChunksByFile(deletedFile);
         delta.removed.push(...deletedChunks.map(c => c.chunk_id));
-        console.log(`   Removed ${deletedChunks.length} chunks from deleted file: ${deletedFile}`);
+        log(`   Removed ${deletedChunks.length} chunks from deleted file: ${deletedFile}`);
       }
     }
     
     if (changedFiles.length === 0 && delta.fileChanges.deleted.length === 0) {
-      console.log('✅ No changes detected, index is up to date');
+      log('✅ No changes detected, index is up to date');
       
       // Still need to initialize relationship engine (will use cache if available)
-      this.stageTracker?.startStage('relationship_analysis', 'Loading relationship graph from cache');
+      // Loading relationship graph from cache - logging handled at higher level
       const files = new Map<string, string>();
       for (const filePath of scanResult.files) {
         try {
           const content = await this.gitScanner.readFile(filePath);
           files.set(filePath, content);
         } catch (error) {
-          console.warn(`Failed to read file for relationships ${filePath}:`, error);
+          warn(`Failed to read file for relationships ${filePath}: ${error}`);
         }
       }
       
       await this.searcher.initializeRelationshipEngine(files);
-      this.stageTracker?.completeStage('relationship_analysis', `Relationship engine loaded from cache (${files.size} files)`);
+      // Relationship engine loaded from cache - logging handled at higher level
       
       const timeTaken = Date.now() - startTime;
       return {
@@ -175,12 +174,12 @@ export class CodebaseIndexer {
     const fileChanges = await this.gitScanner.getFileChanges(changedFiles);
 
     // Process each file change type independently
-    console.log(`🔄 Processing file changes:`);
+    log(`🔄 Processing file changes:`);
     if (delta.fileChanges.added.length > 0) {
-      console.log(`   📁 Adding ${delta.fileChanges.added.length} new files`);
+      log(`   📁 Adding ${delta.fileChanges.added.length} new files`);
     }
     if (delta.fileChanges.modified.length > 0) {
-      console.log(`   📝 Updating ${delta.fileChanges.modified.length} modified files`);
+      log(`   📝 Updating ${delta.fileChanges.modified.length} modified files`);
     }
 
     for (const filePath of changedFiles) {
@@ -201,24 +200,24 @@ export class CodebaseIndexer {
 
       } catch (error) {
         if (error instanceof Error && error.message.includes('File not found')) {
-          console.warn(`Skipping deleted file: ${filePath}`);
+          warn(`Skipping deleted file: ${filePath}`);
         } else {
-          console.warn(`Failed to process file ${filePath}:`, error);
+          warn(`Failed to process file ${filePath}: ${error}`);
         }
       }
     }
     
-    console.log(`💡 Processing summary by file change type:`);
-    console.log(`  - NEW FILES: ${delta.fileChanges.added.length} files`);
-    console.log(`  - MODIFIED FILES: ${delta.fileChanges.modified.length} files`);
-    console.log(`  - DELETED FILES: ${delta.fileChanges.deleted.length} files (${delta.removed.length - (chunksToEmbed.length > 0 ? delta.removed.filter(id => !chunksToEmbed.some(c => c.chunk_id === id)).length : delta.removed.length)} chunks removed)`);
-    console.log(`  - CHUNKS TO EMBED: ${chunksToEmbed.length} (new or modified)`);
-    console.log(`  - CHUNKS TO KEEP: ${chunksToKeep.length} (unchanged, cache hit)`);
-    console.log(`  - TOTAL CHUNKS REMOVED: ${delta.removed.length}`);
+    log(`💡 Processing summary by file change type:`);
+    log(`  - NEW FILES: ${delta.fileChanges.added.length} files`);
+    log(`  - MODIFIED FILES: ${delta.fileChanges.modified.length} files`);
+    log(`  - DELETED FILES: ${delta.fileChanges.deleted.length} files (${delta.removed.length - (chunksToEmbed.length > 0 ? delta.removed.filter(id => !chunksToEmbed.some(c => c.chunk_id === id)).length : delta.removed.length)} chunks removed)`);
+    log(`  - CHUNKS TO EMBED: ${chunksToEmbed.length} (new or modified)`);
+    log(`  - CHUNKS TO KEEP: ${chunksToKeep.length} (unchanged, cache hit)`);
+    log(`  - TOTAL CHUNKS REMOVED: ${delta.removed.length}`);
 
     // Generate embeddings only for new/changed chunks
     if (chunksToEmbed.length > 0) {
-      console.log('🚀 Generating embeddings for new/modified content...');
+      log('🚀 Generating embeddings for new/modified content...');
       const embeddedChunks = await this.generateEmbeddings(chunksToEmbed);
       // These are the brand new or updated chunks
       delta.added = embeddedChunks;
@@ -230,40 +229,40 @@ export class CodebaseIndexer {
     delta.updated = chunksToKeep;
 
     // Apply the fine-grained delta to the vector store
-    console.log('💾 Applying changes to vector database...');
+    log('💾 Applying changes to vector database...');
     await this.vectorStore.applyDelta(delta);
     
     // Save updated index
     await this.vectorStore.savePersistedIndex();
     
     // Update relationship engine with incremental changes
-    this.stageTracker?.startStage('relationship_analysis', 'Updating relationship graph with changes');
+    // Updating relationship graph with changes - logging handled at higher level
     const files = new Map<string, string>();
     for (const filePath of scanResult.files) {
       try {
         const content = await this.gitScanner.readFile(filePath);
         files.set(filePath, content);
       } catch (error) {
-        console.warn(`Failed to read file for relationships ${filePath}:`, error);
+        warn(`Failed to read file for relationships ${filePath}: ${error}`);
       }
     }
     
     // Update dependency relationships for changed files  
     const modifiedFiles = [...delta.fileChanges.added, ...delta.fileChanges.modified];
     if (modifiedFiles.length > 0) {
-      console.log(`🔗 Updating relationships for ${modifiedFiles.length} changed files...`);
+      log(`🔗 Updating relationships for ${modifiedFiles.length} changed files...`);
       await this.dependencyMapper.buildDependencyMap(files);
       const relationships = this.dependencyMapper.generateDependencyRelationships();
       
-      console.log(`✅ Updated ${relationships.length} dependency relationships`);
+      log(`✅ Updated ${relationships.length} dependency relationships`);
     }
     
     // Initialize searcher's relationship engine with updated relationships
     await this.searcher.initializeRelationshipEngine(files);
-    this.stageTracker?.completeStage('relationship_analysis', `Updated relationships (${files.size} files processed)`);
+    // Updated relationships - logging handled at higher level
     
     const timeTaken = Date.now() - startTime;
-    console.log(`✅ Incremental indexing completed in ${timeTaken}ms`);
+    log(`✅ Incremental indexing completed in ${timeTaken}ms`);
     
     return {
       status: 'success',
@@ -273,19 +272,19 @@ export class CodebaseIndexer {
   }
 
   private async performFullIndex(request: IndexRequest, startTime: number): Promise<IndexResponse> {
-    console.log(`Starting full indexing of ${request.repository_path}`);
+    log(`Starting full indexing of ${request.repository_path}`);
     
     // Scan repository for files
     // Map reindex mode to full for git scanner
     const scanMode = request.mode === 'reindex' ? 'full' : request.mode;
     const scanResult = await this.gitScanner.scanRepository(scanMode, request.since_commit);
-    console.log(`Found ${scanResult.totalFiles} files to process`);
+    log(`Found ${scanResult.totalFiles} files to process`);
     
     // Get file changes metadata
     const fileChanges = await this.gitScanner.getFileChanges(scanResult.files);
     
     // Process files in parallel for better performance
-    console.log(`🚀 Processing ${scanResult.files.length} files in parallel...`);
+    log(`🚀 Processing ${scanResult.files.length} files in parallel...`);
     
     const chunkingPromises = scanResult.files.map(async (filePath, index) => {
       try {
@@ -297,15 +296,15 @@ export class CodebaseIndexer {
         
         // Progress reporting for parallel processing
         if ((index + 1) % 10 === 0) {
-          console.log(`📊 Processed ${index + 1}/${scanResult.files.length} files`);
+          log(`📊 Processed ${index + 1}/${scanResult.files.length} files`);
         }
         
         return chunks;
       } catch (error) {
         if (error instanceof Error && error.message.includes('File not found')) {
-          console.warn(`Skipping deleted file: ${filePath}`);
+          warn(`Skipping deleted file: ${filePath}`);
         } else {
-          console.warn(`Failed to process file ${filePath}:`, error);
+          warn(`Failed to process file ${filePath}: ${error}`);
         }
         return [];
       }
@@ -314,14 +313,14 @@ export class CodebaseIndexer {
     const chunkArrays = await Promise.all(chunkingPromises);
     const allChunks: CodeChunk[] = chunkArrays.flat();
     
-    console.log(`Generated ${allChunks.length} code chunks`);
+    log(`Generated ${allChunks.length} code chunks`);
     
     // Generate embeddings in batches
-    console.log('Generating embeddings...');
+    log('Generating embeddings...');
     const embeddedChunks = await this.generateEmbeddings(allChunks);
     
     // Store in vector database
-    console.log('Storing chunks in vector database...');
+    log('Storing chunks in vector database...');
     await this.vectorStore.upsertChunks(embeddedChunks);
     
     // Save persistent index with model information
@@ -329,31 +328,31 @@ export class CodebaseIndexer {
     await this.vectorStore.savePersistedIndex(modelInfo);
     
     // Initialize relationship engine with all files
-    this.stageTracker?.startStage('relationship_analysis', 'Building comprehensive relationship graph');
+    // Building comprehensive relationship graph - logging handled at higher level
     const files = new Map<string, string>();
     for (const filePath of scanResult.files) {
       try {
         const content = await this.gitScanner.readFile(filePath);
         files.set(filePath, content);
       } catch (error) {
-        console.warn(`Failed to read file for relationships ${filePath}:`, error);
+        warn(`Failed to read file for relationships ${filePath}: ${error}`);
       }
     }
     
     // Build comprehensive dependency relationships
-    console.log(`🔗 Analyzing dependencies for ${files.size} files...`);
+    log(`🔗 Analyzing dependencies for ${files.size} files...`);
     await this.dependencyMapper.buildDependencyMap(files);
     const relationships = this.dependencyMapper.generateDependencyRelationships();
     
-    console.log(`✅ Built ${relationships.length} dependency relationships`);
+    log(`✅ Built ${relationships.length} dependency relationships`);
     
     // Initialize searcher's relationship engine with the built relationships
     await this.searcher.initializeRelationshipEngine(files);
     
-    this.stageTracker?.completeStage('relationship_analysis', `Built ${relationships.length} dependency relationships`);
+    // Built dependency relationships - logging handled at higher level
     
     const timeTaken = Date.now() - startTime;
-    console.log(`Indexing completed in ${timeTaken}ms`);
+    log(`Indexing completed in ${timeTaken}ms`);
     
     return {
       status: 'success',
@@ -364,7 +363,7 @@ export class CodebaseIndexer {
 
   private async generateEmbeddings(chunks: CodeChunk[]): Promise<CodeChunk[]> {
     const embedderType = process.env.EMBEDDER_TYPE || 'local';
-    this.stageTracker?.startStage('embedding_generation', `Processing ${chunks.length} chunks with ${embedderType} embedder`);
+    // Processing chunks with embedder - logging handled at higher level
 
     let embeddedChunks: CodeChunk[];
 
@@ -374,7 +373,7 @@ export class CodebaseIndexer {
         ? new CloudflareAIEmbedder()
         : new ProcessPoolEmbedder();
       
-      console.log(`🤖 Using unified embedder: ${this.unifiedEmbedder.providerId}`);
+      log(`🤖 Using unified embedder: ${this.unifiedEmbedder.providerId}`);
     }
     
     try {
@@ -386,12 +385,12 @@ export class CodebaseIndexer {
           priority: 'normal'
         });
         embeddedChunks = chunks.map((chunk, i) => ({ ...chunk, embedding: result.embeddings[i] }));
-        this.stageTracker?.completeStage('embedding_generation', `Generated embeddings for ${chunks.length} chunks using ${this.unifiedEmbedder.providerId}`);
+        // Generated embeddings - logging handled at higher level
       } else {
         // Use ProcessPoolEmbedder's existing method for backward compatibility during transition
         const processPoolEmbedder = this.unifiedEmbedder as ProcessPoolEmbedder;
         embeddedChunks = await processPoolEmbedder.processAllEmbeddings(chunks);
-        this.stageTracker?.completeStage('embedding_generation', `Generated embeddings for ${chunks.length} chunks using ${this.unifiedEmbedder.providerId}`);
+        // Generated embeddings - logging handled at higher level
       }
     } finally {
       // Only shutdown ProcessPoolEmbedder after use

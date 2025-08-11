@@ -4,6 +4,7 @@ import * as path from 'path';
 import * as os from 'os';
 import * as crypto from 'crypto';
 import { CodeChunk, IEmbedder, EmbedOptions, EmbeddingResult as IEmbeddingResult, EmbeddingMetadata, PerformanceStats, ProviderHealth, ProviderMetrics } from './types';
+import { log, warn, error } from './logging-utils';
 
 // Global Resource Management Thresholds (for ProcessPoolEmbedder local execution)
 export const RESOURCE_THRESHOLDS = {
@@ -598,15 +599,15 @@ export class ProcessPoolEmbedder implements IEmbedder {
       singleProcessFallback: isLocal && isWSL2
     };
     
-    console.log(`🏭 ${isCloud ? 'Cloud' : 'Local'} Process Pool Strategy:`);
-    console.log(`   Environment: ${isCloud ? 'Cloud (aggressive)' : isLocal && isWSL2 ? 'Local WSL2 (conservative)' : 'Local (conservative)'}`);
-    console.log(`   CPU Cores: ${totalCores} total`);
-    console.log(`   Starting: ${startProcesses} process${startProcesses > 1 ? 'es' : ''}`);
-    console.log(`   Maximum: ${maxProcessesByCPU} processes`);
-    console.log(`   Memory Thresholds: Stop at ${this.adaptivePool.memoryStopThreshold}%, Resume at ${this.adaptivePool.memoryResumeThreshold}%`);
-    console.log(`   CPU Thresholds: Stop at ${this.adaptivePool.cpuStopThreshold}%, Resume at ${this.adaptivePool.cpuResumeThreshold}%`);
-    console.log(`   Growth Strategy: ${isCloud ? 'Multi-process start → Fast scaling' : 'Single process → 2-step prediction → Conservative scaling'}`);
-    console.log(`✅ Strategy: ${isCloud ? 'Cloud-optimized' : 'Local-optimized'} process pool with predictive resource management`);
+    log(`🏭 ${isCloud ? 'Cloud' : 'Local'} Process Pool Strategy:`);
+    log(`   Environment: ${isCloud ? 'Cloud (aggressive)' : isLocal && isWSL2 ? 'Local WSL2 (conservative)' : 'Local (conservative)'}`);
+    log(`   CPU Cores: ${totalCores} total`);
+    log(`   Starting: ${startProcesses} process${startProcesses > 1 ? 'es' : ''}`);
+    log(`   Maximum: ${maxProcessesByCPU} processes`);
+    log(`   Memory Thresholds: Stop at ${this.adaptivePool.memoryStopThreshold}%, Resume at ${this.adaptivePool.memoryResumeThreshold}%`);
+    log(`   CPU Thresholds: Stop at ${this.adaptivePool.cpuStopThreshold}%, Resume at ${this.adaptivePool.cpuResumeThreshold}%`);
+    log(`   Growth Strategy: ${isCloud ? 'Multi-process start → Fast scaling' : 'Single process → 2-step prediction → Conservative scaling'}`);
+    log(`✅ Strategy: ${isCloud ? 'Cloud-optimized' : 'Local-optimized'} process pool with predictive resource management`);
     
     // Initialize adaptive batching system (will be updated with accurate reading)
     this.systemMemoryMB = Math.round(os.totalmem() / (1024 * 1024));
@@ -831,7 +832,7 @@ export class ProcessPoolEmbedder implements IEmbedder {
       this.adaptivePool.maxProcesses
     );
     
-    console.log(`📈 Growing process pool: ${this.adaptivePool.currentProcesses} → ${newProcessCount} processes`);
+    log(`📈 Growing process pool: ${this.adaptivePool.currentProcesses} → ${newProcessCount} processes`);
     
     try {
       // Create new process
@@ -845,7 +846,7 @@ export class ProcessPoolEmbedder implements IEmbedder {
       // Update queue concurrency
       this.queue.concurrency = newProcessCount;
       
-      console.log(`✅ Process pool grown to ${newProcessCount} processes`);
+      log(`✅ Process pool grown to ${newProcessCount} processes`);
       
       // Check if we've reached maximum
       if (newProcessCount >= this.adaptivePool.maxProcesses) {
@@ -861,7 +862,7 @@ export class ProcessPoolEmbedder implements IEmbedder {
   private async createSingleProcess(processId: number): Promise<ProcessInstance> {
     const processScript = path.join(__dirname, 'external-embedding-process.js');
     
-    console.log(`⏳ Spawning external process ${processId + 1}/${this.adaptivePool.maxProcesses}...`);
+    log(`⏳ Spawning external process ${processId + 1}/${this.adaptivePool.maxProcesses}...`);
     
     const childProcess = spawn('node', ['--expose-gc', '--max-old-space-size=512', processScript], {
       stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
@@ -919,7 +920,7 @@ export class ProcessPoolEmbedder implements IEmbedder {
       }
     }, 30000); // Increased to 30s to be less aggressive
     
-    console.log(`🔍 Started delayed resource monitoring (memory + CPU, 30s intervals)`);
+    log(`🔍 Started delayed resource monitoring (memory + CPU, 30s intervals)`);
   }
   
   private canConsiderScaling(): boolean {

@@ -13,6 +13,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **🌐 Cloud Strategy Separation**: CloudflareAI uses API controls (circuit breakers, rate limiting) vs local resource monitoring
 - **🔄 Signal Cascade System**: Reliable parent-child process cleanup with zero orphaned processes
 - **📊 Auto-sync Intelligence**: Eliminates manual storage commands with intelligent conflict resolution
+- **🕒 Unified Timestamped Logging**: Consistent ISO timestamp formatting across all major components for improved debugging
 - **👀 Smart File Watching**: Real-time code intelligence updates with adaptive activity detection (PLANNED)
 
 ### 🚀 **Upcoming: Smart File Watching System**
@@ -204,6 +205,13 @@ Claude Code ← MCP Server ← Vector Store ← ProcessPool → Incremental Upda
 - **Staleness detection**: Detects >24h apart and chooses newer version
 - **Smart conflict resolution**: Timestamp-based synchronization
 - **Eliminates manual commands**: No more `npm run storage:sync` needed
+
+### Unified Logging System
+- **Consistent timestamps**: All major components use ISO timestamp formatting `[2025-08-11T09:50:57.693Z]`
+- **Preserved UX**: Maintains emoji indicators and visual progress feedback
+- **Core components**: indexer.ts, process-pool-embedder.ts, persistent-vector-store.ts
+- **Logging utility**: `src/logging-utils.ts` provides timestamped console wrappers
+- **Zero performance impact**: Lightweight wrapper around native console methods
 
 ## MCP Server Integration
 

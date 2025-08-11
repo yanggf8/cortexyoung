@@ -1,6 +1,7 @@
 import { CodeChunk, CORTEX_PROGRAM_VERSION, CORTEX_SCHEMA_VERSION, ModelInfo } from './types';
 import { VectorStore } from './vector-store';
 import { SchemaValidator } from './schema-validator';
+import { log } from './logging-utils';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as crypto from 'crypto';
@@ -120,7 +121,7 @@ export class PersistentVectorStore extends VectorStore {
       const globalTime = globalStats.mtime.toISOString();
       const globalIsNewer = globalStats.mtime > localStats.mtime;
       
-      console.log('🔍 Storage Comparison:');
+      log('🔍 Storage Comparison:');
       console.log(`📁 Local:  ${localChunks} chunks, modified ${localTime}`);
       console.log(`🌐 Global: ${globalChunks} chunks, modified ${globalTime}`);
       console.log(`🏆 Winner: ${globalIsNewer ? 'Global (newer)' : 'Local (newer)'} - Loading from ${globalIsNewer ? 'global' : 'local'}`);
