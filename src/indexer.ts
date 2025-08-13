@@ -5,13 +5,14 @@ import { EmbeddingGenerator } from './embedder';
 import { VectorStore } from './vector-store';
 import { PersistentVectorStore } from './persistent-vector-store';
 import { SemanticSearcher } from './searcher';
-import { HierarchicalStageTracker } from './hierarchical-stages';
+import { StartupStageTracker } from './startup-stages';
 import { ReindexAdvisor } from './reindex-advisor';
 import { UnifiedStorageCoordinator } from './unified-storage-coordinator';
 import { FastQEmbedder } from './fastq-embedder';
 import { ProcessPoolEmbedder } from './process-pool-embedder';
 import { CloudflareAIEmbedder } from './cloudflare-ai-embedder';
 import { DependencyMapper } from './dependency-mapper';
+import { EmbeddingStrategyManager } from './embedding-strategy';
 import { log, warn, error } from './logging-utils';
 import * as os from 'os';
 
@@ -20,19 +21,21 @@ export class CodebaseIndexer {
   private chunker: SmartChunker;
   private embedder: EmbeddingGenerator;
   private unifiedEmbedder?: IEmbedder; // Unified interface for all embedding providers
+  private strategyManager: EmbeddingStrategyManager;
   private vectorStore: PersistentVectorStore;
   private searcher: SemanticSearcher;
   private dependencyMapper: DependencyMapper;
   private repositoryPath: string;
-  private stageTracker?: HierarchicalStageTracker;
+  private stageTracker?: StartupStageTracker;
   private reindexAdvisor: ReindexAdvisor;
   private storageCoordinator: UnifiedStorageCoordinator;
 
-  constructor(repositoryPath: string, stageTracker?: HierarchicalStageTracker) {
+  constructor(repositoryPath: string, stageTracker?: StartupStageTracker) {
     this.repositoryPath = repositoryPath;
     this.gitScanner = new GitScanner(repositoryPath);
     this.chunker = new SmartChunker();
     this.embedder = new EmbeddingGenerator();
+    this.strategyManager = new EmbeddingStrategyManager(repositoryPath);
     this.storageCoordinator = new UnifiedStorageCoordinator(repositoryPath);
     this.vectorStore = this.storageCoordinator.getVectorStore();
     this.searcher = new SemanticSearcher(this.vectorStore, this.embedder, repositoryPath);
@@ -42,7 +45,7 @@ export class CodebaseIndexer {
   }
 
   /**
-   * Clean up resources for unified embedder
+   * Clean up resources for unified embedder and strategy manager
    */
   async cleanup(reason: string = 'cleanup'): Promise<void> {
     if (this.unifiedEmbedder) {
@@ -54,6 +57,10 @@ export class CodebaseIndexer {
       }
       
       this.unifiedEmbedder = undefined;
+    }
+
+    if (this.strategyManager) {
+      await this.strategyManager.cleanup();
     }
   }
 
@@ -362,45 +369,45 @@ export class CodebaseIndexer {
   }
 
   private async generateEmbeddings(chunks: CodeChunk[]): Promise<CodeChunk[]> {
+    // Use embedding strategy manager for intelligent strategy selection
     const embedderType = process.env.EMBEDDER_TYPE || 'local';
-    // Processing chunks with embedder - logging handled at higher level
-
-    let embeddedChunks: CodeChunk[];
-
-    // Initialize unified embedder based on type
-    if (!this.unifiedEmbedder) {
-      this.unifiedEmbedder = embedderType === 'cloudflare' 
-        ? new CloudflareAIEmbedder()
-        : new ProcessPoolEmbedder();
-      
-      log(`🤖 Using unified embedder: ${this.unifiedEmbedder.providerId}`);
-    }
     
-    try {
-      if (embedderType === 'cloudflare') {
-        // Use IEmbedder interface for Cloudflare
+    if (embedderType === 'cloudflare') {
+      // Fallback to CloudflareAI when explicitly requested
+      if (!this.unifiedEmbedder) {
+        this.unifiedEmbedder = new CloudflareAIEmbedder();
+        log(`🤖 Using unified embedder: ${this.unifiedEmbedder.providerId}`);
+      }
+      
+      try {
         const texts = chunks.map(chunk => this.createEmbeddingText(chunk));
         const result = await this.unifiedEmbedder.embedBatch(texts, { 
           requestId: `index_${Date.now()}`,
           priority: 'normal'
         });
-        embeddedChunks = chunks.map((chunk, i) => ({ ...chunk, embedding: result.embeddings[i] }));
-        // Generated embeddings - logging handled at higher level
-      } else {
-        // Use ProcessPoolEmbedder's existing method for backward compatibility during transition
-        const processPoolEmbedder = this.unifiedEmbedder as ProcessPoolEmbedder;
-        embeddedChunks = await processPoolEmbedder.processAllEmbeddings(chunks);
-        // Generated embeddings - logging handled at higher level
+        return chunks.map((chunk, i) => ({ ...chunk, embedding: result.embeddings[i] }));
+      } finally {
+        // CloudflareAI doesn't need shutdown
       }
-    } finally {
-      // Only shutdown ProcessPoolEmbedder after use
-      if (this.unifiedEmbedder instanceof ProcessPoolEmbedder) {
-        await this.unifiedEmbedder.shutdown();
-        this.unifiedEmbedder = undefined;
+    } else {
+      // Use intelligent embedding strategy manager
+      const config = EmbeddingStrategyManager.getConfigFromEnv();
+      
+      const result = await this.strategyManager.generateEmbeddings(chunks, config);
+      
+      // Log strategy performance
+      const perf = result.performance;
+      log(`📊 Embedding Performance (${result.strategy}):`);
+      log(`   Total time: ${perf.totalTime}ms`);
+      log(`   Throughput: ${perf.chunksPerSecond.toFixed(2)} chunks/second`);
+      log(`   Peak memory: ${perf.peakMemoryMB.toFixed(1)}MB`);
+      
+      if (perf.cacheStats) {
+        log(`   Cache: ${perf.cacheStats.hits} hits, ${perf.cacheStats.misses} misses (${(perf.cacheStats.hitRate * 100).toFixed(1)}% hit rate)`);
       }
+      
+      return result.chunks;
     }
-
-    return embeddedChunks;
   }
 
 

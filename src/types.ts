@@ -239,3 +239,30 @@ export interface ProviderMetrics {
   totalEmbeddings: number;
   cacheHitRate?: number;
 }
+
+// Embedding Cache Types
+export interface EmbeddingCacheEntry {
+  embedding: number[];
+  created_at: string;
+  model_version: string;
+  access_count: number;
+  last_accessed: string;
+  chunk_metadata: {
+    file_path: string;
+    symbol_name?: string;
+    chunk_type: ChunkType;
+  };
+}
+
+export interface EmbeddingCache {
+  [contentHash: string]: EmbeddingCacheEntry;
+}
+
+export interface CacheStats {
+  total_entries: number;
+  cache_hits: number;
+  cache_misses: number;
+  hit_rate: number;
+  last_cleanup: string;
+  size_bytes: number;
+}

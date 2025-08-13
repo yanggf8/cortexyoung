@@ -549,13 +549,8 @@ export class SmartChunker {
   }
 
   private hashContent(content: string): string {
-    // Simple hash function - in production use crypto.createHash
-    let hash = 0;
-    for (let i = 0; i < content.length; i++) {
-      const char = content.charCodeAt(i);
-      hash = ((hash << 5) - hash) + char;
-      hash = hash & hash; // Convert to 32-bit integer
-    }
-    return hash.toString(16);
+    // Use crypto-based SHA-256 hashing for collision resistance
+    const crypto = require('crypto');
+    return crypto.createHash('sha256').update(content).digest('hex');
   }
 }
