@@ -94,17 +94,26 @@ npm run demo
 
 ### Bug Fixes
 
-**v2.1.3 - Intelligent Embedding Cache & Strategy Selection** 🆕
+**v2.1.4 - Simplified ProcessPool Architecture** 🆕
+- **⚡ Removed redundant original strategy**: ProcessPool with 1 process handles all workload sizes efficiently  
+- **🔧 Fixed 400-chunk batching**: No adaptive sizing - always use optimal batch size for BGE-small-en-v1.5
+- **🧹 Streamlined strategy selection**: Auto-selection now chooses between cached (<500) and process-pool (≥500)
+- **📋 Improved workload management**: Only scale processes when chunk count justifies multiple processes  
+- **🔄 Legacy compatibility**: Original strategy gracefully redirects to cached with deprecation warning
+- **📝 Accurate cleanup messaging**: No more misleading "process pool cleanup" when no processes were created
+
+**v2.1.3 - Intelligent Embedding Cache & Strategy Selection**
 - **📦 Intelligent Embedding Cache**: 95-98% performance improvement with content-hash based caching
   - AST-stable chunk boundaries for optimal cache hit rates  
   - Dual storage system (local + global) with automatic synchronization
   - Real-time hit rate tracking and performance monitoring
   - Content invalidation using SHA-256 hashing for collision resistance
-- **🧪 Embedding Strategy Selection Framework**: Auto-selection based on dataset size and resources
-  - `< 50 chunks`: Original strategy (single-threaded, minimal overhead)
-  - `50-500 chunks`: Cached strategy (intelligent caching + ProcessPool)
-  - `> 500 chunks`: ProcessPool strategy (maximum performance)  
-  - Environment variable overrides: `EMBEDDING_STRATEGY=auto|original|cached|process-pool`
+- **🧪 Simplified Strategy Selection Framework**: Streamlined auto-selection with ProcessPool backend
+  - `< 500 chunks`: Cached strategy (intelligent caching + ProcessPool, starts with 1 process)
+  - `≥ 500 chunks`: ProcessPool strategy (scales to multiple processes)
+  - **Original strategy deprecated**: ProcessPool with 1 process handles all workload sizes efficiently
+  - **Fixed 400-chunk batching**: All strategies use optimal batch size for BGE-small-en-v1.5 model  
+  - Environment variable overrides: `EMBEDDING_STRATEGY=auto|cached|process-pool` (original→cached)
 - **Performance Results**: Single function edit 228s → 0.4s, Feature addition 228s → 2s, File refactoring 228s → 6.5s
 
 **v2.1.2 - Incremental Indexing Logic Fixes**

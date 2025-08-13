@@ -12,10 +12,10 @@ async function cleanup(reason: string = 'unknown') {
   if (globalIndexer && !cleanupInProgress) {
     cleanupInProgress = true;
     try {
-      console.log(`\n🧹 Cleaning up process pool (reason: ${reason})...`);
+      console.log(`\n🧹 Cleaning up indexer resources (reason: ${reason})...`);
       // Use the indexer's cleanup method
       await globalIndexer.cleanup(reason);
-      console.log('✅ Process pool cleaned up successfully');
+      console.log('✅ Indexer resources cleaned up successfully');
     } catch (error) {
       console.error('❌ Error during cleanup:', error);
     } finally {

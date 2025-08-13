@@ -96,21 +96,21 @@ npm run shutdown  # Comprehensive cleanup script
 
 ## Embedding Strategy Architecture 🆕
 
-### 🧪 Intelligent Strategy Selection Framework
-**Auto-selection based on dataset size and system resources:**
+### 🧪 Simplified Strategy Selection Framework
+**Streamlined auto-selection - ProcessPool handles all workload sizes:**
 
-- **< 50 chunks**: Original strategy (single-threaded, minimal overhead)
-- **50-500 chunks**: Cached strategy (intelligent caching with ProcessPool backend)  
-- **> 500 chunks**: ProcessPool strategy (maximum performance for large datasets)
-- **Manual override**: Environment variables allow explicit strategy selection
+- **< 500 chunks**: Cached strategy (intelligent caching with ProcessPool backend, starts with 1 process)
+- **≥ 500 chunks**: ProcessPool strategy (scales to multiple processes for large datasets)
+- **All strategies**: Fixed 400-chunk batching optimized for BGE-small-en-v1.5 model
+- **Original strategy**: Deprecated (ProcessPool with 1 process is equally efficient)
 
 **Environment Configuration:**
 ```bash
 EMBEDDING_STRATEGY=auto         # Auto-select best strategy (default)
-EMBEDDING_STRATEGY=original     # Single-threaded strategy
-EMBEDDING_STRATEGY=cached       # Cached strategy with intelligent cache
-EMBEDDING_STRATEGY=process-pool # ProcessPool strategy for large datasets
-EMBEDDING_BATCH_SIZE=100        # Batch size (original strategy)
+EMBEDDING_STRATEGY=cached       # Cached strategy with ProcessPool backend
+EMBEDDING_STRATEGY=process-pool # Direct ProcessPool strategy for large datasets
+EMBEDDING_STRATEGY=original     # Deprecated - redirects to cached strategy
+# Note: EMBEDDING_BATCH_SIZE removed - fixed at 400 chunks for optimal performance
 EMBEDDING_PROCESS_COUNT=4       # Process count (ProcessPool strategy)
 ```
 
@@ -140,6 +140,21 @@ Content Hash → Cache Entry {
   chunk_metadata: { file_path, symbol_name, chunk_type };
 }
 ```
+
+### ⚡ Fixed 400-Chunk Batching System
+**Optimized specifically for BGE-small-en-v1.5 embedding model:**
+
+**Key Features:**
+- **Fixed batch size**: Always use 400 chunks per batch (no adaptive sizing)
+- **Model optimized**: 400 chunks determined as optimal for BGE-small-en-v1.5 performance
+- **Workload-aware**: Only scale processes when chunk count exceeds 400
+- **Eliminates variability**: No more adaptive chunk sizing strategies
+
+**Rationale:**
+- BGE-small-en-v1.5 performs best with 400-chunk batches
+- Fixed batching eliminates performance variability
+- Simpler logic reduces complexity and potential issues
+- Workload assessment prevents unnecessary process creation
 
 ### ProcessPoolEmbedder (Local Strategy)
 **Global Resource Thresholds** (`RESOURCE_THRESHOLDS` constants):
@@ -256,7 +271,7 @@ Claude Code ← MCP Server ← Vector Store ← ProcessPool → Incremental Upda
 ### Core System
 - **server.ts** - MCP server with HTTP transport and startup tracking
 - **indexer.ts** - Repository indexing with incremental support
-- **process-pool-embedder.ts** - CPU + memory adaptive embedding generation
+- **process-pool-embedder.ts** - CPU + memory adaptive embedding with fixed 400-chunk batching
 - **unified-storage-coordinator.ts** - Auto-sync dual storage management
 
 ### File Watching System (Planned)
@@ -269,6 +284,7 @@ Claude Code ← MCP Server ← Vector Store ← ProcessPool → Incremental Upda
 - **CPU monitoring**: Cross-platform detection (Linux/macOS/Windows)
 - **Memory management**: Accurate system memory via native commands
 - **Process cleanup**: Signal cascade with IPC + OS signal reliability
+- **Fixed batch sizing**: Always use 400 chunks per batch (optimal for BGE-small-en-v1.5)
 - **Adaptive scaling**: Growth decisions based on both CPU and memory
 
 ### Auto-sync Intelligence

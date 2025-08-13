@@ -1961,10 +1961,10 @@ export class ProcessPoolEmbedder implements IEmbedder {
     };
   }
 
-  // Get current adaptive batch size
-  private getAdaptiveBatchSize(totalChunks: number): number {
-    // Ensure batch size doesn't exceed total chunks
-    return Math.min(this.adaptiveBatch.currentSize, totalChunks);
+  // Get fixed batch size - always 400 chunks for optimal embedding model performance
+  private getFixedBatchSize(totalChunks: number): number {
+    // Always use 400 chunks - optimal size for embedding model
+    return Math.min(400, totalChunks);
   }
 
   // Monitor memory usage with reliable fallback estimation
@@ -2511,16 +2511,16 @@ export class ProcessPoolEmbedder implements IEmbedder {
     
     const currentTimestamp = Date.now();
     
-    // Use adaptive batch size that learns and optimizes over time
-    const adaptiveBatchSize = this.getAdaptiveBatchSize(chunks.length);
+    // Use fixed batch size - always 400 chunks for optimal embedding model performance
+    const batchSize = this.getFixedBatchSize(chunks.length);
     
-    console.log(`🎯 Adaptive batch size: ${adaptiveBatchSize} chunks per batch (learning optimal size)`);
-    console.log(`📈 Batch optimization: ${this.adaptiveBatch.isOptimizing ? 'Learning' : 'Converged'} (history: ${this.adaptiveBatch.performanceHistory.length} samples)`);
+    console.log(`🎯 Fixed batch size: ${batchSize} chunks per batch (optimal for embedding model)`);
+    console.log(`📊 No adaptation needed - 400 chunk size is optimal for BGE-small-en-v1.5 model`);
     
     // Create batches for each process with original index tracking
     const batches: { chunks: CodeChunk[]; originalIndices: number[] }[] = [];
-    for (let i = 0; i < chunks.length; i += adaptiveBatchSize) {
-      const batchChunks = chunks.slice(i, i + adaptiveBatchSize);
+    for (let i = 0; i < chunks.length; i += batchSize) {
+      const batchChunks = chunks.slice(i, i + batchSize);
       const batchIndices = Array.from({ length: batchChunks.length }, (_, idx) => i + idx);
       batches.push({
         chunks: batchChunks,

@@ -1,9 +1,8 @@
 import { CodeChunk } from './types';
-import { EmbeddingGenerator } from './embedder';
 import { ProcessPoolEmbedder } from './process-pool-embedder';
 import { CachedEmbedder } from './cached-embedder';
 
-export type EmbeddingStrategy = 'original' | 'process-pool' | 'cached' | 'auto';
+export type EmbeddingStrategy = 'process-pool' | 'cached' | 'auto' | 'original'; // 'original' deprecated, redirects to 'cached'
 
 export interface EmbeddingStrategyConfig {
   strategy: EmbeddingStrategy;
@@ -30,42 +29,29 @@ export interface EmbeddingResult {
 }
 
 export class EmbeddingStrategyManager {
-  private originalEmbedder: EmbeddingGenerator;
   private processPoolEmbedder?: ProcessPoolEmbedder;
   private cachedEmbedder?: CachedEmbedder;
   private repositoryPath: string;
 
   constructor(repositoryPath: string) {
     this.repositoryPath = repositoryPath;
-    this.originalEmbedder = new EmbeddingGenerator();
+    // Note: originalEmbedder removed - ProcessPool handles all cases
   }
 
   /**
    * Determine the best embedding strategy based on environment and chunk count
    */
   private determineAutoStrategy(chunkCount: number): EmbeddingStrategy {
-    // Auto-selection logic based on chunk count and system resources
-    const os = require('os');
-    const cpuCount = os.cpus().length;
-    const totalMemoryGB = os.totalmem() / (1024 * 1024 * 1024);
-
-    // Use original strategy for very small datasets
-    if (chunkCount < 50) {
-      return 'original';
-    }
-
-    // Use cached strategy for medium datasets
-    if (chunkCount >= 50 && chunkCount < 500) {
+    // Simplified auto-selection: ProcessPool starts with 1 process, so no need for original strategy
+    // Use cached strategy for cache benefits, fallback to process-pool for large datasets
+    
+    // Use cached strategy for datasets that can benefit from caching
+    if (chunkCount < 500) {
       return 'cached';
     }
 
-    // Use process pool for large datasets with sufficient resources
-    if (cpuCount >= 4 && totalMemoryGB >= 4 && chunkCount >= 500) {
-      return 'process-pool';
-    }
-
-    // Default to cached for good performance with cache benefits
-    return 'cached';
+    // Use process pool for large datasets (will scale beyond single process)
+    return 'process-pool';
   }
 
   /**
@@ -122,11 +108,6 @@ export class EmbeddingStrategyManager {
 
     try {
       switch (strategy) {
-        case 'original':
-          result = await this.generateWithOriginal(chunks, config);
-          batchInfo = this.calculateOriginalBatchInfo(chunks, config.batchSize || 100);
-          break;
-
         case 'process-pool':
           result = await this.generateWithProcessPool(chunks, config);
           batchInfo = this.calculateProcessPoolBatchInfo(chunks);
@@ -137,6 +118,15 @@ export class EmbeddingStrategyManager {
           result = cachedResult.chunks;
           batchInfo = cachedResult.batchInfo;
           cacheStats = cachedResult.cacheStats;
+          break;
+
+        case 'original':
+          // Legacy support - redirect to cached strategy (ProcessPool with 1 process)
+          console.log(`⚠️ 'original' strategy deprecated - using 'cached' strategy instead`);
+          const legacyResult = await this.generateWithCached(chunks, config);
+          result = legacyResult.chunks;
+          batchInfo = legacyResult.batchInfo;
+          cacheStats = legacyResult.cacheStats;
           break;
 
         default:
@@ -163,52 +153,7 @@ export class EmbeddingStrategyManager {
     };
   }
 
-  /**
-   * Generate embeddings using the original single-threaded approach
-   */
-  private async generateWithOriginal(
-    chunks: CodeChunk[], 
-    config: EmbeddingStrategyConfig
-  ): Promise<CodeChunk[]> {
-    // Initialize model
-    const modelInfo = await this.originalEmbedder.getModelInfo();
-    console.log(`📊 Original Strategy: Model ${modelInfo.name} ready (${modelInfo.dimension}D)`);
-
-    const batchSize = config.batchSize || 100;
-    const embeddedChunks: CodeChunk[] = [];
-    const totalBatches = Math.ceil(chunks.length / batchSize);
-
-    console.log(`📊 Processing ${chunks.length} chunks in ${totalBatches} batches of ${batchSize}...`);
-
-    for (let i = 0; i < chunks.length; i += batchSize) {
-      const batchStartTime = Date.now();
-      const batch = chunks.slice(i, i + batchSize);
-      const texts = batch.map(chunk => this.createEmbeddingText(chunk));
-
-      try {
-        const embeddings = await this.originalEmbedder.embedBatch(texts);
-
-        for (let j = 0; j < batch.length; j++) {
-          embeddedChunks.push({
-            ...batch[j],
-            embedding: embeddings[j] || []
-          });
-        }
-
-        const batchTime = Date.now() - batchStartTime;
-        const currentBatch = Math.floor(i / batchSize) + 1;
-        const progress = (currentBatch / totalBatches) * 100;
-
-        console.log(`📊 [Original] Batch ${currentBatch}/${totalBatches}: ${progress.toFixed(1)}% (${batchTime}ms)`);
-
-      } catch (error) {
-        console.warn(`Failed to generate embeddings for batch starting at ${i}:`, error);
-        embeddedChunks.push(...batch);
-      }
-    }
-
-    return embeddedChunks;
-  }
+  // Note: generateWithOriginal removed - ProcessPool with 1 process handles small workloads
 
   /**
    * Generate embeddings using the ProcessPool approach
@@ -290,21 +235,13 @@ export class EmbeddingStrategyManager {
     return parts.join(' ');
   }
 
-  private calculateOriginalBatchInfo(chunks: CodeChunk[], batchSize: number) {
-    const totalBatches = Math.ceil(chunks.length / batchSize);
-    // Estimate based on typical batch times
-    const estimatedBatchTime = batchSize * 15; // ~15ms per chunk estimate
-    return {
-      totalBatches,
-      averageBatchTime: estimatedBatchTime
-    };
-  }
+  // Note: calculateOriginalBatchInfo removed - original strategy deprecated
 
   private calculateProcessPoolBatchInfo(chunks: CodeChunk[]) {
-    // ProcessPool typically processes in ~50 chunk batches
-    const typicalBatchSize = 50;
-    const totalBatches = Math.ceil(chunks.length / typicalBatchSize);
-    const estimatedBatchTime = 57000; // ~57s per 50-chunk batch based on documentation
+    // ProcessPool uses fixed 400-chunk batches optimized for BGE-small-en-v1.5
+    const fixedBatchSize = 400;
+    const totalBatches = Math.ceil(chunks.length / fixedBatchSize);
+    const estimatedBatchTime = fixedBatchSize * 100; // ~100ms per chunk estimate for ProcessPool
     return {
       totalBatches,
       averageBatchTime: estimatedBatchTime
