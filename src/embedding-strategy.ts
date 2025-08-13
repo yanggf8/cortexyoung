@@ -103,12 +103,19 @@ export class EmbeddingStrategyManager {
         peakMemory = currentHeap;
       }
       
-      // Memory pressure detection (>75% of heap used)
-      const memoryPressure = currentHeap / currentMemory.heapTotal;
-      if (memoryPressure > 0.75) {
+      // Memory pressure detection using available system memory
+      const os = require('os');
+      const totalSystemMemory = os.totalmem();
+      const availableMemory = os.freemem();
+      const availableMemoryGB = availableMemory / (1024 * 1024 * 1024);
+      
+      // Trigger warning when available memory drops below 2GB (conservative threshold)
+      if (availableMemoryGB < 2.0) {
         memoryWarningCount++;
         if (memoryWarningCount === 1) {
-          console.warn(`⚠️  Memory pressure detected: ${(memoryPressure * 100).toFixed(1)}% heap usage`);
+          const totalGB = (totalSystemMemory / (1024 * 1024 * 1024)).toFixed(1);
+          const usedGB = (parseFloat(totalGB) - availableMemoryGB).toFixed(1);
+          console.warn(`⚠️  Memory pressure detected: Only ${availableMemoryGB.toFixed(1)}GB available (${usedGB}GB used of ${totalGB}GB total)`);
         }
       }
     }, 500);
