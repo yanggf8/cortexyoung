@@ -539,4 +539,27 @@ export class PersistentVectorStore extends VectorStore {
       console.warn('Could not update metadata:', error instanceof Error ? error.message : error);
     }
   }
+
+  // Methods needed by redundancy checker
+  async listAllVectors(): Promise<Array<{id: string, vector: number[], metadata?: any}>> {
+    const chunks = this.getAllChunks();
+    return chunks.map(chunk => ({
+      id: chunk.chunk_id,
+      vector: chunk.embedding || [],
+      metadata: {
+        file_path: chunk.file_path,
+        content: chunk.content
+      }
+    }));
+  }
+
+  async deleteVector(id: string): Promise<void> {
+    this.chunks.delete(id);
+    // Persist the change
+    await this.savePersistedIndex();
+  }
+
+  async close(): Promise<void> {
+    // No-op for now, could be used for cleanup
+  }
 }

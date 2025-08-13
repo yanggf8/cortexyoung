@@ -25,3 +25,14 @@ export const error = (message: string): void => {
   const timestamp = new Date().toISOString();
   console.error(`[${timestamp}] ${message}`);
 };
+
+/**
+ * Logger object with common logging methods
+ */
+export const logger = {
+  log: timestampedLog,
+  warn,
+  error,
+  info: timestampedLog,  // Alias for log
+  debug: timestampedLog  // Alias for log
+};

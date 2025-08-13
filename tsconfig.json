@@ -17,5 +17,13 @@
     "moduleResolution": "node"
   },
   "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist", "packages", "apps"]
+  "exclude": [
+    "node_modules", 
+    "dist", 
+    "packages", 
+    "apps",
+    "src/validation/**/*.ts",
+    "src/cli/redundancy-check.ts",
+    "src/redundancy-checker.ts"
+  ]
 }

@@ -286,4 +286,41 @@ export class PersistentRelationshipStore {
     }
     return value;
   }
+
+  // Methods needed by redundancy checker
+  async listAllRelationships(): Promise<Array<{id: string, data: any}>> {
+    try {
+      const graph = await this.loadPersistedRelationshipGraph();
+      if (!graph) return [];
+      
+      return Array.from(graph.relationships.entries()).map(([id, relationship]) => ({
+        id,
+        data: relationship
+      }));
+    } catch (error) {
+      console.warn('Error listing relationships:', error);
+      return [];
+    }
+  }
+
+  async deleteRelationship(id: string): Promise<void> {
+    try {
+      const graph = await this.loadPersistedRelationshipGraph();
+      if (!graph) return;
+      
+      graph.relationships.delete(id);
+      
+      // Rebuild indexes after deletion
+      this.rebuildGraphIndexes(graph);
+      
+      // Save the updated graph
+      await this.savePersistedRelationshipGraph(graph);
+    } catch (error) {
+      console.warn('Error deleting relationship:', error);
+    }
+  }
+
+  async close(): Promise<void> {
+    // No-op for now, could be used for cleanup
+  }
 }

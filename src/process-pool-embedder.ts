@@ -1185,7 +1185,7 @@ export class ProcessPoolEmbedder implements IEmbedder {
     console.log(`🛡️  Graceful shutdown handlers registered`);
   }
 
-  async initialize(): Promise<void> {
+  async initialize(chunkCount?: number): Promise<void> {
     if (this.isInitialized) return;
 
     console.log(`🔧 Starting with ${this.processCount} external Node.js process (ultra-conservative - 2+ saturate system)...`);
@@ -1196,8 +1196,16 @@ export class ProcessPoolEmbedder implements IEmbedder {
     // Wait for initial processes to be ready
     await this.waitForProcessesReady();
     
-    // Get initial accurate memory reading after processes are ready
-    await this.checkResourcesAndAdjustPool();
+    // Only grow during initialization if workload justifies it
+    if (chunkCount && chunkCount > 400) {
+      console.log(`📊 Workload: ${chunkCount} chunks > 400, checking if additional processes needed`);
+      await this.checkResourcesAndAdjustPool();
+    } else if (chunkCount) {
+      console.log(`📊 Workload: ${chunkCount} chunks ≤ 400, single process sufficient`);
+    } else {
+      // Fallback: no chunk count provided, use original logic
+      await this.checkResourcesAndAdjustPool();
+    }
     
     // Start memory monitoring for adaptive growth
     this.startResourceMonitoring();
@@ -2493,8 +2501,8 @@ export class ProcessPoolEmbedder implements IEmbedder {
 
   // Main method: Process all chunks using process pool with batching
   async processAllEmbeddings(chunks: CodeChunk[]): Promise<CodeChunk[]> {
-    // Initialize process pool first
-    await this.initialize();
+    // Initialize process pool first (workload-aware)
+    await this.initialize(chunks.length);
     
     console.log(`📊 Processing ${chunks.length} chunks using ${this.processCount} external processes`);
     

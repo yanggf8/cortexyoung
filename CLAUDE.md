@@ -14,6 +14,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **🔄 Signal Cascade System**: Reliable parent-child process cleanup with zero orphaned processes
 - **📊 Auto-sync Intelligence**: Eliminates manual storage commands with intelligent conflict resolution
 - **🕒 Unified Timestamped Logging**: Consistent ISO timestamp formatting across all major components for improved debugging
+- **⚡ Workload-Aware Process Growth**: Intelligent process scaling based on actual chunk count - prevents unnecessary resource usage for small workloads (≤400 chunks use single process)
 - **👀 Smart File Watching**: Real-time code intelligence updates with adaptive activity detection (PLANNED)
 
 ### 🚀 **Upcoming: Smart File Watching System**
@@ -106,6 +107,20 @@ npm run shutdown  # Comprehensive cleanup script
 - **Rate Limiting**: TokenBucket 100 requests/minute
 - **Concurrency Control**: Managed through API throttling
 - **Strategy Selection**: `EMBEDDER_TYPE=cloudflare` vs `EMBEDDER_TYPE=local`
+
+### Workload-Aware Process Growth (NEW) ⚡
+**Intelligent initialization that considers actual workload before growing:**
+
+1. **Workload Assessment**: Check chunk count during `processAllEmbeddings()`
+2. **Growth Decision**: Only grow if `chunkCount > 400` (batch size threshold)
+3. **Resource Check**: Apply 2-step prediction only when workload justifies growth
+4. **Efficiency Result**: Single process handles ≤400 chunks, preventing unnecessary overhead
+
+**Key Benefits:**
+- ✅ **Prevents waste**: 137 chunks → 1 process (vs previous 2 processes)
+- ✅ **Workload-driven**: Growth decisions based on actual need, not just resources
+- ✅ **Clear logging**: Shows workload assessment in real-time
+- ✅ **Backwards compatible**: Falls back to original logic when chunk count unknown
 
 ### ProcessPool 2-Step Adaptive Growth Algorithm
 **Intelligent scaling that looks ahead 2 steps instead of projecting to theoretical maximum:**
