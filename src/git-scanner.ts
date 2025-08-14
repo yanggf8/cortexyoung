@@ -1,4 +1,5 @@
 import { simpleGit, SimpleGit } from 'simple-git';
+import { warn as timestampedWarn } from './logging-utils';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 
@@ -100,7 +101,7 @@ export class GitScanner {
         }
       } catch (error) {
         // Skip files that can't be analyzed
-        console.warn(`Could not get commit info for ${file}:`, error);
+        timestampedWarn(`Could not get commit info for ${file}: ${error}`);
       }
     }
 
@@ -129,7 +130,7 @@ export class GitScanner {
 
       return Array.from(coChangeFiles);
     } catch (error) {
-      console.warn(`Could not get co-change files for ${file}:`, error);
+      timestampedWarn(`Could not get co-change files for ${file}: ${error}`);
       return [];
     }
   }
@@ -144,9 +145,9 @@ export class GitScanner {
         existingFiles.push(file);
       } catch (error: any) {
         if (error.code === 'ENOENT') {
-          console.warn(`Skipping deleted file: ${file}`);
+          timestampedWarn(`Skipping deleted file: ${file}`);
         } else {
-          console.warn(`Error checking file ${file}:`, error.message);
+          timestampedWarn(`Error checking file ${file}: ${error.message}`);
         }
       }
     }
@@ -191,7 +192,7 @@ export class GitScanner {
       const branch = await this.git.branchLocal();
       return branch.current;
     } catch (error) {
-      console.warn('Could not get current branch:', error);
+      timestampedWarn(`Could not get current branch: ${error}`);
       return 'unknown';
     }
   }
@@ -201,7 +202,7 @@ export class GitScanner {
       const log = await this.git.log({ maxCount: 1 });
       return log.latest?.hash || 'unknown';
     } catch (error) {
-      console.warn('Could not get latest commit:', error);
+      timestampedWarn(`Could not get latest commit: ${error}`);
       return 'unknown';
     }
   }
@@ -211,7 +212,7 @@ export class GitScanner {
       const result = await this.git.raw(['rev-list', '--count', `${fromCommit}..${toCommit}`]);
       return parseInt(result.trim()) || 0;
     } catch (error) {
-      console.warn(`Could not get commit distance from ${fromCommit} to ${toCommit}:`, error);
+      timestampedWarn(`Could not get commit distance from ${fromCommit} to ${toCommit}: ${error}`);
       return 0;
     }
   }

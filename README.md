@@ -94,7 +94,14 @@ npm run demo
 
 ### Bug Fixes
 
-**v2.1.4 - Simplified ProcessPool Architecture** 🆕
+**v2.1.5 - Complete Timestamp Coverage** 🆕
+- **🕐 Fixed missing ISO timestamps**: All startup logs now have consistent `[YYYY-MM-DDTHH:mm:ss.sssZ]` timestamps
+- **📝 Enhanced logging consistency**: Updated 5 core files (index.ts, startup-stages.ts, hierarchical-stages.ts, git-scanner.ts, persistent-relationship-store.ts)
+- **🔧 Improved debugging experience**: Complete timestamp coverage for relationship graph loading, git operations, and storage sync
+- **⚡ Maintained performance**: Zero impact on startup time while adding comprehensive timestamp tracking
+- **🧹 Unified logging architecture**: All console fallbacks now use timestamped logging utilities
+
+**v2.1.4 - Simplified ProcessPool Architecture**
 - **⚡ Removed redundant original strategy**: ProcessPool with 1 process handles all workload sizes efficiently  
 - **🔧 Fixed 400-chunk batching**: No adaptive sizing - always use optimal batch size for BGE-small-en-v1.5
 - **🧹 Streamlined strategy selection**: Auto-selection now chooses between cached (<500) and process-pool (≥500)

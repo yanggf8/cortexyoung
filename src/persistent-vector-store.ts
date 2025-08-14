@@ -2,10 +2,8 @@ import { CodeChunk, CORTEX_PROGRAM_VERSION, CORTEX_SCHEMA_VERSION, ModelInfo } f
 import { VectorStore } from './vector-store';
 import { SchemaValidator } from './schema-validator';
 import { log } from './logging-utils';
+import { StoragePaths } from './storage-constants';
 import * as fs from 'fs/promises';
-import * as path from 'path';
-import * as crypto from 'crypto';
-import * as os from 'os';
 
 interface PersistedIndex {
   version: string;
@@ -49,28 +47,20 @@ export class PersistentVectorStore extends VectorStore {
     this.repositoryPath = repositoryPath;
     this.indexDir = indexDir;
     
-    // Local storage (in repo)
-    this.localIndexPath = path.join(repositoryPath, indexDir);
-    this.metadataPath = path.join(this.localIndexPath, 'index.json');
-    this.deltaPath = path.join(this.localIndexPath, 'deltas');
+    // Get all storage paths using centralized utility
+    const paths = StoragePaths.getAllPaths(repositoryPath, indexDir);
     
-    // Global storage (in ~/.claude)
-    const repoHash = this.getRepositoryHash(repositoryPath);
-    const claudeDir = path.join(os.homedir(), '.claude', 'cortex-embeddings');
-    this.globalIndexPath = path.join(claudeDir, repoHash);
-    this.globalMetadataPath = path.join(this.globalIndexPath, 'index.json');
-    this.globalDeltaPath = path.join(this.globalIndexPath, 'deltas');
+    // Local storage paths
+    this.localIndexPath = paths.local.indexPath;
+    this.metadataPath = paths.local.metadataPath;
+    this.deltaPath = paths.local.deltaPath;
+    
+    // Global storage paths
+    this.globalIndexPath = paths.global.indexPath;
+    this.globalMetadataPath = paths.global.metadataPath;
+    this.globalDeltaPath = paths.global.deltaPath;
   }
 
-  private getRepositoryHash(repoPath: string): string {
-    // Create a consistent hash based on absolute path
-    const absolutePath = path.resolve(repoPath);
-    const hash = crypto.createHash('sha256').update(absolutePath).digest('hex');
-    
-    // Use first 16 chars + repo name for readability
-    const repoName = path.basename(absolutePath);
-    return `${repoName}-${hash.substring(0, 16)}`;
-  }
 
   private static initializedPaths: Set<string> = new Set();
   private initialized: boolean = false;
@@ -123,8 +113,8 @@ export class PersistentVectorStore extends VectorStore {
       const globalIsNewer = globalStats.mtime > localStats.mtime;
       
       log('[StorageCompare] Storage comparison started');
-      log(`[StorageCompare] Local chunks=${localChunks} modified=${localTime}`);
-      log(`[StorageCompare] Global chunks=${globalChunks} modified=${globalTime}`);
+      log(`[StorageCompare] Local chunks=${localChunks} modified=${localTime} path=${this.metadataPath}`);
+      log(`[StorageCompare] Global chunks=${globalChunks} modified=${globalTime} path=${this.globalMetadataPath}`);
       log(`[StorageCompare] Winner=${globalIsNewer ? 'global' : 'local'} reason=${globalIsNewer ? 'newer' : 'newer'} loading=${globalIsNewer ? 'global' : 'local'}`);
       
       if (globalIsNewer) {
@@ -170,8 +160,9 @@ export class PersistentVectorStore extends VectorStore {
     try {
       const indexPath = useGlobal ? this.globalMetadataPath : this.metadataPath;
       const source = useGlobal ? 'global (~/.claude)' : 'local (.cortex)';
+      const fullPath = useGlobal ? this.globalMetadataPath : this.metadataPath;
       
-      log(`[StorageLoad] Loading persisted embeddings source=${source}`);
+      log(`[StorageLoad] Loading persisted embeddings source=${source} path=${fullPath}`);
       const startTime = Date.now();
       
       const indexData = await fs.readFile(indexPath, 'utf-8');
@@ -192,7 +183,7 @@ export class PersistentVectorStore extends VectorStore {
       }
       
       const loadTime = Date.now() - startTime;
-      log(`[StorageLoad] Loaded chunks=${persistedIndex.chunks.length} source=${source} duration=${loadTime}ms`);
+      log(`[StorageLoad] Loaded chunks=${persistedIndex.chunks.length} source=${source} path=${fullPath} duration=${loadTime}ms`);
       log(`[StorageLoad] Index metadata totalChunks=${persistedIndex.metadata.totalChunks} embeddingModel=${persistedIndex.metadata.embeddingModel} lastIndexed=${persistedIndex.metadata.lastIndexed}`);
       
       return true;
@@ -337,7 +328,7 @@ export class PersistentVectorStore extends VectorStore {
   async syncToGlobal(): Promise<void> {
     try {
       if (await this.indexExists()) {
-        log('[StorageSync] Syncing local embeddings to global storage');
+        log(`[StorageSync] Syncing local embeddings to global storage from=${this.metadataPath} to=${this.globalMetadataPath}`);
         const indexData = await fs.readFile(this.metadataPath, 'utf-8');
         const globalTempPath = this.globalMetadataPath + '.tmp';
         await fs.writeFile(globalTempPath, indexData);
@@ -376,7 +367,7 @@ export class PersistentVectorStore extends VectorStore {
             log('[StorageSync] Could not read global chunk count');
           }
           
-          log(`[StorageSync] Syncing global embeddings to local storage chunks=${globalChunks}`);
+          log(`[StorageSync] Syncing global embeddings to local storage chunks=${globalChunks} from=${this.globalMetadataPath} to=${this.metadataPath}`);
           const indexData = await fs.readFile(this.globalMetadataPath, 'utf-8');
           const localTempPath = this.metadataPath + '.tmp';
           await fs.writeFile(localTempPath, indexData);

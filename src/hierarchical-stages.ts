@@ -1,5 +1,6 @@
-// Hierarchical stage tracking for MCP server initialization
-// Replaces the flat 10-step system with a clean 3-stage hierarchy
+// Simple 3-stage tracking for MCP server initialization
+import { timestampedLog, warn as timestampedWarn, error as timestampedError } from './logging-utils';
+// Uses clear break line delimiters for stage entry and exit
 
 export interface HierarchicalSubstep {
   id: string;
@@ -150,8 +151,11 @@ export class HierarchicalStageTracker {
     this.currentStageId = stageId;
     
     const stageNumber = this.getStageNumber(stageId);
-    const message = `🚀 [Stage ${stageNumber}/3] ${stage.name}`;
-    this.logInfo(message);
+    
+    // Stage entry with break line delimiter
+    this.logInfo('==========================================');
+    this.logInfo(`🚀 STAGE ${stageNumber}/3: ${stage.name.toUpperCase()}`);
+    this.logInfo('==========================================');
   }
 
   startSubstep(stageId: string, substepId: string, details?: string): void {
@@ -179,16 +183,13 @@ export class HierarchicalStageTracker {
     stage.currentSubstep = substepId;
     this.currentSubstepId = substepId;
     
-    // Determine visual prefix based on position
-    const isLastSubstep = stage.substeps.indexOf(substep) === stage.substeps.length - 1;
-    const prefix = isLastSubstep ? '└──' : '├──';
-    
-    const message = `${prefix} [${substepId}] ${substep.name}...`;
-    this.logInfo(message);
-    
+    // Step entry with break line delimiter
+    this.logInfo('------------------------------------------');
+    this.logInfo(`⚡ STEP ${substepId}: ${substep.name}`);
     if (details) {
-      this.logInfo(`│   └── ${details}`);
+      this.logInfo(`   Details: ${details}`);
     }
+    this.logInfo('------------------------------------------');
   }
 
   completeSubstep(stageId: string, substepId: string, details?: string): void {
@@ -205,13 +206,16 @@ export class HierarchicalStageTracker {
     }
     if (details) substep.details = details;
 
-    // Determine visual prefix
-    const isLastSubstep = stage.substeps.indexOf(substep) === stage.substeps.length - 1;
-    const prefix = isLastSubstep ? '    ' : '│   ';
-    
     const durationFormatted = this.formatDuration(substep.duration || 0);
-    const message = `${prefix}└── ${details || substep.description} (${durationFormatted})`;
-    this.logInfo(message);
+    
+    // Step exit with break line delimiter
+    this.logInfo('------------------------------------------');
+    this.logInfo(`✅ STEP ${substepId} COMPLETED: ${substep.name}`);
+    if (details) {
+      this.logInfo(`   Result: ${details}`);
+    }
+    this.logInfo(`   Duration: ${durationFormatted}`);
+    this.logInfo('------------------------------------------');
   }
 
   completeStage(stageId: string): void {
@@ -231,8 +235,12 @@ export class HierarchicalStageTracker {
 
     const stageNumber = this.getStageNumber(stageId);
     const durationFormatted = this.formatDuration(stage.duration || 0);
-    const message = `✅ [Stage ${stageNumber}/3] ${stage.name} completed (${durationFormatted})`;
-    this.logInfo(message);
+    
+    // Stage exit with break line delimiter
+    this.logInfo('==========================================');
+    this.logInfo(`✅ STAGE ${stageNumber}/3 COMPLETED: ${stage.name.toUpperCase()}`);
+    this.logInfo(`   Duration: ${durationFormatted}`);
+    this.logInfo('==========================================');
   }
 
   failStage(stageId: string, error: string): void {
@@ -247,8 +255,13 @@ export class HierarchicalStageTracker {
 
     const stageNumber = this.getStageNumber(stageId);
     const durationFormatted = this.formatDuration(stage.duration || 0);
-    const message = `❌ [Stage ${stageNumber}/3] ${stage.name} failed (${durationFormatted}): ${error}`;
-    this.logError(message);
+    
+    // Stage failure with break line delimiter
+    this.logError('==========================================');
+    this.logError(`❌ STAGE ${stageNumber}/3 FAILED: ${stage.name.toUpperCase()}`);
+    this.logError(`   Error: ${error}`);
+    this.logError(`   Duration: ${durationFormatted}`);
+    this.logError('==========================================');
   }
 
   failSubstep(stageId: string, substepId: string, error: string): void {
@@ -265,12 +278,14 @@ export class HierarchicalStageTracker {
       substep.duration = substep.endTime - substep.startTime;
     }
 
-    const isLastSubstep = stage.substeps.indexOf(substep) === stage.substeps.length - 1;
-    const prefix = isLastSubstep ? '    ' : '│   ';
-    
     const durationFormatted = this.formatDuration(substep.duration || 0);
-    const message = `${prefix}└── ❌ ${substep.name} failed (${durationFormatted}): ${error}`;
-    this.logError(message);
+    
+    // Step failure with break line delimiter
+    this.logError('------------------------------------------');
+    this.logError(`❌ STEP ${substepId} FAILED: ${substep.name}`);
+    this.logError(`   Error: ${error}`);
+    this.logError(`   Duration: ${durationFormatted}`);
+    this.logError('------------------------------------------');
   }
 
   getProgress(): HierarchicalProgress {
@@ -312,7 +327,12 @@ export class HierarchicalStageTracker {
   logStartupSummary(): void {
     const totalDuration = Date.now() - this.startTime;
     const durationFormatted = this.formatDuration(totalDuration);
-    this.logInfo(`✨ Cortex MCP Server Ready! Total startup: ${durationFormatted}`);
+    
+    // Final startup summary with break line delimiter
+    this.logInfo('==========================================');
+    this.logInfo('🎉 CORTEX MCP SERVER READY!');
+    this.logInfo(`   Total startup duration: ${durationFormatted}`);
+    this.logInfo('==========================================');
   }
 
   private getStageNumber(stageId: string): number {
@@ -334,7 +354,7 @@ export class HierarchicalStageTracker {
     if (this.logger) {
       this.logger.info(message);
     } else {
-      console.log(`[INFO] ${message}`);
+      timestampedLog(`[INFO] ${message}`);
     }
   }
 
@@ -342,7 +362,7 @@ export class HierarchicalStageTracker {
     if (this.logger) {
       this.logger.warn(message);
     } else {
-      console.warn(`[WARN] ${message}`);
+      timestampedWarn(`[WARN] ${message}`);
     }
   }
 
@@ -350,7 +370,7 @@ export class HierarchicalStageTracker {
     if (this.logger) {
       this.logger.error(message);
     } else {
-      console.error(`[ERROR] ${message}`);
+      timestampedError(`[ERROR] ${message}`);
     }
   }
 

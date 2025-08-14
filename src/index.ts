@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { CodebaseIndexer } from './indexer';
+import { timestampedLog, warn, error as timestampedError } from './logging-utils';
 import * as path from 'path';
 
 // Global cleanup handler
@@ -11,12 +12,12 @@ async function cleanup(reason: string = 'unknown') {
   if (globalIndexer && !cleanupInProgress) {
     cleanupInProgress = true;
     try {
-      console.log(`\n🧹 Cleaning up indexer resources (reason: ${reason})...`);
+      timestampedLog(`\n🧹 Cleaning up indexer resources (reason: ${reason})...`);
       // Use the indexer's cleanup method
       await globalIndexer.cleanup(reason);
-      console.log('✅ Indexer resources cleaned up successfully');
+      timestampedLog('✅ Indexer resources cleaned up successfully');
     } catch (error) {
-      console.error('❌ Error during cleanup:', error);
+      timestampedError(`❌ Error during cleanup: ${error}`);
     } finally {
       globalIndexer = null;
       cleanupInProgress = false;
@@ -26,13 +27,13 @@ async function cleanup(reason: string = 'unknown') {
 
 // Setup cleanup handlers
 process.on('SIGINT', async () => {
-  console.log('\n⚠️ Received SIGINT (Ctrl+C)');
+  timestampedLog('\n⚠️ Received SIGINT (Ctrl+C)');
   await cleanup('SIGINT');
   process.exit(0);
 });
 
 process.on('SIGTERM', async () => {
-  console.log('\n⚠️ Received SIGTERM');
+  timestampedLog('\n⚠️ Received SIGTERM');
   await cleanup('SIGTERM');
   process.exit(0);
 });
@@ -43,13 +44,13 @@ process.on('exit', async () => {
 
 // Handle uncaught exceptions
 process.on('uncaughtException', async (error) => {
-  console.error('❌ Uncaught Exception:', error);
+  timestampedError(`❌ Uncaught Exception: ${error}`);
   await cleanup('uncaughtException');
   process.exit(1);
 });
 
 process.on('unhandledRejection', async (reason, promise) => {
-  console.error('❌ Unhandled Rejection at:', promise, 'reason:', reason);
+  timestampedError(`❌ Unhandled Rejection at: ${promise}, reason: ${reason}`);
   await cleanup('unhandledRejection');
   process.exit(1);
 });
@@ -61,9 +62,9 @@ async function main() {
   const forceReindex = args.includes('--reindex') || args.includes('--force-rebuild');
   const forceFullMode = args.includes('--full');
   
-  console.log(`🚀 Starting Cortex indexing for: ${repoPath}`);
-  if (forceReindex) console.log('🔄 Force rebuild requested (--reindex)');
-  if (forceFullMode) console.log('🔄 Full mode requested (--full)');
+  timestampedLog(`🚀 Starting Cortex indexing for: ${repoPath}`);
+  if (forceReindex) timestampedLog('🔄 Force rebuild requested (--reindex)');
+  if (forceFullMode) timestampedLog('🔄 Full mode requested (--full)');
   
   // Initialize indexer
   const indexer = new CodebaseIndexer(repoPath);
@@ -72,7 +73,7 @@ async function main() {
   globalIndexer = indexer;
   
   try {
-    console.log('🔍 Checking for existing embeddings cache...');
+    timestampedLog('🔍 Checking for existing embeddings cache...');
     
     // Check if index exists to determine mode
     const vectorStore = (indexer as any).vectorStore;
@@ -89,7 +90,7 @@ async function main() {
       mode = hasExistingIndex ? 'incremental' : 'full';
     }
     
-    console.log(`🔍 Index mode: ${mode} (existing index: ${hasExistingIndex ? 'found' : 'not found'})`);
+    timestampedLog(`🔍 Index mode: ${mode} (existing index: ${hasExistingIndex ? 'found' : 'not found'})`);
     
     const response = await indexer.indexRepository({
       repository_path: repoPath,
@@ -97,13 +98,13 @@ async function main() {
       force_rebuild: forceReindex
     });
     
-    console.log('✅ Indexing completed successfully');
+    timestampedLog('✅ Indexing completed successfully');
     
-    console.log(`✅ Indexing complete!`);
-    console.log(`📊 Results: ${response.chunks_processed} chunks`);
-    console.log(`⚡ Processing time: ${response.time_taken_ms}ms`);
+    timestampedLog(`✅ Indexing complete!`);
+    timestampedLog(`📊 Results: ${response.chunks_processed} chunks`);
+    timestampedLog(`⚡ Processing time: ${response.time_taken_ms}ms`);
   } catch (error) {
-    console.error('❌ Indexing failed:', error);
+    timestampedError(`❌ Indexing failed: ${error}`);
     process.exit(1);
   } finally {
     // Ensure cleanup happens even if other cleanup calls missed
@@ -112,7 +113,7 @@ async function main() {
 }
 
 if (require.main === module) {
-  main().catch(console.error);
+  main().catch(err => timestampedError(`❌ Main function failed: ${err}`));
 }
 
 export * from './types';

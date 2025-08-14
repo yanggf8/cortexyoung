@@ -4,10 +4,9 @@ import {
   CodeRelationship
 } from './relationship-types';
 import { CORTEX_SCHEMA_VERSION } from './types';
+import { StoragePaths } from './storage-constants';
+import { timestampedLog, warn as timestampedWarn, error as timestampedError } from './logging-utils';
 import * as fs from 'fs/promises';
-import * as path from 'path';
-import * as crypto from 'crypto';
-import * as os from 'os';
 
 interface PersistedRelationshipGraph {
   version: string;
@@ -34,23 +33,18 @@ export class PersistentRelationshipStore {
   constructor(repositoryPath: string, indexDir: string = '.cortex') {
     this.repositoryPath = repositoryPath;
     
-    // Local storage (in repo)
-    this.localGraphPath = path.join(repositoryPath, indexDir);
-    this.metadataPath = path.join(this.localGraphPath, 'relationships.json');
+    // Get all storage paths using centralized utility
+    const paths = StoragePaths.getAllPaths(repositoryPath, indexDir);
     
-    // Global storage (in ~/.claude)
-    const repoHash = this.getRepositoryHash(repositoryPath);
-    const claudeDir = path.join(os.homedir(), '.claude', 'cortex-embeddings');
-    this.globalGraphPath = path.join(claudeDir, repoHash);
-    this.globalMetadataPath = path.join(this.globalGraphPath, 'relationships.json');
+    // Local storage paths
+    this.localGraphPath = paths.local.indexPath;
+    this.metadataPath = paths.local.relationshipsPath;
+    
+    // Global storage paths
+    this.globalGraphPath = paths.global.indexPath;
+    this.globalMetadataPath = paths.global.relationshipsPath;
   }
 
-  private getRepositoryHash(repoPath: string): string {
-    const absolutePath = path.resolve(repoPath);
-    const hash = crypto.createHash('sha256').update(absolutePath).digest('hex');
-    const repoName = path.basename(absolutePath);
-    return `${repoName}-${hash.substring(0, 16)}`;
-  }
 
   async initialize(): Promise<void> {
     // Ensure both directories exist
@@ -81,7 +75,7 @@ export class PersistentRelationshipStore {
       const graphPath = useGlobal ? this.globalMetadataPath : this.metadataPath;
       const source = useGlobal ? 'global (~/.claude)' : 'local (.cortex)';
       
-      console.log(`🔗 Loading persisted relationship graph from ${source}...`);
+      timestampedLog(`🔗 Loading persisted relationship graph from ${source}...`);
       const startTime = Date.now();
       
       const graphData = await fs.readFile(graphPath, 'utf-8');
@@ -102,18 +96,18 @@ export class PersistentRelationshipStore {
       this.rebuildGraphIndexes(graph);
       
       const loadTime = Date.now() - startTime;
-      console.log(`✅ Loaded ${graph.symbols.size} symbols and ${graph.relationships.size} relationships from ${source} in ${loadTime}ms`);
+      timestampedLog(`✅ Loaded ${graph.symbols.size} symbols and ${graph.relationships.size} relationships from ${source} in ${loadTime}ms`);
       
       return graph;
     } catch (error) {
-      console.warn('⚠️ Failed to load persisted relationship graph:', error instanceof Error ? error.message : error);
+      timestampedWarn(`⚠️ Failed to load persisted relationship graph: ${error instanceof Error ? error.message : error}`);
       return null;
     }
   }
 
   async savePersistedRelationshipGraph(graph: RelationshipGraph): Promise<void> {
     try {
-      console.log('💾 Saving relationship graph to both local and global storage...');
+      timestampedLog('💾 Saving relationship graph to both local and global storage...');
       const startTime = Date.now();
       
       const persistedGraph: PersistedRelationshipGraph = {
@@ -144,11 +138,11 @@ export class PersistentRelationshipStore {
       await fs.rename(globalTempPath, this.globalMetadataPath);
       
       const saveTime = Date.now() - startTime;
-      console.log(`✅ Saved relationship graph to both storages in ${saveTime}ms`);
-      console.log(`📁 Local: ${this.metadataPath}`);
-      console.log(`🌐 Global: ${this.globalMetadataPath}`);
+      timestampedLog(`✅ Saved relationship graph to both storages in ${saveTime}ms`);
+      timestampedLog(`📁 Local: ${this.metadataPath}`);
+      timestampedLog(`🌐 Global: ${this.globalMetadataPath}`);
     } catch (error) {
-      console.error('❌ Failed to save persisted relationship graph:', error instanceof Error ? error.message : error);
+      timestampedError(`❌ Failed to save persisted relationship graph: ${error instanceof Error ? error.message : error}`);
       throw error;
     }
   }
@@ -156,15 +150,15 @@ export class PersistentRelationshipStore {
   async syncToGlobal(): Promise<void> {
     try {
       if (await this.relationshipGraphExists()) {
-        console.log('🔄 Syncing local relationship graph to global storage...');
+        timestampedLog('🔄 Syncing local relationship graph to global storage...');
         const graphData = await fs.readFile(this.metadataPath, 'utf-8');
         const globalTempPath = this.globalMetadataPath + '.tmp';
         await fs.writeFile(globalTempPath, graphData);
         await fs.rename(globalTempPath, this.globalMetadataPath);
-        console.log('✅ Synced relationship graph to global storage');
+        timestampedLog('✅ Synced relationship graph to global storage');
       }
     } catch (error) {
-      console.warn('⚠️ Failed to sync relationship graph to global storage:', error instanceof Error ? error.message : error);
+      timestampedWarn(`⚠️ Failed to sync relationship graph to global storage: ${error instanceof Error ? error.message : error}`);
     }
   }
 
@@ -183,18 +177,18 @@ export class PersistentRelationshipStore {
         }
         
         if (shouldSync) {
-          console.log('🔄 Syncing global relationship graph to local storage...');
+          timestampedLog('🔄 Syncing global relationship graph to local storage...');
           const graphData = await fs.readFile(this.globalMetadataPath, 'utf-8');
           const localTempPath = this.metadataPath + '.tmp';
           await fs.writeFile(localTempPath, graphData);
           await fs.rename(localTempPath, this.metadataPath);
-          console.log('✅ Synced relationship graph to local storage');
+          timestampedLog('✅ Synced relationship graph to local storage');
         } else {
-          console.log('📋 Local relationship graph is up to date');
+          timestampedLog('📋 Local relationship graph is up to date');
         }
       }
     } catch (error) {
-      console.warn('⚠️ Failed to sync relationship graph to local storage:', error instanceof Error ? error.message : error);
+      timestampedWarn(`⚠️ Failed to sync relationship graph to local storage: ${error instanceof Error ? error.message : error}`);
     }
   }
 
@@ -203,7 +197,7 @@ export class PersistentRelationshipStore {
       await fs.rm(this.localGraphPath, { recursive: true, force: true });
       await fs.mkdir(this.localGraphPath, { recursive: true });
     } catch (error) {
-      console.warn('⚠️ Failed to clear relationship graph directory:', error instanceof Error ? error.message : error);
+      timestampedWarn(`⚠️ Failed to clear relationship graph directory: ${error instanceof Error ? error.message : error}`);
     }
   }
 
@@ -298,7 +292,7 @@ export class PersistentRelationshipStore {
         data: relationship
       }));
     } catch (error) {
-      console.warn('Error listing relationships:', error);
+      timestampedWarn(`Error listing relationships: ${error}`);
       return [];
     }
   }
@@ -316,7 +310,7 @@ export class PersistentRelationshipStore {
       // Save the updated graph
       await this.savePersistedRelationshipGraph(graph);
     } catch (error) {
-      console.warn('Error deleting relationship:', error);
+      timestampedWarn(`Error deleting relationship: ${error}`);
     }
   }
 

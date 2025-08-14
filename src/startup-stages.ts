@@ -1,4 +1,5 @@
 // Startup stage tracking for MCP server initialization
+import { timestampedLog, warn as timestampedWarn, error as timestampedError } from './logging-utils';
 
 // Total stages constants based on execution mode
 const TOTAL_STAGES_FULL = 10;        // Full pipeline: server_init, cache_check, file_scan, model_load, delta_analysis, code_chunking, embedding_generation, relationship_analysis, vector_storage, mcp_ready
@@ -113,7 +114,7 @@ export class StartupStageTracker {
       if (this.logger) {
         this.logger.warn(message);
       } else {
-        console.warn(message);
+        timestampedWarn(message);
       }
       return;
     }
@@ -142,8 +143,8 @@ export class StartupStageTracker {
       this.logger.info(message);
       if (details) this.logger.info(`   Details: ${details}`);
     } else {
-      console.log(message);
-      if (details) console.log(`   Details: ${details}`);
+      timestampedLog(message);
+      if (details) timestampedLog(`   Details: ${details}`);
     }
   }
 
@@ -169,7 +170,7 @@ export class StartupStageTracker {
     if (this.logger) {
       this.logger.info(message);
     } else {
-      console.log(message);
+      timestampedLog(message);
     }
   }
 
@@ -202,7 +203,7 @@ export class StartupStageTracker {
     if (this.logger) {
       this.logger.info(message);
     } else {
-      console.log(message);
+      timestampedLog(message);
     }
   }
 
@@ -234,7 +235,7 @@ export class StartupStageTracker {
     if (this.logger) {
       this.logger.error(message);
     } else {
-      console.error(message);
+      timestampedError(message);
     }
   }
 
