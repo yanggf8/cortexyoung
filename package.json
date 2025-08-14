@@ -1,6 +1,6 @@
 {
   "name": "cortexyoung",
-  "version": "1.0.0",
+  "version": "2.1.5",
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc && cp src/*.js dist/ 2>/dev/null || true",
