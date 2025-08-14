@@ -71,7 +71,6 @@ export class RelationshipTraversalEngine {
       if (cachedGraph) {
         this.graph = cachedGraph;
         loadedFromCache = true;
-        console.log(`✅ Loaded cached relationship graph: ${this.graph.symbols.size} symbols, ${this.graph.relationships.size} relationships`);
         
         // Sync to local if needed
         await this.persistentStore.syncToLocal();
@@ -82,7 +81,6 @@ export class RelationshipTraversalEngine {
       if (cachedGraph) {
         this.graph = cachedGraph;
         loadedFromCache = true;
-        console.log(`✅ Loaded cached relationship graph: ${this.graph.symbols.size} symbols, ${this.graph.relationships.size} relationships`);
         
         // Sync to global
         await this.persistentStore.syncToGlobal();
