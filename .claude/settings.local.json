@@ -14,7 +14,9 @@
       "Bash(npm run:*)",
       "Bash(ls:*)",
       "Bash(grep:*)",
-      "mcp__gemini-cli__ask-gemini"
+      "mcp__gemini-cli__ask-gemini",
+      "mcp__cursor-agent__ask-cursor",
+      "WebFetch(domain:clickhouse.com)"
     ],
     "deny": []
   }

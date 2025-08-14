@@ -1,6 +1,6 @@
 import { CodebaseIndexer } from './indexer';
 import { SemanticSearcher } from './searcher';
-import { StartupStageTracker } from './startup-stages';
+import { HierarchicalStageTracker } from './hierarchical-stages';
 import { UnifiedStorageCoordinator } from './unified-storage-coordinator';
 import * as fs from 'fs/promises';
 import * as path from 'path';
@@ -52,12 +52,12 @@ interface PerformanceReport {
 export class PerformanceBenchmark {
   private repositoryPath: string;
   private results: BenchmarkResult[] = [];
-  private startupTracker: StartupStageTracker;
+  private startupTracker: HierarchicalStageTracker;
   private peakMemoryUsage = 0;
 
   constructor(repositoryPath: string) {
     this.repositoryPath = repositoryPath;
-    this.startupTracker = new StartupStageTracker();
+    this.startupTracker = new HierarchicalStageTracker();
   }
 
   private recordMemoryUsage(): NodeJS.MemoryUsage {
@@ -132,7 +132,7 @@ export class PerformanceBenchmark {
     });
     
     const { result: coldStartResult, benchmark: coldStart } = await this.runBenchmark('cold-start-full-index', async () => {
-      const indexer = new CodebaseIndexer(this.repositoryPath, this.startupTracker);
+      const indexer = new CodebaseIndexer(this.repositoryPath);
       return await indexer.indexRepository({
         repository_path: this.repositoryPath,
         mode: 'full'
@@ -146,7 +146,7 @@ export class PerformanceBenchmark {
     
     // 2. Warm start (with cache)
     const { result: warmStartResult, benchmark: warmStart } = await this.runBenchmark('warm-start-incremental', async () => {
-      const indexer = new CodebaseIndexer(this.repositoryPath, this.startupTracker);
+      const indexer = new CodebaseIndexer(this.repositoryPath);
       return await indexer.indexRepository({
         repository_path: this.repositoryPath,
         mode: 'incremental'
@@ -160,7 +160,7 @@ export class PerformanceBenchmark {
     
     // 3. Cache-only start (no changes)
     const { result: cacheStartResult, benchmark: cacheStart } = await this.runBenchmark('cache-only-start', async () => {
-      const indexer = new CodebaseIndexer(this.repositoryPath, this.startupTracker);
+      const indexer = new CodebaseIndexer(this.repositoryPath);
       return await indexer.indexRepository({
         repository_path: this.repositoryPath,
         mode: 'incremental'

@@ -7,7 +7,7 @@ async function cleanupDuplicates() {
   
   try {
     const validator = new RedundantRelationshipValidator(
-      new (await import('../persistent-relationship-store')).PersistentRelationshipStore()
+      new (await import('../persistent-relationship-store')).PersistentRelationshipStore(process.cwd())
     );
     
     const result = await validator.cleanupDuplicates();

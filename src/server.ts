@@ -7,7 +7,7 @@ import { CodebaseIndexer } from './indexer';
 import { SemanticSearcher } from './searcher';
 import { SemanticSearchHandler, ContextualReadHandler, CodeIntelligenceHandler, RelationshipAnalysisHandler, TraceExecutionPathHandler, FindCodePatternsHandler } from './mcp-handlers';
 import { IndexHealthChecker } from './index-health-checker';
-import { StartupStageTracker } from './startup-stages';
+import { HierarchicalStageTracker } from './hierarchical-stages';
 import { CORTEX_TOOLS } from './mcp-tools';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -77,13 +77,13 @@ export class CortexMCPServer {
   private handlers: Map<string, any> = new Map();
   private httpServer: any;
   private logger: Logger;
-  private stageTracker: StartupStageTracker;
+  private stageTracker: HierarchicalStageTracker;
 
   constructor(
     indexer: CodebaseIndexer,
     searcher: SemanticSearcher,
     loggerOrFile?: Logger | string,
-    stageTracker?: StartupStageTracker
+    stageTracker?: HierarchicalStageTracker
   ) {
     this.indexer = indexer;
     this.searcher = searcher;
@@ -95,7 +95,7 @@ export class CortexMCPServer {
       this.logger = new Logger(loggerOrFile as string);
     }
     
-    this.stageTracker = stageTracker || new StartupStageTracker(this.logger);
+    this.stageTracker = stageTracker || new HierarchicalStageTracker(this.logger);
     this.setupHandlers();
     this.setupIPC();
     this.logger.info('CortexMCPServer initialized');
@@ -537,93 +537,95 @@ async function main() {
   const logger = new Logger(logFile);
   
   // Create stage tracker with logger to prevent duplicate output
-  const stageTracker = new StartupStageTracker(logger);
+  const stageTracker = new HierarchicalStageTracker(logger);
   
-  stageTracker.startStage('server_init', `Repository: ${repoPath}, Port: ${port}`);
-  logger.info('Initializing Cortex MCP Server', { repoPath, port });
+  logger.info('🎯 Cortex MCP Server Starting...');
+  logger.info(`    Repository: ${repoPath} | Port: ${port}`);
   
   try {
-    stageTracker.completeStage('server_init');
-    stageTracker.startStage('cache_check', 'Checking for existing embeddings cache');
+    // ==================== STAGE 1: Initialization & Pre-flight ====================
+    stageTracker.startStage('stage_1');
     
-    // Initialize indexer and searcher
+    // 1.1 Server Initialization
+    stageTracker.startSubstep('stage_1', '1.1', 'Logger setup, repository validation, MCP server components');
+    logger.info('Initializing Cortex MCP Server', { repoPath, port });
+    stageTracker.completeSubstep('stage_1', '1.1', 'Server components initialized');
+    
+    // 1.2 Cache & Storage Health Check
+    stageTracker.startSubstep('stage_1', '1.2', 'Storage comparison, cache loading, health validation');
     logger.info('Starting repository indexing');
     const indexer = new CodebaseIndexer(repoPath);
     
-    // Use intelligent mode by default, or explicit mode if specified
+    // Determine indexing mode
     let indexMode: 'full' | 'incremental' | 'reindex';
-    
     if (process.env.INDEX_MODE === 'reindex' || process.env.FORCE_REBUILD === 'true') {
       indexMode = 'reindex';
       logger.info('🔄 Force rebuild requested, using reindex mode');
-      stageTracker.updateStageProgress('cache_check', 50, 'Force rebuild requested (reindex mode)');
     } else if (process.env.INDEX_MODE) {
       indexMode = process.env.INDEX_MODE as 'full' | 'incremental';
       logger.info('Using explicit indexing mode', { mode: indexMode });
-      stageTracker.updateStageProgress('cache_check', 100, `Using explicit mode: ${indexMode}`);
     } else {
       indexMode = await getIntelligentIndexMode(indexer, logger);
-      stageTracker.updateStageProgress('cache_check', 100, `Intelligent mode selected: ${indexMode}`);
     }
+    stageTracker.completeSubstep('stage_1', '1.2', `Index healthy → Using ${indexMode} mode`);
     
-    stageTracker.completeStage('cache_check');
+    // 1.3 AI Model Loading
+    stageTracker.startSubstep('stage_1', '1.3', 'BGE-small-en-v1.5 initialization and readiness');
+    stageTracker.completeSubstep('stage_1', '1.3', 'BGE-small-en-v1.5 ready');
     
-    // Start file scanning stage
-    stageTracker.startStage('file_scan', 'Scanning repository for code files');
-    stageTracker.updateStageProgress('file_scan', 50, 'Analyzing repository structure');
+    stageTracker.completeStage('stage_1');
     
-    // Index the repository with proper stage tracking
+    // ==================== STAGE 2: Code Intelligence Indexing ====================
+    stageTracker.startStage('stage_2');
+    
+    // 2.1 Repository Analysis
+    stageTracker.startSubstep('stage_2', '2.1', 'File discovery, delta analysis, change categorization');
+    
+    // Index the repository
     const indexResponse = await indexer.indexRepository({
       repository_path: repoPath,
       mode: indexMode
     });
     
-    // Complete file scan and move through actual stages based on indexing result
-    stageTracker.completeStage('file_scan');
+    // Determine what happened during indexing
+    const deltaInfo = indexResponse.chunks_processed > 0 
+      ? `+${indexResponse.chunks_processed} chunks processed` 
+      : 'No changes detected, using cache';
+    stageTracker.completeSubstep('stage_2', '2.1', deltaInfo);
     
-    // Set total stages based on actual execution path
+    // 2.2 Embedding Generation (if chunks were processed)
     if (indexResponse.chunks_processed > 0) {
-      // Full pipeline: server_init, cache_check, file_scan, model_load, delta_analysis, code_chunking, embedding_generation, relationship_analysis, vector_storage, mcp_ready = 10 stages
-      stageTracker.setTotalStages('full');
-      // If files were actually processed, we went through the full pipeline
-      stageTracker.startStage('model_load', 'BGE-small-en-v1.5 embedding model loaded');
-      stageTracker.completeStage('model_load');
-      
-      stageTracker.startStage('delta_analysis', 'Analyzed file changes');
-      stageTracker.completeStage('delta_analysis');
-      
-      stageTracker.startStage('code_chunking', 'Code files broken into semantic chunks');
-      stageTracker.completeStage('code_chunking');
-      
-      stageTracker.startStage('embedding_generation', 'Vector embeddings generated for code chunks');
-      stageTracker.completeStage('embedding_generation');
-      
-      stageTracker.startStage('relationship_analysis', 'Relationship graph built between code elements');
-      stageTracker.completeStage('relationship_analysis');
+      stageTracker.startSubstep('stage_2', '2.2', 'Process pool setup, chunk processing, resource monitoring');
+      stageTracker.completeSubstep('stage_2', '2.2', `${indexResponse.chunks_processed} chunks embedded`);
     } else {
-      // Cache-only pipeline: server_init, cache_check, file_scan, model_load, delta_analysis, vector_storage, mcp_ready = 7 stages  
-      stageTracker.setTotalStages('incremental');
-      // If no chunks processed, skip intermediate stages but show cache/incremental work
-      stageTracker.startStage('model_load', 'Model loaded from cache');
-      stageTracker.completeStage('model_load');
-      
-      stageTracker.startStage('delta_analysis', 'No changes detected - using cached data');
-      stageTracker.completeStage('delta_analysis');
+      stageTracker.startSubstep('stage_2', '2.2', 'No new embeddings needed, using cached data');
+      stageTracker.completeSubstep('stage_2', '2.2', 'Embeddings loaded from cache');
     }
     
-    // Always complete vector storage (even if from cache)
-    stageTracker.startStage('vector_storage', 'Vector storage ready');
-    stageTracker.completeStage('vector_storage', `${indexResponse.chunks_processed} chunks ${indexResponse.chunks_processed > 0 ? 'processed' : 'loaded from cache'}`);
+    // 2.3 Relationship Analysis
+    stageTracker.startSubstep('stage_2', '2.3', 'Dependency mapping, symbol extraction, graph building');
+    stageTracker.completeSubstep('stage_2', '2.3', 'Relationship graph ready');
+    
+    // 2.4 Vector Storage Commit
+    stageTracker.startSubstep('stage_2', '2.4', 'Database updates, storage persistence, synchronization');
+    const storageInfo = `${indexResponse.chunks_processed} chunks ${indexResponse.chunks_processed > 0 ? 'processed' : 'loaded from cache'}`;
+    stageTracker.completeSubstep('stage_2', '2.4', `Storage committed: ${storageInfo}`);
+    
+    stageTracker.completeStage('stage_2');
     
     logger.info('Repository indexing completed', { 
       chunksProcessed: indexResponse.chunks_processed,
       timeMs: indexResponse.time_taken_ms
     });
     
+    // ==================== STAGE 3: Server Activation ====================
+    stageTracker.startStage('stage_3');
+    
+    // 3.1 MCP Server Startup
+    stageTracker.startSubstep('stage_3', '3.1', 'HTTP transport, endpoint registration, service availability');
+    
     // Get searcher from indexer
     const searcher = (indexer as any).searcher; // Access the searcher instance
-    
-    stageTracker.startStage('mcp_ready', 'Starting MCP server');
     
     // Create and start MCP server (pass logger instance to avoid double creation)
     const mcpServer = new CortexMCPServer(indexer, searcher, logger, stageTracker);
@@ -631,7 +633,12 @@ async function main() {
     logger.info('Starting MCP server with HTTP transport', { port });
     await mcpServer.startHttp(port);
     
-    stageTracker.completeStage('mcp_ready', 'MCP server ready to accept requests');
+    stageTracker.completeSubstep('stage_3', '3.1', `HTTP server ready at http://localhost:${port}`);
+    
+    stageTracker.completeStage('stage_3');
+    
+    // Final startup summary
+    stageTracker.logStartupSummary();
     
     // Handle graceful shutdown
     process.on('SIGINT', async () => {
@@ -647,7 +654,15 @@ async function main() {
     });
     
   } catch (error) {
-    logger.error('Failed to start Cortex MCP Server', { error: error instanceof Error ? error.message : error });
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    logger.error('Failed to start Cortex MCP Server', { error: errorMessage });
+    
+    // Log failure in hierarchical tracker if available
+    if (stageTracker.getCurrentStage()) {
+      const currentStage = stageTracker.getCurrentStage()!;
+      stageTracker.failStage(currentStage.id, errorMessage);
+    }
+    
     process.exit(1);
   }
 }

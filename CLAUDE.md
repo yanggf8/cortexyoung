@@ -17,6 +17,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **⚡ Workload-Aware Process Growth**: Intelligent process scaling based on actual chunk count - prevents unnecessary resource usage for small workloads (≤400 chunks use single process)
 - **📦 Intelligent Embedding Cache**: 95-98% performance improvement with content-hash based caching and dual storage
 - **🧪 Embedding Strategy Selection**: Auto-selection framework choosing optimal strategy based on dataset size and system resources
+- **🏗️ Hierarchical Startup Stages**: 3-stage startup system with substeps for granular progress tracking and enhanced debugging
+- **🔧 Enhanced Error Handling**: Improved TypeScript compatibility and robust error reporting throughout the system
 - **👀 Smart File Watching**: Real-time code intelligence updates with adaptive activity detection (PLANNED)
 
 ### 🚀 **Upcoming: Smart File Watching System**
@@ -251,6 +253,7 @@ EMBEDDER_TYPE=cloudflare        # Cloudflare AI embedder (cloud-based)
 - **Cloud**: Cloudflare Workers AI option
 - **Storage**: Dual persistence (local `.cortex/` + global `~/.claude/`)
 - **Auto-sync**: Intelligent conflict resolution and missing data recovery
+- **Startup**: Hierarchical 3-stage system (Initialization → Code Intelligence → Server Activation)
 
 ### Planned: File Watching Integration (Phase A)
 - **SmartFileWatcher**: chokidar-based with git-tracked file filtering
@@ -269,10 +272,11 @@ Claude Code ← MCP Server ← Vector Store ← ProcessPool → Incremental Upda
 ## Key Components
 
 ### Core System
-- **server.ts** - MCP server with HTTP transport and startup tracking
+- **server.ts** - MCP server with HTTP transport and hierarchical startup tracking
 - **indexer.ts** - Repository indexing with incremental support
 - **process-pool-embedder.ts** - CPU + memory adaptive embedding with fixed 400-chunk batching
 - **unified-storage-coordinator.ts** - Auto-sync dual storage management
+- **hierarchical-stages.ts** - 3-stage startup system with substep granularity
 
 ### File Watching System (Planned)
 - **smart-file-watcher.ts** - Main file watching orchestrator with chokidar
@@ -299,6 +303,7 @@ Claude Code ← MCP Server ← Vector Store ← ProcessPool → Incremental Upda
 - **Core components**: indexer.ts, process-pool-embedder.ts, persistent-vector-store.ts
 - **Logging utility**: `src/logging-utils.ts` provides timestamped console wrappers
 - **Zero performance impact**: Lightweight wrapper around native console methods
+- **Hierarchical tracking**: Stage and substep progression with duration reporting
 
 ## MCP Server Integration
 

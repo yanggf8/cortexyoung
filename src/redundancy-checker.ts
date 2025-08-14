@@ -30,13 +30,13 @@ export class RedundancyChecker {
   }
 
   async checkVectorRedundancy(): Promise<RedundancyReport> {
-    logger.info('🔍 Starting vector redundancy check...');
+    logger.log('🔍 Starting vector redundancy check...');
     
     const vectors = await this.vectorStore.listAllVectors();
     const hashMap = new Map<string, Array<{id: string, timestamp: Date}>>();
     
     for (const vector of vectors) {
-      const hash = this.hashVector(vector.embedding);
+      const hash = this.hashVector(vector.vector);
       const key = hash;
       
       if (!hashMap.has(key)) {
@@ -61,7 +61,7 @@ export class RedundancyChecker {
 
     const totalItems = vectors.length;
     const duplicateCount = duplicates.reduce((sum, d) => sum + (d.count - 1), 0);
-    const spaceSaved = duplicateCount * (vectors[0]?.embedding?.length || 1536) * 4; // float32 bytes
+    const spaceSaved = duplicateCount * (vectors[0]?.vector?.length || 1536) * 4; // float32 bytes
 
     return {
       timestamp: new Date(),
@@ -121,14 +121,14 @@ export class RedundancyChecker {
   }
 
   async checkProcessRedundancy(): Promise<RedundancyReport> {
-    logger.info('🔍 Checking for redundant processes...');
+    logger.log('🔍 Checking for redundant processes...');
     
     try {
       const { execSync } = require('child_process');
       const processes = execSync('ps aux | grep -E "(embedding|embedder|worker)" | grep -v grep', 
         { encoding: 'utf8' })
         .split('\n')
-        .filter(line => line.trim());
+        .filter((line: string) => line.trim());
       
       const processMap = new Map<string, number>();
       
@@ -268,7 +268,7 @@ export class RedundancyChecker {
     if (report.type === 'vector') {
       for (const duplicate of report.duplicates) {
         const items = (await this.vectorStore.listAllVectors())
-          .filter(v => this.hashVector(v.embedding) === duplicate.hash);
+          .filter(v => this.hashVector(v.vector) === duplicate.hash);
         
         // Keep the first one, remove the rest
         for (let i = 1; i < items.length; i++) {

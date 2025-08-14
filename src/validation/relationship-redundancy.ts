@@ -193,7 +193,7 @@ export class RedundantRelationshipValidator implements RelationshipValidator {
 
 async function validateRelationships() {
   const validator = new RedundantRelationshipValidator(
-    new PersistentRelationshipStore()
+    new PersistentRelationshipStore(process.cwd())
   );
   
   console.log('🔍 Validating relationships for duplicates...');
@@ -213,7 +213,7 @@ async function validateRelationships() {
   }
 }
 
-export { RedundantRelationshipValidator };
+// Export already declared above
 
 if (require.main === module) {
   validateRelationships().catch(console.error);

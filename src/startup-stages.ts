@@ -130,14 +130,12 @@ export class StartupStageTracker {
     
     this.currentStageId = stageId;
     
-    // Get current step number based on stages that have been started
-    const stageArray = Array.from(this.stages.values());
-    const startedOrCompletedStages = stageArray.filter(s => s.status === 'in_progress' || s.status === 'completed');
-    const currentStepNumber = startedOrCompletedStages.length;
-    
-    // For total steps, we'll dynamically track as stages are added
-    const totalSteps = startedOrCompletedStages.length + 
-      (this.currentStageId === 'mcp_ready' ? 0 : Math.min(3, 10 - startedOrCompletedStages.length)); // Estimate remaining
+    // Get step number based on stage order in definition
+    const stageOrder = [
+      'server_init', 'cache_check', 'model_load', 'file_scan', 'delta_analysis',
+      'code_chunking', 'embedding_generation', 'relationship_analysis', 'vector_storage', 'mcp_ready'
+    ];
+    const currentStepNumber = stageOrder.indexOf(stageId) + 1;
     
     const message = `🚀 [Step ${currentStepNumber}/${this.totalStages}] ${stage.name}: ${stage.description}`;
     if (this.logger) {
@@ -156,14 +154,12 @@ export class StartupStageTracker {
     stage.progress = Math.min(100, Math.max(0, progress));
     if (details) stage.details = details;
 
-    // Get current step number based on stages that have been started
-    const stageArray = Array.from(this.stages.values());
-    const startedOrCompletedStages = stageArray.filter(s => s.status === 'in_progress' || s.status === 'completed');
-    const currentStepNumber = startedOrCompletedStages.length;
-    
-    // For total steps, we'll dynamically track as stages are added
-    const totalSteps = startedOrCompletedStages.length + 
-      (this.currentStageId === 'mcp_ready' ? 0 : Math.min(3, 10 - startedOrCompletedStages.length)); // Estimate remaining
+    // Get step number based on stage order in definition
+    const stageOrder = [
+      'server_init', 'cache_check', 'model_load', 'file_scan', 'delta_analysis',
+      'code_chunking', 'embedding_generation', 'relationship_analysis', 'vector_storage', 'mcp_ready'
+    ];
+    const currentStepNumber = stageOrder.indexOf(stageId) + 1;
     
     // Calculate elapsed time for this stage
     const elapsedMs = stage.startTime ? Date.now() - stage.startTime : 0;
@@ -189,14 +185,12 @@ export class StartupStageTracker {
     }
     if (details) stage.details = details;
 
-    // Get current step number based on completed stages
-    const stageArray = Array.from(this.stages.values());
-    const completedStages = stageArray.filter(s => s.status === 'completed');
-    const currentStepNumber = completedStages.length;
-    
-    // Total steps now includes completed plus any remaining that might execute
-    const totalSteps = currentStepNumber + 
-      (this.currentStageId === 'mcp_ready' ? 0 : Math.min(3, 10 - currentStepNumber));
+    // Get step number based on stage order in definition
+    const stageOrder = [
+      'server_init', 'cache_check', 'model_load', 'file_scan', 'delta_analysis',
+      'code_chunking', 'embedding_generation', 'relationship_analysis', 'vector_storage', 'mcp_ready'
+    ];
+    const currentStepNumber = stageOrder.indexOf(stageId) + 1;
     
     // Format duration nicely
     const durationMs = stage.duration || 0;
@@ -223,14 +217,12 @@ export class StartupStageTracker {
       stage.duration = stage.endTime - stage.startTime;
     }
 
-    // Get current step number based on stages that have been started
-    const stageArray = Array.from(this.stages.values());
-    const startedOrCompletedOrFailedStages = stageArray.filter(s => s.status !== 'pending');
-    const currentStepNumber = startedOrCompletedOrFailedStages.length;
-    
-    // Total steps includes current plus estimated remaining
-    const totalSteps = currentStepNumber + 
-      (this.currentStageId === 'mcp_ready' ? 0 : Math.min(3, 10 - currentStepNumber));
+    // Get step number based on stage order in definition
+    const stageOrder = [
+      'server_init', 'cache_check', 'model_load', 'file_scan', 'delta_analysis',
+      'code_chunking', 'embedding_generation', 'relationship_analysis', 'vector_storage', 'mcp_ready'
+    ];
+    const currentStepNumber = stageOrder.indexOf(stageId) + 1;
     
     // Format duration nicely
     const durationMs = stage.duration || 0;

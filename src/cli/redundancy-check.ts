@@ -1,16 +1,16 @@
 #!/usr/bin/env node
 
-import { RedundancyChecker } from './redundancy-checker';
-import { PersistentVectorStore } from './persistent-vector-store';
-import { PersistentRelationshipStore } from './persistent-relationship-store';
+import { RedundancyChecker } from '../redundancy-checker';
+import { PersistentVectorStore } from '../persistent-vector-store';
+import { PersistentRelationshipStore } from '../persistent-relationship-store';
 import { existsSync, mkdirSync, writeFileSync } from 'fs';
 
 async function main() {
   console.log('🔍 Cortex Redundancy Checker');
   console.log('================================\n');
 
-  const vectorStore = new PersistentVectorStore();
-  const relationshipStore = new PersistentRelationshipStore();
+  const vectorStore = new PersistentVectorStore(process.cwd());
+  const relationshipStore = new PersistentRelationshipStore(process.cwd());
   
   try {
     await vectorStore.initialize();
@@ -24,7 +24,7 @@ async function main() {
     const cleanup = args.includes('--cleanup');
     const output = args.find(arg => arg.startsWith('--output='))?.split('=')[1];
     
-    let report;
+    let report = '';
     
     if (!type || type === 'full') {
       report = await checker.generateReport();
@@ -37,7 +37,7 @@ Duplicates: ${rpt.duplicateCount}
 Space Wasted: ${rpt.spaceSaved} bytes
 
 ### Duplicates
-${rpt.duplicates.map(d => 
+${rpt.duplicates.map((d: any) => 
   '* ID: ' + d.id + ' (Count: ' + d.count + ')').join('\n')}`;
 
       if (cleanup && rpt.duplicateCount > 0) {
@@ -54,7 +54,7 @@ Duplicates: ${rpt.duplicateCount}
 Space Wasted: ${rpt.spaceSaved} bytes
 
 ### Duplicates
-${rpt.duplicates.map(d => 
+${rpt.duplicates.map((d: any) => 
   '* ID: ' + d.id + ' (Count: ' + d.count + ')').join('\n')}`;
 
       if (cleanup && rpt.duplicateCount > 0) {
@@ -71,7 +71,7 @@ Duplicates: ${rpt.duplicateCount}
 Space Wasted: ${rpt.spaceSaved} bytes
 
 ### Duplicates
-${rpt.duplicates.map(d => 
+${rpt.duplicates.map((d: any) => 
   '* ' + d.id.substring(0, 50) + '... (Count: ' + d.count + ')').join('\n')}`;
     } else if (type === 'code') {
       const rpt = await checker.checkCodeRedundancy();
@@ -82,7 +82,7 @@ Duplicates: ${rpt.duplicateCount}
 Space Wasted: ${rpt.spaceSaved} bytes
 
 ### Duplicates
-${rpt.duplicates.slice(0, 5).map(d => 
+${rpt.duplicates.slice(0, 5).map((d: any) => 
   '* File: ' + d.id + ' (Count: ' + d.count + ')').join('\n')}`;
     }
     
