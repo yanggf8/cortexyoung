@@ -4,17 +4,29 @@ import { EmbeddingGenerator } from './embedder';
 import { RelationshipTraversalEngine } from './relationship-traversal-engine';
 import { RelationshipQuery, TraversalOptions, RelationshipType } from './relationship-types';
 import { log, warn, error } from './logging-utils';
+import { GuardedMMRSelector, MMRConfig, MMRResult } from './guarded-mmr-selector';
 
 export class SemanticSearcher {
   private relationshipEngine?: RelationshipTraversalEngine;
+  private mmrSelector: GuardedMMRSelector;
+  private mmrEnabled: boolean;
 
   constructor(
     private vectorStore: VectorStore,
     private embedder: EmbeddingGenerator,
-    private repositoryPath?: string
+    private repositoryPath?: string,
+    mmrConfig?: Partial<MMRConfig>
   ) {
     if (repositoryPath) {
       this.relationshipEngine = new RelationshipTraversalEngine(repositoryPath);
+    }
+    
+    // Initialize MMR selector with optional config
+    this.mmrSelector = new GuardedMMRSelector(mmrConfig);
+    this.mmrEnabled = process.env.CORTEX_MMR_ENABLED !== 'false'; // Enable by default
+    
+    if (this.mmrEnabled) {
+      log('[Searcher] Guarded MMR context optimization enabled');
     }
   }
 
@@ -118,29 +130,58 @@ export class SemanticSearcher {
       queryEmbedding
     );
 
+    // Apply MMR optimization if enabled
+    let finalChunks = rankedResults;
+    let mmrResult: MMRResult | undefined;
+    
+    if (this.mmrEnabled && rankedResults.length > (query.max_chunks || 20)) {
+      try {
+        mmrResult = await this.mmrSelector.selectOptimalChunks(
+          rankedResults,
+          query,
+          query.max_chunks || 20
+        );
+        finalChunks = mmrResult.selectedChunks;
+        
+        log(`[Searcher] MMR optimization applied original=${rankedResults.length} selected=${finalChunks.length} tokens=${mmrResult.totalTokens} critical_coverage=${(mmrResult.criticalSetCoverage * 100).toFixed(1)}%`);
+      } catch (mmrError) {
+        warn(`[Searcher] MMR optimization failed, using fallback ranking error=${mmrError instanceof Error ? mmrError.message : mmrError}`);
+        finalChunks = rankedResults.slice(0, query.max_chunks || 20);
+      }
+    } else {
+      finalChunks = rankedResults.slice(0, query.max_chunks || 20);
+    }
+
     // Synthesize enhanced context package
     const contextPackage = this.synthesizeRelationshipContext(
-      rankedResults,
+      finalChunks,
       relationshipResult,
-      query.context_mode || 'structured'
+      query.context_mode || 'structured',
+      mmrResult
     );
 
     const queryTime = Date.now() - startTime;
     
     return {
       status: 'success',
-      chunks: rankedResults.slice(0, query.max_chunks || 20),
+      chunks: finalChunks,
       context_package: contextPackage,
       query_time_ms: queryTime,
       total_chunks_considered: allChunks.length,
       relationship_paths: relationshipResult.relationshipPaths.slice(0, 5), // Include top paths
-      efficiency_score: relationshipResult.efficiencyScore,
+      efficiency_score: mmrResult?.diversityScore || relationshipResult.efficiencyScore,
       metadata: {
         total_chunks_found: allChunks.length,
         query_time_ms: queryTime,
-        chunks_returned: rankedResults.slice(0, query.max_chunks || 20).length,
-        token_estimate: contextPackage.total_tokens || 0,
-        efficiency_score: relationshipResult.efficiencyScore
+        chunks_returned: finalChunks.length,
+        token_estimate: mmrResult?.totalTokens || contextPackage.total_tokens || 0,
+        efficiency_score: mmrResult?.diversityScore || relationshipResult.efficiencyScore,
+        mmr_metrics: mmrResult ? {
+          critical_set_coverage: mmrResult.criticalSetCoverage,
+          diversity_score: mmrResult.diversityScore,
+          budget_utilization: mmrResult.budgetUtilization,
+          selection_time_ms: mmrResult.selectionTime
+        } : undefined
       }
     };
   }
@@ -175,26 +216,52 @@ export class SemanticSearcher {
       query
     );
     
+    // Apply MMR optimization if enabled for traditional search too
+    let finalChunks = rankedResults;
+    let mmrResult: MMRResult | undefined;
+    
+    if (this.mmrEnabled && rankedResults.length > (query.max_chunks || 20)) {
+      try {
+        mmrResult = await this.mmrSelector.selectOptimalChunks(
+          rankedResults,
+          query,
+          query.max_chunks || 20
+        );
+        finalChunks = mmrResult.selectedChunks;
+        
+        log(`[Searcher] MMR optimization applied (traditional) original=${rankedResults.length} selected=${finalChunks.length} tokens=${mmrResult.totalTokens} critical_coverage=${(mmrResult.criticalSetCoverage * 100).toFixed(1)}%`);
+      } catch (mmrError) {
+        warn(`[Searcher] MMR optimization failed (traditional), using fallback ranking error=${mmrError instanceof Error ? mmrError.message : mmrError}`);
+      }
+    }
+    
     // Synthesize context package
     const contextPackage = this.synthesizeContext(
-      rankedResults,
-      query.context_mode || 'structured'
+      finalChunks,
+      query.context_mode || 'structured',
+      mmrResult
     );
     
     const queryTime = Date.now() - startTime;
       
     return {
       status: 'success',
-      chunks: rankedResults,
+      chunks: finalChunks,
       context_package: contextPackage,
       query_time_ms: queryTime,
       total_chunks_considered: expandedCandidates.length,
       metadata: {
         total_chunks_found: expandedCandidates.length,
         query_time_ms: queryTime,
-        chunks_returned: rankedResults.length,
-        token_estimate: contextPackage.total_tokens || 0,
-        efficiency_score: contextPackage.token_efficiency || 0.7
+        chunks_returned: finalChunks.length,
+        token_estimate: mmrResult?.totalTokens || contextPackage.total_tokens || 0,
+        efficiency_score: mmrResult?.diversityScore || contextPackage.token_efficiency || 0.7,
+        mmr_metrics: mmrResult ? {
+          critical_set_coverage: mmrResult.criticalSetCoverage,
+          diversity_score: mmrResult.diversityScore,
+          budget_utilization: mmrResult.budgetUtilization,
+          selection_time_ms: mmrResult.selectionTime
+        } : undefined
       }
     };
   }
@@ -276,7 +343,7 @@ export class SemanticSearcher {
       .slice(0, query.max_chunks || 20);
   }
 
-  private synthesizeContext(chunks: CodeChunk[], mode: string): ContextPackage {
+  private synthesizeContext(chunks: CodeChunk[], mode: string, mmrResult?: MMRResult): ContextPackage {
     // Group chunks by file and type
     const fileGroups = new Map<string, CodeChunk[]>();
     const typeGroups = new Map<string, CodeChunk[]>();
@@ -310,10 +377,19 @@ export class SemanticSearcher {
     // Create summary
     const summary = this.generateSummary(chunks, groups);
     
+    // Calculate token efficiency - use MMR result if available
+    const tokenEfficiency = mmrResult ? 
+      mmrResult.diversityScore * mmrResult.budgetUtilization : 
+      this.calculateEfficiency({ summary, groups, related_files: Array.from(fileGroups.keys()) });
+
     return {
-      summary,
+      summary: mmrResult ? 
+        `${summary} Context optimized via MMR: ${mmrResult.selectedChunks.length} chunks, ${(mmrResult.criticalSetCoverage * 100).toFixed(0)}% critical coverage, ${mmrResult.totalTokens} tokens.` :
+        summary,
       groups: groups.sort((a, b) => b.importance_score - a.importance_score),
-      related_files: Array.from(fileGroups.keys())
+      related_files: Array.from(fileGroups.keys()),
+      total_tokens: mmrResult?.totalTokens || this.estimateTokens({ summary, groups, related_files: Array.from(fileGroups.keys()) }),
+      token_efficiency: tokenEfficiency
     };
   }
 
@@ -501,7 +577,8 @@ export class SemanticSearcher {
   private synthesizeRelationshipContext(
     chunks: CodeChunk[],
     relationshipResult: any,
-    mode: string
+    mode: string,
+    mmrResult?: MMRResult
   ): ContextPackage {
     const groups: ContextGroup[] = [];
     
@@ -537,13 +614,20 @@ export class SemanticSearcher {
     // Generate enhanced summary
     const summary = this.generateRelationshipSummary(chunks, relationshipResult);
     
+    // Enhanced summary with MMR information
+    const enhancedSummary = mmrResult ? 
+      `${summary} MMR optimization: ${mmrResult.selectedChunks.length} chunks selected, ${(mmrResult.criticalSetCoverage * 100).toFixed(0)}% critical coverage, ${mmrResult.totalTokens} tokens.` :
+      summary;
+
     return {
-      summary,
+      summary: enhancedSummary,
       groups: groups.sort((a, b) => b.importance_score - a.importance_score),
       related_files: [...new Set(chunks.map(c => c.file_path))],
       relationship_insights: this.generateRelationshipInsights(relationshipResult),
-      total_tokens: relationshipResult.totalTokens || this.estimateTokens({ summary, groups } as ContextPackage),
-      token_efficiency: relationshipResult.efficiencyScore || 0.7
+      total_tokens: mmrResult?.totalTokens || relationshipResult.totalTokens || this.estimateTokens({ summary, groups } as ContextPackage),
+      token_efficiency: mmrResult ? 
+        mmrResult.diversityScore * mmrResult.budgetUtilization :
+        relationshipResult.efficiencyScore || 0.7
     };
   }
 

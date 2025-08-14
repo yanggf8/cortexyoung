@@ -9,6 +9,7 @@ import { SemanticSearchHandler, ContextualReadHandler, CodeIntelligenceHandler, 
 import { IndexHealthChecker } from './index-health-checker';
 import { HierarchicalStageTracker } from './hierarchical-stages';
 import { CORTEX_TOOLS } from './mcp-tools';
+import { MMRConfigManager, createMMRConfigFromEnvironment } from './mmr-config-manager';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';

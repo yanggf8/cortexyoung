@@ -146,6 +146,12 @@ export interface QueryMetadata {
   efficiency_score: number;
   relationship_paths?: any[];
   confidence_scores?: number[];
+  mmr_metrics?: {
+    critical_set_coverage: number;
+    diversity_score: number;
+    budget_utilization: number;
+    selection_time_ms: number;
+  };
 }
 
 export interface IndexRequest {

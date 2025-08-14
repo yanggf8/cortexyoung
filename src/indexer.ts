@@ -15,6 +15,7 @@ import { CloudflareAIEmbedder } from './cloudflare-ai-embedder';
 import { DependencyMapper } from './dependency-mapper';
 import { EmbeddingStrategyManager } from './embedding-strategy';
 import { log, warn, error } from './logging-utils';
+import { MMRConfigManager, createMMRConfigFromEnvironment } from './mmr-config-manager';
 import * as os from 'os';
 
 export class CodebaseIndexer {
@@ -39,7 +40,18 @@ export class CodebaseIndexer {
     this.strategyManager = new EmbeddingStrategyManager(repositoryPath);
     this.storageCoordinator = new UnifiedStorageCoordinator(repositoryPath);
     this.vectorStore = this.storageCoordinator.getVectorStore();
-    this.searcher = new SemanticSearcher(this.vectorStore, this.embedder, repositoryPath);
+    
+    // Initialize MMR configuration
+    const mmrConfigManager = new MMRConfigManager(repositoryPath);
+    const envOverrides = createMMRConfigFromEnvironment();
+    let mmrConfig = undefined;
+    
+    if (envOverrides) {
+      log('[Indexer] Applying MMR configuration overrides from environment');
+      mmrConfig = envOverrides;
+    }
+    
+    this.searcher = new SemanticSearcher(this.vectorStore, this.embedder, repositoryPath, mmrConfig);
     this.dependencyMapper = new DependencyMapper(repositoryPath);
     this.stageTracker = stageTracker;
     this.reindexAdvisor = new ReindexAdvisor(this.embedder);
