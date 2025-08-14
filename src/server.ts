@@ -611,6 +611,25 @@ async function main() {
     
     // 2.3 Relationship Analysis
     stageTracker.startSubstep('stage_2', '2.3', 'Dependency mapping, symbol extraction, graph building');
+    
+    // Initialize relationship engine (uses cache if available)
+    const searcher = (indexer as any).searcher;
+    
+    // Build file map for relationship analysis (this is quick since files are already read)
+    const files = new Map<string, string>();
+    const gitScanner = (indexer as any).gitScanner;
+    const allFiles = await gitScanner.scanRepository('full');
+    
+    for (const filePath of allFiles.files) {
+      try {
+        const content = await gitScanner.readFile(filePath);
+        files.set(filePath, content);
+      } catch (error) {
+        logger.warn('Failed to read file for relationships', { filePath, error: error instanceof Error ? error.message : error });
+      }
+    }
+    
+    await searcher.initializeRelationshipEngine(files);
     stageTracker.completeSubstep('stage_2', '2.3', 'Relationship graph ready');
     
     // 2.4 Vector Storage Commit
@@ -631,13 +650,10 @@ async function main() {
     // 3.1 MCP Server Startup
     stageTracker.startSubstep('stage_3', '3.1', 'HTTP transport, endpoint registration, service availability');
     
-    // Get searcher from indexer
-    const searcher = (indexer as any).searcher; // Access the searcher instance
-    
     // Create and start MCP server (pass logger instance to avoid double creation)
     const mcpServer = new CortexMCPServer(indexer, searcher, logger, stageTracker);
     
-    logger.info('Starting MCP server with HTTP transport', { port });
+    // MCP server startup message handled by startHttp method
     await mcpServer.startHttp(port);
     
     stageTracker.completeSubstep('stage_3', '3.1', `HTTP server ready at http://localhost:${port}`);

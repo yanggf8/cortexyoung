@@ -160,21 +160,6 @@ export class CodebaseIndexer {
     if (changedFiles.length === 0 && delta.fileChanges.deleted.length === 0) {
       log('✅ No changes detected, index is up to date');
       
-      // Still need to initialize relationship engine (will use cache if available)
-      // Loading relationship graph from cache - logging handled at higher level
-      const files = new Map<string, string>();
-      for (const filePath of scanResult.files) {
-        try {
-          const content = await this.gitScanner.readFile(filePath);
-          files.set(filePath, content);
-        } catch (error) {
-          warn(`Failed to read file for relationships ${filePath}: ${error}`);
-        }
-      }
-      
-      await this.searcher.initializeRelationshipEngine(files);
-      // Relationship engine loaded from cache - logging handled at higher level
-      
       const timeTaken = Date.now() - startTime;
       return {
         status: 'success',
@@ -278,9 +263,7 @@ export class CodebaseIndexer {
       log(`✅ Updated ${relationships.length} dependency relationships`);
     }
     
-    // Initialize searcher's relationship engine with updated relationships
-    await this.searcher.initializeRelationshipEngine(files);
-    // Updated relationships - logging handled at higher level
+    // Relationship engine initialization handled in stage 2.3
     
     const timeTaken = Date.now() - startTime;
     log(`✅ Incremental indexing completed in ${timeTaken}ms`);
@@ -354,29 +337,7 @@ export class CodebaseIndexer {
     const modelInfo = await this.embedder.getModelInfo();
     await this.vectorStore.savePersistedIndex(modelInfo);
     
-    // Initialize relationship engine with all files
-    // Building comprehensive relationship graph - logging handled at higher level
-    const files = new Map<string, string>();
-    for (const filePath of scanResult.files) {
-      try {
-        const content = await this.gitScanner.readFile(filePath);
-        files.set(filePath, content);
-      } catch (error) {
-        warn(`Failed to read file for relationships ${filePath}: ${error}`);
-      }
-    }
-    
-    // Build comprehensive dependency relationships
-    log(`🔗 Analyzing dependencies for ${files.size} files...`);
-    await this.dependencyMapper.buildDependencyMap(files);
-    const relationships = this.dependencyMapper.generateDependencyRelationships();
-    
-    log(`✅ Built ${relationships.length} dependency relationships`);
-    
-    // Initialize searcher's relationship engine with the built relationships
-    await this.searcher.initializeRelationshipEngine(files);
-    
-    // Built dependency relationships - logging handled at higher level
+    // Relationship engine initialization handled in stage 2.3
     
     const timeTaken = Date.now() - startTime;
     log(`Indexing completed in ${timeTaken}ms`);
