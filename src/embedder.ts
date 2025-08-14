@@ -18,7 +18,7 @@ export class EmbeddingGenerator {
   private async ensureInitialized(): Promise<void> {
     if (!this.isInitialized) {
       try {
-        console.log(`🔄 Initializing BGE-small-en-v1.5 embedding model...`);
+        // BGE initialization is announced by server stage tracker
         this.embedder = await FlagEmbedding.init({
           model: this.modelName,
           maxLength: 400,
