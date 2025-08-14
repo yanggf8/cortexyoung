@@ -18,9 +18,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **⚡ Workload-Aware Process Growth**: Intelligent process scaling based on actual chunk count - prevents unnecessary resource usage for small workloads (≤400 chunks use single process, >400 chunks scale up)
 - **📦 Intelligent Embedding Cache**: 95-98% performance improvement with content-hash based caching and dual storage
 - **🧪 Embedding Strategy Selection**: Auto-selection framework choosing optimal strategy based on dataset size and system resources
-- **🏗️ Hierarchical Startup Stages**: 3-stage startup system with substeps for granular progress tracking and enhanced debugging
+- **🏗️ Clear Stage-Based Startup**: Simplified 3-stage startup system with clear break-line delimiters for enhanced readability and debugging
 - **🔧 Enhanced Error Handling**: Improved TypeScript compatibility and robust error reporting throughout the system
 - **🎯 File-Content Hash Delta Detection**: Fast file-level change detection with SHA256 hashing - eliminates false positives and achieves 7x faster startup times
+- **📁 Centralized Storage Architecture**: Global constants and utilities for consistent storage path management with complete file paths in logs
+- **⏰ Unified Timestamped Logging**: Consistent ISO timestamp formatting across all components with standardized logging utilities
 - **👀 Smart File Watching**: Real-time code intelligence updates with adaptive activity detection (PLANNED)
 
 ### 🚀 **Upcoming: Smart File Watching System**
@@ -413,7 +415,7 @@ All critical performance targets achieved:
 - ✅ **Storage efficiency**: 1-3ms operations with dual persistence
 - ✅ **Process monitoring**: Clear DEBUG/INFO/ERROR categorization for all process messages
 
-**Status**: Production-ready with comprehensive CPU + memory management, reliable process cleanup, clear process monitoring, clean startup logging, and ultra-fast incremental change detection! 🚀
+**Status**: Production-ready with comprehensive CPU + memory management, reliable process cleanup, clear process monitoring, centralized storage architecture, enhanced startup logging, and ultra-fast incremental change detection! 🚀
 
 ### File-Content Hash Delta Detection ✅
 
@@ -474,6 +476,69 @@ mmr_metrics: {
   selection_time_ms: 45           // 45ms selection time
 }
 ```
+
+---
+
+## 🔧 Recent System Improvements (Latest Release)
+
+### 📁 Centralized Storage Architecture ✅
+**Complete refactor of storage path management with centralized constants:**
+
+- ✅ **StoragePaths Utility Class**: Centralized path generation with consistent repository hashing
+- ✅ **Global Storage Constants**: Centralized filenames (`STORAGE_FILENAMES`) and directory names (`STORAGE_DIRECTORIES`)
+- ✅ **Backward Compatibility**: Maintains existing path structures and repository hash formats
+- ✅ **Complete Path Logging**: All storage operations now show full file paths instead of abbreviated versions
+- ✅ **Code Deduplication**: Eliminated duplicate path construction logic across storage classes
+
+**Storage Path Examples:**
+```
+Local:  /home/user/repo/.cortex/index.json
+Global: /home/user/.claude/cortex-embeddings/reponame-abc123/index.json
+```
+
+### 🏗️ Clear Stage-Based Startup Logging ✅
+**Redesigned hierarchical logging system with clear visual delimiters:**
+
+- ✅ **Stage Delimiters**: `==========================================` for stage entry/exit
+- ✅ **Step Delimiters**: `------------------------------------------` for step entry/exit  
+- ✅ **Clear Labeling**: `🚀 STAGE 1/3: INITIALIZATION & PRE-FLIGHT CHECKS` format
+- ✅ **Completion Tracking**: `✅ STAGE 1/3 COMPLETED` with duration information
+- ✅ **Error Handling**: Consistent delimiter format for failures with detailed error messages
+- ✅ **Simplified Structure**: 3 main stages with clear substeps instead of complex hierarchy
+
+**Example Startup Output:**
+```
+==========================================
+🚀 STAGE 1/3: INITIALIZATION & PRE-FLIGHT CHECKS
+==========================================
+------------------------------------------
+⚡ STEP 1.1: Server Initialization
+   Details: Logger setup, repository validation
+------------------------------------------
+------------------------------------------
+✅ STEP 1.1 COMPLETED: Server Initialization
+   Result: Server components initialized
+   Duration: 1ms
+------------------------------------------
+==========================================
+✅ STAGE 1/3 COMPLETED: INITIALIZATION & PRE-FLIGHT CHECKS
+   Duration: 2.0s
+==========================================
+```
+
+### ⏰ Enhanced Timestamped Logging ✅
+**Unified timestamped logging system integrated throughout codebase:**
+
+- ✅ **Centralized Logging Utilities**: `timestampedLog()`, `timestampedWarn()`, `timestampedError()` functions
+- ✅ **Consistent Timestamps**: ISO format `[2025-08-14T17:38:44.584Z]` across all components
+- ✅ **Zero Performance Impact**: Lightweight wrappers around native console methods
+- ✅ **Backward Compatibility**: Works with existing logger instances and standalone mode
+- ✅ **Complete Coverage**: Updated all storage classes and hierarchical stages to use timestamped logging
+
+**Key Benefits:**
+- **Debugging Enhancement**: Precise timing information for all operations
+- **Production Monitoring**: Consistent log formats for better observability
+- **Performance Analysis**: Easy correlation of events across system components
 
 ---
 
