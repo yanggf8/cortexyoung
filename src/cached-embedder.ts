@@ -1,5 +1,6 @@
 import { CodeChunk, EmbeddingCache, EmbeddingCacheEntry, CacheStats } from './types';
 import { ProcessPoolEmbedder } from './process-pool-embedder';
+import { log, warn } from './logging-utils';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as crypto from 'crypto';
@@ -51,7 +52,7 @@ export class CachedEmbedder extends ProcessPoolEmbedder {
     // Partition chunks into cached vs uncached
     const partition = await this.partitionChunks(chunks);
     
-    console.log(`📦 Cache: ${partition.cached.length} hits, ${partition.uncached.length} misses`);
+    log(`[CachedEmbedder] Cache hits=${partition.cached.length} misses=${partition.uncached.length}`);
     
     // Update stats
     this.stats.cache_hits += partition.cached.length;
@@ -61,7 +62,7 @@ export class CachedEmbedder extends ProcessPoolEmbedder {
     // Generate embeddings only for uncached chunks
     let newEmbeddings: CodeChunk[] = [];
     if (partition.uncached.length > 0) {
-      console.log(`🔄 Generating ${partition.uncached.length} new embeddings...`);
+      log(`[CachedEmbedder] Generating new embeddings count=${partition.uncached.length}`);
       newEmbeddings = await super.processAllEmbeddings(partition.uncached);
       
       // Update cache with new embeddings
@@ -72,8 +73,8 @@ export class CachedEmbedder extends ProcessPoolEmbedder {
     const result = this.mergeResults(chunks, partition.cached, newEmbeddings);
     
     const timeTaken = Date.now() - startTime;
-    console.log(`✅ Cache-aware embedding completed in ${timeTaken}ms`);
-    console.log(`   📊 Hit rate: ${(this.stats.hit_rate * 100).toFixed(1)}%`);
+    log(`[CachedEmbedder] Cache-aware embedding completed duration=${timeTaken}ms`);
+    log(`[CachedEmbedder] Hit rate=${(this.stats.hit_rate * 100).toFixed(1)}%`);
     
     return result;
   }
@@ -158,7 +159,7 @@ export class CachedEmbedder extends ProcessPoolEmbedder {
           cacheData = await fs.readFile(this.cacheFilePath, 'utf-8');
           sourceLocation = 'local';
         } catch {
-          console.log('📦 No existing embedding cache found, starting fresh');
+          log('[CachedEmbedder] No existing embedding cache found, starting fresh');
           return;
         }
       }
@@ -167,7 +168,7 @@ export class CachedEmbedder extends ProcessPoolEmbedder {
         const parsed = JSON.parse(cacheData);
         this.cache = parsed.cache || {};
         this.stats = { ...this.stats, ...parsed.stats };
-        console.log(`📦 Loaded embedding cache from ${sourceLocation}: ${this.stats.total_entries} entries`);
+        log(`[CachedEmbedder] Loaded embedding cache from ${sourceLocation} entries=${this.stats.total_entries}`);
         
         // Sync to other location if needed
         if (sourceLocation === 'global') {
@@ -177,7 +178,7 @@ export class CachedEmbedder extends ProcessPoolEmbedder {
         }
       }
     } catch (error) {
-      console.warn('⚠️ Failed to load embedding cache:', error);
+      warn(`[CachedEmbedder] Failed to load embedding cache error=${error instanceof Error ? error.message : error}`);
       this.cache = {};
     }
   }
@@ -203,7 +204,7 @@ export class CachedEmbedder extends ProcessPoolEmbedder {
       
       await fs.writeFile(filePath, JSON.stringify(cacheData, null, 2));
     } catch (error) {
-      console.warn(`⚠️ Failed to save cache to ${filePath}:`, error);
+      warn(`[CachedEmbedder] Failed to save cache to ${filePath} error=${error instanceof Error ? error.message : error}`);
     }
   }
 
@@ -224,6 +225,6 @@ export class CachedEmbedder extends ProcessPoolEmbedder {
     };
     
     await this.saveCache();
-    console.log('🗑️ Embedding cache cleared');
+    log('[CachedEmbedder] Embedding cache cleared');
   }
 }

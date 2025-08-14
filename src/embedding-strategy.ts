@@ -102,7 +102,7 @@ export class EmbeddingStrategyManager {
         if (memoryWarningCount === 1) {
           const totalGB = (totalSystemMemory / (1024 * 1024 * 1024)).toFixed(1);
           const usedGB = (parseFloat(totalGB) - availableMemoryGB).toFixed(1);
-          console.warn(`⚠️  Memory pressure detected: Only ${availableMemoryGB.toFixed(1)}GB available (${usedGB}GB used of ${totalGB}GB total)`);
+          log(`[EmbeddingStrategy] Memory pressure detected available=${availableMemoryGB.toFixed(1)}GB used=${usedGB}GB total=${totalGB}GB`);
         }
       }
     }, 500);
@@ -123,7 +123,7 @@ export class EmbeddingStrategyManager {
 
         case 'original':
           // Legacy support - redirect to cached strategy (ProcessPool with 1 process)
-          console.log(`⚠️ 'original' strategy deprecated - using 'cached' strategy instead`);
+          log(`[EmbeddingStrategy] Original strategy deprecated - using cached strategy instead`);
           const legacyResult = await this.generateWithCached(chunks, config);
           result = legacyResult.chunks;
           batchInfo = legacyResult.batchInfo;
@@ -166,7 +166,7 @@ export class EmbeddingStrategyManager {
     this.processPoolEmbedder = new ProcessPoolEmbedder();
 
     try {
-      console.log(`📊 ProcessPool Strategy: Initializing processes...`);
+      log(`[EmbeddingStrategy] ProcessPool strategy initializing processes`);
       
       const result = await this.processPoolEmbedder.processAllEmbeddings(chunks);
       
@@ -194,7 +194,7 @@ export class EmbeddingStrategyManager {
     this.cachedEmbedder = new CachedEmbedder(this.repositoryPath);
 
     try {
-      console.log(`📊 Cached Strategy: Initializing with intelligent embedding cache...`);
+      log(`[EmbeddingStrategy] Cached strategy initializing with intelligent embedding cache`);
       await this.cachedEmbedder.initialize(chunks.length);
       
       const result = await this.cachedEmbedder.processAllEmbeddings(chunks);

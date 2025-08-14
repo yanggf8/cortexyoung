@@ -12,6 +12,7 @@ import {
   RelationshipSearchResult,
   ContextGroup
 } from './relationship-types';
+import { log, warn } from './logging-utils';
 import { CallGraphAnalyzer } from './call-graph-analyzer';
 import { DependencyMapper } from './dependency-mapper';
 import { DataFlowAnalyzer } from './data-flow-analyzer';
@@ -57,7 +58,7 @@ export class RelationshipTraversalEngine {
   }
 
   async buildRelationshipGraph(files: Map<string, string>): Promise<void> {
-    console.log(`🔗 Building comprehensive relationship graph for ${files.size} files...`);
+    log(`[RelationshipEngine] Building comprehensive relationship graph files=${files.size}`);
     const startTime = Date.now();
 
     // Initialize persistent store
@@ -66,7 +67,7 @@ export class RelationshipTraversalEngine {
     // Try to load cached relationship graph (prefer global, fallback to local)
     let loadedFromCache = false;
     if (await this.persistentStore.globalRelationshipGraphExists()) {
-      console.log('🌐 Loading relationship graph from global storage...');
+      log('[RelationshipEngine] Loading relationship graph from global storage');
       const cachedGraph = await this.persistentStore.loadPersistedRelationshipGraph(true);
       if (cachedGraph) {
         this.graph = cachedGraph;
@@ -76,7 +77,7 @@ export class RelationshipTraversalEngine {
         await this.persistentStore.syncToLocal();
       }
     } else if (await this.persistentStore.relationshipGraphExists()) {
-      console.log('📁 Loading relationship graph from local storage...');
+      log('[RelationshipEngine] Loading relationship graph from local storage');
       const cachedGraph = await this.persistentStore.loadPersistedRelationshipGraph(false);
       if (cachedGraph) {
         this.graph = cachedGraph;
@@ -89,7 +90,7 @@ export class RelationshipTraversalEngine {
 
     // If no cache available or cache is invalid, build from scratch
     if (!loadedFromCache) {
-      console.log('🔄 Building relationship graph from scratch...');
+      log('[RelationshipEngine] Building relationship graph from scratch');
       
       // Phase 1: Build dependency map
       await this.dependencyMapper.buildDependencyMap(files);
@@ -113,7 +114,7 @@ export class RelationshipTraversalEngine {
           }
 
         } catch (error) {
-          console.warn(`Failed to analyze relationships in ${filePath}:`, error);
+          warn(`[RelationshipEngine] Failed to analyze relationships in ${filePath} error=${error instanceof Error ? error.message : error}`);
         }
       }
 
@@ -133,7 +134,7 @@ export class RelationshipTraversalEngine {
 
     const timeMs = Date.now() - startTime;
     const action = loadedFromCache ? 'loaded from cache' : 'built from scratch';
-    console.log(`✅ Relationship graph ${action} in ${timeMs}ms: ${this.graph.symbols.size} symbols, ${this.graph.relationships.size} relationships`);
+    log(`[RelationshipEngine] Relationship graph ${action} duration=${timeMs}ms symbols=${this.graph.symbols.size} relationships=${this.graph.relationships.size}`);
   }
 
   private parseFile(content: string, filePath: string): Parser.Tree | null {
@@ -156,12 +157,12 @@ export class RelationshipTraversalEngine {
       
       // Verify parse was successful
       if (tree.rootNode.hasError) {
-        console.warn(`⚠️ Parse errors in ${filePath}, partial AST analysis may be incomplete`);
+        warn(`[RelationshipEngine] Parse errors in ${filePath} - partial AST analysis may be incomplete`);
       }
       
       return tree;
     } catch (error) {
-      console.warn(`❌ Failed to parse ${filePath}:`, error instanceof Error ? error.message : error);
+      warn(`[RelationshipEngine] Failed to parse ${filePath} error=${error instanceof Error ? error.message : error}`);
       return null;
     }
   }
@@ -230,13 +231,13 @@ export class RelationshipTraversalEngine {
     const allPaths: RelationshipPath[] = [];
     const visited = new Set<string>();
 
-    console.log(`🚶 Traversing relationships from ${startSymbolIds.length} starting symbols...`);
+    log(`[RelationshipEngine] Traversing relationships starting_symbols=${startSymbolIds.length}`);
 
     // Start traversal from each starting symbol
     for (const startSymbolId of startSymbolIds) {
       const startSymbol = this.graph.symbols.get(startSymbolId);
       if (!startSymbol) {
-        console.warn(`Start symbol not found: ${startSymbolId}`);
+        warn(`[RelationshipEngine] Start symbol not found symbol=${startSymbolId}`);
         continue;
       }
 
@@ -270,7 +271,7 @@ export class RelationshipTraversalEngine {
       statistics
     };
 
-    console.log(`✅ Traversal completed: ${discoveredSymbols.size} symbols, ${traversedRelationships.size} relationships, ${allPaths.length} paths`);
+    log(`[RelationshipEngine] Traversal completed symbols=${discoveredSymbols.size} relationships=${traversedRelationships.size} paths=${allPaths.length}`);
 
     return result;
   }
@@ -537,7 +538,7 @@ export class RelationshipTraversalEngine {
 
   // Public query interface
   async executeRelationshipQuery(query: RelationshipQuery): Promise<RelationshipSearchResult> {
-    console.log(`🔍 Executing relationship query: "${query.baseQuery}"`);
+    log(`[RelationshipEngine] Executing relationship query: ${query.baseQuery}`);
 
     // Find initial symbols based on base query
     const startingSymbols = await this.findSymbolsForQuery(query.baseQuery, query.focusSymbols);

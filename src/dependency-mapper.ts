@@ -1,5 +1,6 @@
 import * as path from 'path';
 import * as fs from 'fs/promises';
+import { log, warn } from './logging-utils';
 import {
   CodeSymbol,
   CodeRelationship,
@@ -68,7 +69,7 @@ export class DependencyMapper {
   }
 
   async buildDependencyMap(files: Map<string, string>): Promise<void> {
-    console.log(`🔗 Building dependency map for ${files.size} files...`);
+    log(`[DependencyMapper] Building dependency map files=${files.size}`);
     
     // Phase 1: Analyze all files and extract imports/exports
     for (const [filePath, content] of files) {
@@ -84,13 +85,13 @@ export class DependencyMapper {
     // Phase 4: Detect circular dependencies
     const circularDeps = this.detectCircularDependencies();
     if (circularDeps.length > 0) {
-      console.warn(`⚠️ Found ${circularDeps.length} circular dependencies`);
+      warn(`[DependencyMapper] Found circular dependencies count=${circularDeps.length}`);
       circularDeps.forEach(dep => {
-        console.warn(`  ${dep.modules.join(' → ')}`);
+        warn(`[DependencyMapper] Circular dependency: ${dep.modules.join(' → ')}`);
       });
     }
 
-    console.log(`✅ Dependency map built: ${this.moduleMap.size} internal modules, ${this.externalModules.size} external modules`);
+    log(`[DependencyMapper] Dependency map built internal=${this.moduleMap.size} external=${this.externalModules.size}`);
   }
 
   private async analyzeModuleDependencies(filePath: string, content: string): Promise<void> {
@@ -146,7 +147,7 @@ export class DependencyMapper {
       this.moduleMap.set(filePath, moduleInfo);
 
     } catch (error) {
-      console.warn(`Failed to analyze dependencies for ${filePath}:`, error);
+      warn(`[DependencyMapper] Failed to analyze dependencies for ${filePath} error=${error instanceof Error ? error.message : error}`);
     }
   }
 

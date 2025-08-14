@@ -16,7 +16,8 @@
       "Bash(grep:*)",
       "mcp__gemini-cli__ask-gemini",
       "mcp__cursor-agent__ask-cursor",
-      "WebFetch(domain:clickhouse.com)"
+      "WebFetch(domain:clickhouse.com)",
+      "mcp__cursor-agent__next-chunk"
     ],
     "deny": []
   }
