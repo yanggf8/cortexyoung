@@ -571,6 +571,13 @@ async function main() {
     
     // 1.3 AI Model Loading
     stageTracker.startSubstep('stage_1', '1.3', 'BGE-small-en-v1.5 initialization and readiness');
+    
+    // Pre-initialize both embedder and storage coordinator to avoid duplication in Stage 2
+    await Promise.all([
+      (indexer as any).embedder.getModelInfo(),
+      (indexer as any).storageCoordinator.initialize()
+    ]);
+    
     stageTracker.completeSubstep('stage_1', '1.3', 'BGE-small-en-v1.5 ready');
     
     stageTracker.completeStage('stage_1');
