@@ -136,16 +136,10 @@ export class CodebaseIndexer {
     
     // Calculate what has changed using chunk-based hashing for accurate delta detection
     const chunkHashCalculator = async (filePath: string): Promise<string> => {
+      // Simple approach: just hash the file content directly
+      // This avoids all chunking inconsistencies by comparing at the file level
       const content = await this.gitScanner.readFile(filePath);
-      const fileChange = await this.gitScanner.getFileChanges([filePath]).then(changes => changes[0]);
-      const coChangeFiles = await this.gitScanner.getCoChangeFiles(filePath);
-      
-      // Generate chunks using the same algorithm as processing
-      const chunks = await this.chunker.chunkFile(filePath, content, fileChange, coChangeFiles);
-      
-      // Create hash from chunk content representation
-      const chunkContents = chunks.map(chunk => chunk.content).join('');
-      return crypto.createHash('sha256').update(chunkContents).digest('hex');
+      return crypto.createHash('sha256').update(content).digest('hex');
     };
     
     const delta = await this.vectorStore.calculateFileDelta(scanResult.files, chunkHashCalculator);
@@ -211,6 +205,12 @@ export class CodebaseIndexer {
         
         const newChunks = await this.chunker.chunkFile(filePath, content, fileChange, coChangeFiles);
         const oldChunks = this.vectorStore.getChunksByFile(filePath);
+
+        // Store file content hash for delta detection
+        const contentHash = crypto.createHash('sha256').update(content).digest('hex');
+        if (this.vectorStore instanceof require('./persistent-vector-store').PersistentVectorStore) {
+          (this.vectorStore as any).setFileHash(filePath, contentHash);
+        }
 
         const { toAdd, toKeep, toRemove } = this.vectorStore.compareChunks(oldChunks, newChunks);
         
@@ -314,6 +314,12 @@ export class CodebaseIndexer {
         const coChangeFiles = await this.gitScanner.getCoChangeFiles(filePath);
         
         const chunks = await this.chunker.chunkFile(filePath, content, fileChange, coChangeFiles);
+        
+        // Store file content hash for delta detection
+        const contentHash = crypto.createHash('sha256').update(content).digest('hex');
+        if (this.vectorStore instanceof require('./persistent-vector-store').PersistentVectorStore) {
+          (this.vectorStore as any).setFileHash(filePath, contentHash);
+        }
         
         // Progress reporting for parallel processing
         if ((index + 1) % 10 === 0) {

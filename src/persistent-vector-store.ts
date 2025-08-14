@@ -13,6 +13,7 @@ interface PersistedIndex {
   timestamp: number;
   repositoryPath: string;
   chunks: CodeChunk[];
+  fileHashes: Record<string, string>; // file path -> content hash for fast comparison
   metadata: {
     totalChunks: number;
     lastIndexed: number;
@@ -41,6 +42,7 @@ export class PersistentVectorStore extends VectorStore {
   private globalMetadataPath: string;
   private deltaPath: string;
   private globalDeltaPath: string;
+  private fileHashes: Map<string, string> = new Map(); // file path -> content hash
 
   constructor(repositoryPath: string, indexDir: string = '.cortex') {
     super(); // Call parent constructor
@@ -181,8 +183,13 @@ export class PersistentVectorStore extends VectorStore {
         this.chunks.set(chunk.chunk_id, chunk);
       }
       
-      // Note: File change detection now uses chunk-based comparison
-      // No need to load file hashes - we calculate from stored chunks vs current chunks
+      // Load file hashes for fast file-level comparison
+      this.fileHashes.clear();
+      if (persistedIndex.fileHashes) {
+        for (const [filePath, hash] of Object.entries(persistedIndex.fileHashes)) {
+          this.fileHashes.set(filePath, hash);
+        }
+      }
       
       const loadTime = Date.now() - startTime;
       console.log(`✅ Loaded ${persistedIndex.chunks.length} chunks from ${source} in ${loadTime}ms`);
@@ -206,6 +213,7 @@ export class PersistentVectorStore extends VectorStore {
         timestamp: Date.now(),
         repositoryPath: this.repositoryPath,
         chunks: Array.from(this.chunks.values()),
+        fileHashes: Object.fromEntries(this.fileHashes.entries()),
         metadata: {
           totalChunks: this.chunks.size,
           lastIndexed: Date.now(),
@@ -265,22 +273,18 @@ export class PersistentVectorStore extends VectorStore {
           // New file - no existing chunks
           delta.fileChanges.added.push(filePath);
         } else {
-          // Calculate hash from stored chunks
-          const storedChunkContent = storedChunks
-            .sort((a, b) => a.start_line - b.start_line) // Ensure consistent order by line number
-            .map(chunk => chunk.content)
-            .join('');
-          const storedHash = crypto.createHash('sha256').update(storedChunkContent).digest('hex');
-          
-          // Calculate current chunk hash using provided calculator
+          // Use file content hash for fast comparison
           if (chunkHashCalculator) {
             const currentHash = await chunkHashCalculator(filePath);
+            const storedHash = this.fileHashes.get(filePath);
             
-            if (storedHash !== currentHash) {
-              // File changed - chunk representation differs
+            if (!storedHash) {
+              // No stored hash (old data format) - treat as modified to rebuild file hash
               delta.fileChanges.modified.push(filePath);
-              
-              // Remove old chunks for this file
+              delta.removed.push(...storedChunks.map(chunk => chunk.chunk_id));
+            } else if (storedHash !== currentHash) {
+              // File changed at content level
+              delta.fileChanges.modified.push(filePath);
               delta.removed.push(...storedChunks.map(chunk => chunk.chunk_id));
             }
             // If hashes match, file is unchanged - no action needed
@@ -451,7 +455,12 @@ export class PersistentVectorStore extends VectorStore {
   async upsertChunks(chunks: CodeChunk[]): Promise<void> {
     await super.upsertChunks(chunks);
     
-    // Note: No file hash storage needed - delta calculation uses chunk comparison
+    // Note: File hashes are updated separately via setFileHash() method during indexing
+  }
+
+  // Set file content hash for delta detection
+  setFileHash(filePath: string, contentHash: string): void {
+    this.fileHashes.set(filePath, contentHash);
   }
 
   // Enhanced getStats with persistence information
