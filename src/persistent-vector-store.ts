@@ -80,12 +80,12 @@ export class PersistentVectorStore extends VectorStore {
     const key = `${this.repositoryPath}:${this.indexDir}`;
     
     if (this.initialized) {
-      console.log('📋 Vector store already initialized, skipping...');
+      log('[VectorStore] Already initialized, skipping');
       return;
     }
 
     if (PersistentVectorStore.initializedPaths.has(key)) {
-      console.log('📋 Vector store for this path already initialized by another instance, skipping load...');
+      log('[VectorStore] Path already initialized by another instance, skipping load');
       this.initialized = true;
       return;
     }
@@ -115,17 +115,17 @@ export class PersistentVectorStore extends VectorStore {
         localChunks = localData.chunks?.length || 0;
         globalChunks = globalData.chunks?.length || 0;
       } catch (error) {
-        console.warn('⚠️ Could not read chunk counts for comparison');
+        log('[StorageSync] Could not read chunk counts for comparison');
       }
       
       const localTime = localStats.mtime.toISOString();
       const globalTime = globalStats.mtime.toISOString();
       const globalIsNewer = globalStats.mtime > localStats.mtime;
       
-      log('🔍 Storage Comparison:');
-      console.log(`📁 Local:  ${localChunks} chunks, modified ${localTime}`);
-      console.log(`🌐 Global: ${globalChunks} chunks, modified ${globalTime}`);
-      console.log(`🏆 Winner: ${globalIsNewer ? 'Global (newer)' : 'Local (newer)'} - Loading from ${globalIsNewer ? 'global' : 'local'}`);
+      log('[StorageCompare] Storage comparison started');
+      log(`[StorageCompare] Local chunks=${localChunks} modified=${localTime}`);
+      log(`[StorageCompare] Global chunks=${globalChunks} modified=${globalTime}`);
+      log(`[StorageCompare] Winner=${globalIsNewer ? 'global' : 'local'} reason=${globalIsNewer ? 'newer' : 'newer'} loading=${globalIsNewer ? 'global' : 'local'}`);
       
       if (globalIsNewer) {
         await this.loadPersistedIndex(true);
@@ -135,11 +135,11 @@ export class PersistentVectorStore extends VectorStore {
         await this.syncToGlobal();
       }
     } else if (globalExists) {
-      console.log('🌐 Loading from global storage (~/.claude) - local not found');
+      log('[StorageLoad] Loading from global storage - local not found');
       await this.loadPersistedIndex(true);
       await this.syncToLocal();
     } else if (localExists) {
-      console.log('📁 Loading from local storage (.cortex) - global not found');
+      log('[StorageLoad] Loading from local storage - global not found');
       await this.loadPersistedIndex(false);
       await this.syncToGlobal();
     }
@@ -171,7 +171,7 @@ export class PersistentVectorStore extends VectorStore {
       const indexPath = useGlobal ? this.globalMetadataPath : this.metadataPath;
       const source = useGlobal ? 'global (~/.claude)' : 'local (.cortex)';
       
-      console.log(`🔄 Loading persisted embeddings from ${source}...`);
+      log(`[StorageLoad] Loading persisted embeddings source=${source}`);
       const startTime = Date.now();
       
       const indexData = await fs.readFile(indexPath, 'utf-8');
@@ -192,19 +192,19 @@ export class PersistentVectorStore extends VectorStore {
       }
       
       const loadTime = Date.now() - startTime;
-      console.log(`✅ Loaded ${persistedIndex.chunks.length} chunks from ${source} in ${loadTime}ms`);
-      console.log(`📊 Index metadata:`, persistedIndex.metadata);
+      log(`[StorageLoad] Loaded chunks=${persistedIndex.chunks.length} source=${source} duration=${loadTime}ms`);
+      log(`[StorageLoad] Index metadata totalChunks=${persistedIndex.metadata.totalChunks} embeddingModel=${persistedIndex.metadata.embeddingModel} lastIndexed=${persistedIndex.metadata.lastIndexed}`);
       
       return true;
     } catch (error) {
-      console.warn('⚠️ Failed to load persisted index:', error instanceof Error ? error.message : error);
+      log(`[StorageLoad] Failed to load persisted index error=${error instanceof Error ? error.message : error}`);
       return false;
     }
   }
 
   async savePersistedIndex(modelInfo?: ModelInfo): Promise<void> {
     try {
-      console.log('💾 Saving embeddings to both local and global storage...');
+      log('[StorageSave] Saving embeddings to both local and global storage');
       const startTime = Date.now();
       
       const persistedIndex: PersistedIndex = {
@@ -241,11 +241,11 @@ export class PersistentVectorStore extends VectorStore {
       await Promise.all([saveLocal(), saveGlobal()]);
       
       const saveTime = Date.now() - startTime;
-      console.log(`✅ Saved ${persistedIndex.chunks.length} chunks to both storages in ${saveTime}ms`);
-      console.log(`📁 Local: ${this.metadataPath}`);
-      console.log(`🌐 Global: ${this.globalMetadataPath}`);
+      log(`[StorageSave] Saved chunks=${persistedIndex.chunks.length} duration=${saveTime}ms`);
+      log(`[StorageSave] Local path=${this.metadataPath}`);
+      log(`[StorageSave] Global path=${this.globalMetadataPath}`);
     } catch (error) {
-      console.error('❌ Failed to save persisted index:', error instanceof Error ? error.message : error);
+      log(`[StorageSave] Failed to save persisted index error=${error instanceof Error ? error.message : error}`);
       throw error;
     }
   }
@@ -295,7 +295,7 @@ export class PersistentVectorStore extends VectorStore {
           }
         }
       } catch (error) {
-        console.warn(`⚠️ Failed to process file ${filePath}:`, error instanceof Error ? error.message : error);
+        log(`[VectorStore] Failed to process file file=${filePath} error=${error instanceof Error ? error.message : error}`);
       }
     }
 
@@ -331,21 +331,21 @@ export class PersistentVectorStore extends VectorStore {
       this.chunks.set(chunk.chunk_id, chunk);
     }
 
-    console.log(`📊 Applied delta: +${delta.added.length} ~${delta.updated.length} -${delta.removed.length} chunks`);
+    log(`[StorageDelta] Applied delta added=${delta.added.length} updated=${delta.updated.length} removed=${delta.removed.length}`);
   }
 
   async syncToGlobal(): Promise<void> {
     try {
       if (await this.indexExists()) {
-        console.log('🔄 Syncing local embeddings to global storage...');
+        log('[StorageSync] Syncing local embeddings to global storage');
         const indexData = await fs.readFile(this.metadataPath, 'utf-8');
         const globalTempPath = this.globalMetadataPath + '.tmp';
         await fs.writeFile(globalTempPath, indexData);
         await fs.rename(globalTempPath, this.globalMetadataPath);
-        console.log('✅ Synced to global storage');
+        log('[StorageSync] Synced to global storage');
       }
     } catch (error) {
-      console.warn('⚠️ Failed to sync to global storage:', error instanceof Error ? error.message : error);
+      log(`[StorageSync] Failed to sync to global storage error=${error instanceof Error ? error.message : error}`);
     }
   }
 
@@ -373,21 +373,21 @@ export class PersistentVectorStore extends VectorStore {
             const globalData = JSON.parse(await fs.readFile(this.globalMetadataPath, 'utf-8'));
             globalChunks = globalData.chunks?.length || 0;
           } catch (error) {
-            console.warn('⚠️ Could not read global chunk count');
+            log('[StorageSync] Could not read global chunk count');
           }
           
-          console.log(`🔄 Syncing global embeddings to local storage (${globalChunks} chunks)...`);
+          log(`[StorageSync] Syncing global embeddings to local storage chunks=${globalChunks}`);
           const indexData = await fs.readFile(this.globalMetadataPath, 'utf-8');
           const localTempPath = this.metadataPath + '.tmp';
           await fs.writeFile(localTempPath, indexData);
           await fs.rename(localTempPath, this.metadataPath);
-          console.log(`✅ Synced ${globalChunks} chunks to local storage`);
+          log(`[StorageSync] Synced chunks=${globalChunks} to local storage`);
         } else {
-          console.log('📋 Local storage is up to date');
+          log('[StorageSync] Local storage is up to date');
         }
       }
     } catch (error) {
-      console.warn('⚠️ Failed to sync to local storage:', error instanceof Error ? error.message : error);
+      log(`[StorageSync] Failed to sync to local storage error=${error instanceof Error ? error.message : error}`);
     }
   }
 
@@ -493,7 +493,7 @@ export class PersistentVectorStore extends VectorStore {
       await fs.mkdir(this.localIndexPath, { recursive: true });
       await fs.mkdir(this.deltaPath, { recursive: true });
     } catch (error) {
-      console.warn('⚠️ Failed to clear index directory:', error instanceof Error ? error.message : error);
+      log(`[VectorStore] Failed to clear index directory error=${error instanceof Error ? error.message : error}`);
     }
   }
 
@@ -527,7 +527,7 @@ export class PersistentVectorStore extends VectorStore {
         return indexData.metadata || {};
       }
     } catch (error) {
-      console.warn('Could not load metadata:', error instanceof Error ? error.message : error);
+      log(`[VectorStore] Could not load metadata error=${error instanceof Error ? error.message : error}`);
     }
     return null;
   }
@@ -546,7 +546,7 @@ export class PersistentVectorStore extends VectorStore {
       await fs.writeFile(tempPath, JSON.stringify(indexData, null, 2));
       await fs.rename(tempPath, this.metadataPath);
     } catch (error) {
-      console.warn('Could not update metadata:', error instanceof Error ? error.message : error);
+      log(`[VectorStore] Could not update metadata error=${error instanceof Error ? error.message : error}`);
     }
   }
 

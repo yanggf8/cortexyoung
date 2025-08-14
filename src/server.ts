@@ -11,6 +11,28 @@ import { HierarchicalStageTracker } from './hierarchical-stages';
 import { CORTEX_TOOLS } from './mcp-tools';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as os from 'os';
+import { execSync } from 'child_process';
+
+// Helper function to get git commit hash
+function getGitCommit(): string {
+  try {
+    return execSync('git rev-parse --short HEAD', { encoding: 'utf8' }).trim();
+  } catch {
+    return 'unknown';
+  }
+}
+
+// Helper function to get version from package.json  
+function getVersion(): string {
+  try {
+    const packagePath = path.join(__dirname, '../package.json');
+    const packageJson = JSON.parse(fs.readFileSync(packagePath, 'utf8'));
+    return packageJson.version || 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
 
 // Logger class for file and console logging
 class Logger {
@@ -34,7 +56,11 @@ class Logger {
 
   private formatMessage(level: string, message: string, data?: any): string {
     const timestamp = new Date().toISOString();
-    const dataStr = data ? ` | ${JSON.stringify(data)}` : '';
+    let dataStr = '';
+    if (data && typeof data === 'object') {
+      const pairs = Object.entries(data).map(([key, value]) => `${key}=${value}`);
+      dataStr = pairs.length > 0 ? ` ${pairs.join(' ')}` : '';
+    }
     return `[${timestamp}] [${level}] ${message}${dataStr}`;
   }
 
@@ -539,8 +565,16 @@ async function main() {
   // Create stage tracker with logger to prevent duplicate output
   const stageTracker = new HierarchicalStageTracker(logger);
   
+  // Startup metadata header
+  const version = getVersion();
+  const commit = getGitCommit(); 
+  const nodeVersion = process.version;
+  const platform = os.platform();
+  const pid = process.pid;
+  
+  logger.info(`[Startup] Cortex MCP Server version=${version} commit=${commit} pid=${pid} node=${nodeVersion} platform=${platform} port=${port}`);
+  logger.info(`[Startup] Repository path=${repoPath} logFile=${logFile || 'default'}`);
   logger.info('🎯 Cortex MCP Server Starting...');
-  logger.info(`    Repository: ${repoPath} | Port: ${port}`);
   
   try {
     // ==================== STAGE 1: Initialization & Pre-flight ====================

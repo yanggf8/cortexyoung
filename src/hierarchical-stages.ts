@@ -183,7 +183,7 @@ export class HierarchicalStageTracker {
     const isLastSubstep = stage.substeps.indexOf(substep) === stage.substeps.length - 1;
     const prefix = isLastSubstep ? '└──' : '├──';
     
-    const message = `${prefix} ⚙️  [${substepId}] ${substep.name}...`;
+    const message = `${prefix} [${substepId}] ${substep.name}...`;
     this.logInfo(message);
     
     if (details) {
@@ -210,7 +210,7 @@ export class HierarchicalStageTracker {
     const prefix = isLastSubstep ? '    ' : '│   ';
     
     const durationFormatted = this.formatDuration(substep.duration || 0);
-    const message = `${prefix}└── ✅ ${details || substep.description}`;
+    const message = `${prefix}└── ${details || substep.description} (${durationFormatted})`;
     this.logInfo(message);
   }
 

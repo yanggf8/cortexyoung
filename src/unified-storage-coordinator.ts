@@ -2,6 +2,7 @@ import { PersistentVectorStore } from './persistent-vector-store';
 import { PersistentRelationshipStore } from './persistent-relationship-store';
 import { RelationshipGraph } from './relationship-types';
 import { CodeChunk, ModelInfo } from './types';
+import { log } from './logging-utils';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 
@@ -49,29 +50,29 @@ export class UnifiedStorageCoordinator {
   async initialize(): Promise<void> {
     // Prevent duplicate initialization
     if (this.initialized) {
-      console.log('📋 Unified storage coordinator already initialized, skipping...');
+      log('[StorageCoord] Already initialized, skipping');
       return;
     }
 
-    console.log('🔄 Initializing unified storage coordinator...');
+    log('[StorageCoord] Initializing unified storage coordinator');
     await Promise.all([
       this.vectorStore.initialize(),
       this.relationshipStore.initialize()
     ]);
 
     // Check for synchronization issues and auto-sync if needed
-    console.log('🔍 Checking storage synchronization...');
+    log('[StorageCoord] Checking storage synchronization');
     const status = await this.getStorageStatus();
     
     if (!status.synchronized) {
-      console.log('⚠️ Storage synchronization issues detected, performing auto-sync...');
+      log('[StorageCoord] Storage sync issues detected, performing auto-sync');
       await this.performAutoSync(status);
-      console.log('✅ Auto-sync completed');
+      log('[StorageCoord] Auto-sync completed');
     } else {
-      console.log('✅ Storage layers are synchronized');
+      log('[StorageCoord] Storage layers are synchronized');
     }
 
-    console.log('✅ Unified storage coordinator ready');
+    log('[StorageCoord] Unified storage coordinator ready');
     this.initialized = true;
   }
 

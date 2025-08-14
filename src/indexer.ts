@@ -114,13 +114,13 @@ export class CodebaseIndexer {
       }
       
       return await this.performFullIndex(request, startTime);
-    } catch (error) {
-      console.error('Indexing failed:', error);
+    } catch (err) {
+      error(`Indexing failed: ${err instanceof Error ? err.message : 'Unknown error'}`);
       return {
         status: 'error',
         chunks_processed: 0,
         time_taken_ms: Date.now() - startTime,
-        error_message: error instanceof Error ? error.message : 'Unknown error'
+        error_message: err instanceof Error ? err.message : 'Unknown error'
       };
     }
   }

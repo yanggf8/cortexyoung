@@ -633,11 +633,9 @@ export class ProcessPoolEmbedder implements IEmbedder {
       consecutiveFailures: 0
     };
     
-    console.log(`🚀 Fixed chunk sizing strategy:`);
-    console.log(`  Chunk size: ${this.adaptiveBatch.currentSize} chunks (fixed as requested)`);
-    console.log(`  Strategy: Consistent 400-chunk batches for reliable performance`);
-    
-    console.log(`🎯 Fixed Batching: Size=${this.adaptiveBatch.currentSize} chunks (no adaptation)`);
+    log(`[ProcessPool] Fixed chunk sizing strategy size=${this.adaptiveBatch.currentSize} chunks`);
+    log('[ProcessPool] Strategy: Consistent 400-chunk batches for reliable performance');
+    log(`[ProcessPool] Fixed batching size=${this.adaptiveBatch.currentSize} chunks`);
     
     // Create fastq queue - consumer count matches initial process count
     this.queue = fastq.promise(this.processEmbeddingTask.bind(this), this.processCount);

@@ -1,5 +1,6 @@
 import { FlagEmbedding, EmbeddingModel } from 'fastembed';
 import { ModelInfo } from './types';
+import { log } from './logging-utils';
 import * as crypto from 'crypto';
 import * as fs from 'fs/promises';
 import * as path from 'path';
@@ -29,9 +30,9 @@ export class EmbeddingGenerator {
         await this.calculateModelHash();
         
         this.isInitialized = true;
-        console.log('✅ Embedding model initialized successfully');
+        log('[Embedder] Embedding model initialized successfully');
       } catch (error) {
-        console.warn('⚠️  Failed to initialize embedding model, using mock embeddings:', error);
+        log(`[Embedder] Failed to initialize embedding model, using mock embeddings error=${error}`);
         this.embedder = null;
         this.isInitialized = true;
       }

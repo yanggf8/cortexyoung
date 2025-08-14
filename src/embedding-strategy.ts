@@ -1,6 +1,7 @@
 import { CodeChunk } from './types';
 import { ProcessPoolEmbedder } from './process-pool-embedder';
 import { CachedEmbedder } from './cached-embedder';
+import { log } from './logging-utils';
 
 export type EmbeddingStrategy = 'process-pool' | 'cached' | 'auto' | 'original'; // 'original' deprecated, redirects to 'cached'
 
@@ -67,10 +68,10 @@ export class EmbeddingStrategyManager {
     // Resolve auto strategy
     if (strategy === 'auto') {
       strategy = this.determineAutoStrategy(chunks.length);
-      console.log(`🤖 Auto-selected embedding strategy: ${strategy} (${chunks.length} chunks)`);
+      log(`[EmbeddingStrategy] Auto-selected strategy=${strategy} chunks=${chunks.length}`);
     }
 
-    console.log(`🚀 Using ${strategy} embedding strategy for ${chunks.length} chunks`);
+    log(`[EmbeddingStrategy] Using strategy=${strategy} chunks=${chunks.length}`);
 
     let result: CodeChunk[];
     let batchInfo: { totalBatches: number; averageBatchTime: number };

@@ -13,7 +13,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **🌐 Cloud Strategy Separation**: CloudflareAI uses API controls (circuit breakers, rate limiting) vs local resource monitoring
 - **🔄 Signal Cascade System**: Reliable parent-child process cleanup with zero orphaned processes
 - **📊 Auto-sync Intelligence**: Eliminates manual storage commands with intelligent conflict resolution
-- **🕒 Unified Timestamped Logging**: Consistent ISO timestamp formatting across all major components for improved debugging
+- **🕒 Unified Timestamped Logging**: Consistent ISO timestamp formatting across all components with standardized key=value format for improved debugging and readability
 - **⚡ Workload-Aware Process Growth**: Intelligent process scaling based on actual chunk count - prevents unnecessary resource usage for small workloads (≤400 chunks use single process, >400 chunks scale up)
 - **📦 Intelligent Embedding Cache**: 95-98% performance improvement with content-hash based caching and dual storage
 - **🧪 Embedding Strategy Selection**: Auto-selection framework choosing optimal strategy based on dataset size and system resources
@@ -299,10 +299,11 @@ Claude Code ← MCP Server ← Vector Store ← ProcessPool → Incremental Upda
 - **Smart conflict resolution**: Timestamp-based synchronization
 - **Eliminates manual commands**: No more `npm run storage:sync` needed
 
-### Unified Logging System
-- **Consistent timestamps**: All major components use ISO timestamp formatting `[2025-08-11T09:50:57.693Z]`
+### Unified Logging System ✅
+- **Complete Timestamp Coverage**: All console.log statements converted to ISO timestamp format `[2025-08-14T12:34:56.789Z]`
+- **Standardized Key=Value Format**: Replaced verbose JSON output with clean `key=value` pairs for better readability  
 - **Preserved UX**: Maintains emoji indicators and visual progress feedback
-- **Core components**: indexer.ts, process-pool-embedder.ts, persistent-vector-store.ts
+- **Comprehensive Coverage**: All components including indexer.ts, server.ts, hierarchical-stages.ts, storage operations
 - **Logging utility**: `src/logging-utils.ts` provides timestamped console wrappers
 - **Zero performance impact**: Lightweight wrapper around native console methods
 - **Hierarchical tracking**: Stage and substep progression with duration reporting
