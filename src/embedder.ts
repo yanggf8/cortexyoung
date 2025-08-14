@@ -64,7 +64,7 @@ export class EmbeddingGenerator {
         this.modelHash = hash.digest('hex').substring(0, 16);
       }
     } catch (error) {
-      console.warn('Failed to calculate model hash:', error);
+      log(`[Embedder] Failed to calculate model hash error=${error instanceof Error ? error.message : error}`);
       this.modelHash = null;
     }
   }
@@ -83,7 +83,7 @@ export class EmbeddingGenerator {
       }
       return this.generateMockEmbedding(text);
     } catch (error) {
-      console.warn('Failed to generate embedding, using mock:', error);
+      log(`[Embedder] Failed to generate embedding using mock error=${error instanceof Error ? error.message : error}`);
       return this.generateMockEmbedding(text);
     }
   }
@@ -103,7 +103,7 @@ export class EmbeddingGenerator {
       }
       return results;
     } catch (error) {
-      console.warn('Failed to generate batch embeddings, using mock:', error);
+      log(`[Embedder] Failed to generate batch embeddings using mock error=${error instanceof Error ? error.message : error}`);
       return texts.map(text => this.generateMockEmbedding(text));
     }
   }

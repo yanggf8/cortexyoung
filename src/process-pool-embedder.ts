@@ -1192,7 +1192,7 @@ export class ProcessPoolEmbedder implements IEmbedder {
   async initialize(chunkCount?: number): Promise<void> {
     if (this.isInitialized) return;
 
-    console.log(`🔧 Starting with ${this.processCount} external Node.js process (ultra-conservative - 2+ saturate system)...`);
+    log(`[ProcessPool] Starting with ${this.processCount} external Node.js process (ultra-conservative - 2+ saturate system)`);
     
     // Create initial processes first
     await this.createProcesses();
@@ -1205,10 +1205,10 @@ export class ProcessPoolEmbedder implements IEmbedder {
     
     // Only grow during initialization if workload justifies it
     if (chunkCount && chunkCount > 400) {
-      console.log(`📊 Workload: ${chunkCount} chunks > 400, checking if additional processes needed`);
+      log(`[ProcessPool] Workload ${chunkCount} chunks > 400, checking if additional processes needed`);
       await this.checkResourcesAndAdjustPool();
     } else if (chunkCount) {
-      console.log(`📊 Workload: ${chunkCount} chunks ≤ 400, single process sufficient`);
+      log(`[ProcessPool] Workload ${chunkCount} chunks ≤ 400, single process sufficient`);
     } else {
       // Fallback: no chunk count provided, use original logic
       console.log(`⚠️ No chunk count provided, falling back to original scaling logic`);
@@ -1222,15 +1222,15 @@ export class ProcessPoolEmbedder implements IEmbedder {
     this.setupGracefulShutdown();
     
     this.isInitialized = true;
-    console.log(`🎉 Process pool initialized with ${this.processes.length} ready processes`);
-    console.log(`📈 Adaptive growth: Scales one-by-one up to ${this.adaptivePool.maxProcesses} processes based on CPU + memory constraints`);
+    log(`[ProcessPool] Process pool initialized with ${this.processes.length} ready processes`);
+    log(`[ProcessPool] Adaptive growth scales one-by-one up to ${this.adaptivePool.maxProcesses} processes based on CPU + memory constraints`);
   }
 
   private async createProcesses(): Promise<void> {
     const processScript = path.join(__dirname, 'external-embedding-process.js');
 
     for (let i = 0; i < this.processCount; i++) {
-      console.log(`⏳ Spawning external process ${i + 1}/${this.processCount}...`);
+      log(`[ProcessPool] Spawning external process ${i + 1}/${this.processCount}`);
       
       // Spawn external Node.js process
       const childProcess = spawn('node', ['--expose-gc', '--max-old-space-size=512', processScript], {
@@ -1333,7 +1333,7 @@ export class ProcessPoolEmbedder implements IEmbedder {
     if (type === 'init_complete') {
       if (message.success) {
         processInstance.isReady = true;
-        console.log(`✅ Process ${processInstance.id} ready with isolated FastEmbedding`);
+        log(`[ProcessPool] Process ${processInstance.id} ready with isolated FastEmbedding`);
       } else {
         console.error(`❌ Process ${processInstance.id} initialization failed:`, message.error);
       }
@@ -1624,11 +1624,11 @@ export class ProcessPoolEmbedder implements IEmbedder {
       const readyProcesses = this.processes.filter(p => p.isReady).length;
       
       if (readyProcesses === this.processCount) {
-        console.log(`✅ All ${this.processCount} processes ready`);
+        log(`[ProcessPool] All ${this.processCount} processes ready`);
         return;
       }
       
-      console.log(`⏳ Waiting for processes: ${readyProcesses}/${this.processCount} ready...`);
+      log(`[ProcessPool] Waiting for processes ${readyProcesses}/${this.processCount} ready`);
       await new Promise(resolve => setTimeout(resolve, 2000));
     }
     
@@ -1737,7 +1737,7 @@ export class ProcessPoolEmbedder implements IEmbedder {
         const elapsed = Date.now() - startTime;
         
         if (processInstance.isReady) {
-          console.log(`✅ Process ${processInstance.id} ready with isolated FastEmbedding`);
+          log(`[ProcessPool] Process ${processInstance.id} ready with isolated FastEmbedding`);
           resolve();
         } else if (elapsed > maxWaitTime) {
           // Enhanced timeout message with diagnostics
@@ -2512,7 +2512,7 @@ export class ProcessPoolEmbedder implements IEmbedder {
     // Initialize process pool first (workload-aware)
     await this.initialize(chunks.length);
     
-    console.log(`📊 Processing ${chunks.length} chunks using ${this.processCount} external processes`);
+    log(`[ProcessPool] Processing ${chunks.length} chunks using ${this.processCount} external processes`);
     
     // Now that we're actually processing chunks, start delayed resource monitoring for scaling
     this.startResourceMonitoringDelayed();

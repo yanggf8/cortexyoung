@@ -3,6 +3,7 @@ import { VectorStore } from './vector-store';
 import { EmbeddingGenerator } from './embedder';
 import { RelationshipTraversalEngine } from './relationship-traversal-engine';
 import { RelationshipQuery, TraversalOptions, RelationshipType } from './relationship-types';
+import { log, warn, error } from './logging-utils';
 
 export class SemanticSearcher {
   private relationshipEngine?: RelationshipTraversalEngine;
@@ -29,7 +30,7 @@ export class SemanticSearcher {
     const startTime = Date.now();
     
     try {
-      console.log(`🔍 Searching for: "${query.task}"`);
+      log(`[Searcher] Searching for: ${query.task}`);
       
       // Check if we should use relationship-aware search
       if (this.relationshipEngine && query.multi_hop?.enabled) {
@@ -39,8 +40,8 @@ export class SemanticSearcher {
       // Fallback to traditional semantic search
       return await this.traditionalSemanticSearch(query, startTime);
       
-    } catch (error) {
-      console.error('Search failed:', error);
+    } catch (err) {
+      error(`[Searcher] Search failed error=${err instanceof Error ? err.message : err}`);
       
       return {
         status: 'error',
@@ -66,7 +67,7 @@ export class SemanticSearcher {
   }
 
   private async relationshipAwareSearch(query: QueryRequest, startTime: number): Promise<SearchResponse> {
-    console.log('🔗 Using relationship-aware search');
+    log('[Searcher] Using relationship-aware search');
     
     // Generate query embedding for initial search
     const queryEmbedding = await this.embedder.embed(query.task);
@@ -77,7 +78,7 @@ export class SemanticSearcher {
       Math.min(query.max_chunks || 20, 10) // Limit initial candidates for traversal
     );
     
-    console.log(`📊 Found ${initialCandidates.length} initial candidates`);
+    log(`[Searcher] Found initial candidates=${initialCandidates.length}`);
     
     if (initialCandidates.length === 0) {
       return this.createEmptyResponse(startTime);
@@ -96,8 +97,8 @@ export class SemanticSearcher {
     // Execute relationship traversal
     const relationshipResult = await this.relationshipEngine!.executeRelationshipQuery(relationshipQuery);
     
-    console.log(`🔗 Found ${relationshipResult.relationshipPaths.length} relationship paths`);
-    console.log(`📊 Generated ${relationshipResult.contextGroups.length} context groups`);
+    log(`[Searcher] Found relationship paths=${relationshipResult.relationshipPaths.length}`);
+    log(`[Searcher] Generated context groups=${relationshipResult.contextGroups.length}`);
 
     // Combine initial candidates with relationship-discovered chunks
     const allChunkIds = new Set([
@@ -145,7 +146,7 @@ export class SemanticSearcher {
   }
 
   private async traditionalSemanticSearch(query: QueryRequest, startTime: number): Promise<SearchResponse> {
-    console.log('📊 Using traditional semantic search');
+    log('[Searcher] Using traditional semantic search');
     
     // Generate query embedding
     const queryEmbedding = await this.embedder.embed(query.task);
@@ -156,7 +157,7 @@ export class SemanticSearcher {
       query.max_chunks || 20
     );
     
-    console.log(`📊 Found ${candidates.length} candidate chunks`);
+    log(`[Searcher] Found candidate chunks=${candidates.length}`);
     
     // Apply legacy multi-hop expansion if needed
     let expandedCandidates = candidates;
@@ -165,7 +166,7 @@ export class SemanticSearcher {
         candidates,
         query.multi_hop
       );
-      console.log(`🔗 Expanded to ${expandedCandidates.length} chunks via relationships`);
+      log(`[Searcher] Expanded to chunks=${expandedCandidates.length} via relationships`);
     }
     
     // Rank and filter results
@@ -451,7 +452,7 @@ export class SemanticSearcher {
           chunks.push(chunk);
         }
       } catch (error) {
-        console.warn(`Failed to retrieve chunk ${chunkId}:`, error);
+        warn(`[Searcher] Failed to retrieve chunk ${chunkId} error=${error instanceof Error ? error.message : error}`);
       }
     }
     

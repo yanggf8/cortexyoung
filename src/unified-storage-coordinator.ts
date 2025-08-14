@@ -227,10 +227,10 @@ export class UnifiedStorageCoordinator {
 
     // Log what was found and what actions were taken
     if (issues.length > 0) {
-      console.log('   Issues found:');
-      issues.forEach(issue => console.log(`   • ${issue}`));
-      console.log('   Actions taken:');
-      actions.forEach(action => console.log(`   • ${action}`));
+      log('[StorageCoord] Issues found:');
+      issues.forEach(issue => log(`[StorageCoord] Issue: ${issue}`));
+      log('[StorageCoord] Actions taken:');
+      actions.forEach(action => log(`[StorageCoord] Action: ${action}`));
     }
   }
 
@@ -262,7 +262,7 @@ export class UnifiedStorageCoordinator {
         }
       }
     } catch (error) {
-      console.warn('Could not read relationship stats:', error instanceof Error ? error.message : error);
+      log(`[StorageCoord] Could not read relationship stats error=${error instanceof Error ? error.message : error}`);
     }
 
     // Calculate total size
@@ -289,7 +289,7 @@ export class UnifiedStorageCoordinator {
   }
 
   async syncAll(): Promise<void> {
-    console.log('🔄 Syncing all storage layers...');
+    log('[StorageCoord] Syncing all storage layers');
     
     const status = await this.getStorageStatus();
     
@@ -307,22 +307,22 @@ export class UnifiedStorageCoordinator {
       await this.relationshipStore.syncToLocal();
     }
     
-    console.log('✅ All storage layers synchronized');
+    log('[StorageCoord] All storage layers synchronized');
   }
 
   async clearAll(): Promise<void> {
-    console.log('🗑️ Clearing all storage...');
+    log('[StorageCoord] Clearing all storage');
     
     await Promise.all([
       this.vectorStore.clear(),
       this.relationshipStore.clearRelationshipGraph()
     ]);
     
-    console.log('✅ All storage cleared');
+    log('[StorageCoord] All storage cleared');
   }
 
   async saveAll(chunks: CodeChunk[], relationshipGraph: RelationshipGraph, modelInfo?: ModelInfo): Promise<void> {
-    console.log('💾 Saving all data to unified storage...');
+    log('[StorageCoord] Saving all data to unified storage');
     const startTime = Date.now();
     
     // Save both storages in parallel for consistency
@@ -332,7 +332,7 @@ export class UnifiedStorageCoordinator {
     ]);
     
     const saveTime = Date.now() - startTime;
-    console.log(`✅ Unified storage save completed in ${saveTime}ms`);
+    log(`[StorageCoord] Unified storage save completed duration=${saveTime}ms`);
   }
 
   async loadAll(): Promise<{
@@ -340,7 +340,7 @@ export class UnifiedStorageCoordinator {
     relationshipGraph: RelationshipGraph | null;
     loadedFromCache: boolean;
   }> {
-    console.log('📥 Loading from unified storage...');
+    log('[StorageCoord] Loading from unified storage');
     const startTime = Date.now();
     
     // Try to load both storages in parallel
@@ -354,8 +354,8 @@ export class UnifiedStorageCoordinator {
     
     const loadTime = Date.now() - startTime;
     const status = loadedFromCache ? 'from cache' : 'partially from cache';
-    console.log(`📊 Unified storage load ${status} in ${loadTime}ms`);
-    console.log(`   Chunks: ${chunks.length}, Relationships: ${relationshipGraph ? 'loaded' : 'missing'}`);
+    log(`[StorageCoord] Unified storage load status=${status} duration=${loadTime}ms`);
+    log(`[StorageCoord] Chunks loaded=${chunks.length} relationships=${relationshipGraph ? 'loaded' : 'missing'}`);
     
     return {
       chunks,
@@ -419,8 +419,8 @@ export class UnifiedStorageCoordinator {
   }
 
   async printStorageReport(): Promise<void> {
-    console.log('📊 Unified Storage Report');
-    console.log('========================');
+    log('[StorageCoord] Unified Storage Report');
+    log('[StorageCoord] ========================');
     
     const [status, stats, consistency] = await Promise.all([
       this.getStorageStatus(),
@@ -429,29 +429,29 @@ export class UnifiedStorageCoordinator {
     ]);
     
     // Storage status
-    console.log('\n📁 Storage Status:');
-    console.log(`   Embeddings: Local ${status.embeddings.local ? '✅' : '❌'} | Global ${status.embeddings.global ? '✅' : '❌'}`);
-    console.log(`   Relationships: Local ${status.relationships.local ? '✅' : '❌'} | Global ${status.relationships.global ? '✅' : '❌'}`);
-    console.log(`   Synchronized: ${status.synchronized ? '✅' : '❌'}`);
+    log('[StorageCoord] Storage Status:');
+    log(`[StorageCoord] Embeddings local=${status.embeddings.local} global=${status.embeddings.global}`);
+    log(`[StorageCoord] Relationships local=${status.relationships.local} global=${status.relationships.global}`);
+    log(`[StorageCoord] Synchronized=${status.synchronized}`);
     
     // Storage statistics
-    console.log('\n📈 Storage Statistics:');
-    console.log(`   Embeddings: ${stats.embeddings.chunks} chunks across ${stats.embeddings.files} files (${stats.embeddings.size})`);
-    console.log(`   Relationships: ${stats.relationships.symbols} symbols, ${stats.relationships.relationships} relationships (${stats.relationships.size})`);
-    console.log(`   Total size: ${stats.totalSize}`);
+    log('[StorageCoord] Storage Statistics:');
+    log(`[StorageCoord] Embeddings chunks=${stats.embeddings.chunks} files=${stats.embeddings.files} size=${stats.embeddings.size}`);
+    log(`[StorageCoord] Relationships symbols=${stats.relationships.symbols} relationships=${stats.relationships.relationships} size=${stats.relationships.size}`);
+    log(`[StorageCoord] Total size=${stats.totalSize}`);
     
     // Consistency check
-    console.log('\n🔍 Consistency Check:');
-    console.log(`   Status: ${consistency.consistent ? '✅ Consistent' : '⚠️ Issues found'}`);
+    log('[StorageCoord] Consistency Check:');
+    log(`[StorageCoord] Consistency status=${consistency.consistent ? 'consistent' : 'issues_found'}`);
     
     if (consistency.issues.length > 0) {
-      console.log('\n❌ Issues:');
-      consistency.issues.forEach(issue => console.log(`   • ${issue}`));
+      log('[StorageCoord] Issues:');
+      consistency.issues.forEach(issue => log(`[StorageCoord] Issue: ${issue}`));
     }
     
     if (consistency.recommendations.length > 0) {
-      console.log('\n💡 Recommendations:');
-      consistency.recommendations.forEach(rec => console.log(`   • ${rec}`));
+      log('[StorageCoord] Recommendations:');
+      consistency.recommendations.forEach(rec => log(`[StorageCoord] Recommendation: ${rec}`));
     }
   }
 
