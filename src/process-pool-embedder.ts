@@ -185,6 +185,7 @@ export class ProcessPoolEmbedder implements IEmbedder {
   private cpuMonitoringInterval?: NodeJS.Timeout;
   private isShuttingDown = false;
   private shutdownPromise?: Promise<void>;
+  private workloadChunkCount?: number; // Store workload size to prevent unnecessary scaling
   
   // Cache management configuration
   private static readonly MAX_CACHE_SIZE = 10000; // Maximum cache entries
@@ -645,6 +646,11 @@ export class ProcessPoolEmbedder implements IEmbedder {
   // Predictive resource pool management with 2-step forecasting
   private async checkResourcesAndAdjustPool(): Promise<void> {
     try {
+      // Skip scaling if workload is too small (≤400 chunks)
+      if (this.workloadChunkCount && this.workloadChunkCount <= 400) {
+        console.log(`🚫 Scaling skipped: Workload ${this.workloadChunkCount} chunks ≤ 400, single process optimal`);
+        return;
+      }
       // Get both memory and CPU info in parallel for efficiency
       const [memInfo, cpuInfo] = await Promise.all([
         this.getAccurateSystemMemory(),
@@ -1196,6 +1202,9 @@ export class ProcessPoolEmbedder implements IEmbedder {
     // Wait for initial processes to be ready
     await this.waitForProcessesReady();
     
+    // Store workload size for ongoing scaling decisions
+    this.workloadChunkCount = chunkCount;
+    
     // Only grow during initialization if workload justifies it
     if (chunkCount && chunkCount > 400) {
       console.log(`📊 Workload: ${chunkCount} chunks > 400, checking if additional processes needed`);
@@ -1204,6 +1213,7 @@ export class ProcessPoolEmbedder implements IEmbedder {
       console.log(`📊 Workload: ${chunkCount} chunks ≤ 400, single process sufficient`);
     } else {
       // Fallback: no chunk count provided, use original logic
+      console.log(`⚠️ No chunk count provided, falling back to original scaling logic`);
       await this.checkResourcesAndAdjustPool();
     }
     

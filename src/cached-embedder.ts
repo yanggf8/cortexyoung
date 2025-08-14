@@ -40,8 +40,8 @@ export class CachedEmbedder extends ProcessPoolEmbedder {
     this.globalCacheFilePath = path.join(globalCacheDir, 'embedding-cache.json');
   }
 
-  async initialize(): Promise<void> {
-    await super.initialize();
+  async initialize(chunkCount?: number): Promise<void> {
+    await super.initialize(chunkCount);
     await this.loadCache();
   }
 

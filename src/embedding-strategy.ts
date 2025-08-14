@@ -194,7 +194,7 @@ export class EmbeddingStrategyManager {
 
     try {
       console.log(`📊 Cached Strategy: Initializing with intelligent embedding cache...`);
-      await this.cachedEmbedder.initialize();
+      await this.cachedEmbedder.initialize(chunks.length);
       
       const result = await this.cachedEmbedder.processAllEmbeddings(chunks);
       const stats = await this.cachedEmbedder.getEmbeddingCacheStats();

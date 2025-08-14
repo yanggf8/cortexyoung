@@ -21,7 +21,6 @@ async function initializeEmbedder(id) {
   try {
     processId = id;
     // Log to stderr for parent process to capture as debug info (not error)
-    process.stderr.write(`[Process] External embedding process started, waiting for init...\n`);
     process.stderr.write(`[Process] Node.js version: ${process.version}, Platform: ${process.platform}, Arch: ${process.arch}\n`);
     process.stderr.write(`[Process ${processId}] Starting separate Node.js instance...\n`);
     
@@ -467,5 +466,4 @@ if (typeof global.gc === 'function') {
   console.error(`[Process] GC not exposed. Start with --expose-gc for better memory management`);
 }
 
-process.stderr.write(`[Process] External embedding process started, waiting for init...\n`);
-process.stderr.write(`[Process] Node.js version: ${process.version}, Platform: ${process.platform}, Arch: ${process.arch}\n`);
+// Startup messages are logged in initializeEmbedder function to avoid duplication
