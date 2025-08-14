@@ -33,7 +33,6 @@ interface IndexDelta {
 }
 
 export class PersistentVectorStore extends VectorStore {
-  private fileHashes: Map<string, string> = new Map();
   private repositoryPath: string;
   private indexDir: string;
   private localIndexPath: string;
@@ -182,8 +181,8 @@ export class PersistentVectorStore extends VectorStore {
         this.chunks.set(chunk.chunk_id, chunk);
       }
       
-      // File hashes are rebuilt on startup instead of being persisted
-      // This ensures they always reflect the current file state
+      // Note: File change detection now uses chunk-based comparison
+      // No need to load file hashes - we calculate from stored chunks vs current chunks
       
       const loadTime = Date.now() - startTime;
       console.log(`✅ Loaded ${persistedIndex.chunks.length} chunks from ${source} in ${loadTime}ms`);
@@ -243,7 +242,7 @@ export class PersistentVectorStore extends VectorStore {
     }
   }
 
-  async calculateFileDelta(files: string[]): Promise<IndexDelta> {
+  async calculateFileDelta(files: string[], chunkHashCalculator?: (filePath: string) => Promise<string>): Promise<IndexDelta> {
     const delta: IndexDelta = {
       added: [],
       updated: [],
@@ -255,47 +254,57 @@ export class PersistentVectorStore extends VectorStore {
       }
     };
 
-    // File hashes are always rebuilt from current files - no persistence needed
-    // This ensures accurate delta calculation that reflects the current file state
-
-    // Check each file for changes
+    // Check each file for changes by comparing stored chunks with current chunks
     for (const filePath of files) {
       try {
-        const content = await fs.readFile(path.join(this.repositoryPath, filePath), 'utf-8');
-        const currentHash = crypto.createHash('sha256').update(content).digest('hex');
-        const storedHash = this.fileHashes.get(filePath);
-
-        if (!storedHash) {
-          // New file
-          delta.fileChanges.added.push(filePath);
-        } else if (storedHash !== currentHash) {
-          // Modified file
-          delta.fileChanges.modified.push(filePath);
-          
-          // Remove old chunks for this file
-          const oldChunks = Array.from(this.chunks.values())
-            .filter(chunk => chunk.file_path === filePath);
-          delta.removed.push(...oldChunks.map(chunk => chunk.chunk_id));
-        }
+        // Get stored chunks for this file
+        const storedChunks = Array.from(this.chunks.values())
+          .filter(chunk => chunk.file_path === filePath);
         
-        // Update file hash
-        this.fileHashes.set(filePath, currentHash);
+        if (storedChunks.length === 0) {
+          // New file - no existing chunks
+          delta.fileChanges.added.push(filePath);
+        } else {
+          // Calculate hash from stored chunks
+          const storedChunkContent = storedChunks
+            .sort((a, b) => a.start_line - b.start_line) // Ensure consistent order by line number
+            .map(chunk => chunk.content)
+            .join('');
+          const storedHash = crypto.createHash('sha256').update(storedChunkContent).digest('hex');
+          
+          // Calculate current chunk hash using provided calculator
+          if (chunkHashCalculator) {
+            const currentHash = await chunkHashCalculator(filePath);
+            
+            if (storedHash !== currentHash) {
+              // File changed - chunk representation differs
+              delta.fileChanges.modified.push(filePath);
+              
+              // Remove old chunks for this file
+              delta.removed.push(...storedChunks.map(chunk => chunk.chunk_id));
+            }
+            // If hashes match, file is unchanged - no action needed
+          } else {
+            // Fallback: treat as modified if no calculator provided
+            delta.fileChanges.modified.push(filePath);
+            delta.removed.push(...storedChunks.map(chunk => chunk.chunk_id));
+          }
+        }
       } catch (error) {
         console.warn(`⚠️ Failed to process file ${filePath}:`, error instanceof Error ? error.message : error);
       }
     }
 
-    // Check for deleted files
-    for (const [filePath] of this.fileHashes) {
+    // Check for deleted files - files that have chunks but aren't in current file list
+    const filesWithChunks = new Set(Array.from(this.chunks.values()).map(chunk => chunk.file_path));
+    for (const filePath of filesWithChunks) {
       if (!files.includes(filePath)) {
         delta.fileChanges.deleted.push(filePath);
         
-        // Remove chunks for deleted file
+        // Remove chunks for deleted files
         const deletedChunks = Array.from(this.chunks.values())
           .filter(chunk => chunk.file_path === filePath);
         delta.removed.push(...deletedChunks.map(chunk => chunk.chunk_id));
-        
-        this.fileHashes.delete(filePath);
       }
     }
 
@@ -442,20 +451,7 @@ export class PersistentVectorStore extends VectorStore {
   async upsertChunks(chunks: CodeChunk[]): Promise<void> {
     await super.upsertChunks(chunks);
     
-    // Populate file hashes for new chunks to enable proper delta calculation
-    for (const chunk of chunks) {
-      try {
-        // Only calculate hash if we don't already have it
-        if (!this.fileHashes.has(chunk.file_path)) {
-          const content = await fs.readFile(path.join(this.repositoryPath, chunk.file_path), 'utf-8');
-          const currentHash = crypto.createHash('sha256').update(content).digest('hex');
-          this.fileHashes.set(chunk.file_path, currentHash);
-        }
-      } catch (error) {
-        // File might not exist (e.g., during testing) - this is okay for file hash population
-        console.warn(`⚠️ Could not calculate file hash for ${chunk.file_path}:`, error instanceof Error ? error.message : error);
-      }
-    }
+    // Note: No file hash storage needed - delta calculation uses chunk comparison
   }
 
   // Enhanced getStats with persistence information
@@ -468,9 +464,12 @@ export class PersistentVectorStore extends VectorStore {
     const stats = await fs.stat(this.metadataPath).catch(() => null);
     const indexSize = stats ? `${(stats.size / 1024 / 1024).toFixed(2)} MB` : 'Unknown';
     
+    // Count unique files from chunks
+    const uniqueFiles = new Set(Array.from(this.chunks.values()).map(chunk => chunk.file_path));
+    
     return {
       total_chunks: this.chunks.size,
-      totalFiles: this.fileHashes.size,
+      totalFiles: uniqueFiles.size,
       indexSize,
       lastUpdated: stats?.mtime || new Date()
     };
@@ -479,7 +478,6 @@ export class PersistentVectorStore extends VectorStore {
   // Override clear to also clear persistence
   async clear(): Promise<void> {
     await super.clear();
-    this.fileHashes.clear();
     
     try {
       await fs.rm(this.localIndexPath, { recursive: true, force: true });
@@ -503,11 +501,14 @@ export class PersistentVectorStore extends VectorStore {
   }
 
   getFileHashCount(): number {
-    return this.fileHashes.size;
+    // Return count of unique files from chunks
+    const uniqueFiles = new Set(Array.from(this.chunks.values()).map(chunk => chunk.file_path));
+    return uniqueFiles.size;
   }
 
   hasFileHashes(): boolean {
-    return this.fileHashes.size > 0;
+    // Always return true since we calculate from chunks
+    return this.chunks.size > 0;
   }
 
   async getMetadata(): Promise<any> {
@@ -524,7 +525,7 @@ export class PersistentVectorStore extends VectorStore {
 
   async updateMetadata(metadata: any): Promise<void> {
     try {
-      let indexData: any = { chunks: [], fileHashes: {}, metadata: {} };
+      let indexData: any = { chunks: [], metadata: {} };
       
       if (await this.indexExists()) {
         indexData = JSON.parse(await fs.readFile(this.metadataPath, 'utf-8'));

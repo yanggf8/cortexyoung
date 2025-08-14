@@ -1,6 +1,7 @@
 import { CodeChunk, IndexRequest, IndexResponse, QueryRequest, QueryResponse, IEmbedder } from './types';
 import { GitScanner } from './git-scanner';
 import { SmartChunker } from './chunker';
+import * as crypto from 'crypto';
 import { EmbeddingGenerator } from './embedder';
 import { VectorStore } from './vector-store';
 import { PersistentVectorStore } from './persistent-vector-store';
@@ -133,8 +134,21 @@ export class CodebaseIndexer {
     const scanResult = await this.gitScanner.scanRepository('full'); // Get all files to compare
     log(`Found ${scanResult.totalFiles} total files`);
     
-    // Calculate what has changed
-    const delta = await this.vectorStore.calculateFileDelta(scanResult.files);
+    // Calculate what has changed using chunk-based hashing for accurate delta detection
+    const chunkHashCalculator = async (filePath: string): Promise<string> => {
+      const content = await this.gitScanner.readFile(filePath);
+      const fileChange = await this.gitScanner.getFileChanges([filePath]).then(changes => changes[0]);
+      const coChangeFiles = await this.gitScanner.getCoChangeFiles(filePath);
+      
+      // Generate chunks using the same algorithm as processing
+      const chunks = await this.chunker.chunkFile(filePath, content, fileChange, coChangeFiles);
+      
+      // Create hash from chunk content representation
+      const chunkContents = chunks.map(chunk => chunk.content).join('');
+      return crypto.createHash('sha256').update(chunkContents).digest('hex');
+    };
+    
+    const delta = await this.vectorStore.calculateFileDelta(scanResult.files, chunkHashCalculator);
     const changedFiles = [...delta.fileChanges.added, ...delta.fileChanges.modified];
     
     log(`📊 Delta analysis: +${delta.fileChanges.added.length} ~${delta.fileChanges.modified.length} -${delta.fileChanges.deleted.length} files`);
