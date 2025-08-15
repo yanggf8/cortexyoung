@@ -80,60 +80,68 @@ export class PersistentVectorStore extends VectorStore {
       return;
     }
 
-    // Ensure both index directories exist
-    await fs.mkdir(this.localIndexPath, { recursive: true });
-    await fs.mkdir(this.deltaPath, { recursive: true });
-    await fs.mkdir(this.globalIndexPath, { recursive: true });
-    await fs.mkdir(this.globalDeltaPath, { recursive: true });
+    // Ensure both index directories exist in parallel
+    await Promise.all([
+      fs.mkdir(this.localIndexPath, { recursive: true }),
+      fs.mkdir(this.deltaPath, { recursive: true }),
+      fs.mkdir(this.globalIndexPath, { recursive: true }),
+      fs.mkdir(this.globalDeltaPath, { recursive: true })
+    ]);
     
-    // Try to load existing index with comparison details
-    const localExists = await this.indexExists();
-    const globalExists = await this.globalIndexExists();
+    // Check existence and get stats in parallel
+    const [localExists, globalExists, localStats, globalStats] = await Promise.all([
+      this.indexExists(),
+      this.globalIndexExists(),
+      this.indexExists().then(exists => exists ? fs.stat(this.metadataPath).catch(() => null) : null),
+      this.globalIndexExists().then(exists => exists ? fs.stat(this.globalMetadataPath).catch(() => null) : null)
+    ]);
     
-    if (globalExists && localExists) {
-      // Both exist - compare and choose winner
-      const [localStats, globalStats] = await Promise.all([
-        fs.stat(this.metadataPath),
-        fs.stat(this.globalMetadataPath)
-      ]);
+    if (globalExists && localExists && localStats && globalStats) {
+      // Quick timestamp comparison - skip expensive chunk counting if timestamps are identical
+      const localTime = localStats.mtime.getTime();
+      const globalTime = globalStats.mtime.getTime();
       
-      // Get chunk counts for comparison
-      let localChunks = 0, globalChunks = 0;
-      try {
-        const localData = JSON.parse(await fs.readFile(this.metadataPath, 'utf-8'));
-        const globalData = JSON.parse(await fs.readFile(this.globalMetadataPath, 'utf-8'));
-        localChunks = localData.chunks?.length || 0;
-        globalChunks = globalData.chunks?.length || 0;
-      } catch (error) {
-        log('[StorageSync] Could not read chunk counts for comparison');
-      }
-      
-      const localTime = localStats.mtime.toISOString();
-      const globalTime = globalStats.mtime.toISOString();
-      
-      log('[StorageCompare] Storage comparison started');
-      log(`[StorageCompare] Local chunks=${localChunks} modified=${localTime} path=${this.metadataPath}`);
-      log(`[StorageCompare] Global chunks=${globalChunks} modified=${globalTime} path=${this.globalMetadataPath}`);
-      
-      // Check if both storages are empty/corrupt (0 chunks)
-      if (localChunks === 0 && globalChunks === 0) {
-        log('[StorageCompare] Both storages have 0 chunks - neither qualifies for comparison');
-        log('[StorageCompare] No valid storage to load - initialize() will complete without loading any data');
-        // Don't load any data - let the indexer detect this via hasValidIndex()
+      if (Math.abs(localTime - globalTime) < 1000) { // Within 1 second
+        log('[StorageCompare] Timestamps nearly identical, using local storage (quick path)');
+        await this.loadPersistedIndex(false);
         this.initialized = true;
         PersistentVectorStore.initializedPaths.add(key);
         return;
       }
       
-      // Check if only one storage has valid chunks
+      // Parallel chunk count reading for comparison
+      const [localData, globalData] = await Promise.all([
+        fs.readFile(this.metadataPath, 'utf-8').then(data => JSON.parse(data)).catch(() => ({ chunks: [] })),
+        fs.readFile(this.globalMetadataPath, 'utf-8').then(data => JSON.parse(data)).catch(() => ({ chunks: [] }))
+      ]);
+      
+      const localChunks = localData.chunks?.length || 0;
+      const globalChunks = globalData.chunks?.length || 0;
+      
+      log('[StorageCompare] Storage comparison started');
+      log(`[StorageCompare] Local chunks=${localChunks} modified=${localStats.mtime.toISOString()} path=${this.metadataPath}`);
+      log(`[StorageCompare] Global chunks=${globalChunks} modified=${globalStats.mtime.toISOString()} path=${this.globalMetadataPath}`);
+      
+      // Check if both storages are empty/corrupt (0 chunks)
+      if (localChunks === 0 && globalChunks === 0) {
+        log('[StorageCompare] Both storages have 0 chunks - neither qualifies for comparison');
+        log('[StorageCompare] No valid storage to load - initialize() will complete without loading any data');
+        this.initialized = true;
+        PersistentVectorStore.initializedPaths.add(key);
+        return;
+      }
+      
+      // Determine winner and load + sync in parallel where possible
       if (localChunks === 0 && globalChunks > 0) {
         log('[StorageCompare] Winner=global reason=local_empty loading=global');
         await this.loadPersistedIndex(true);
-        await this.syncToLocal();
+        // Sync in background - don't wait
+        this.syncToLocal().catch(err => log(`[StorageSync] Background sync failed: ${err}`));
       } else if (globalChunks === 0 && localChunks > 0) {
         log('[StorageCompare] Winner=local reason=global_empty loading=local');
         await this.loadPersistedIndex(false);
-        await this.syncToGlobal();
+        // Sync in background - don't wait
+        this.syncToGlobal().catch(err => log(`[StorageSync] Background sync failed: ${err}`));
       } else {
         // Both have valid chunks - compare timestamps
         const globalIsNewer = globalStats.mtime > localStats.mtime;
@@ -141,20 +149,24 @@ export class PersistentVectorStore extends VectorStore {
         
         if (globalIsNewer) {
           await this.loadPersistedIndex(true);
-          await this.syncToLocal();
+          // Sync in background - don't wait
+          this.syncToLocal().catch(err => log(`[StorageSync] Background sync failed: ${err}`));
         } else {
           await this.loadPersistedIndex(false);
-          await this.syncToGlobal();
+          // Sync in background - don't wait
+          this.syncToGlobal().catch(err => log(`[StorageSync] Background sync failed: ${err}`));
         }
       }
     } else if (globalExists) {
       log('[StorageLoad] Loading from global storage - local not found');
       await this.loadPersistedIndex(true);
-      await this.syncToLocal();
+      // Sync in background - don't wait
+      this.syncToLocal().catch(err => log(`[StorageSync] Background sync failed: ${err}`));
     } else if (localExists) {
       log('[StorageLoad] Loading from local storage - global not found');
       await this.loadPersistedIndex(false);
-      await this.syncToGlobal();
+      // Sync in background - don't wait
+      this.syncToGlobal().catch(err => log(`[StorageSync] Background sync failed: ${err}`));
     }
 
     this.initialized = true;
@@ -255,18 +267,19 @@ export class PersistentVectorStore extends VectorStore {
         }
       };
       
-      const indexData = JSON.stringify(persistedIndex, null, 2);
+      // Optimize JSON serialization for large datasets
+      const indexData = JSON.stringify(persistedIndex, null, 0); // No pretty printing for faster writes
       
-      // Save to both storages in parallel for better performance
+      // Save to both storages in parallel with optimized writes
       const saveLocal = async () => {
         const localTempPath = this.metadataPath + '.tmp';
-        await fs.writeFile(localTempPath, indexData);
+        await fs.writeFile(localTempPath, indexData, { encoding: 'utf8' });
         await fs.rename(localTempPath, this.metadataPath);
       };
 
       const saveGlobal = async () => {
         const globalTempPath = this.globalMetadataPath + '.tmp';
-        await fs.writeFile(globalTempPath, indexData);
+        await fs.writeFile(globalTempPath, indexData, { encoding: 'utf8' });
         await fs.rename(globalTempPath, this.globalMetadataPath);
       };
       
@@ -280,6 +293,34 @@ export class PersistentVectorStore extends VectorStore {
     } catch (error) {
       log(`[StorageSave] Failed to save persisted index error=${error instanceof Error ? error.message : error}`);
       throw error;
+    }
+  }
+
+  /**
+   * Quick health check that skips expensive validation when possible
+   */
+  async quickHealthCheck(): Promise<{ healthy: boolean; reason?: string }> {
+    try {
+      // Check if index exists
+      const indexExists = await this.indexExists();
+      if (!indexExists) {
+        return { healthy: false, reason: 'No index found' };
+      }
+
+      // Quick metadata validation
+      const metadata = await this.getMetadata();
+      if (!metadata || !metadata.totalChunks || metadata.totalChunks === 0) {
+        return { healthy: false, reason: 'Empty or corrupt index' };
+      }
+
+      // Check if chunks match metadata count
+      if (this.chunks.size !== metadata.totalChunks) {
+        return { healthy: false, reason: 'Chunk count mismatch' };
+      }
+
+      return { healthy: true };
+    } catch (error) {
+      return { healthy: false, reason: `Health check failed: ${error instanceof Error ? error.message : 'Unknown error'}` };
     }
   }
 

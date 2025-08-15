@@ -1,4 +1,5 @@
 import { IEmbedder, EmbedOptions, EmbeddingResult, EmbeddingMetadata, PerformanceStats, ProviderHealth, ProviderMetrics } from './types';
+import { error } from './logging-utils';
 
 const WORKER_URL = 'https://cortex-embedder.yanggf.workers.dev';
 const BATCH_SIZE = 100; // As per Cloudflare's documented limit
@@ -38,9 +39,9 @@ class CircuitBreaker {
       const result = await operation();
       this.onSuccess();
       return result;
-    } catch (error) {
+    } catch (err) {
       this.onFailure();
-      throw error;
+      throw err;
     }
   }
 
@@ -232,10 +233,10 @@ export class CloudflareAIEmbedder implements IEmbedder {
         }
       };
       
-    } catch (error) {
+    } catch (err) {
       this.metrics.errorCount++;
-      console.error(`Error embedding batch with Cloudflare AI (${this.circuitBreaker.getState()}):`, error);
-      throw error;
+      error(`Error embedding batch with Cloudflare AI (${this.circuitBreaker.getState()}):`, err);
+      throw err;
     }
   }
   
@@ -290,10 +291,10 @@ export class CloudflareAIEmbedder implements IEmbedder {
         errorRate
       };
       
-    } catch (error) {
+    } catch (err) {
       return {
         status: "unhealthy",
-        details: `Health check failed: ${error instanceof Error ? error.message : String(error)}`,
+        details: `Health check failed: ${err instanceof Error ? err.message : String(err)}`,
         lastCheck: Date.now(),
         uptime: Date.now() - this.startTime,
         errorRate: 1.0

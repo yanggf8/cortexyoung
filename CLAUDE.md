@@ -303,6 +303,42 @@ Claude Code ← MCP Server ← Vector Store ← ProcessPool → Incremental Upda
 - **Smart conflict resolution**: Timestamp-based synchronization
 - **Eliminates manual commands**: No more `npm run storage:sync` needed
 
+### Performance & Concurrency Optimizations ✅
+
+**v2.1.6 introduces major performance improvements:**
+
+**⚡ Parallel Operations**
+- Vector store initialization uses `Promise.all` for concurrent operations
+- Directory creation, file stats, and metadata loading run in parallel
+- Background storage synchronization to avoid blocking startup
+
+**🚀 Smart Health Checks**
+```typescript
+// Quick health check avoids expensive validation
+const quickHealth = await vectorStore.quickHealthCheck();
+if (!quickHealth.healthy) {
+  // Only run detailed analysis if needed
+  const healthChecker = new IndexHealthChecker(process.cwd(), vectorStore);
+  healthResult = await healthChecker.shouldRebuild();
+}
+```
+
+**🔄 Concurrent Processing**
+```typescript
+// Relationship building runs parallel with embedding generation
+const relationshipPromise = this.buildRelationshipsForChangedFiles(files, changedFiles);
+const embeddedChunks = await this.generateEmbeddings(chunksToEmbed);
+const [, relationshipCount] = await Promise.all([
+  this.vectorStore.savePersistedIndex(),
+  relationshipPromise
+]);
+```
+
+**📊 Streaming Embeddings**
+- Large datasets (>100 chunks) use streaming generation
+- Batched processing (50 chunks per batch) for memory efficiency
+- Real-time progress reporting and performance metrics
+
 ### Unified Logging System ✅
 - **Complete Timestamp Coverage**: All console.log statements converted to ISO timestamp format `[2025-08-14T12:34:56.789Z]`
 - **Standardized Key=Value Format**: Replaced verbose JSON output with clean `key=value` pairs for better readability  

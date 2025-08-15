@@ -6,9 +6,9 @@
 /**
  * Log with ISO timestamp prefix, preserving emoji and formatting
  */
-export const timestampedLog = (message: string): void => {
+export const timestampedLog = (message: string, ...args: any[]): void => {
   const timestamp = new Date().toISOString();
-  console.log(`[${timestamp}] ${message}`);
+  console.log(`[${timestamp}] ${message}`, ...args);
 };
 
 /**
@@ -16,14 +16,14 @@ export const timestampedLog = (message: string): void => {
  */
 export const log = timestampedLog;
 
-export const warn = (message: string): void => {
+export const warn = (message: string, ...args: any[]): void => {
   const timestamp = new Date().toISOString();
-  console.warn(`[${timestamp}] ${message}`);
+  console.warn(`[${timestamp}] ${message}`, ...args);
 };
 
-export const error = (message: string): void => {
+export const error = (message: string, ...args: any[]): void => {
   const timestamp = new Date().toISOString();
-  console.error(`[${timestamp}] ${message}`);
+  console.error(`[${timestamp}] ${message}`, ...args);
 };
 
 /**

@@ -10,6 +10,7 @@ import { IndexHealthChecker } from './index-health-checker';
 import { HierarchicalStageTracker } from './hierarchical-stages';
 import { CORTEX_TOOLS } from './mcp-tools';
 import { MMRConfigManager, createMMRConfigFromEnvironment } from './mmr-config-manager';
+import { error } from './logging-utils';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
@@ -534,10 +535,25 @@ async function getIntelligentIndexMode(indexer: CodebaseIndexer, logger: Logger)
       return 'full';
     }
 
-    // Perform health check to determine if rebuild is needed
+    // Perform quick health check to determine if rebuild is needed
     logger.info('🩺 Running health check on existing index...');
-    const healthChecker = new IndexHealthChecker(process.cwd(), vectorStore);
-    const healthResult = await healthChecker.shouldRebuild();
+    
+    const quickHealth = await vectorStore.quickHealthCheck();
+    
+    // Only run expensive full health check if quick check fails
+    let healthResult;
+    if (!quickHealth.healthy) {
+      logger.info(`⚠️  Quick health check failed: ${quickHealth.reason}, running detailed analysis...`);
+      const healthChecker = new IndexHealthChecker(process.cwd(), vectorStore);
+      healthResult = await healthChecker.shouldRebuild();
+    } else {
+      // Create a simple healthy result for quick path
+      healthResult = {
+        shouldRebuild: false,
+        reason: 'Index is healthy (quick check)',
+        mode: 'incremental' as const
+      };
+    }
     
     if (healthResult.shouldRebuild) {
       logger.info(`🧠 Intelligent mode: ${healthResult.reason}, using ${healthResult.mode} indexing`);
@@ -745,5 +761,5 @@ async function main() {
 
 // Start server if this file is run directly
 if (require.main === module) {
-  main().catch(console.error);
+  main().catch(error);
 }

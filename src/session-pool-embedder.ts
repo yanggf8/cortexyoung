@@ -3,6 +3,7 @@ import { Mutex } from 'async-mutex';
 import fastq from 'fastq';
 import * as os from 'os';
 import { CodeChunk } from './types';
+import { log, warn, error } from './logging-utils';
 
 interface EmbeddingTask {
   texts: string[];
@@ -42,8 +43,8 @@ export class SessionPoolEmbedder {
     // Use fewer sessions than cores to avoid ONNX Runtime issues
     this.numSessions = Math.min(4, totalCores <= 2 ? 1 : Math.max(1, totalCores - 2));
     
-    console.log(`🚀 Session Pool Embedder: ${this.numSessions} sessions (${totalCores} CPU cores)`);
-    console.log(`✅ Option 2: Global sessions with mutex protection (ONNX-safe)`);
+    log(`🚀 Session Pool Embedder: ${this.numSessions} sessions (${totalCores} CPU cores)`);
+    log(`✅ Option 2: Global sessions with mutex protection (ONNX-safe)`);
     
     // FastQ queue with concurrency = number of sessions
     this.queue = fastq.promise(this.processEmbeddingTask.bind(this), this.numSessions);
@@ -52,12 +53,12 @@ export class SessionPoolEmbedder {
   async initialize(): Promise<void> {
     if (this.initialized) return;
     
-    console.log('🔄 Initializing session pool...');
+    log('🔄 Initializing session pool...');
     const startTime = Date.now();
     
     // Create all sessions sequentially to avoid conflicts
     for (let i = 0; i < this.numSessions; i++) {
-      console.log(`📡 Initializing session ${i + 1}/${this.numSessions}...`);
+      log(`📡 Initializing session ${i + 1}/${this.numSessions}...`);
       
       const embedder = await FlagEmbedding.init({
         model: EmbeddingModel.BGESmallENV15,
@@ -72,11 +73,11 @@ export class SessionPoolEmbedder {
       };
       
       this.sessions.push(sessionSlot);
-      console.log(`✅ Session ${i + 1} ready`);
+      log(`✅ Session ${i + 1} ready`);
     }
     
     const initDuration = Date.now() - startTime;
-    console.log(`✅ All ${this.numSessions} sessions initialized in ${initDuration}ms`);
+    log(`✅ All ${this.numSessions} sessions initialized in ${initDuration}ms`);
     this.initialized = true;
   }
 
@@ -108,7 +109,7 @@ export class SessionPoolEmbedder {
       const memoryDelta = Math.round((afterMemory.heapUsed - beforeMemory.heapUsed) / 1024 / 1024);
       const duration = Date.now() - startTime;
       
-      console.log(`✅ Batch ${task.batchIndex + 1}/${task.totalBatches} completed by session ${session.id} in ${duration}ms`);
+      log(`✅ Batch ${task.batchIndex + 1}/${task.totalBatches} completed by session ${session.id} in ${duration}ms`);
       
       return {
         embeddings,
@@ -120,9 +121,9 @@ export class SessionPoolEmbedder {
         }
       };
       
-    } catch (error) {
-      console.error(`❌ Session ${session.id} error processing batch ${task.batchIndex}:`, error);
-      throw error;
+    } catch (err) {
+      error(`❌ Session ${session.id} error processing batch ${task.batchIndex}:`, err);
+      throw err;
     }
   }
 
@@ -142,7 +143,7 @@ export class SessionPoolEmbedder {
       batches.push(chunks.slice(i, i + optimalBatchSize));
     }
     
-    console.log(`📊 Processing ${chunks.length} chunks in ${batches.length} batches (${optimalBatchSize} per batch)`);
+    log(`📊 Processing ${chunks.length} chunks in ${batches.length} batches (${optimalBatchSize} per batch)`);
     
     // Add all tasks to FastQ queue
     const taskPromises: Promise<EmbeddingResult>[] = [];
@@ -160,7 +161,7 @@ export class SessionPoolEmbedder {
       taskPromises.push(taskPromise);
     }
     
-    console.log(`⏳ Processing ${taskPromises.length} tasks with session pool...`);
+    log(`⏳ Processing ${taskPromises.length} tasks with session pool...`);
     
     // Execute all tasks concurrently (up to numSessions in parallel)
     const results = await Promise.all(taskPromises);
@@ -203,20 +204,20 @@ export class SessionPoolEmbedder {
   }
 
   private printStats(): void {
-    console.log('\n📊 Session Pool Embedding Statistics:');
-    console.log('━'.repeat(50));
-    console.log(`Queue: ${this.queue.length()} pending, ${this.queue.running()} running`);
-    console.log(`Sessions: ${this.numSessions} total, ${this.sessions.length} initialized`);
-    console.log(`Memory: ${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB heap`);
-    console.log('━'.repeat(50));
+    log('\n📊 Session Pool Embedding Statistics:');
+    log('━'.repeat(50));
+    log(`Queue: ${this.queue.length()} pending, ${this.queue.running()} running`);
+    log(`Sessions: ${this.numSessions} total, ${this.sessions.length} initialized`);
+    log(`Memory: ${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB heap`);
+    log('━'.repeat(50));
   }
 
   async shutdown(): Promise<void> {
-    console.log('🛑 Shutting down session pool embedder...');
+    log('🛑 Shutting down session pool embedder...');
     
     // Wait for queue to drain
     await this.queue.drained();
     
-    console.log('✅ Session pool embedder shut down');
+    log('✅ Session pool embedder shut down');
   }
 }

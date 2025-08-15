@@ -5,6 +5,17 @@
 
 const readline = require('readline');
 
+// Simple timestamp function for consistent logging
+function timestampedLog(...args) {
+  const timestamp = new Date().toISOString();
+  console.error(`[${timestamp}]`, ...args);
+}
+
+function timestampedWrite(message) {
+  const timestamp = new Date().toISOString();
+  process.stderr.write(`[${timestamp}] ${message}`);
+}
+
 // Process-local variables - completely isolated
 let embedder = null;
 let processId = null;
@@ -21,13 +32,13 @@ async function initializeEmbedder(id) {
   try {
     processId = id;
     // Log to stderr for parent process to capture as debug info (not error)
-    process.stderr.write(`[Process] Node.js version: ${process.version}, Platform: ${process.platform}, Arch: ${process.arch}\n`);
-    process.stderr.write(`[Process ${processId}] Starting separate Node.js instance...\n`);
+    timestampedWrite(`[Process] Node.js version: ${process.version}, Platform: ${process.platform}, Arch: ${process.arch}\n`);
+    timestampedWrite(`[Process ${processId}] Starting separate Node.js instance...\n`);
     
     // Dynamic import in separate process - complete isolation
     const { FlagEmbedding, EmbeddingModel } = await import('fastembed');
     
-    process.stderr.write(`[Process ${processId}] Creating isolated FastEmbedding instance...\n`);
+    timestampedWrite(`[Process ${processId}] Creating isolated FastEmbedding instance...\n`);
     
     // Each process gets its own BGE instance with simplified configuration
     embedder = await FlagEmbedding.init({
@@ -38,7 +49,7 @@ async function initializeEmbedder(id) {
     });
     
     isInitialized = true;
-    process.stderr.write(`[Process ${processId}] FastEmbedding ready in separate process\n`);
+    timestampedWrite(`[Process ${processId}] FastEmbedding ready in separate process\n`);
     
     // Send success response
     console.log(JSON.stringify({
@@ -48,7 +59,7 @@ async function initializeEmbedder(id) {
     }));
     
   } catch (error) {
-    console.error(`[Process ${processId}] Initialization failed:`, error);
+    timestampedLog(`[Process ${processId}] Initialization failed:`, error);
     console.log(JSON.stringify({
       type: 'init_complete',
       processId,
@@ -102,7 +113,7 @@ async function processEmbeddingBatch(texts, batchId, timeoutWarning = null) {
   }
   
   try {
-    console.error(`[Process ${processId}] Processing ${texts.length} texts for batch ${batchId}`);
+    timestampedLog(`[Process ${processId}] Processing ${texts.length} texts for batch ${batchId}`);
     
     // Use this process's isolated embedder instance with memory-conscious processing
     // Process in smaller sub-batches to prevent memory spikes
@@ -113,7 +124,7 @@ async function processEmbeddingBatch(texts, batchId, timeoutWarning = null) {
       subBatches.push(texts.slice(i, i + maxSubBatchSize));
     }
     
-    console.error(`[Process ${processId}] Splitting ${texts.length} texts into ${subBatches.length} sub-batches of ~${maxSubBatchSize}`);
+    timestampedLog(`[Process ${processId}] Splitting ${texts.length} texts into ${subBatches.length} sub-batches of ~${maxSubBatchSize}`);
     
     const embeddings = embedder.embed(texts); // Still use full batch but with optimized settings
     
@@ -124,7 +135,7 @@ async function processEmbeddingBatch(texts, batchId, timeoutWarning = null) {
       // Check if we're approaching timeout and should return partial results
       const elapsed = Date.now() - startTime;
       if (timeoutWarning && elapsed > timeoutWarning * 0.9 && results.length > 0) {
-        console.error(`[Process ${processId}] Timeout warning reached, returning ${results.length} partial results`);
+        timestampedLog(`[Process ${processId}] Timeout warning reached, returning ${results.length} partial results`);
         clearInterval(progressInterval);
         clearTimeout(timeoutWarningTimer);
         
@@ -171,7 +182,7 @@ async function processEmbeddingBatch(texts, batchId, timeoutWarning = null) {
     const memoryDelta = Math.round((afterMemory.heapUsed - beforeMemory.heapUsed) / 1024 / 1024);
     const duration = Date.now() - startTime;
     
-    console.error(`[Process ${processId}] Completed batch ${batchId} in ${duration}ms`);
+    timestampedLog(`[Process ${processId}] Completed batch ${batchId} in ${duration}ms`);
     
     // Send success response
     console.log(JSON.stringify({
@@ -191,7 +202,7 @@ async function processEmbeddingBatch(texts, batchId, timeoutWarning = null) {
     clearInterval(progressInterval);
     clearTimeout(timeoutWarningTimer);
     
-    console.error(`[Process ${processId}] Processing error:`, error);
+    timestampedLog(`[Process ${processId}] Processing error:`, error);
     console.log(JSON.stringify({
       type: 'embed_complete',
       batchId,
@@ -216,7 +227,7 @@ async function processEmbeddingBatchShared(texts, batchId, sharedBufferKey, expe
   const beforeMemory = process.memoryUsage();
   
   try {
-    console.error(`[Process ${processId}] Processing ${texts.length} texts for batch ${batchId} with SharedArrayBuffer`);
+    timestampedLog(`[Process ${processId}] Processing ${texts.length} texts for batch ${batchId} with SharedArrayBuffer`);
     
     // Use this process's isolated embedder instance
     const embeddings = embedder.embed(texts);
@@ -238,7 +249,7 @@ async function processEmbeddingBatchShared(texts, batchId, sharedBufferKey, expe
     const memoryDelta = Math.round((afterMemory.heapUsed - beforeMemory.heapUsed) / 1024 / 1024);
     const duration = Date.now() - startTime;
     
-    console.error(`[Process ${processId}] Completed shared memory batch ${batchId} in ${duration}ms (${results.length} embeddings)`);
+    timestampedLog(`[Process ${processId}] Completed shared memory batch ${batchId} in ${duration}ms (${results.length} embeddings)`);
     
     // Send shared memory response with optimization marker
     console.log(JSON.stringify({
@@ -260,7 +271,7 @@ async function processEmbeddingBatchShared(texts, batchId, sharedBufferKey, expe
     }));
     
   } catch (error) {
-    console.error(`[Process ${processId}] Shared memory processing error:`, error);
+    timestampedLog(`[Process ${processId}] Shared memory processing error:`, error);
     console.log(JSON.stringify({
       type: 'shared_memory',
       batchId,
@@ -307,10 +318,10 @@ rl.on('line', async (line) => {
         processId
       }));
     } else if (type === 'shutdown') {
-      console.error(`[Process ${processId}] Shutting down gracefully...`);
+      timestampedLog(`[Process ${processId}] Shutting down gracefully...`);
       process.exit(0);
     } else if (type === 'abort') {
-      console.error(`[Process ${processId}] Received abort signal from parent: ${message.reason || 'Unknown reason'}`);
+      timestampedLog(`[Process ${processId}] Received abort signal from parent: ${message.reason || 'Unknown reason'}`);
       
       // Send acknowledgment to parent
       console.log(JSON.stringify({
@@ -325,14 +336,14 @@ rl.on('line', async (line) => {
         embedder = null;
       }
       
-      console.error(`[Process ${processId}] Aborting gracefully...`);
+      timestampedLog(`[Process ${processId}] Aborting gracefully...`);
       process.exit(0);
     } else {
       throw new Error(`Unknown message type: ${type}`);
     }
     
   } catch (error) {
-    console.error(`[Process ${processId}] Message handling error:`, error);
+    timestampedLog(`[Process ${processId}] Message handling error:`, error);
     console.log(JSON.stringify({
       type: 'error',
       error: error.message,
@@ -343,7 +354,7 @@ rl.on('line', async (line) => {
 
 // Handle process termination
 process.on('SIGTERM', () => {
-  console.error(`[Process ${processId}] Received SIGTERM, shutting down...`);
+  timestampedLog(`[Process ${processId}] Received SIGTERM, shutting down...`);
   
   // Send acknowledgment to parent before exit (if possible)
   try {
@@ -366,7 +377,7 @@ process.on('SIGTERM', () => {
 });
 
 process.on('SIGINT', () => {
-  console.error(`[Process ${processId}] Received SIGINT, shutting down...`);
+  timestampedLog(`[Process ${processId}] Received SIGINT, shutting down...`);
   
   // Send acknowledgment to parent before exit (if possible)
   try {
@@ -394,7 +405,7 @@ process.on('message', (message) => {
     const { type, reason, timestamp } = message;
     
     if (type === 'abort') {
-      console.error(`[Process ${processId}] Received abort via IPC: ${reason || 'Unknown reason'}`);
+      timestampedLog(`[Process ${processId}] Received abort via IPC: ${reason || 'Unknown reason'}`);
       
       // Send acknowledgment via IPC
       process.send?.({
@@ -409,19 +420,19 @@ process.on('message', (message) => {
         embedder = null;
       }
       
-      console.error(`[Process ${processId}] Aborting gracefully via IPC...`);
+      timestampedLog(`[Process ${processId}] Aborting gracefully via IPC...`);
       process.exit(0);
     }
   } catch (error) {
-    console.error(`[Process ${processId}] IPC message handling error:`, error);
+    timestampedLog(`[Process ${processId}] IPC message handling error:`, error);
   }
 });
 
 // Enhanced error handling with memory reporting
 process.on('uncaughtException', (error) => {
   const memoryUsage = process.memoryUsage();
-  console.error(`[Process ${processId}] Uncaught exception:`, error);
-  console.error(`[Process ${processId}] Memory at crash: RSS=${Math.round(memoryUsage.rss/1024/1024)}MB, Heap=${Math.round(memoryUsage.heapUsed/1024/1024)}MB`);
+  timestampedLog(`[Process ${processId}] Uncaught exception:`, error);
+  timestampedLog(`[Process ${processId}] Memory at crash: RSS=${Math.round(memoryUsage.rss/1024/1024)}MB, Heap=${Math.round(memoryUsage.heapUsed/1024/1024)}MB`);
   console.log(JSON.stringify({
     type: 'error',
     error: error.message,
@@ -437,8 +448,8 @@ process.on('uncaughtException', (error) => {
 
 process.on('unhandledRejection', (reason, promise) => {
   const memoryUsage = process.memoryUsage();
-  console.error(`[Process ${processId}] Unhandled rejection:`, reason);
-  console.error(`[Process ${processId}] Memory at rejection: RSS=${Math.round(memoryUsage.rss/1024/1024)}MB, Heap=${Math.round(memoryUsage.heapUsed/1024/1024)}MB`);
+  timestampedLog(`[Process ${processId}] Unhandled rejection:`, reason);
+  timestampedLog(`[Process ${processId}] Memory at rejection: RSS=${Math.round(memoryUsage.rss/1024/1024)}MB, Heap=${Math.round(memoryUsage.heapUsed/1024/1024)}MB`);
   console.log(JSON.stringify({
     type: 'error',
     error: String(reason),
@@ -459,11 +470,11 @@ if (typeof global.gc === 'function') {
     global.gc();
     const memoryUsage = process.memoryUsage();
     if (memoryUsage.rss > 500 * 1024 * 1024) { // Warn if RSS > 500MB
-      console.error(`[Process ${processId}] High memory usage: RSS=${Math.round(memoryUsage.rss/1024/1024)}MB`);
+      timestampedLog(`[Process ${processId}] High memory usage: RSS=${Math.round(memoryUsage.rss/1024/1024)}MB`);
     }
   }, 30000);
 } else {
-  console.error(`[Process] GC not exposed. Start with --expose-gc for better memory management`);
+  timestampedLog(`[Process] GC not exposed. Start with --expose-gc for better memory management`);
 }
 
 // Startup messages are logged in initializeEmbedder function to avoid duplication

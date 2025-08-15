@@ -271,10 +271,14 @@ export class CodebaseIndexer {
     log(`  - CHUNKS TO KEEP: ${chunksToKeep.length} (unchanged, cache hit)`);
     log(`  - TOTAL CHUNKS REMOVED: ${delta.removed.length}`);
 
+    // Start relationship building in parallel with embedding generation
+    const relationshipPromise = this.buildRelationshipsForChangedFiles(scanResult.files, [...delta.fileChanges.added, ...delta.fileChanges.modified]);
+    
     // Generate embeddings only for new/changed chunks
+    let embeddedChunks: CodeChunk[] = [];
     if (chunksToEmbed.length > 0) {
       log('🚀 Generating embeddings for new/modified content...');
-      const embeddedChunks = await this.generateEmbeddings(chunksToEmbed);
+      embeddedChunks = await this.generateEmbeddings(chunksToEmbed);
       // These are the brand new or updated chunks
       delta.added = embeddedChunks;
     } else {
@@ -288,29 +292,14 @@ export class CodebaseIndexer {
     log('💾 Applying changes to vector database...');
     await this.vectorStore.applyDelta(delta);
     
-    // Save updated index
-    await this.vectorStore.savePersistedIndex();
+    // Save updated index and wait for relationship building to complete in parallel
+    const [, relationshipCount] = await Promise.all([
+      this.vectorStore.savePersistedIndex(),
+      relationshipPromise
+    ]);
     
-    // Update relationship engine with incremental changes
-    // Updating relationship graph with changes - logging handled at higher level
-    const files = new Map<string, string>();
-    for (const filePath of scanResult.files) {
-      try {
-        const content = await this.gitScanner.readFile(filePath);
-        files.set(filePath, content);
-      } catch (error) {
-        warn(`Failed to read file for relationships ${filePath}: ${error}`);
-      }
-    }
-    
-    // Update dependency relationships for changed files  
-    const modifiedFiles = [...delta.fileChanges.added, ...delta.fileChanges.modified];
-    if (modifiedFiles.length > 0) {
-      log(`🔗 Updating relationships for ${modifiedFiles.length} changed files...`);
-      await this.dependencyMapper.buildDependencyMap(files);
-      const relationships = this.dependencyMapper.generateDependencyRelationships();
-      
-      log(`✅ Updated ${relationships.length} dependency relationships`);
+    if (relationshipCount > 0) {
+      log(`✅ Updated ${relationshipCount} dependency relationships`);
     }
     
     // Relationship engine initialization handled in stage 2.3
@@ -421,26 +410,91 @@ export class CodebaseIndexer {
         // CloudflareAI doesn't need shutdown
       }
     } else {
-      // Use intelligent embedding strategy manager
+      // Use intelligent embedding strategy manager with streaming storage
       const config = EmbeddingStrategyManager.getConfigFromEnv();
       
-      const result = await this.strategyManager.generateEmbeddings(chunks, config);
-      
-      // Log strategy performance
-      const perf = result.performance;
-      log(`📊 Embedding Performance (${result.strategy}):`);
-      log(`   Total time: ${perf.totalTime}ms`);
-      log(`   Throughput: ${perf.chunksPerSecond.toFixed(2)} chunks/second`);
-      log(`   Peak memory: ${perf.peakMemoryMB.toFixed(1)}MB`);
-      
-      if (perf.cacheStats) {
-        log(`   Cache: ${perf.cacheStats.hits} hits, ${perf.cacheStats.misses} misses (${(perf.cacheStats.hitRate * 100).toFixed(1)}% hit rate)`);
+      // For large chunk sets, implement streaming storage
+      if (chunks.length > 100) {
+        return await this.generateEmbeddingsWithStreaming(chunks, config);
+      } else {
+        const result = await this.strategyManager.generateEmbeddings(chunks, config);
+        
+        // Log strategy performance
+        const perf = result.performance;
+        log(`📊 Embedding Performance (${result.strategy}):`);
+        log(`   Total time: ${perf.totalTime}ms`);
+        log(`   Throughput: ${perf.chunksPerSecond.toFixed(2)} chunks/second`);
+        log(`   Peak memory: ${perf.peakMemoryMB.toFixed(1)}MB`);
+        
+        if (perf.cacheStats) {
+          log(`   Cache: ${perf.cacheStats.hits} hits, ${perf.cacheStats.misses} misses (${(perf.cacheStats.hitRate * 100).toFixed(1)}% hit rate)`);
+        }
+        
+        return result.chunks;
       }
-      
-      return result.chunks;
     }
   }
 
+  /**
+   * Generate embeddings with streaming storage for large datasets
+   */
+  private async generateEmbeddingsWithStreaming(chunks: CodeChunk[], config: any): Promise<CodeChunk[]> {
+    const batchSize = 50; // Process in smaller batches for streaming
+    const allEmbeddedChunks: CodeChunk[] = [];
+    
+    log(`🔄 Using streaming embedding generation for ${chunks.length} chunks (batch size: ${batchSize})`);
+    
+    for (let i = 0; i < chunks.length; i += batchSize) {
+      const batch = chunks.slice(i, i + batchSize);
+      const batchNum = Math.floor(i / batchSize) + 1;
+      const totalBatches = Math.ceil(chunks.length / batchSize);
+      
+      log(`📦 Processing batch ${batchNum}/${totalBatches} (${batch.length} chunks)`);
+      
+      const result = await this.strategyManager.generateEmbeddings(batch, config);
+      allEmbeddedChunks.push(...result.chunks);
+      
+      // Stream to storage immediately for this batch
+      if (result.chunks.length > 0) {
+        await this.vectorStore.upsertChunks(result.chunks);
+        log(`💾 Streamed batch ${batchNum} to storage (${result.chunks.length} chunks)`);
+      }
+    }
+    
+    log(`✅ Streaming embedding generation completed: ${allEmbeddedChunks.length} total chunks`);
+    return allEmbeddedChunks;
+  }
+
+
+  /**
+   * Build relationships for changed files in parallel with embedding generation
+   */
+  private async buildRelationshipsForChangedFiles(allFiles: string[], modifiedFiles: string[]): Promise<number> {
+    if (modifiedFiles.length === 0) {
+      return 0;
+    }
+    
+    log(`🔗 Updating relationships for ${modifiedFiles.length} changed files...`);
+    
+    // Read all files in parallel for relationship analysis
+    const files = new Map<string, string>();
+    const fileReadPromises = allFiles.map(async (filePath) => {
+      try {
+        const content = await this.gitScanner.readFile(filePath);
+        files.set(filePath, content);
+      } catch (error) {
+        warn(`Failed to read file for relationships ${filePath}: ${error}`);
+      }
+    });
+    
+    await Promise.all(fileReadPromises);
+    
+    // Build dependency map and generate relationships
+    await this.dependencyMapper.buildDependencyMap(files);
+    const relationships = this.dependencyMapper.generateDependencyRelationships();
+    
+    return relationships.length;
+  }
 
   private createEmbeddingText(chunk: CodeChunk): string {
     // Optimized embedding text generation - consistent across all embedding generation

@@ -94,7 +94,16 @@ npm run demo
 
 ### Bug Fixes
 
-**v2.1.5 - Complete Timestamp Coverage** 🆕
+**v2.1.6 - Performance & Concurrency Optimizations** 🆕
+- **⚡ Parallel Operations**: Vector store initialization now uses Promise.all for concurrent directory creation and file operations
+- **🚀 Smart Health Checks**: New `quickHealthCheck()` method avoids expensive validation when index is healthy
+- **🔄 Concurrent Processing**: Relationship building now runs in parallel with embedding generation for faster indexing
+- **📊 Streaming Embeddings**: Large datasets (>100 chunks) use streaming generation with batched storage for memory efficiency
+- **🧠 Intelligent Startup**: Quick health checks before detailed analysis, reducing startup time for healthy indexes
+- **🔧 Enhanced Logging**: Improved argument handling in logging utilities with better error reporting
+- **💾 Background Sync**: Storage synchronization operations now run in background to avoid blocking startup
+
+**v2.1.5 - Complete Timestamp Coverage**
 - **🕐 Fixed missing ISO timestamps**: All startup logs now have consistent `[YYYY-MM-DDTHH:mm:ss.sssZ]` timestamps
 - **📝 Enhanced logging consistency**: Updated 5 core files (index.ts, startup-stages.ts, hierarchical-stages.ts, git-scanner.ts, persistent-relationship-store.ts)
 - **🔧 Improved debugging experience**: Complete timestamp coverage for relationship graph loading, git operations, and storage sync

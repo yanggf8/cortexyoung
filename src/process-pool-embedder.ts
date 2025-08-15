@@ -294,7 +294,7 @@ export class ProcessPoolEmbedder implements IEmbedder {
           } else {
             throw new Error('Invalid memory values');
           }
-        } catch (error) {
+        } catch (err) {
           // Fallback to Node.js built-in
           const totalMB = Math.round(os.totalmem() / (1024 * 1024));
           const freeMB = Math.round(os.freemem() / (1024 * 1024));
@@ -418,7 +418,7 @@ export class ProcessPoolEmbedder implements IEmbedder {
           } else {
             throw new Error('Invalid CPU values');
           }
-        } catch (error) {
+        } catch (err) {
           // Fallback to load average
           const loadAvg = os.loadavg()[0];
           const usagePercent = Math.min((loadAvg / coreCount) * 100, 100);
@@ -825,8 +825,8 @@ export class ProcessPoolEmbedder implements IEmbedder {
         }
       }
       
-    } catch (error) {
-      warn(`[ProcessPool] Resource check failed error=${error instanceof Error ? error.message : error}`);
+    } catch (err) {
+      warn(`[ProcessPool] Resource check failed error=${err instanceof Error ? err.message : err}`);
     }
   }
   
@@ -971,8 +971,8 @@ export class ProcessPoolEmbedder implements IEmbedder {
       });
       
       return await healthCheckPromise;
-    } catch (error) {
-      warn(`[ProcessPool] Child process health check failed error=${error instanceof Error ? error.message : error}`);
+    } catch (err) {
+      warn(`[ProcessPool] Child process health check failed error=${err instanceof Error ? err.message : err}`);
       return false;
     }
   }
@@ -1024,8 +1024,8 @@ export class ProcessPoolEmbedder implements IEmbedder {
         new Promise(resolve => setTimeout(resolve, 10000)) // 10s timeout
       ]);
       log(`[ProcessPool] All child processes acknowledged shutdown`);
-    } catch (error) {
-      console.warn(`⚠️  Some processes didn't respond to shutdown signal:`, error);
+    } catch (err) {
+      warn(`⚠️  Some processes didn't respond to shutdown signal:`, err);
     }
 
     // Force kill any remaining processes
@@ -1037,7 +1037,7 @@ export class ProcessPoolEmbedder implements IEmbedder {
     this.isInitialized = false;
 
     const shutdownTime = Date.now() - startTime;
-    console.log(`🏁 Graceful shutdown completed in ${shutdownTime}ms`);
+    log(`🏁 Graceful shutdown completed in ${shutdownTime}ms`);
   }
 
   private async abortChildProcess(processInstance: ProcessInstance): Promise<void> {
@@ -1047,7 +1047,7 @@ export class ProcessPoolEmbedder implements IEmbedder {
         return;
       }
 
-      console.log(`📤 Sending abort signal to process ${processInstance.id}...`);
+      log(`📤 Sending abort signal to process ${processInstance.id}...`);
 
       // Send abort message via IPC first (for graceful shutdown)
       const abortMessage = {
@@ -1058,8 +1058,8 @@ export class ProcessPoolEmbedder implements IEmbedder {
 
       try {
         processInstance.process.send?.(abortMessage);
-      } catch (error) {
-        console.warn(`⚠️  Failed to send IPC abort to process ${processInstance.id}:`, error);
+      } catch (err) {
+        warn(`⚠️  Failed to send IPC abort to process ${processInstance.id}:`, err);
       }
 
       // Also send SIGTERM for OS-level signal (backup method)
@@ -1068,21 +1068,21 @@ export class ProcessPoolEmbedder implements IEmbedder {
           if (!processInstance.process.killed) {
             processInstance.process.kill('SIGTERM');
           }
-        } catch (error) {
-          console.warn(`⚠️  Failed to send SIGTERM to process ${processInstance.id}:`, error);
+        } catch (err) {
+          warn(`⚠️  Failed to send SIGTERM to process ${processInstance.id}:`, err);
         }
       }, 1000); // Wait 1 second for IPC, then send SIGTERM
 
       // Set up timeout for graceful shutdown
       const timeout = setTimeout(() => {
-        console.warn(`⚠️  Process ${processInstance.id} didn't respond to abort signal within timeout`);
+        warn(`⚠️  Process ${processInstance.id} didn't respond to abort signal within timeout`);
         resolve();
       }, 5000); // 5 second timeout per process
 
       // Listen for acknowledgment (from either IPC abort or SIGTERM)
       const onMessage = (message: any) => {
         if (message?.type === 'abort_ack') {
-          console.log(`✅ Process ${processInstance.id} acknowledged abort: ${message.reason || 'IPC'}`);
+          log(`✅ Process ${processInstance.id} acknowledged abort: ${message.reason || 'IPC'}`);
           clearTimeout(timeout);
           processInstance.process.off('message', onMessage);
           resolve();
@@ -1093,7 +1093,7 @@ export class ProcessPoolEmbedder implements IEmbedder {
 
       // Also resolve if process exits
       const onExit = () => {
-        console.log(`✅ Process ${processInstance.id} exited gracefully`);
+        log(`✅ Process ${processInstance.id} exited gracefully`);
         clearTimeout(timeout);
         processInstance.process.off('message', onMessage);
         resolve();
@@ -1110,15 +1110,15 @@ export class ProcessPoolEmbedder implements IEmbedder {
         return;
       }
 
-      console.log(`🔪 Force killing process ${processInstance.id}...`);
+      log(`🔪 Force killing process ${processInstance.id}...`);
 
       // Set timeout for force kill
       const timeout = setTimeout(() => {
-        console.warn(`⚠️  Process ${processInstance.id} didn't exit after SIGTERM, using SIGKILL`);
+        warn(`⚠️  Process ${processInstance.id} didn't exit after SIGTERM, using SIGKILL`);
         try {
           processInstance.process.kill('SIGKILL');
-        } catch (error) {
-          console.warn(`⚠️  SIGKILL failed for process ${processInstance.id}:`, error);
+        } catch (err) {
+          warn(`⚠️  SIGKILL failed for process ${processInstance.id}:`, err);
         }
         resolve();
       }, 3000); // 3 second timeout
@@ -1126,15 +1126,15 @@ export class ProcessPoolEmbedder implements IEmbedder {
       // Listen for exit
       processInstance.process.once('exit', () => {
         clearTimeout(timeout);
-        console.log(`✅ Process ${processInstance.id} exited`);
+        log(`✅ Process ${processInstance.id} exited`);
         resolve();
       });
 
       // Send SIGTERM first
       try {
         processInstance.process.kill('SIGTERM');
-      } catch (error) {
-        console.warn(`⚠️  SIGTERM failed for process ${processInstance.id}:`, error);
+      } catch (err) {
+        warn(`⚠️  SIGTERM failed for process ${processInstance.id}:`, err);
         clearTimeout(timeout);
         resolve();
       }
@@ -1144,28 +1144,28 @@ export class ProcessPoolEmbedder implements IEmbedder {
   private setupGracefulShutdown(): void {
     // Handle SIGINT (Ctrl+C)
     process.on('SIGINT', async () => {
-      console.log('\n🛑 Received SIGINT (Ctrl+C)...');
+      log('\n🛑 Received SIGINT (Ctrl+C)...');
       await this.shutdown('SIGINT');
       process.exit(0);
     });
 
     // Handle SIGTERM (process termination)
     process.on('SIGTERM', async () => {
-      console.log('\n🛑 Received SIGTERM...');
+      log('\n🛑 Received SIGTERM...');
       await this.shutdown('SIGTERM');
       process.exit(0);
     });
 
     // Handle uncaught exceptions
-    process.on('uncaughtException', async (error) => {
-      console.error('\n💥 Uncaught Exception:', error);
+    process.on('uncaughtException', async (err) => {
+      error('\n💥 Uncaught Exception:', err);
       await this.shutdown('uncaughtException');
       process.exit(1);
     });
 
     // Handle unhandled promise rejections
     process.on('unhandledRejection', async (reason) => {
-      console.error('\n💥 Unhandled Rejection:', reason);
+      error('\n💥 Unhandled Rejection:', reason);
       await this.shutdown('unhandledRejection');
       process.exit(1);
     });
@@ -1173,20 +1173,20 @@ export class ProcessPoolEmbedder implements IEmbedder {
     // Emergency cleanup on process exit
     process.on('exit', () => {
       if (!this.isShuttingDown) {
-        console.log('\n⚠️  Emergency shutdown - killing child processes...');
+        log('\n⚠️  Emergency shutdown - killing child processes...');
         this.processes.forEach(proc => {
           try {
             if (proc.process && !proc.process.killed) {
               proc.process.kill('SIGKILL');
             }
-          } catch (error) {
+          } catch (err) {
             // Ignore errors during emergency cleanup
           }
         });
       }
     });
 
-    console.log(`🛡️  Graceful shutdown handlers registered`);
+    log(`🛡️  Graceful shutdown handlers registered`);
   }
 
   async initialize(chunkCount?: number): Promise<void> {
@@ -1211,7 +1211,7 @@ export class ProcessPoolEmbedder implements IEmbedder {
       log(`[ProcessPool] Workload ${chunkCount} chunks ≤ 400, single process sufficient`);
     } else {
       // Fallback: no chunk count provided, use original logic
-      console.log(`⚠️ No chunk count provided, falling back to original scaling logic`);
+      log(`⚠️ No chunk count provided, falling back to original scaling logic`);
       await this.checkResourcesAndAdjustPool();
     }
     
@@ -1270,10 +1270,10 @@ export class ProcessPoolEmbedder implements IEmbedder {
             try {
               const message = JSON.parse(line);
               this.handleProcessMessage(processInstance, message);
-            } catch (error) {
-              const errorMessage = error instanceof Error ? error.message : String(error);
-              console.error(`❌ Failed to parse JSON from process ${i}:`, errorMessage);
-              console.error(`❌ Problematic line: ${line.substring(0, 200)}...`);
+            } catch (err) {
+              const errorMessage = err instanceof Error ? err.message : String(err);
+              error(`❌ Failed to parse JSON from process ${i}:`, errorMessage);
+              error(`❌ Problematic line: ${line.substring(0, 200)}...`);
             }
           }
         }
@@ -1287,14 +1287,14 @@ export class ProcessPoolEmbedder implements IEmbedder {
 
       // Handle process exit with OOM detection
       childProcess.on('exit', (code, signal) => {
-        console.error(`❌ Process ${i} exited with code ${code}, signal ${signal}`);
+        error(`❌ Process ${i} exited with code ${code}, signal ${signal}`);
         
         // Detect OOM kills (SIGKILL from system)
         if (signal === 'SIGKILL' && code === null) {
-          console.warn(`🔥 Process ${i} was SIGKILL'd - likely OOM kill`);
+          warn(`🔥 Process ${i} was SIGKILL'd - likely OOM kill`);
           this.detectOOMKill(i);
         } else if (code !== 0) {
-          console.warn(`⚠️  Process ${i} exited abnormally - potential resource issue`);
+          warn(`⚠️  Process ${i} exited abnormally - potential resource issue`);
         }
         
         processInstance.isReady = false;
@@ -1309,8 +1309,8 @@ export class ProcessPoolEmbedder implements IEmbedder {
       });
 
       // Handle process errors
-      childProcess.on('error', (error) => {
-        console.error(`❌ Process ${i} error:`, error);
+      childProcess.on('error', (err) => {
+        error(`❌ Process ${i} error:`, err);
         processInstance.isReady = false;
         processInstance.isAvailable = false;
       });
@@ -1335,7 +1335,7 @@ export class ProcessPoolEmbedder implements IEmbedder {
         processInstance.isReady = true;
         log(`[ProcessPool] Process ${processInstance.id} ready with isolated FastEmbedding`);
       } else {
-        console.error(`❌ Process ${processInstance.id} initialization failed:`, message.error);
+        error(`❌ Process ${processInstance.id} initialization failed:`, message.error);
       }
     } else if (type === 'progress' && batchId) {
       // Handle progress updates from child process
@@ -1343,10 +1343,10 @@ export class ProcessPoolEmbedder implements IEmbedder {
       if (pending && pending.onProgress) {
         pending.onProgress(message);
       }
-      console.log(`📊 Process ${processInstance.id} progress: ${message.message || `${message.processed}/${message.total} (${message.progress}%)`}`);
+      log(`📊 Process ${processInstance.id} progress: ${message.message || `${message.processed}/${message.total} (${message.progress}%)`}`);
     } else if (type === 'timeout_warning' && batchId) {
       // Handle timeout warnings from child process
-      console.log(`⚠️ Process ${processInstance.id}: ${message.message}`);
+      log(`⚠️ Process ${processInstance.id}: ${message.message}`);
     } else if (type === 'embed_complete' && batchId) {
       const pending = processInstance.pendingRequests.get(batchId);
       if (pending) {
@@ -1358,7 +1358,7 @@ export class ProcessPoolEmbedder implements IEmbedder {
         
         if (message.success) {
           if (message.partial) {
-            console.log(`⚠️ Process ${processInstance.id} returned partial results: ${message.stats.chunksProcessed}/${message.stats.totalChunks} chunks`);
+            log(`⚠️ Process ${processInstance.id} returned partial results: ${message.stats.chunksProcessed}/${message.stats.totalChunks} chunks`);
           }
           pending.resolve(message);
         } else {
@@ -1400,15 +1400,15 @@ export class ProcessPoolEmbedder implements IEmbedder {
         }
       }
     } else if (type === 'error') {
-      console.error(`❌ Process ${processInstance.id} error:`, message.error);
+      error(`❌ Process ${processInstance.id} error:`, message.error);
     } else if (type === 'abort_ack') {
-      console.log(`✅ Process ${processInstance.id} acknowledged abort: ${message.reason}`);
+      log(`✅ Process ${processInstance.id} acknowledged abort: ${message.reason}`);
       // This will be handled by the promise in abortChildProcess method
     }
   }
 
   private async restartProcess(processInstance: ProcessInstance): Promise<void> {
-    console.log(`🔄 Restarting failed process ${processInstance.id}...`);
+    log(`🔄 Restarting failed process ${processInstance.id}...`);
     
     // Kill old process if still running
     if (processInstance.process && !processInstance.process.killed) {
@@ -1446,14 +1446,14 @@ export class ProcessPoolEmbedder implements IEmbedder {
     
     // Set up error handling with OOM detection
     childProcess.on('exit', (code, signal) => {
-      console.error(`❌ Process ${processInstance.id} exited with code ${code}, signal ${signal}`);
+      error(`❌ Process ${processInstance.id} exited with code ${code}, signal ${signal}`);
       
       // Detect OOM kills (SIGKILL from system)
       if (signal === 'SIGKILL' && code === null) {
-        console.warn(`🔥 Process ${processInstance.id} was SIGKILL'd - likely OOM kill`);
+        warn(`🔥 Process ${processInstance.id} was SIGKILL'd - likely OOM kill`);
         this.detectOOMKill(processInstance.id);
       } else if (code !== 0) {
-        console.warn(`⚠️  Process ${processInstance.id} exited abnormally - potential resource issue`);
+        warn(`⚠️  Process ${processInstance.id} exited abnormally - potential resource issue`);
       }
       
       processInstance.isReady = false;
@@ -1467,8 +1467,8 @@ export class ProcessPoolEmbedder implements IEmbedder {
       processInstance.pendingRequests.clear();
     });
     
-    childProcess.on('error', (error) => {
-      console.error(`❌ Process ${processInstance.id} error:`, error);
+    childProcess.on('error', (err) => {
+      error(`❌ Process ${processInstance.id} error:`, err);
       processInstance.isReady = false;
       processInstance.isAvailable = false;
     });
@@ -1507,7 +1507,7 @@ export class ProcessPoolEmbedder implements IEmbedder {
     const embeddingTexts = chunks.map(chunk => this.createOptimizedEmbeddingText(chunk));
     const batchId = `recovery-${batchIndex}-${Date.now()}`;
     
-    console.log(`🔧 Processing recovery batch with ${chunks.length} chunks`);
+    log(`🔧 Processing recovery batch with ${chunks.length} chunks`);
     
     return new Promise<{ embeddings: number[][], stats: any }>((resolve, reject) => {
       const timeoutDuration = 60000; // 1 minute timeout for recovery
@@ -1519,7 +1519,7 @@ export class ProcessPoolEmbedder implements IEmbedder {
       }, timeoutDuration);
       
       const progressCallback = (progressMessage: any) => {
-        console.log(`🔧 Recovery batch progress: ${progressMessage.message || 'Processing...'}`);
+        log(`🔧 Recovery batch progress: ${progressMessage.message || 'Processing...'}`);
       };
       
       processInstance.pendingRequests.set(batchId, { 
@@ -1556,7 +1556,7 @@ export class ProcessPoolEmbedder implements IEmbedder {
       // In emergency mode or single process fallback, use only first process
       if (this.adaptivePool.emergencyMode || this.adaptivePool.singleProcessFallback) {
         eligibleProcesses = eligibleProcesses.slice(0, 1);
-        console.log(`🚨 Emergency/Single process mode: using only process ${eligibleProcesses[0]?.id || 'none'}`);
+        log(`🚨 Emergency/Single process mode: using only process ${eligibleProcesses[0]?.id || 'none'}`);
       }
       
       const availableProcess = eligibleProcesses
@@ -1588,10 +1588,10 @@ export class ProcessPoolEmbedder implements IEmbedder {
         }));
         
         results.push(...subResults);
-        console.log(`✅ Sub-batch retry successful: ${subBatch.length} chunks processed`);
+        log(`✅ Sub-batch retry successful: ${subBatch.length} chunks processed`);
         
-      } catch (error) {
-        console.error(`❌ Sub-batch retry failed:`, error);
+      } catch (err) {
+        error(`❌ Sub-batch retry failed:`, err);
         // Add zero embeddings for failed chunks
         const failedResults = subBatch.map((chunk, idx) => ({
           originalIndex: originalBatchIndex * this.adaptiveBatch.currentSize + i + idx,
@@ -1656,11 +1656,11 @@ export class ProcessPoolEmbedder implements IEmbedder {
           try {
             const message = JSON.parse(line);
             this.handleProcessMessage(processInstance, message);
-          } catch (error) {
+          } catch (err) {
             // Not JSON - could be log output, display it
             const output = line.trim();
             if (output.includes('[Process') || output.includes('FastEmbedding')) {
-              console.log(output);
+              log(output);
             }
           }
         }
@@ -1680,17 +1680,17 @@ export class ProcessPoolEmbedder implements IEmbedder {
           message.includes('Completed batch ') || 
           message.includes('Splitting ') && message.includes(' texts into')) {
         // These are debug/info messages, not errors
-        console.log(`[Process ${processInstance.id} DEBUG]: ${message}`);
+        log(`[Process ${processInstance.id} DEBUG]: ${message}`);
       } else if (message.includes('Received abort') || 
                  message.includes('Aborting gracefully') ||
                  message.includes('Shutting down gracefully') ||
                  message.includes('Received SIGTERM') ||
                  message.includes('Received SIGINT')) {
         // Shutdown messages are info, not errors
-        console.log(`[Process ${processInstance.id} INFO]: ${message}`);
+        log(`[Process ${processInstance.id} INFO]: ${message}`);
       } else {
         // Actual errors
-        console.error(`[Process ${processInstance.id} ERROR]: ${message}`);
+        error(`[Process ${processInstance.id} ERROR]: ${message}`);
       }
     });
     
@@ -1703,14 +1703,14 @@ export class ProcessPoolEmbedder implements IEmbedder {
     
     // Handle process exit
     childProcess.on('exit', (code, signal) => {
-      console.log(`[Process ${processInstance.id}] Exited with code ${code}, signal ${signal}`);
+      log(`[Process ${processInstance.id}] Exited with code ${code}, signal ${signal}`);
       processInstance.isReady = false;
       processInstance.isAvailable = false;
     });
     
     // Handle process error
-    childProcess.on('error', (error) => {
-      console.error(`[Process ${processInstance.id} ERROR]:`, error);
+    childProcess.on('error', (err) => {
+      error(`[Process ${processInstance.id} ERROR]:`, err);
       processInstance.isReady = false;
       processInstance.isAvailable = false;
     });
@@ -1726,7 +1726,7 @@ export class ProcessPoolEmbedder implements IEmbedder {
     let modelLoadingSeen = false;
     
     // Send init message first!
-    console.log(`📤 Sending init message to process ${processInstance.id}...`);
+    log(`📤 Sending init message to process ${processInstance.id}...`);
     this.sendToProcess(processInstance, {
       type: 'init',
       data: { processId: processInstance.id }
@@ -1754,7 +1754,7 @@ export class ProcessPoolEmbedder implements IEmbedder {
           // Show periodic diagnostics during long waits
           if (elapsed - lastDiagnostic >= diagnosticInterval) {
             const phase = modelLoadingSeen ? 'Loading model' : initMessageSeen ? 'Starting' : 'Initializing';
-            console.log(`⏳ Process ${processInstance.id}: ${phase} (${Math.round(elapsed/1000)}s elapsed)...`);
+            log(`⏳ Process ${processInstance.id}: ${phase} (${Math.round(elapsed/1000)}s elapsed)...`);
             lastDiagnostic = elapsed;
           }
           setTimeout(checkReady, 1000);
@@ -1904,7 +1904,7 @@ export class ProcessPoolEmbedder implements IEmbedder {
   private evictLRUEntries(): void {
     // Prevent concurrent evictions
     if (this.isEvicting) {
-      console.log(`⚠️ Cache eviction already in progress, skipping...`);
+      log(`⚠️ Cache eviction already in progress, skipping...`);
       return;
     }
     
@@ -1918,7 +1918,7 @@ export class ProcessPoolEmbedder implements IEmbedder {
         return;
       }
       
-      console.log(`🧹 Cache eviction: Removing ${targetRemoval} entries (${currentSize} → ${currentSize - targetRemoval})`);
+      log(`🧹 Cache eviction: Removing ${targetRemoval} entries (${currentSize} → ${currentSize - targetRemoval})`);
       
       // Convert to array and sort by LRU score (combination of lastAccessed and hitCount)
       const entries = Array.from(this.embeddingCache.entries())
@@ -1945,10 +1945,10 @@ export class ProcessPoolEmbedder implements IEmbedder {
       
       this.cacheStats.evictions += removed;
       
-      console.log(`✅ Cache eviction completed: Removed ${removed} entries, cache size now ${this.embeddingCache.size}`);
+      log(`✅ Cache eviction completed: Removed ${removed} entries, cache size now ${this.embeddingCache.size}`);
       
-    } catch (error) {
-      console.error(`❌ Cache eviction failed:`, error);
+    } catch (err) {
+      error(`❌ Cache eviction failed:`, err);
     } finally {
       this.isEvicting = false;
     }
@@ -1995,7 +1995,7 @@ export class ProcessPoolEmbedder implements IEmbedder {
     const totalChildMemoryMB = activeProcessCount * estimatedChildHeapMB;
     const totalUsedMB = mainUsedMB + totalChildMemoryMB;
     
-    console.log(`📊 Reliable memory estimate: Main=${mainUsedMB}MB, Children=${activeProcessCount}x${estimatedChildHeapMB}MB=${totalChildMemoryMB}MB, Total=${totalUsedMB}MB`);
+    log(`📊 Reliable memory estimate: Main=${mainUsedMB}MB, Children=${activeProcessCount}x${estimatedChildHeapMB}MB=${totalChildMemoryMB}MB, Total=${totalUsedMB}MB`);
     
     return {
       total: totalUsedMB,
@@ -2017,7 +2017,7 @@ export class ProcessPoolEmbedder implements IEmbedder {
       
       const requestId = `memory-${Date.now()}-${processInstance.id}`;
       const timeout = setTimeout(() => {
-        console.warn(`⚠️ Memory query timeout for process ${processInstance.id}`);
+        warn(`⚠️ Memory query timeout for process ${processInstance.id}`);
         resolve(0);
       }, 2000); // Increased timeout to 2 seconds
       
@@ -2026,12 +2026,12 @@ export class ProcessPoolEmbedder implements IEmbedder {
         resolve: (response: any) => {
           clearTimeout(timeout);
           const memoryMB = Math.round(response.memoryUsage.heapUsed / (1024 * 1024));
-          console.log(`📊 Process ${processInstance.id} memory: ${memoryMB}MB`);
+          log(`📊 Process ${processInstance.id} memory: ${memoryMB}MB`);
           resolve(memoryMB);
         },
         reject: (error: any) => {
           clearTimeout(timeout);
-          console.warn(`⚠️ Memory query failed for process ${processInstance.id}:`, error);
+          warn(`⚠️ Memory query failed for process ${processInstance.id}:`, error);
           resolve(0);
         },
         timeout
@@ -2078,7 +2078,7 @@ export class ProcessPoolEmbedder implements IEmbedder {
     this.adaptivePool.consecutiveOOMKills++;
     this.adaptivePool.lastOOMKill = Date.now();
     
-    console.warn(`⚠️  OOM kill detected for process ${processId}. Consecutive OOM kills: ${this.adaptivePool.consecutiveOOMKills}`);
+    warn(`⚠️  OOM kill detected for process ${processId}. Consecutive OOM kills: ${this.adaptivePool.consecutiveOOMKills}`);
     
     // Activate emergency mode after 2+ OOM kills
     if (this.adaptivePool.consecutiveOOMKills >= 2) {
@@ -2089,7 +2089,7 @@ export class ProcessPoolEmbedder implements IEmbedder {
       this.adaptiveBatch.currentSize = Math.max(10, this.adaptiveBatch.minSize);
       this.adaptiveBatch.maxSize = 50;
       
-      console.warn(`🚨 EMERGENCY MODE ACTIVATED: Falling back to single process, small batches`);
+      warn(`🚨 EMERGENCY MODE ACTIVATED: Falling back to single process, small batches`);
     }
   }
 
@@ -2099,7 +2099,7 @@ export class ProcessPoolEmbedder implements IEmbedder {
       this.adaptivePool.consecutiveOOMKills = Math.max(0, this.adaptivePool.consecutiveOOMKills - 1);
       
       if (this.adaptivePool.consecutiveOOMKills === 0) {
-        console.log(`✅ OOM tracking reset - system appears stable`);
+        log(`✅ OOM tracking reset - system appears stable`);
       }
     }
   }
@@ -2131,7 +2131,7 @@ export class ProcessPoolEmbedder implements IEmbedder {
     // Adapt batch size based on performance
     this.adaptBatchSize(metrics);
     
-    console.log(`📈 Batch perf: size=${batchSize}, duration=${duration}ms, throughput=${throughput.toFixed(1)} chunks/s, heap=${currentHeap.heapUsedMB}MB (${currentHeap.availableHeapMB}MB available)`);
+    log(`📈 Batch perf: size=${batchSize}, duration=${duration}ms, throughput=${throughput.toFixed(1)} chunks/s, heap=${currentHeap.heapUsedMB}MB (${currentHeap.availableHeapMB}MB available)`);
   }
 
   // Adaptive batch sizing algorithm with hysteresis to prevent oscillation
@@ -2154,8 +2154,8 @@ export class ProcessPoolEmbedder implements IEmbedder {
       config.lastAdjustment = Date.now();
       config.stableCount = 0; // Reset stability counter
       
-      console.log(`⚠️ Memory pressure detected - system memory constrained!`);
-      console.log(`  Reducing batch size: ${oldSize} → ${config.currentSize} (-${reduction} chunks)`);
+      log(`⚠️ Memory pressure detected - system memory constrained!`);
+      log(`  Reducing batch size: ${oldSize} → ${config.currentSize} (-${reduction} chunks)`);
       return;
     }
     
@@ -2175,7 +2175,7 @@ export class ProcessPoolEmbedder implements IEmbedder {
     if (this.detectOscillation(config)) {
       config.isOptimizing = false;
       config.optimalSize = config.currentSize;
-      console.log(`🌊 Oscillation detected! Converging at batch size ${config.currentSize}`);
+      log(`🌊 Oscillation detected! Converging at batch size ${config.currentSize}`);
       return;
     }
     
@@ -2203,7 +2203,7 @@ export class ProcessPoolEmbedder implements IEmbedder {
         config.currentSize = Math.min(config.maxSize, config.currentSize + config.stepSize);
         config.lastDirection = 'up';
         config.stableCount = 0;
-        console.log(`🚀 Throughput improved (${throughputRatio.toFixed(3)}x)! Increasing batch size: ${oldSize} → ${config.currentSize}`);
+        log(`🚀 Throughput improved (${throughputRatio.toFixed(3)}x)! Increasing batch size: ${oldSize} → ${config.currentSize}`);
       }
       else if (throughputRatio < downThreshold) {
         // Performance declined - we may have found the peak
@@ -2215,10 +2215,10 @@ export class ProcessPoolEmbedder implements IEmbedder {
         if (config.stableCount >= 2) { // Need multiple confirmations
           config.isOptimizing = false;
           config.optimalSize = config.currentSize;
-          console.log(`🎯 Found optimal batch size: ${config.currentSize} (throughput peaked, confirmed over ${config.stableCount + 1} measurements)`);
+          log(`🎯 Found optimal batch size: ${config.currentSize} (throughput peaked, confirmed over ${config.stableCount + 1} measurements)`);
         } else {
           config.stableCount++;
-          console.log(`📉 Throughput declined (${throughputRatio.toFixed(3)}x), reducing batch size: ${oldSize} → ${config.currentSize} (confirmation ${config.stableCount}/3)`);
+          log(`📉 Throughput declined (${throughputRatio.toFixed(3)}x), reducing batch size: ${oldSize} → ${config.currentSize} (confirmation ${config.stableCount}/3)`);
         }
       }
       else {
@@ -2227,7 +2227,7 @@ export class ProcessPoolEmbedder implements IEmbedder {
         if (config.stableCount >= 5) {
           config.isOptimizing = false;
           config.optimalSize = config.currentSize;
-          console.log(`🎯 Converged at stable batch size: ${config.currentSize} (${config.stableCount} stable measurements)`);
+          log(`🎯 Converged at stable batch size: ${config.currentSize} (${config.stableCount} stable measurements)`);
         }
       }
     } else {
@@ -2246,7 +2246,7 @@ export class ProcessPoolEmbedder implements IEmbedder {
           config.currentSize = Math.min(config.maxSize, config.currentSize + adjustment);
         }
         
-        console.log(`🔧 Fine-tuning batch size: ${oldSize} → ${config.currentSize} (throughput: ${throughputRatio.toFixed(3)}x)`);
+        log(`🔧 Fine-tuning batch size: ${oldSize} → ${config.currentSize} (throughput: ${throughputRatio.toFixed(3)}x)`);
       }
     }
     
@@ -2284,7 +2284,7 @@ export class ProcessPoolEmbedder implements IEmbedder {
     const cacheHits = cached.filter(emb => emb !== null).length;
     const cacheMisses = uncachedIndices.length;
     
-    console.log(`🧠 Cache check: ${cacheHits} hits, ${cacheMisses} misses (${Math.round(cacheHits/task.chunks.length*100)}% hit rate)`);
+    log(`🧠 Cache check: ${cacheHits} hits, ${cacheMisses} misses (${Math.round(cacheHits/task.chunks.length*100)}% hit rate)`);
     
     let processEmbeddings: number[][] = [];
     
@@ -2297,7 +2297,7 @@ export class ProcessPoolEmbedder implements IEmbedder {
       if (this.adaptivePool.emergencyMode || this.adaptivePool.singleProcessFallback) {
         const readyProcesses = this.processes.filter(p => p.isReady);
         eligibleProcesses = readyProcesses.slice(0, 1);
-        console.log(`🚨 Emergency/Single process mode: using only process ${eligibleProcesses[0]?.id || 'none'}`);
+        log(`🚨 Emergency/Single process mode: using only process ${eligibleProcesses[0]?.id || 'none'}`);
       }
       
       const availableProcess = eligibleProcesses
@@ -2316,7 +2316,7 @@ export class ProcessPoolEmbedder implements IEmbedder {
         const uncachedChunks = uncachedIndices.map(i => task.chunks[i]);
         const embeddingTexts = uncachedChunks.map(chunk => this.createOptimizedEmbeddingText(chunk));
         
-        console.log(`🔄 Process ${availableProcess.id} processing batch ${task.batchIndex} (${uncachedChunks.length}/${task.chunks.length} uncached chunks)`);
+        log(`🔄 Process ${availableProcess.id} processing batch ${task.batchIndex} (${uncachedChunks.length}/${task.chunks.length} uncached chunks)`);
         
         // Record memory before processing (including child processes for accurate monitoring)
         const memoryBefore = this.getMemoryStats().used; // Quick estimate for immediate use
@@ -2331,7 +2331,7 @@ export class ProcessPoolEmbedder implements IEmbedder {
         if (useSharedMemory) {
           const bufferSize = uncachedChunks.length * embedDimension * 4; // 4 bytes per float32
           sharedBuffer = this.createSharedBuffer(availableProcess, bufferKey, bufferSize);
-          console.log(`💾 Using SharedArrayBuffer for ${uncachedChunks.length} chunks (${Math.round(bufferSize/1024)}KB)`);
+          log(`💾 Using SharedArrayBuffer for ${uncachedChunks.length} chunks (${Math.round(bufferSize/1024)}KB)`);
         }
         
         // Send batch with shared memory info to external process
@@ -2351,7 +2351,7 @@ export class ProcessPoolEmbedder implements IEmbedder {
             }, timeoutDuration);
 
             const progressCallback = (progressMessage: any) => {
-              console.log(`📊 Batch ${task.batchIndex} progress: ${progressMessage.message || 'Processing...'}`);
+              log(`📊 Batch ${task.batchIndex} progress: ${progressMessage.message || 'Processing...'}`);
             };
 
             availableProcess.pendingRequests.set(batchId, { 
@@ -2375,30 +2375,30 @@ export class ProcessPoolEmbedder implements IEmbedder {
               }
             });
           });
-        } catch (error) {
+        } catch (err) {
           processingSuccess = false;
-          console.error(`❌ Process ${availableProcess.id} failed batch ${task.batchIndex}:`, error);
+          error(`❌ Process ${availableProcess.id} failed batch ${task.batchIndex}:`, err);
           
           // Increment failure count and trigger recovery
           this.adaptiveBatch.consecutiveFailures++;
-          console.log(`🚨 Process failure detected (${this.adaptiveBatch.consecutiveFailures} consecutive failures)`);
+          log(`🚨 Process failure detected (${this.adaptiveBatch.consecutiveFailures} consecutive failures)`);
           
           // If we have multiple failures, switch to recovery mode
           if (this.adaptiveBatch.consecutiveFailures >= 2) {
-            console.log(`🔧 Entering failure recovery mode - reducing batch size to ${this.adaptiveBatch.failureRecoverySize}`);
+            log(`🔧 Entering failure recovery mode - reducing batch size to ${this.adaptiveBatch.failureRecoverySize}`);
             const originalSize = this.adaptiveBatch.currentSize;
             this.adaptiveBatch.currentSize = this.adaptiveBatch.failureRecoverySize || 50;
             
             try {
               // Restart the failed process
               await this.restartProcess(availableProcess);
-              console.log(`✅ Process ${availableProcess.id} restarted successfully`);
+              log(`✅ Process ${availableProcess.id} restarted successfully`);
               
               // Retry with smaller chunks
               const smallerChunks = uncachedChunks.slice(0, this.adaptiveBatch.currentSize);
               const remainingChunks = uncachedChunks.slice(this.adaptiveBatch.currentSize);
               
-              console.log(`🔄 Retrying with reduced batch: ${smallerChunks.length} chunks (${remainingChunks.length} remaining)`);
+              log(`🔄 Retrying with reduced batch: ${smallerChunks.length} chunks (${remainingChunks.length} remaining)`);
               
               // Process smaller batch
               const retryResult = await this.processSmallBatch(availableProcess, smallerChunks, task.batchIndex);
@@ -2407,20 +2407,20 @@ export class ProcessPoolEmbedder implements IEmbedder {
               // If successful, reset failure count and restore some confidence
               this.adaptiveBatch.consecutiveFailures = 0;
               this.adaptiveBatch.currentSize = Math.min(originalSize, this.adaptiveBatch.currentSize * 2);
-              console.log(`✅ Recovery successful - gradually increasing batch size to ${this.adaptiveBatch.currentSize}`);
+              log(`✅ Recovery successful - gradually increasing batch size to ${this.adaptiveBatch.currentSize}`);
               
               // Update cache with successful embeddings
               this.updateCache(smallerChunks, processEmbeddings, task.timestamp);
               
               // If there were remaining chunks, we'll need to process them separately
               if (remainingChunks.length > 0) {
-                console.log(`📋 ${remainingChunks.length} chunks remaining - will be processed in next batch`);
+                log(`📋 ${remainingChunks.length} chunks remaining - will be processed in next batch`);
                 // Add remaining chunks back to queue for next iteration
                 // This is handled by the caller in the main processing loop
               }
               
             } catch (retryError) {
-              console.error(`❌ Recovery failed for process ${availableProcess.id}:`, retryError);
+              error(`❌ Recovery failed for process ${availableProcess.id}:`, retryError);
               // Further reduce batch size for next attempt
               this.adaptiveBatch.failureRecoverySize = Math.max(10, (this.adaptiveBatch.failureRecoverySize || 50) / 2);
               this.adaptiveBatch.currentSize = this.adaptiveBatch.failureRecoverySize;
@@ -2435,7 +2435,7 @@ export class ProcessPoolEmbedder implements IEmbedder {
           
           // Track actual Node.js heap usage - simple and direct
           const heapUsage = this.getCurrentHeapUsage();
-          console.log(`🚀 Heap usage: ${heapUsage.heapUsedMB}MB used, ${heapUsage.availableHeapMB}MB available (${heapUsage.heapTotalMB}MB total)`);
+          log(`🚀 Heap usage: ${heapUsage.heapUsedMB}MB used, ${heapUsage.availableHeapMB}MB available (${heapUsage.heapTotalMB}MB total)`);
           
           this.recordBatchPerformance(uncachedChunks.length, duration, memoryBefore, heapUsage.heapUsedMB, processingSuccess);
           
@@ -2447,18 +2447,18 @@ export class ProcessPoolEmbedder implements IEmbedder {
           // Get reliable system-wide stats for next iteration (don't block current processing)
           this.getSystemWideMemoryStats().then(systemStats => {
             if (systemStats.reliable) {
-              console.log(`📊 System memory: Total=${systemStats.total}MB (Main=${systemStats.main}MB, Children=${systemStats.children.reduce((sum, mem) => sum + mem, 0)}MB)`);
+              log(`📊 System memory: Total=${systemStats.total}MB (Main=${systemStats.main}MB, Children=${systemStats.children.reduce((sum, mem) => sum + mem, 0)}MB)`);
             }
           }).catch(() => {
             // Silently ignore
           });
         }
 
-        console.log(`✅ Process ${availableProcess.id} completed batch ${task.batchIndex} (${uncachedChunks.length} chunks) in ${result.stats.duration}ms`);
+        log(`✅ Process ${availableProcess.id} completed batch ${task.batchIndex} (${uncachedChunks.length} chunks) in ${result.stats.duration}ms`);
         
         // Reset failure count on successful processing
         if (this.adaptiveBatch.consecutiveFailures > 0) {
-          console.log(`✅ Successful batch - resetting failure count from ${this.adaptiveBatch.consecutiveFailures} to 0`);
+          log(`✅ Successful batch - resetting failure count from ${this.adaptiveBatch.consecutiveFailures} to 0`);
           this.adaptiveBatch.consecutiveFailures = 0;
         }
         
@@ -2522,8 +2522,8 @@ export class ProcessPoolEmbedder implements IEmbedder {
     // Use fixed batch size - always 400 chunks for optimal embedding model performance
     const batchSize = this.getFixedBatchSize(chunks.length);
     
-    console.log(`🎯 Fixed batch size: ${batchSize} chunks per batch (optimal for embedding model)`);
-    console.log(`📊 No adaptation needed - 400 chunk size is optimal for BGE-small-en-v1.5 model`);
+    log(`🎯 Fixed batch size: ${batchSize} chunks per batch (optimal for embedding model)`);
+    log(`📊 No adaptation needed - 400 chunk size is optimal for BGE-small-en-v1.5 model`);
     
     // Create batches for each process with original index tracking
     const batches: { chunks: CodeChunk[]; originalIndices: number[] }[] = [];
@@ -2536,7 +2536,7 @@ export class ProcessPoolEmbedder implements IEmbedder {
       });
     }
     
-    console.log(`🔄 Created ${batches.length} batches for ${this.processCount} processes`);
+    log(`🔄 Created ${batches.length} batches for ${this.processCount} processes`);
     
     // Create tasks for each batch
     const tasks: Promise<ProcessEmbeddingResult[]>[] = [];
@@ -2553,7 +2553,7 @@ export class ProcessPoolEmbedder implements IEmbedder {
       tasks.push(taskPromise);
     }
 
-    console.log(`⏳ Processing ${tasks.length} batches with process pool...`);
+    log(`⏳ Processing ${tasks.length} batches with process pool...`);
     
     // Wait for all tasks to complete with retry logic
     const batchResults = await Promise.allSettled(tasks);
@@ -2566,7 +2566,7 @@ export class ProcessPoolEmbedder implements IEmbedder {
       if (result.status === 'fulfilled') {
         successfulResults.push(result.value);
       } else {
-        console.log(`❌ Batch ${index} failed:`, result.reason);
+        log(`❌ Batch ${index} failed:`, result.reason);
         const startIdx = index * this.adaptiveBatch.currentSize;
         const endIdx = Math.min(startIdx + this.adaptiveBatch.currentSize, chunks.length);
         failedBatches.push({
@@ -2580,11 +2580,11 @@ export class ProcessPoolEmbedder implements IEmbedder {
     // Retry failed batches with smaller chunk sizes
     for (const failedBatch of failedBatches) {
       try {
-        console.log(`🔄 Retrying failed batch ${failedBatch.batchIndex} with ${failedBatch.chunks.length} chunks`);
+        log(`🔄 Retrying failed batch ${failedBatch.batchIndex} with ${failedBatch.chunks.length} chunks`);
         const retryResults = await this.retryFailedBatch(failedBatch.chunks, failedBatch.batchIndex);
         successfulResults.push(retryResults);
       } catch (retryError) {
-        console.error(`❌ Final retry failed for batch ${failedBatch.batchIndex}:`, retryError);
+        error(`❌ Final retry failed for batch ${failedBatch.batchIndex}:`, retryError);
         // Add empty results to maintain indexing
         const emptyResults: ProcessEmbeddingResult[] = failedBatch.chunks.map((chunk, idx) => ({
           originalIndex: failedBatch.batchIndex * this.adaptiveBatch.currentSize + idx,
@@ -2638,8 +2638,8 @@ export class ProcessPoolEmbedder implements IEmbedder {
   }
 
   private printBatchStats(batchResults: ProcessEmbeddingResult[][]): void {
-    console.log('\n📊 Process Pool Statistics:');
-    console.log('━'.repeat(50));
+    log('\n📊 Process Pool Statistics:');
+    log('━'.repeat(50));
     
     // Flatten results for analysis
     const allResults = batchResults.flat();
@@ -2649,14 +2649,14 @@ export class ProcessPoolEmbedder implements IEmbedder {
     const storageStats = this.getStorageStats();
     const utilizationRate = (this.embeddingCache.size / ProcessPoolEmbedder.MAX_CACHE_SIZE * 100);
     
-    console.log(`🧠 Cache Performance:`);
-    console.log(`  Total requests: ${this.cacheStats.total}`);
-    console.log(`  Cache hits: ${this.cacheStats.hits}`);
-    console.log(`  Cache misses: ${this.cacheStats.misses}`);
-    console.log(`  Cache evictions: ${this.cacheStats.evictions}`);
-    console.log(`  Hit rate: ${hitRate.toFixed(1)}%`);
-    console.log(`  Cache size: ${this.embeddingCache.size}/${ProcessPoolEmbedder.MAX_CACHE_SIZE} (${utilizationRate.toFixed(1)}%)`);
-    console.log(`  Memory usage: ~${storageStats.estimatedMemoryMB}MB`);
+    log(`🧠 Cache Performance:`);
+    log(`  Total requests: ${this.cacheStats.total}`);
+    log(`  Cache hits: ${this.cacheStats.hits}`);
+    log(`  Cache misses: ${this.cacheStats.misses}`);
+    log(`  Cache evictions: ${this.cacheStats.evictions}`);
+    log(`  Hit rate: ${hitRate.toFixed(1)}%`);
+    log(`  Cache size: ${this.embeddingCache.size}/${ProcessPoolEmbedder.MAX_CACHE_SIZE} (${utilizationRate.toFixed(1)}%)`);
+    log(`  Memory usage: ~${storageStats.estimatedMemoryMB}MB`);
     
     // Process usage stats (exclude cache hits with processId = -1)
     const processUsage = new Map<number, number>();
@@ -2673,18 +2673,18 @@ export class ProcessPoolEmbedder implements IEmbedder {
       }
     });
     
-    console.log('\nProcess Usage (batches):');
+    log('\nProcess Usage (batches):');
     if (cacheHits > 0) {
-      console.log(`  Cache: ${cacheHits} chunks (no process needed)`);
+      log(`  Cache: ${cacheHits} chunks (no process needed)`);
     }
     processUsage.forEach((batchCount, processId) => {
       const totalChunks = allResults.filter(r => r.stats.processId === processId).length;
-      console.log(`  Process ${processId}: ${batchCount} batch(es), ${totalChunks} chunks`);
+      log(`  Process ${processId}: ${batchCount} batch(es), ${totalChunks} chunks`);
     });
     
-    console.log('\nBatch Sizes:');
+    log('\nBatch Sizes:');
     batchSizes.forEach((size, batchIndex) => {
-      console.log(`  Batch ${batchIndex}: ${size} chunks`);
+      log(`  Batch ${batchIndex}: ${size} chunks`);
     });
     
     // Performance stats (only for non-cached results)
@@ -2697,24 +2697,24 @@ export class ProcessPoolEmbedder implements IEmbedder {
       const maxDuration = Math.max(...batchDurations);
       const minDuration = Math.min(...batchDurations);
       
-      console.log(`\nPerformance:`);
-      console.log(`  Batch duration: ${avgDuration}ms avg (${minDuration}-${maxDuration}ms range)`);
-      console.log(`  Total chunks: ${allResults.length}`);
-      console.log(`  Cached chunks: ${cacheHits}`);
-      console.log(`  Processed chunks: ${allResults.length - cacheHits}`);
-      console.log(`  Total batches: ${batchResults.length}`);
-      console.log(`  Processes used: ${processUsage.size}/${this.processes.length}`);
+      log(`\nPerformance:`);
+      log(`  Batch duration: ${avgDuration}ms avg (${minDuration}-${maxDuration}ms range)`);
+      log(`  Total chunks: ${allResults.length}`);
+      log(`  Cached chunks: ${cacheHits}`);
+      log(`  Processed chunks: ${allResults.length - cacheHits}`);
+      log(`  Total batches: ${batchResults.length}`);
+      log(`  Processes used: ${processUsage.size}/${this.processes.length}`);
     }
     
-    console.log('━'.repeat(50));
+    log('━'.repeat(50));
   }
 
   // Clear cache manually (useful for testing or memory pressure)
   clearCache(): void {
-    console.log(`🧹 Manually clearing cache (${this.embeddingCache.size} entries)`);
+    log(`🧹 Manually clearing cache (${this.embeddingCache.size} entries)`);
     this.embeddingCache.clear();
     this.cacheStats = { hits: 0, misses: 0, total: 0, evictions: 0 };
-    console.log(`✅ Cache cleared successfully`);
+    log(`✅ Cache cleared successfully`);
   }
 
 
@@ -2809,7 +2809,7 @@ export class ProcessPoolEmbedder implements IEmbedder {
     let systemMemory;
     try {
       systemMemory = await this.getSystemWideMemoryStats();
-    } catch (error) {
+    } catch (err) {
       systemMemory = {
         total: 0,
         main: this.getMemoryStats().used,
@@ -2924,9 +2924,9 @@ export class ProcessPoolEmbedder implements IEmbedder {
         }
       };
       
-    } catch (error) {
+    } catch (err) {
       this.interfaceMetrics.errorCount++;
-      console.error('Error in ProcessPoolEmbedder.embedBatch:', error);
+      error('Error in ProcessPoolEmbedder.embedBatch:', err);
       throw error;
     }
   }
@@ -2964,7 +2964,7 @@ export class ProcessPoolEmbedder implements IEmbedder {
         errorRate
       };
       
-    } catch (error) {
+    } catch (err) {
       return {
         status: "unhealthy",
         details: `Health check failed: ${error instanceof Error ? error.message : String(error)}`,

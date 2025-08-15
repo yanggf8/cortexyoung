@@ -1,6 +1,7 @@
 import { EventEmitter } from 'events';
 import { performance } from 'perf_hooks';
 import * as os from 'os';
+import { log } from './logging-utils';
 
 interface PerformanceMetric {
   timestamp: number;
@@ -96,7 +97,7 @@ export class PerformanceMonitor extends EventEmitter {
     if (this.isMonitoring) return;
     
     this.isMonitoring = true;
-    console.log(`📊 Performance monitoring started (${intervalMs}ms intervals)`);
+    log(`📊 Performance monitoring started (${intervalMs}ms intervals)`);
     
     // Monitor system metrics
     const systemInterval = setInterval(() => {
@@ -114,7 +115,7 @@ export class PerformanceMonitor extends EventEmitter {
     this.intervals = [];
     this.isMonitoring = false;
     
-    console.log('📊 Performance monitoring stopped');
+    log('📊 Performance monitoring stopped');
   }
 
   // Record current system metrics
@@ -306,7 +307,7 @@ export class PerformanceMonitor extends EventEmitter {
   // Clear all metrics
   clearMetrics(): void {
     this.metrics = [];
-    console.log('📊 Performance metrics cleared');
+    log('📊 Performance metrics cleared');
   }
 
   // Export metrics to JSON
