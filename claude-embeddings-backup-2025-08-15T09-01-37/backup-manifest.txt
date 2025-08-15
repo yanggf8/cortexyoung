@@ -1,0 +1,3 @@
+-rw-r--r-- 1 yanggf yanggf 0 Aug 15 09:01 claude-embeddings-backup-2025-08-15T09-01-37/backup-manifest.txt
+-rw-r--r-- 1 yanggf yanggf 299355 Aug 15 09:01 claude-embeddings-backup-2025-08-15T09-01-37/cortex-embeddings/cortexyoung-fffee63e5d51a22c/embedding-cache.json
+-rw-r--r-- 1 yanggf yanggf 21039007 Aug 15 09:01 claude-embeddings-backup-2025-08-15T09-01-37/cortex-embeddings/cortexyoung-e27912b0ccf860bb/index.json

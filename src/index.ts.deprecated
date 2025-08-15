@@ -1,0 +1,122 @@
+#!/usr/bin/env node
+
+import { CodebaseIndexer } from './indexer';
+import { timestampedLog, warn, error as timestampedError } from './logging-utils';
+import * as path from 'path';
+
+// Global cleanup handler
+let globalIndexer: CodebaseIndexer | null = null;
+let cleanupInProgress = false;
+
+async function cleanup(reason: string = 'unknown') {
+  if (globalIndexer && !cleanupInProgress) {
+    cleanupInProgress = true;
+    try {
+      timestampedLog(`\n🧹 Cleaning up indexer resources (reason: ${reason})...`);
+      // Use the indexer's cleanup method
+      await globalIndexer.cleanup(reason);
+      timestampedLog('✅ Indexer resources cleaned up successfully');
+    } catch (error) {
+      timestampedError(`❌ Error during cleanup: ${error}`);
+    } finally {
+      globalIndexer = null;
+      cleanupInProgress = false;
+    }
+  }
+}
+
+// Setup cleanup handlers
+process.on('SIGINT', async () => {
+  timestampedLog('\n⚠️ Received SIGINT (Ctrl+C)');
+  await cleanup('SIGINT');
+  process.exit(0);
+});
+
+process.on('SIGTERM', async () => {
+  timestampedLog('\n⚠️ Received SIGTERM');
+  await cleanup('SIGTERM');
+  process.exit(0);
+});
+
+process.on('exit', async () => {
+  await cleanup('exit');
+});
+
+// Handle uncaught exceptions
+process.on('uncaughtException', async (error) => {
+  timestampedError(`❌ Uncaught Exception: ${error}`);
+  await cleanup('uncaughtException');
+  process.exit(1);
+});
+
+process.on('unhandledRejection', async (reason, promise) => {
+  timestampedError(`❌ Unhandled Rejection at: ${promise}, reason: ${reason}`);
+  await cleanup('unhandledRejection');
+  process.exit(1);
+});
+
+async function main() {
+  // Parse command line arguments
+  const args = process.argv.slice(2);
+  const repoPath = args.find(arg => !arg.startsWith('--')) || process.cwd();
+  const forceReindex = args.includes('--reindex') || args.includes('--force-rebuild');
+  const forceFullMode = args.includes('--full');
+  
+  timestampedLog(`🚀 Starting Cortex indexing for: ${repoPath}`);
+  if (forceReindex) timestampedLog('🔄 Force rebuild requested (--reindex)');
+  if (forceFullMode) timestampedLog('🔄 Full mode requested (--full)');
+  
+  // Initialize indexer
+  const indexer = new CodebaseIndexer(repoPath);
+  
+  // Store indexer globally for cleanup
+  globalIndexer = indexer;
+  
+  try {
+    timestampedLog('🔍 Checking for existing embeddings cache...');
+    
+    // Check if valid index exists to determine mode
+    const vectorStore = (indexer as any).vectorStore;
+    await vectorStore.initialize();
+    const hasExistingIndex = await vectorStore.hasValidIndex();
+    
+    // Determine indexing mode
+    let mode: 'full' | 'incremental' | 'reindex';
+    if (forceReindex) {
+      mode = 'reindex';
+    } else if (forceFullMode) {
+      mode = 'full';
+    } else {
+      mode = hasExistingIndex ? 'incremental' : 'full';
+    }
+    
+    timestampedLog(`🔍 Index mode: ${mode} (existing index: ${hasExistingIndex ? 'found' : 'not found'})`);
+    
+    const response = await indexer.indexRepository({
+      repository_path: repoPath,
+      mode,
+      force_rebuild: forceReindex
+    });
+    
+    timestampedLog('✅ Indexing completed successfully');
+    
+    timestampedLog(`✅ Indexing complete!`);
+    timestampedLog(`📊 Results: ${response.chunks_processed} chunks`);
+    timestampedLog(`⚡ Processing time: ${response.time_taken_ms}ms`);
+  } catch (error) {
+    timestampedError(`❌ Indexing failed: ${error}`);
+    process.exit(1);
+  } finally {
+    // Ensure cleanup happens even if other cleanup calls missed
+    await cleanup('finally');
+  }
+}
+
+if (require.main === module) {
+  main().catch(err => timestampedError(`❌ Main function failed: ${err}`));
+}
+
+export * from './types';
+export * from './indexer';
+export * from './searcher';
+export * from './server';

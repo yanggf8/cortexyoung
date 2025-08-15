@@ -1,0 +1,10 @@
+# Claude Embeddings Backup
+Created: Fri Aug 15 09:01:49 CST 2025
+Source: ~/.claude/cortex-embeddings/
+Backup Directory: claude-embeddings-backup-2025-08-15T09-01-37
+Git Commit: ae9671c91f24eba882d4e01fbaa39f2a53d05a29
+System: Linux Thinkpade15 6.6.87.2-microsoft-standard-WSL2 #1 SMP PREEMPT_DYNAMIC Thu Jun  5 18:30:46 UTC 2025 x86_64 x86_64 x86_64 GNU/Linux
+
+# File Summary:
+2 files backed up
+Total Size: 21M

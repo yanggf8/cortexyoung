@@ -2,6 +2,7 @@ import { CodeChunk, IndexRequest, IndexResponse, QueryRequest, QueryResponse, IE
 import { GitScanner } from './git-scanner';
 import { SmartChunker } from './chunker';
 import * as crypto from 'crypto';
+import * as path from 'path';
 import { EmbeddingGenerator } from './embedder';
 import { VectorStore } from './vector-store';
 import { PersistentVectorStore } from './persistent-vector-store';
@@ -15,6 +16,7 @@ import { CloudflareAIEmbedder } from './cloudflare-ai-embedder';
 import { DependencyMapper } from './dependency-mapper';
 import { EmbeddingStrategyManager } from './embedding-strategy';
 import { log, warn, error } from './logging-utils';
+import { EmbeddingBackupUtility } from './embedding-backup-utility';
 import { MMRConfigManager, createMMRConfigFromEnvironment } from './mmr-config-manager';
 import * as os from 'os';
 
@@ -77,6 +79,33 @@ export class CodebaseIndexer {
     }
   }
 
+  /**
+   * Creates a backup of current embedding data before destructive operations
+   * Only backs up valid data (chunk count > 0, valid JSON)
+   */
+  private async createPreRebuildBackup(reason: string): Promise<void> {
+    try {
+      // Get the local storage directory from the vector store
+      const localIndexDir = path.dirname((this.vectorStore as any).metadataPath);
+      
+      // Create validated backup
+      const backupResult = await EmbeddingBackupUtility.createValidatedBackup(
+        localIndexDir, 
+        reason
+      );
+      
+      if (backupResult.success) {
+        log(`✅ Pre-rebuild backup created: ${backupResult.backupPath}`);
+        log(`📊 Backed up ${backupResult.validationResult.chunkCount} chunks safely`);
+      } else {
+        log(`ℹ️  Backup skipped: ${backupResult.skipReason}`);
+      }
+    } catch (error) {
+      warn(`⚠️  Backup creation failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      log('   Proceeding with rebuild (no valid data to lose)');
+    }
+  }
+
   async indexRepository(request: IndexRequest): Promise<IndexResponse> {
     const startTime = Date.now();
     
@@ -90,8 +119,8 @@ export class CodebaseIndexer {
       // Ensure model is loaded before we need it
       await modelLoadPromise;
       
-      // Check if we can load existing embeddings
-      const hasExistingIndex = await this.vectorStore.indexExists();
+      // Check if we can load existing embeddings with valid data
+      const hasExistingIndex = await this.vectorStore.hasValidIndex();
       
       if (hasExistingIndex && request.mode === 'incremental') {
         // Analyze index health for informational purposes only
@@ -105,6 +134,10 @@ export class CodebaseIndexer {
           log('🚨 CRITICAL CORRUPTION DETECTED: ' + recommendation.primaryReason);
           log('🔄 Cannot proceed with incremental mode due to severe index corruption');
           log('   Switching to full rebuild to recover from corruption...');
+          
+          // Create backup before clearing corrupted data (may still have valuable chunks)
+          await this.createPreRebuildBackup('corruption-recovery');
+          
           await this.vectorStore.clearIndex();
           return await this.performFullIndex({ ...request, mode: 'reindex' }, startTime);
         }
@@ -120,6 +153,11 @@ export class CodebaseIndexer {
       } else if (hasExistingIndex && (request.mode === 'full' || request.mode === 'reindex')) {
         const reason = request.mode === 'reindex' ? 'forced rebuild requested' : 'full mode specified';
         log(`🔄 Existing index found, but performing full reindex (${reason})...`);
+        
+        // Create backup before intentional full rebuild
+        const backupReason = request.mode === 'reindex' ? 'manual-reindex' : 'manual-full-rebuild';
+        await this.createPreRebuildBackup(backupReason);
+        
         await this.vectorStore.clearIndex();
       } else {
         log('🆕 No existing index found, performing full index...');

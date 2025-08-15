@@ -523,11 +523,11 @@ export class CortexMCPServer {
 // Helper function for intelligent indexing mode detection with health checks
 async function getIntelligentIndexMode(indexer: CodebaseIndexer, logger: Logger): Promise<'full' | 'incremental'> {
   try {
-    // Access the vector store to check if index exists
+    // Access the vector store to check if valid index exists
     const vectorStore = (indexer as any).vectorStore;
     await vectorStore.initialize();
     
-    const hasExistingIndex = await vectorStore.indexExists();
+    const hasExistingIndex = await vectorStore.hasValidIndex();
     
     if (!hasExistingIndex) {
       logger.info('🧠 Intelligent mode: No existing embeddings found, using full indexing');
@@ -556,9 +556,16 @@ async function getIntelligentIndexMode(indexer: CodebaseIndexer, logger: Logger)
 
 // Main startup function
 async function main() {
-  const repoPath = process.argv[2] || process.cwd();
+  // Parse command line arguments
+  const args = process.argv.slice(2);
+  const repoPath = args.find(arg => !arg.startsWith('--')) || process.cwd();
   const port = parseInt(process.env.PORT || '8765');
   const logFile = process.env.LOG_FILE;
+  
+  // Check for demo mode
+  const isDemoMode = args.includes('--demo');
+  const forceReindex = args.includes('--reindex') || args.includes('--force-rebuild');
+  const forceFullMode = args.includes('--full');
   
   // Create main logger first
   const logger = new Logger(logFile);
@@ -593,9 +600,12 @@ async function main() {
     
     // Determine indexing mode
     let indexMode: 'full' | 'incremental' | 'reindex';
-    if (process.env.INDEX_MODE === 'reindex' || process.env.FORCE_REBUILD === 'true') {
+    if (forceReindex || process.env.INDEX_MODE === 'reindex' || process.env.FORCE_REBUILD === 'true') {
       indexMode = 'reindex';
       logger.info('🔄 Force rebuild requested, using reindex mode');
+    } else if (forceFullMode) {
+      indexMode = 'full';
+      logger.info('🔄 Full mode requested, using full indexing');
     } else if (process.env.INDEX_MODE) {
       indexMode = process.env.INDEX_MODE as 'full' | 'incremental';
       logger.info('Using explicit indexing mode', { mode: indexMode });
@@ -678,6 +688,14 @@ async function main() {
       chunksProcessed: indexResponse.chunks_processed,
       timeMs: indexResponse.time_taken_ms
     });
+    
+    // If in demo mode, exit after indexing is complete
+    if (isDemoMode) {
+      logger.info('🎯 Demo mode complete - indexing finished successfully');
+      logger.info(`📊 Processed ${indexResponse.chunks_processed} chunks in ${indexResponse.time_taken_ms}ms`);
+      logger.info('✅ Demo completed, exiting...');
+      process.exit(0);
+    }
     
     // ==================== STAGE 3: Server Activation ====================
     stageTracker.startStage('stage_3');

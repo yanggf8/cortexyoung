@@ -23,6 +23,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **🎯 File-Content Hash Delta Detection**: Fast file-level change detection with SHA256 hashing - eliminates false positives and achieves 7x faster startup times
 - **📁 Centralized Storage Architecture**: Global constants and utilities for consistent storage path management with complete file paths in logs
 - **⏰ Unified Timestamped Logging**: Consistent ISO timestamp formatting across all components with standardized logging utilities
+- **🛡️ Intelligent Pre-Rebuild Backup System**: Automatic validation and backup of valuable embedding data before destructive operations - only backs up valid data (chunk count > 0), skips empty/corrupt storage
 - **👀 Smart File Watching**: Real-time code intelligence updates with adaptive activity detection (PLANNED)
 
 ### 🚀 **Upcoming: Smart File Watching System**
@@ -374,6 +375,40 @@ npm run cache:clear       # Clears both vector and embedding caches
 
 # Individual cache clearing
 # Note: Embedding cache is cleared automatically when needed
+```
+
+### Backup Management 🛡️
+**Intelligent Pre-Rebuild Backup System** provides automatic data protection:
+
+```bash
+# Automatic backups (triggered during rebuild operations)
+# No manual commands needed - system automatically creates backups
+
+# Example backup creation scenarios:
+# - Manual full reindex operations
+# - Corruption recovery with clearIndex() calls
+# - Storage reset operations requiring data protection
+```
+
+**Backup Features:**
+- **Smart Validation**: Only backs up valuable data (chunk count > 0)
+- **Corruption Detection**: Skips empty or corrupt embedding storage
+- **Automatic Triggering**: No manual intervention needed before destructive operations
+- **Timestamped Archives**: Creates dated backup directories with full metadata
+- **Fast Recovery**: Maintains original directory structure for easy restoration
+
+**Backup Validation Logic:**
+- ✅ **Valid Backup**: JSON parseable, chunk count > 0, valid metadata present
+- ❌ **Skipped Backup**: Empty arrays, malformed JSON, 0 chunks detected
+- 🔍 **Validation Report**: Complete assessment with chunk count and metadata validation
+
+**Example Backup Directory Structure:**
+```
+embedding-backup-manual-full-rebuild-2025-08-15T01-08-27-846Z/
+├── backup-metadata.json    # Backup timestamp, reason, validation results
+├── index.json             # Original vector store data  
+├── embedding-cache.json   # Cached embeddings (if present)
+└── relationships.json     # Symbol relationships (if present)
 ```
 
 ## Testing & Validation
