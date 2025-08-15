@@ -2,6 +2,7 @@ import chokidar from 'chokidar';
 import { readFile } from 'fs/promises';
 import { log, warn } from './logging-utils';
 import { CodebaseIndexer } from './indexer';
+import { StagingManager } from './staging-manager';
 
 interface SemanticChange {
   filePath: string;
@@ -12,6 +13,7 @@ interface SemanticChange {
 export class SemanticWatcher {
   private watcher: chokidar.FSWatcher | null = null;
   private indexer: CodebaseIndexer;
+  private stagingManager: StagingManager;
   private isActive = false;
   
   // Simple semantic patterns that affect Claude Code's understanding
@@ -25,6 +27,11 @@ export class SemanticWatcher {
 
   constructor(repositoryPath: string, indexer: CodebaseIndexer) {
     this.indexer = indexer;
+    this.stagingManager = new StagingManager(repositoryPath, {
+      includeUntrackedFiles: true,
+      maxUntrackedFiles: 50,
+      maxFileSizeKB: 2048 // 2MB max
+    });
     
     this.watcher = chokidar.watch(repositoryPath, {
       ignored: [
@@ -46,11 +53,16 @@ export class SemanticWatcher {
     
     this.watcher
       .on('change', (path) => this.handleFileChange(path))
+      .on('add', (path) => this.handleFileChange(path))  // Handle new files too
       .on('unlink', (path) => this.handleFileDelete(path))
       .on('error', (err) => warn('[SemanticWatcher] Error:', err));
     
     this.isActive = true;
-    log('[SemanticWatcher] Semantic watcher active');
+    log('[SemanticWatcher] Semantic watcher active with dual-mode tracking');
+    
+    // Log staging configuration for visibility
+    const stats = this.stagingManager.getStats();
+    log(`[SemanticWatcher] Staging configuration: untracked files support=${this.stagingManager['config'].includeUntrackedFiles}, max=${this.stagingManager['config'].maxUntrackedFiles}`);
   }
 
   async stop(): Promise<void> {
@@ -63,20 +75,39 @@ export class SemanticWatcher {
 
   private async handleFileChange(filePath: string): Promise<void> {
     try {
+      log(`[SemanticWatcher] Processing file change: ${filePath}`);
+      
+      // First, stage the file (works for both tracked and untracked files)
+      const staged = await this.stagingManager.stageFile(filePath);
+      if (!staged) {
+        log(`[SemanticWatcher] File not staged (excluded or doesn't meet criteria): ${filePath}`);
+        return; // File doesn't meet staging criteria
+      }
+
+      log(`[SemanticWatcher] File staged successfully: ${filePath}`);
+
       const content = await readFile(filePath, 'utf-8');
       const semanticChange = await this.analyzeSemanticChange(filePath, content);
       
       if (semanticChange) {
         log(`[SemanticWatcher] Semantic change detected: ${filePath}`);
         await this.processSemanticChange(semanticChange);
+        this.stagingManager.markFileIndexed(filePath);
+        log(`[SemanticWatcher] File marked as indexed: ${filePath}`);
+      } else {
+        log(`[SemanticWatcher] No semantic changes detected: ${filePath}`);
       }
     } catch (error) {
       // File might be deleted or inaccessible, ignore
+      log(`[SemanticWatcher] Error processing file change for ${filePath}: ${error}`);
     }
   }
 
   private async handleFileDelete(filePath: string): Promise<void> {
     log(`[SemanticWatcher] File deleted: ${filePath}`);
+    
+    // Remove from staging if it was staged
+    this.stagingManager.unstageFile(filePath);
     
     const semanticChange: SemanticChange = {
       filePath,
@@ -133,5 +164,17 @@ export class SemanticWatcher {
 
   isWatching(): boolean {
     return this.isActive;
+  }
+
+  getStagingStats(): any {
+    return this.stagingManager.getStats();
+  }
+
+  getStagedFiles(): any[] {
+    return this.stagingManager.getStagedFiles();
+  }
+
+  getFilesNeedingIndex(): any[] {
+    return this.stagingManager.getFilesNeedingIndex();
   }
 }

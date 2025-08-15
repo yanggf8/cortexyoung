@@ -39,9 +39,29 @@ export class GitScanner {
 
   private async scanFull(): Promise<ScanResult> {
     // Get all tracked files
-    const files = await this.git.raw(['ls-files']).then(result => 
+    let files = await this.git.raw(['ls-files']).then(result => 
       result.split('\n').filter(Boolean)
     );
+
+    // Optionally include untracked files for dual-mode support
+    const includeUntracked = process.env.CORTEX_INCLUDE_UNTRACKED === 'true';
+    if (includeUntracked) {
+      try {
+        // Get untracked files
+        const untrackedFiles = await this.git.raw(['ls-files', '--others', '--exclude-standard']).then(result => 
+          result.split('\n').filter(Boolean)
+        );
+        
+        // Combine tracked and untracked files
+        files = [...files, ...untrackedFiles];
+        
+        if (untrackedFiles.length > 0) {
+          console.log(`[GitScanner] Including ${untrackedFiles.length} untracked files in scan`);
+        }
+      } catch (error) {
+        timestampedWarn(`[GitScanner] Failed to get untracked files: ${error}`);
+      }
+    }
 
     // Filter for code and documentation files and check if files exist
     const relevantFiles = await this.filterExistingFiles(

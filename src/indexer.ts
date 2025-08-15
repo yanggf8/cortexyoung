@@ -586,23 +586,22 @@ export class CodebaseIndexer {
       // Reprocess the changed file
       const chunks = await this.chunker.chunkFile(filePath, content);
       if (chunks.length > 0) {
-        // Use the unified embedder for consistency
-        if (this.unifiedEmbedder) {
-          const texts = chunks.map(chunk => this.createEmbeddingText(chunk));
-          const result = await this.unifiedEmbedder.embedBatch(texts);
-          
-          // Add embeddings to chunks
-          for (let i = 0; i < chunks.length; i++) {
-            chunks[i].embedding = result.embeddings[i];
-          }
-          
-          // Store the updated chunks
-          await this.vectorStore.upsertChunks(chunks);
-        }
-        log(`[CodebaseIndexer] Updated ${chunks.length} chunks for ${relativePath}`);
+        // Use strategy manager for real-time embedding generation
+        const config = EmbeddingStrategyManager.getConfigFromEnv();
+        
+        log(`[CodebaseIndexer] Generating embeddings for real-time update: ${chunks.length} chunks in ${relativePath}`);
+        const result = await this.strategyManager.generateEmbeddings(chunks, config);
+        
+        // Store the updated chunks with embeddings
+        await this.vectorStore.upsertChunks(result.chunks);
+        
+        // Also save to persistent storage for consistency
+        await this.vectorStore.savePersistedIndex();
+        
+        log(`[CodebaseIndexer] Successfully updated ${result.chunks.length} chunks for ${relativePath}`);
       }
     } catch (error) {
-      warn(`[CodebaseIndexer] Failed to process file change for ${relativePath}:`, error);
+      warn(`[CodebaseIndexer] Failed to process file change for ${relativePath}:`, error instanceof Error ? error.message : error);
     }
   }
 

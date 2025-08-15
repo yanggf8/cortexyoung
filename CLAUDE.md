@@ -25,6 +25,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **⏰ Unified Timestamped Logging**: Consistent ISO timestamp formatting across all components with standardized logging utilities
 - **🛡️ Intelligent Pre-Rebuild Backup System**: Automatic validation and backup of valuable embedding data before destructive operations - only backs up valid data (chunk count > 0), skips empty/corrupt storage
 - **👀 Smart File Watching**: Real-time code intelligence updates with semantic change detection ✅ **IMPLEMENTED**
+- **🗂️ Dual-Mode File Tracking**: Intelligent staging system for both git-tracked and untracked files ✅ **IMPLEMENTED**
 
 ### 🚀 **Smart File Watching System - COMPLETED** ✅
 **Status**: Real-time semantic file watching is production-ready and operational
@@ -80,6 +81,19 @@ ENABLE_REAL_TIME=true npm run server # Alternative: use environment variable
 
 # Test file watching validation
 node test-semantic-watching.js      # Run comprehensive validation tests
+node test-realtime-search.ts        # Test dual-mode search functionality
+```
+
+### Dual-Mode File Tracking ✅ **NEW**
+```bash
+# Environment Variables
+CORTEX_INCLUDE_UNTRACKED=true       # Enable untracked files in bulk indexing (optional)
+
+# Real-time system automatically handles:
+# - Git-tracked files: immediate indexing on changes
+# - Untracked files: intelligent staging with size/type filtering
+# - File limits: max 50 untracked files, 2MB per file
+# - Smart cleanup: automatic unstaging on file deletion
 ```
 
 ## Critical Process Management
@@ -348,6 +362,175 @@ const [, relationshipCount] = await Promise.all([
 - **Zero performance impact**: Lightweight wrapper around native console methods
 - **Hierarchical tracking**: Stage and substep progression with duration reporting
 - **Pure chunk comparison**: Real-time delta detection comparing stored chunks vs current chunks
+
+## 🗂️ Dual-Mode File Tracking System ✅ **NEW**
+
+**Revolutionary approach to maximize Claude Code's context window efficiency by intelligently handling both git-tracked and untracked files.**
+
+### Key Innovation: User Touch = Immediate Relevance
+
+**The Problem Solved:**
+- Developer creates new file (`new-feature.ts`) 
+- Starts coding immediately (file not git-tracked yet)
+- Wants to use Claude Code to search/analyze new code
+- Traditional systems miss untracked files
+
+**Our Solution:**
+- **Real-time detection**: SemanticWatcher monitors ALL file changes
+- **Intelligent staging**: StagingManager evaluates untracked files  
+- **Immediate indexing**: User-touched files become searchable instantly
+- **Smart filtering**: Size limits, type detection, exclusion patterns
+
+### Architecture Overview
+
+```
+File Change Event
+    ↓
+SemanticWatcher (chokidar-based)
+    ↓
+StagingManager.stageFile()
+    ↓
+[Git-tracked?] → Yes → Process immediately
+    ↓
+    No → Apply staging criteria:
+         • File size < 2MB
+         • Valid text file
+         • Not in exclusion patterns  
+         • Under file limit (50 max)
+    ↓
+Real-time Embedding Generation
+    ↓
+Vector Store Update
+    ↓
+Claude Code Search Ready
+```
+
+### Staging Manager Features
+
+**Smart File Evaluation:**
+```typescript
+interface StagingConfig {
+  includeUntrackedFiles: boolean;  // Enable untracked file staging
+  maxUntrackedFiles: number;       // Default: 50 files maximum
+  maxFileSizeKB: number;           // Default: 2MB per file
+  excludePatterns: string[];       // node_modules, .git, *.log, etc.
+}
+```
+
+**Status Tracking:**
+- `new`: Untracked file just created
+- `modified`: Tracked file changed
+- `staged`: Ready for indexing
+- `indexed`: Successfully processed
+
+**Automatic Cleanup:**
+- Files deleted → automatically unstaged
+- File limits exceeded → oldest files removed
+- Git tracking added → moved to tracked category
+
+### Real-Time Processing Flow
+
+**For Git-Tracked Files:**
+1. File change detected → immediate processing
+2. Semantic analysis → embedding generation  
+3. Vector store update → searchable in Claude Code
+
+**For Untracked Files:**
+1. File change detected → staging evaluation
+2. Pass criteria → stage for processing
+3. Semantic analysis → embedding generation
+4. Vector store update → searchable in Claude Code
+
+### Performance Benefits
+
+**Context Window Optimization:**
+- **User intent signal**: File editing = 100% relevance indicator
+- **Immediate availability**: No manual reindexing required
+- **Smart filtering**: Only valuable content gets indexed
+- **Resource efficient**: Limits prevent bloat
+
+**Development Workflow:**
+- Create file → start coding → use Claude Code immediately
+- No git add required for Claude Code functionality
+- Seamless transition from untracked to tracked
+- Zero configuration needed
+
+### Configuration Examples
+
+**Default Configuration (Recommended):**
+```bash
+# Real-time watching enabled
+npm run server -- --watch
+
+# Staging limits (built-in)
+Max untracked files: 50
+Max file size: 2MB
+Excluded: node_modules, .git, *.log, dist, build
+```
+
+**Advanced Configuration:**
+```typescript
+// Custom staging config in SemanticWatcher
+const stagingManager = new StagingManager(repositoryPath, {
+  includeUntrackedFiles: true,
+  maxUntrackedFiles: 100,        // Increase limit
+  maxFileSizeKB: 4096,          // 4MB files allowed
+  excludePatterns: [
+    'node_modules/**',
+    '.git/**',
+    '*.log',
+    'custom-ignore-pattern/**'
+  ]
+});
+```
+
+**Bulk Indexing Integration (Optional):**
+```bash
+# Include staged files in bulk indexing
+CORTEX_INCLUDE_UNTRACKED=true npm run startup
+```
+
+### Monitoring and Statistics
+
+**Real-Time Status:**
+```typescript
+// Get staging statistics
+const stats = semanticWatcher.getStagingStats();
+console.log(`Staged files: ${stats.totalStaged}`);
+console.log(`Git tracked: ${stats.gitTracked}`);  
+console.log(`Untracked: ${stats.untracked}`);
+console.log(`Status breakdown:`, stats.byStatus);
+```
+
+**File Management:**
+```typescript
+// Get staged files
+const staged = semanticWatcher.getStagedFiles();
+
+// Get files needing indexing
+const pending = semanticWatcher.getFilesNeedingIndex();
+```
+
+### Testing and Validation
+
+**Test Scripts:**
+```bash
+# Test dual-mode functionality  
+node test-realtime-search.ts
+
+# Create test file and verify immediate indexing
+echo "export function test() {}" > new-test.ts
+# Wait 2 seconds, then search in Claude Code → should find it
+```
+
+**Validation Evidence:**
+```
+[SemanticWatcher] Semantic change detected: untracked-test.ts
+[StagingManager] Staged file: untracked-test.ts (untracked)  
+[CodebaseIndexer] Updated 4 chunks for untracked-test.ts
+```
+
+This system represents a **fundamental advancement in code intelligence** - transforming static indexing into **dynamic, user-intent-driven context optimization** for Claude Code.
 
 ## MCP Server Integration
 
