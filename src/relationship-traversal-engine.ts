@@ -831,4 +831,111 @@ export class RelationshipTraversalEngine {
     
     return this.graph.symbols.size > 0 ? totalConnections / this.graph.symbols.size : 0;
   }
+
+  /**
+   * Find related symbols by relationship type with depth limit
+   */
+  async findRelatedByType(
+    symbolId: string,
+    relationshipTypes: RelationshipType[],
+    maxDepth: number = 2
+  ): Promise<CodeSymbol[]> {
+    const related: CodeSymbol[] = [];
+    const visited = new Set<string>();
+    const queue: { symbolId: string, depth: number }[] = [{ symbolId, depth: 0 }];
+
+    while (queue.length > 0) {
+      const { symbolId: currentSymbolId, depth } = queue.shift()!;
+      
+      if (visited.has(currentSymbolId) || depth >= maxDepth) {
+        continue;
+      }
+      visited.add(currentSymbolId);
+
+      const outgoingRelIds = this.graph.outgoingRelationships.get(currentSymbolId) || new Set();
+      
+      for (const relId of outgoingRelIds) {
+        const relationship = this.graph.relationships.get(relId);
+        if (!relationship || !relationshipTypes.includes(relationship.type)) {
+          continue;
+        }
+
+        const targetSymbol = this.graph.symbols.get(relationship.toSymbol);
+        if (targetSymbol && !visited.has(targetSymbol.id)) {
+          related.push(targetSymbol);
+          
+          if (depth + 1 < maxDepth) {
+            queue.push({ symbolId: targetSymbol.id, depth: depth + 1 });
+          }
+        }
+      }
+    }
+
+    return related;
+  }
+
+  /**
+   * Find callers of a symbol (reverse relationship lookup)
+   */
+  async findCallers(symbolId: string, maxDepth: number = 2): Promise<CodeSymbol[]> {
+    const callers: CodeSymbol[] = [];
+    const visited = new Set<string>();
+    const queue: { symbolId: string, depth: number }[] = [{ symbolId, depth: 0 }];
+
+    while (queue.length > 0) {
+      const { symbolId: currentSymbolId, depth } = queue.shift()!;
+      
+      if (visited.has(currentSymbolId) || depth >= maxDepth) {
+        continue;
+      }
+      visited.add(currentSymbolId);
+
+      const incomingRelIds = this.graph.incomingRelationships.get(currentSymbolId) || new Set();
+      
+      for (const relId of incomingRelIds) {
+        const relationship = this.graph.relationships.get(relId);
+        if (!relationship || relationship.type !== 'calls') {
+          continue;
+        }
+
+        const callerSymbol = this.graph.symbols.get(relationship.fromSymbol);
+        if (callerSymbol && !visited.has(callerSymbol.id)) {
+          callers.push(callerSymbol);
+          
+          if (depth + 1 < maxDepth) {
+            queue.push({ symbolId: callerSymbol.id, depth: depth + 1 });
+          }
+        }
+      }
+    }
+
+    return callers;
+  }
+
+  /**
+   * Find direct relationship between two symbols
+   */
+  async findDirectRelationship(
+    fromSymbolId: string,
+    toSymbolId: string
+  ): Promise<CodeRelationship | null> {
+    const outgoingRelIds = this.graph.outgoingRelationships.get(fromSymbolId) || new Set();
+    
+    for (const relId of outgoingRelIds) {
+      const relationship = this.graph.relationships.get(relId);
+      if (relationship && relationship.toSymbol === toSymbolId) {
+        return relationship;
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Get all symbols in the relationship graph
+   */
+  getAllSymbols(): Map<string, CodeSymbol> {
+    return new Map(this.graph.symbols);
+  }
+
 }

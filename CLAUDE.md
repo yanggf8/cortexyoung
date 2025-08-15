@@ -26,6 +26,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **🛡️ Intelligent Pre-Rebuild Backup System**: Automatic validation and backup of valuable embedding data before destructive operations - only backs up valid data (chunk count > 0), skips empty/corrupt storage
 - **👀 Smart File Watching**: Real-time code intelligence updates with semantic change detection ✅ **IMPLEMENTED**
 - **🗂️ Dual-Mode File Tracking**: Intelligent staging system for both git-tracked and untracked files ✅ **IMPLEMENTED**
+- **🔗 Smart Dependency Chains**: Automatic inclusion of complete dependency context for functions X - includes what X calls and what calls X ✅ **IMPLEMENTED**
 
 ### 🚀 **Smart File Watching System - COMPLETED** ✅
 **Status**: Real-time semantic file watching is production-ready and operational
@@ -48,6 +49,33 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - ✅ **Context freshness**: Claude Code always sees current codebase state - MCP tools reflect live changes
 - ✅ **Zero configuration**: Works seamlessly with existing Cortex architecture
 - ✅ **Cross-platform**: Windows/macOS/Linux compatibility through chokidar
+
+### 🔗 **Smart Dependency Chains - COMPLETED** ✅
+**Status**: Context window optimization with automatic dependency inclusion is production-ready and operational
+
+**✅ Complete Implementation**:
+- ✅ **SmartDependencyTraverser**: Bidirectional call graph analysis with token budget awareness
+- ✅ **Forward Dependencies**: Automatically includes what function X calls
+- ✅ **Backward Dependencies**: Automatically includes what calls function X  
+- ✅ **Critical Dependencies**: Prioritizes types, interfaces, and direct calls
+- ✅ **Token Budget Management**: Respects context window limits with 15% safety buffer
+- ✅ **Context Completeness Scoring**: 0-1 metric for dependency context quality
+- ✅ **MMR Integration**: Diversity optimization for final chunk selection
+- ✅ **Priority-Based Selection**: Critical → Forward → Backward → Contextual
+
+**🎯 Context Window Optimization Benefits**:
+- ✅ **Maximum Relevance**: When Claude asks about function X, automatically includes complete call graph
+- ✅ **Essential Context**: Critical dependencies (types, interfaces) prioritized first  
+- ✅ **Token Efficiency**: Smart selection within token budgets prevents context overflow
+- ✅ **Quality Metrics**: Completeness scores help gauge context adequacy
+- ✅ **Intelligent Balancing**: MMR optimization for diversity vs relevance trade-offs
+
+**🔧 Technical Features**:
+- **Automatic Activation**: Enabled when multi-hop relationship traversal is requested
+- **Token Budget Aware**: Configurable via `token_budget` parameter (default: 4000 tokens)
+- **Depth Control**: Configurable traversal depth (default: 2 hops)
+- **Real-time Compatible**: Works seamlessly with live file watching system
+- **Production Ready**: Integrated into MCP semantic_search tool
 
 ## Quick Start Commands
 

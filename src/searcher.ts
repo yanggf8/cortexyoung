@@ -5,9 +5,11 @@ import { RelationshipTraversalEngine } from './relationship-traversal-engine';
 import { RelationshipQuery, TraversalOptions, RelationshipType } from './relationship-types';
 import { log, warn, error } from './logging-utils';
 import { GuardedMMRSelector, MMRConfig, MMRResult } from './guarded-mmr-selector';
+import { SmartDependencyTraverser, DependencyChain, DependencyOptions } from './smart-dependency-chain';
 
 export class SemanticSearcher {
   private relationshipEngine?: RelationshipTraversalEngine;
+  private smartDependencyTraverser?: SmartDependencyTraverser;
   private mmrSelector: GuardedMMRSelector;
   private mmrEnabled: boolean;
 
@@ -19,6 +21,7 @@ export class SemanticSearcher {
   ) {
     if (repositoryPath) {
       this.relationshipEngine = new RelationshipTraversalEngine(repositoryPath);
+      // Initialize SmartDependencyTraverser when we have relationship engine
     }
     
     // Initialize MMR selector with optional config
@@ -34,6 +37,14 @@ export class SemanticSearcher {
     if (this.relationshipEngine) {
       // Relationship initialization logging handled by stage tracker
       await this.relationshipEngine.buildRelationshipGraph(files);
+      
+      // Initialize SmartDependencyTraverser after relationship graph is built
+      this.smartDependencyTraverser = new SmartDependencyTraverser(
+        this.relationshipEngine,
+        this.vectorStore
+      );
+      
+      log('[Searcher] Smart dependency chain traversal enabled');
       // Success logging handled by stage tracker
     }
   }
@@ -43,6 +54,11 @@ export class SemanticSearcher {
     
     try {
       log(`[Searcher] Searching for: ${query.task}`);
+      
+      // Check if we should use smart dependency chain optimization
+      if (this.smartDependencyTraverser && query.multi_hop?.enabled) {
+        return await this.smartDependencyChainSearch(query, startTime);
+      }
       
       // Check if we should use relationship-aware search
       if (this.relationshipEngine && query.multi_hop?.enabled) {
@@ -76,6 +92,118 @@ export class SemanticSearcher {
         }
       };
     }
+  }
+
+  private async smartDependencyChainSearch(query: QueryRequest, startTime: number): Promise<SearchResponse> {
+    log('[Searcher] Using smart dependency chain optimization for maximum context efficiency');
+    
+    // Generate query embedding for initial search
+    const queryEmbedding = await this.embedder.embed(query.task);
+    
+    // Perform initial semantic search to find seed chunks
+    const initialCandidates = await this.vectorStore.similaritySearch(
+      queryEmbedding,
+      Math.min(query.max_chunks || 20, 8) // Limit seeds for dependency expansion
+    );
+    
+    log(`[Searcher] Found seed chunks=${initialCandidates.length} for dependency chain analysis`);
+    
+    if (initialCandidates.length === 0) {
+      return this.createEmptyResponse(startTime);
+    }
+
+    // Calculate token budget for dependency chain analysis
+    const maxTokens = this.calculateTokenBudget(query);
+    const dependencyOptions: DependencyOptions = {
+      maxTokens,
+      maxDepth: query.multi_hop?.max_hops || 2,
+      includeCallers: true, // Always include what calls our functions
+      includeTypes: true,   // Include type definitions for completeness
+      includeCriticalOnly: false, // Include contextual dependencies if budget allows
+      reserveBuffer: 0.15   // 15% token safety buffer
+    };
+
+    // Find complete dependency chain using smart traversal
+    const dependencyChain = await this.smartDependencyTraverser!.findDependencyChain(
+      initialCandidates,
+      query,
+      dependencyOptions
+    );
+
+    log(`[Searcher] Dependency chain analysis complete: seeds=${dependencyChain.seedChunks.length} critical=${dependencyChain.criticalDependencies.length} forward=${dependencyChain.forwardDependencies.length} backward=${dependencyChain.backwardDependencies.length} contextual=${dependencyChain.contextualDependencies.length} completeness=${(dependencyChain.completenessScore * 100).toFixed(1)}%`);
+
+    // Combine all chunks with priority ordering
+    const allChunks = this.prioritizeDependencyChunks(dependencyChain, query);
+
+    // Apply MMR optimization if enabled and we have more chunks than requested
+    let finalChunks = allChunks;
+    let mmrResult: MMRResult | undefined;
+    
+    if (this.mmrEnabled && allChunks.length > (query.max_chunks || 20)) {
+      try {
+        mmrResult = await this.mmrSelector.selectOptimalChunks(
+          allChunks,
+          query,
+          query.max_chunks || 20
+        );
+        finalChunks = mmrResult.selectedChunks;
+        
+        log(`[Searcher] MMR optimization applied to dependency chain original=${allChunks.length} selected=${finalChunks.length} tokens=${mmrResult.totalTokens} critical_coverage=${(mmrResult.criticalSetCoverage * 100).toFixed(1)}%`);
+      } catch (mmrError) {
+        warn(`[Searcher] MMR optimization failed on dependency chain, using priority ordering error=${mmrError instanceof Error ? mmrError.message : mmrError}`);
+        finalChunks = allChunks.slice(0, query.max_chunks || 20);
+      }
+    } else {
+      finalChunks = allChunks.slice(0, query.max_chunks || 20);
+    }
+
+    // Create enhanced context package with dependency chain insights
+    const contextPackage = this.synthesizeDependencyChainContext(
+      finalChunks,
+      dependencyChain,
+      query.context_mode || 'structured',
+      mmrResult
+    );
+
+    const queryTime = Date.now() - startTime;
+    
+    return {
+      status: 'success',
+      chunks: finalChunks,
+      context_package: contextPackage,
+      query_time_ms: queryTime,
+      total_chunks_considered: allChunks.length,
+      dependency_chain: {
+        completeness_score: dependencyChain.completenessScore,
+        total_dependencies: dependencyChain.criticalDependencies.length + 
+                           dependencyChain.forwardDependencies.length + 
+                           dependencyChain.backwardDependencies.length + 
+                           dependencyChain.contextualDependencies.length,
+        relationship_paths: dependencyChain.relationshipPaths.slice(0, 5)
+      },
+      efficiency_score: mmrResult?.diversityScore || dependencyChain.completenessScore,
+      metadata: {
+        total_chunks_found: allChunks.length,
+        query_time_ms: queryTime,
+        chunks_returned: finalChunks.length,
+        token_estimate: mmrResult?.totalTokens || dependencyChain.totalTokens,
+        efficiency_score: mmrResult?.diversityScore || dependencyChain.completenessScore,
+        dependency_metrics: {
+          completeness_score: dependencyChain.completenessScore,
+          critical_dependencies: dependencyChain.criticalDependencies.length,
+          forward_dependencies: dependencyChain.forwardDependencies.length,
+          backward_dependencies: dependencyChain.backwardDependencies.length,
+          contextual_dependencies: dependencyChain.contextualDependencies.length,
+          relationship_paths: dependencyChain.relationshipPaths.length
+        },
+        mmr_metrics: mmrResult ? {
+          critical_set_coverage: mmrResult.criticalSetCoverage,
+          diversity_score: mmrResult.diversityScore,
+          budget_utilization: mmrResult.budgetUtilization,
+          selection_time_ms: mmrResult.selectionTime
+        } : undefined
+      }
+    };
   }
 
   private async relationshipAwareSearch(query: QueryRequest, startTime: number): Promise<SearchResponse> {
@@ -705,6 +833,217 @@ export class SemanticSearcher {
       insights.push('Low connectivity - mostly independent code pieces');
     }
     
+    return insights;
+  }
+
+  // Smart Dependency Chain Helper Methods
+
+  private calculateTokenBudget(query: QueryRequest): number {
+    // Default token budget for context window optimization
+    // Can be overridden by query parameters
+    return query.token_budget || 4000; // Default 4K tokens for dependency analysis
+  }
+
+  private prioritizeDependencyChunks(dependencyChain: DependencyChain, query: QueryRequest): CodeChunk[] {
+    // Priority order: seeds -> critical -> forward -> backward -> contextual
+    const prioritizedChunks: CodeChunk[] = [];
+    
+    // 1. Seed chunks (highest priority - original search results)
+    prioritizedChunks.push(...dependencyChain.seedChunks);
+    
+    // 2. Critical dependencies (types, interfaces, direct calls)
+    prioritizedChunks.push(...dependencyChain.criticalDependencies);
+    
+    // 3. Forward dependencies (what our functions call)
+    prioritizedChunks.push(...dependencyChain.forwardDependencies);
+    
+    // 4. Backward dependencies (what calls our functions)  
+    prioritizedChunks.push(...dependencyChain.backwardDependencies);
+    
+    // 5. Contextual dependencies (nice-to-have)
+    prioritizedChunks.push(...dependencyChain.contextualDependencies);
+    
+    // Remove duplicates while preserving priority order
+    const seen = new Set<string>();
+    return prioritizedChunks.filter(chunk => {
+      if (seen.has(chunk.chunk_id)) {
+        return false;
+      }
+      seen.add(chunk.chunk_id);
+      return true;
+    });
+  }
+
+  private synthesizeDependencyChainContext(
+    chunks: CodeChunk[],
+    dependencyChain: DependencyChain,
+    mode: string,
+    mmrResult?: MMRResult
+  ): ContextPackage {
+    const groups: ContextGroup[] = [];
+    
+    // Create groups based on dependency types
+    if (dependencyChain.seedChunks.length > 0) {
+      const seedChunks = chunks.filter(c => 
+        dependencyChain.seedChunks.some(seed => seed.chunk_id === c.chunk_id)
+      );
+      if (seedChunks.length > 0) {
+        groups.push({
+          title: '🎯 Primary Results',
+          description: `${seedChunks.length} chunks matching your search query`,
+          chunks: seedChunks,
+          importance_score: 1.0,
+          dependency_type: 'seed'
+        });
+      }
+    }
+
+    if (dependencyChain.criticalDependencies.length > 0) {
+      const criticalChunks = chunks.filter(c =>
+        dependencyChain.criticalDependencies.some(crit => crit.chunk_id === c.chunk_id)
+      );
+      if (criticalChunks.length > 0) {
+        groups.push({
+          title: '🔑 Critical Dependencies',
+          description: `${criticalChunks.length} essential types, interfaces, and direct calls`,
+          chunks: criticalChunks,
+          importance_score: 0.9,
+          dependency_type: 'critical'
+        });
+      }
+    }
+
+    if (dependencyChain.forwardDependencies.length > 0) {
+      const forwardChunks = chunks.filter(c =>
+        dependencyChain.forwardDependencies.some(fwd => fwd.chunk_id === c.chunk_id)
+      );
+      if (forwardChunks.length > 0) {
+        groups.push({
+          title: '➡️ Forward Dependencies',
+          description: `${forwardChunks.length} functions and modules called by your code`,
+          chunks: forwardChunks,
+          importance_score: 0.8,
+          dependency_type: 'forward'
+        });
+      }
+    }
+
+    if (dependencyChain.backwardDependencies.length > 0) {
+      const backwardChunks = chunks.filter(c =>
+        dependencyChain.backwardDependencies.some(back => back.chunk_id === c.chunk_id)
+      );
+      if (backwardChunks.length > 0) {
+        groups.push({
+          title: '⬅️ Backward Dependencies',
+          description: `${backwardChunks.length} callers and users of your code`,
+          chunks: backwardChunks,
+          importance_score: 0.7,
+          dependency_type: 'backward'
+        });
+      }
+    }
+
+    if (dependencyChain.contextualDependencies.length > 0) {
+      const contextualChunks = chunks.filter(c =>
+        dependencyChain.contextualDependencies.some(ctx => ctx.chunk_id === c.chunk_id)
+      );
+      if (contextualChunks.length > 0) {
+        groups.push({
+          title: '🔗 Related Context',
+          description: `${contextualChunks.length} co-change patterns and related functionality`,
+          chunks: contextualChunks,
+          importance_score: 0.6,
+          dependency_type: 'contextual'
+        });
+      }
+    }
+
+    // Generate comprehensive summary
+    const summary = this.generateDependencyChainSummary(dependencyChain, mmrResult);
+
+    return {
+      summary,
+      groups: groups.sort((a, b) => b.importance_score - a.importance_score),
+      related_files: [...new Set(chunks.map(c => c.file_path))],
+      dependency_insights: this.generateDependencyInsights(dependencyChain),
+      total_tokens: mmrResult?.totalTokens || dependencyChain.totalTokens,
+      token_efficiency: mmrResult ? 
+        mmrResult.diversityScore * mmrResult.budgetUtilization :
+        dependencyChain.completenessScore,
+      completeness_score: dependencyChain.completenessScore
+    };
+  }
+
+  private generateDependencyChainSummary(dependencyChain: DependencyChain, mmrResult?: MMRResult): string {
+    const totalDeps = dependencyChain.criticalDependencies.length + 
+                     dependencyChain.forwardDependencies.length + 
+                     dependencyChain.backwardDependencies.length + 
+                     dependencyChain.contextualDependencies.length;
+
+    const parts = [
+      `Smart dependency analysis found ${dependencyChain.seedChunks.length} primary results`,
+      `${totalDeps} dependencies across the codebase`
+    ];
+
+    if (dependencyChain.completenessScore > 0.8) {
+      parts.push('with comprehensive context coverage');
+    } else if (dependencyChain.completenessScore > 0.6) {
+      parts.push('with good context coverage');
+    } else {
+      parts.push('with partial context coverage');
+    }
+
+    // Add MMR optimization info
+    if (mmrResult) {
+      parts.push(`Context optimized via MMR: ${mmrResult.selectedChunks.length} chunks selected`);
+      parts.push(`${(mmrResult.criticalSetCoverage * 100).toFixed(0)}% critical coverage`);
+      parts.push(`${mmrResult.totalTokens} tokens`);
+    } else {
+      parts.push(`${dependencyChain.totalTokens} total tokens`);
+    }
+
+    return parts.join(', ') + '.';
+  }
+
+  private generateDependencyInsights(dependencyChain: DependencyChain): string[] {
+    const insights: string[] = [];
+
+    // Completeness insights
+    if (dependencyChain.completenessScore >= 0.9) {
+      insights.push('🟢 Excellent dependency coverage - all critical relationships included');
+    } else if (dependencyChain.completenessScore >= 0.7) {
+      insights.push('🟡 Good dependency coverage - most important relationships included');
+    } else {
+      insights.push('🔴 Partial dependency coverage - some relationships may be missing');
+    }
+
+    // Dependency type insights
+    if (dependencyChain.criticalDependencies.length > 0) {
+      insights.push(`💎 ${dependencyChain.criticalDependencies.length} critical dependencies ensure context completeness`);
+    }
+
+    if (dependencyChain.forwardDependencies.length > dependencyChain.backwardDependencies.length) {
+      insights.push('📈 Forward-heavy dependency pattern - focuses on what your code calls');
+    } else if (dependencyChain.backwardDependencies.length > dependencyChain.forwardDependencies.length) {
+      insights.push('📊 Backward-heavy dependency pattern - shows how your code is used');
+    } else {
+      insights.push('⚖️ Balanced dependency pattern - includes both callers and callees');
+    }
+
+    // Relationship path insights
+    if (dependencyChain.relationshipPaths.length > 0) {
+      const avgImportance = dependencyChain.relationshipPaths.reduce((sum, path) => 
+        sum + path.importance, 0) / dependencyChain.relationshipPaths.length;
+      
+      if (avgImportance > 0.8) {
+        insights.push('🔗 Strong relationship connections throughout the dependency chain');
+      } else if (avgImportance > 0.5) {
+        insights.push('🔗 Moderate relationship connections in the dependency chain');
+      } else {
+        insights.push('🔗 Weak relationship connections - dependencies may be loosely coupled');
+      }
+    }
+
     return insights;
   }
 }

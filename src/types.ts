@@ -81,6 +81,7 @@ export interface QueryRequest {
   include_tests?: boolean;
   multi_hop?: MultiHopConfig;
   context_mode?: ContextMode;
+  token_budget?: number; // Maximum tokens for dependency analysis
 }
 
 export interface MultiHopConfig {
@@ -119,6 +120,13 @@ export interface SearchResponse {
   efficiency_score?: number;
   metadata: QueryMetadata;
   context_chunks?: CodeChunk[];
+  dependency_chain?: DependencyChainMetadata; // Smart dependency chain info
+}
+
+export interface DependencyChainMetadata {
+  completeness_score: number;
+  total_dependencies: number;
+  relationship_paths: any[];
 }
 
 export interface ContextPackage {
@@ -128,6 +136,8 @@ export interface ContextPackage {
   total_tokens?: number;
   token_efficiency?: number;
   relationship_insights?: any;
+  dependency_insights?: string[]; // Smart dependency chain insights
+  completeness_score?: number;   // Dependency context completeness
 }
 
 export interface ContextGroup {
@@ -136,6 +146,7 @@ export interface ContextGroup {
   chunks: CodeChunk[];
   importance_score: number;
   relationship_paths?: any[];
+  dependency_type?: 'seed' | 'critical' | 'forward' | 'backward' | 'contextual'; // Dependency classification
 }
 
 export interface QueryMetadata {
@@ -151,6 +162,14 @@ export interface QueryMetadata {
     diversity_score: number;
     budget_utilization: number;
     selection_time_ms: number;
+  };
+  dependency_metrics?: {
+    completeness_score: number;
+    critical_dependencies: number;
+    forward_dependencies: number;
+    backward_dependencies: number;
+    contextual_dependencies: number;
+    relationship_paths: number;
   };
 }
 

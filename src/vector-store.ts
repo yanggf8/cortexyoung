@@ -79,6 +79,40 @@ export class VectorStore {
     return results;
   }
 
+  /**
+   * Get chunk by symbol name or chunk ID
+   */
+  async getChunkBySymbol(symbolId: string): Promise<CodeChunk | null> {
+    // First try direct chunk ID lookup
+    const chunkById = this.chunks.get(symbolId);
+    if (chunkById) {
+      return chunkById;
+    }
+
+    // Then try to find by symbol name
+    for (const chunk of this.chunks.values()) {
+      if (chunk.symbol_name === symbolId) {
+        return chunk;
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Get all chunks
+   */
+  getAllChunks(): CodeChunk[] {
+    return Array.from(this.chunks.values());
+  }
+
+  /**
+   * Get chunk count
+   */
+  getChunkCount(): number {
+    return this.chunks.size;
+  }
+
   private cosineSimilarity(a: number[], b: number[]): number {
     if (a.length !== b.length) return 0;
 
