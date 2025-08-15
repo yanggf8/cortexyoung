@@ -286,6 +286,16 @@ export const CORTEX_TOOLS = {
       },
       required: ['pattern_type']
     }
+  },
+
+  real_time_status: {
+    name: 'real_time_status',
+    description: 'Get real-time file watching status and context freshness for the codebase',
+    inputSchema: {
+      type: 'object',
+      properties: {},
+      required: []
+    }
   }
 } as const;
 

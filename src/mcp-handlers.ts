@@ -1,5 +1,6 @@
 import { QueryRequest, QueryResponse } from './types';
 import { SemanticSearcher } from './searcher';
+import { CodebaseIndexer } from './indexer';
 
 export abstract class BaseHandler {
   abstract handle(params: any): Promise<any>;
@@ -198,6 +199,31 @@ export class FindCodePatternsHandler extends BaseHandler {
       })),
       total_matches: result.context_chunks?.length || 0,
       confidence_scores: result.metadata.confidence_scores
+    };
+  }
+}
+
+export class RealTimeStatusHandler extends BaseHandler {
+  constructor(private indexer: CodebaseIndexer) {
+    super();
+  }
+
+  async handle(params: any): Promise<any> {
+    const stats = this.indexer.getRealTimeStats();
+    
+    return {
+      realTimeEnabled: stats.isWatching,
+      invalidatedChunks: stats.invalidatedChunks,
+      contextFreshness: stats.invalidatedChunks === 0 ? 'fresh' : 'stale',
+      lastUpdate: new Date().toISOString(),
+      status: stats.isWatching ? 'active' : 'disabled',
+      fileWatchingActive: stats.isWatching,
+      pendingUpdates: stats.invalidatedChunks,
+      systemInfo: {
+        realTimeUpdatesSupported: true,
+        fileWatcherType: 'chokidar',
+        semanticFilteringEnabled: true
+      }
     };
   }
 }

@@ -5,7 +5,7 @@ import express, { Request, Response } from 'express';
 import cors from 'cors';
 import { CodebaseIndexer } from './indexer';
 import { SemanticSearcher } from './searcher';
-import { SemanticSearchHandler, ContextualReadHandler, CodeIntelligenceHandler, RelationshipAnalysisHandler, TraceExecutionPathHandler, FindCodePatternsHandler } from './mcp-handlers';
+import { SemanticSearchHandler, ContextualReadHandler, CodeIntelligenceHandler, RelationshipAnalysisHandler, TraceExecutionPathHandler, FindCodePatternsHandler, RealTimeStatusHandler } from './mcp-handlers';
 import { IndexHealthChecker } from './index-health-checker';
 import { HierarchicalStageTracker } from './hierarchical-stages';
 import { CORTEX_TOOLS } from './mcp-tools';
@@ -136,6 +136,7 @@ export class CortexMCPServer {
     this.handlers.set('relationship_analysis', new RelationshipAnalysisHandler(this.searcher));
     this.handlers.set('trace_execution_path', new TraceExecutionPathHandler(this.searcher));
     this.handlers.set('find_code_patterns', new FindCodePatternsHandler(this.searcher));
+    this.handlers.set('real_time_status', new RealTimeStatusHandler(this.indexer));
   }
 
   private setupIPC(): void {
@@ -582,6 +583,7 @@ async function main() {
   const isDemoMode = args.includes('--demo');
   const forceReindex = args.includes('--reindex') || args.includes('--force-rebuild');
   const forceFullMode = args.includes('--full');
+  const enableRealTime = args.includes('--watch') || process.env.ENABLE_REAL_TIME === 'true';
   
   // Create main logger first
   const logger = new Logger(logFile);
@@ -729,18 +731,43 @@ async function main() {
     
     stageTracker.completeStage('stage_3');
     
+    // Optional: Enable real-time file watching
+    if (enableRealTime) {
+      logger.info('🔄 Enabling real-time file watching...');
+      try {
+        await indexer.enableRealTimeUpdates();
+        logger.info('✅ Real-time file watching enabled successfully');
+        logger.info('📡 MCP tools will now reflect live codebase changes');
+      } catch (error) {
+        logger.warn('⚠️  Failed to enable real-time watching', { 
+          error: error instanceof Error ? error.message : 'Unknown error' 
+        });
+        logger.info('📊 Server will continue with static indexing mode');
+      }
+    } else {
+      logger.info('📊 Real-time watching disabled (use --watch or ENABLE_REAL_TIME=true to enable)');
+    }
+    
     // Final startup summary
     stageTracker.logStartupSummary();
     
     // Handle graceful shutdown
     process.on('SIGINT', async () => {
       logger.info('Received SIGINT, initiating graceful shutdown');
+      if (enableRealTime) {
+        logger.info('🔄 Disabling real-time file watching...');
+        await indexer.disableRealTimeUpdates();
+      }
       await mcpServer.stop();
       process.exit(0);
     });
     
     process.on('SIGTERM', async () => {
       logger.info('Received SIGTERM, initiating graceful shutdown');
+      if (enableRealTime) {
+        logger.info('🔄 Disabling real-time file watching...');
+        await indexer.disableRealTimeUpdates();
+      }
       await mcpServer.stop();
       process.exit(0);
     });
