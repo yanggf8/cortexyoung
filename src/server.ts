@@ -583,7 +583,7 @@ async function main() {
   const isDemoMode = args.includes('--demo');
   const forceReindex = args.includes('--reindex') || args.includes('--force-rebuild');
   const forceFullMode = args.includes('--full');
-  const enableRealTime = args.includes('--watch') || process.env.ENABLE_REAL_TIME === 'true';
+  const enableRealTime = !args.includes('--no-watch') && process.env.DISABLE_REAL_TIME !== 'true';
   
   // Create main logger first
   const logger = new Logger(logFile);
@@ -745,7 +745,7 @@ async function main() {
         logger.info('📊 Server will continue with static indexing mode');
       }
     } else {
-      logger.info('📊 Real-time watching disabled (use --watch or ENABLE_REAL_TIME=true to enable)');
+      logger.info('📊 Real-time watching disabled (use --no-watch flag or DISABLE_REAL_TIME=true to disable when needed)');
     }
     
     // Final startup summary

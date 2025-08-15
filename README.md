@@ -151,7 +151,8 @@ npm run demo
 ## Available Scripts
 
 - `npm run demo` - Run indexing demo with real embeddings
-- `npm run server` - Start MCP server for Claude Code integration
+- `npm run server` - Start MCP server with real-time watching (default)
+- `npm run server -- --no-watch` - Start MCP server in static mode only
 - `npm run build` - Build TypeScript to JavaScript
 - `npm run start` - Run compiled server from dist/
 
@@ -219,7 +220,7 @@ Cortex provides semantic tools via MCP server:
 }
 ```
 
-2. Start Cortex server: `npm run server`
+2. Start Cortex server: `npm run server` (real-time enabled by default)
 3. Restart Claude Code
 4. Test with: `/mcp cortex semantic_search query="your query"`
 

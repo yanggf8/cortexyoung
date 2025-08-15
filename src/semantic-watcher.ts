@@ -52,10 +52,10 @@ export class SemanticWatcher {
     log('[SemanticWatcher] Starting semantic file watcher...');
     
     this.watcher
-      .on('change', (path) => this.handleFileChange(path))
-      .on('add', (path) => this.handleFileChange(path))  // Handle new files too
-      .on('unlink', (path) => this.handleFileDelete(path))
-      .on('error', (err) => warn('[SemanticWatcher] Error:', err));
+      .on('change', (path: string) => this.handleFileChange(path))
+      .on('add', (path: string) => this.handleFileChange(path))  // Handle new files too
+      .on('unlink', (path: string) => this.handleFileDelete(path))
+      .on('error', (err: Error) => warn('[SemanticWatcher] Error:', err));
     
     this.isActive = true;
     log('[SemanticWatcher] Semantic watcher active with dual-mode tracking');

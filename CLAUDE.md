@@ -37,7 +37,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - ✅ **TypeScript Integration**: Full type safety and build system compatibility
 - ✅ **MCP Tool Integration**: `real_time_status` tool for monitoring context freshness
 - ✅ **Testing Framework**: Comprehensive validation with real codebases (`test-semantic-watching.js`)
-- ✅ **Server Integration**: Automatic startup with `--watch` flag or `ENABLE_REAL_TIME=true`
+- ✅ **Server Integration**: Real-time enabled by default, use `--no-watch` or `DISABLE_REAL_TIME=true` to disable
 - ✅ **Documentation**: Complete setup guides and usage instructions
 - ✅ **Production Validation**: Tested and validated with real codebase changes
 
@@ -61,9 +61,10 @@ npm run health         # HTTP-based health check
 
 ### Server Modes
 ```bash
-npm run server         # MCP server for Claude Code
-npm run start:full     # Full indexing mode  
-npm run start:cloudflare  # Cloud-based embedder (no local CPU/memory)
+npm run server                    # MCP server with real-time enabled (default)
+npm run server -- --no-watch     # MCP server with static mode only
+npm run start:full               # Full indexing mode  
+npm run start:cloudflare        # Cloud-based embedder (no local CPU/memory)
 ```
 
 ### Development & Testing
@@ -74,10 +75,11 @@ npm run test:cleanup   # Test process cleanup
 npm run benchmark      # Performance benchmarking
 ```
 
-### Real-Time File Watching ✅ **IMPLEMENTED**
+### Real-Time File Watching ✅ **ENABLED BY DEFAULT**
 ```bash
-npm run server -- --watch           # Start server with real-time watching
-ENABLE_REAL_TIME=true npm run server # Alternative: use environment variable
+npm run server                       # Real-time enabled by default
+npm run server -- --no-watch        # Disable real-time (static mode only)
+DISABLE_REAL_TIME=true npm run server # Alternative: disable via environment
 
 # Test file watching validation
 node test-semantic-watching.js      # Run comprehensive validation tests
@@ -89,7 +91,7 @@ node test-realtime-search.ts        # Test dual-mode search functionality
 # Environment Variables
 CORTEX_INCLUDE_UNTRACKED=true       # Enable untracked files in bulk indexing (optional)
 
-# Real-time system automatically handles:
+# Real-time system (enabled by default) automatically handles:
 # - Git-tracked files: immediate indexing on changes
 # - Untracked files: intelligent staging with size/type filtering
 # - File limits: max 50 untracked files, 2MB per file
@@ -811,17 +813,18 @@ Global: /home/user/.claude/cortex-embeddings/reponame-abc123/index.json
 2. ✅ **ContextInvalidator**: Built intelligent chunk invalidation system
 3. ✅ **Real-time Integration**: Extended CodebaseIndexer with live update capabilities
 4. ✅ **MCP Tool**: Added `real_time_status` tool for monitoring context freshness
-5. ✅ **Server Integration**: Added `--watch` flag and `ENABLE_REAL_TIME` environment variable
+5. ✅ **Server Integration**: Real-time enabled by default, `--no-watch` flag to disable
 6. ✅ **Testing Framework**: Created comprehensive validation suite (`test-semantic-watching.js`)
 7. ✅ **Documentation**: Updated all guides and usage instructions
 
 ### **How to Use Real-Time File Watching**
 ```bash
-# Start server with real-time watching
-npm run server -- --watch
+# Start server (real-time enabled by default)
+npm run server
 
-# Or use environment variable
-ENABLE_REAL_TIME=true npm run server
+# Disable real-time when needed
+npm run server -- --no-watch
+DISABLE_REAL_TIME=true npm run server
 
 # Check status via MCP tool
 curl -X POST http://localhost:8765/mcp \
