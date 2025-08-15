@@ -499,6 +499,23 @@ export class PersistentVectorStore extends VectorStore {
     return Array.from(this.chunks.values()).filter(chunk => chunk.file_path === filePath);
   }
 
+  // Methods for real-time file watching support
+  getChunksForFile(filePath: string): CodeChunk[] {
+    return this.getChunksByFile(filePath);
+  }
+
+  async removeChunksForFile(filePath: string): Promise<void> {
+    const chunksToRemove = this.getChunksByFile(filePath);
+    for (const chunk of chunksToRemove) {
+      this.chunks.delete(chunk.chunk_id);
+    }
+    log(`[VectorStore] Removed ${chunksToRemove.length} chunks for file: ${filePath}`);
+  }
+
+  async getChunk(chunkId: string): Promise<CodeChunk | undefined> {
+    return this.chunks.get(chunkId);
+  }
+
   compareChunks(oldChunks: CodeChunk[], newChunks: CodeChunk[]): { toAdd: CodeChunk[], toKeep: CodeChunk[], toRemove: CodeChunk[] } {
     const oldChunkMap = new Map(oldChunks.map(c => [c.content_hash, c]));
     const newChunkMap = new Map(newChunks.map(c => [c.content_hash, c]));

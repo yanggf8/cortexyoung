@@ -17,7 +17,8 @@
       "mcp__gemini-cli__ask-gemini",
       "mcp__cursor-agent__ask-cursor",
       "WebFetch(domain:clickhouse.com)",
-      "mcp__cursor-agent__next-chunk"
+      "mcp__cursor-agent__next-chunk",
+      "Bash(npm install:*)"
     ],
     "deny": []
   }

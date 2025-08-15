@@ -18,6 +18,8 @@ import { EmbeddingStrategyManager } from './embedding-strategy';
 import { log, warn, error } from './logging-utils';
 import { EmbeddingBackupUtility } from './embedding-backup-utility';
 import { MMRConfigManager, createMMRConfigFromEnvironment } from './mmr-config-manager';
+import { SemanticWatcher } from './semantic-watcher';
+import { ContextInvalidator } from './context-invalidator';
 import * as os from 'os';
 
 export class CodebaseIndexer {
@@ -33,6 +35,8 @@ export class CodebaseIndexer {
   private stageTracker?: StartupStageTracker;
   private reindexAdvisor: ReindexAdvisor;
   private storageCoordinator: UnifiedStorageCoordinator;
+  private semanticWatcher?: SemanticWatcher;
+  private contextInvalidator?: ContextInvalidator;
 
   constructor(repositoryPath: string, stageTracker?: StartupStageTracker) {
     this.repositoryPath = repositoryPath;
@@ -536,5 +540,102 @@ export class CodebaseIndexer {
   // Search functionality
   async search(query: QueryRequest): Promise<QueryResponse> {
     return await this.searcher.search(query);
+  }
+
+  // Real-time file watching methods
+  async enableRealTimeUpdates(): Promise<void> {
+    if (this.semanticWatcher) return;
+    
+    log('[CodebaseIndexer] Enabling real-time updates...');
+    
+    this.contextInvalidator = new ContextInvalidator(this.vectorStore);
+    this.semanticWatcher = new SemanticWatcher(this.repositoryPath, this);
+    
+    // Listen for incremental reindex triggers
+    (process as any).on('cortex:triggerIncrementalReindex', () => {
+      this.performIncrementalReindex();
+    });
+    
+    await this.semanticWatcher.start();
+    log('[CodebaseIndexer] Real-time updates enabled');
+  }
+
+  async disableRealTimeUpdates(): Promise<void> {
+    if (this.semanticWatcher) {
+      await this.semanticWatcher.stop();
+      this.semanticWatcher = undefined;
+    }
+    this.contextInvalidator = undefined;
+    log('[CodebaseIndexer] Real-time updates disabled');
+  }
+
+  async handleFileChange(filePath: string, changeType: string): Promise<void> {
+    // Simple incremental update - reprocess just this file
+    const relativePath = path.relative(this.repositoryPath, filePath);
+    
+    if (changeType === 'deleted') {
+      await this.vectorStore.removeChunksForFile(relativePath);
+      return;
+    }
+    
+    try {
+      // Read file content
+      const fs = await import('fs/promises');
+      const content = await fs.readFile(filePath, 'utf-8');
+      
+      // Reprocess the changed file
+      const chunks = await this.chunker.chunkFile(filePath, content);
+      if (chunks.length > 0) {
+        // Use the unified embedder for consistency
+        if (this.unifiedEmbedder) {
+          const texts = chunks.map(chunk => this.createEmbeddingText(chunk));
+          const result = await this.unifiedEmbedder.embedBatch(texts);
+          
+          // Add embeddings to chunks
+          for (let i = 0; i < chunks.length; i++) {
+            chunks[i].embedding = result.embeddings[i];
+          }
+          
+          // Store the updated chunks
+          await this.vectorStore.upsertChunks(chunks);
+        }
+        log(`[CodebaseIndexer] Updated ${chunks.length} chunks for ${relativePath}`);
+      }
+    } catch (error) {
+      warn(`[CodebaseIndexer] Failed to process file change for ${relativePath}:`, error);
+    }
+  }
+
+  private async performIncrementalReindex(): Promise<void> {
+    if (!this.contextInvalidator) return;
+    
+    const invalidatedChunks = this.contextInvalidator.getInvalidatedChunks();
+    if (invalidatedChunks.length === 0) return;
+    
+    log(`[CodebaseIndexer] Performing incremental reindex for ${invalidatedChunks.length} chunks`);
+    
+    // Simple approach: reindex files with invalidated chunks
+    const filesToReindex = new Set<string>();
+    for (const chunkId of invalidatedChunks) {
+      const chunk = await this.vectorStore.getChunk(chunkId);
+      if (chunk) filesToReindex.add(chunk.file_path);
+    }
+    
+    for (const filePath of filesToReindex) {
+      await this.handleFileChange(path.join(this.repositoryPath, filePath), 'content');
+    }
+    
+    this.contextInvalidator.clearInvalidatedChunks();
+    log('[CodebaseIndexer] Incremental reindex completed');
+  }
+
+  getRealTimeStats(): { 
+    isWatching: boolean; 
+    invalidatedChunks: number; 
+  } {
+    return {
+      isWatching: this.semanticWatcher?.isWatching() ?? false,
+      invalidatedChunks: this.contextInvalidator?.getStats().invalidatedCount ?? 0
+    };
   }
 }
