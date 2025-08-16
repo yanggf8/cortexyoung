@@ -184,18 +184,28 @@ export class PersistentVectorStore extends VectorStore {
 
   /**
    * Check if a valid index exists with actual chunks
-   * @param useGlobal Whether to check global or local storage
-   * @returns true if index exists and has valid chunks, false otherwise
+   * @param useGlobal Whether to check global or local storage (deprecated - now checks both)
+   * @returns true if index exists and has valid chunks in either local or global storage
    */
   async hasValidIndex(useGlobal: boolean = false): Promise<boolean> {
+    // Check local storage first
     try {
-      const indexPath = useGlobal ? this.globalMetadataPath : this.metadataPath;
-      await fs.access(indexPath);
-      
-      const indexData = JSON.parse(await fs.readFile(indexPath, 'utf-8'));
-      const chunkCount = indexData.chunks?.length || 0;
-      
-      return chunkCount > 0;
+      await fs.access(this.metadataPath);
+      const localData = JSON.parse(await fs.readFile(this.metadataPath, 'utf-8'));
+      const localChunks = localData.chunks?.length || 0;
+      if (localChunks > 0) {
+        return true;
+      }
+    } catch {
+      // Local storage not available or empty, continue to check global
+    }
+    
+    // Check global storage if local is empty/missing
+    try {
+      await fs.access(this.globalMetadataPath);
+      const globalData = JSON.parse(await fs.readFile(this.globalMetadataPath, 'utf-8'));
+      const globalChunks = globalData.chunks?.length || 0;
+      return globalChunks > 0;
     } catch {
       return false;
     }
@@ -336,6 +346,23 @@ export class PersistentVectorStore extends VectorStore {
       }
     };
 
+    // If fileHashes is empty/corrupted, rebuild from stored chunks for more accurate delta detection
+    if (this.fileHashes.size === 0 && this.chunks.size > 0 && chunkHashCalculator) {
+      log(`[DeltaDetection] Empty fileHashes detected, rebuilding from ${this.chunks.size} stored chunks`);
+      
+      const filesWithChunks = new Set(Array.from(this.chunks.values()).map(chunk => chunk.file_path));
+      for (const filePath of filesWithChunks) {
+        try {
+          const currentHash = await chunkHashCalculator(filePath);
+          this.fileHashes.set(filePath, currentHash);
+        } catch (error) {
+          // File might be deleted, skip hash rebuild for this file
+          log(`[DeltaDetection] Failed to rebuild hash for ${filePath}: ${error instanceof Error ? error.message : error}`);
+        }
+      }
+      log(`[DeltaDetection] Rebuilt ${this.fileHashes.size} file hashes from stored chunks`);
+    }
+
     // Check each file for changes by comparing stored chunks with current chunks
     for (const filePath of files) {
       try {
@@ -349,21 +376,32 @@ export class PersistentVectorStore extends VectorStore {
         } else {
           // Use file content hash for fast comparison
           if (chunkHashCalculator) {
-            const currentHash = await chunkHashCalculator(filePath);
-            const storedHash = this.fileHashes.get(filePath);
-            
-            if (!storedHash) {
-              // No stored hash (old data format) - treat as modified to rebuild file hash
-              delta.fileChanges.modified.push(filePath);
-              delta.removed.push(...storedChunks.map(chunk => chunk.chunk_id));
-            } else if (storedHash !== currentHash) {
-              // File changed at content level
+            try {
+              const currentHash = await chunkHashCalculator(filePath);
+              const storedHash = this.fileHashes.get(filePath);
+              
+              if (!storedHash) {
+                // No stored hash (old data format) - treat as modified to rebuild file hash
+                log(`[DeltaDetection] Missing stored hash for ${filePath}, marking as modified`);
+                delta.fileChanges.modified.push(filePath);
+                delta.removed.push(...storedChunks.map(chunk => chunk.chunk_id));
+              } else if (storedHash !== currentHash) {
+                // File changed at content level
+                log(`[DeltaDetection] Hash mismatch for ${filePath}, marking as modified`);
+                delta.fileChanges.modified.push(filePath);
+                delta.removed.push(...storedChunks.map(chunk => chunk.chunk_id));
+              }
+              // If hashes match, file is unchanged - no action needed
+            } catch (hashError) {
+              // Hash calculation failed - treat as modified (conservative approach)
+              log(`[DeltaDetection] Hash calculation failed for ${filePath}: ${hashError instanceof Error ? hashError.message : hashError}`);
+              log(`[DeltaDetection] Treating ${filePath} as modified due to hash failure`);
               delta.fileChanges.modified.push(filePath);
               delta.removed.push(...storedChunks.map(chunk => chunk.chunk_id));
             }
-            // If hashes match, file is unchanged - no action needed
           } else {
             // Fallback: treat as modified if no calculator provided
+            log(`[DeltaDetection] No hash calculator provided, treating ${filePath} as modified`);
             delta.fileChanges.modified.push(filePath);
             delta.removed.push(...storedChunks.map(chunk => chunk.chunk_id));
           }

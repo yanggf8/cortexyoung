@@ -1,0 +1,15 @@
+{
+  "servers": {
+    "cortex": {
+      "transport": {
+        "type": "http",
+        "url": "http://localhost:8765/mcp"
+      },
+      "description": "Cortex MCP Server - Semantic code search and intelligence",
+      "capabilities": {
+        "tools": ["semantic_search", "contextual_read", "code_intelligence"]
+      }
+    }
+  },
+  "default_server": "cortex"
+}
