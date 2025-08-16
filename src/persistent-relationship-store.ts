@@ -127,13 +127,16 @@ export class PersistentRelationshipStore {
       
       const graphData = JSON.stringify(persistedGraph, this.mapReplacer, 2);
       
+      // Use unique temp file names to prevent race conditions
+      const uniqueSuffix = `${Date.now()}.${Math.random().toString(36).substring(2, 8)}`;
+      
       // Save to local storage
-      const localTempPath = this.metadataPath + '.tmp';
+      const localTempPath = `${this.metadataPath}.tmp.${uniqueSuffix}`;
       await fs.writeFile(localTempPath, graphData);
       await fs.rename(localTempPath, this.metadataPath);
       
       // Save to global storage
-      const globalTempPath = this.globalMetadataPath + '.tmp';
+      const globalTempPath = `${this.globalMetadataPath}.tmp.${uniqueSuffix}`;
       await fs.writeFile(globalTempPath, graphData);
       await fs.rename(globalTempPath, this.globalMetadataPath);
       
@@ -152,7 +155,8 @@ export class PersistentRelationshipStore {
       if (await this.relationshipGraphExists()) {
         timestampedLog('🔄 Syncing local relationship graph to global storage...');
         const graphData = await fs.readFile(this.metadataPath, 'utf-8');
-        const globalTempPath = this.globalMetadataPath + '.tmp';
+        const uniqueSuffix = `${Date.now()}.${Math.random().toString(36).substring(2, 8)}`;
+        const globalTempPath = `${this.globalMetadataPath}.tmp.${uniqueSuffix}`;
         await fs.writeFile(globalTempPath, graphData);
         await fs.rename(globalTempPath, this.globalMetadataPath);
         timestampedLog('✅ Synced relationship graph to global storage');
@@ -179,7 +183,8 @@ export class PersistentRelationshipStore {
         if (shouldSync) {
           timestampedLog('🔄 Syncing global relationship graph to local storage...');
           const graphData = await fs.readFile(this.globalMetadataPath, 'utf-8');
-          const localTempPath = this.metadataPath + '.tmp';
+          const uniqueSuffix = `${Date.now()}.${Math.random().toString(36).substring(2, 8)}`;
+          const localTempPath = `${this.metadataPath}.tmp.${uniqueSuffix}`;
           await fs.writeFile(localTempPath, graphData);
           await fs.rename(localTempPath, this.metadataPath);
           timestampedLog('✅ Synced relationship graph to local storage');

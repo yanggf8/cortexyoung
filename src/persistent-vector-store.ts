@@ -281,14 +281,19 @@ export class PersistentVectorStore extends VectorStore {
       const indexData = JSON.stringify(persistedIndex, null, 0); // No pretty printing for faster writes
       
       // Save to both storages in parallel with optimized writes
+      // Use unique temp file names to prevent race conditions between batch and real-time operations
+      const timestamp = Date.now();
+      const randomSuffix = Math.random().toString(36).substring(2, 8);
+      const uniqueSuffix = `${timestamp}.${randomSuffix}`;
+      
       const saveLocal = async () => {
-        const localTempPath = this.metadataPath + '.tmp';
+        const localTempPath = `${this.metadataPath}.tmp.${uniqueSuffix}`;
         await fs.writeFile(localTempPath, indexData, { encoding: 'utf8' });
         await fs.rename(localTempPath, this.metadataPath);
       };
 
       const saveGlobal = async () => {
-        const globalTempPath = this.globalMetadataPath + '.tmp';
+        const globalTempPath = `${this.globalMetadataPath}.tmp.${uniqueSuffix}`;
         await fs.writeFile(globalTempPath, indexData, { encoding: 'utf8' });
         await fs.rename(globalTempPath, this.globalMetadataPath);
       };
@@ -451,7 +456,8 @@ export class PersistentVectorStore extends VectorStore {
       if (await this.indexExists()) {
         log(`[StorageSync] Syncing local embeddings to global storage from=${this.metadataPath} to=${this.globalMetadataPath}`);
         const indexData = await fs.readFile(this.metadataPath, 'utf-8');
-        const globalTempPath = this.globalMetadataPath + '.tmp';
+        const uniqueSuffix = `${Date.now()}.${Math.random().toString(36).substring(2, 8)}`;
+        const globalTempPath = `${this.globalMetadataPath}.tmp.${uniqueSuffix}`;
         await fs.writeFile(globalTempPath, indexData);
         await fs.rename(globalTempPath, this.globalMetadataPath);
         log('[StorageSync] Synced to global storage');
@@ -490,7 +496,8 @@ export class PersistentVectorStore extends VectorStore {
           
           log(`[StorageSync] Syncing global embeddings to local storage chunks=${globalChunks} from=${this.globalMetadataPath} to=${this.metadataPath}`);
           const indexData = await fs.readFile(this.globalMetadataPath, 'utf-8');
-          const localTempPath = this.metadataPath + '.tmp';
+          const uniqueSuffix = `${Date.now()}.${Math.random().toString(36).substring(2, 8)}`;
+          const localTempPath = `${this.metadataPath}.tmp.${uniqueSuffix}`;
           await fs.writeFile(localTempPath, indexData);
           await fs.rename(localTempPath, this.metadataPath);
           log(`[StorageSync] Synced chunks=${globalChunks} to local storage`);
@@ -676,7 +683,8 @@ export class PersistentVectorStore extends VectorStore {
       
       indexData.metadata = { ...indexData.metadata, ...metadata };
       
-      const tempPath = this.metadataPath + '.tmp';
+      const uniqueSuffix = `${Date.now()}.${Math.random().toString(36).substring(2, 8)}`;
+      const tempPath = `${this.metadataPath}.tmp.${uniqueSuffix}`;
       await fs.writeFile(tempPath, JSON.stringify(indexData, null, 2));
       await fs.rename(tempPath, this.metadataPath);
     } catch (error) {
