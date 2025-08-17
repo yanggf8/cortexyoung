@@ -195,15 +195,15 @@ Claude Code ← MCP Server ← Vector Store ← ProcessPool → Incremental Upda
 6. **find_code_patterns** - Pattern recognition, architectural analysis, code quality assessment
 7. **real_time_status** ✅ - Real-time file watching status and context freshness validation
 
-### **🎯 Enhanced Tool Guidance for Claude Code Users**
-- **Smart Tool Selection**: Each tool includes "BEST FOR" guidance to help users choose optimally
-- **Context Optimization Hints**: Real-time suggestions for MMR presets, token budgets, and follow-up tools
-- **Query Quality Assessment**: Automatic complexity analysis with optimization recommendations
-- **Usage Pattern Learning**: System tracks effectiveness and suggests improvements automatically
+### **🎯 Enhanced Claude Code Integration**
+- **Smart Tool Selection**: Automatic tool selection with "BEST FOR" optimization patterns
+- **Context Optimization**: Real-time MMR presets, token budgets, and tool recommendations
+- **Query Intelligence**: Automatic complexity analysis with optimization hints
+- **Pattern Learning**: System tracks effectiveness and optimizes automatically
 
-**📚 Comprehensive Documentation Available:**
-- `CLAUDE_CODE_README.md` - User-friendly guide with examples and optimization settings
-- `TOOL_USAGE_GUIDE.md` - Advanced usage patterns and tool combination strategies
+**📚 Documentation Available:**
+- `CLAUDE_CODE_README.md` - Simple setup guide for programmers  
+- `TOOL_USAGE_GUIDE.md` - Internal tool optimization patterns
 
 ## Storage Management
 

@@ -229,21 +229,28 @@ real_time_status()  // Check if context is current
 
 ## 🎯 **SUCCESS METRICS**
 
-**This server is designed to maximize these outcomes:**
+**Claude Code automatically achieves:**
 - ✅ **Faster code understanding** - Complete context in fewer queries
 - ✅ **Better development decisions** - All relevant dependencies included
 - ✅ **Reduced context waste** - Only essential information provided
 - ✅ **Improved code quality** - Pattern recognition and relationship analysis
 
-**Your usage patterns help improve the system automatically!**
+**The system learns and optimizes automatically - no configuration needed!**
 
 ---
 
 ## 🚀 **GET STARTED**
 
-1. **Start the server**: `npm run server`
-2. **Try a simple query**: `semantic_search({ query: "user authentication" })`
-3. **Explore with intelligence**: `code_intelligence({ task: "understand the main application flow" })`
-4. **Check effectiveness**: `npm run telemetry:dashboard`
+**For Programmers**: Just run the server, Claude Code handles everything automatically!
 
-**The server learns from your usage patterns and automatically optimizes for your coding style!**
+```bash
+npm run server  # Start the MCP server
+```
+
+**That's it!** Claude Code will automatically:
+- Choose the right tools for your coding tasks
+- Optimize context window usage  
+- Learn from usage patterns to improve recommendations
+- Provide the most relevant code context automatically
+
+**Optional**: Monitor optimization with `npm run telemetry:dashboard`
