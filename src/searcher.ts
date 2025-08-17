@@ -6,12 +6,14 @@ import { RelationshipQuery, TraversalOptions, RelationshipType } from './relatio
 import { log, warn, error } from './logging-utils';
 import { GuardedMMRSelector, MMRConfig, MMRResult } from './guarded-mmr-selector';
 import { SmartDependencyTraverser, DependencyChain, DependencyOptions } from './smart-dependency-chain';
+import { TelemetryCollector } from './telemetry-collector';
 
 export class SemanticSearcher {
   private relationshipEngine?: RelationshipTraversalEngine;
   private smartDependencyTraverser?: SmartDependencyTraverser;
   private mmrSelector: GuardedMMRSelector;
   private mmrEnabled: boolean;
+  private telemetryCollector?: TelemetryCollector;
 
   constructor(
     private vectorStore: VectorStore,
@@ -22,6 +24,9 @@ export class SemanticSearcher {
     if (repositoryPath) {
       this.relationshipEngine = new RelationshipTraversalEngine(repositoryPath);
       // Initialize SmartDependencyTraverser when we have relationship engine
+      
+      // Initialize telemetry collector for usage pattern monitoring
+      this.telemetryCollector = new TelemetryCollector(repositoryPath);
     }
     
     // Initialize MMR selector with optional config
@@ -51,22 +56,23 @@ export class SemanticSearcher {
 
   async search(query: QueryRequest): Promise<SearchResponse> {
     const startTime = Date.now();
+    const queryId = this.generateQueryId();
     
     try {
-      log(`[Searcher] Searching for: ${query.task}`);
+      log(`[Searcher] Searching for: ${query.task} queryId=${queryId.substring(0, 8)}`);
       
       // Check if we should use smart dependency chain optimization
       if (this.smartDependencyTraverser && query.multi_hop?.enabled) {
-        return await this.smartDependencyChainSearch(query, startTime);
+        return await this.smartDependencyChainSearch(query, startTime, queryId);
       }
       
       // Check if we should use relationship-aware search
       if (this.relationshipEngine && query.multi_hop?.enabled) {
-        return await this.relationshipAwareSearch(query, startTime);
+        return await this.relationshipAwareSearch(query, startTime, queryId);
       }
       
       // Fallback to traditional semantic search
-      return await this.traditionalSemanticSearch(query, startTime);
+      return await this.traditionalSemanticSearch(query, startTime, queryId);
       
     } catch (err) {
       error(`[Searcher] Search failed error=${err instanceof Error ? err.message : err}`);
@@ -94,7 +100,7 @@ export class SemanticSearcher {
     }
   }
 
-  private async smartDependencyChainSearch(query: QueryRequest, startTime: number): Promise<SearchResponse> {
+  private async smartDependencyChainSearch(query: QueryRequest, startTime: number, queryId: string): Promise<SearchResponse> {
     log('[Searcher] Using smart dependency chain optimization for maximum context efficiency');
     
     // Generate query embedding for initial search
@@ -167,6 +173,16 @@ export class SemanticSearcher {
 
     const queryTime = Date.now() - startTime;
     
+    // Track telemetry for context effectiveness monitoring
+    await this.trackContextRetrieval(queryId, query, {
+      allChunks,
+      finalChunks,
+      dependencyChain,
+      mmrResult,
+      queryTime,
+      queryType: 'semantic_search'
+    });
+    
     return {
       status: 'success',
       chunks: finalChunks,
@@ -206,7 +222,7 @@ export class SemanticSearcher {
     };
   }
 
-  private async relationshipAwareSearch(query: QueryRequest, startTime: number): Promise<SearchResponse> {
+  private async relationshipAwareSearch(query: QueryRequest, startTime: number, queryId: string): Promise<SearchResponse> {
     log('[Searcher] Using relationship-aware search');
     
     // Generate query embedding for initial search
@@ -314,7 +330,7 @@ export class SemanticSearcher {
     };
   }
 
-  private async traditionalSemanticSearch(query: QueryRequest, startTime: number): Promise<SearchResponse> {
+  private async traditionalSemanticSearch(query: QueryRequest, startTime: number, queryId: string): Promise<SearchResponse> {
     log('[Searcher] Using traditional semantic search');
     
     // Generate query embedding
@@ -1045,5 +1061,97 @@ export class SemanticSearcher {
     }
 
     return insights;
+  }
+
+  // Telemetry tracking helper methods
+  private async trackContextRetrieval(
+    queryId: string, 
+    query: QueryRequest, 
+    searchData: any
+  ): Promise<void> {
+    if (!this.telemetryCollector) return;
+
+    try {
+      const mmrConfig = this.mmrSelector.getCurrentConfig?.() || {
+        preset: 'balanced',
+        lambdaRelevance: 0.7,
+        diversityMetric: 'semantic',
+        maxTokenBudget: 100000
+      };
+
+      await this.telemetryCollector.trackContextRetrieval({
+        queryId,
+        queryType: searchData.queryType,
+        mmrConfig: {
+          preset: mmrConfig.preset || 'balanced',
+          lambdaRelevance: mmrConfig.lambdaRelevance || 0.7,
+          diversityMetric: mmrConfig.diversityMetric || 'semantic',
+          maxTokenBudget: mmrConfig.maxTokenBudget || 100000
+        },
+        searchParams: {
+          maxChunks: query.max_chunks || 20,
+          query: query.task
+        },
+        candidateMetrics: {
+          total: searchData.allChunks?.length || 0,
+          filtered: searchData.allChunks?.length || 0,
+          chainLength: searchData.dependencyChain?.chainLength || 0
+        },
+        criticalSetMetrics: {
+          files: searchData.dependencyChain?.seedChunks?.length || 0,
+          functions: searchData.dependencyChain?.criticalDependencies?.length || 0,
+          confidence: searchData.dependencyChain?.completenessScore || 0,
+          chunksSelected: searchData.dependencyChain?.criticalDependencies?.length || 0
+        },
+        mmrResults: {
+          chunksSelected: searchData.finalChunks?.length || 0,
+          totalTokens: searchData.mmrResult?.totalTokens || 0,
+          budgetUtilization: searchData.mmrResult?.totalTokens ? 
+            (searchData.mmrResult.totalTokens / (mmrConfig.maxTokenBudget || 100000)) : 0,
+          criticalSetCoverage: searchData.mmrResult?.criticalSetCoverage || 0,
+          diversityScore: searchData.mmrResult?.diversityScore || 0
+        },
+        contextComposition: {
+          filesIncluded: new Set(searchData.finalChunks?.map((c: any) => c.file_path) || []).size,
+          fileTypes: [...new Set(searchData.finalChunks?.map((c: any) => 
+            c.file_path?.split('.').pop() || 'unknown') || [])],
+          relationshipTypes: searchData.dependencyChain?.relationshipPaths?.map((p: any) => 
+            p.relationshipType) || []
+        },
+        timing: {
+          selectionTimeMs: searchData.queryTime || 0
+        }
+      });
+
+      // Also track MMR performance if we have MMR results
+      if (searchData.mmrResult) {
+        await this.telemetryCollector.trackMMRPerformance({
+          queryId,
+          mmrMetrics: {
+            tradeoff: (mmrConfig.lambdaRelevance || 0.7) * 2 - 1, // Convert 0-1 to -1 to 1
+            efficiency: searchData.finalChunks?.length / (searchData.allChunks?.length || 1),
+            tokenEfficiency: searchData.mmrResult.totalTokens / (mmrConfig.maxTokenBudget || 100000)
+          },
+          qualityIndicators: {
+            referenceMatchRate: 0, // Will be updated by user interaction tracking
+            followUpReductionRate: 0, // Will be calculated from interaction patterns
+            contextReuseRate: 0 // Will be calculated from session patterns
+          }
+        });
+      }
+    } catch (error) {
+      // Don't let telemetry errors affect search functionality
+      warn(`[Telemetry] Failed to track context retrieval: ${error instanceof Error ? error.message : error}`);
+    }
+  }
+
+  private generateQueryId(): string {
+    return Date.now().toString(36) + Math.random().toString(36).substr(2, 9);
+  }
+
+  async shutdown(): Promise<void> {
+    if (this.telemetryCollector) {
+      await this.telemetryCollector.shutdown();
+    }
   }
 }

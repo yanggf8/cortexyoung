@@ -20,6 +20,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **🗂️ Dual-Mode File Tracking**: Intelligent staging system for both git-tracked and untracked files ✅ **IMPLEMENTED**
 - **🔗 Smart Dependency Chains**: Automatic inclusion of complete dependency context ✅ **IMPLEMENTED**
 - **🔒 Storage Race Condition Fix**: Zero ENOENT errors with unique temp file naming ✅ **IMPLEMENTED**
+- **🤖 Enhanced Claude Code Integration**: Smart tool guidance with context optimization hints and telemetry-driven improvements ✅ **IMPLEMENTED**
 
 ## Quick Start Commands
 
@@ -185,14 +186,24 @@ Claude Code ← MCP Server ← Vector Store ← ProcessPool → Incremental Upda
 }
 ```
 
-### Available MCP Tools
-1. **semantic_search** - Advanced semantic code search with relationship traversal and MMR optimization
-2. **contextual_read** - File reading with semantic context awareness  
-3. **code_intelligence** - High-level semantic codebase analysis with intelligent chunk selection
-4. **relationship_analysis** - Code relationship analysis and traversal
-5. **trace_execution_path** - Execution path tracing
-6. **find_code_patterns** - Complex code pattern discovery with MMR diversity balancing
-7. **real_time_status** ✅ - Get real-time file watching status and context freshness
+### Available MCP Tools ✅
+1. **semantic_search** - Quick code discovery, debugging, finding specific functionality with MMR optimization and auto dependency inclusion
+2. **contextual_read** - Smart file reading with semantic context awareness
+3. **code_intelligence** - Complex analysis, architecture understanding, feature implementation with critical set protection  
+4. **relationship_analysis** - Dependency mapping, impact analysis, refactoring planning with strength scoring
+5. **trace_execution_path** - Execution flow analysis, error path tracing, bidirectional traversal
+6. **find_code_patterns** - Pattern recognition, architectural analysis, code quality assessment
+7. **real_time_status** ✅ - Real-time file watching status and context freshness validation
+
+### **🎯 Enhanced Tool Guidance for Claude Code Users**
+- **Smart Tool Selection**: Each tool includes "BEST FOR" guidance to help users choose optimally
+- **Context Optimization Hints**: Real-time suggestions for MMR presets, token budgets, and follow-up tools
+- **Query Quality Assessment**: Automatic complexity analysis with optimization recommendations
+- **Usage Pattern Learning**: System tracks effectiveness and suggests improvements automatically
+
+**📚 Comprehensive Documentation Available:**
+- `CLAUDE_CODE_README.md` - User-friendly guide with examples and optimization settings
+- `TOOL_USAGE_GUIDE.md` - Advanced usage patterns and tool combination strategies
 
 ## Storage Management
 
@@ -281,6 +292,7 @@ npm run validate:performance   # Critical improvements validation
 - **Resource management**: Adaptive scaling operational
 - **Storage operations**: Zero race conditions with unique temp file naming
 - **Logging system**: Clear and accurate chunk deletion tracking
+- **MCP Tool Enhancement**: Smart guidance system for Claude Code users with context optimization hints ✅
 
 ### **Next Targets** 🎯
 - ✅ **Zero storage errors during real-time updates** - COMPLETED with stress testing validation

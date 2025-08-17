@@ -3,7 +3,7 @@
 export const CORTEX_TOOLS = {
   semantic_search: {
     name: 'semantic_search',
-    description: 'Semantic code search using vector embeddings to find relevant code chunks',
+    description: 'BEST FOR: Quick code discovery, finding specific functions/patterns, debugging. Uses advanced semantic search with MMR optimization to find the most relevant code chunks while ensuring diversity. Automatically includes related dependencies.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -101,7 +101,7 @@ export const CORTEX_TOOLS = {
 
   code_intelligence: {
     name: 'code_intelligence',
-    description: 'High-level semantic analysis for complex development tasks',
+    description: 'BEST FOR: Complex development tasks, architecture understanding, feature implementation. Provides comprehensive semantic analysis with smart dependency chain traversal and critical set protection. Optimizes context window for maximum code understanding.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -135,7 +135,7 @@ export const CORTEX_TOOLS = {
 
   relationship_analysis: {
     name: 'relationship_analysis',
-    description: 'Advanced code relationship analysis and traversal for understanding complex code interactions',
+    description: 'BEST FOR: Understanding code dependencies, impact analysis, refactoring planning. Traces complex code relationships (calls, imports, data flow) with strength scoring. Essential for architectural decisions and safe code changes.',
     inputSchema: {
       type: 'object',
       properties: {

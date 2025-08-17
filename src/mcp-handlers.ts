@@ -21,7 +21,74 @@ export class SemanticSearchHandler extends BaseHandler {
       context_mode: params.context_mode || 'structured'
     };
 
-    return await this.searcher.search(query);
+    const result = await this.searcher.search(query);
+    
+    // Add context optimization hints to help Claude Code learn
+    const enhancedResult = {
+      ...result,
+      context_optimization: {
+        tool_used: 'semantic_search',
+        query_complexity: this.assessQueryComplexity(params.query),
+        token_efficiency: result.context_package?.token_efficiency || 0,
+        critical_coverage: result.dependency_chain?.completeness_score || 0,
+        suggested_mmr_preset: this.suggestMMRPreset(params.query),
+        follow_up_suggestions: this.generateFollowUpSuggestions(result, params.query),
+        optimization_tips: this.generateOptimizationTips(result, params)
+      }
+    };
+
+    return enhancedResult;
+  }
+
+  private assessQueryComplexity(query: string): 'simple' | 'medium' | 'complex' {
+    const words = query.split(/\s+/).length;
+    const hasSpecialTerms = /\b(implement|understand|analyze|debug|refactor|architecture)\b/i.test(query);
+    
+    if (words > 10 || hasSpecialTerms) return 'complex';
+    if (words > 5) return 'medium';
+    return 'simple';
+  }
+
+  private suggestMMRPreset(query: string): string {
+    if (/\b(debug|error|fix|bug|issue)\b/i.test(query)) return 'high-relevance';
+    if (/\b(understand|learn|explore|architecture|overview)\b/i.test(query)) return 'high-diversity';
+    return 'balanced';
+  }
+
+  private generateFollowUpSuggestions(result: any, query: string): string[] {
+    const suggestions: string[] = [];
+    
+    if (result.chunks?.length > 15) {
+      suggestions.push('Consider using code_intelligence for comprehensive analysis of complex results');
+    }
+    
+    if (/\b(debug|error)\b/i.test(query)) {
+      suggestions.push('Use trace_execution_path to understand error propagation');
+    }
+    
+    if (result.context_package?.groups?.length > 3) {
+      suggestions.push('Use relationship_analysis to understand connections between components');
+    }
+    
+    return suggestions;
+  }
+
+  private generateOptimizationTips(result: any, params: any): string[] {
+    const tips: string[] = [];
+    
+    if (!params.multi_hop?.enabled) {
+      tips.push('Enable multi_hop for better dependency context');
+    }
+    
+    if (result.context_package?.token_efficiency < 0.7) {
+      tips.push('Consider more specific query terms to improve relevance');
+    }
+    
+    if (result.chunks?.length < 5) {
+      tips.push('Try broader search terms or increase max_chunks');
+    }
+    
+    return tips;
   }
 }
 
