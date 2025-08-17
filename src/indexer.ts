@@ -202,11 +202,13 @@ export class CodebaseIndexer {
     log(`📊 Delta analysis: +${delta.fileChanges.added.length} ~${delta.fileChanges.modified.length} -${delta.fileChanges.deleted.length} files`);
     
     // Handle deleted files first (clean up their chunks from the index)
+    let deletedFileChunks = 0;
     if (delta.fileChanges.deleted.length > 0) {
       log(`🗑️  Processing ${delta.fileChanges.deleted.length} deleted files...`);
       for (const deletedFile of delta.fileChanges.deleted) {
         const deletedChunks = this.vectorStore.getChunksByFile(deletedFile);
         delta.removed.push(...deletedChunks.map(c => c.chunk_id));
+        deletedFileChunks += deletedChunks.length;
         log(`   Removed ${deletedChunks.length} chunks from deleted file: ${deletedFile}`);
       }
     }
@@ -270,7 +272,7 @@ export class CodebaseIndexer {
     log(`💡 Processing summary by file change type:`);
     log(`  - NEW FILES: ${delta.fileChanges.added.length} files`);
     log(`  - MODIFIED FILES: ${delta.fileChanges.modified.length} files`);
-    log(`  - DELETED FILES: ${delta.fileChanges.deleted.length} files (${delta.removed.length - (chunksToEmbed.length > 0 ? delta.removed.filter(id => !chunksToEmbed.some(c => c.chunk_id === id)).length : delta.removed.length)} chunks removed)`);
+    log(`  - DELETED FILES: ${delta.fileChanges.deleted.length} files (${deletedFileChunks} chunks removed)`);
     log(`  - CHUNKS TO EMBED: ${chunksToEmbed.length} (new or modified)`);
     log(`  - CHUNKS TO KEEP: ${chunksToKeep.length} (unchanged, cache hit)`);
     log(`  - TOTAL CHUNKS REMOVED: ${delta.removed.length}`);
