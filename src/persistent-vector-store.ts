@@ -4,6 +4,7 @@ import { SchemaValidator } from './schema-validator';
 import { log } from './logging-utils';
 import { StoragePaths } from './storage-constants';
 import * as fs from 'fs/promises';
+import * as path from 'path';
 
 interface PersistedIndex {
   version: string;
@@ -419,8 +420,13 @@ export class PersistentVectorStore extends VectorStore {
     // Check for deleted files - files that have chunks but aren't in current file list
     const filesWithChunks = new Set(Array.from(this.chunks.values()).map(chunk => chunk.file_path));
     for (const filePath of filesWithChunks) {
-      if (!files.includes(filePath)) {
-        delta.fileChanges.deleted.push(filePath);
+      // Normalize paths for comparison - convert absolute chunk paths to relative
+      const normalizedChunkPath = path.isAbsolute(filePath) 
+        ? path.relative(this.repositoryPath, filePath)
+        : filePath;
+      
+      if (!files.includes(normalizedChunkPath)) {
+        delta.fileChanges.deleted.push(normalizedChunkPath);
         
         // Remove chunks for deleted files
         const deletedChunks = Array.from(this.chunks.values())
