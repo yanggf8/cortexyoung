@@ -263,4 +263,4 @@ if (require.main === module) {
   });
 }
 
-export { TelemetryDashboard };
+// TelemetryDashboard already exported above

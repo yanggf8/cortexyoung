@@ -269,10 +269,28 @@ export class CodebaseIndexer {
       }
     }
     
+    // CRITICAL FIX: Preserve chunks from unchanged files
+    // The issue was that only chunks from changed files were being processed,
+    // but chunks from unchanged files need to be explicitly preserved
+    log('🔄 Preserving chunks from unchanged files...');
+    const unchangedFiles = scanResult.files.filter(filePath => 
+      !delta.fileChanges.added.includes(filePath) && 
+      !delta.fileChanges.modified.includes(filePath) && 
+      !delta.fileChanges.deleted.includes(filePath)
+    );
+    
+    let unchangedChunksCount = 0;
+    for (const unchangedFile of unchangedFiles) {
+      const existingChunks = this.vectorStore.getChunksByFile(unchangedFile);
+      chunksToKeep.push(...existingChunks);
+      unchangedChunksCount += existingChunks.length;
+    }
+    
     log(`💡 Processing summary by file change type:`);
     log(`  - NEW FILES: ${delta.fileChanges.added.length} files`);
     log(`  - MODIFIED FILES: ${delta.fileChanges.modified.length} files`);
     log(`  - DELETED FILES: ${delta.fileChanges.deleted.length} files (${deletedFileChunks} chunks removed)`);
+    log(`  - UNCHANGED FILES: ${unchangedFiles.length} files (${unchangedChunksCount} chunks preserved)`);
     log(`  - CHUNKS TO EMBED: ${chunksToEmbed.length} (new or modified)`);
     log(`  - CHUNKS TO KEEP: ${chunksToKeep.length} (unchanged, cache hit)`);
     log(`  - TOTAL CHUNKS REMOVED: ${delta.removed.length}`);

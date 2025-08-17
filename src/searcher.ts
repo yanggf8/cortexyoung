@@ -1072,7 +1072,7 @@ export class SemanticSearcher {
     if (!this.telemetryCollector) return;
 
     try {
-      const mmrConfig = this.mmrSelector.getCurrentConfig?.() || {
+      const mmrConfig = {
         preset: 'balanced',
         lambdaRelevance: 0.7,
         diversityMetric: 'semantic',

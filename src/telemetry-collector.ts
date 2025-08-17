@@ -74,7 +74,8 @@ export class TelemetryCollector {
     if (!this.shouldCollect('track_context_retrieval')) return;
 
     const event: ContextRetrievalEvent = {
-      ...this.createBaseEvent('context_retrieval'),
+      ...this.createBaseEvent(),
+      event_type: 'context_retrieval' as const,
       query_id: params.queryId,
       query_type: params.queryType as any,
       
@@ -122,7 +123,8 @@ export class TelemetryCollector {
     if (!this.shouldCollect('track_user_interactions')) return;
 
     const event: UserInteractionEvent = {
-      ...this.createBaseEvent('user_interaction'),
+      ...this.createBaseEvent(),
+      event_type: 'user_interaction' as const,
       query_id: params.queryId,
       interaction_type: params.interactionType as any,
       file_path_hash: params.filePath ? this.hashFilePath(params.filePath) : undefined,
@@ -147,7 +149,8 @@ export class TelemetryCollector {
     if (!this.shouldCollect('track_mmr_performance')) return;
 
     const event: MMRPerformanceEvent = {
-      ...this.createBaseEvent('mmr_performance'),
+      ...this.createBaseEvent(),
+      event_type: 'mmr_performance' as const,
       query_id: params.queryId,
       preset_comparison: params.comparisonData,
       relevance_vs_diversity_tradeoff: params.mmrMetrics.tradeoff || 0,
@@ -171,7 +174,8 @@ export class TelemetryCollector {
     if (!this.shouldCollect('track_system_performance')) return;
 
     const event: SystemPerformanceEvent = {
-      ...this.createBaseEvent('system_performance'),
+      ...this.createBaseEvent(),
+      event_type: 'system_performance' as const,
       avg_query_response_time_ms: metrics.avgResponseTime,
       embedding_cache_hit_rate: metrics.cacheHitRate,
       index_freshness_score: metrics.indexFreshness,
@@ -242,21 +246,20 @@ export class TelemetryCollector {
   }
 
   // Utility methods
-  private createBaseEvent(eventType: string): TelemetryEvent {
+  private createBaseEvent(): Omit<TelemetryEvent, 'event_type'> {
     return {
       event_id: this.generateEventId(),
       session_id: this.sessionId,
       timestamp: this.config.anonymize_timestamps ? 
         Math.floor(Date.now() / (5 * 60 * 1000)) * (5 * 60 * 1000) : // Round to 5-minute intervals
         Date.now(),
-      event_type: eventType,
       repository_hash: this.repositoryHash
     };
   }
 
   private shouldCollect(eventTypeSetting: keyof TelemetryConfig): boolean {
     return this.config.enabled && 
-           this.config[eventTypeSetting] && 
+           Boolean(this.config[eventTypeSetting]) && 
            Math.random() < this.config.sampling_rate;
   }
 

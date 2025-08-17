@@ -267,6 +267,21 @@ export class CortexMCPServer {
       }
     });
 
+    // MCP endpoint health check (for Claude Code health checking)
+    app.get('/mcp', (req: Request, res: Response) => {
+      res.json({
+        status: 'healthy',
+        server: 'cortex-mcp-server',
+        version: '2.1.6',
+        ready: true,
+        timestamp: Date.now(),
+        protocolVersion: '2025-01-07',
+        capabilities: {
+          tools: {}
+        }
+      });
+    });
+
     // MCP endpoint for JSON-RPC communication
     app.post('/mcp', async (req: Request, res: Response) => {
       try {

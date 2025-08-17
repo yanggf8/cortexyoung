@@ -20,7 +20,13 @@
       "mcp__cursor-agent__next-chunk",
       "Bash(npm install:*)",
       "Bash(npm install:*)",
-      "Bash(find:*)"
+      "Bash(find:*)",
+      "Bash(rm:*)",
+      "mcp__rovodev__Ping",
+      "mcp__rovodev__ask-rovodev",
+      "Bash(curl:*)",
+      "Bash(pkill:*)",
+      "Bash(kill:*)"
     ],
     "deny": []
   }
