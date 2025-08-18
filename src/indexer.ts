@@ -606,19 +606,43 @@ export class CodebaseIndexer {
       // Reprocess the changed file - use relativePath for chunking
       const chunks = await this.chunker.chunkFile(relativePath, content);
       if (chunks.length > 0) {
-        // Use strategy manager for real-time embedding generation
+        // Use strategy manager for real-time embedding generation with graceful degradation
         const config = EmbeddingStrategyManager.getConfigFromEnv();
         
         log(`[CodebaseIndexer] Generating embeddings for real-time update: ${chunks.length} chunks in ${relativePath}`);
-        const result = await this.strategyManager.generateEmbeddings(chunks, config);
         
-        // Store the updated chunks with embeddings
-        await this.vectorStore.upsertChunks(result.chunks);
-        
-        // Also save to persistent storage for consistency
-        await this.vectorStore.savePersistedIndex();
-        
-        log(`[CodebaseIndexer] Successfully updated ${result.chunks.length} chunks for ${relativePath}`);
+        try {
+          const result = await this.strategyManager.generateEmbeddings(chunks, config);
+          
+          // Store the updated chunks with embeddings
+          await this.vectorStore.upsertChunks(result.chunks);
+          
+          // Also save to persistent storage for consistency
+          await this.vectorStore.savePersistedIndex();
+          
+          log(`[CodebaseIndexer] Successfully updated ${result.chunks.length} chunks for ${relativePath}`);
+          
+        } catch (memoryError) {
+          // Graceful degradation for real-time updates when memory is constrained
+          if (memoryError instanceof Error && memoryError.message.includes('System memory too high')) {
+            warn(`[CodebaseIndexer] Real-time embedding skipped due to memory pressure (${relativePath})`);
+            warn(`[CodebaseIndexer] Chunks will be reprocessed when memory becomes available`);
+            
+            // Store chunks without embeddings for now (they'll be embedded during next full indexing)
+            const chunksWithoutEmbeddings = chunks.map(chunk => ({
+              ...chunk,
+              embedding: [] // Empty embedding array indicates pending embedding
+            }));
+            
+            await this.vectorStore.upsertChunks(chunksWithoutEmbeddings);
+            await this.vectorStore.savePersistedIndex();
+            
+            log(`[CodebaseIndexer] Stored ${chunks.length} chunks without embeddings for ${relativePath} (memory-constrained mode)`);
+          } else {
+            // Re-throw non-memory related errors
+            throw memoryError;
+          }
+        }
       }
     } catch (error) {
       warn(`[CodebaseIndexer] Failed to process file change for ${relativePath}:`, error instanceof Error ? error.message : error);

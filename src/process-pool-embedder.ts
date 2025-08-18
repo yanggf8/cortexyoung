@@ -663,6 +663,12 @@ export class ProcessPoolEmbedder implements IEmbedder {
         log(`[ProcessPool] Scaling skipped workload=${this.workloadChunkCount} chunks reason=single_process_optimal`);
         return;
       }
+      
+      // Check for scale-down opportunities when queue is empty
+      if (await this.shouldScaleDown()) {
+        await this.scaleDownProcessPool();
+        return; // Skip further scaling checks this cycle
+      }
       // Get both memory and CPU info in parallel for efficiency
       const [memInfo, cpuInfo] = await Promise.all([
         this.getAccurateSystemMemory(),
@@ -881,6 +887,130 @@ export class ProcessPoolEmbedder implements IEmbedder {
     } catch (err) {
       error(`[ProcessPool] Failed to grow process pool error=${err instanceof Error ? err.message : err}`);
     }
+  }
+
+  // Intelligent scale-down logic to terminate idle processes
+  private async shouldScaleDown(): Promise<boolean> {
+    // Never scale down below minimum (1 process)
+    if (this.adaptivePool.currentProcesses <= 1) {
+      return false;
+    }
+    
+    // Only scale down when queue is completely empty
+    const hasActiveWork = this.queue.length() > 0 || this.queue.running() > 0;
+    if (hasActiveWork) {
+      return false;
+    }
+    
+    // Check if we have idle processes for sufficient time (5 minutes)
+    const idleTimeoutMs = 5 * 60 * 1000; // 5 minutes
+    const now = Date.now();
+    
+    // Check if processes have been idle long enough
+    const idleProcesses = this.processes.filter(proc => 
+      proc.isReady && 
+      proc.isAvailable && 
+      (now - proc.lastUsed) > idleTimeoutMs
+    );
+    
+    // Scale down if we have more than 1 process and at least half are idle
+    const shouldScale = idleProcesses.length >= Math.ceil(this.adaptivePool.currentProcesses / 2) && 
+                       this.adaptivePool.currentProcesses > 1;
+    
+    if (shouldScale) {
+      log(`[ProcessPool] Scale-down conditions met: idle_processes=${idleProcesses.length} total_processes=${this.adaptivePool.currentProcesses} queue_empty=true`);
+    }
+    
+    return shouldScale;
+  }
+
+  // Scale down by terminating the least recently used idle process
+  private async scaleDownProcessPool(): Promise<void> {
+    if (this.adaptivePool.currentProcesses <= 1) {
+      return; // Never scale below 1 process
+    }
+    
+    // Find the least recently used idle process
+    const idleProcesses = this.processes
+      .filter(proc => proc.isReady && proc.isAvailable)
+      .sort((a, b) => a.lastUsed - b.lastUsed); // Sort by last used time (oldest first)
+    
+    if (idleProcesses.length === 0) {
+      log(`[ProcessPool] No idle processes available for scale-down`);
+      return;
+    }
+    
+    const processToTerminate = idleProcesses[0];
+    const newProcessCount = this.adaptivePool.currentProcesses - 1;
+    
+    log(`📉 Scaling down process pool: ${this.adaptivePool.currentProcesses} → ${newProcessCount} processes (terminating process ${processToTerminate.id})`);
+    
+    try {
+      // Remove process from the array
+      const processIndex = this.processes.findIndex(p => p.id === processToTerminate.id);
+      if (processIndex !== -1) {
+        this.processes.splice(processIndex, 1);
+      }
+      
+      // Gracefully terminate the process
+      await this.terminateProcess(processToTerminate);
+      
+      // Update counts
+      this.adaptivePool.currentProcesses = newProcessCount;
+      this.processCount = newProcessCount;
+      
+      // Update queue concurrency
+      this.queue.concurrency = newProcessCount;
+      
+      log(`✅ Process pool scaled down to ${newProcessCount} processes`);
+      
+      // Reset growth phase to allow future growth if needed
+      if (this.adaptivePool.growthPhase === 'completed') {
+        this.adaptivePool.growthPhase = 'gradual';
+      }
+      
+    } catch (err) {
+      error(`[ProcessPool] Failed to scale down process pool error=${err instanceof Error ? err.message : err}`);
+    }
+  }
+
+  // Gracefully terminate a single process
+  private async terminateProcess(processInstance: ProcessInstance): Promise<void> {
+    return new Promise<void>((resolve) => {
+      if (!processInstance.process || processInstance.process.killed) {
+        resolve();
+        return;
+      }
+      
+      log(`🔄 Gracefully terminating process ${processInstance.id}...`);
+      
+      // Set up timeout for graceful shutdown
+      const timeout = setTimeout(() => {
+        log(`⚠️  Process ${processInstance.id} didn't exit gracefully, force killing...`);
+        try {
+          processInstance.process.kill('SIGKILL');
+        } catch (err) {
+          log(`⚠️  Force kill failed for process ${processInstance.id}: ${err}`);
+        }
+        resolve();
+      }, 5000); // 5 second timeout
+      
+      // Handle process exit
+      processInstance.process.on('exit', () => {
+        clearTimeout(timeout);
+        log(`✅ Process ${processInstance.id} terminated gracefully`);
+        resolve();
+      });
+      
+      // Send graceful shutdown signal
+      try {
+        processInstance.process.kill('SIGTERM');
+      } catch (err) {
+        clearTimeout(timeout);
+        log(`⚠️  Failed to send SIGTERM to process ${processInstance.id}: ${err}`);
+        resolve();
+      }
+    });
   }
   
   private async createSingleProcess(processId: number): Promise<ProcessInstance> {
