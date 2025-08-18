@@ -43,8 +43,8 @@ export class GitScanner {
       result.split('\n').filter(Boolean)
     );
 
-    // Include untracked files for dual-mode support (default: true, can be disabled)
-    const includeUntracked = process.env.CORTEX_INCLUDE_UNTRACKED !== 'false';
+    // Optionally include untracked files for dual-mode support
+    const includeUntracked = process.env.CORTEX_INCLUDE_UNTRACKED === 'true';
     if (includeUntracked) {
       try {
         // Get untracked files

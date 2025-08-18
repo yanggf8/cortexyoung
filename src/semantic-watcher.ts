@@ -1,5 +1,6 @@
 import chokidar from 'chokidar';
 import { readFile } from 'fs/promises';
+import * as path from 'path';
 import { log, warn } from './logging-utils';
 import { CodebaseIndexer } from './indexer';
 import { StagingManager } from './staging-manager';
@@ -96,7 +97,17 @@ export class SemanticWatcher {
         log(`[SemanticWatcher] File marked as indexed: ${filePath}`);
       } else {
         log(`[SemanticWatcher] No semantic changes detected: ${filePath}`);
-        // Still mark as indexed to prevent accumulation in staging
+        // For files without semantic changes, still index them if they're untracked
+        // (git-tracked files are handled by startup indexing)
+        const stagedFile = this.stagingManager.getStagedFiles().find(f => 
+          path.resolve(this.stagingManager['repositoryPath'], f.filePath) === filePath
+        );
+        
+        if (stagedFile && !stagedFile.isGitTracked) {
+          log(`[SemanticWatcher] Indexing untracked file without semantic changes: ${filePath}`);
+          await this.indexer.handleFileChange(filePath, 'content');
+        }
+        
         this.stagingManager.markFileIndexed(filePath);
         log(`[SemanticWatcher] File marked as indexed (no semantic changes): ${filePath}`);
       }
