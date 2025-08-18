@@ -96,6 +96,9 @@ export class SemanticWatcher {
         log(`[SemanticWatcher] File marked as indexed: ${filePath}`);
       } else {
         log(`[SemanticWatcher] No semantic changes detected: ${filePath}`);
+        // Still mark as indexed to prevent accumulation in staging
+        this.stagingManager.markFileIndexed(filePath);
+        log(`[SemanticWatcher] File marked as indexed (no semantic changes): ${filePath}`);
       }
     } catch (error) {
       // File might be deleted or inaccessible, ignore
@@ -146,7 +149,14 @@ export class SemanticWatcher {
   }
 
   private isCodeFile(filePath: string): boolean {
-    const codeExtensions = ['.js', '.ts', '.jsx', '.tsx', '.py', '.java', '.cpp', '.c', '.h'];
+    // Expanded to match staging manager's text file detection
+    const codeExtensions = [
+      '.ts', '.js', '.tsx', '.jsx', '.py', '.java', '.cpp', '.c', '.h',
+      '.cs', '.php', '.rb', '.go', '.rs', '.swift', '.kt', '.scala',
+      '.html', '.css', '.scss', '.less', '.vue', '.svelte',
+      '.json', '.xml', '.yaml', '.yml', '.toml', '.ini',
+      '.md', '.txt', '.rst', '.tex', '.sql'
+    ];
     return codeExtensions.some(ext => filePath.endsWith(ext));
   }
 
