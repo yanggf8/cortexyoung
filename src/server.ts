@@ -13,6 +13,7 @@ import { conditionalLogger } from './utils/console-logger';
 import { CORTEX_TOOLS } from './mcp-tools';
 import { MMRConfigManager, createMMRConfigFromEnvironment } from './mmr-config-manager';
 import { error } from './logging-utils';
+import { cortexConfig } from './env-config';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
@@ -44,7 +45,7 @@ class Logger {
   private logStream: fs.WriteStream;
 
   constructor(logFile?: string) {
-    this.logFile = logFile || path.join(process.cwd(), 'logs', 'cortex-server.log');
+    this.logFile = logFile || cortexConfig.logFile || path.join(process.cwd(), 'logs', 'cortex-server.log');
     
     // Ensure log directory exists
     const logDir = path.dirname(this.logFile);
@@ -91,7 +92,7 @@ class Logger {
   }
 
   debug(message: string, data?: any): void {
-    if (process.env.DEBUG === 'true') {
+    if (cortexConfig.debug) {
       this.writeLog('DEBUG', message, data);
     }
   }
@@ -197,7 +198,7 @@ export class CortexMCPServer {
           requestId,
           data: {
             serverRunning: !!this.httpServer,
-            port: process.env.PORT || 8765,
+            port: cortexConfig.port,
             stages: this.stageTracker.getProgressData(),
             currentStage: this.stageTracker.getCurrentStage(),
             progress: this.stageTracker.getProgress()
@@ -593,21 +594,21 @@ async function main() {
   // Parse command line arguments
   const args = process.argv.slice(2);
   const repoPath = args.find(arg => !arg.startsWith('--')) || process.cwd();
-  const port = parseInt(process.env.PORT || '8765');
-  const logFile = process.env.LOG_FILE;
+  const port = cortexConfig.port;
+  const logFile = cortexConfig.logFile;
   
   // Check for demo mode
   const isDemoMode = args.includes('--demo');
-  const forceReindex = args.includes('--reindex') || args.includes('--force-rebuild');
+  const forceReindex = args.includes('--reindex') || args.includes('--force-rebuild') || cortexConfig.forceRebuild;
   const forceFullMode = args.includes('--full');
-  const enableRealTime = !args.includes('--no-watch') && process.env.DISABLE_REAL_TIME !== 'true';
+  const enableRealTime = !args.includes('--no-watch') && !cortexConfig.disableRealTime;
   
   // Create main logger first
   const logger = new Logger(logFile);
   
   // Create stage tracker with logger to prevent duplicate output
   // Use enhanced tracker if new logging is enabled, otherwise fallback to original
-  const stageTracker = process.env.ENABLE_NEW_LOGGING === 'true' 
+  const stageTracker = cortexConfig.enableNewLogging 
     ? new EnhancedHierarchicalStageTracker(logger)
     : new HierarchicalStageTracker(logger);
   
@@ -619,7 +620,7 @@ async function main() {
   const pid = process.pid;
   
   // Enhanced startup header with new logging
-  if (process.env.ENABLE_NEW_LOGGING === 'true') {
+  if (cortexConfig.enableNewLogging) {
     conditionalLogger.ready(`Cortex MCP Server v${version} (${commit})`, {
       metadata: { 
         pid, 
@@ -656,9 +657,9 @@ async function main() {
     
     // Determine indexing mode
     let indexMode: 'full' | 'incremental' | 'reindex';
-    if (forceReindex || process.env.INDEX_MODE === 'reindex' || process.env.FORCE_REBUILD === 'true') {
+    if (forceReindex || cortexConfig.indexMode === 'reindex') {
       indexMode = 'reindex';
-      if (process.env.ENABLE_NEW_LOGGING === 'true') {
+      if (cortexConfig.enableNewLogging) {
         conditionalLogger.warn('Force rebuild requested', { 
           metadata: { mode: 'reindex' },
           reason: 'User requested complete rebuild'
@@ -668,14 +669,14 @@ async function main() {
       }
     } else if (forceFullMode) {
       indexMode = 'full';
-      if (process.env.ENABLE_NEW_LOGGING === 'true') {
+      if (cortexConfig.enableNewLogging) {
         conditionalLogger.ok('Full indexing mode requested', { metadata: { mode: 'full' } });
       } else {
         logger.info('🔄 Full mode requested, using full indexing');
       }
-    } else if (process.env.INDEX_MODE) {
-      indexMode = process.env.INDEX_MODE as 'full' | 'incremental';
-      if (process.env.ENABLE_NEW_LOGGING === 'true') {
+    } else if (cortexConfig.indexMode) {
+      indexMode = cortexConfig.indexMode as 'full' | 'incremental';
+      if (cortexConfig.enableNewLogging) {
         conditionalLogger.ok('Explicit indexing mode', { metadata: { mode: indexMode } });
       } else {
         logger.info('Using explicit indexing mode', { mode: indexMode });

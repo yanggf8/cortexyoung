@@ -128,6 +128,15 @@ npm run demo
 
 ### Bug Fixes
 
+**v2.1.7 - Environment Variable Configuration Overhaul** 🆕
+- **🔧 Centralized Environment Configuration**: New `env-config.ts` utility for type-safe configuration management
+- **🏷️ CORTEX_ Prefix Support**: Added support for prefixed environment variables (`CORTEX_PORT`, `CORTEX_LOG_FILE`, etc.) to prevent conflicts
+- **⚠️ Backward Compatibility**: Maintains support for unprefixed variables with deprecation warnings
+- **📋 Accurate Documentation**: Updated README to reflect all actually implemented environment variables (25+ variables documented)
+- **🛡️ Type Safety**: Implemented TypeScript interfaces and validation for all configuration options
+- **🧹 Code Cleanup**: Replaced direct `process.env` access with centralized `cortexConfig` object
+- **📝 Migration Path**: Clear upgrade path from unprefixed to prefixed environment variables
+
 **v2.1.6 - Performance & Concurrency Optimizations** 🆕
 - **⚡ Parallel Operations**: Vector store initialization now uses Promise.all for concurrent directory creation and file operations
 - **🚀 Smart Health Checks**: New `quickHealthCheck()` method avoids expensive validation when index is healthy
@@ -223,9 +232,38 @@ npm run demo
 
 ### Environment Variables
 
+**Core Configuration:**
 - `PORT` - Server port (default: 8765)
 - `LOG_FILE` - Custom log file path (default: logs/cortex-server.log)
 - `DEBUG` - Enable debug logging (set to 'true')
+
+**Advanced Configuration:**
+- `DISABLE_REAL_TIME` - Disable real-time file watching (set to 'true')
+- `ENABLE_NEW_LOGGING` - Enable enhanced logging system (set to 'true')
+- `INDEX_MODE` - Force indexing mode ('full' | 'incremental' | 'reindex')
+- `FORCE_REBUILD` - Force complete rebuild (set to 'true')
+
+**Embedding & Processing:**
+- `EMBEDDING_STRATEGY` - Embedding strategy ('auto' | 'cached' | 'process-pool')
+- `EMBEDDING_BATCH_SIZE` - Batch size for embedding generation
+- `EMBEDDING_PROCESS_COUNT` - Number of processes for embedding
+- `EMBEDDING_TIMEOUT_MS` - Timeout for embedding operations
+- `EMBEDDER_TYPE` - Embedder type ('local' | 'cloudflare')
+
+**MMR & Search:**
+- `CORTEX_MMR_ENABLED` - Enable MMR optimization (default: true)
+- `CORTEX_MMR_LAMBDA` - MMR diversity parameter (0.0-1.0)
+- `CORTEX_MMR_TOKEN_BUDGET` - Token budget for context window
+- `CORTEX_MMR_DIVERSITY_METRIC` - Diversity metric for MMR
+
+**Git & Telemetry:**
+- `CORTEX_INCLUDE_UNTRACKED` - Include untracked files (set to 'true')
+- `CORTEX_TELEMETRY_ENABLED` - Enable telemetry (default: true)
+- `CORTEX_TELEMETRY_SAMPLE_RATE` - Telemetry sampling rate (0.0-1.0)
+- `CORTEX_TELEMETRY_ANONYMIZATION` - Anonymization level
+- `CORTEX_TELEMETRY_RETENTION_DAYS` - Data retention period
+
+> **Note:** Environment variables without `CORTEX_` prefix may conflict with other applications. Future versions will migrate to prefixed variables for better isolation.
 
 ### Log Files
 
