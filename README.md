@@ -136,6 +136,8 @@ npm run demo
 - **🛡️ Type Safety**: Implemented TypeScript interfaces and validation for all configuration options
 - **🧹 Code Cleanup**: Replaced direct `process.env` access with centralized `cortexConfig` object
 - **📝 Migration Path**: Clear upgrade path from unprefixed to prefixed environment variables
+- **🔌 Dual MCP Integration**: Complete installation instructions for both Claude Code (HTTP) and Amazon Q CLI (stdio)
+- **🌐 Global Configuration**: User-level and global scope setup for seamless cross-project availability
 
 **v2.1.6 - Performance & Concurrency Optimizations** 🆕
 - **⚡ Parallel Operations**: Vector store initialization now uses Promise.all for concurrent directory creation and file operations
@@ -301,40 +303,93 @@ Based on architectural review, we've incorporated:
 
 Our system provides 80-90% token reduction through semantic understanding and multi-hop relationship traversal, addressing Claude Code's primary limitation of 50-70% token waste due to manual, text-based code discovery.
 
-## Integration with Claude Code
+## Integration with Claude Code and Amazon Q CLI
 
-Cortex provides semantic tools via MCP server:
+Cortex provides semantic tools via MCP server for both Claude Code and Amazon Q CLI:
 
 - `semantic_search` → Enhanced code search with vector embeddings
 - `contextual_read` → File reading with semantic context awareness  
 - `code_intelligence` → High-level semantic codebase analysis
+- `relationship_analysis` → Advanced code relationship discovery
+- `trace_execution_path` → Function call graph traversal
+- `find_code_patterns` → Pattern-based code discovery
+- `real_time_status` → Live context freshness monitoring
 
 **Production Results:**
 - ✅ **Sub-100ms** response times achieved
-- ✅ **408 chunks** indexed and searchable
+- ✅ **6000+ chunks** indexed and searchable
 - ✅ **Real BGE embeddings** working in production
-- ✅ **All curl tests passing** with comprehensive semantic results
 - ✅ **MCP server operational** on port 8765
+- ✅ **Dual AI assistant support** (Claude Code + Amazon Q CLI)
 
 ### Claude Code Setup
 
-1. Add to `~/.claude/mcp_servers.json`:
-```json
-{
-  "cortex": {
-    "command": "npm",
-    "args": ["run", "server"],
-    "cwd": "/path/to/cortexyoung",
-    "env": {
-      "PORT": "8765"
-    }
-  }
-}
+1. **Install the MCP server globally:**
+```bash
+# Start the Cortex server
+cd /path/to/cortexyoung
+npm run server
+
+# In another terminal, add to Claude Code (user-level/global)
+claude mcp add cortex http://localhost:8765/mcp --transport http --scope user
 ```
 
-2. Start Cortex server: `npm run server` (real-time enabled by default)
-3. Restart Claude Code
-4. Test with: `/mcp cortex semantic_search query="your query"`
+2. **Verify installation:**
+```bash
+claude mcp list
+claude mcp get cortex
+```
+
+3. **Use in Claude Code:**
+```bash
+/mcp cortex semantic_search query="your search"
+/mcp cortex contextual_read path="some/file.ts"
+/mcp cortex code_intelligence
+```
+
+### Amazon Q CLI Setup
+
+1. **Install the MCP server globally:**
+```bash
+q mcp add --name cortex --command "bash" --args "-c,cd /path/to/cortexyoung && npm run server" --scope global
+```
+
+2. **Verify installation:**
+```bash
+q mcp list
+q mcp status --name cortex
+```
+
+3. **Use in Amazon Q CLI:**
+```bash
+q chat  # Then use MCP tools within the chat session
+```
+
+### MCP Server Configuration
+
+**For Claude Code (HTTP):**
+- **Type:** HTTP MCP Server
+- **URL:** `http://localhost:8765/mcp`
+- **Scope:** User-level (available in all projects)
+- **Transport:** HTTP
+
+**For Amazon Q CLI (Stdio):**
+- **Type:** Stdio MCP Server  
+- **Command:** `bash -c "cd /path/to/cortexyoung && npm run server"`
+- **Scope:** Global
+- **Transport:** Stdio
+
+**Server Management:**
+```bash
+# Start server manually
+npm run server
+
+# Or use background process
+nohup npm run server > cortex-server.log 2>&1 &
+
+# Health check
+curl http://localhost:8765/health
+```
 
 ## Contributing
 
