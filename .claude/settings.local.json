@@ -29,7 +29,9 @@
       "Bash(kill:*)",
       "Bash(claude mcp get:*)",
       "WebFetch(domain:docs.anthropic.com)",
-      "Bash(claude mcp add:*)"
+      "Bash(claude mcp add:*)",
+      "Bash(ss:*)",
+      "Bash(claude mcp:*)"
     ],
     "deny": []
   }

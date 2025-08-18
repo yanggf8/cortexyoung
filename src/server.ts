@@ -275,7 +275,7 @@ export class CortexMCPServer {
         version: '2.1.6',
         ready: true,
         timestamp: Date.now(),
-        protocolVersion: '2025-01-07',
+        protocolVersion: '2024-11-05',
         capabilities: {
           tools: {}
         }
@@ -300,7 +300,7 @@ export class CortexMCPServer {
           response = {
             jsonrpc: '2.0',
             result: {
-              protocolVersion: '2025-01-07',
+              protocolVersion: '2024-11-05',
               capabilities: {
                 tools: {}
               },
