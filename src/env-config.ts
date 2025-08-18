@@ -98,7 +98,7 @@ export function loadCortexConfig(): CortexConfig {
 
     // Advanced Configuration
     disableRealTime: getBooleanEnv('DISABLE_REAL_TIME', false),
-    enableNewLogging: getBooleanEnv('ENABLE_NEW_LOGGING', false),
+    enableNewLogging: getBooleanEnv('ENABLE_NEW_LOGGING', false), // Note: Using ENABLE_NEW_LOGGING for backward compatibility, getEnvVar will check CORTEX_ENABLE_NEW_LOGGING first
     indexMode: getEnvVar('INDEX_MODE') as 'full' | 'incremental' | 'reindex' | undefined,
     forceRebuild: getBooleanEnv('FORCE_REBUILD', false),
 

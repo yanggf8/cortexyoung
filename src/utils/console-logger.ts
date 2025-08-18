@@ -237,9 +237,10 @@ export const logger = {
   debug: (message: string) => ok(message),
 };
 
-// Feature flag support
+// Feature flag support with consistent environment variable naming
 export const isNewLoggingEnabled = (): boolean => {
-  return process.env.ENABLE_NEW_LOGGING === 'true';
+  // Check CORTEX_ENABLE_NEW_LOGGING first, fallback to ENABLE_NEW_LOGGING for backward compatibility
+  return process.env.CORTEX_ENABLE_NEW_LOGGING === 'true' || process.env.ENABLE_NEW_LOGGING === 'true';
 };
 
 // Stage and Step tracking
