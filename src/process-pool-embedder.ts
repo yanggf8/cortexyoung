@@ -5,6 +5,7 @@ import * as os from 'os';
 import * as crypto from 'crypto';
 import { CodeChunk, IEmbedder, EmbedOptions, EmbeddingResult as IEmbeddingResult, EmbeddingMetadata, PerformanceStats, ProviderHealth, ProviderMetrics } from './types';
 import { log, warn, error } from './logging-utils';
+import { MemoryMappedCache } from './memory-mapped-cache';
 
 // Global Resource Management Thresholds (for ProcessPoolEmbedder local execution)
 export const RESOURCE_THRESHOLDS = {
@@ -174,8 +175,8 @@ export class ProcessPoolEmbedder implements IEmbedder {
   private queue: fastq.queueAsPromised<EmbeddingTask, ProcessEmbeddingResult[]>;
   private processCount: number;
   private isInitialized = false;
-  private embeddingCache: Map<string, CachedEmbedding> = new Map(); // Shared cache across all processes
-  private cacheStats = { hits: 0, misses: 0, total: 0, evictions: 0 };
+  private static sharedCache: MemoryMappedCache | null = null; // Singleton memory-mapped cache
+  private embeddingCache: MemoryMappedCache; // Instance reference to memory-mapped cache
   private adaptiveBatch: AdaptiveBatchConfig;
   private systemMemoryMB: number;
   private systemCpuCores: number;
@@ -653,6 +654,24 @@ export class ProcessPoolEmbedder implements IEmbedder {
     
     // Create fastq queue - consumer count matches initial process count
     this.queue = fastq.promise(this.processEmbeddingTask.bind(this), this.processCount);
+    
+    // Initialize memory-mapped cache (singleton pattern)
+    if (!ProcessPoolEmbedder.sharedCache) {
+      ProcessPoolEmbedder.sharedCache = MemoryMappedCache.getInstance(
+        './.cortex/mmap-cache',
+        ProcessPoolEmbedder.MAX_CACHE_SIZE,
+        384 // BGE-small-en-v1.5 dimensions
+      );
+      // Initialize the cache asynchronously
+      ProcessPoolEmbedder.sharedCache.initialize().catch(err => {
+        error(`[MemoryMappedCache] Failed to initialize: ${err}`);
+      });
+      log(`[MemoryMappedCache] Initialized memory-mapped cache with ${ProcessPoolEmbedder.MAX_CACHE_SIZE} entries`);
+    } else {
+      log(`[MemoryMappedCache] Reusing existing memory-mapped cache instance`);
+    }
+    
+    this.embeddingCache = ProcessPoolEmbedder.sharedCache;
   }
 
   // Predictive resource pool management with 2-step forecasting

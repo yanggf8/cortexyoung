@@ -163,21 +163,21 @@ export class EmbeddingStrategyManager {
     chunks: CodeChunk[], 
     config: EmbeddingStrategyConfig
   ): Promise<CodeChunk[]> {
-    this.processPoolEmbedder = new ProcessPoolEmbedder();
-
-    try {
-      log(`[EmbeddingStrategy] ProcessPool strategy initializing processes`);
-      
-      const result = await this.processPoolEmbedder.processAllEmbeddings(chunks);
-      
-      return result;
-
-    } finally {
-      if (this.processPoolEmbedder) {
-        await this.processPoolEmbedder.shutdown();
-        this.processPoolEmbedder = undefined;
-      }
+    // Reuse existing ProcessPoolEmbedder instance to avoid spawning new processes
+    if (!this.processPoolEmbedder) {
+      this.processPoolEmbedder = new ProcessPoolEmbedder();
+      log(`[EmbeddingStrategy] ProcessPool strategy creating new embedder instance`);
+    } else {
+      log(`[EmbeddingStrategy] ProcessPool strategy reusing existing embedder instance`);
     }
+
+    log(`[EmbeddingStrategy] ProcessPool strategy processing ${chunks.length} chunks`);
+    
+    const result = await this.processPoolEmbedder.processAllEmbeddings(chunks);
+    
+    return result;
+
+    // Note: No longer shutting down after each use - pool persists for reuse
   }
 
   /**
@@ -191,31 +191,31 @@ export class EmbeddingStrategyManager {
     batchInfo: { totalBatches: number; averageBatchTime: number };
     cacheStats: { hits: number; misses: number; hitRate: number };
   }> {
-    this.cachedEmbedder = new CachedEmbedder(this.repositoryPath);
-
-    try {
-      log(`[EmbeddingStrategy] Cached strategy initializing with intelligent embedding cache`);
+    // Reuse existing CachedEmbedder instance to avoid spawning new processes
+    if (!this.cachedEmbedder) {
+      this.cachedEmbedder = new CachedEmbedder(this.repositoryPath);
+      log(`[EmbeddingStrategy] Cached strategy creating new embedder instance`);
       await this.cachedEmbedder.initialize(chunks.length);
-      
-      const result = await this.cachedEmbedder.processAllEmbeddings(chunks);
-      const stats = await this.cachedEmbedder.getEmbeddingCacheStats();
-
-      return {
-        chunks: result,
-        batchInfo: this.calculateCachedBatchInfo(chunks, stats),
-        cacheStats: {
-          hits: stats.cache_hits,
-          misses: stats.cache_misses,
-          hitRate: stats.hit_rate
-        }
-      };
-
-    } finally {
-      if (this.cachedEmbedder) {
-        await this.cachedEmbedder.shutdown();
-        this.cachedEmbedder = undefined;
-      }
+    } else {
+      log(`[EmbeddingStrategy] Cached strategy reusing existing embedder instance`);
     }
+
+    log(`[EmbeddingStrategy] Cached strategy processing ${chunks.length} chunks`);
+    
+    const result = await this.cachedEmbedder.processAllEmbeddings(chunks);
+    const stats = await this.cachedEmbedder.getEmbeddingCacheStats();
+
+    return {
+      chunks: result,
+      batchInfo: this.calculateCachedBatchInfo(chunks, stats),
+      cacheStats: {
+        hits: stats.cache_hits,
+        misses: stats.cache_misses,
+        hitRate: stats.hit_rate
+      }
+    };
+
+    // Note: No longer shutting down after each use - embedder persists for reuse
   }
 
   private createEmbeddingText(chunk: CodeChunk): string {
