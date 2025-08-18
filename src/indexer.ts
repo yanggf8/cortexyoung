@@ -603,8 +603,8 @@ export class CodebaseIndexer {
       const fs = await import('fs/promises');
       const content = await fs.readFile(filePath, 'utf-8');
       
-      // Reprocess the changed file
-      const chunks = await this.chunker.chunkFile(filePath, content);
+      // Reprocess the changed file - use relativePath for chunking
+      const chunks = await this.chunker.chunkFile(relativePath, content);
       if (chunks.length > 0) {
         // Use strategy manager for real-time embedding generation
         const config = EmbeddingStrategyManager.getConfigFromEnv();
@@ -641,7 +641,9 @@ export class CodebaseIndexer {
     }
     
     for (const filePath of filesToReindex) {
-      await this.handleFileChange(path.join(this.repositoryPath, filePath), 'content');
+      // filePath from chunks is already relative, so we need to join with repositoryPath
+      const absolutePath = path.isAbsolute(filePath) ? filePath : path.join(this.repositoryPath, filePath);
+      await this.handleFileChange(absolutePath, 'content');
     }
     
     this.contextInvalidator.clearInvalidatedChunks();
