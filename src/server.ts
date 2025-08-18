@@ -8,6 +8,8 @@ import { SemanticSearcher } from './searcher';
 import { SemanticSearchHandler, ContextualReadHandler, CodeIntelligenceHandler, RelationshipAnalysisHandler, TraceExecutionPathHandler, FindCodePatternsHandler, RealTimeStatusHandler } from './mcp-handlers';
 import { IndexHealthChecker } from './index-health-checker';
 import { HierarchicalStageTracker } from './hierarchical-stages';
+import { EnhancedHierarchicalStageTracker } from './enhanced-hierarchical-stages';
+import { conditionalLogger } from './utils/console-logger';
 import { CORTEX_TOOLS } from './mcp-tools';
 import { MMRConfigManager, createMMRConfigFromEnvironment } from './mmr-config-manager';
 import { error } from './logging-utils';
@@ -604,7 +606,10 @@ async function main() {
   const logger = new Logger(logFile);
   
   // Create stage tracker with logger to prevent duplicate output
-  const stageTracker = new HierarchicalStageTracker(logger);
+  // Use enhanced tracker if new logging is enabled, otherwise fallback to original
+  const stageTracker = process.env.ENABLE_NEW_LOGGING === 'true' 
+    ? new EnhancedHierarchicalStageTracker(logger)
+    : new HierarchicalStageTracker(logger);
   
   // Startup metadata header
   const version = getVersion();
@@ -613,9 +618,27 @@ async function main() {
   const platform = os.platform();
   const pid = process.pid;
   
-  logger.info(`[Startup] Cortex MCP Server version=${version} commit=${commit} pid=${pid} node=${nodeVersion} platform=${platform} port=${port}`);
-  logger.info(`[Startup] Repository path=${repoPath} logFile=${logFile || 'default'}`);
-  logger.info('🎯 Cortex MCP Server Starting...');
+  // Enhanced startup header with new logging
+  if (process.env.ENABLE_NEW_LOGGING === 'true') {
+    conditionalLogger.ready(`Cortex MCP Server v${version} (${commit})`, {
+      metadata: { 
+        pid, 
+        node: nodeVersion,
+        platform,
+        port 
+      }
+    });
+    conditionalLogger.ok(`Repo: ${repoPath}`, {
+      metadata: { 
+        logFile: logFile || 'default'
+      }
+    });
+    console.log(''); // Separator before stages
+  } else {
+    logger.info(`[Startup] Cortex MCP Server version=${version} commit=${commit} pid=${pid} node=${nodeVersion} platform=${platform} port=${port}`);
+    logger.info(`[Startup] Repository path=${repoPath} logFile=${logFile || 'default'}`);
+    logger.info('🎯 Cortex MCP Server Starting...');
+  }
   
   try {
     // ==================== STAGE 1: Initialization & Pre-flight ====================
@@ -635,13 +658,28 @@ async function main() {
     let indexMode: 'full' | 'incremental' | 'reindex';
     if (forceReindex || process.env.INDEX_MODE === 'reindex' || process.env.FORCE_REBUILD === 'true') {
       indexMode = 'reindex';
-      logger.info('🔄 Force rebuild requested, using reindex mode');
+      if (process.env.ENABLE_NEW_LOGGING === 'true') {
+        conditionalLogger.warn('Force rebuild requested', { 
+          metadata: { mode: 'reindex' },
+          reason: 'User requested complete rebuild'
+        });
+      } else {
+        logger.info('🔄 Force rebuild requested, using reindex mode');
+      }
     } else if (forceFullMode) {
       indexMode = 'full';
-      logger.info('🔄 Full mode requested, using full indexing');
+      if (process.env.ENABLE_NEW_LOGGING === 'true') {
+        conditionalLogger.ok('Full indexing mode requested', { metadata: { mode: 'full' } });
+      } else {
+        logger.info('🔄 Full mode requested, using full indexing');
+      }
     } else if (process.env.INDEX_MODE) {
       indexMode = process.env.INDEX_MODE as 'full' | 'incremental';
-      logger.info('Using explicit indexing mode', { mode: indexMode });
+      if (process.env.ENABLE_NEW_LOGGING === 'true') {
+        conditionalLogger.ok('Explicit indexing mode', { metadata: { mode: indexMode } });
+      } else {
+        logger.info('Using explicit indexing mode', { mode: indexMode });
+      }
     } else {
       indexMode = await getIntelligentIndexMode(indexer, logger);
     }

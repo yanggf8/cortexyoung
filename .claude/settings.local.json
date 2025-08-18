@@ -31,7 +31,8 @@
       "WebFetch(domain:docs.anthropic.com)",
       "Bash(claude mcp add:*)",
       "Bash(ss:*)",
-      "Bash(claude mcp:*)"
+      "Bash(claude mcp:*)",
+      "Bash(ENABLE_NEW_LOGGING=true npm run demo)"
     ],
     "deny": []
   }
