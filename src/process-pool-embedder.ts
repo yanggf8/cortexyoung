@@ -1234,7 +1234,7 @@ export class ProcessPoolEmbedder implements IEmbedder {
       
       // Spawn external Node.js process
       const childProcess = spawn('node', ['--expose-gc', '--max-old-space-size=512', processScript], {
-        stdio: ['pipe', 'pipe', 'pipe'], // stdin, stdout, stderr
+        stdio: ['pipe', 'pipe', 'pipe', 'ipc'], // stdin, stdout, stderr, ipc
         env: { 
           ...process.env, 
           NODE_ENV: 'production',
@@ -1428,7 +1428,7 @@ export class ProcessPoolEmbedder implements IEmbedder {
     
     // Spawn new process
     const childProcess = spawn('node', ['--expose-gc', '--max-old-space-size=512', path.join(__dirname, 'external-embedding-process.js')], {
-      stdio: ['pipe', 'pipe', 'pipe', 'pipe'],
+      stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
       env: {
         ...process.env,
         PROCESS_ID: processInstance.id.toString(),
