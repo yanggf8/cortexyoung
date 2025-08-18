@@ -13,10 +13,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **🔄 Signal Cascade System**: Reliable parent-child process cleanup with zero orphaned processes
 - **📊 Auto-sync Intelligence**: Eliminates manual storage commands with intelligent conflict resolution
 - **🎯 Guarded MMR Context Window Optimization**: Production-ready Maximal Marginal Relevance system with 95%+ critical set coverage
-- **⚡ Workload-Aware Process Growth**: Intelligent process scaling based on actual chunk count
+- **⚡ Intelligent ProcessPool Scaling**: Automatic scale-up/down with queue-aware resource management and LRU process termination ✅ **IMPLEMENTED**
 - **📦 Intelligent Embedding Cache**: 95-98% performance improvement with content-hash based caching
 - **🎯 File-Content Hash Delta Detection**: Fast file-level change detection with SHA256 hashing - 7x faster startup times
 - **👀 Smart File Watching**: Real-time code intelligence updates with semantic change detection ✅ **IMPLEMENTED**
+- **🛡️ Real-Time Graceful Degradation**: Memory-aware processing that continues operation during resource pressure ✅ **IMPLEMENTED**
 - **🗂️ Dual-Mode File Tracking**: Git-tracked files processed directly, untracked files via intelligent staging ✅ **IMPLEMENTED**
 - **🔗 Smart Dependency Chains**: Automatic inclusion of complete dependency context ✅ **IMPLEMENTED**
 - **🔒 Storage Race Condition Fix**: Zero ENOENT errors with unique temp file naming ✅ **IMPLEMENTED**
@@ -73,6 +74,7 @@ node test-semantic-watching.js      # Run comprehensive validation tests
 - **SemanticWatcher**: chokidar-based file monitoring with semantic pattern detection
 - **ContextInvalidator**: Intelligent chunk management and batch reindexing triggers
 - **Dual-Mode Tracking**: Git-tracked files processed directly, untracked files via staging system
+- **Graceful Degradation**: Continues operation during memory pressure by storing chunks without embeddings
 - **Zero Configuration**: Works seamlessly with existing Cortex architecture
 - **Cross-platform**: Windows/macOS/Linux compatibility through chokidar
 
@@ -92,6 +94,37 @@ npm run shutdown  # Comprehensive cleanup script
 - **Parent processes**: `npm run demo`, `ts-node src/index.ts`, `npm run benchmark`
 - **Child processes**: `node src/external-embedding-process.js` (spawned by ProcessPoolEmbedder)
 - **Memory impact**: Each external-embedding-process uses ~200-400MB
+
+### Intelligent Process Scaling ✅ **NEW**
+
+**Automatic Scale-Up/Down based on workload and resource availability:**
+
+```bash
+# Scale-up triggers (conservative growth)
+- Large workloads >400 chunks
+- 2-step CPU + memory predictions safe  
+- Queue has pending work
+
+# Scale-down triggers (intelligent resource management)
+- Queue completely empty (no pending/running tasks)
+- Processes idle for >5 minutes
+- At least half of processes are idle
+- System has adequate resources
+```
+
+**Key Features**:
+- **Queue-aware decisions**: Only scales down when no active work
+- **LRU process termination**: Terminates least recently used idle processes
+- **Conservative minimums**: Never scales below 1 process
+- **Graceful shutdown**: 5-second timeout with SIGTERM→SIGKILL fallback
+- **Growth phase reset**: Allows future scaling after scale-down
+
+**Scaling Logs**:
+```bash
+📈 Growing process pool: 1 → 2 processes
+📉 Scaling down process pool: 3 → 2 processes (terminating process 1)
+✅ Process pool scaled down to 2 processes
+```
 
 ## Embedding Strategy Architecture
 
@@ -122,6 +155,36 @@ EMBEDDING_PROCESS_COUNT=4       # Process count (ProcessPool strategy)
 - **Circuit Breaker**: 5 failures → 1min timeout → 2 successes to recover
 - **Rate Limiting**: TokenBucket 100 requests/minute
 - **Concurrency Control**: Managed through API throttling
+
+### Real-Time Graceful Degradation ✅ **NEW**
+
+**Continuous operation during memory pressure:**
+
+```bash
+# Normal operation
+[CodebaseIndexer] Successfully updated N chunks for filename
+
+# During memory pressure (>75% memory usage)
+[CodebaseIndexer] Real-time embedding skipped due to memory pressure (filename)
+[CodebaseIndexer] Chunks will be reprocessed when memory becomes available
+[CodebaseIndexer] Stored N chunks without embeddings (memory-constrained mode)
+
+# Recovery when memory becomes available  
+[CodebaseIndexer] Successfully updated N chunks for filename (recovered)
+```
+
+**Key Benefits**:
+- **Uninterrupted Service**: Real-time file watching never stops
+- **Smart Resource Management**: Skips expensive embedding generation during pressure
+- **Automatic Recovery**: Chunks get embeddings when resources become available
+- **Data Consistency**: All file changes tracked, embeddings applied when safe
+- **Production Ready**: No service interruption during high memory usage
+
+**Memory Pressure Handling**:
+- **Threshold**: 75% system memory usage triggers degradation
+- **Fallback**: Store chunks without embeddings (empty embedding array)  
+- **Recovery**: Automatic re-processing during next full indexing or when memory drops
+- **Logging**: Clear user-friendly messages explaining degradation state
 
 ## Performance Targets
 
@@ -303,6 +366,46 @@ npm run validate:performance   # Critical improvements validation
 
 ## Recent System Improvements ✅
 
+### 🔄 Intelligent ProcessPool Scaling & Real-Time Graceful Degradation - PRODUCTION READY ✅ **LATEST**
+
+**Revolutionary improvement for continuous operation and intelligent resource management:**
+
+#### **Intelligent Scale-Down Logic**
+- ✅ **Queue-aware scaling**: Scale down when queue is empty and processes idle >5min
+- ✅ **LRU process termination**: Terminates least recently used idle processes first
+- ✅ **Conservative minimums**: Never scales below 1 process for stability
+- ✅ **Graceful shutdown**: 5-second timeout with SIGTERM→SIGKILL fallback
+- ✅ **Growth phase reset**: Allows future scaling after scale-down operations
+
+#### **Real-Time Graceful Degradation**
+- ✅ **Memory pressure handling**: Skip embedding generation when memory >75%
+- ✅ **Service continuity**: Store chunks without embeddings during memory pressure
+- ✅ **Automatic recovery**: Chunks get embeddings when memory becomes available
+- ✅ **No service interruption**: Real-time file watching continues uninterrupted
+- ✅ **Production validated**: Handles memory pressure gracefully without shutdown
+
+#### **Problem Solved**
+**Before**: `[CodebaseIndexer] Failed to process file change: System memory too high (84.7%)`  
+**After**: `[CodebaseIndexer] Real-time embedding skipped due to memory pressure (memory-constrained mode)`
+
+### 🎨 Enhanced Console Logging System - PRODUCTION READY
+
+**Complete logging infrastructure with beautiful visualization and configuration management:**
+
+#### **Week 2 Features**
+- ✅ **Advanced Data Formatters**: 13 comprehensive formatting functions + 3 templates (JSON, tables, progress bars, boxes)
+- ✅ **Configuration System**: 6 profiles (development, production, ci, debug, testing, silent) with 4 themes
+- ✅ **Environment Auto-detection**: Smart profile selection based on NODE_ENV, CI, DEBUG flags
+- ✅ **File Output & Buffering**: Complete logging infrastructure with level filtering
+- ✅ **Cross-platform Support**: Proper terminal detection and color management (NO_COLOR, TTY)
+
+#### **Configuration Usage**
+```bash
+ENABLE_NEW_LOGGING=true npm run demo    # Test enhanced logging
+NODE_ENV=production npm run server      # Auto-selects production profile
+DEBUG=true npm run demo                  # Auto-selects debug profile
+```
+
 ### 🔧 Delta Detection Path Format Fix - PRODUCTION READY
 **Fixed critical path format inconsistency bug causing file misclassification:**
 
@@ -385,7 +488,7 @@ node test-configuration-demo.js      # Configuration capabilities demo
 ## Current Status & Roadmap
 
 ### **Current Status** ✅ **PRODUCTION READY**
-- **Real-time file watching**: ✅ Fully operational with semantic change detection
+- **Real-time file watching**: ✅ Fully operational with semantic change detection + graceful degradation
 - **Claude Code MCP Integration**: ✅ HTTP server installed and operational via `claude mcp add`
 - **7 MCP Tools**: ✅ All tools accessible via @cortex-[tool_name] syntax
 - **Smart dependency chains**: ✅ Automatic context inclusion with relationship traversal
@@ -393,17 +496,17 @@ node test-configuration-demo.js      # Configuration capabilities demo
 - **Exception handling**: ✅ Robust error recovery with conservative fallback approaches
 - **Build system**: ✅ TypeScript compilation passes without errors
 - **Storage operations**: ✅ Zero race conditions with unique temp file naming
-- **Resource management**: ✅ Adaptive scaling with CPU + memory monitoring
+- **Resource management**: ✅ Intelligent scaling with queue-aware scale-up/down and memory pressure handling
 
 ### **Latest Achievements** 🎉
+- ✅ **Intelligent ProcessPool Scaling** - Automatic scale-up/down with queue-aware resource management and LRU process termination
+- ✅ **Real-Time Graceful Degradation** - Continuous operation during memory pressure with automatic recovery
+- ✅ **Enhanced Console Logging System** - Beautiful colors, emojis, 6 profiles, 4 themes, advanced data formatters
 - ✅ **Claude Code MCP Integration** - One-command installation with HTTP transport
 - ✅ **Enhanced relationship engine** - Deep code connection analysis
 - ✅ **Smart dependency traversal** - Complete context in single queries  
 - ✅ **Telemetry-driven optimization** - Usage pattern learning and adaptation
 - ✅ **Production-grade error handling** - Never fails, always provides results
-- ✅ **TypeScript build fixes** - All compilation errors resolved
-- ✅ **Comprehensive test validation** - Exception handling, MCP connectivity verified
-- ✅ **MCP Protocol Compatibility Fix** - Resolved version mismatch (2025-01-07 → 2024-11-05) ensuring Claude Code connectivity
 
 ### **Performance Metrics** 📊
 - **Startup time**: 27.1s (including real-time activation)
