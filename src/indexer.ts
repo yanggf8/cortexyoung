@@ -279,6 +279,9 @@ export class CodebaseIndexer {
       !delta.fileChanges.deleted.includes(filePath)
     );
     
+    // Count chunks before adding unchanged files to get accurate breakdown
+    const chunksFromModifiedFiles = chunksToKeep.length;
+    
     let unchangedChunksCount = 0;
     for (const unchangedFile of unchangedFiles) {
       const existingChunks = this.vectorStore.getChunksByFile(unchangedFile);
@@ -292,8 +295,13 @@ export class CodebaseIndexer {
     log(`  - DELETED FILES: ${delta.fileChanges.deleted.length} files (${deletedFileChunks} chunks removed)`);
     log(`  - UNCHANGED FILES: ${unchangedFiles.length} files (${unchangedChunksCount} chunks preserved)`);
     log(`  - CHUNKS TO EMBED: ${chunksToEmbed.length} (new or modified)`);
-    log(`  - CHUNKS TO KEEP: ${chunksToKeep.length} (unchanged, cache hit)`);
+    log(`  - CHUNKS TO KEEP: ${chunksToKeep.length} total (${unchangedChunksCount} from unchanged files + ${chunksFromModifiedFiles} unchanged in modified files)`);
     log(`  - TOTAL CHUNKS REMOVED: ${delta.removed.length}`);
+    
+    // Chunk accounting validation
+    const startingChunks = this.vectorStore.getAllChunks().length;
+    const expectedFinalChunks = startingChunks - delta.removed.length + chunksToEmbed.length;
+    log(`🔢 Chunk accounting: ${startingChunks} initial → ${expectedFinalChunks} expected final (${startingChunks} - ${delta.removed.length} removed + ${chunksToEmbed.length} new)`);
 
     // Start relationship building in parallel with embedding generation
     const relationshipPromise = this.buildRelationshipsForChangedFiles(scanResult.files, [...delta.fileChanges.added, ...delta.fileChanges.modified]);
