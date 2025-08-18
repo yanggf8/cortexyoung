@@ -4,26 +4,22 @@
  */
 
 import { getLoggerConfig, LoggerConfig } from './logger-config';
-import { ConsoleLogger } from './console-logger';
+import { logger as baseLogger, stage as baseStage, step as baseStep } from './console-logger';
 import { formatJson, formatTable, formatBox, formatProgress } from './advanced-formatters';
 
 // Create a configurable logger instance that adapts to the current configuration
 class ConfigurableLogger {
-  private baseLogger: ConsoleLogger;
-  
-  constructor() {
-    this.baseLogger = new ConsoleLogger();
-  }
-  
   // Update logger behavior based on current configuration
   private updateLoggerFromConfig(): void {
     const config = getLoggerConfig();
     
-    // Update base logger configuration
-    this.baseLogger.setColorEnabled(config.colors);
-    this.baseLogger.setEmojiEnabled(config.emojis);
-    
-    // Handle log level filtering at the method level
+    // The base logger uses environment variables, so we set them temporarily
+    // This is a simple approach that works with the existing logger architecture
+    if (!config.colors) {
+      process.env.NO_COLOR = '1';
+    } else {
+      delete process.env.NO_COLOR;
+    }
   }
   
   // Check if message should be logged based on configuration
@@ -43,44 +39,37 @@ class ConfigurableLogger {
   debug(message: string, metadata?: Record<string, any>): void {
     if (!this.shouldLog('debug')) return;
     this.updateLoggerFromConfig();
-    
-    const config = getLoggerConfig();
-    if (config.timestamps) {
-      this.baseLogger.debug(message, metadata);
-    } else {
-      // Use base logger without timestamp
-      this.baseLogger.info(message, metadata);
-    }
+    baseLogger.start(message, { metadata });
   }
   
   info(message: string, metadata?: Record<string, any>): void {
     if (!this.shouldLog('info')) return;
     this.updateLoggerFromConfig();
-    this.baseLogger.info(message, metadata);
+    baseLogger.start(message, { metadata });
   }
   
   warn(message: string, metadata?: Record<string, any>): void {
     if (!this.shouldLog('warn')) return;
     this.updateLoggerFromConfig();
-    this.baseLogger.warn(message, metadata);
+    baseLogger.warn(message, { metadata });
   }
   
   error(message: string, metadata?: Record<string, any>): void {
     if (!this.shouldLog('error')) return;
     this.updateLoggerFromConfig();
-    this.baseLogger.error(message, metadata);
+    baseLogger.fail(message, { metadata });
   }
   
   success(message: string, metadata?: Record<string, any>): void {
     if (!this.shouldLog('info')) return;
     this.updateLoggerFromConfig();
-    this.baseLogger.success(message, metadata);
+    baseLogger.ok(message, { metadata });
   }
   
   ready(message: string, metadata?: Record<string, any>): void {
     if (!this.shouldLog('info')) return;
     this.updateLoggerFromConfig();
-    this.baseLogger.ready(message, metadata);
+    baseLogger.ready(message, { metadata });
   }
   
   // Stage management with configuration support
@@ -92,10 +81,10 @@ class ConfigurableLogger {
       this.updateLoggerFromConfig();
       
       if (config.stageDelimiters) {
-        this.baseLogger.stage.start(stageNumber, totalStages, name);
+        baseStage.start(stageNumber, totalStages, name);
       } else {
         // Simple stage start without delimiters
-        this.baseLogger.info(`STAGE ${stageNumber}/${totalStages}: ${name}`);
+        baseLogger.start(`STAGE ${stageNumber}/${totalStages}: ${name}`);
       }
     },
     
@@ -106,16 +95,16 @@ class ConfigurableLogger {
       this.updateLoggerFromConfig();
       
       if (config.stageDelimiters) {
-        this.baseLogger.stage.complete(result);
+        baseStage.complete(result);
       } else {
-        this.baseLogger.success(`Stage completed${result ? ': ' + result : ''}`);
+        baseLogger.ok(`Stage completed${result ? ': ' + result : ''}`);
       }
     },
     
     fail: (error: string): void => {
       if (!this.shouldLog('error')) return;
       this.updateLoggerFromConfig();
-      this.baseLogger.stage.fail(error);
+      baseStage.fail(error);
     }
   };
   
@@ -128,12 +117,12 @@ class ConfigurableLogger {
       this.updateLoggerFromConfig();
       
       if (config.stepDelimiters) {
-        this.baseLogger.step.start(stepId, name, description);
+        baseStep.start(stepId, name, description);
       } else {
         // Simple step start without delimiters
-        this.baseLogger.info(`STEP ${stepId}: ${name}`);
+        baseLogger.start(`STEP ${stepId}: ${name}`);
         if (description && config.metadata) {
-          this.baseLogger.info(`  ${description}`);
+          baseLogger.start(`  ${description}`);
         }
       }
     },
@@ -141,19 +130,19 @@ class ConfigurableLogger {
     complete: (result?: string): void => {
       if (!this.shouldLog('info')) return;
       this.updateLoggerFromConfig();
-      this.baseLogger.step.complete(result);
+      baseStep.complete(result);
     },
     
     fail: (error: string, hint?: string): void => {
       if (!this.shouldLog('error')) return;
       this.updateLoggerFromConfig();
-      this.baseLogger.step.fail(error, hint);
+      baseStep.fail(error, hint);
     },
     
     update: (message: string, metadata?: Record<string, any>): void => {
       if (!this.shouldLog('info')) return;
       this.updateLoggerFromConfig();
-      this.baseLogger.step.update(message, metadata);
+      baseStep.update(message, metadata);
     }
   };
   
@@ -171,7 +160,7 @@ class ConfigurableLogger {
     });
     
     const progressMessage = message ? `${message} ${progressBar}` : progressBar;
-    this.baseLogger.info(progressMessage);
+    baseLogger.start(progressMessage);
   }
   
   // Structured data logging with advanced formatters

@@ -303,9 +303,9 @@ Based on architectural review, we've incorporated:
 
 Our system provides 80-90% token reduction through semantic understanding and multi-hop relationship traversal, addressing Claude Code's primary limitation of 50-70% token waste due to manual, text-based code discovery.
 
-## Integration with Claude Code and Amazon Q CLI
+## Integration with Claude Code
 
-Cortex provides semantic tools via MCP server for both Claude Code and Amazon Q CLI:
+Cortex provides semantic tools via HTTP MCP server for Claude Code:
 
 - `semantic_search` → Enhanced code search with vector embeddings
 - `contextual_read` → File reading with semantic context awareness  
@@ -320,7 +320,7 @@ Cortex provides semantic tools via MCP server for both Claude Code and Amazon Q 
 - ✅ **6000+ chunks** indexed and searchable
 - ✅ **Real BGE embeddings** working in production
 - ✅ **MCP server operational** on port 8765
-- ✅ **Dual AI assistant support** (Claude Code + Amazon Q CLI)
+- ✅ **Claude Code integration** (HTTP transport)
 
 ### Claude Code Setup
 
@@ -347,23 +347,11 @@ claude mcp get cortex
 /mcp cortex code_intelligence
 ```
 
-### Amazon Q CLI Setup
+### Amazon Q CLI Support
 
-1. **Install the MCP server globally:**
-```bash
-q mcp add --name cortex --command "bash" --args "-c,cd /path/to/cortexyoung && npm run server" --scope global
-```
+**Status:** Not currently supported. The Cortex server uses HTTP transport only, while Amazon Q CLI requires stdio transport for MCP servers.
 
-2. **Verify installation:**
-```bash
-q mcp list
-q mcp status --name cortex
-```
-
-3. **Use in Amazon Q CLI:**
-```bash
-q chat  # Then use MCP tools within the chat session
-```
+**Future Enhancement:** Stdio transport support could be added in a future version to enable Amazon Q CLI integration.
 
 ### MCP Server Configuration
 
@@ -372,12 +360,6 @@ q chat  # Then use MCP tools within the chat session
 - **URL:** `http://localhost:8765/mcp`
 - **Scope:** User-level (available in all projects)
 - **Transport:** HTTP
-
-**For Amazon Q CLI (Stdio):**
-- **Type:** Stdio MCP Server  
-- **Command:** `bash -c "cd /path/to/cortexyoung && npm run server"`
-- **Scope:** Global
-- **Transport:** Stdio
 
 **Server Management:**
 ```bash

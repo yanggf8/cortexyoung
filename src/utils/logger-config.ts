@@ -4,7 +4,8 @@
  */
 
 // Define color keys compatible with both systems
-type LoggerColorKey = 'red' | 'green' | 'yellow' | 'blue' | 'magenta' | 'cyan' | 'white' | 'gray';
+type LoggerColorKey = 'red' | 'green' | 'yellow' | 'blue' | 'magenta' | 'cyan' | 'white' | 'gray' | 
+                     'success' | 'warning' | 'error' | 'info' | 'accent' | 'border' | 'header';
 
 // Base logging configuration
 export interface LoggerConfig {
