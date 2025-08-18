@@ -78,38 +78,48 @@ export class SemanticWatcher {
     try {
       log(`[SemanticWatcher] Processing file change: ${filePath}`);
       
-      // First, stage the file (works for both tracked and untracked files)
-      const staged = await this.stagingManager.stageFile(filePath);
-      if (!staged) {
-        log(`[SemanticWatcher] File not staged (excluded or doesn't meet criteria): ${filePath}`);
-        return; // File doesn't meet staging criteria
-      }
-
-      log(`[SemanticWatcher] File staged successfully: ${filePath}`);
-
-      const content = await readFile(filePath, 'utf-8');
-      const semanticChange = await this.analyzeSemanticChange(filePath, content);
+      // Check if file is git-tracked
+      const isGitTracked = await this.stagingManager.isGitTracked(filePath);
       
-      if (semanticChange) {
-        log(`[SemanticWatcher] Semantic change detected: ${filePath}`);
-        await this.processSemanticChange(semanticChange);
-        this.stagingManager.markFileIndexed(filePath);
-        log(`[SemanticWatcher] File marked as indexed: ${filePath}`);
-      } else {
-        log(`[SemanticWatcher] No semantic changes detected: ${filePath}`);
-        // For files without semantic changes, still index them if they're untracked
-        // (git-tracked files are handled by startup indexing)
-        const stagedFile = this.stagingManager.getStagedFiles().find(f => 
-          path.resolve(this.stagingManager['repositoryPath'], f.filePath) === filePath
-        );
+      if (isGitTracked) {
+        // Git-tracked files: Direct processing (bypass staging)
+        log(`[SemanticWatcher] Git-tracked file detected, processing directly: ${filePath}`);
         
-        if (stagedFile && !stagedFile.isGitTracked) {
-          log(`[SemanticWatcher] Indexing untracked file without semantic changes: ${filePath}`);
+        const content = await readFile(filePath, 'utf-8');
+        const semanticChange = await this.analyzeSemanticChange(filePath, content);
+        
+        if (semanticChange) {
+          log(`[SemanticWatcher] Semantic change detected in git-tracked file: ${filePath}`);
+          await this.processSemanticChange(semanticChange);
+        } else {
+          log(`[SemanticWatcher] No semantic changes in git-tracked file, re-indexing: ${filePath}`);
+          await this.indexer.handleFileChange(filePath, 'content');
+        }
+        
+        log(`[SemanticWatcher] Git-tracked file processed: ${filePath}`);
+      } else {
+        // Untracked files: Use staging manager
+        const staged = await this.stagingManager.stageFile(filePath);
+        if (!staged) {
+          log(`[SemanticWatcher] Untracked file not staged (excluded or doesn't meet criteria): ${filePath}`);
+          return;
+        }
+
+        log(`[SemanticWatcher] Untracked file staged successfully: ${filePath}`);
+
+        const content = await readFile(filePath, 'utf-8');
+        const semanticChange = await this.analyzeSemanticChange(filePath, content);
+        
+        if (semanticChange) {
+          log(`[SemanticWatcher] Semantic change detected in untracked file: ${filePath}`);
+          await this.processSemanticChange(semanticChange);
+        } else {
+          log(`[SemanticWatcher] No semantic changes in untracked file, indexing: ${filePath}`);
           await this.indexer.handleFileChange(filePath, 'content');
         }
         
         this.stagingManager.markFileIndexed(filePath);
-        log(`[SemanticWatcher] File marked as indexed (no semantic changes): ${filePath}`);
+        log(`[SemanticWatcher] Untracked file marked as indexed: ${filePath}`);
       }
     } catch (error) {
       // File might be deleted or inaccessible, ignore

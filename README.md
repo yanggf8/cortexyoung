@@ -46,7 +46,7 @@ User Query → Git Scanner/Chunker → Local Embeddings → Vector DB
 - **⏰ Unified Timestamped Logging**: Consistent ISO timestamp formatting across all components with standardized logging utilities
 - **🛡️ Intelligent Pre-Rebuild Backup System**: Automatic validation and backup of valuable embedding data before destructive operations - only backs up valid data (chunk count > 0), skips empty/corrupt storage
 - **👀 Smart File Watching**: Real-time code intelligence updates with semantic change detection ✅ **IMPLEMENTED**
-- **🗂️ Dual-Mode File Tracking**: Intelligent staging system for both git-tracked and untracked files ✅ **IMPLEMENTED**
+- **🗂️ Dual-Mode File Tracking**: Git-tracked files processed directly, untracked files via intelligent staging ✅ **IMPLEMENTED**
 - **🔗 Smart Dependency Chains**: Context window optimization with automatic inclusion of complete function call graphs and dependency context ✅ **IMPLEMENTED**
 
 ## Project Structure
@@ -107,7 +107,7 @@ cortexyoung/
 
 **Phase 4: Advanced Features** ✅
 - [x] **Smart File Watching System** - Real-time semantic file watching fully implemented
-- [x] **Dual-Mode File Tracking** - Intelligent staging for both git-tracked and untracked files
+- [x] **Dual-Mode File Tracking** - Separate processing paths: direct indexing for git-tracked files, staging for untracked files
 - [x] **Context Invalidator** - Intelligent chunk management for real-time updates
 - [x] **Staging Manager** - File staging system with size/type filtering
 - [x] **Real-time Status Tool** - MCP tool for monitoring context freshness

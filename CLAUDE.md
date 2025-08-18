@@ -17,7 +17,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **📦 Intelligent Embedding Cache**: 95-98% performance improvement with content-hash based caching
 - **🎯 File-Content Hash Delta Detection**: Fast file-level change detection with SHA256 hashing - 7x faster startup times
 - **👀 Smart File Watching**: Real-time code intelligence updates with semantic change detection ✅ **IMPLEMENTED**
-- **🗂️ Dual-Mode File Tracking**: Intelligent staging system for both git-tracked and untracked files ✅ **IMPLEMENTED**
+- **🗂️ Dual-Mode File Tracking**: Git-tracked files processed directly, untracked files via intelligent staging ✅ **IMPLEMENTED**
 - **🔗 Smart Dependency Chains**: Automatic inclusion of complete dependency context ✅ **IMPLEMENTED**
 - **🔒 Storage Race Condition Fix**: Zero ENOENT errors with unique temp file naming ✅ **IMPLEMENTED**
 - **🤖 Enhanced Claude Code Integration**: Smart tool guidance with context optimization hints and telemetry-driven improvements ✅ **IMPLEMENTED**
@@ -64,7 +64,7 @@ node test-semantic-watching.js      # Run comprehensive validation tests
 **Key Features**:
 - **SemanticWatcher**: chokidar-based file monitoring with semantic pattern detection
 - **ContextInvalidator**: Intelligent chunk management and batch reindexing triggers
-- **Dual-Mode Tracking**: Both git-tracked and untracked files supported automatically
+- **Dual-Mode Tracking**: Git-tracked files processed directly, untracked files via staging system
 - **Zero Configuration**: Works seamlessly with existing Cortex architecture
 - **Cross-platform**: Windows/macOS/Linux compatibility through chokidar
 
