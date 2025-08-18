@@ -26,7 +26,10 @@
       "mcp__rovodev__ask-rovodev",
       "Bash(curl:*)",
       "Bash(pkill:*)",
-      "Bash(kill:*)"
+      "Bash(kill:*)",
+      "Bash(claude mcp get:*)",
+      "WebFetch(domain:docs.anthropic.com)",
+      "Bash(claude mcp add:*)"
     ],
     "deny": []
   }

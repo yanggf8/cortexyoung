@@ -163,9 +163,33 @@ Claude Code ← MCP Server ← Vector Store ← ProcessPool → Incremental Upda
 - **Fixed batch sizing**: Always use 400 chunks per batch (optimal for BGE-small-en-v1.5)
 - **Adaptive scaling**: Growth decisions based on both CPU and memory
 
-## MCP Server Integration
+## MCP Server Integration ✅ **PRODUCTION READY**
 
-**Configuration for Claude Code** (`~/.claude/mcp_servers.json`):
+### **🚀 Installation to Claude Code (Command Line)**
+
+**Prerequisites:**
+- Cortex server running: `npm run server` (port 8765)
+- Claude Code CLI installed
+
+**One-Command Installation:**
+```bash
+claude mcp add --transport http cortex http://localhost:8765/mcp
+```
+
+**Verify Installation:**
+```bash
+claude mcp list
+# Should show: cortex: http://localhost:8765/mcp (HTTP)
+```
+
+**Start Using with Claude Code:**
+```bash
+claude chat --mcp
+# Then use: @cortex-semantic_search "your query"
+```
+
+### **📋 Manual Configuration** (Alternative)
+**Configuration file** (`~/.claude/mcp_servers.json`):
 ```json
 {
   "mcpServers": {
@@ -175,11 +199,13 @@ Claude Code ← MCP Server ← Vector Store ← ProcessPool → Incremental Upda
       "cwd": "/home/yanggf/a/cortexyoung",
       "env": {
         "PORT": "8765",
-        "EMBEDDER_TYPE": "local"
+        "EMBEDDER_TYPE": "local",
+        "ENABLE_REAL_TIME": "true",
+        "CORTEX_TELEMETRY_ENABLED": "true"
       },
       "transport": {
         "type": "http", 
-        "url": "http://localhost:8765"
+        "url": "http://localhost:8765/mcp"
       }
     }
   }
@@ -195,11 +221,32 @@ Claude Code ← MCP Server ← Vector Store ← ProcessPool → Incremental Upda
 6. **find_code_patterns** - Pattern recognition, architectural analysis, code quality assessment
 7. **real_time_status** ✅ - Real-time file watching status and context freshness validation
 
+### **🎯 Usage Examples with Claude Code**
+
+**Quick Code Discovery:**
+```bash
+@cortex-semantic_search "JWT token validation logic"
+@cortex-semantic_search "error handling patterns" 
+```
+
+**Complex Analysis:**
+```bash
+@cortex-code_intelligence "understand the payment processing workflow"
+@cortex-relationship_analysis --analysis_type call_graph --starting_symbols "authenticate"
+```
+
+**Real-time Monitoring:**
+```bash
+@cortex-real_time_status  # Check context freshness
+@cortex-find_code_patterns --pattern_type design_pattern --pattern_description "observer pattern"
+```
+
 ### **🎯 Enhanced Claude Code Integration**
 - **Smart Tool Selection**: Automatic tool selection with "BEST FOR" optimization patterns
 - **Context Optimization**: Real-time MMR presets, token budgets, and tool recommendations
 - **Query Intelligence**: Automatic complexity analysis with optimization hints
 - **Pattern Learning**: System tracks effectiveness and optimizes automatically
+- **Production Ready**: ✅ HTTP MCP server with 7 operational tools
 
 **📚 Documentation Available:**
 - `CLAUDE_CODE_README.md` - Simple setup guide for programmers  
@@ -287,7 +334,8 @@ npm run validate:performance   # Critical improvements validation
 
 ### **Current Status** ✅ **PRODUCTION READY**
 - **Real-time file watching**: ✅ Fully operational with semantic change detection
-- **7 MCP Tools**: ✅ All tools working perfectly for Claude Code integration
+- **Claude Code MCP Integration**: ✅ HTTP server installed and operational via `claude mcp add`
+- **7 MCP Tools**: ✅ All tools accessible via @cortex-[tool_name] syntax
 - **Smart dependency chains**: ✅ Automatic context inclusion with relationship traversal
 - **Telemetry system**: ✅ Privacy-focused usage analytics for continuous improvement
 - **Exception handling**: ✅ Robust error recovery with conservative fallback approaches
@@ -296,6 +344,7 @@ npm run validate:performance   # Critical improvements validation
 - **Resource management**: ✅ Adaptive scaling with CPU + memory monitoring
 
 ### **Latest Achievements** 🎉
+- ✅ **Claude Code MCP Integration** - One-command installation with HTTP transport
 - ✅ **Enhanced relationship engine** - Deep code connection analysis
 - ✅ **Smart dependency traversal** - Complete context in single queries  
 - ✅ **Telemetry-driven optimization** - Usage pattern learning and adaptation
