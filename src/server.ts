@@ -589,6 +589,53 @@ async function getIntelligentIndexMode(indexer: CodebaseIndexer, logger: Logger)
   }
 }
 
+// Check if another Cortex server is already running
+const checkForRunningServer = async (port: number): Promise<boolean> => {
+  try {
+    const { execSync } = require('child_process');
+    const result = execSync(`lsof -ti :${port} 2>/dev/null || echo ""`, { encoding: 'utf8' });
+    return result.trim() !== '';
+  } catch (error) {
+    return false; // Assume no server if we can't check
+  }
+};
+
+// Count existing Cortex server processes
+const countCortexProcesses = async (): Promise<number> => {
+  try {
+    const { execSync } = require('child_process');
+    const result = execSync('ps aux | grep -c "cortex.*server\\|server.*js" | grep -v grep || echo "1"', { encoding: 'utf8' });
+    return Math.max(1, parseInt(result.trim()) || 1); // At least count this process
+  } catch (error) {
+    return 1;
+  }
+};
+
+// Check and clean up orphaned embedding processes at startup
+const cleanupOrphanedProcesses = async (): Promise<number> => {
+  try {
+    const { execSync } = require('child_process');
+    const countResult = execSync('ps aux | grep -c "external-embedding-process" | grep -v grep || echo "0"', { encoding: 'utf8' });
+    const orphanedCount = parseInt(countResult.trim()) || 0;
+    
+    if (orphanedCount > 0) {
+      console.log('🧹 CLEANUP: Found orphaned embedding processes from previous sessions');
+      console.log(`🔄 Cleaning up ${orphanedCount} orphaned processes...`);
+      try {
+        execSync('pkill -f "external-embedding-process" 2>/dev/null || true');
+        console.log('✅ Orphaned processes cleaned up successfully');
+      } catch (cleanupError) {
+        console.log('⚠️  Some processes may require manual cleanup');
+      }
+      console.log('');
+    }
+    
+    return orphanedCount;
+  } catch (error) {
+    return 0;
+  }
+};
+
 // Main startup function
 async function main() {
   // Parse command line arguments
@@ -596,6 +643,32 @@ async function main() {
   const repoPath = args.find(arg => !arg.startsWith('--')) || process.cwd();
   const port = cortexConfig.port;
   const logFile = cortexConfig.logFile;
+  
+  // Check for server reentrance and cleanup orphaned processes
+  const isPortOccupied = await checkForRunningServer(port);
+  const cortexProcessCount = await countCortexProcesses();
+  
+  if (isPortOccupied && cortexProcessCount > 1) {
+    console.log('');
+    console.log('🚨 SERVER ALREADY RUNNING: Another Cortex server is using this port');
+    console.log('');
+    console.log(`📡 Port ${port} is already in use`);
+    console.log(`🔄 Found ${cortexProcessCount} Cortex server processes running`);
+    console.log('');
+    console.log('🛠️  SOLUTIONS:');
+    console.log('   1. Use the existing server (no action needed)');
+    console.log(`   2. Stop existing server: pkill -f "server.*js" or npm run shutdown`);
+    console.log(`   3. Use different port: PORT=8766 npm run start`);
+    console.log(`   4. Check server status: curl http://localhost:${port}/mcp/health`);
+    console.log('');
+    console.log('ℹ️  Cortex is designed to run one instance per repository');
+    console.log('   Multiple instances can cause resource conflicts and data corruption');
+    console.log('');
+    process.exit(0); // Exit gracefully, not an error
+  }
+  
+  // Clean up orphaned processes from previous crashed sessions
+  await cleanupOrphanedProcesses();
   
   // Check for demo mode
   const isDemoMode = args.includes('--demo');
@@ -840,7 +913,47 @@ async function main() {
   }
 }
 
+// Handle resource-related errors with helpful messages
+const handleResourceError = (error: Error) => {
+  console.log('');
+  
+  if (error.message.includes('System memory too high')) {
+    console.log('🚨 RESOURCE ERROR: System Memory Too High');
+    console.log('');
+    console.log('💾 The system is using too much memory to safely start Cortex');
+    console.log('⚠️  Starting anyway could cause system crashes or data corruption');
+  } else if (error.message.includes('Too many embedding processes')) {
+    console.log('🚨 PROCESS ERROR: Orphaned Processes Detected');
+    console.log('');
+    console.log('🔄 Too many embedding processes from previous Cortex sessions');
+    console.log('⚠️  These orphaned processes consume memory and cause conflicts');
+  } else if (error.message.includes('EADDRINUSE') || error.message.includes('port')) {
+    console.log('🚨 PORT ERROR: Address Already In Use');
+    console.log('');
+    console.log('📡 Another application is already using the server port');
+    console.log('⚠️  Multiple Cortex instances can cause data corruption');
+  } else {
+    console.log('🚨 STARTUP ERROR: Failed to start Cortex server');
+    console.log('');
+    console.log('⚠️  An unexpected error occurred during server initialization');
+  }
+  
+  console.log('');
+  console.log('🆘 GENERAL TROUBLESHOOTING:');
+  console.log('   • Check system resources: free -h && ps aux | grep node');
+  console.log('   • Clean up processes: npm run shutdown');
+  console.log('   • Try cloud mode: npm run start:cloudflare');
+  console.log('   • Restart system if issues persist');
+  console.log('   • Report issues: https://github.com/anthropics/claude-code/issues');
+  console.log('');
+  console.log(`📋 Error Details: ${error.message}`);
+  console.log('');
+};
+
 // Start server if this file is run directly
 if (require.main === module) {
-  main().catch(error);
+  main().catch((error) => {
+    handleResourceError(error);
+    process.exit(1);
+  });
 }

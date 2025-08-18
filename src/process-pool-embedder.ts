@@ -192,6 +192,20 @@ export class ProcessPoolEmbedder implements IEmbedder {
   private static readonly CACHE_EVICTION_THRESHOLD = 0.8; // Trigger cleanup at 80% capacity
   private static readonly EVICTION_PERCENTAGE = 0.2; // Remove 20% when evicting
 
+  /**
+   * Count existing embedding processes to prevent runaway spawning
+   */
+  private async countExistingEmbeddingProcesses(): Promise<number> {
+    try {
+      const { execSync } = require('child_process');
+      const result = execSync('ps aux | grep -c "external-embedding-process" | grep -v grep || echo "0"', { encoding: 'utf8' });
+      return parseInt(result.trim()) || 0;
+    } catch (error) {
+      log(`[ProcessPool] Warning: Could not count existing processes: ${error}`);
+      return 0; // Assume safe if we can't count
+    }
+  }
+
   // Accurate system memory monitoring across platforms
   private async getAccurateSystemMemory(): Promise<SystemMemoryInfo> {
     const { spawn } = await import('child_process');
@@ -789,21 +803,27 @@ export class ProcessPoolEmbedder implements IEmbedder {
                        this.adaptivePool.growthPhase !== 'completed';
         
         if (canGrow) {
-          // Original growth decision logic (no predictions)
+          // CRITICAL FIX: Use realistic memory estimation per process instead of flawed system division
+          // Each external embedding process uses approximately 400-512MB based on --max-old-space-size=512
           const currentProcesses = this.adaptivePool.currentProcesses;
           const maxProcesses = this.adaptivePool.maxProcesses;
-          const memoryPerProcess = memInfo.usedMB / Math.max(currentProcesses, 1);
+          
+          // Fixed memory estimation: 512MB per process + 100MB buffer for overhead
+          const memoryPerProcessMB = 612; // 512MB (max-old-space-size) + 100MB overhead
           
           const nextStep = Math.min(currentProcesses + 1, maxProcesses);
-          const nextStepMemory = memoryPerProcess * nextStep;
+          const nextStepMemory = memoryPerProcessMB * nextStep;
           const nextStepMemoryPercent = (nextStepMemory / memInfo.totalMB) * 100;
           
           const twoSteps = Math.min(currentProcesses + 2, maxProcesses);
-          const twoStepsMemory = memoryPerProcess * twoSteps;
+          const twoStepsMemory = memoryPerProcessMB * twoSteps;
           const twoStepsMemoryPercent = (twoStepsMemory / memInfo.totalMB) * 100;
           
-          const nextStepMemoryOK = nextStepMemoryPercent < this.adaptivePool.memoryStopThreshold;
-          const twoStepsMemorySafe = twoStepsMemoryPercent < this.adaptivePool.memoryStopThreshold * 0.9;
+          // EMERGENCY FIX: Much more conservative thresholds to prevent OOM kills
+          // Current system: 16GB used / 19GB total = 84% usage, swap exhausted
+          const conservativeMemoryThreshold = 50; // Only allow growth if under 50% system memory
+          const nextStepMemoryOK = memInfo.usagePercent < conservativeMemoryThreshold;
+          const twoStepsMemorySafe = memInfo.usagePercent < (conservativeMemoryThreshold - 5); // 45%
           const cpuProjectionOK = cpuInfo.usagePercent < this.adaptivePool.cpuStopThreshold * 0.8;
           
           if (nextStepMemoryOK && twoStepsMemorySafe && cpuProjectionOK) {
@@ -1192,7 +1212,48 @@ export class ProcessPoolEmbedder implements IEmbedder {
   async initialize(chunkCount?: number): Promise<void> {
     if (this.isInitialized) return;
 
+    // EMERGENCY OOM PREVENTION: Check system memory before any process creation
+    const memInfo = await this.getAccurateSystemMemory();
+    if (memInfo.usagePercent > 75) {
+      error(`[ProcessPool] CRITICAL: System memory at ${memInfo.usagePercent.toFixed(1)}% - Risk of OOM kill`);
+      error(`[ProcessPool] Memory: ${memInfo.usedMB}MB used / ${memInfo.totalMB}MB total`);
+      console.log('');
+      console.log('🚨 RESOURCE ERROR: Cannot start Cortex server - System memory too high');
+      console.log('');
+      console.log(`💾 Current memory usage: ${memInfo.usagePercent.toFixed(1)}% (${memInfo.usedMB}MB / ${memInfo.totalMB}MB)`);
+      console.log('⚠️  Safe threshold: 75% or lower');
+      console.log('');
+      console.log('🛠️  SOLUTIONS:');
+      console.log('   1. Close other applications to free memory');
+      console.log('   2. Restart your system to clear memory leaks');
+      console.log('   3. Use cloud embeddings: npm run start:cloudflare');
+      console.log('   4. Check for orphaned processes: ps aux | grep node');
+      console.log('');
+      throw new Error(`System memory too high (${memInfo.usagePercent.toFixed(1)}%) - Cannot safely initialize ProcessPool`);
+    }
+
+    // EMERGENCY PROCESS LIMIT: Prevent runaway process creation
+    const existingProcesses = await this.countExistingEmbeddingProcesses();
+    if (existingProcesses > 10) {
+      error(`[ProcessPool] CRITICAL: ${existingProcesses} embedding processes already running - Possible runaway condition`);
+      console.log('');
+      console.log('🚨 PROCESS ERROR: Too many orphaned embedding processes detected');
+      console.log('');
+      console.log(`🔄 Found ${existingProcesses} embedding processes (safe limit: 10)`);
+      console.log('⚠️  This indicates orphaned processes from previous server crashes');
+      console.log('');
+      console.log('🛠️  SOLUTIONS:');
+      console.log('   1. Clean up processes: pkill -f "external-embedding-process"');
+      console.log('   2. Use automated cleanup: npm run shutdown');
+      console.log('   3. Restart your terminal/system if processes persist');
+      console.log('   4. Check running processes: ps aux | grep "external-embedding-process"');
+      console.log('');
+      throw new Error(`Too many embedding processes (${existingProcesses} > 10) - Clean up orphaned processes first`);
+    }
+    log(`[ProcessPool] Found ${existingProcesses} existing embedding processes, proceeding safely`);
+
     log(`[ProcessPool] Starting with ${this.processCount} external Node.js process (ultra-conservative - 2+ saturate system)`);
+    log(`[ProcessPool] System memory check: ${memInfo.usagePercent.toFixed(1)}% used (${memInfo.usedMB}MB / ${memInfo.totalMB}MB)`);
     
     // Create initial processes first
     await this.createProcesses();
