@@ -186,7 +186,7 @@ export class SharedEmbeddingCache {
   private validateCacheEntry(cached: CachedEmbedding): boolean {
     return Array.isArray(cached.embedding) && 
            cached.embedding.length > 0 &&
-           cached.contentHash &&
+           typeof cached.contentHash === 'string' &&
            cached.timestamp > 0;
   }
 
@@ -275,9 +275,9 @@ export class SharedEmbeddingCache {
 
       this.unsavedChanges = 0;
       log(`[SharedCache] Saved ${this.cache.size} entries to disk`);
-    } catch (error) {
-      error(`[SharedCache] Failed to save cache: ${error}`);
-      throw error;
+    } catch (err) {
+      error(`[SharedCache] Failed to save cache: ${err}`);
+      throw err;
     } finally {
       this.isSaving = false;
     }

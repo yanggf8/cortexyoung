@@ -52,9 +52,21 @@ async function initializeEmbedder(id) {
     
     // Initialize memory-mapped cache (same files as parent process)
     try {
-      const { MemoryMappedCache } = require('./memory-mapped-cache.js');
+      const { MemoryMappedCache } = require('../dist/memory-mapped-cache.js');
       cache = MemoryMappedCache.getInstance('./.cortex/mmap-cache', 10000, 384);
+      
+      // Suppress MemoryMappedCache logging to avoid JSON parsing interference
+      const originalConsoleLog = console.log;
+      const originalConsoleError = console.error;
+      console.log = () => {};
+      console.error = () => {};
+      
       await cache.initialize();
+      
+      // Restore console logging
+      console.log = originalConsoleLog;
+      console.error = originalConsoleError;
+      
       timestampedWrite(`[Process ${processId}] Memory-mapped cache initialized\n`);
     } catch (error) {
       timestampedWrite(`[Process ${processId}] Failed to initialize cache: ${error.message}\n`);
