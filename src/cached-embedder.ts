@@ -1,6 +1,7 @@
 import { CodeChunk, EmbeddingCache, EmbeddingCacheEntry, CacheStats } from './types';
 import { ProcessPoolEmbedder } from './process-pool-embedder';
 import { log, warn } from './logging-utils';
+import { CompressionUtils, StoragePaths } from './storage-constants';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as crypto from 'crypto';
@@ -152,11 +153,11 @@ export class CachedEmbedder extends ProcessPoolEmbedder {
       let sourceLocation = '';
 
       try {
-        cacheData = await fs.readFile(this.globalCacheFilePath, 'utf-8');
+        cacheData = await CompressionUtils.readFileWithDecompression(this.globalCacheFilePath);
         sourceLocation = 'global';
       } catch {
         try {
-          cacheData = await fs.readFile(this.cacheFilePath, 'utf-8');
+          cacheData = await CompressionUtils.readFileWithDecompression(this.cacheFilePath);
           sourceLocation = 'local';
         } catch {
           log('[CachedEmbedder] No existing embedding cache found, starting fresh');
@@ -193,16 +194,14 @@ export class CachedEmbedder extends ProcessPoolEmbedder {
 
   private async saveCacheToLocation(filePath: string): Promise<void> {
     try {
-      const dir = path.dirname(filePath);
-      await fs.mkdir(dir, { recursive: true });
-      
       const cacheData = {
         cache: this.cache,
         stats: this.stats,
         updated_at: new Date().toISOString()
       };
       
-      await fs.writeFile(filePath, JSON.stringify(cacheData, null, 2));
+      const jsonData = JSON.stringify(cacheData, null, 2);
+      await CompressionUtils.writeFileWithCompression(filePath, jsonData);
     } catch (error) {
       warn(`[CachedEmbedder] Failed to save cache to ${filePath} error=${error instanceof Error ? error.message : error}`);
     }

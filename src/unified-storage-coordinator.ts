@@ -3,6 +3,7 @@ import { PersistentRelationshipStore } from './persistent-relationship-store';
 import { RelationshipGraph } from './relationship-types';
 import { CodeChunk, ModelInfo } from './types';
 import { log } from './logging-utils';
+import { StoragePaths, CompressionUtils } from './storage-constants';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 
@@ -251,14 +252,37 @@ export class UnifiedStorageCoordinator {
         relationshipInfo.local.path : relationshipInfo.global.path;
       
       if (relationshipPath) {
-        const stats = await fs.stat(relationshipPath).catch(() => null);
-        if (stats) {
-          relationshipSize = `${(stats.size / 1024).toFixed(2)} KB`;
-          
-          // Try to read metadata
-          const data = JSON.parse(await fs.readFile(relationshipPath, 'utf-8'));
-          symbolCount = data.metadata?.totalSymbols || 0;
-          relationshipCount = data.metadata?.totalRelationships || 0;
+        // Get the actual file path (compressed or uncompressed) for stat operations
+        const getActualFilePath = async (basePath: string): Promise<string | null> => {
+          const compressedPath = StoragePaths.getCompressedPath(basePath);
+          try {
+            await fs.access(compressedPath);
+            return compressedPath;
+          } catch {
+            try {
+              await fs.access(basePath);
+              return basePath;
+            } catch {
+              return null;
+            }
+          }
+        };
+
+        const actualPath = await getActualFilePath(relationshipPath);
+        if (actualPath) {
+          const stats = await fs.stat(actualPath).catch(() => null);
+          if (stats) {
+            relationshipSize = `${(stats.size / 1024).toFixed(2)} KB`;
+            
+            // Try to read metadata using compression-aware reader
+            try {
+              const data = JSON.parse(await CompressionUtils.readFileWithDecompression(relationshipPath));
+              symbolCount = data.metadata?.totalSymbols || 0;
+              relationshipCount = data.metadata?.totalRelationships || 0;
+            } catch (error) {
+              // Ignore metadata read errors
+            }
+          }
         }
       }
     } catch (error) {

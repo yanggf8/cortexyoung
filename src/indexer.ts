@@ -216,6 +216,12 @@ export class CodebaseIndexer {
     if (changedFiles.length === 0 && delta.fileChanges.deleted.length === 0) {
       log('✅ No changes detected, index is up to date');
       
+      // Provide additional context for users who expect changes
+      const indexStats = await this.vectorStore.getStats();
+      log(`🔍 Index contains ${this.vectorStore.getChunkCount()} chunks from ${indexStats.totalFiles} files`);
+      log(`🕒 Index last updated: ${indexStats.lastUpdated.toISOString()}`);
+      log('💡 If you expect changes, try: npm run cache:clear-all && npm run startup');
+      
       const timeTaken = Date.now() - startTime;
       return {
         status: 'success',

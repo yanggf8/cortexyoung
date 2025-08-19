@@ -2,7 +2,7 @@ import { CodeChunk, CORTEX_PROGRAM_VERSION, CORTEX_SCHEMA_VERSION, ModelInfo } f
 import { VectorStore } from './vector-store';
 import { SchemaValidator } from './schema-validator';
 import { log } from './logging-utils';
-import { StoragePaths } from './storage-constants';
+import { StoragePaths, CompressionUtils } from './storage-constants';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 
@@ -93,8 +93,8 @@ export class PersistentVectorStore extends VectorStore {
     const [localExists, globalExists, localStats, globalStats] = await Promise.all([
       this.indexExists(),
       this.globalIndexExists(),
-      this.indexExists().then(exists => exists ? fs.stat(this.metadataPath).catch(() => null) : null),
-      this.globalIndexExists().then(exists => exists ? fs.stat(this.globalMetadataPath).catch(() => null) : null)
+      this.indexExists().then(exists => exists ? this.getFileStats(this.metadataPath) : null),
+      this.globalIndexExists().then(exists => exists ? this.getFileStats(this.globalMetadataPath) : null)
     ]);
     
     if (globalExists && localExists && localStats && globalStats) {
@@ -112,8 +112,8 @@ export class PersistentVectorStore extends VectorStore {
       
       // Parallel chunk count reading for comparison
       const [localData, globalData] = await Promise.all([
-        fs.readFile(this.metadataPath, 'utf-8').then(data => JSON.parse(data)).catch(() => ({ chunks: [] })),
-        fs.readFile(this.globalMetadataPath, 'utf-8').then(data => JSON.parse(data)).catch(() => ({ chunks: [] }))
+        CompressionUtils.readFileWithDecompression(this.metadataPath).then(data => JSON.parse(data)).catch(() => ({ chunks: [] })),
+        CompressionUtils.readFileWithDecompression(this.globalMetadataPath).then(data => JSON.parse(data)).catch(() => ({ chunks: [] }))
       ]);
       
       const localChunks = localData.chunks?.length || 0;
@@ -175,11 +175,23 @@ export class PersistentVectorStore extends VectorStore {
   }
 
   async indexExists(): Promise<boolean> {
+    return await CompressionUtils.fileExists(this.metadataPath);
+  }
+
+  /**
+   * Get stats for a metadata file (compressed or uncompressed)
+   */
+  private async getFileStats(metadataPath: string): Promise<any | null> {
+    const compressedPath = StoragePaths.getCompressedPath(metadataPath);
+    
     try {
-      await fs.access(this.metadataPath);
-      return true;
+      return await fs.stat(compressedPath);
     } catch {
-      return false;
+      try {
+        return await fs.stat(metadataPath);
+      } catch {
+        return null;
+      }
     }
   }
 
@@ -191,11 +203,12 @@ export class PersistentVectorStore extends VectorStore {
   async hasValidIndex(useGlobal: boolean = false): Promise<boolean> {
     // Check local storage first
     try {
-      await fs.access(this.metadataPath);
-      const localData = JSON.parse(await fs.readFile(this.metadataPath, 'utf-8'));
-      const localChunks = localData.chunks?.length || 0;
-      if (localChunks > 0) {
-        return true;
+      if (await CompressionUtils.fileExists(this.metadataPath)) {
+        const localData = JSON.parse(await CompressionUtils.readFileWithDecompression(this.metadataPath));
+        const localChunks = localData.chunks?.length || 0;
+        if (localChunks > 0) {
+          return true;
+        }
       }
     } catch {
       // Local storage not available or empty, continue to check global
@@ -203,22 +216,20 @@ export class PersistentVectorStore extends VectorStore {
     
     // Check global storage if local is empty/missing
     try {
-      await fs.access(this.globalMetadataPath);
-      const globalData = JSON.parse(await fs.readFile(this.globalMetadataPath, 'utf-8'));
-      const globalChunks = globalData.chunks?.length || 0;
-      return globalChunks > 0;
+      if (await CompressionUtils.fileExists(this.globalMetadataPath)) {
+        const globalData = JSON.parse(await CompressionUtils.readFileWithDecompression(this.globalMetadataPath));
+        const globalChunks = globalData.chunks?.length || 0;
+        return globalChunks > 0;
+      }
     } catch {
-      return false;
+      // Global storage error
     }
+    
+    return false;
   }
 
   async globalIndexExists(): Promise<boolean> {
-    try {
-      await fs.access(this.globalMetadataPath);
-      return true;
-    } catch {
-      return false;
-    }
+    return await CompressionUtils.fileExists(this.globalMetadataPath);
   }
 
   async loadPersistedIndex(useGlobal: boolean = false): Promise<boolean> {
@@ -230,7 +241,7 @@ export class PersistentVectorStore extends VectorStore {
       log(`[StorageLoad] Loading persisted embeddings source=${source} path=${fullPath}`);
       const startTime = Date.now();
       
-      const indexData = await fs.readFile(indexPath, 'utf-8');
+      const indexData = await CompressionUtils.readFileWithDecompression(indexPath);
       const persistedIndex: PersistedIndex = JSON.parse(indexData);
       
       // Load chunks
@@ -287,16 +298,13 @@ export class PersistentVectorStore extends VectorStore {
       const randomSuffix = Math.random().toString(36).substring(2, 8);
       const uniqueSuffix = `${timestamp}.${randomSuffix}`;
       
+      // Save to both storages in parallel with automatic compression
       const saveLocal = async () => {
-        const localTempPath = `${this.metadataPath}.tmp.${uniqueSuffix}`;
-        await fs.writeFile(localTempPath, indexData, { encoding: 'utf8' });
-        await fs.rename(localTempPath, this.metadataPath);
+        await CompressionUtils.writeFileWithCompression(this.metadataPath, indexData);
       };
 
       const saveGlobal = async () => {
-        const globalTempPath = `${this.globalMetadataPath}.tmp.${uniqueSuffix}`;
-        await fs.writeFile(globalTempPath, indexData, { encoding: 'utf8' });
-        await fs.rename(globalTempPath, this.globalMetadataPath);
+        await CompressionUtils.writeFileWithCompression(this.globalMetadataPath, indexData);
       };
       
       // Execute storage operations in parallel
@@ -461,7 +469,7 @@ export class PersistentVectorStore extends VectorStore {
     try {
       if (await this.indexExists()) {
         log(`[StorageSync] Syncing local embeddings to global storage from=${this.metadataPath} to=${this.globalMetadataPath}`);
-        const indexData = await fs.readFile(this.metadataPath, 'utf-8');
+        const indexData = await CompressionUtils.readFileWithDecompression(this.metadataPath);
         const uniqueSuffix = `${Date.now()}.${Math.random().toString(36).substring(2, 8)}`;
         const globalTempPath = `${this.globalMetadataPath}.tmp.${uniqueSuffix}`;
         await fs.writeFile(globalTempPath, indexData);
@@ -482,8 +490,8 @@ export class PersistentVectorStore extends VectorStore {
         
         if (localExists) {
           const [localStats, globalStats] = await Promise.all([
-            fs.stat(this.metadataPath),
-            fs.stat(this.globalMetadataPath)
+            this.getFileStats(this.metadataPath),
+            this.getFileStats(this.globalMetadataPath)
           ]);
           
           // Only sync if global is newer
@@ -494,14 +502,14 @@ export class PersistentVectorStore extends VectorStore {
           // Get chunk count from global before syncing
           let globalChunks = 0;
           try {
-            const globalData = JSON.parse(await fs.readFile(this.globalMetadataPath, 'utf-8'));
+            const globalData = JSON.parse(await CompressionUtils.readFileWithDecompression(this.globalMetadataPath));
             globalChunks = globalData.chunks?.length || 0;
           } catch (error) {
             log('[StorageSync] Could not read global chunk count');
           }
           
           log(`[StorageSync] Syncing global embeddings to local storage chunks=${globalChunks} from=${this.globalMetadataPath} to=${this.metadataPath}`);
-          const indexData = await fs.readFile(this.globalMetadataPath, 'utf-8');
+          const indexData = await CompressionUtils.readFileWithDecompression(this.globalMetadataPath);
           const uniqueSuffix = `${Date.now()}.${Math.random().toString(36).substring(2, 8)}`;
           const localTempPath = `${this.metadataPath}.tmp.${uniqueSuffix}`;
           await fs.writeFile(localTempPath, indexData);
@@ -534,12 +542,12 @@ export class PersistentVectorStore extends VectorStore {
     };
 
     if (localExists) {
-      const localStats = await fs.stat(this.metadataPath);
+      const localStats = await this.getFileStats(this.metadataPath);
       info.local.lastModified = localStats.mtime;
     }
 
     if (globalExists) {
-      const globalStats = await fs.stat(this.globalMetadataPath);
+      const globalStats = await this.getFileStats(this.globalMetadataPath);
       info.global.lastModified = globalStats.mtime;
     }
 
@@ -612,7 +620,7 @@ export class PersistentVectorStore extends VectorStore {
     indexSize: string;
     lastUpdated: Date;
   }> {
-    const stats = await fs.stat(this.metadataPath).catch(() => null);
+    const stats = await this.getFileStats(this.metadataPath);
     const indexSize = stats ? `${(stats.size / 1024 / 1024).toFixed(2)} MB` : 'Unknown';
     
     // Count unique files from chunks
@@ -665,7 +673,7 @@ export class PersistentVectorStore extends VectorStore {
   async getMetadata(): Promise<any> {
     try {
       if (await this.indexExists()) {
-        const indexData = JSON.parse(await fs.readFile(this.metadataPath, 'utf-8'));
+        const indexData = JSON.parse(await CompressionUtils.readFileWithDecompression(this.metadataPath));
         return indexData.metadata || {};
       }
     } catch (error) {
@@ -684,7 +692,7 @@ export class PersistentVectorStore extends VectorStore {
       let indexData: any = { chunks: [], metadata: {} };
       
       if (await this.indexExists()) {
-        indexData = JSON.parse(await fs.readFile(this.metadataPath, 'utf-8'));
+        indexData = JSON.parse(await CompressionUtils.readFileWithDecompression(this.metadataPath));
       }
       
       indexData.metadata = { ...indexData.metadata, ...metadata };

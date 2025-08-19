@@ -4,7 +4,7 @@ import {
   CodeRelationship
 } from './relationship-types';
 import { CORTEX_SCHEMA_VERSION } from './types';
-import { StoragePaths } from './storage-constants';
+import { StoragePaths, CompressionUtils } from './storage-constants';
 import { timestampedLog, warn as timestampedWarn, error as timestampedError } from './logging-utils';
 import * as fs from 'fs/promises';
 
@@ -53,21 +53,11 @@ export class PersistentRelationshipStore {
   }
 
   async relationshipGraphExists(): Promise<boolean> {
-    try {
-      await fs.access(this.metadataPath);
-      return true;
-    } catch {
-      return false;
-    }
+    return await CompressionUtils.fileExists(this.metadataPath);
   }
 
   async globalRelationshipGraphExists(): Promise<boolean> {
-    try {
-      await fs.access(this.globalMetadataPath);
-      return true;
-    } catch {
-      return false;
-    }
+    return await CompressionUtils.fileExists(this.globalMetadataPath);
   }
 
   async loadPersistedRelationshipGraph(useGlobal: boolean = false): Promise<RelationshipGraph | null> {
@@ -78,7 +68,7 @@ export class PersistentRelationshipStore {
       timestampedLog(`🔗 Loading persisted relationship graph from ${source}...`);
       const startTime = Date.now();
       
-      const graphData = await fs.readFile(graphPath, 'utf-8');
+      const graphData = await CompressionUtils.readFileWithDecompression(graphPath);
       const persistedGraph: PersistedRelationshipGraph = JSON.parse(graphData);
       
       // Reconstruct the relationship graph
@@ -127,18 +117,9 @@ export class PersistentRelationshipStore {
       
       const graphData = JSON.stringify(persistedGraph, this.mapReplacer, 2);
       
-      // Use unique temp file names to prevent race conditions
-      const uniqueSuffix = `${Date.now()}.${Math.random().toString(36).substring(2, 8)}`;
-      
-      // Save to local storage
-      const localTempPath = `${this.metadataPath}.tmp.${uniqueSuffix}`;
-      await fs.writeFile(localTempPath, graphData);
-      await fs.rename(localTempPath, this.metadataPath);
-      
-      // Save to global storage
-      const globalTempPath = `${this.globalMetadataPath}.tmp.${uniqueSuffix}`;
-      await fs.writeFile(globalTempPath, graphData);
-      await fs.rename(globalTempPath, this.globalMetadataPath);
+      // Save to both storages with automatic compression
+      await CompressionUtils.writeFileWithCompression(this.metadataPath, graphData);
+      await CompressionUtils.writeFileWithCompression(this.globalMetadataPath, graphData);
       
       const saveTime = Date.now() - startTime;
       timestampedLog(`✅ Saved relationship graph to both storages in ${saveTime}ms`);
@@ -154,11 +135,8 @@ export class PersistentRelationshipStore {
     try {
       if (await this.relationshipGraphExists()) {
         timestampedLog('🔄 Syncing local relationship graph to global storage...');
-        const graphData = await fs.readFile(this.metadataPath, 'utf-8');
-        const uniqueSuffix = `${Date.now()}.${Math.random().toString(36).substring(2, 8)}`;
-        const globalTempPath = `${this.globalMetadataPath}.tmp.${uniqueSuffix}`;
-        await fs.writeFile(globalTempPath, graphData);
-        await fs.rename(globalTempPath, this.globalMetadataPath);
+        const graphData = await CompressionUtils.readFileWithDecompression(this.metadataPath);
+        await CompressionUtils.writeFileWithCompression(this.globalMetadataPath, graphData);
         timestampedLog('✅ Synced relationship graph to global storage');
       }
     } catch (error) {
@@ -173,20 +151,33 @@ export class PersistentRelationshipStore {
         let shouldSync = true;
         
         if (localExists) {
+          // Get the actual file paths (compressed or uncompressed) for stat operations
+          const getActualFilePath = async (basePath: string) => {
+            const compressedPath = StoragePaths.getCompressedPath(basePath);
+            try {
+              await fs.access(compressedPath);
+              return compressedPath;
+            } catch {
+              return basePath;
+            }
+          };
+          
+          const [localActualPath, globalActualPath] = await Promise.all([
+            getActualFilePath(this.metadataPath),
+            getActualFilePath(this.globalMetadataPath)
+          ]);
+          
           const [localStats, globalStats] = await Promise.all([
-            fs.stat(this.metadataPath),
-            fs.stat(this.globalMetadataPath)
+            fs.stat(localActualPath),
+            fs.stat(globalActualPath)
           ]);
           shouldSync = globalStats.mtime > localStats.mtime;
         }
         
         if (shouldSync) {
           timestampedLog('🔄 Syncing global relationship graph to local storage...');
-          const graphData = await fs.readFile(this.globalMetadataPath, 'utf-8');
-          const uniqueSuffix = `${Date.now()}.${Math.random().toString(36).substring(2, 8)}`;
-          const localTempPath = `${this.metadataPath}.tmp.${uniqueSuffix}`;
-          await fs.writeFile(localTempPath, graphData);
-          await fs.rename(localTempPath, this.metadataPath);
+          const graphData = await CompressionUtils.readFileWithDecompression(this.globalMetadataPath);
+          await CompressionUtils.writeFileWithCompression(this.metadataPath, graphData);
           timestampedLog('✅ Synced relationship graph to local storage');
         } else {
           timestampedLog('📋 Local relationship graph is up to date');
@@ -220,13 +211,26 @@ export class PersistentRelationshipStore {
       global: { exists: globalExists, path: this.globalMetadataPath }
     } as any;
 
+    // Get actual file paths for stat operations (compressed or uncompressed)
+    const getActualFilePathForStat = async (basePath: string): Promise<string> => {
+      const compressedPath = StoragePaths.getCompressedPath(basePath);
+      try {
+        await fs.access(compressedPath);
+        return compressedPath;
+      } catch {
+        return basePath;
+      }
+    };
+
     if (localExists) {
-      const localStats = await fs.stat(this.metadataPath);
+      const localActualPath = await getActualFilePathForStat(this.metadataPath);
+      const localStats = await fs.stat(localActualPath);
       info.local.lastModified = localStats.mtime;
     }
 
     if (globalExists) {
-      const globalStats = await fs.stat(this.globalMetadataPath);
+      const globalActualPath = await getActualFilePathForStat(this.globalMetadataPath);
+      const globalStats = await fs.stat(globalActualPath);
       info.global.lastModified = globalStats.mtime;
     }
 
