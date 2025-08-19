@@ -2,6 +2,7 @@ import { QueryRequest, QueryResponse } from './types';
 import { SemanticSearcher } from './searcher';
 import { CodebaseIndexer } from './indexer';
 import { cacheText, getCachedChunk, getNextChunk } from './utils/chunk-cache';
+import { ProjectManager, ProjectInfo } from './project-manager';
 
 export abstract class BaseHandler {
   abstract handle(params: any): Promise<any>;
@@ -56,11 +57,16 @@ export abstract class BaseHandler {
 }
 
 export class SemanticSearchHandler extends BaseHandler {
-  constructor(private searcher: SemanticSearcher) {
+  constructor(private searcher: SemanticSearcher, private projectManager?: ProjectManager) {
     super();
   }
 
   async handle(params: any): Promise<QueryResponse | string> {
+    // Use project manager's current searcher if available, otherwise fall back to constructor searcher
+    const activeSearcher = this.projectManager?.getCurrentSearcher() || this.searcher;
+    if (!activeSearcher) {
+      throw new Error('No active project or searcher available. Use switch_project to set up a project.');
+    }
     const query: QueryRequest = {
       task: params.query,
       max_chunks: params.max_chunks || 20,
@@ -70,7 +76,7 @@ export class SemanticSearchHandler extends BaseHandler {
       context_mode: params.context_mode || 'structured'
     };
 
-    const result = await this.searcher.search(query);
+    const result = await activeSearcher.search(query);
     
     // Add semantic search specific context optimization
     const enhancedResult = {
@@ -141,11 +147,17 @@ export class SemanticSearchHandler extends BaseHandler {
 }
 
 export class ContextualReadHandler extends BaseHandler {
-  constructor(private searcher: SemanticSearcher) {
+  constructor(private searcher: SemanticSearcher, private projectManager?: ProjectManager) {
     super();
   }
 
   async handle(params: any): Promise<any> {
+    // Use project manager's current searcher if available, otherwise fall back to constructor searcher
+    const activeSearcher = this.projectManager?.getCurrentSearcher() || this.searcher;
+    if (!activeSearcher) {
+      throw new Error('No active project or searcher available. Use switch_project to set up a project.');
+    }
+
     // TODO: Implement contextual file reading
     // This would read a specific file but include semantically related context
     const filePath = params.file_path;
@@ -160,7 +172,7 @@ export class ContextualReadHandler extends BaseHandler {
       context_mode: 'structured'
     };
 
-    const result = await this.searcher.search(query);
+    const result = await activeSearcher.search(query);
     
     return {
       file_path: filePath,
@@ -172,11 +184,17 @@ export class ContextualReadHandler extends BaseHandler {
 }
 
 export class CodeIntelligenceHandler extends BaseHandler {
-  constructor(private searcher: SemanticSearcher) {
+  constructor(private searcher: SemanticSearcher, private projectManager?: ProjectManager) {
     super();
   }
 
   async handle(params: any): Promise<any> {
+    // Use project manager's current searcher if available, otherwise fall back to constructor searcher
+    const activeSearcher = this.projectManager?.getCurrentSearcher() || this.searcher;
+    if (!activeSearcher) {
+      throw new Error('No active project or searcher available. Use switch_project to set up a project.');
+    }
+
     const query: QueryRequest = {
       task: params.task,
       max_chunks: Math.floor((params.max_context_tokens || 4000) / 200), // Rough token estimation
@@ -194,7 +212,7 @@ export class CodeIntelligenceHandler extends BaseHandler {
       query.file_filters = params.focus_areas.map((area: string) => `*${area}*`);
     }
 
-    const result = await this.searcher.search(query);
+    const result = await activeSearcher.search(query);
     
     // Add code intelligence specific context optimization
     const enhancedResult = {
@@ -213,11 +231,17 @@ export class CodeIntelligenceHandler extends BaseHandler {
 }
 
 export class RelationshipAnalysisHandler extends BaseHandler {
-  constructor(private searcher: SemanticSearcher) {
+  constructor(private searcher: SemanticSearcher, private projectManager?: ProjectManager) {
     super();
   }
 
   async handle(params: any): Promise<any> {
+    // Use project manager's current searcher if available, otherwise fall back to constructor searcher
+    const activeSearcher = this.projectManager?.getCurrentSearcher() || this.searcher;
+    if (!activeSearcher) {
+      throw new Error('No active project or searcher available. Use switch_project to set up a project.');
+    }
+
     const { analysis_type, starting_symbols, target_symbols, max_depth, relationship_filters } = params;
     
     // Create a specialized query for relationship analysis
@@ -235,7 +259,7 @@ export class RelationshipAnalysisHandler extends BaseHandler {
       context_mode: 'structured'
     };
 
-    const result = await this.searcher.search(query);
+    const result = await activeSearcher.search(query);
     
     // Create relationship analysis specific response
     const enhancedResult = {
@@ -260,11 +284,17 @@ export class RelationshipAnalysisHandler extends BaseHandler {
 }
 
 export class TraceExecutionPathHandler extends BaseHandler {
-  constructor(private searcher: SemanticSearcher) {
+  constructor(private searcher: SemanticSearcher, private projectManager?: ProjectManager) {
     super();
   }
 
   async handle(params: any): Promise<any> {
+    // Use project manager's current searcher if available, otherwise fall back to constructor searcher
+    const activeSearcher = this.projectManager?.getCurrentSearcher() || this.searcher;
+    if (!activeSearcher) {
+      throw new Error('No active project or searcher available. Use switch_project to set up a project.');
+    }
+
     const { entry_point, trace_type, include_data_flow, max_execution_depth } = params;
     
     const query: QueryRequest = {
@@ -281,7 +311,7 @@ export class TraceExecutionPathHandler extends BaseHandler {
       context_mode: 'adaptive'
     };
 
-    const result = await this.searcher.search(query);
+    const result = await activeSearcher.search(query);
     
     // Create execution path specific response
     const enhancedResult = {
@@ -305,11 +335,17 @@ export class TraceExecutionPathHandler extends BaseHandler {
 }
 
 export class FindCodePatternsHandler extends BaseHandler {
-  constructor(private searcher: SemanticSearcher) {
+  constructor(private searcher: SemanticSearcher, private projectManager?: ProjectManager) {
     super();
   }
 
   async handle(params: any): Promise<any> {
+    // Use project manager's current searcher if available, otherwise fall back to constructor searcher
+    const activeSearcher = this.projectManager?.getCurrentSearcher() || this.searcher;
+    if (!activeSearcher) {
+      throw new Error('No active project or searcher available. Use switch_project to set up a project.');
+    }
+
     const { pattern_type, pattern_description, scope, confidence_threshold, max_results } = params;
     
     const searchTask = pattern_description || 
@@ -333,7 +369,7 @@ export class FindCodePatternsHandler extends BaseHandler {
       query.max_chunks = Math.min(query.max_chunks || 10, 5);
     }
 
-    const result = await this.searcher.search(query);
+    const result = await activeSearcher.search(query);
     
     // Create pattern finding specific response
     const enhancedResult = {
@@ -423,5 +459,160 @@ export class NextChunkHandler extends BaseHandler {
     }
     
     return `chunk: ${next.index}/${next.total} (cacheKey: ${cacheKey})\n\n${next.chunk}`;
+  }
+}
+
+export class GetCurrentProjectHandler extends BaseHandler {
+  constructor(private projectManager: ProjectManager) {
+    super();
+  }
+
+  async handle(params: any): Promise<any> {
+    const currentProject = this.projectManager.getCurrentProject();
+    
+    if (!currentProject) {
+      return {
+        status: 'no_project',
+        message: 'No project is currently active. Use switch_project or add_project to get started.',
+        available_projects: (await this.projectManager.listProjects(false)).length
+      };
+    }
+
+    // Get project stats if available
+    const stats = await this.projectManager.getProjectStats(currentProject.name);
+    
+    return {
+      project_name: currentProject.name,
+      project_path: currentProject.path,
+      index_status: currentProject.indexStatus,
+      last_accessed: new Date(currentProject.lastAccessed).toISOString(),
+      stats: stats ? {
+        file_count: stats.fileCount,
+        chunk_count: stats.chunkCount,
+        last_indexed: new Date(stats.lastIndexed).toISOString()
+      } : null
+    };
+  }
+}
+
+export class ListAvailableProjectsHandler extends BaseHandler {
+  constructor(private projectManager: ProjectManager) {
+    super();
+  }
+
+  async handle(params: any): Promise<any> {
+    const includeStats = params.include_stats !== false;
+    const projects = await this.projectManager.listProjects(includeStats);
+    const currentProject = this.projectManager.getCurrentProject();
+
+    return {
+      total_projects: projects.length,
+      current_project: currentProject?.name || null,
+      projects: projects.map(project => ({
+        name: project.name,
+        path: project.path,
+        index_status: project.indexStatus,
+        is_current: currentProject?.name === project.name,
+        added_at: new Date(project.addedAt).toISOString(),
+        last_accessed: new Date(project.lastAccessed).toISOString(),
+        ...(includeStats && {
+          file_count: project.fileCount,
+          index_size: project.indexSize
+        }),
+        ...(project.error && { error: project.error })
+      }))
+    };
+  }
+}
+
+export class SwitchProjectHandler extends BaseHandler {
+  constructor(private projectManager: ProjectManager) {
+    super();
+  }
+
+  async handle(params: any): Promise<any> {
+    const { project_path, project_name, auto_index } = params;
+    
+    if (!project_path) {
+      return {
+        error: 'project_path is required'
+      };
+    }
+
+    try {
+      const projectInfo = await this.projectManager.switchProject(
+        project_path, 
+        project_name, 
+        auto_index !== false
+      );
+
+      // Get updated stats
+      const stats = await this.projectManager.getProjectStats(projectInfo.name);
+      
+      return {
+        success: true,
+        project_name: projectInfo.name,
+        project_path: projectInfo.path,
+        index_status: projectInfo.indexStatus,
+        switched_at: new Date().toISOString(),
+        stats: stats ? {
+          file_count: stats.fileCount,
+          chunk_count: stats.chunkCount
+        } : null,
+        message: `Successfully switched to project: ${projectInfo.name}`
+      };
+
+    } catch (error) {
+      return {
+        error: error instanceof Error ? error.message : 'Unknown error',
+        success: false
+      };
+    }
+  }
+}
+
+export class AddProjectHandler extends BaseHandler {
+  constructor(private projectManager: ProjectManager) {
+    super();
+  }
+
+  async handle(params: any): Promise<any> {
+    const { project_path, project_name, start_indexing } = params;
+    
+    if (!project_path) {
+      return {
+        error: 'project_path is required'
+      };
+    }
+
+    try {
+      const projectInfo = await this.projectManager.addProject(
+        project_path, 
+        project_name, 
+        start_indexing !== false
+      );
+
+      // Get stats if indexing completed
+      const stats = await this.projectManager.getProjectStats(projectInfo.name);
+      
+      return {
+        success: true,
+        project_name: projectInfo.name,
+        project_path: projectInfo.path,
+        index_status: projectInfo.indexStatus,
+        added_at: new Date(projectInfo.addedAt).toISOString(),
+        stats: stats ? {
+          file_count: stats.fileCount,
+          chunk_count: stats.chunkCount
+        } : null,
+        message: `Successfully added project: ${projectInfo.name}`
+      };
+
+    } catch (error) {
+      return {
+        error: error instanceof Error ? error.message : 'Unknown error',
+        success: false
+      };
+    }
   }
 }

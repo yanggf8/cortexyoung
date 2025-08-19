@@ -338,6 +338,80 @@ export const CORTEX_TOOLS = {
       },
       required: ['cacheKey']
     }
+  },
+
+  get_current_project: {
+    name: 'get_current_project',
+    description: 'PROJECT MANAGEMENT: Shows the current active project that Cortex is analyzing. WHEN TO USE: To verify which project Claude Code is currently working on, or to understand the context before running other tools. Essential for multi-project workflows to ensure you are analyzing the correct codebase.',
+    inputSchema: {
+      type: 'object',
+      properties: {},
+      required: []
+    }
+  },
+
+  list_available_projects: {
+    name: 'list_available_projects',
+    description: 'PROJECT MANAGEMENT: Lists all discovered projects and their status. WHEN TO USE: To see all available projects that Cortex can analyze, including their indexing status and basic information. Helps with project discovery and management.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        include_stats: {
+          type: 'boolean',
+          description: 'Include basic statistics for each project (file count, index status)',
+          default: true
+        }
+      },
+      required: []
+    }
+  },
+
+  switch_project: {
+    name: 'switch_project',
+    description: 'PROJECT MANAGEMENT: Switch Cortex to analyze a different project/repository. WHEN TO USE: When Claude Code needs to work on a different codebase. Automatically handles indexing the new project and updating context. Essential for multi-project development workflows.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project_path: {
+          type: 'string',
+          description: 'Absolute path to the project directory to switch to (e.g., "/home/user/my-project")'
+        },
+        project_name: {
+          type: 'string',
+          description: 'Optional friendly name for the project. If not provided, will use directory name.'
+        },
+        auto_index: {
+          type: 'boolean',
+          description: 'Automatically start indexing if the project is not already indexed',
+          default: true
+        }
+      },
+      required: ['project_path']
+    }
+  },
+
+  add_project: {
+    name: 'add_project',
+    description: 'PROJECT MANAGEMENT: Add a new project to Cortex for future analysis. WHEN TO USE: To register a new project/repository that Claude Code will work with. Pre-indexes the project for faster future access. Useful for setting up multi-project environments.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project_path: {
+          type: 'string',
+          description: 'Absolute path to the project directory to add (e.g., "/home/user/new-project")'
+        },
+        project_name: {
+          type: 'string',
+          description: 'Optional friendly name for the project. If not provided, will use directory name.'
+        },
+        start_indexing: {
+          type: 'boolean',
+          description: 'Start indexing immediately after adding the project',
+          default: true
+        }
+      },
+      required: ['project_path']
+    }
   }
 } as const;
 

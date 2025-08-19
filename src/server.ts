@@ -5,7 +5,8 @@ import express, { Request, Response } from 'express';
 import cors from 'cors';
 import { CodebaseIndexer } from './indexer';
 import { SemanticSearcher } from './searcher';
-import { SemanticSearchHandler, ContextualReadHandler, CodeIntelligenceHandler, RelationshipAnalysisHandler, TraceExecutionPathHandler, FindCodePatternsHandler, RealTimeStatusHandler, FetchChunkHandler, NextChunkHandler } from './mcp-handlers';
+import { SemanticSearchHandler, ContextualReadHandler, CodeIntelligenceHandler, RelationshipAnalysisHandler, TraceExecutionPathHandler, FindCodePatternsHandler, RealTimeStatusHandler, FetchChunkHandler, NextChunkHandler, GetCurrentProjectHandler, ListAvailableProjectsHandler, SwitchProjectHandler, AddProjectHandler } from './mcp-handlers';
+import { ProjectManager } from './project-manager';
 import { IndexHealthChecker } from './index-health-checker';
 import { HierarchicalStageTracker } from './hierarchical-stages';
 import { EnhancedHierarchicalStageTracker } from './enhanced-hierarchical-stages';
@@ -105,6 +106,7 @@ class Logger {
 export class CortexMCPServer {
   private indexer: CodebaseIndexer;
   private searcher: SemanticSearcher;
+  private projectManager: ProjectManager;
   private handlers: Map<string, any> = new Map();
   private httpServer: any;
   private logger: Logger;
@@ -113,11 +115,13 @@ export class CortexMCPServer {
   constructor(
     indexer: CodebaseIndexer,
     searcher: SemanticSearcher,
+    projectManager: ProjectManager,
     loggerOrFile?: Logger | string,
     stageTracker?: HierarchicalStageTracker
   ) {
     this.indexer = indexer;
     this.searcher = searcher;
+    this.projectManager = projectManager;
     
     // Accept either a Logger instance or create new one from file path
     if (loggerOrFile && typeof loggerOrFile === 'object' && 'info' in loggerOrFile) {
@@ -133,15 +137,24 @@ export class CortexMCPServer {
   }
 
   private setupHandlers(): void {
-    this.handlers.set('semantic_search', new SemanticSearchHandler(this.searcher));
-    this.handlers.set('contextual_read', new ContextualReadHandler(this.searcher));
-    this.handlers.set('code_intelligence', new CodeIntelligenceHandler(this.searcher));
-    this.handlers.set('relationship_analysis', new RelationshipAnalysisHandler(this.searcher));
-    this.handlers.set('trace_execution_path', new TraceExecutionPathHandler(this.searcher));
-    this.handlers.set('find_code_patterns', new FindCodePatternsHandler(this.searcher));
+    // Core semantic analysis handlers - now project-aware
+    this.handlers.set('semantic_search', new SemanticSearchHandler(this.searcher, this.projectManager));
+    this.handlers.set('contextual_read', new ContextualReadHandler(this.searcher, this.projectManager));
+    this.handlers.set('code_intelligence', new CodeIntelligenceHandler(this.searcher, this.projectManager));
+    this.handlers.set('relationship_analysis', new RelationshipAnalysisHandler(this.searcher, this.projectManager));
+    this.handlers.set('trace_execution_path', new TraceExecutionPathHandler(this.searcher, this.projectManager));
+    this.handlers.set('find_code_patterns', new FindCodePatternsHandler(this.searcher, this.projectManager));
     this.handlers.set('real_time_status', new RealTimeStatusHandler(this.indexer));
+    
+    // Chunking handlers
     this.handlers.set('fetch_chunk', new FetchChunkHandler());
     this.handlers.set('next_chunk', new NextChunkHandler());
+    
+    // Project management handlers
+    this.handlers.set('get_current_project', new GetCurrentProjectHandler(this.projectManager));
+    this.handlers.set('list_available_projects', new ListAvailableProjectsHandler(this.projectManager));
+    this.handlers.set('switch_project', new SwitchProjectHandler(this.projectManager));
+    this.handlers.set('add_project', new AddProjectHandler(this.projectManager));
   }
 
   private setupIPC(): void {
@@ -832,6 +845,10 @@ async function main() {
     await searcher.initializeRelationshipEngine(files);
     stageTracker.completeSubstep('stage_2', '2.3', 'Relationship graph ready');
     
+    // Initialize project manager and register current project
+    const projectManager = new ProjectManager();
+    await projectManager.initializeWithCurrentDirectory();
+    
     // 2.4 Vector Storage Commit
     stageTracker.startSubstep('stage_2', '2.4', 'Database updates, storage persistence, synchronization');
     const storageInfo = `${indexResponse.chunks_processed} chunks ${indexResponse.chunks_processed > 0 ? 'processed' : 'loaded from cache'}`;
@@ -859,7 +876,7 @@ async function main() {
     stageTracker.startSubstep('stage_3', '3.1', 'HTTP transport, endpoint registration, service availability');
     
     // Create and start MCP server (pass logger instance to avoid double creation)
-    const mcpServer = new CortexMCPServer(indexer, searcher, logger, stageTracker);
+    const mcpServer = new CortexMCPServer(indexer, searcher, projectManager, logger, stageTracker);
     
     // MCP server startup message handled by startHttp method
     await mcpServer.startHttp(port);
