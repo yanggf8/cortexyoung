@@ -128,6 +128,16 @@ npm run demo
 
 ### Bug Fixes
 
+**v2.1.8 - Centralized Storage Architecture & Compression** 🆕
+- **🏗️ Centralized Storage Constants**: New `storage-constants.ts` module for unified storage path management across all components
+- **📦 Intelligent File Compression**: Automatic compression for large storage files (>10MB) with configurable thresholds and .gz extension support
+- **🔧 Enhanced Storage Utilities**: Comprehensive path generation utilities for both local (.cortex) and global (~/.claude/cortex-embeddings) storage
+- **🎯 Repository Hash Consistency**: Standardized repository identification using `repoName-16chars` format for reliable cross-session storage
+- **⚡ Improved Storage Coordination**: Enhanced unified storage coordinator with better error handling and compression support
+- **🧹 Code Consolidation**: Eliminated duplicate storage path logic across persistent stores and caching systems
+- **📁 Complete Path Management**: Centralized handling of metadata, relationships, deltas, and embedding cache paths
+- **🔄 Backward Compatibility**: Maintains existing storage structure while adding new compression and organization features
+
 **v2.1.7 - Environment Variable Configuration Overhaul** 🆕
 - **🔧 Centralized Environment Configuration**: New `env-config.ts` utility for type-safe configuration management
 - **🏷️ CORTEX_ Prefix Support**: Added support for prefixed environment variables (`CORTEX_PORT`, `CORTEX_LOG_FILE`, etc.) to prevent conflicts
