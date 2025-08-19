@@ -5,6 +5,7 @@ import * as os from 'os';
 import * as crypto from 'crypto';
 import { CodeChunk, IEmbedder, EmbedOptions, EmbeddingResult as IEmbeddingResult, EmbeddingMetadata, PerformanceStats, ProviderHealth, ProviderMetrics } from './types';
 import { log, warn, error } from './logging-utils';
+import { MemoryMappedCache } from './memory-mapped-cache';
 
 // Global Resource Management Thresholds (for ProcessPoolEmbedder local execution)
 export const RESOURCE_THRESHOLDS = {
@@ -174,8 +175,8 @@ export class ProcessPoolEmbedder implements IEmbedder {
   private queue: fastq.queueAsPromised<EmbeddingTask, ProcessEmbeddingResult[]>;
   private processCount: number;
   private isInitialized = false;
-  private embeddingCache: Map<string, CachedEmbedding> = new Map(); // Shared cache across all processes
-  private cacheStats = { hits: 0, misses: 0, total: 0, evictions: 0 };
+  private static sharedCache: MemoryMappedCache | null = null; // Singleton memory-mapped cache
+  private embeddingCache: MemoryMappedCache; // Instance reference to memory-mapped cache
   private adaptiveBatch: AdaptiveBatchConfig;
   private systemMemoryMB: number;
   private systemCpuCores: number;
@@ -186,6 +187,7 @@ export class ProcessPoolEmbedder implements IEmbedder {
   private isShuttingDown = false;
   private shutdownPromise?: Promise<void>;
   private workloadChunkCount?: number; // Store workload size to prevent unnecessary scaling
+  private cacheStats = { hits: 0, misses: 0, total: 0, evictions: 0 }; // Track cache statistics
   
   // Cache management configuration
   private static readonly MAX_CACHE_SIZE = 10000; // Maximum cache entries
@@ -653,6 +655,24 @@ export class ProcessPoolEmbedder implements IEmbedder {
     
     // Create fastq queue - consumer count matches initial process count
     this.queue = fastq.promise(this.processEmbeddingTask.bind(this), this.processCount);
+    
+    // Initialize memory-mapped cache (singleton pattern)
+    if (!ProcessPoolEmbedder.sharedCache) {
+      ProcessPoolEmbedder.sharedCache = MemoryMappedCache.getInstance(
+        './.cortex/mmap-cache',
+        ProcessPoolEmbedder.MAX_CACHE_SIZE,
+        384 // BGE-small-en-v1.5 dimensions
+      );
+      // Initialize the cache asynchronously
+      ProcessPoolEmbedder.sharedCache.initialize().catch(err => {
+        error(`[MemoryMappedCache] Failed to initialize: ${err}`);
+      });
+      log(`[MemoryMappedCache] Initialized memory-mapped cache with ${ProcessPoolEmbedder.MAX_CACHE_SIZE} entries`);
+    } else {
+      log(`[MemoryMappedCache] Reusing existing memory-mapped cache instance`);
+    }
+    
+    this.embeddingCache = ProcessPoolEmbedder.sharedCache;
   }
 
   // Predictive resource pool management with 2-step forecasting
@@ -2000,21 +2020,15 @@ export class ProcessPoolEmbedder implements IEmbedder {
       const cacheKey = this.generateCacheKey(chunk.content);
       const cachedEmbedding = this.embeddingCache.get(cacheKey);
       
-      if (cachedEmbedding && this.validateCacheEntry(chunk.content, cachedEmbedding.embedding)) {
-        cached.push(cachedEmbedding.embedding);
-        cachedEmbedding.hitCount++;
-        cachedEmbedding.lastAccessed = currentTime; // Update LRU timestamp
-        this.cacheStats.hits++;
+      if (cachedEmbedding && this.validateCacheEntry(chunk.content, Array.from(cachedEmbedding))) {
+        cached.push(Array.from(cachedEmbedding)); // Convert Float32Array to number[]
+        this.getCacheStats().hits++;
       } else {
-        // Remove invalid cache entry if found
-        if (cachedEmbedding) {
-          this.embeddingCache.delete(cacheKey);
-        }
         cached.push(null);
         uncachedIndices.push(index);
-        this.cacheStats.misses++;
+        this.getCacheStats().misses++;
       }
-      this.cacheStats.total++;
+      this.getCacheStats().total++;
     });
     
     // Check if cache cleanup is needed
@@ -2032,12 +2046,8 @@ export class ProcessPoolEmbedder implements IEmbedder {
       
       // Validate embedding before caching
       if (this.validateCacheEntry(chunk.content, embeddings[index])) {
-        this.embeddingCache.set(cacheKey, {
-          embedding: embeddings[index],
-          timestamp,
-          hitCount: 0,
-          lastAccessed: currentTime
-        });
+        const embeddingArray = new Float32Array(embeddings[index]);
+        this.embeddingCache.set(cacheKey, embeddingArray);
       }
     });
     
@@ -2082,83 +2092,32 @@ export class ProcessPoolEmbedder implements IEmbedder {
 
   // Check if cache needs eviction and perform LRU cleanup (thread-safe)
   private checkAndEvictCache(): void {
-    const currentSize = this.embeddingCache.size;
-    const threshold = ProcessPoolEmbedder.MAX_CACHE_SIZE * ProcessPoolEmbedder.CACHE_EVICTION_THRESHOLD;
-    
-    // Only evict if needed and not already evicting (prevents concurrent evictions)
-    if (currentSize > threshold && !this.isEvicting) {
-      this.evictLRUEntries();
-    }
+    // MemoryMappedCache handles its own LRU eviction automatically
+    // No manual eviction needed
   }
 
   // Perform LRU eviction to keep cache size manageable (with concurrency protection)
   private evictLRUEntries(): void {
-    // Prevent concurrent evictions
-    if (this.isEvicting) {
-      log(`⚠️ Cache eviction already in progress, skipping...`);
-      return;
-    }
-    
-    this.isEvicting = true;
-    
-    try {
-      const currentSize = this.embeddingCache.size;
-      const targetRemoval = Math.floor(currentSize * ProcessPoolEmbedder.EVICTION_PERCENTAGE);
-      
-      if (targetRemoval <= 0) {
-        return;
-      }
-      
-      log(`🧹 Cache eviction: Removing ${targetRemoval} entries (${currentSize} → ${currentSize - targetRemoval})`);
-      
-      // Convert to array and sort by LRU score (combination of lastAccessed and hitCount)
-      const entries = Array.from(this.embeddingCache.entries())
-        .map(([key, value]) => {
-          // LRU score: prioritize recently accessed and frequently used items
-          const timeSinceAccess = Date.now() - value.lastAccessed;
-          const lruScore = timeSinceAccess / (value.hitCount + 1); // Lower score = keep longer
-          return { key, value, lruScore };
-        })
-        .sort((a, b) => b.lruScore - a.lruScore); // Highest LRU score first (least valuable)
-      
-      // Remove least valuable entries atomically
-      let removed = 0;
-      const keysToRemove: string[] = [];
-      
-      for (const entry of entries) {
-        if (removed >= targetRemoval) break;
-        keysToRemove.push(entry.key);
-        removed++;
-      }
-      
-      // Batch delete for better performance
-      keysToRemove.forEach(key => this.embeddingCache.delete(key));
-      
-      this.cacheStats.evictions += removed;
-      
-      log(`✅ Cache eviction completed: Removed ${removed} entries, cache size now ${this.embeddingCache.size}`);
-      
-    } catch (err) {
-      error(`❌ Cache eviction failed:`, err);
-    } finally {
-      this.isEvicting = false;
-    }
+    // MemoryMappedCache handles its own LRU eviction automatically
+    // No manual eviction needed
   }
 
   // Get storage and memory statistics
   private getStorageStats(): { cacheEntries: number; estimatedMemoryMB: number; hitRate: string } {
-    const estimatedMemoryBytes = this.embeddingCache.size * 384 * 4; // 384 dims × 4 bytes per float32
+    const cacheStats = this.embeddingCache.getStats();
+    const estimatedMemoryBytes = cacheStats.size * 384 * 4; // 384 dims × 4 bytes per float32
     const estimatedMemoryMB = Math.round(estimatedMemoryBytes / (1024 * 1024));
     const hitRate = this.cacheStats.total > 0 
       ? ((this.cacheStats.hits / this.cacheStats.total) * 100).toFixed(1) + '%'
       : '0%';
     
     return {
-      cacheEntries: this.embeddingCache.size,
+      cacheEntries: cacheStats.size,
       estimatedMemoryMB,
       hitRate
     };
   }
+
 
   // Get fixed batch size - always 400 chunks for optimal embedding model performance
   private getFixedBatchSize(totalChunks: number): number {
@@ -2838,7 +2797,7 @@ export class ProcessPoolEmbedder implements IEmbedder {
     // Enhanced cache statistics
     const hitRate = this.cacheStats.total > 0 ? (this.cacheStats.hits / this.cacheStats.total * 100) : 0;
     const storageStats = this.getStorageStats();
-    const utilizationRate = (this.embeddingCache.size / ProcessPoolEmbedder.MAX_CACHE_SIZE * 100);
+    const mmapStats = this.embeddingCache.getStats();
     
     log(`🧠 Cache Performance:`);
     log(`  Total requests: ${this.cacheStats.total}`);
@@ -2846,7 +2805,7 @@ export class ProcessPoolEmbedder implements IEmbedder {
     log(`  Cache misses: ${this.cacheStats.misses}`);
     log(`  Cache evictions: ${this.cacheStats.evictions}`);
     log(`  Hit rate: ${hitRate.toFixed(1)}%`);
-    log(`  Cache size: ${this.embeddingCache.size}/${ProcessPoolEmbedder.MAX_CACHE_SIZE} (${utilizationRate.toFixed(1)}%)`);
+    log(`  Cache size: ${mmapStats.size}/${mmapStats.maxSize} (${mmapStats.utilizationRate})`);
     log(`  Memory usage: ~${storageStats.estimatedMemoryMB}MB`);
     
     // Process usage stats (exclude cache hits with processId = -1)
@@ -2902,10 +2861,12 @@ export class ProcessPoolEmbedder implements IEmbedder {
 
   // Clear cache manually (useful for testing or memory pressure)
   clearCache(): void {
-    log(`🧹 Manually clearing cache (${this.embeddingCache.size} entries)`);
-    this.embeddingCache.clear();
+    const stats = this.embeddingCache.getStats();
+    log(`🧹 Cache clear requested (${stats.size} entries) - MemoryMappedCache manages persistence`);
+    // MemoryMappedCache doesn't support manual clear - it manages its own LRU eviction
+    // Reset local statistics only
     this.cacheStats = { hits: 0, misses: 0, total: 0, evictions: 0 };
-    log(`✅ Cache cleared successfully`);
+    log(`✅ Local cache statistics cleared`);
   }
 
 
@@ -2921,9 +2882,7 @@ export class ProcessPoolEmbedder implements IEmbedder {
       queueLength: this.queue.length(),
       queueRunning: this.queue.running(),
       cache: {
-        size: this.embeddingCache.size,
-        maxSize: ProcessPoolEmbedder.MAX_CACHE_SIZE,
-        utilizationRate: ((this.embeddingCache.size / ProcessPoolEmbedder.MAX_CACHE_SIZE) * 100).toFixed(1) + '%',
+        ...this.embeddingCache.getStats(),
         hits: this.cacheStats.hits,
         misses: this.cacheStats.misses,
         evictions: this.cacheStats.evictions,
@@ -2938,22 +2897,18 @@ export class ProcessPoolEmbedder implements IEmbedder {
   getCacheStats() {
     const hitRate = this.cacheStats.total > 0 ? (this.cacheStats.hits / this.cacheStats.total * 100) : 0;
     const storageStats = this.getStorageStats();
+    const mmapCacheStats = this.embeddingCache.getStats();
     
-    // Calculate cache efficiency metrics
-    const entries = Array.from(this.embeddingCache.values());
-    const avgHitCount = entries.length > 0 
-      ? entries.reduce((sum, entry) => sum + entry.hitCount, 0) / entries.length 
-      : 0;
-    
-    const utilizationRate = (this.embeddingCache.size / ProcessPoolEmbedder.MAX_CACHE_SIZE * 100);
+    // MemoryMappedCache handles its own metrics, use those
+    const utilizationRate = parseFloat(mmapCacheStats.utilizationRate);
     
     return {
-      // Basic stats
-      size: this.embeddingCache.size,
-      maxSize: ProcessPoolEmbedder.MAX_CACHE_SIZE,
-      utilizationRate: utilizationRate.toFixed(1) + '%',
+      // Basic stats from MemoryMappedCache
+      size: mmapCacheStats.size,
+      maxSize: mmapCacheStats.maxSize,
+      utilizationRate: mmapCacheStats.utilizationRate,
       
-      // Hit/miss stats
+      // Hit/miss stats from local tracking
       hits: this.cacheStats.hits,
       misses: this.cacheStats.misses,
       total: this.cacheStats.total,
@@ -2962,30 +2917,13 @@ export class ProcessPoolEmbedder implements IEmbedder {
       
       // Memory stats
       estimatedMemoryMB: storageStats.estimatedMemoryMB,
-      avgHitCount: avgHitCount.toFixed(1),
+      avgHitCount: 0, // MemoryMappedCache doesn't track individual hit counts
       
-      // Top performers
-      topEntries: Array.from(this.embeddingCache.entries())
-        .sort((a, b) => b[1].hitCount - a[1].hitCount)
-        .slice(0, 10)
-        .map(([key, value]) => ({ 
-          key: key.substring(0, 12) + '...', 
-          hitCount: value.hitCount,
-          age: Math.round((Date.now() - value.timestamp) / 1000) + 's'
-        })),
+      // Top performers - MemoryMappedCache doesn't expose individual entries
+      topEntries: [],
         
-      // LRU candidates (for monitoring)
-      lruCandidates: entries.length > 100 ? Array.from(this.embeddingCache.entries())
-        .map(([key, value]) => {
-          const timeSinceAccess = Date.now() - value.lastAccessed;
-          return { 
-            key: key.substring(0, 12) + '...', 
-            lruScore: timeSinceAccess / (value.hitCount + 1),
-            lastAccessed: Math.round(timeSinceAccess / 1000) + 's ago'
-          };
-        })
-        .sort((a, b) => b.lruScore - a.lruScore)
-        .slice(0, 5) : []
+      // LRU candidates - handled internally by MemoryMappedCache
+      lruCandidates: []
     };
   }
 

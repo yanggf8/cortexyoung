@@ -360,6 +360,14 @@ export class CortexMCPServer {
               id
             };
           }
+        } else if (method === 'notifications/initialized') {
+          // Handle notifications/initialized - this is a notification, not a request
+          // Notifications don't require a response, but we'll return a simple acknowledgment
+          response = {
+            jsonrpc: '2.0',
+            result: {},
+            id: id || null
+          };
         } else {
           response = {
             jsonrpc: '2.0',

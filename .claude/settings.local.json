@@ -33,7 +33,8 @@
       "Bash(ss:*)",
       "Bash(claude mcp:*)",
       "Bash(ENABLE_NEW_LOGGING=true npm run demo)",
-      "mcp__rovodev__next-chunk"
+      "mcp__rovodev__next-chunk",
+      "Bash(npx tsc:*)"
     ],
     "deny": []
   }

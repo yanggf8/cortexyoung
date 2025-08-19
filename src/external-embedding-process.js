@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 
 // External Node.js process for embedding generation
-// Complete isolation from main process - no shared memory or threads
+// Complete isolation from main process - coordinates via IPC for shared caching
 
 const readline = require('readline');
+// Memory-mapped cache will be imported dynamically after TypeScript compilation
 
 // Simple timestamp function for consistent logging
 function timestampedLog(...args) {
@@ -20,6 +21,7 @@ function timestampedWrite(message) {
 let embedder = null;
 let processId = null;
 let isInitialized = false;
+let cache = null;
 
 // Create readline interface for IPC communication
 const rl = readline.createInterface({
@@ -48,8 +50,31 @@ async function initializeEmbedder(id) {
       // Use default settings - let FastEmbed choose the best available backend
     });
     
+    // Initialize memory-mapped cache (same files as parent process)
+    try {
+      const { MemoryMappedCache } = require('../dist/memory-mapped-cache.js');
+      cache = MemoryMappedCache.getInstance('./.cortex/mmap-cache', 10000, 384);
+      
+      // Suppress MemoryMappedCache logging to avoid JSON parsing interference
+      const originalConsoleLog = console.log;
+      const originalConsoleError = console.error;
+      console.log = () => {};
+      console.error = () => {};
+      
+      await cache.initialize();
+      
+      // Restore console logging
+      console.log = originalConsoleLog;
+      console.error = originalConsoleError;
+      
+      timestampedWrite(`[Process ${processId}] Memory-mapped cache initialized\n`);
+    } catch (error) {
+      timestampedWrite(`[Process ${processId}] Failed to initialize cache: ${error.message}\n`);
+      cache = null; // Fallback to no cache
+    }
+    
     isInitialized = true;
-    timestampedWrite(`[Process ${processId}] FastEmbedding ready in separate process\n`);
+    timestampedWrite(`[Process ${processId}] FastEmbedding ready in separate process with shared cache\n`);
     
     // Send success response
     console.log(JSON.stringify({
@@ -126,52 +151,87 @@ async function processEmbeddingBatch(texts, batchId, timeoutWarning = null) {
     
     timestampedLog(`[Process ${processId}] Splitting ${texts.length} texts into ${subBatches.length} sub-batches of ~${maxSubBatchSize}`);
     
-    const embeddings = embedder.embed(texts); // Still use full batch but with optimized settings
-    
+    // Check cache for existing embeddings first
     const results = [];
-    let processedCount = 0;
+    const uncachedTexts = [];
+    const uncachedIndices = [];
     
-    for await (const batch of embeddings) {
-      // Check if we're approaching timeout and should return partial results
-      const elapsed = Date.now() - startTime;
-      if (timeoutWarning && elapsed > timeoutWarning * 0.9 && results.length > 0) {
-        timestampedLog(`[Process ${processId}] Timeout warning reached, returning ${results.length} partial results`);
-        clearInterval(progressInterval);
-        clearTimeout(timeoutWarningTimer);
-        
-        // Send partial results
-        console.log(JSON.stringify({
-          type: 'embed_complete',
-          batchId,
-          success: true,
-          partial: true,
-          embeddings: results,
-          stats: {
-            duration: elapsed,
-            memoryDelta: Math.round((process.memoryUsage().heapUsed - beforeMemory.heapUsed) / 1024 / 1024),
-            chunksProcessed: results.length,
-            totalChunks: texts.length,
-            processId
+    for (let i = 0; i < texts.length; i++) {
+      const text = texts[i];
+      const contentHash = require('crypto').createHash('sha256').update(text).digest('hex');
+      
+      // Check memory-mapped cache directly (zero overhead)
+      if (cache) {
+        try {
+          const cachedEmbedding = cache.get(contentHash);
+          if (cachedEmbedding) {
+            results[i] = Array.from(cachedEmbedding);
+            continue; // Cache hit, skip to next
           }
-        }));
-        return;
+        } catch (error) {
+          // Cache error, treat as miss and continue
+        }
       }
       
-      // Process batch normally
-      const batchResults = batch.map(emb => Array.from(emb));
-      results.push(...batchResults);
-      processedCount += batchResults.length;
+      // Cache miss - add to uncached list
+      uncachedTexts.push(text);
+      uncachedIndices.push(i);
+    }
+    
+    timestampedLog(`[Process ${processId}] Cache check: ${results.filter(Boolean).length} hits, ${uncachedTexts.length} misses`);
+    
+    // Generate embeddings only for cache misses
+    if (uncachedTexts.length > 0) {
+      const embeddings = embedder.embed(uncachedTexts);
       
-      // Report progress for large batches
-      if (texts.length > 100 && processedCount % 50 === 0) {
-        console.log(JSON.stringify({
-          type: 'progress',
-          batchId,
-          processId,
-          processed: processedCount,
-          total: texts.length,
-          progress: Math.round((processedCount / texts.length) * 100)
-        }));
+      let embeddingIndex = 0;
+      let processedCount = 0;
+      
+      for await (const batch of embeddings) {
+        // Check if we're approaching timeout and should return partial results
+        const elapsed = Date.now() - startTime;
+        if (timeoutWarning && elapsed > timeoutWarning * 0.9 && results.some(r => r !== undefined)) {
+          timestampedLog(`[Process ${processId}] Timeout warning reached, returning partial results`);
+          break;
+        }
+        
+        // Process batch and store in cache
+        const batchResults = batch.map(emb => Array.from(emb));
+        
+        for (let i = 0; i < batchResults.length; i++) {
+          const embedding = batchResults[i];
+          const originalIndex = uncachedIndices[embeddingIndex];
+          const originalText = uncachedTexts[embeddingIndex];
+          
+          // Store in results array at correct position
+          results[originalIndex] = embedding;
+          
+          // Store in memory-mapped cache for future use
+          if (cache) {
+            try {
+              const contentHash = require('crypto').createHash('sha256').update(originalText).digest('hex');
+              const embeddingArray = new Float32Array(embedding);
+              cache.set(contentHash, embeddingArray);
+            } catch (cacheError) {
+              // Cache storage failed, but continue processing
+            }
+          }
+          
+          embeddingIndex++;
+          processedCount++;
+        }
+        
+        // Report progress for large batches
+        if (texts.length > 100 && processedCount % 50 === 0) {
+          console.log(JSON.stringify({
+            type: 'progress',
+            batchId,
+            processId,
+            processed: processedCount + results.filter(Boolean).length - processedCount, // Include cache hits
+            total: texts.length,
+            progress: Math.round(((processedCount + results.filter(Boolean).length - processedCount) / texts.length) * 100)
+          }));
+        }
       }
     }
     
