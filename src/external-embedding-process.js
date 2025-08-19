@@ -529,8 +529,16 @@ if (typeof global.gc === 'function') {
   setInterval(() => {
     global.gc();
     const memoryUsage = process.memoryUsage();
-    if (memoryUsage.rss > 500 * 1024 * 1024) { // Warn if RSS > 500MB
-      timestampedLog(`[Process ${processId}] High memory usage: RSS=${Math.round(memoryUsage.rss/1024/1024)}MB`);
+    const rssMB = Math.round(memoryUsage.rss / 1024 / 1024);
+    
+    // System-aware memory context (informational only, not a scaling trigger)
+    const os = require('os');
+    const totalSystemMemoryMB = Math.round(os.totalmem() / 1024 / 1024);
+    const systemPercent = ((memoryUsage.rss / os.totalmem()) * 100).toFixed(1);
+    
+    // Log context instead of arbitrary warning threshold
+    if (rssMB > 1000) { // Only log for truly large processes (>1GB)
+      timestampedLog(`[Process ${processId}] Memory status: RSS=${rssMB}MB (${systemPercent}% of ${totalSystemMemoryMB}MB system) - Normal for BGE model`);
     }
   }, 30000);
 } else {

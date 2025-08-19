@@ -4,28 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**Cortex V2.1** is a semantic code intelligence MCP server designed to enhance Claude Code's context window efficiency through intelligent code analysis and advanced relationship traversal. Provides 80-90% token reduction and reduces follow-up queries by 85%.
-
-### Key Achievements ✅
-- **🎯 Advanced Relationship Traversal**: Multi-hop relationship discovery with complete context in single queries
-- **🚀 ONNX Runtime Stability**: External Node.js processes with complete isolation and 10x parallelism  
-- **💻 Local Resource Management**: Global thresholds for ProcessPoolEmbedder (CPU: 69%/49%, Memory: 78%/69%)
-- **🔄 Signal Cascade System**: Reliable parent-child process cleanup with zero orphaned processes
-- **📊 Auto-sync Intelligence**: Eliminates manual storage commands with intelligent conflict resolution
-- **🎯 Guarded MMR Context Window Optimization**: Production-ready Maximal Marginal Relevance system with 95%+ critical set coverage
-- **⚡ Intelligent ProcessPool Scaling**: Automatic scale-up/down with queue-aware resource management and LRU process termination ✅ **IMPLEMENTED**
-- **📦 Intelligent Embedding Cache**: 95-98% performance improvement with content-hash based caching
-- **🎯 File-Content Hash Delta Detection**: Fast file-level change detection with SHA256 hashing - 7x faster startup times
-- **👀 Smart File Watching**: Real-time code intelligence updates with semantic change detection ✅ **IMPLEMENTED**
-- **🛡️ Real-Time Graceful Degradation**: Memory-aware processing that continues operation during resource pressure ✅ **IMPLEMENTED**
-- **🗂️ Dual-Mode File Tracking**: Git-tracked files processed directly, untracked files via intelligent staging ✅ **IMPLEMENTED**
-- **🔗 Smart Dependency Chains**: Automatic inclusion of complete dependency context ✅ **IMPLEMENTED**
-- **🔒 Storage Race Condition Fix**: Zero ENOENT errors with unique temp file naming ✅ **IMPLEMENTED**
-- **🤖 Enhanced Claude Code Integration**: Smart tool guidance with context optimization hints and telemetry-driven improvements ✅ **IMPLEMENTED**
-- **🎨 Enhanced Console Logging System**: Beautiful colors, emojis, structured formatting with stage/step management ✅ **IMPLEMENTED**
-- **⚙️ Configuration System & Profiles**: 6 profiles (dev/prod/ci/debug/test/silent) with 4 themes and environment auto-detection ✅ **IMPLEMENTED**
-- **📊 Advanced Data Formatters**: JSON, tables, progress bars, boxes, templates with comprehensive visualization tools ✅ **IMPLEMENTED**
-- **🗃️ Memory-Mapped Shared Cache**: Zero-copy cross-process embedding cache with 99.9% hit rate and 0.05ms read performance ✅ **IMPLEMENTED**
+**Cortex V2.1** is a semantic code intelligence MCP server that enhances Claude Code's context window efficiency through intelligent code analysis and advanced relationship traversal. Provides 80-90% token reduction and reduces follow-up queries by 85%.
 
 ## Quick Start Commands
 
@@ -53,31 +32,141 @@ npm run test:cleanup   # Test process cleanup
 npm run benchmark      # Performance benchmarking
 
 # Enhanced Logging System Testing
-ENABLE_NEW_LOGGING=true npm run demo    # Test enhanced logging with demo
-node test-configuration-system.js       # Test configuration system with all profiles
-node test-configuration-demo.js         # Demonstrate configuration capabilities
+CORTEX_ENABLE_NEW_LOGGING=true npm run demo    # Test enhanced logging with demo
+node test-configuration-system.js               # Test configuration system with all profiles
 ```
 
-## Real-Time File Watching ✅
+## Claude Code MCP Integration ✅ **PRODUCTION READY**
 
-**Status**: Production-ready and enabled by default
+### Installation
+**One-Command Installation:**
+```bash
+claude mcp add --transport http cortex http://localhost:8765/mcp
+```
+
+**Verify Installation:**
+```bash
+claude mcp list
+# Should show: cortex: http://localhost:8765/mcp (HTTP)
+```
+
+**Start Using:**
+```bash
+claude chat --mcp
+# Then use: @cortex-semantic_search "your query"
+```
+
+### Available MCP Tools
+1. **semantic_search** - Quick code discovery and debugging with MMR optimization
+2. **contextual_read** - Smart file reading with semantic context awareness
+3. **code_intelligence** - Complex analysis and architecture understanding
+4. **relationship_analysis** - Dependency mapping and impact analysis
+5. **trace_execution_path** - Execution flow analysis and error path tracing
+6. **find_code_patterns** - Pattern recognition and architectural analysis
+7. **real_time_status** - Real-time file watching status and context freshness
+
+### Usage Examples
+```bash
+@cortex-semantic_search "JWT token validation logic"
+@cortex-code_intelligence "understand the payment processing workflow"
+@cortex-relationship_analysis --analysis_type call_graph --starting_symbols "authenticate"
+@cortex-real_time_status  # Check context freshness
+```
+
+## Core Features
+
+### 🎯 Advanced Relationship Traversal
+Multi-hop relationship discovery with complete context in single queries. Automatic inclusion of complete dependency context with strength scoring.
+
+### 🚀 Enhanced ProcessPool Scaling
+- **Batch Boundary Safety**: Never interrupts active BGE batch processing (CRITICAL safety feature)
+- **Symmetric Predictive Logic**: 2-step resource predictions for both scale-up AND scale-down consistency
+- **Workload-Based Decisions**: Queue state and batch activity drive scaling, not arbitrary memory thresholds
+- **System-Aware Context**: Memory shown as percentage of total system (e.g., "13.8% of 16GB system")
+- **Startup Cost Amortization**: 10-minute minimum process lifetime prevents expensive restart cycles
+- **Conservative Safety Checks**: Multiple validation layers before any process termination
+- **LRU process termination**: Terminates least recently used idle processes only when safe
+- **Queue-aware decisions**: Only scales down when no active work AND no active batches
+
+### 🛡️ Real-Time Graceful Degradation
+- **Memory pressure handling**: Skip embedding generation when memory >75%
+- **Service continuity**: Store chunks without embeddings during memory pressure
+- **Automatic recovery**: Chunks get embeddings when memory becomes available
+- **No service interruption**: Real-time file watching continues uninterrupted
+
+### 🗃️ Memory-Mapped Shared Cache
+Revolutionary shared memory caching with zero IPC overhead:
+
+```bash
+# Performance Results (Production Validated)
+✅ Write: 0.14ms per embedding (1000 embeddings in 141ms)
+✅ Read: 0.05ms per embedding (1000 embeddings in 52ms)  
+✅ Cache hit rate: 99.9% (999/1000 hits)
+✅ Multi-process shared memory: Child processes read/write directly
+✅ Zero-copy shared memory access between parent and child processes
+```
+
+**Key Features**:
+- **True Shared Memory**: Memory-mapped files enable direct cross-process cache access
+- **Zero IPC Overhead**: Cache operations bypass expensive stdio communication
+- **Hybrid Architecture**: Memory-mapped files for cache + IPC for process management
+- **Production Ready**: Full TypeScript integration, LRU eviction, persistence
+
+### 👀 Smart File Watching
+Real-time code intelligence updates with semantic change detection:
 
 ```bash
 npm run server                       # Real-time enabled by default
 npm run server -- --no-watch        # Disable real-time (static mode only)
 DISABLE_REAL_TIME=true npm run server # Alternative: disable via environment
-
-# Test file watching validation
-node test-semantic-watching.js      # Run comprehensive validation tests
 ```
 
 **Key Features**:
 - **SemanticWatcher**: chokidar-based file monitoring with semantic pattern detection
 - **ContextInvalidator**: Intelligent chunk management and batch reindexing triggers
-- **Dual-Mode Tracking**: Git-tracked files processed directly, untracked files via staging system
-- **Graceful Degradation**: Continues operation during memory pressure by storing chunks without embeddings
-- **Zero Configuration**: Works seamlessly with existing Cortex architecture
+- **Dual-Mode Tracking**: Git-tracked files processed directly, untracked files via staging
 - **Cross-platform**: Windows/macOS/Linux compatibility through chokidar
+
+### 🎨 Enhanced Console Logging System
+Beautiful, configurable logging with advanced formatting:
+
+```bash
+# Enable enhanced logging
+CORTEX_ENABLE_NEW_LOGGING=true npm run demo
+
+# Test different profiles
+NODE_ENV=production CORTEX_ENABLE_NEW_LOGGING=true npm run server  # Production profile
+CI=true CORTEX_ENABLE_NEW_LOGGING=true npm run server              # CI profile  
+DEBUG=true CORTEX_ENABLE_NEW_LOGGING=true npm run server           # Debug profile
+```
+
+**Features**:
+- **6 Profiles**: development, production, ci, debug, testing, silent
+- **4 Themes**: Enhanced visual output with colors and emojis
+- **Advanced Data Formatters**: JSON, tables, progress bars, boxes
+- **Environment Intelligence**: Auto-detection of NODE_ENV, CI, DEBUG flags
+
+## Embedding Strategy Architecture
+
+### Strategy Selection Framework
+**Streamlined auto-selection - ProcessPool handles all workload sizes:**
+
+- **< 500 chunks**: Cached strategy (intelligent caching with ProcessPool backend)
+- **≥ 500 chunks**: ProcessPool strategy (scales to multiple processes)
+- **All strategies**: Fixed 400-chunk batching optimized for BGE-small-en-v1.5 model
+
+### ProcessPoolEmbedder (Local Strategy)
+**Global Resource Thresholds**:
+- **Memory**: Stop at 78%, Resume at 69% (prevents OOM)
+- **CPU**: Stop at 69%, Resume at 49% (prevents system freeze)  
+- **Real-time monitoring**: Every 15 seconds, cross-platform
+- **Process management**: External Node.js processes with complete ONNX isolation
+
+### CloudflareAI Embedder (Cloud Strategy)
+**API-based Controls** (no local resource monitoring):
+- **Circuit Breaker**: 5 failures → 1min timeout → 2 successes to recover
+- **Rate Limiting**: TokenBucket 100 requests/minute
+- **Concurrency Control**: Managed through API throttling
 
 ## Process Management
 
@@ -95,263 +184,6 @@ npm run shutdown  # Comprehensive cleanup script
 - **Parent processes**: `npm run demo`, `ts-node src/index.ts`, `npm run benchmark`
 - **Child processes**: `node src/external-embedding-process.js` (spawned by ProcessPoolEmbedder)
 - **Memory impact**: Each external-embedding-process uses ~200-400MB
-
-### Intelligent Process Scaling ✅ **NEW**
-
-**Automatic Scale-Up/Down based on workload and resource availability:**
-
-```bash
-# Scale-up triggers (conservative growth)
-- Large workloads >400 chunks
-- 2-step CPU + memory predictions safe  
-- Queue has pending work
-
-# Scale-down triggers (intelligent resource management)
-- Queue completely empty (no pending/running tasks)
-- Processes idle for >5 minutes
-- At least half of processes are idle
-- System has adequate resources
-```
-
-**Key Features**:
-- **Queue-aware decisions**: Only scales down when no active work
-- **LRU process termination**: Terminates least recently used idle processes
-- **Conservative minimums**: Never scales below 1 process
-- **Graceful shutdown**: 5-second timeout with SIGTERM→SIGKILL fallback
-- **Growth phase reset**: Allows future scaling after scale-down
-
-**Scaling Logs**:
-```bash
-📈 Growing process pool: 1 → 2 processes
-📉 Scaling down process pool: 3 → 2 processes (terminating process 1)
-✅ Process pool scaled down to 2 processes
-```
-
-## Embedding Strategy Architecture
-
-### Strategy Selection Framework
-**Streamlined auto-selection - ProcessPool handles all workload sizes:**
-
-- **< 500 chunks**: Cached strategy (intelligent caching with ProcessPool backend, starts with 1 process)
-- **≥ 500 chunks**: ProcessPool strategy (scales to multiple processes for large datasets)
-- **All strategies**: Fixed 400-chunk batching optimized for BGE-small-en-v1.5 model
-
-**Environment Configuration:**
-```bash
-EMBEDDING_STRATEGY=auto         # Auto-select best strategy (default)
-EMBEDDING_STRATEGY=cached       # Cached strategy with ProcessPool backend
-EMBEDDING_STRATEGY=process-pool # Direct ProcessPool strategy for large datasets
-EMBEDDING_PROCESS_COUNT=4       # Process count (ProcessPool strategy)
-```
-
-### ProcessPoolEmbedder (Local Strategy)
-**Global Resource Thresholds**:
-- **Memory**: Stop at 78%, Resume at 69% (prevents OOM)
-- **CPU**: Stop at 69%, Resume at 49% (prevents system freeze)  
-- **Real-time monitoring**: Every 15 seconds, cross-platform
-- **Process management**: External Node.js processes with complete ONNX isolation
-
-### CloudflareAI Embedder (Cloud Strategy)
-**API-based Controls** (no local resource monitoring):
-- **Circuit Breaker**: 5 failures → 1min timeout → 2 successes to recover
-- **Rate Limiting**: TokenBucket 100 requests/minute
-- **Concurrency Control**: Managed through API throttling
-
-### Memory-Mapped Shared Cache ✅ **PRODUCTION READY**
-
-**Revolutionary shared memory caching with zero IPC overhead:**
-
-```bash
-# Performance Results (Production Validated)
-✅ Write: 0.14ms per embedding (1000 embeddings in 141ms)
-✅ Read: 0.05ms per embedding (1000 embeddings in 52ms)  
-✅ Cache hit rate: 99.9% (999/1000 hits)
-✅ Multi-process shared memory: Child processes read/write directly
-✅ LRU eviction: Automatic memory management
-✅ Integration tested: 153 chunks processed, 137 cache entries stored
-✅ Throughput: 7.8-9.0 chunks/second sustained performance
-```
-
-**Key Features**:
-- **True Shared Memory**: Memory-mapped files enable direct cross-process cache access
-- **Zero IPC Overhead**: Cache operations bypass expensive stdio communication  
-- **Hybrid Architecture**: Memory-mapped files for cache + IPC for process management
-- **Critical Bug Fixes**: Off-by-one hash storage error resolved, circular dependency eliminated
-- **Production Ready**: Full TypeScript integration, LRU eviction, persistence, cross-platform compatibility
-
-**Architecture**:
-- **File Layout**: Header (24 bytes) + Entries (40 bytes each) + Embeddings (1536 bytes each) + Hashes (65 bytes each)
-- **Memory Mapping**: Node.js Buffer with file descriptor synchronization
-- **Storage Format**: Binary format with atomic write operations
-- **Cross-Process**: Multiple child processes share same cache instance without copying data
-- **TypeScript Integration**: Full compatibility with ProcessPoolEmbedder and external embedding processes
-
-### Real-Time Graceful Degradation ✅ **IMPLEMENTED**
-
-**Continuous operation during memory pressure:**
-
-```bash
-# Normal operation
-[CodebaseIndexer] Successfully updated N chunks for filename
-
-# During memory pressure (>75% memory usage)
-[CodebaseIndexer] Real-time embedding skipped due to memory pressure (filename)
-[CodebaseIndexer] Chunks will be reprocessed when memory becomes available
-[CodebaseIndexer] Stored N chunks without embeddings (memory-constrained mode)
-
-# Recovery when memory becomes available  
-[CodebaseIndexer] Successfully updated N chunks for filename (recovered)
-```
-
-**Key Benefits**:
-- **Uninterrupted Service**: Real-time file watching never stops
-- **Smart Resource Management**: Skips expensive embedding generation during pressure
-- **Automatic Recovery**: Chunks get embeddings when resources become available
-- **Data Consistency**: All file changes tracked, embeddings applied when safe
-- **Production Ready**: No service interruption during high memory usage
-
-**Memory Pressure Handling**:
-- **Threshold**: 75% system memory usage triggers degradation
-- **Fallback**: Store chunks without embeddings (empty embedding array)  
-- **Recovery**: Automatic re-processing during next full indexing or when memory drops
-- **Logging**: Clear user-friendly messages explaining degradation state
-
-## Performance Targets
-
-### Current System ✅
-- 🎯 **Cold start**: < 3 minutes (first run with model download)
-- 🎯 **Warm start**: < 30 seconds (subsequent runs with cache)
-- 🎯 **Incremental detection**: < 15 seconds (no changes detected with chunk-based hashing)
-- 🎯 **Memory usage**: < 78% threshold with adaptive scaling
-- 🎯 **CPU usage**: < 69% threshold preventing system overload
-- 🎯 **Process cleanup**: Zero orphaned processes after any exit
-- 🎯 **Storage operations**: Zero race conditions with unique temp file naming
-
-## Architecture Overview
-
-### Current: Hybrid Local + Cloud Architecture
-- **Local**: ProcessPoolEmbedder with CPU + memory adaptive management
-- **Cloud**: Cloudflare Workers AI option
-- **Storage**: Dual persistence (local `.cortex/` + global `~/.claude/`)
-- **Auto-sync**: Intelligent conflict resolution and missing data recovery
-- **Startup**: Hierarchical 3-stage system (Initialization → Code Intelligence → Server Activation)
-
-### Data Flow
-```
-File Changes → SemanticWatcher → Change Queue → Delta Analysis
-     ↓               ↓               ↓              ↓
-Claude Code ← MCP Server ← Vector Store ← ProcessPool → Incremental Updates
-```
-
-## Key Components
-
-### Core System
-- **server.ts** - MCP server with HTTP transport and hierarchical startup tracking
-- **indexer.ts** - Repository indexing with incremental support
-- **process-pool-embedder.ts** - CPU + memory adaptive embedding with fixed 400-chunk batching
-- **unified-storage-coordinator.ts** - Auto-sync dual storage management
-- **hierarchical-stages.ts** - 3-stage startup system with substep granularity
-
-### File Watching System ✅
-- **semantic-watcher.ts** - Main file watching orchestrator with chokidar
-- **staging-manager.ts** - Dual-mode file tracking (git-tracked + untracked)
-- **context-invalidator.ts** - Intelligent chunk invalidation system
-
-### Resource Management
-- **CPU monitoring**: Cross-platform detection (Linux/macOS/Windows)
-- **Memory management**: Accurate system memory via native commands
-- **Process cleanup**: Signal cascade with IPC + OS signal reliability
-- **Fixed batch sizing**: Always use 400 chunks per batch (optimal for BGE-small-en-v1.5)
-- **Adaptive scaling**: Growth decisions based on both CPU and memory
-
-## MCP Server Integration ✅ **PRODUCTION READY**
-
-### **🚀 Installation to Claude Code (Command Line)**
-
-**Prerequisites:**
-- Cortex server running: `npm run server` (port 8765)
-- Claude Code CLI installed
-
-**One-Command Installation:**
-```bash
-claude mcp add --transport http cortex http://localhost:8765/mcp
-```
-
-**Verify Installation:**
-```bash
-claude mcp list
-# Should show: cortex: http://localhost:8765/mcp (HTTP)
-```
-
-**Start Using with Claude Code:**
-```bash
-claude chat --mcp
-# Then use: @cortex-semantic_search "your query"
-```
-
-### **📋 Manual Configuration** (Alternative)
-**Configuration file** (`~/.claude/mcp_servers.json`):
-```json
-{
-  "mcpServers": {
-    "cortex": {
-      "command": "npm",
-      "args": ["run", "server"],
-      "cwd": "/home/yanggf/a/cortexyoung",
-      "env": {
-        "PORT": "8765",
-        "EMBEDDER_TYPE": "local",
-        "ENABLE_REAL_TIME": "true",
-        "CORTEX_TELEMETRY_ENABLED": "true"
-      },
-      "transport": {
-        "type": "http", 
-        "url": "http://localhost:8765/mcp"
-      }
-    }
-  }
-}
-```
-
-### Available MCP Tools ✅
-1. **semantic_search** - Quick code discovery, debugging, finding specific functionality with MMR optimization and auto dependency inclusion
-2. **contextual_read** - Smart file reading with semantic context awareness
-3. **code_intelligence** - Complex analysis, architecture understanding, feature implementation with critical set protection  
-4. **relationship_analysis** - Dependency mapping, impact analysis, refactoring planning with strength scoring
-5. **trace_execution_path** - Execution flow analysis, error path tracing, bidirectional traversal
-6. **find_code_patterns** - Pattern recognition, architectural analysis, code quality assessment
-7. **real_time_status** ✅ - Real-time file watching status and context freshness validation
-
-### **🎯 Usage Examples with Claude Code**
-
-**Quick Code Discovery:**
-```bash
-@cortex-semantic_search "JWT token validation logic"
-@cortex-semantic_search "error handling patterns" 
-```
-
-**Complex Analysis:**
-```bash
-@cortex-code_intelligence "understand the payment processing workflow"
-@cortex-relationship_analysis --analysis_type call_graph --starting_symbols "authenticate"
-```
-
-**Real-time Monitoring:**
-```bash
-@cortex-real_time_status  # Check context freshness
-@cortex-find_code_patterns --pattern_type design_pattern --pattern_description "observer pattern"
-```
-
-### **🎯 Enhanced Claude Code Integration**
-- **Smart Tool Selection**: Automatic tool selection with "BEST FOR" optimization patterns
-- **Context Optimization**: Real-time MMR presets, token budgets, and tool recommendations
-- **Query Intelligence**: Automatic complexity analysis with optimization hints
-- **Pattern Learning**: System tracks effectiveness and optimizes automatically
-- **Production Ready**: ✅ HTTP MCP server with 7 operational tools
-
-**📚 Documentation Available:**
-- `CLAUDE_CODE_README.md` - Simple setup guide for programmers  
-- `TOOL_USAGE_GUIDE.md` - Internal tool optimization patterns
 
 ## Storage Management
 
@@ -385,6 +217,53 @@ npm run benchmark:quick        # Quick validation
 npm run validate:performance   # Critical improvements validation
 ```
 
+## Performance Targets
+
+### Current System ✅
+- 🎯 **Cold start**: < 3 minutes (first run with model download)
+- 🎯 **Warm start**: < 30 seconds (subsequent runs with cache)
+- 🎯 **Incremental detection**: < 15 seconds (no changes detected)
+- 🎯 **Memory usage**: < 78% threshold with adaptive scaling
+- 🎯 **CPU usage**: < 69% threshold preventing system overload
+- 🎯 **Process cleanup**: Zero orphaned processes after any exit
+- 🎯 **Storage operations**: Zero race conditions with unique temp file naming
+
+## Architecture Overview
+
+### Current: Hybrid Local + Cloud Architecture
+- **Local**: ProcessPoolEmbedder with CPU + memory adaptive management
+- **Cloud**: Cloudflare Workers AI option
+- **Storage**: Dual persistence (local `.cortex/` + global `~/.claude/`)
+- **Auto-sync**: Intelligent conflict resolution and missing data recovery
+- **Startup**: Hierarchical 3-stage system (Initialization → Code Intelligence → Server Activation)
+
+### Data Flow
+```
+File Changes → SemanticWatcher → Change Queue → Delta Analysis
+     ↓               ↓               ↓              ↓
+Claude Code ← MCP Server ← Vector Store ← ProcessPool → Incremental Updates
+```
+
+## Key Components
+
+### Core System
+- **server.ts** - MCP server with HTTP transport and hierarchical startup tracking
+- **indexer.ts** - Repository indexing with incremental support
+- **process-pool-embedder.ts** - CPU + memory adaptive embedding with fixed 400-chunk batching
+- **unified-storage-coordinator.ts** - Auto-sync dual storage management
+- **hierarchical-stages.ts** - 3-stage startup system with substep granularity
+
+### File Watching System
+- **semantic-watcher.ts** - Main file watching orchestrator with chokidar
+- **staging-manager.ts** - Dual-mode file tracking (git-tracked + untracked)
+- **context-invalidator.ts** - Intelligent chunk invalidation system
+
+### Enhanced Logging System
+- **console-logger.ts** - Enhanced console logger with colors and emojis
+- **advanced-formatters.ts** - Data visualization and formatting tools
+- **logger-config.ts** - Configuration system with profiles and themes
+- **configurable-logger.ts** - Configuration-driven logger implementation
+
 ## Development Notes
 
 - **TypeScript strict mode** with ES2020 target
@@ -394,221 +273,15 @@ npm run validate:performance   # Critical improvements validation
 - **Zero orphaned processes** guaranteed through signal cascade system
 - **Production-ready** CPU + memory management prevents system overload
 
-## Recent System Improvements ✅
+## Current Status & Performance Metrics
 
-### 📊 Chunk Accounting Transparency Fix - PRODUCTION READY ✅ **LATEST**
-
-**Complete resolution of confusing incremental indexing statistics:**
-
-#### **Problem Solved**
-- ✅ **Root Cause Identified**: Chunk counting mixed sources without clear breakdown in logging output
-- ✅ **Math Confusion**: `chunksToKeep` included both unchanged files + unchanged chunks from modified files but logging treated as separate
-- ✅ **Surgical Fix Applied**: Added detailed chunk source tracking in indexer.ts:282-304
-- ✅ **Validation Logic**: Full mathematical accounting with start→end chunk count verification
-- ✅ **Production Validated**: Crystal clear chunk accounting with source attribution
-
-#### **Before vs After**
-**Before**: 
-```
-- UNCHANGED FILES: 160 files (4500 chunks preserved)  
-- CHUNKS TO KEEP: 4578 (unchanged, cache hit)  [Confusing - where do extra 78 come from?]
-```
-**After**: 
-```
-- CHUNKS TO KEEP: 4578 total (4500 from unchanged files + 78 unchanged in modified files)
-🔢 Chunk accounting: 6150 initial → 6054 expected final (6150 - 96 removed + 0 new)
-```
-
-#### **Results**
-- ✅ **Crystal Clear Accounting**: Detailed breakdown of every chunk source and destination
-- ✅ **Mathematical Validation**: Full start→end chunk count verification with equation
-- ✅ **Developer Experience**: No more confusion about incremental indexing statistics
-- ✅ **Debugging Enhancement**: Easy identification of chunk processing issues
-
-### 🔌 MCP Protocol Compliance Fix - PRODUCTION READY ✅
-
-### 🔄 Intelligent ProcessPool Scaling & Real-Time Graceful Degradation - PRODUCTION READY ✅
-
-**Revolutionary improvement for continuous operation and intelligent resource management:**
-
-#### **Intelligent Scale-Down Logic**
-- ✅ **Queue-aware scaling**: Scale down when queue is empty and processes idle >5min
-- ✅ **LRU process termination**: Terminates least recently used idle processes first
-- ✅ **Conservative minimums**: Never scales below 1 process for stability
-- ✅ **Graceful shutdown**: 5-second timeout with SIGTERM→SIGKILL fallback
-- ✅ **Growth phase reset**: Allows future scaling after scale-down operations
-
-#### **Real-Time Graceful Degradation**
-- ✅ **Memory pressure handling**: Skip embedding generation when memory >75%
-- ✅ **Service continuity**: Store chunks without embeddings during memory pressure
-- ✅ **Automatic recovery**: Chunks get embeddings when memory becomes available
-- ✅ **No service interruption**: Real-time file watching continues uninterrupted
-- ✅ **Production validated**: Handles memory pressure gracefully without shutdown
-
-#### **Problem Solved**
-**Before**: `[CodebaseIndexer] Failed to process file change: System memory too high (84.7%)`  
-**After**: `[CodebaseIndexer] Real-time embedding skipped due to memory pressure (memory-constrained mode)`
-
-### 🎨 Enhanced Console Logging System - PRODUCTION READY ✅ **REFACTORED**
-
-**Complete logging infrastructure with beautiful visualization and configuration management:**
-
-#### **Week 2 Features + Critical Issue Fixes**
-- ✅ **Advanced Data Formatters**: 13 comprehensive formatting functions + 3 templates (JSON, tables, progress bars, boxes)
-- ✅ **Configuration System**: 6 profiles (development, production, ci, debug, testing, silent) with 4 themes
-- ✅ **Environment Auto-detection**: Smart profile selection based on NODE_ENV, CI, DEBUG flags
-- ✅ **File Output & Buffering**: Complete logging infrastructure with level filtering
-- ✅ **Cross-platform Support**: Proper terminal detection and color management (NO_COLOR, TTY)
-
-#### **Critical Issues Resolved** 🔴→✅
-- ✅ **Double Logging Eliminated**: Replaced inheritance-based dual logging with composition architecture
-- ✅ **Environment Variable Consistency**: Standardized to `CORTEX_ENABLE_NEW_LOGGING` with backward compatibility
-- ✅ **Centralized Stage Constants**: Replaced 9+ hard-coded values with single `STAGE_CONSTANTS.TOTAL_STAGES`
-- ✅ **Unified Logging Interface**: Single logging path eliminates conflicts and duplication
-
-#### **Refactored Architecture**
-```bash
-# New preferred environment variable (with backward compatibility)
-CORTEX_ENABLE_NEW_LOGGING=true npm run demo    # Enhanced logging with unified interface
-ENABLE_NEW_LOGGING=true npm run demo           # Backward compatibility supported
-
-# Test refactored system
-node dist/server-with-refactored-stages.js     # Demonstrates composition architecture
-```
-
-#### **Key Improvements**
-- **50% reduction** in duplicate log lines
-- **Single source of truth** for stage constants (`STAGE_CONSTANTS.TOTAL_STAGES = 3`)
-- **Clean composition architecture** replacing problematic inheritance
-- **Environment variable precedence**: `CORTEX_*` takes priority over legacy variables
-- **100% backward compatibility** during transition period
-
-### 🔧 Delta Detection Path Format Fix - PRODUCTION READY
-**Fixed critical path format inconsistency bug causing file misclassification:**
-
-- ✅ **Root Cause Identified**: Path format mismatch in `calculateFileDelta()` where normalized paths used for comparison but original absolute paths used for deletion marking
-- ✅ **Surgical Fix Applied**: Changed `delta.fileChanges.deleted.push(filePath)` to `delta.fileChanges.deleted.push(normalizedChunkPath)` in persistent-vector-store.ts:429
-- ✅ **Path Format Consistency**: Ensured both comparison logic and deletion marking use identical normalized relative paths
-- ✅ **Production Validated**: Demo testing shows `DELETED FILES: 0 files` with proper `MODIFIED FILES: 1 files` classification
-- ✅ **Real-time Testing**: File watching system correctly processes changes without false deletions
-
-### 🔒 Storage Race Condition Fix - PRODUCTION READY
-**Complete elimination of concurrent storage operation conflicts:**
-
-- ✅ **Unique Temp File Naming**: Implemented timestamp + random suffix for all temp file operations
-- ✅ **Atomic Storage Operations**: Each concurrent operation uses unique temp files preventing ENOENT errors
-- ✅ **Production Validated**: Stress tested with 10 concurrent operations (5 creates + 5 modifies) - zero failures
-- ✅ **Zero Storage Errors**: Complete elimination of `ENOENT: no such file or directory, rename` errors
-
-### 🔍 Enhanced Delta Detection System
-**Robust incremental indexing with intelligent hash reconstruction and exception handling:**
-
-- ✅ **Smart Hash Reconstruction**: When fileHashes are missing/corrupted, system rebuilds hash map from existing chunks
-- ✅ **Enhanced Exception Handling**: Hash calculation failures no longer abort delta detection
-- ✅ **Conservative Fallback**: Hash failures result in "modified" classification instead of system abort
-- ✅ **Eliminates false "no changes"** - System correctly detects file differences even with corrupted index data
-
-### 📁 Centralized Storage Architecture
-- ✅ **StoragePaths Utility Class**: Centralized path generation with consistent repository hashing
-- ✅ **Global Storage Constants**: Centralized filenames and directory names
-- ✅ **Complete Path Logging**: All storage operations now show full file paths
-
-### 🏗️ Clear Stage-Based Startup Logging
-- ✅ **Stage Delimiters**: Clear visual separators for startup phases
-- ✅ **Completion Tracking**: Duration information for each stage and step
-- ✅ **Simplified Structure**: 3 main stages with clear substeps
-
-### 🔌 MCP Protocol Compatibility Fix - PRODUCTION READY
-**Resolved Claude Code connectivity issue with protocol version compatibility:**
-
-- ✅ **Root Cause Identified**: MCP protocol version mismatch between server (2025-01-07) and Claude Code (2024-11-05)
-- ✅ **Protocol Version Fix**: Updated server.ts to use compatible MCP protocol version 2024-11-05
-- ✅ **Full Connectivity Restored**: Claude Code now shows "cortex: ✓ Connected" in mcp list
-- ✅ **All 7 MCP Tools Operational**: semantic_search, code_intelligence, relationship_analysis, etc.
-- ✅ **Production Validated**: End-to-end testing confirms stable MCP communication
-
-### 🗃️ Memory-Mapped Shared Cache Integration - PRODUCTION READY
-**Complete ProcessPool integration with revolutionary shared memory caching:**
-
-- ✅ **TypeScript Integration**: Full ProcessPoolEmbedder compatibility with MemoryMappedCache interface
-- ✅ **Critical Bug Fixes**: Off-by-one hash storage error (64→65 bytes), circular dependency resolved
-- ✅ **Child Process Integration**: External embedding processes use `../dist/memory-mapped-cache.js` successfully
-- ✅ **End-to-End Validation**: 153 chunks processed, 137 cache entries stored, 7.8-9.0 chunks/s sustained
-- ✅ **Zero Compilation Errors**: Complete TypeScript build success after interface alignment
-- ✅ **Production Testing**: Full incremental indexing workflow with memory-mapped cache operational
-- ✅ **Cross-Platform Verified**: WSL2/Linux environment compatibility confirmed
-- ✅ **Memory Efficiency**: Zero-copy shared memory access between parent and child processes
-
-### 🎨 Enhanced Console Logging System - PRODUCTION READY
-**Beautiful, configurable logging with advanced formatting and environment intelligence:**
-
-- ✅ **Enhanced Visual Output**: Colors, emojis, structured formatting with scannable status indicators
-- ✅ **Stage/Step Management**: Hierarchical logging with delimiters, timing, and completion tracking
-- ✅ **Configuration System**: 6 profiles (development, production, ci, debug, testing, silent) with 4 themes
-- ✅ **Environment Intelligence**: Auto-detection of NODE_ENV, CI, DEBUG flags with appropriate profile selection
-- ✅ **Advanced Data Formatters**: JSON syntax highlighting, professional tables, progress bars, framed boxes
-- ✅ **Template System**: Pre-built templates for system status, performance metrics, and error details
-- ✅ **Runtime Configuration**: Dynamic profile switching and configuration updates during execution
-- ✅ **TypeScript Integration**: Complete type safety with zero compilation errors
-- ✅ **Backward Compatibility**: Works seamlessly with existing Cortex architecture via feature flag
-
-**Usage:**
-```bash
-# Enable enhanced logging
-ENABLE_NEW_LOGGING=true npm run demo
-
-# Test different profiles
-NODE_ENV=production ENABLE_NEW_LOGGING=true npm run server  # Production profile
-CI=true ENABLE_NEW_LOGGING=true npm run server              # CI profile  
-DEBUG=true ENABLE_NEW_LOGGING=true npm run server           # Debug profile
-
-# Test configuration system
-node test-configuration-system.js    # Comprehensive validation
-node test-configuration-demo.js      # Configuration capabilities demo
-```
-
-**Key Files:**
-- `src/utils/console-logger.ts` - Enhanced console logger with colors and emojis ✅ **Updated with CORTEX_ prefix support**
-- `src/utils/advanced-formatters.ts` - Data visualization and formatting tools
-- `src/utils/logger-config.ts` - Configuration system with profiles and themes
-- `src/utils/configurable-logger.ts` - Configuration-driven logger implementation
-- `src/enhanced-hierarchical-stages.ts` - Stage/step management integration ⚠️ **Legacy (has double logging issue)**
-
-**Refactored Architecture Files:** ✅ **NEW**
-- `src/constants/stage-constants.ts` - Centralized stage constants (eliminates 9+ hard-coded values)
-- `src/interfaces/logging-interface.ts` - Unified logging interface (eliminates double logging)
-- `src/refactored-hierarchical-stages.ts` - Composition-based stage tracker (clean architecture)
-- `src/server-with-refactored-stages.ts` - Example implementation demonstrating refactored system
-- `MIGRATION_GUIDE.md` - Comprehensive migration documentation and deployment strategy
-
-## Current Status & Roadmap
-
-### **Current Status** ✅ **PRODUCTION READY**
-- **Real-time file watching**: ✅ Fully operational with semantic change detection + graceful degradation
-- **Claude Code MCP Integration**: ✅ HTTP server installed and operational via `claude mcp add`
-- **7 MCP Tools**: ✅ All tools accessible via @cortex-[tool_name] syntax
-- **Smart dependency chains**: ✅ Automatic context inclusion with relationship traversal
-- **Telemetry system**: ✅ Privacy-focused usage analytics for continuous improvement
-- **Exception handling**: ✅ Robust error recovery with conservative fallback approaches
-- **Build system**: ✅ TypeScript compilation passes without errors (including refactored logging system)
-- **Storage operations**: ✅ Zero race conditions with unique temp file naming
-- **Resource management**: ✅ Intelligent scaling with queue-aware scale-up/down and memory pressure handling
-- **Logging architecture**: ✅ Refactored composition-based system eliminates double logging and hard-coded values
-
-### **Latest Achievements** 🎉
-- ✅ **Refactored Logging Architecture** - Eliminated double logging, centralized constants, and composition-based clean design
-- ✅ **Revolutionary Memory-Mapped Shared Cache** - Zero-copy cross-process embedding cache with true shared memory
-- ✅ **Production Integration Complete** - End-to-end testing with 153 chunks processed successfully
-- ✅ **Critical Bug Fixes** - Hash storage off-by-one error and circular dependency resolved
-- ✅ **TypeScript Integration** - Full ProcessPoolEmbedder compatibility with MemoryMappedCache
-- ✅ **Intelligent ProcessPool Scaling** - Automatic scale-up/down with queue-aware resource management and LRU process termination
-- ✅ **Real-Time Graceful Degradation** - Continuous operation during memory pressure with automatic recovery
-- ✅ **Enhanced Console Logging System** - Beautiful colors, emojis, 6 profiles, 4 themes, advanced data formatters
-- ✅ **Claude Code MCP Integration** - One-command installation with HTTP transport
-- ✅ **Enhanced relationship engine** - Deep code connection analysis
-- ✅ **Smart dependency traversal** - Complete context in single queries  
-- ✅ **Telemetry-driven optimization** - Usage pattern learning and adaptation
-- ✅ **Production-grade error handling** - Never fails, always provides results
+### **Production Ready** ✅
+- **Real-time file watching**: Fully operational with semantic change detection + graceful degradation
+- **Claude Code MCP Integration**: HTTP server installed and operational via `claude mcp add`
+- **7 MCP Tools**: All tools accessible via @cortex-[tool_name] syntax
+- **Smart dependency chains**: Automatic context inclusion with relationship traversal
+- **Storage operations**: Zero race conditions with unique temp file naming
+- **Resource management**: Intelligent scaling with queue-aware scale-up/down and memory pressure handling
 
 ### **Performance Metrics** 📊
 - **Startup time**: 27.1s (including real-time activation)
@@ -616,11 +289,27 @@ node test-configuration-demo.js      # Configuration capabilities demo
 - **Critical set coverage**: 95%+ dependency inclusion
 - **Real-time updates**: < 3s file change processing
 - **MCP tools**: 7 operational tools with advanced features
-- **Cache performance**: 99.9% hit rate, 0.05ms read, 0.14ms write per embedding (memory-mapped)
-- **Memory efficiency**: Zero-copy shared memory across child processes with true shared memory-mapped files
+- **Cache performance**: 99.9% hit rate, 0.05ms read, 0.14ms write per embedding
+- **Memory efficiency**: Zero-copy shared memory across child processes
 - **Integration testing**: 153 chunks processed, 137 cache entries, 7.8-9.0 chunks/s throughput
+- **Scaling safety**: Zero batch interruptions, 10-minute startup cost amortization, 2-step prediction validation
+- **Memory context**: System-aware logging with percentage context (e.g., "13.8% of 16GB system")
 
-### **Next Targets** 🎯 **OPTIMIZATION PHASE**
+### **Latest Achievements** 🎉
+- ✅ **Enhanced ProcessPool Management** - Batch boundary safety with zero BGE processing interruptions and symmetric predictive scaling
+- ✅ **Batch Boundary Safety** - CRITICAL protection prevents termination during active batch processing (never lose 2GB+ of BGE work)
+- ✅ **Symmetric Predictive Scaling** - Consistent 2-step resource prediction algorithm for both scale-up and scale-down decisions
+- ✅ **System-Aware Memory Context** - Memory displayed as percentage of total system with meaningful thresholds
+- ✅ **Workload-Based Scaling** - Queue state and batch activity drive decisions, not arbitrary memory thresholds
+- ✅ **Revolutionary Memory-Mapped Shared Cache** - Zero-copy cross-process embedding cache with true shared memory
+- ✅ **Real-Time Graceful Degradation** - Continuous operation during memory pressure with automatic recovery
+- ✅ **Enhanced Console Logging System** - Beautiful colors, emojis, 6 profiles, 4 themes, advanced data formatters
+- ✅ **Claude Code MCP Integration** - One-command installation with HTTP transport
+- ✅ **Enhanced relationship engine** - Deep code connection analysis
+- ✅ **Smart dependency traversal** - Complete context in single queries
+- ✅ **Production-grade error handling** - Never fails, always provides results
+
+### **Next Targets** 🎯
 - < 2s response time for file changes
 - Support for 1000+ file repositories  
 - 99.9% uptime for continuous operation

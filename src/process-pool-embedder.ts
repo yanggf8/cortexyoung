@@ -41,6 +41,14 @@ interface ProcessEmbeddingResult {
   };
 }
 
+interface ProcessBatchInfo {
+  id: string;
+  chunkCount: number;
+  startTime: number;
+  estimatedCompletion: number;
+  progress: number; // 0-100%
+}
+
 interface ProcessInstance {
   id: number;
   process: ChildProcess;
@@ -56,6 +64,14 @@ interface ProcessInstance {
   }>;
   messageBuffer: string; // Buffer for incomplete JSON messages
   sharedBuffers: Map<string, SharedArrayBuffer>; // Shared memory buffers for large data transfer
+  
+  // CRITICAL: Batch boundary tracking for safe scale-down
+  currentBatch: ProcessBatchInfo | null;
+  queuedBatches: number;
+  isInBatchProcessing: boolean;
+  lastBatchCompletion: number;
+  batchHistory: Array<{ completedAt: number; duration: number; chunkCount: number }>;
+  startTime: number; // Process startup time for amortization
 }
 
 interface CachedEmbedding {
@@ -909,6 +925,32 @@ export class ProcessPoolEmbedder implements IEmbedder {
     }
   }
 
+  // CRITICAL: Check if process can be safely terminated (batch boundary awareness)
+  private canSafelyTerminateProcess(proc: ProcessInstance): boolean {
+    const now = Date.now();
+    const idleTimeoutMs = 5 * 60 * 1000; // 5 minutes
+    const batchCooldownMs = 2 * 60 * 1000; // 2 minutes since last batch
+    const minLifetimeMs = 10 * 60 * 1000; // 10 minutes minimum lifetime
+    
+    return proc.isReady &&                                    // Process is initialized
+           proc.isAvailable &&                              // Not handling requests
+           proc.currentBatch === null &&                    // No active batch
+           proc.queuedBatches === 0 &&                     // No queued batches
+           !proc.isInBatchProcessing &&                    // Not in batch processing
+           (now - proc.lastUsed) > idleTimeoutMs &&        // Idle timeout
+           (now - proc.lastBatchCompletion) > batchCooldownMs && // Batch cooldown
+           (now - proc.startTime) > minLifetimeMs;         // Minimum lifetime (startup cost amortization)
+  }
+
+  // Enhanced method to check for active batch processing across all processes
+  private hasActiveBatches(): boolean {
+    return this.processes.some(proc => 
+      proc.currentBatch !== null || 
+      proc.isInBatchProcessing || 
+      proc.queuedBatches > 0
+    );
+  }
+
   // Intelligent scale-down logic to terminate idle processes
   private async shouldScaleDown(): Promise<boolean> {
     // Never scale down below minimum (1 process)
@@ -922,23 +964,57 @@ export class ProcessPoolEmbedder implements IEmbedder {
       return false;
     }
     
-    // Check if we have idle processes for sufficient time (5 minutes)
-    const idleTimeoutMs = 5 * 60 * 1000; // 5 minutes
-    const now = Date.now();
+    // CRITICAL: No active batch processing anywhere in the pool
+    if (this.hasActiveBatches()) {
+      log(`[ProcessPool] Scale-down blocked: Active batch processing detected`);
+      return false;
+    }
     
-    // Check if processes have been idle long enough
-    const idleProcesses = this.processes.filter(proc => 
-      proc.isReady && 
-      proc.isAvailable && 
-      (now - proc.lastUsed) > idleTimeoutMs
+    // Find processes that can be safely terminated (batch boundary aware)
+    const safeToTerminateProcesses = this.processes.filter(proc => 
+      this.canSafelyTerminateProcess(proc)
     );
     
-    // Scale down if we have more than 1 process and at least half are idle
-    const shouldScale = idleProcesses.length >= Math.ceil(this.adaptivePool.currentProcesses / 2) && 
+    if (safeToTerminateProcesses.length === 0) {
+      if (this.adaptivePool.currentProcesses > 1) {
+        log(`[ProcessPool] Scale-down blocked: No processes safe to terminate (batch boundaries, lifetime, or cooldown)`);
+      }
+      return false;
+    }
+    
+    // ENHANCED: Use predictive logic for intelligent scale-down (reusing scale-up prediction system)
+    if (this.adaptivePool.isLocal && this.adaptivePool.resourcePrediction.cpuHistory.length >= 2) {
+      const [memInfo, cpuInfo] = await Promise.all([
+        this.getAccurateSystemMemory(),
+        this.getAccurateSystemCpu()
+      ]);
+      
+      const cpuPrediction = this.predictResourceUsage(this.adaptivePool.resourcePrediction.cpuHistory, cpuInfo.usagePercent);
+      const memoryPrediction = this.predictResourceUsage(this.adaptivePool.resourcePrediction.memoryHistory, memInfo.usagePercent);
+      
+      // Predict resources will stay low for next 2 steps (conservative threshold: <50%)
+      const lowResourceThreshold = 50;
+      const willStayLowCpu = cpuPrediction.step1 < lowResourceThreshold && cpuPrediction.step2 < lowResourceThreshold;
+      const willStayLowMemory = memoryPrediction.step1 < lowResourceThreshold && memoryPrediction.step2 < lowResourceThreshold;
+      
+      if (!willStayLowCpu || !willStayLowMemory) {
+        const reasons = [];
+        if (!willStayLowCpu) reasons.push(`CPU will rise (${cpuPrediction.step1.toFixed(1)}% → ${cpuPrediction.step2.toFixed(1)}%)`);
+        if (!willStayLowMemory) reasons.push(`Memory will rise (${memoryPrediction.step1.toFixed(1)}% → ${memoryPrediction.step2.toFixed(1)}%)`);
+        
+        log(`[ProcessPool] Scale-down blocked by predictions: ${reasons.join(', ')}`);
+        return false;
+      }
+      
+      log(`[ProcessPool] Scale-down approved by predictions: CPU stable (${cpuPrediction.step1.toFixed(1)}% → ${cpuPrediction.step2.toFixed(1)}%), Memory stable (${memoryPrediction.step1.toFixed(1)}% → ${memoryPrediction.step2.toFixed(1)}%)`);
+    }
+    
+    // Scale down if we have at least one process that can be safely terminated
+    const shouldScale = safeToTerminateProcesses.length > 0 && 
                        this.adaptivePool.currentProcesses > 1;
     
     if (shouldScale) {
-      log(`[ProcessPool] Scale-down conditions met: idle_processes=${idleProcesses.length} total_processes=${this.adaptivePool.currentProcesses} queue_empty=true`);
+      log(`[ProcessPool] Scale-down conditions met: safe_processes=${safeToTerminateProcesses.length} total_processes=${this.adaptivePool.currentProcesses} queue_empty=true no_active_batches=true predictions_stable=true`);
     }
     
     return shouldScale;
@@ -950,17 +1026,17 @@ export class ProcessPoolEmbedder implements IEmbedder {
       return; // Never scale below 1 process
     }
     
-    // Find the least recently used idle process
-    const idleProcesses = this.processes
-      .filter(proc => proc.isReady && proc.isAvailable)
+    // CRITICAL: Find processes that can be safely terminated (batch boundary aware)
+    const safeToTerminateProcesses = this.processes
+      .filter(proc => this.canSafelyTerminateProcess(proc))
       .sort((a, b) => a.lastUsed - b.lastUsed); // Sort by last used time (oldest first)
     
-    if (idleProcesses.length === 0) {
-      log(`[ProcessPool] No idle processes available for scale-down`);
+    if (safeToTerminateProcesses.length === 0) {
+      log(`[ProcessPool] No processes safe to terminate (respecting batch boundaries)`);
       return;
     }
     
-    const processToTerminate = idleProcesses[0];
+    const processToTerminate = safeToTerminateProcesses[0];
     const newProcessCount = this.adaptivePool.currentProcesses - 1;
     
     log(`📉 Scaling down process pool: ${this.adaptivePool.currentProcesses} → ${newProcessCount} processes (terminating process ${processToTerminate.id})`);
@@ -1056,7 +1132,15 @@ export class ProcessPoolEmbedder implements IEmbedder {
       lastUsed: 0,
       pendingRequests: new Map(),
       messageBuffer: '',
-      sharedBuffers: new Map()
+      sharedBuffers: new Map(),
+      
+      // CRITICAL: Initialize batch boundary tracking
+      currentBatch: null,
+      queuedBatches: 0,
+      isInBatchProcessing: false,
+      lastBatchCompletion: 0,
+      batchHistory: [],
+      startTime: Date.now()
     };
     
     // Set up process event handlers
@@ -1461,7 +1545,15 @@ export class ProcessPoolEmbedder implements IEmbedder {
         lastUsed: 0,
         pendingRequests: new Map(),
         messageBuffer: '', // Initialize message buffer
-        sharedBuffers: new Map() // Shared memory buffers for large data transfer
+        sharedBuffers: new Map(), // Shared memory buffers for large data transfer
+        
+        // CRITICAL: Initialize batch boundary tracking
+        currentBatch: null,
+        queuedBatches: 0,
+        isInBatchProcessing: false,
+        lastBatchCompletion: 0,
+        batchHistory: [],
+        startTime: Date.now()
       };
 
       // Handle process stdout (responses) with proper JSON parsing
@@ -2466,6 +2558,18 @@ export class ProcessPoolEmbedder implements IEmbedder {
         const uncachedChunks = uncachedIndices.map(i => task.chunks[i]);
         const embeddingTexts = uncachedChunks.map(chunk => this.createOptimizedEmbeddingText(chunk));
         
+        // CRITICAL: Track batch processing for safe scale-down
+        const batchId = `batch-${task.batchIndex}-${Date.now()}`;
+        const estimatedDuration = uncachedChunks.length * 100; // ~100ms per chunk estimate
+        availableProcess.currentBatch = {
+          id: batchId,
+          chunkCount: uncachedChunks.length,
+          startTime: Date.now(),
+          estimatedCompletion: Date.now() + estimatedDuration,
+          progress: 0
+        };
+        availableProcess.isInBatchProcessing = true;
+        
         log(`🔄 Process ${availableProcess.id} processing batch ${task.batchIndex} (${uncachedChunks.length}/${task.chunks.length} uncached chunks)`);
         
         // Record memory before processing (including child processes for accurate monitoring)
@@ -2485,7 +2589,7 @@ export class ProcessPoolEmbedder implements IEmbedder {
         }
         
         // Send batch with shared memory info to external process
-        const batchId = bufferKey;
+        // Use the same batchId from batch tracking above
         let result: any;
         let processingSuccess = true;
         
@@ -2580,6 +2684,26 @@ export class ProcessPoolEmbedder implements IEmbedder {
           
           throw error;
         } finally {
+          // CRITICAL: Clean up batch tracking for safe scale-down
+          if (availableProcess.currentBatch) {
+            const batchDuration = Date.now() - availableProcess.currentBatch.startTime;
+            availableProcess.batchHistory.push({
+              completedAt: Date.now(),
+              duration: batchDuration,
+              chunkCount: availableProcess.currentBatch.chunkCount
+            });
+            
+            // Keep only last 10 batch records for history
+            if (availableProcess.batchHistory.length > 10) {
+              availableProcess.batchHistory = availableProcess.batchHistory.slice(-10);
+            }
+          }
+          
+          availableProcess.currentBatch = null;
+          availableProcess.isInBatchProcessing = false;
+          availableProcess.lastBatchCompletion = Date.now();
+          availableProcess.queuedBatches = Math.max(0, availableProcess.queuedBatches - 1);
+          
           // Record performance metrics for adaptive sizing with direct heap tracking
           const duration = Date.now() - startTime;
           
