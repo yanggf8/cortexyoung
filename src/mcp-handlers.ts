@@ -1,9 +1,58 @@
 import { QueryRequest, QueryResponse } from './types';
 import { SemanticSearcher } from './searcher';
 import { CodebaseIndexer } from './indexer';
+import { cacheText, getCachedChunk, getNextChunk } from './utils/chunk-cache';
 
 export abstract class BaseHandler {
   abstract handle(params: any): Promise<any>;
+
+  // Shared MCP optimization for all handlers - MINIMAL data only
+  protected optimizeForMCP(result: any, params: any): any {
+    const CHUNK_SIZE = typeof params.chunk_size === 'number' ? params.chunk_size : 20000;
+    
+    // Create ultra-lean MCP response - only what Claude Code actually needs
+    const mcpOptimizedResult: any = {
+      // Essential chunks data only
+      chunks: result.chunks?.map((chunk: any) => ({
+        file_path: chunk.file_path,
+        start_line: chunk.start_line,
+        end_line: chunk.end_line,
+        content: chunk.content,
+        // Only include symbol name if it exists and is meaningful
+        ...(chunk.symbol_name && chunk.symbol_name !== 'section_0' ? { symbol_name: chunk.symbol_name } : {})
+      })) || [],
+      
+      // Minimal summary only
+      summary: result.context_package?.summary || `Found ${result.chunks?.length || 0} relevant code chunks`,
+      
+      // Essential file list for reference
+      files: [...new Set(result.chunks?.map((chunk: any) => chunk.file_path) || [])],
+      
+      // Preserve tool-specific fields that are actually useful
+      ...(result.analysis_type ? { analysis_type: result.analysis_type } : {}),
+      ...(result.starting_symbols ? { starting_symbols: result.starting_symbols } : {}),
+      ...(result.entry_point ? { entry_point: result.entry_point } : {}),
+      ...(result.pattern_type ? { pattern_type: result.pattern_type } : {}),
+      ...(result.patterns_found ? { patterns_found: result.patterns_found } : {}),
+      ...(result.execution_path ? { execution_path: result.execution_path } : {}),
+      ...(result.relationships_found ? { relationships_found: result.relationships_found } : {}),
+      ...(result.visualization ? { visualization: result.visualization } : {})
+    };
+
+    // Check if response needs chunking
+    const resultString = JSON.stringify(mcpOptimizedResult, null, 2);
+    
+    if (resultString.length > CHUNK_SIZE) {
+      const { key, total } = cacheText(resultString, CHUNK_SIZE);
+      const first = getCachedChunk(key, 1);
+      
+      if (!first) return mcpOptimizedResult;
+      
+      return `Response too large (${resultString.length} chars); returning first chunk. Use fetch-chunk or next-chunk with cacheKey to continue.\ncacheKey: ${key}\nchunk: 1/${total}\n\n${first.chunk}`;
+    }
+
+    return mcpOptimizedResult;
+  }
 }
 
 export class SemanticSearchHandler extends BaseHandler {
@@ -11,7 +60,7 @@ export class SemanticSearchHandler extends BaseHandler {
     super();
   }
 
-  async handle(params: any): Promise<QueryResponse> {
+  async handle(params: any): Promise<QueryResponse | string> {
     const query: QueryRequest = {
       task: params.query,
       max_chunks: params.max_chunks || 20,
@@ -23,21 +72,20 @@ export class SemanticSearchHandler extends BaseHandler {
 
     const result = await this.searcher.search(query);
     
-    // Add context optimization hints to help Claude Code learn
+    // Add semantic search specific context optimization
     const enhancedResult = {
       ...result,
       context_optimization: {
         tool_used: 'semantic_search',
         query_complexity: this.assessQueryComplexity(params.query),
-        token_efficiency: result.context_package?.token_efficiency || 0,
-        critical_coverage: result.dependency_chain?.completeness_score || 0,
-        suggested_mmr_preset: this.suggestMMRPreset(params.query),
+        response_optimized_for: 'mcp_client',
         follow_up_suggestions: this.generateFollowUpSuggestions(result, params.query),
         optimization_tips: this.generateOptimizationTips(result, params)
       }
     };
 
-    return enhancedResult;
+    // Use shared MCP optimization
+    return this.optimizeForMCP(enhancedResult, params);
   }
 
   private assessQueryComplexity(query: string): 'simple' | 'medium' | 'complex' {
@@ -128,7 +176,7 @@ export class CodeIntelligenceHandler extends BaseHandler {
     super();
   }
 
-  async handle(params: any): Promise<QueryResponse> {
+  async handle(params: any): Promise<any> {
     const query: QueryRequest = {
       task: params.task,
       max_chunks: Math.floor((params.max_context_tokens || 4000) / 200), // Rough token estimation
@@ -146,7 +194,21 @@ export class CodeIntelligenceHandler extends BaseHandler {
       query.file_filters = params.focus_areas.map((area: string) => `*${area}*`);
     }
 
-    return await this.searcher.search(query);
+    const result = await this.searcher.search(query);
+    
+    // Add code intelligence specific context optimization
+    const enhancedResult = {
+      ...result,
+      context_optimization: {
+        tool_used: 'code_intelligence',
+        analysis_type: 'comprehensive',
+        focus_areas: params.focus_areas || [],
+        response_optimized_for: 'mcp_client'
+      }
+    };
+
+    // Use shared MCP optimization
+    return this.optimizeForMCP(enhancedResult, params);
   }
 }
 
@@ -175,15 +237,25 @@ export class RelationshipAnalysisHandler extends BaseHandler {
 
     const result = await this.searcher.search(query);
     
-    return {
+    // Create relationship analysis specific response
+    const enhancedResult = {
+      ...result,
       analysis_type,
       starting_symbols,
       target_symbols,
-      relationships_found: result.metadata.relationship_paths || [],
-      context: result.context_package,
+      relationships_found: result.metadata?.relationship_paths || [],
       visualization: `Analysis of ${analysis_type} for symbols: ${starting_symbols.join(', ')}`,
-      confidence_scores: result.metadata.confidence_scores
+      confidence_scores: result.metadata?.confidence_scores || [],
+      context_optimization: {
+        tool_used: 'relationship_analysis',
+        analysis_type: analysis_type,
+        starting_symbols: starting_symbols,
+        response_optimized_for: 'mcp_client'
+      }
     };
+
+    // Use shared MCP optimization
+    return this.optimizeForMCP(enhancedResult, params);
   }
 }
 
@@ -211,14 +283,24 @@ export class TraceExecutionPathHandler extends BaseHandler {
 
     const result = await this.searcher.search(query);
     
-    return {
+    // Create execution path specific response
+    const enhancedResult = {
+      ...result,
       entry_point,
       trace_type,
-      execution_path: result.metadata.relationship_paths || [],
+      execution_path: result.metadata?.relationship_paths || [],
       data_flow_included: include_data_flow,
-      context: result.context_package,
-      execution_summary: `Execution trace from ${entry_point} with ${result.context_chunks?.length || 0} steps discovered`
+      execution_summary: `Execution trace from ${entry_point} with ${result.context_chunks?.length || 0} steps discovered`,
+      context_optimization: {
+        tool_used: 'trace_execution_path',
+        entry_point: entry_point,
+        trace_type: trace_type,
+        response_optimized_for: 'mcp_client'
+      }
     };
+
+    // Use shared MCP optimization
+    return this.optimizeForMCP(enhancedResult, params);
   }
 }
 
@@ -253,20 +335,31 @@ export class FindCodePatternsHandler extends BaseHandler {
 
     const result = await this.searcher.search(query);
     
-    return {
+    // Create pattern finding specific response
+    const enhancedResult = {
+      ...result,
       pattern_type,
       pattern_description: searchTask,
       scope,
-      patterns_found: (result.context_chunks || []).map((chunk, index) => ({
+      patterns_found: (result.context_chunks || []).map((chunk: any, index: number) => ({
         file: chunk.file_path,
         line_range: `${chunk.start_line}-${chunk.end_line}`,
-        confidence: chunk.similarity_score,
-        description: `Pattern match ${index + 1}: ${chunk.function_name || 'code block'}`,
+        confidence: chunk.similarity_score || chunk.relevance_score,
+        description: `Pattern match ${index + 1}: ${chunk.function_name || chunk.symbol_name || 'code block'}`,
         code_excerpt: chunk.content.substring(0, 200) + '...'
       })),
       total_matches: result.context_chunks?.length || 0,
-      confidence_scores: result.metadata.confidence_scores
+      confidence_scores: result.metadata?.confidence_scores || [],
+      context_optimization: {
+        tool_used: 'find_code_patterns',
+        pattern_type: pattern_type,
+        scope: scope,
+        response_optimized_for: 'mcp_client'
+      }
     };
+
+    // Use shared MCP optimization
+    return this.optimizeForMCP(enhancedResult, params);
   }
 }
 
@@ -278,19 +371,57 @@ export class RealTimeStatusHandler extends BaseHandler {
   async handle(params: any): Promise<any> {
     const stats = this.indexer.getRealTimeStats();
     
+    // Ultra-minimal status for Claude Code
     return {
-      realTimeEnabled: stats.isWatching,
-      invalidatedChunks: stats.invalidatedChunks,
-      contextFreshness: stats.invalidatedChunks === 0 ? 'fresh' : 'stale',
-      lastUpdate: new Date().toISOString(),
       status: stats.isWatching ? 'active' : 'disabled',
-      fileWatchingActive: stats.isWatching,
-      pendingUpdates: stats.invalidatedChunks,
-      systemInfo: {
-        realTimeUpdatesSupported: true,
-        fileWatcherType: 'chokidar',
-        semanticFilteringEnabled: true
-      }
+      context_freshness: stats.invalidatedChunks === 0 ? 'fresh' : 'stale',
+      pending_updates: stats.invalidatedChunks
     };
+  }
+}
+
+export class FetchChunkHandler extends BaseHandler {
+  constructor() {
+    super();
+  }
+
+  async handle(params: any): Promise<string> {
+    const { cacheKey, chunkIndex } = params;
+    
+    if (!cacheKey || typeof cacheKey !== 'string') {
+      return 'Error: cacheKey is required and must be a string';
+    }
+    
+    if (!chunkIndex || typeof chunkIndex !== 'number' || chunkIndex < 1) {
+      return 'Error: chunkIndex is required and must be a positive number';
+    }
+    
+    const cached = getCachedChunk(cacheKey, chunkIndex);
+    if (!cached) {
+      return `No cached chunk ${chunkIndex} for key ${cacheKey}. The cache may have expired or the chunk index is invalid.`;
+    }
+    
+    return `chunk: ${chunkIndex}/${cached.total} (cacheKey: ${cacheKey})\n\n${cached.chunk}`;
+  }
+}
+
+export class NextChunkHandler extends BaseHandler {
+  constructor() {
+    super();
+  }
+
+  async handle(params: any): Promise<string> {
+    const { cacheKey } = params;
+    
+    if (!cacheKey || typeof cacheKey !== 'string') {
+      return 'Error: cacheKey is required and must be a string';
+    }
+    
+    const next = getNextChunk(cacheKey);
+    if (!next) {
+      return `No further chunks available for key ${cacheKey}. You may have reached the end or the cache may have expired.`;
+    }
+    
+    return `chunk: ${next.index}/${next.total} (cacheKey: ${cacheKey})\n\n${next.chunk}`;
   }
 }

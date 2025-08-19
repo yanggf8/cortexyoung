@@ -34,7 +34,12 @@
       "Bash(claude mcp:*)",
       "Bash(ENABLE_NEW_LOGGING=true npm run demo)",
       "mcp__rovodev__next-chunk",
-      "Bash(npx tsc:*)"
+      "Bash(npx tsc:*)",
+      "mcp__amazon-q-cli__take_q",
+      "mcp__cortex__semantic_search",
+      "mcp__cortex__real_time_status",
+      "mcp__cortex__relationship_analysis",
+      "mcp__cortex__code_intelligence"
     ],
     "deny": []
   }

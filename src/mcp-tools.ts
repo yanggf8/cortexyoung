@@ -3,7 +3,7 @@
 export const CORTEX_TOOLS = {
   semantic_search: {
     name: 'semantic_search',
-    description: 'BEST FOR: Quick code discovery, finding specific functions/patterns, debugging. Uses advanced semantic search with MMR optimization to find the most relevant code chunks while ensuring diversity. Automatically includes related dependencies.',
+    description: 'BEST FOR: Quick code discovery, finding specific functions/patterns, debugging. WHEN TO USE: First choice for most code search needs - fast, efficient, and comprehensive. Uses advanced semantic search with MMR optimization to find the most relevant code chunks while ensuring diversity. Automatically includes related dependencies for complete context. RESPONSE: Optimized for Claude Code with ~80-90% token reduction. Large responses automatically chunked.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -67,6 +67,13 @@ export const CORTEX_TOOLS = {
               description: 'Include relationship paths in response'
             }
           }
+        },
+        chunk_size: {
+          type: 'number',
+          description: 'Size of chunks for large responses (default: 20000 characters)',
+          default: 20000,
+          minimum: 5000,
+          maximum: 100000
         }
       },
       required: ['query']
@@ -101,7 +108,7 @@ export const CORTEX_TOOLS = {
 
   code_intelligence: {
     name: 'code_intelligence',
-    description: 'BEST FOR: Complex development tasks, architecture understanding, feature implementation. Provides comprehensive semantic analysis with smart dependency chain traversal and critical set protection. Optimizes context window for maximum code understanding.',
+    description: 'BEST FOR: Complex development tasks, architecture understanding, feature implementation. WHEN TO USE: When you need comprehensive analysis of large codebases or complex architectural patterns. Provides advanced semantic analysis with smart dependency chain traversal. CONTEXT OPTIMIZATION: Delivers maximum code understanding with critical set protection and intelligent token budgeting. RESPONSE: MCP-optimized with automatic chunking for large analyses.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -135,7 +142,7 @@ export const CORTEX_TOOLS = {
 
   relationship_analysis: {
     name: 'relationship_analysis',
-    description: 'BEST FOR: Understanding code dependencies, impact analysis, refactoring planning. Traces complex code relationships (calls, imports, data flow) with strength scoring. Essential for architectural decisions and safe code changes.',
+    description: 'BEST FOR: Understanding code dependencies, impact analysis, refactoring planning. WHEN TO USE: Before making changes, for impact analysis, or understanding how code components connect. Traces complex code relationships (calls, imports, data flow) with strength scoring and confidence metrics. Essential for safe refactoring and architectural decisions. RESPONSE: MCP-optimized with visualization support and automatic chunking.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -196,7 +203,7 @@ export const CORTEX_TOOLS = {
 
   trace_execution_path: {
     name: 'trace_execution_path',
-    description: 'Trace execution paths through code to understand flow and dependencies',
+    description: 'BEST FOR: Understanding execution flow, debugging error paths, tracing function calls. WHEN TO USE: When debugging issues, understanding program flow, or analyzing error propagation. Traces execution paths through code with data flow analysis and error path detection. RESPONSE: MCP-optimized with detailed execution summaries and automatic chunking.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -245,7 +252,7 @@ export const CORTEX_TOOLS = {
 
   find_code_patterns: {
     name: 'find_code_patterns',
-    description: 'Find complex code patterns and architectural relationships',
+    description: 'BEST FOR: Identifying design patterns, code smells, architectural patterns, anti-patterns. WHEN TO USE: During code reviews, refactoring planning, or architectural analysis. Finds complex code patterns and architectural relationships with confidence scoring. RESPONSE: MCP-optimized with pattern examples and automatic chunking.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -290,11 +297,46 @@ export const CORTEX_TOOLS = {
 
   real_time_status: {
     name: 'real_time_status',
-    description: 'Get real-time file watching status and context freshness for the codebase',
+    description: 'BEST FOR: Checking if context is up-to-date, verifying file watching status. WHEN TO USE: Before important operations, to check context freshness, or troubleshoot real-time updates. Shows real-time file watching status and context freshness for the codebase. RESPONSE: Lightweight status report, always fast.',
     inputSchema: {
       type: 'object',
       properties: {},
       required: []
+    }
+  },
+
+  fetch_chunk: {
+    name: 'fetch_chunk',
+    description: 'CHUNKING TOOL: Retrieves a specific chunk from large responses by index (random access). WHEN TO USE: When a Cortex tool returns "Response too large" with a cacheKey and you need to access a specific chunk number or re-read a previous chunk. Essential for handling large analysis results from code_intelligence and relationship_analysis tools.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        cacheKey: {
+          type: 'string',
+          description: 'The cache key provided in the "Response too large" message from any Cortex tool (e.g., "4bb2c31e-5259-4c0e-afc2-37a5498260aa")'
+        },
+        chunkIndex: {
+          type: 'number',
+          description: 'Which chunk to retrieve (1-based index). For example, if response says "chunk: 1/5", you can request chunks 1, 2, 3, 4, or 5',
+          minimum: 1
+        }
+      },
+      required: ['cacheKey', 'chunkIndex']
+    }
+  },
+
+  next_chunk: {
+    name: 'next_chunk',
+    description: 'CHUNKING TOOL: Fetches the next chunk in sequence from large responses (sequential access). WHEN TO USE: When a Cortex tool returns "Response too large" with a cacheKey and you want to read through all chunks sequentially. More convenient than fetch_chunk when reading everything in order. Essential for comprehensive analysis of large code intelligence results.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        cacheKey: {
+          type: 'string',
+          description: 'The cache key from the "Response too large" message from any Cortex tool. This tool automatically tracks which chunk to return next.'
+        }
+      },
+      required: ['cacheKey']
     }
   }
 } as const;

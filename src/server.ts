@@ -5,7 +5,7 @@ import express, { Request, Response } from 'express';
 import cors from 'cors';
 import { CodebaseIndexer } from './indexer';
 import { SemanticSearcher } from './searcher';
-import { SemanticSearchHandler, ContextualReadHandler, CodeIntelligenceHandler, RelationshipAnalysisHandler, TraceExecutionPathHandler, FindCodePatternsHandler, RealTimeStatusHandler } from './mcp-handlers';
+import { SemanticSearchHandler, ContextualReadHandler, CodeIntelligenceHandler, RelationshipAnalysisHandler, TraceExecutionPathHandler, FindCodePatternsHandler, RealTimeStatusHandler, FetchChunkHandler, NextChunkHandler } from './mcp-handlers';
 import { IndexHealthChecker } from './index-health-checker';
 import { HierarchicalStageTracker } from './hierarchical-stages';
 import { EnhancedHierarchicalStageTracker } from './enhanced-hierarchical-stages';
@@ -140,6 +140,8 @@ export class CortexMCPServer {
     this.handlers.set('trace_execution_path', new TraceExecutionPathHandler(this.searcher));
     this.handlers.set('find_code_patterns', new FindCodePatternsHandler(this.searcher));
     this.handlers.set('real_time_status', new RealTimeStatusHandler(this.indexer));
+    this.handlers.set('fetch_chunk', new FetchChunkHandler());
+    this.handlers.set('next_chunk', new NextChunkHandler());
   }
 
   private setupIPC(): void {
