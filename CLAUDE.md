@@ -4,7 +4,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**Cortex V2.1** is a semantic code intelligence MCP server that enhances Claude Code's context window efficiency through intelligent code analysis and advanced relationship traversal. Provides 80-90% token reduction and reduces follow-up queries by 85%.
+**Cortex V2.1** is a semantic code intelligence MCP server designed to solve Claude Code's context window problem. 
+
+### The Real Problem We're Solving: Automatic Economic Context Supply
+Claude Code suffers from **manual and inefficient foundational context supply**. It doesn't "forget" - it simply lacks critical architectural and structural context at the moment of generation, leading to code suggestions that break existing architecture, miss dependencies, and are inconsistent with project patterns.
+
+**The 80/20 Root Cause**: 80% of development friction comes from 20% cause - the inability to automatically and economically provide the right pieces of architectural context for every single query.
+
+**Our Solution**: Intelligent architectural context engine that automatically discovers and delivers critical structural information, dependencies, and patterns relevant to each specific query, eliminating manual context preparation overhead.
 
 ## Quick Start Commands
 
