@@ -364,26 +364,23 @@ Claude Code ← MCP Server ← Vector Store ← ProcessPool → Incremental Upda
 - ✅ **Smart dependency traversal** - Complete context in single queries
 - ✅ **Production-grade error handling** - Never fails, always provides results
 
-### **Next Targets** 🎯 (Cortex V3.0 - Distributed Architecture)
-- **Multi-Project Concurrency**: 20+ concurrent projects with Claude Code
-- **Sub-Second Performance**: <200ms semantic search, <500ms code intelligence
-- **99.9% Reliability**: Fault-tolerant with intelligent fallbacks
-- **Zero-Friction Onboarding**: One-command project setup with stdio MCP servers
+### **Next Target** 🎯 (Cortex V4.0 - Proactive Context Engine)
+- **Proactive CLAUDE.md Maintenance**: Automatically maintain project context in CLAUDE.md
+- **Zero Developer Burden**: Fully automatic project context detection and updates
+- **Prevention Over Reaction**: Ensure Claude Code has project awareness from startup
+- **Direct Communication**: Use CLAUDE.md as native Claude Code communication channel
 
-### **V3.0 Implementation Roadmap**
-**Phase 1** (Week 1): Centralized Search Server (gRPC+HTTP, job queue, worker pools)
-**Phase 2** (Week 1): Local MCP Server (stdio transport, health checks, fallbacks)  
-**Phase 3** (Week 2): Integration Testing (multi-project scenarios, performance validation)
-**Phase 4** (Week 2): Migration Strategy (gradual transition from monolithic architecture)
+### **V4.0 Implementation Roadmap** 
+**Phase 1** (Week 1): Core project detection and CLAUDE.md maintenance engine
+**Phase 2** (Week 2): Proactive file watching system for automatic updates
+**Phase 3** (Week 3): Integration with existing Cortex infrastructure and testing
+**Phase 4** (Week 4): Production optimization and monitoring
 
-### **Future Enhancements** (V3.1+)
-- Cross-project semantic search and relationship analysis
-- Advanced code completion and refactoring suggestions
-- Enterprise features: RBAC, audit logging, high availability
-- IDE plugins (VS Code, JetBrains) with direct integration
+### **Context Accuracy Revolution**
+The core insight: Claude Code's context issues stem from **lack of project awareness at startup**. By the time developers query Claude Code, it's already too late. V4.0 solves this by automatically maintaining CLAUDE.md with current project context, ensuring Claude Code never lacks essential project information.
 
 ---
 
-**Status**: V2.1 Production-ready with revolutionary V3.0 distributed architecture designed! Ready for unlimited multi-project support with Claude Code through lightweight stdio MCP servers and centralized intelligence backend! 🚀
+**Status**: V2.1 Production-ready, V4.0 Proactive Context Engine designed! Moving from reactive context enhancement to proactive CLAUDE.md maintenance for true Claude Code context accuracy! 🚀
 
-📖 **Architecture Documentation**: See `DISTRIBUTED-ARCHITECTURE.md` for complete V3.0 design specifications and implementation plan.
+📖 **V4.0 Documentation**: See `CORTEX-PROPOSAL-V4.md` for complete proactive context engine design and implementation plan.
