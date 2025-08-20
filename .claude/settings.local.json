@@ -39,7 +39,11 @@
       "mcp__cortex__semantic_search",
       "mcp__cortex__real_time_status",
       "mcp__cortex__relationship_analysis",
-      "mcp__cortex__code_intelligence"
+      "mcp__cortex__code_intelligence",
+      "mcp__gemini-cli__fetch-chunk",
+      "mcp__amazon-q-cli__ask_q",
+      "mcp__rovodev__tap-rovodev",
+      "mcp__amazon-q-cli__q_status"
     ],
     "deny": []
   }

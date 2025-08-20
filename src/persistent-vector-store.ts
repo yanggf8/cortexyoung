@@ -5,6 +5,7 @@ import { log } from './logging-utils';
 import { StoragePaths, CompressionUtils } from './storage-constants';
 import * as fs from 'fs/promises';
 import * as path from 'path';
+import { execSync } from 'child_process';
 
 interface PersistedIndex {
   version: string;
@@ -18,6 +19,8 @@ interface PersistedIndex {
     lastIndexed: number;
     embeddingModel: string;
     modelInfo?: ModelInfo;
+    gitCommitHash?: string; // Current repository commit when embeddings were generated
+    gitBranchName?: string; // Current branch when embeddings were generated
   };
 }
 
@@ -42,6 +45,43 @@ export class PersistentVectorStore extends VectorStore {
   private deltaPath: string;
   private globalDeltaPath: string;
   private fileHashes: Map<string, string> = new Map(); // file path -> content hash
+
+  // Git utility functions for commit tracking
+  private getCurrentCommitHash(): string | null {
+    try {
+      return execSync('git rev-parse HEAD', { 
+        cwd: this.repositoryPath, 
+        encoding: 'utf8' 
+      }).trim();
+    } catch (error) {
+      log(`[GitUtils] Failed to get commit hash: ${error instanceof Error ? error.message : error}`);
+      return null;
+    }
+  }
+
+  private getCurrentBranchName(): string | null {
+    try {
+      return execSync('git branch --show-current', { 
+        cwd: this.repositoryPath, 
+        encoding: 'utf8' 
+      }).trim();
+    } catch (error) {
+      log(`[GitUtils] Failed to get branch name: ${error instanceof Error ? error.message : error}`);
+      return null;
+    }
+  }
+
+  private isStorageValidForCurrentCommit(metadata: any): boolean {
+    const currentCommit = this.getCurrentCommitHash();
+    const storedCommit = metadata?.gitCommitHash;
+    
+    if (!currentCommit || !storedCommit) {
+      // If we can't determine commits, assume invalid for safety
+      return false;
+    }
+    
+    return currentCommit === storedCommit;
+  }
 
   constructor(repositoryPath: string, indexDir: string = '.cortex') {
     super(); // Call parent constructor
@@ -285,7 +325,9 @@ export class PersistentVectorStore extends VectorStore {
           totalChunks: this.chunks.size,
           lastIndexed: Date.now(),
           embeddingModel: modelInfo?.name || 'BGE-small-en-v1.5',
-          modelInfo
+          modelInfo,
+          gitCommitHash: this.getCurrentCommitHash() || undefined,
+          gitBranchName: this.getCurrentBranchName() || undefined
         }
       };
       
@@ -525,8 +567,8 @@ export class PersistentVectorStore extends VectorStore {
   }
 
   async getStorageInfo(): Promise<{
-    local: { exists: boolean; path: string; lastModified?: Date };
-    global: { exists: boolean; path: string; lastModified?: Date };
+    local: { exists: boolean; path: string; lastModified?: Date; commitValid?: boolean; commitHash?: string; chunks?: number };
+    global: { exists: boolean; path: string; lastModified?: Date; commitValid?: boolean; commitHash?: string; chunks?: number };
   }> {
     const [localExists, globalExists] = await Promise.all([
       this.indexExists(),
@@ -534,21 +576,45 @@ export class PersistentVectorStore extends VectorStore {
     ]);
 
     const info: {
-      local: { exists: boolean; path: string; lastModified?: Date };
-      global: { exists: boolean; path: string; lastModified?: Date };
+      local: { exists: boolean; path: string; lastModified?: Date; commitValid?: boolean; commitHash?: string; chunks?: number };
+      global: { exists: boolean; path: string; lastModified?: Date; commitValid?: boolean; commitHash?: string; chunks?: number };
     } = {
       local: { exists: localExists, path: this.metadataPath },
       global: { exists: globalExists, path: this.globalMetadataPath }
     };
 
+    // Get local storage info with commit validation
     if (localExists) {
-      const localStats = await this.getFileStats(this.metadataPath);
-      info.local.lastModified = localStats.mtime;
+      try {
+        const localStats = await this.getFileStats(this.metadataPath);
+        info.local.lastModified = localStats.mtime;
+        
+        // Read metadata to check commit validity
+        const localData = JSON.parse(await CompressionUtils.readFileWithDecompression(this.metadataPath));
+        info.local.commitValid = this.isStorageValidForCurrentCommit(localData.metadata);
+        info.local.commitHash = localData.metadata?.gitCommitHash;
+        info.local.chunks = localData.chunks?.length || 0;
+      } catch (error) {
+        log(`[StorageInfo] Failed to read local metadata: ${error instanceof Error ? error.message : error}`);
+        info.local.commitValid = false;
+      }
     }
 
+    // Get global storage info with commit validation
     if (globalExists) {
-      const globalStats = await this.getFileStats(this.globalMetadataPath);
-      info.global.lastModified = globalStats.mtime;
+      try {
+        const globalStats = await this.getFileStats(this.globalMetadataPath);
+        info.global.lastModified = globalStats.mtime;
+        
+        // Read metadata to check commit validity
+        const globalData = JSON.parse(await CompressionUtils.readFileWithDecompression(this.globalMetadataPath));
+        info.global.commitValid = this.isStorageValidForCurrentCommit(globalData.metadata);
+        info.global.commitHash = globalData.metadata?.gitCommitHash;
+        info.global.chunks = globalData.chunks?.length || 0;
+      } catch (error) {
+        log(`[StorageInfo] Failed to read global metadata: ${error instanceof Error ? error.message : error}`);
+        info.global.commitValid = false;
+      }
     }
 
     return info;

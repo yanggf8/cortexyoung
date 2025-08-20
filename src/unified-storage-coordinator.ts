@@ -165,24 +165,83 @@ export class UnifiedStorageCoordinator {
       actions.push('Syncing global embeddings to local storage');
       await this.vectorStore.syncToLocal();
     }
-    // Handle embeddings staleness (both exist but >24h apart)
-    else if (status.embeddings.local && status.embeddings.global && 
-             embeddingInfo.local.lastModified && embeddingInfo.global.lastModified) {
-      const timeDiff = Math.abs(embeddingInfo.local.lastModified.getTime() - embeddingInfo.global.lastModified.getTime());
-      const hoursApart = timeDiff / (60 * 60 * 1000);
+    // Handle embeddings based on commit validity and timestamp
+    else if (status.embeddings.local && status.embeddings.global) {
+      const localCommitValid = embeddingInfo.local.commitValid ?? false;
+      const globalCommitValid = embeddingInfo.global.commitValid ?? false;
+      const localChunks = embeddingInfo.local.chunks ?? 0;
+      const globalChunks = embeddingInfo.global.chunks ?? 0;
       
-      if (hoursApart > 24) {
-        const localIsNewer = embeddingInfo.local.lastModified > embeddingInfo.global.lastModified;
-        const olderHours = Math.floor(hoursApart);
-        
-        if (localIsNewer) {
-          issues.push(`Embeddings are ${olderHours} hours apart - local version is newer`);
-          actions.push('Auto-syncing newer local embeddings to global storage');
-          await this.vectorStore.syncToGlobal();
+      log(`[StorageCompare] Local chunks=${localChunks} modified=${embeddingInfo.local.lastModified?.toISOString()} path=${embeddingInfo.local.path}`);
+      log(`[StorageCompare] Global chunks=${globalChunks} modified=${embeddingInfo.global.lastModified?.toISOString()} path=${embeddingInfo.global.path}`);
+      log(`[StorageCompare] Local commit_valid=${localCommitValid} commit=${embeddingInfo.local.commitHash}`);
+      log(`[StorageCompare] Global commit_valid=${globalCommitValid} commit=${embeddingInfo.global.commitHash}`);
+      
+      // Priority: Commit validity > Chunk count > Timestamp
+      if (localCommitValid && !globalCommitValid) {
+        issues.push('Local embeddings match current commit, global embeddings are stale');
+        actions.push('Winner=local reason=commit_match loading=local');
+        log(`[StorageCompare] Winner=local reason=commit_match loading=local`);
+        await this.vectorStore.syncToGlobal();
+      } else if (!localCommitValid && globalCommitValid) {
+        issues.push('Global embeddings match current commit, local embeddings are stale');
+        actions.push('Winner=global reason=commit_match loading=global');
+        log(`[StorageCompare] Winner=global reason=commit_match loading=global`);
+        await this.vectorStore.syncToLocal();
+      } else if (localCommitValid && globalCommitValid) {
+        // Both match current commit - use timestamp to determine newer working changes
+        if (embeddingInfo.local.lastModified && embeddingInfo.global.lastModified) {
+          const localIsNewer = embeddingInfo.local.lastModified > embeddingInfo.global.lastModified;
+          if (localIsNewer) {
+            issues.push('Both match current commit - local is newer');
+            actions.push('Winner=local reason=newer loading=local');
+            log(`[StorageCompare] Winner=local reason=newer loading=local`);
+            await this.vectorStore.syncToGlobal();
+          } else {
+            issues.push('Both match current commit - global is newer');
+            actions.push('Winner=global reason=newer loading=global');
+            log(`[StorageCompare] Winner=global reason=newer loading=global`);
+            await this.vectorStore.syncToLocal();
+          }
         } else {
-          issues.push(`Embeddings are ${olderHours} hours apart - global version is newer`);
-          actions.push('Auto-syncing newer global embeddings to local storage');
+          // Fallback: prefer global if no timestamps available
+          issues.push('Both match current commit - no timestamps, defaulting to global');
+          actions.push('Winner=global reason=no_timestamps loading=global');
+          log(`[StorageCompare] Winner=global reason=no_timestamps loading=global`);
           await this.vectorStore.syncToLocal();
+        }
+      } else {
+        // Neither matches current commit - use larger dataset or newer timestamp
+        if (localChunks > globalChunks) {
+          issues.push('Neither matches current commit - local has more chunks (will need reindexing)');
+          actions.push('Winner=local reason=more_chunks_stale loading=local');
+          log(`[StorageCompare] Winner=local reason=more_chunks_stale loading=local`);
+          await this.vectorStore.syncToGlobal();
+        } else if (globalChunks > localChunks) {
+          issues.push('Neither matches current commit - global has more chunks (will need reindexing)');
+          actions.push('Winner=global reason=more_chunks_stale loading=global');
+          log(`[StorageCompare] Winner=global reason=more_chunks_stale loading=global`);
+          await this.vectorStore.syncToLocal();
+        } else if (embeddingInfo.local.lastModified && embeddingInfo.global.lastModified) {
+          const timeDiff = Math.abs(embeddingInfo.local.lastModified.getTime() - embeddingInfo.global.lastModified.getTime());
+          const hoursApart = timeDiff / (60 * 60 * 1000);
+          
+          if (hoursApart > 24) {
+            const localIsNewer = embeddingInfo.local.lastModified > embeddingInfo.global.lastModified;
+            const olderHours = Math.floor(hoursApart);
+            
+            if (localIsNewer) {
+              issues.push(`Neither matches current commit - local is ${olderHours}h newer (will need reindexing)`);
+              actions.push('Winner=local reason=newer_stale loading=local');
+              log(`[StorageCompare] Winner=local reason=newer_stale loading=local`);
+              await this.vectorStore.syncToGlobal();
+            } else {
+              issues.push(`Neither matches current commit - global is ${olderHours}h newer (will need reindexing)`);
+              actions.push('Winner=global reason=newer_stale loading=global');
+              log(`[StorageCompare] Winner=global reason=newer_stale loading=global`);
+              await this.vectorStore.syncToLocal();
+            }
+          }
         }
       }
     }
