@@ -5,11 +5,7 @@
 Cortex V3.0 introduces a **local MCP server architecture** designed to **dramatically improve Claude Code's context window quality** through intelligent semantic code analysis with perfect project isolation.
 
 ### Primary Goal: Context Window Optimization for Claude Code
-This system exists to solve a critical problem: **Claude Code's limited context window forces developers to manually provide relevant code context**, leading to:
-- ❌ Incomplete analysis due to missing dependencies
-- ❌ Inefficient token usage with irrelevant code
-- ❌ Poor code understanding across large codebases  
-- ❌ Manual hunting for related code across multiple abstraction levels
+
 
 Our local MCP architecture delivers **80-90% context window efficiency gains** by:
 - ✅ **Intelligent Code Discovery**: Automatically finding semantically relevant code chunks

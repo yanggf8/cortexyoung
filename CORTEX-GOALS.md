@@ -1,8 +1,8 @@
-# Cortex Goals: Automatic Economic Context Supply for Claude Code
+# Cortex Goals: Proactive Project Awareness for Claude Code
 
 ## Primary Mission
 
-Transform Claude Code from a context-lacking assistant to an architecturally-aware development partner through **automatic economic context supply** - delivering the right architectural and structural context for every query without manual intervention.
+Transform Claude Code from a context-lacking assistant to a project-aware development partner through **proactive project awareness** - ensuring Claude Code understands the project's implementation patterns from startup, before any queries are asked.
 
 ## The 80/20 Problem We're Solving
 
@@ -14,128 +14,127 @@ Transform Claude Code from a context-lacking assistant to an architecturally-awa
 - Constant need to correct Claude Code's architectural misconceptions
 
 ### 🔍 **20% Root Cause (What We're Targeting)**
-**Manual and inefficient foundational context supply** - Claude Code lacks architectural and structural context at the moment of generation.
+**Lack of project awareness at startup** - Claude Code doesn't know how the project implements authentication, API responses, and error handling before developers ask questions.
 
 ## Core Goals
 
-### Goal 1: **Automatic Architectural Discovery**
-**Eliminate manual context preparation through intelligent architectural analysis**
+### Goal 1: **Proactive Implementation Pattern Detection**
+**Automatically detect HOW the project implements critical patterns before Claude Code needs them**
 
 **What This Means:**
-- Automatically identify critical architectural patterns and conventions
-- Discover project-specific dependencies and relationships
-- Surface structural information relevant to each query
-- Understand codebase organization and design patterns
+- Detect how authentication actually works (`req.user` vs `req.context.user`, cookie vs header tokens)
+- Discover actual API response format (`{data: any}` vs `{result: any}` vs bare objects)
+- Identify real error handling patterns (`{error: string}` vs `{message: string}`, global middleware vs try/catch)
+- Focus on implementation details that prevent wrong suggestions
 
 **Success Criteria:**
-- Zero manual file selection for architectural context
-- Automatic discovery of relevant dependencies and patterns
-- Query-aware architectural context identification
-- 95%+ accuracy in identifying relevant structural information
+- 85%+ confidence in detecting authentication user property patterns
+- 90%+ accuracy in identifying API response wrapper formats
+- 80%+ confidence in error handling structure detection
+- Evidence-based detection with file path citations
 
-### Goal 2: **Economic Context Delivery** 
-**Provide essential architectural understanding without context window waste**
+### Goal 2: **Startup Project Awareness**
+**Ensure Claude Code knows project implementation patterns from the moment it starts**
 
 **What This Means:**
-- Deliver only the critical architectural context needed for each query
-- Optimize context packaging for maximum architectural insight per token
-- Avoid context window contamination with irrelevant structural information
-- Focus on foundational understanding, not exhaustive code details
+- Proactive CLAUDE.md maintenance with implementation patterns before first query
+- Boot-time project awareness that prevents wrong assumptions
+- Critical guardrails clearly documented (e.g., "NEVER use localStorage for tokens")
+- Prevention approach: context ready before problems happen
 
 **Success Criteria:**
-- 80-90% reduction in manual context explanation overhead
-- Context window usage optimized for architectural understanding
-- Essential structural information always available
-- No wasted tokens on irrelevant architectural details
+- CLAUDE.md updated within 10 seconds of project changes
+- Implementation patterns documented before first developer interaction
+- Critical guardrails prevent common architectural mistakes
+- Zero manual context preparation required
 
-### Goal 3: **Query-Aware Intelligence**
-**Tailor architectural context to the specific task being asked**
+### Goal 3: **Implementation Detail Accuracy**
+**Focus on the specific implementation details that cause wrong suggestions**
 
 **What This Means:**
-- Different architectural context for different types of queries
-- Authentication queries → security patterns and middleware context
-- Database queries → data layer architecture and connection patterns  
-- API queries → service layer structure and interface patterns
-- UI queries → component architecture and state management patterns
+- Not just "uses JWT" but "JWT in httpOnly cookies, user in req.user, 401 errors"
+- Not just "REST API" but "{data: any} wrapper, explicit status codes, always wrapped responses"
+- Not just "error handling" but "global middleware, {error: string} format, throw exceptions"
+- Deep implementation knowledge over broad technology detection
 
 **Success Criteria:**
-- Context relevance matches query intent 95%+ of the time
-- Different query types receive appropriate architectural context
-- No generic architectural information that doesn't apply to current task
-- Adaptive context based on development phase and focus area
+- Prevent localStorage suggestions in cookie-based auth projects
+- Prevent bare object responses in wrapper-based API projects  
+- Prevent inconsistent error formats across the codebase
+- 30% reduction in implementation-specific wrong suggestions
 
-### Goal 4: **Consistency Assurance**
-**Ensure Claude Code always has proper foundational architectural understanding**
+### Goal 4: **Confidence-Based Reliability**
+**Only assert implementation patterns when confident, mark uncertainty clearly**
 
 **What This Means:**
-- Reliable architectural context supply for every interaction
-- Consistent understanding of project structure and patterns
-- Maintained awareness of critical dependencies and relationships
-- Preserved knowledge of architectural constraints and conventions
+- 60%+ confidence threshold for asserting implementation patterns
+- "Unknown" states for uncertain patterns to prevent wrong guidance
+- Evidence citations for all implementation pattern claims
+- Low-confidence warnings: "Ask before making assumptions"
 
 **Success Criteria:**
-- Claude Code suggestions consistent with existing architecture 95%+ of the time
-- Zero architectural misconceptions or pattern violations
-- Reliable dependency awareness across all interactions
-- Consistent code quality aligned with project conventions
+- No false positive implementation guidance that breaks existing patterns
+- Clear uncertainty indicators when pattern detection is ambiguous
+- Evidence-backed claims with file paths supporting each assertion
+- Developer trust in pattern detection accuracy
 
 ## Implementation Strategy
 
-### Phase 1: Architectural Intelligence Foundation
-**Build the core architectural discovery and understanding engine**
+### Phase 1: Implementation Pattern Detection Engine
+**Build the core implementation pattern detection and analysis system**
 
 **Components:**
-- **Architectural Pattern Detection**: Identify project-specific patterns and conventions
-- **Dependency Analysis**: Map critical relationships and structural dependencies
-- **Query Classification**: Understand what type of architectural context each query needs
-- **Context Optimization**: Package architectural understanding for economic delivery
+- **Authentication Pattern Detection**: Extract user property patterns, token storage, error formats
+- **API Response Pattern Detection**: Identify success/error formats, wrapper patterns, status code usage
+- **Error Handling Pattern Detection**: Discover catch patterns, error structures, propagation styles
+- **Evidence Collection**: File content analysis with citation tracking
 
-### Phase 2: Query-Aware Context Engine
-**Develop intelligent context supply based on specific queries**
-
-**Components:**
-- **Context Matching**: Match architectural context to query intent
-- **Structural Prioritization**: Rank architectural information by relevance to current task
-- **Economic Packaging**: Deliver maximum architectural insight with minimum tokens
-- **Consistency Validation**: Ensure architectural context remains accurate and current
-
-### Phase 3: Adaptive Architectural Intelligence
-**Create self-improving architectural understanding that evolves with the codebase**
+### Phase 2: Proactive CLAUDE.md Maintenance
+**Develop automatic project awareness system that prevents context issues**
 
 **Components:**
-- **Pattern Evolution**: Track architectural changes and pattern updates
-- **Context Learning**: Improve context relevance based on usage patterns
-- **Architectural Health**: Monitor and maintain architectural context accuracy
-- **Developer Feedback Integration**: Learn from corrections and architectural guidance
+- **Boot-time Context Generation**: Populate CLAUDE.md before first developer interaction
+- **Pattern Documentation**: Generate implementation-specific guidance with confidence scores
+- **Critical Guardrails**: Document project-specific constraints and patterns
+- **Atomic Updates**: Safe marker-based content updates with error recovery
+
+### Phase 3: Real-time Project Awareness Maintenance
+**Create self-updating project awareness that evolves with codebase changes**
+
+**Components:**
+- **Pattern Change Detection**: Monitor implementation file changes for pattern updates
+- **Context Freshness**: Keep CLAUDE.md current with codebase evolution
+- **Confidence Tracking**: Maintain accuracy of implementation pattern detection
+- **Reliability Monitoring**: Ensure consistent project awareness quality
 
 ## Success Metrics
 
-### Developer Experience Metrics
-- **Trust Improvement**: Developers rely on Claude Code architectural understanding 95%+ of the time
-- **Friction Reduction**: 80-90% reduction in manual architectural explanation and correction
-- **Development Velocity**: Faster development cycles with reliable architectural context
-- **Code Quality**: Consistent adherence to project patterns and architectural constraints
+### Implementation Pattern Accuracy Metrics
+- **Authentication Detection**: 85%+ confidence in user property patterns (`req.user` vs `req.context.user`)
+- **API Response Detection**: 90%+ accuracy in response format detection (`{data: any}` vs bare objects)
+- **Error Handling Detection**: 80%+ confidence in error structure patterns (`{error: string}` vs `{message: string}`)
+- **Evidence Quality**: All pattern assertions backed by file citations and confidence scores
 
-### Technical Performance Metrics  
-- **Context Accuracy**: Architectural context relevant to query 95%+ of the time
-- **Economic Efficiency**: Essential architectural understanding delivered with <10% context window usage
-- **Response Consistency**: Architectural context supply reliable across all query types
-- **Adaptation Speed**: Architectural understanding updates within 24 hours of codebase changes
+### Startup Awareness Metrics  
+- **Boot-time Readiness**: CLAUDE.md populated with implementation patterns before first interaction
+- **Context Freshness**: Implementation patterns updated within 10 seconds of relevant file changes
+- **Guardrail Effectiveness**: Critical warnings prevent common implementation mistakes
+- **Zero Manual Preparation**: No developer action required for project awareness
 
-### System Health Metrics
-- **Discovery Accuracy**: Critical architectural patterns identified correctly 95%+ of the time
-- **Relationship Mapping**: Dependencies and structural relationships tracked accurately
-- **Pattern Recognition**: Project-specific conventions understood and applied consistently
-- **Context Freshness**: Architectural understanding reflects current codebase state
+### Prevention Effectiveness Metrics
+- **Wrong Suggestion Reduction**: 30% fewer implementation-specific incorrect suggestions from Claude Code
+- **Pattern Consistency**: 95%+ adherence to detected implementation patterns in suggestions
+- **First Interaction Accuracy**: Correct implementation guidance from the very first Claude Code query
+- **Architecture Alignment**: Zero localStorage suggestions in cookie-based auth projects
 
-## Vision: Architecturally-Aware Claude Code
+## Vision: Implementation-Aware Claude Code
 
-**The Future State**: Claude Code that intrinsically understands your project's architecture, patterns, and constraints - providing suggestions that always align with existing structure, respect critical dependencies, and maintain consistency with project conventions.
+**The Future State**: Claude Code that knows exactly HOW your project implements authentication, API responses, and error handling from the moment it starts - preventing wrong implementation suggestions before they happen.
 
-**The Developer Experience**: Work with Claude Code as a knowledgeable team member who deeply understands your architectural decisions and never suggests code that breaks your carefully designed patterns.
+**The Developer Experience**: Work with Claude Code that immediately understands your project's specific patterns - suggesting `req.user` instead of `req.context.user`, `{data: any}` instead of bare objects, and never recommending localStorage in cookie-based auth projects.
 
-**The Technical Reality**: An intelligent architectural context engine that automatically and economically supplies the foundational understanding Claude Code needs to be a truly effective development partner.
+**The Technical Reality**: A proactive implementation pattern detection engine that automatically maintains CLAUDE.md with deep project awareness, ensuring Claude Code has accurate implementation knowledge before any developer interaction.
 
 ---
 
-**These goals transform Cortex from a search tool into an architectural intelligence engine that solves the real 80/20 problem: giving Claude Code the foundational understanding it needs to provide consistently excellent, architecturally-aware assistance.**
+**These goals transform Cortex from a reactive search tool into a proactive project awareness engine that solves the real problem: giving Claude Code startup implementation knowledge to prevent wrong suggestions from the first interaction.**
