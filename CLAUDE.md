@@ -364,24 +364,31 @@ Claude Code ← MCP Server ← Vector Store ← ProcessPool → Incremental Upda
 - ✅ **Smart dependency traversal** - Complete context in single queries
 - ✅ **Production-grade error handling** - Never fails, always provides results
 
-### **Next Target** 🎯 (Cortex Enhanced Proactive Context Engine)
-- **Proactive CLAUDE.md Maintenance**: Automatically maintain project context in CLAUDE.md
-- **Implementation Pattern Detection**: Detect HOW authentication, database, API patterns work (not just WHAT technologies)
-- **Zero Developer Burden**: Fully automatic project context detection and updates
-- **Prevention Over Reaction**: Ensure Claude Code has project awareness from startup
-- **Direct Communication**: Use CLAUDE.md as native Claude Code communication channel
+### **Next Evolution** 🎯 (stdio MCP Architecture)
+**Current Priority**: Transition from HTTP MCP to stdio MCP with Claude Code launch detection.
 
-### **Implementation Roadmap** 
-**Phase 1** (Week 1): Core project detection and CLAUDE.md maintenance engine with implementation pattern analysis
-**Phase 2** (Week 2): ContextWatcher system replacing SemanticWatcher for proactive file monitoring
-**Phase 3** (Week 3): Integration with existing Cortex infrastructure and comprehensive testing
-**Phase 4** (Week 4): Production optimization, monitoring, and rollout
+**Architecture Transition Plan** (HTTP → stdio):
+- **Process Detection**: Monitor Claude Code launch/exit for conditional activation
+- **stdio Transport**: Replace Express HTTP with MCP SDK stdio transport (JSON-RPC over stdin/stdout)
+- **Zero Idle Resources**: Only active when Claude Code is running
+- **Native Integration**: Proper MCP SDK usage instead of custom HTTP implementation
+- **Installation Change**: `claude mcp add cortex npx cortex-mcp` (no more HTTP endpoints)
 
-### **Context Accuracy Revolution**
-The core insight: Claude Code's context issues stem from **lack of project awareness at startup**. This enhanced proactive context engine solves this by automatically maintaining CLAUDE.md with both project context AND implementation patterns, ensuring Claude Code understands not just WHAT technologies are used but HOW they're implemented in the specific project.
+**Key Benefits**:
+- 🔋 **Zero idle resource usage** - background monitoring only
+- ⚡ **Better performance** - stdio faster than HTTP  
+- 🛠️ **Simpler deployment** - no port management or conflicts
+- 🎯 **Native MCP** - proper SDK integration
+
+### **Future Project** 🚀 (ClaudeCat - Enhanced Proactive Context Engine) 
+After stdio transition, the Claude Code context accuracy problem will be solved in **ClaudeCat**.
+
+**ClaudeCat Mission**: Revolutionary proactive context engine that automatically maintains CLAUDE.md with implementation patterns.
+
+**Project Location**: `../claudecat/` - Separate dedicated codebase for focused development
 
 ---
 
-**Status**: V2.1 Production-ready, Enhanced Proactive Context Engine with Implementation Pattern Detection designed! Moving from reactive context enhancement to proactive CLAUDE.md maintenance for true Claude Code context accuracy! 🚀
+**Current Status**: Cortex V2.1 Production-ready! Next: stdio MCP architecture for optimal resource efficiency! 🎯
 
-📖 **Documentation**: See `CORTEX-PROPOSAL.md` for complete enhanced proactive context engine design and implementation plan.
+📖 **ClaudeCat Documentation**: See `../claudecat/CLAUDECAT-PROPOSAL.md` for future enhanced proactive context engine.
