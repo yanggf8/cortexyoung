@@ -45,22 +45,49 @@ node test-configuration-system.js               # Test configuration system with
 
 ## Claude Code MCP Integration ✅ **PRODUCTION READY**
 
-### Installation
+### Installation (stdio Transport)
 **One-Command Installation:**
 ```bash
-claude mcp add --transport http cortex http://localhost:8765/mcp
+claude mcp add cortex npx cortex-mcp
 ```
 
 **Verify Installation:**
 ```bash
 claude mcp list
-# Should show: cortex: http://localhost:8765/mcp (HTTP)
+# Should show: cortex: npx cortex-mcp (stdio)
 ```
 
 **Start Using:**
 ```bash
 claude chat --mcp
 # Then use: @cortex-semantic_search "your query"
+```
+
+### Migration from HTTP to stdio
+**For existing HTTP users:**
+```bash
+# 1. Remove old HTTP configuration
+claude mcp remove cortex
+
+# 2. Install new stdio version
+claude mcp add cortex npx cortex-mcp
+
+# 3. Verify new installation
+claude mcp list
+```
+
+**Benefits of stdio vs HTTP:**
+- 🔋 **Zero idle resources** - only runs when Claude Code active
+- ⚡ **Better performance** - stdio faster than HTTP localhost  
+- 🛠️ **Simpler setup** - no port management or conflicts
+- 🎯 **Native MCP** - proper MCP SDK integration
+
+### Legacy HTTP Installation (Deprecated)
+```bash
+# OLD: HTTP transport (will be removed in future versions)
+claude mcp add --transport http cortex http://localhost:8765/mcp
+# NEW: stdio transport (recommended)
+claude mcp add cortex npx cortex-mcp
 ```
 
 ### Available MCP Tools
@@ -76,10 +103,19 @@ claude chat --mcp
 
 ### Usage Examples
 ```bash
+# Core search and analysis
 @cortex-semantic_search "JWT token validation logic"
 @cortex-code_intelligence "understand the payment processing workflow"
 @cortex-relationship_analysis --analysis_type call_graph --starting_symbols "authenticate"
+
+# Status and chunking tools
 @cortex-real_time_status  # Check context freshness
+@cortex-fetch_chunk --cacheKey "uuid" --chunkIndex 2  # Get specific chunk
+@cortex-next_chunk --cacheKey "uuid"  # Get next chunk in sequence
+
+# Project management
+@cortex-get_current_project  # Show current project
+@cortex-switch_project --project_path "/path/to/project"  # Switch projects
 ```
 
 ## Core Features
@@ -364,8 +400,11 @@ Claude Code ← MCP Server ← Vector Store ← ProcessPool → Incremental Upda
 - ✅ **Smart dependency traversal** - Complete context in single queries
 - ✅ **Production-grade error handling** - Never fails, always provides results
 
-### **Next Target** 🎯 (Cortex V3.0 - Centralized Architecture + Context Enhancement)
-**CORTEX FOCUS**: V3.0 centralized architecture for MCP server optimization and context enhancement.
+### **Current Priority** 🎯 (stdio MCP Optimization)
+**ACTIVE FOCUS**: stdio transport optimization with Claude Code process detection for zero idle resources.
+
+### **Next Evolution** 🎯 (Cortex V3.0 - Centralized Architecture + Context Enhancement)
+**FUTURE ROADMAP**: V3.0 centralized architecture for MCP server optimization and context enhancement.
 
 **V4.0 STATUS**: Moved to separate Claude Code project for future consideration. V4.0's CLAUDE.md maintenance approach will be evaluated independently as a standalone Claude Code enhancement tool.
 
@@ -373,7 +412,7 @@ Claude Code ← MCP Server ← Vector Store ← ProcessPool → Incremental Upda
 1. **Resource Consolidation**: N Claude instances × 8 processes → Single HTTP server with 8 shared processes
 2. **Context Accuracy**: Automatic project awareness injection into semantic search results
 
-#### **V3.0 Focus Areas**
+#### **V3.0 Focus Areas** (After stdio completion)
 - **MCP Server Optimization**: Centralized ProcessPool eliminates resource multiplication
 - **Context Enhancement**: Real-time project awareness for better Claude Code suggestions
 - **Scalable Architecture**: HTTP interface for distributed deployment capability
@@ -411,3 +450,33 @@ LIBRARIES: express, jsonwebtoken, prisma, zod
 **Status**: V2.1 Production-ready → **V3.0 Centralized Architecture APPROVED** for immediate implementation! This is the definitive solution for Claude Code accuracy through resource consolidation and intelligent context enhancement! 🚀
 
 📖 **V3.0 Documentation**: See `ARCHITECTURE.md` for complete centralized architecture design and implementation plan.
+=======
+### **Next Evolution** 🎯 (stdio MCP Architecture)
+**Current Priority**: Transition from HTTP MCP to stdio MCP with Claude Code launch detection.
+
+**Architecture Transition Plan** (HTTP → stdio):
+- **Process Detection**: Monitor Claude Code launch/exit for conditional activation
+- **stdio Transport**: Replace Express HTTP with MCP SDK stdio transport (JSON-RPC over stdin/stdout)
+- **Zero Idle Resources**: Only active when Claude Code is running
+- **Native Integration**: Proper MCP SDK usage instead of custom HTTP implementation
+- **Installation Change**: `claude mcp add cortex npx cortex-mcp` (no more HTTP endpoints)
+
+**Key Benefits**:
+- 🔋 **Zero idle resource usage** - background monitoring only
+- ⚡ **Better performance** - stdio faster than HTTP  
+- 🛠️ **Simpler deployment** - no port management or conflicts
+- 🎯 **Native MCP** - proper SDK integration
+
+### **Future Project** 🚀 (ClaudeCat - Enhanced Proactive Context Engine) 
+After stdio transition, the Claude Code context accuracy problem will be solved in **ClaudeCat**.
+
+**ClaudeCat Mission**: Revolutionary proactive context engine that automatically maintains CLAUDE.md with implementation patterns.
+
+**Project Location**: `../claudecat/` - Separate dedicated codebase for focused development
+
+---
+
+**Current Status**: Cortex V2.1 Production-ready! Next: stdio MCP architecture for optimal resource efficiency! 🎯
+
+📖 **ClaudeCat Documentation**: See `../claudecat/CLAUDECAT-PROPOSAL.md` for future enhanced proactive context engine.
+>>>>>>> f45918f16ab05e5d5f75849b9ec69f524949f70d

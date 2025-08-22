@@ -2,8 +2,11 @@
   "name": "cortexyoung",
   "version": "2.1.6",
   "main": "dist/index.js",
+  "bin": {
+    "cortex-mcp": "./cortex-mcp.js"
+  },
   "scripts": {
-    "build": "tsc && cp src/*.js dist/ 2>/dev/null || true",
+    "build": "tsc && cp src/*.js dist/ 2>/dev/null || true && cp cortex-mcp.js dist/ 2>/dev/null || true",
     "dev": "ts-node src/server.ts --demo",
     "demo": "ts-node src/server.ts --demo",
     "demo:reindex": "ts-node src/server.ts --demo --reindex",
@@ -61,6 +64,10 @@
     "test:signal-cascade": "node test-signal-cascade.js",
     "test:auto-sync-staleness": "npm run build && node test-auto-sync-staleness.js",
     "shutdown": "node scripts/shutdown.js",
+    "server:stdio": "ts-node src/stdio-server.ts",
+    "server:stdio:demo": "ts-node src/stdio-server.ts --demo",
+    "server:stdio:reindex": "ts-node src/stdio-server.ts --reindex",
+    "server:stdio:full": "ts-node src/stdio-server.ts --full",
     "startup": "node scripts/startup.js",
     "status": "node scripts/check-server-status.js"
   },
@@ -76,7 +83,7 @@
     "typescript": "^5.9.2"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.17.1",
+    "@modelcontextprotocol/sdk": "^1.17.3",
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.3",
     "async-mutex": "^0.5.0",
