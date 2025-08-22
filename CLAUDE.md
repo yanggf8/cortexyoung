@@ -45,22 +45,49 @@ node test-configuration-system.js               # Test configuration system with
 
 ## Claude Code MCP Integration ✅ **PRODUCTION READY**
 
-### Installation
+### Installation (stdio Transport)
 **One-Command Installation:**
 ```bash
-claude mcp add --transport http cortex http://localhost:8765/mcp
+claude mcp add cortex npx cortex-mcp
 ```
 
 **Verify Installation:**
 ```bash
 claude mcp list
-# Should show: cortex: http://localhost:8765/mcp (HTTP)
+# Should show: cortex: npx cortex-mcp (stdio)
 ```
 
 **Start Using:**
 ```bash
 claude chat --mcp
 # Then use: @cortex-semantic_search "your query"
+```
+
+### Migration from HTTP to stdio
+**For existing HTTP users:**
+```bash
+# 1. Remove old HTTP configuration
+claude mcp remove cortex
+
+# 2. Install new stdio version
+claude mcp add cortex npx cortex-mcp
+
+# 3. Verify new installation
+claude mcp list
+```
+
+**Benefits of stdio vs HTTP:**
+- 🔋 **Zero idle resources** - only runs when Claude Code active
+- ⚡ **Better performance** - stdio faster than HTTP localhost  
+- 🛠️ **Simpler setup** - no port management or conflicts
+- 🎯 **Native MCP** - proper MCP SDK integration
+
+### Legacy HTTP Installation (Deprecated)
+```bash
+# OLD: HTTP transport (will be removed in future versions)
+claude mcp add --transport http cortex http://localhost:8765/mcp
+# NEW: stdio transport (recommended)
+claude mcp add cortex npx cortex-mcp
 ```
 
 ### Available MCP Tools
@@ -76,10 +103,19 @@ claude chat --mcp
 
 ### Usage Examples
 ```bash
+# Core search and analysis
 @cortex-semantic_search "JWT token validation logic"
 @cortex-code_intelligence "understand the payment processing workflow"
 @cortex-relationship_analysis --analysis_type call_graph --starting_symbols "authenticate"
+
+# Status and chunking tools
 @cortex-real_time_status  # Check context freshness
+@cortex-fetch_chunk --cacheKey "uuid" --chunkIndex 2  # Get specific chunk
+@cortex-next_chunk --cacheKey "uuid"  # Get next chunk in sequence
+
+# Project management
+@cortex-get_current_project  # Show current project
+@cortex-switch_project --project_path "/path/to/project"  # Switch projects
 ```
 
 ## Core Features
