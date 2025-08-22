@@ -364,23 +364,50 @@ Claude Code ← MCP Server ← Vector Store ← ProcessPool → Incremental Upda
 - ✅ **Smart dependency traversal** - Complete context in single queries
 - ✅ **Production-grade error handling** - Never fails, always provides results
 
-### **Next Target** 🎯 (Cortex V4.0 - Proactive Context Engine)
-- **Proactive CLAUDE.md Maintenance**: Automatically maintain project context in CLAUDE.md
-- **Zero Developer Burden**: Fully automatic project context detection and updates
-- **Prevention Over Reaction**: Ensure Claude Code has project awareness from startup
-- **Direct Communication**: Use CLAUDE.md as native Claude Code communication channel
+### **Next Target** 🎯 (Cortex V3.0 - Centralized Architecture + Context Enhancement)
+**CORTEX FOCUS**: V3.0 centralized architecture for MCP server optimization and context enhancement.
 
-### **V4.0 Implementation Roadmap** 
-**Phase 1** (Week 1): Core project detection and CLAUDE.md maintenance engine
-**Phase 2** (Week 2): Proactive file watching system for automatic updates
-**Phase 3** (Week 3): Integration with existing Cortex infrastructure and testing
-**Phase 4** (Week 4): Production optimization and monitoring
+**V4.0 STATUS**: Moved to separate Claude Code project for future consideration. V4.0's CLAUDE.md maintenance approach will be evaluated independently as a standalone Claude Code enhancement tool.
 
-### **Context Accuracy Revolution**
-The core insight: Claude Code's context issues stem from **lack of project awareness at startup**. By the time developers query Claude Code, it's already too late. V4.0 solves this by automatically maintaining CLAUDE.md with current project context, ensuring Claude Code never lacks essential project information.
+#### **V3.0 Core Innovation: Dual Problem Solution**
+1. **Resource Consolidation**: N Claude instances × 8 processes → Single HTTP server with 8 shared processes
+2. **Context Accuracy**: Automatic project awareness injection into semantic search results
+
+#### **V3.0 Focus Areas**
+- **MCP Server Optimization**: Centralized ProcessPool eliminates resource multiplication
+- **Context Enhancement**: Real-time project awareness for better Claude Code suggestions
+- **Scalable Architecture**: HTTP interface for distributed deployment capability
+- **Complete Visibility**: Monitoring dashboard for process pool management
+
+### **V3.0 Implementation Roadmap** 
+**Week 1**: Extract ProcessPoolEmbedder to centralized HTTP embedding server
+**Week 2**: Implement Context Enhancement Layer with project awareness injection
+**Week 3**: Convert MCP servers to lightweight HTTP clients with graceful degradation
+**Week 4**: Real-time monitoring dashboard and performance optimization
+
+### **Context Enhancement Strategy**
+```typescript
+// V3.0 Context Enhancement Example
+@cortex-semantic_search "JWT middleware implementation"
+
+// Enhanced Response:
+PROJECT: Express TypeScript API (typescript)
+STRUCTURE: src/services, src/middleware, src/types
+LIBRARIES: express, jsonwebtoken, prisma, zod
+
+## Authentication Middleware (src/middleware/auth.ts:15)
+[Semantic search results continue...]
+```
+
+### **V3.0 Success Metrics**
+- **Resource Efficiency**: N×8 processes → 8 total processes
+- **Context Enhancement Rate**: 90% of responses include project awareness
+- **Project Detection Accuracy**: 95% correct project type identification
+- **Claude Code Suggestion Improvement**: 25% increase in relevance
+- **Follow-up Query Reduction**: 50% fewer clarifying questions needed
 
 ---
 
-**Status**: V2.1 Production-ready, V4.0 Proactive Context Engine designed! Moving from reactive context enhancement to proactive CLAUDE.md maintenance for true Claude Code context accuracy! 🚀
+**Status**: V2.1 Production-ready → **V3.0 Centralized Architecture APPROVED** for immediate implementation! This is the definitive solution for Claude Code accuracy through resource consolidation and intelligent context enhancement! 🚀
 
-📖 **V4.0 Documentation**: See `CORTEX-PROPOSAL-V4.md` for complete proactive context engine design and implementation plan.
+📖 **V3.0 Documentation**: See `ARCHITECTURE.md` for complete centralized architecture design and implementation plan.
