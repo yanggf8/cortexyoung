@@ -1,11 +1,16 @@
 import express, { Request, Response } from 'express';
 import cors from 'cors';
-import { ProcessPoolEmbedder } from './process-pool-embedder';
-import { ContextEnhancer } from './context-enhancer';
-import { CodeChunk, EmbedOptions } from './types';
-import { log, warn, error } from './logging-utils';
-import { conditionalLogger } from './utils/console-logger';
+import { spawn, ChildProcess } from 'child_process';
+import fastq from 'fastq';
+import * as path from 'path';
 import * as os from 'os';
+import * as fs from 'fs';
+import { CodeChunk, IEmbedder, EmbedOptions, EmbeddingResult, EmbeddingMetadata, PerformanceStats, ProviderHealth, ProviderMetrics } from './types';
+import { log, warn, error } from './logging-utils';
+import { MemoryMappedCache } from './memory-mapped-cache';
+import { ContextEnhancementLayer } from './context-enhancement-layer';
+import { CentralizedHandlers, createCentralizedHandlers } from './centralized-handlers';
+import { ProcessPoolEmbedder } from './process-pool-embedder';
 
 interface ServerStatus {
   processPool: {
@@ -59,10 +64,17 @@ interface SemanticSearchRequest {
  * Consolidates ProcessPool management across multiple Claude Code instances
  * Provides enhanced semantic search with project context awareness
  */
-export class CortexEmbeddingServer {
+export class CortexEmbeddingServer implements IEmbedder {
+  public readonly providerId = "cortex.centralized.bge-small-v1.5";
+  public readonly modelId = "@cortex/bge-small-en-v1.5";
+  public readonly dimensions = 384;
+  public readonly maxBatchSize = 800;
+  public readonly normalization = "l2" as const;
+
   private app: express.Application;
   private processPool?: ProcessPoolEmbedder;
-  private contextEnhancer?: ContextEnhancer;
+  private contextEnhancer?: ContextEnhancementLayer;
+  private centralizedHandlers?: CentralizedHandlers;
   private server: any;
   private startTime: number;
   private activeClients: Map<string, { project: string; lastActivity: Date }> = new Map();
@@ -70,6 +82,7 @@ export class CortexEmbeddingServer {
   private requestsToday = 0;
   private responseTimes: number[] = [];
   private errors = 0;
+  private isInitialized = false;
 
   constructor(private port: number = 3001) {
     this.app = express();
@@ -126,24 +139,14 @@ export class CortexEmbeddingServer {
     // Core embedding generation endpoint
     this.app.post('/embed', async (req: Request, res: Response) => {
       try {
-        const { chunks, options, clientId, projectPath }: EmbeddingRequest = req.body;
+        const { texts, options } = req.body;
         
-        if (!chunks || !Array.isArray(chunks)) {
-          return res.status(400).json({ error: 'Invalid chunks provided' });
+        if (!Array.isArray(texts)) {
+          return res.status(400).json({ error: 'texts must be an array' });
         }
-
-        // TODO: Implement actual embedding generation
-        const result = {
-          embeddings: chunks.map(() => Array.from({ length: 384 }, () => Math.random())),
-          metadata: { processed: chunks.length },
-          stats: { duration: 100, memoryUsed: 1024 }
-        };
         
-        res.json({
-          embeddings: result.embeddings,
-          metadata: result.metadata,
-          stats: result.stats
-        });
+        const result = await this.centralizedHandlers!.handleEmbedBatch(texts, options);
+        res.json(result);
         
       } catch (err) {
         this.errors++;
@@ -182,61 +185,126 @@ export class CortexEmbeddingServer {
     // Enhanced semantic search with context enhancement
     this.app.post('/semantic-search-enhanced', async (req: Request, res: Response) => {
       try {
-        const { query, options, projectPath }: SemanticSearchRequest = req.body;
+        const { query, options = {}, projectPath, clientId } = req.body;
         
         if (!query) {
           return res.status(400).json({ error: 'Query is required' });
         }
 
-        if (!projectPath) {
-          return res.status(400).json({ error: 'Project path is required for context enhancement' });
-        }
-
-        const startTime = Date.now();
-
-        // TODO: Integrate with actual semantic search from ProcessPool
-        // For now, simulate semantic search results
-        const mockSemanticResults = `// Semantic search results for: ${query}
-// Found relevant code chunks:
-function authenticate(req, res, next) {
-  const token = req.headers.authorization;
-  // JWT validation logic here
-  next();
-}
-
-class UserService {
-  async validateUser(credentials) {
-    // User validation implementation
-  }
-}`;
-
-        // Apply context enhancement  
-        const enhancement = await this.contextEnhancer!.enhanceSemanticResults(
-          mockSemanticResults,
+        const result = await this.centralizedHandlers!.handleSemanticSearch({
           query,
+          ...options,
           projectPath,
-          { maxTokens: 150 }
-        );
-
-        const processingTime = Date.now() - startTime;
-
-        res.json({
-          results: enhancement.results,
-          contextEnhanced: enhancement.stats.enhanced,
-          enhancementStats: enhancement.stats,
-          metadata: {
-            query,
-            projectPath,
-            resultCount: 2, // Mock result count
-            processingTime,
-            tokensAdded: enhancement.stats.tokensAdded
-          }
+          clientId
         });
+        
+        res.json(result);
         
       } catch (err) {
         this.errors++;
         error('Enhanced semantic search failed', { error: err });
         res.status(500).json({ error: 'Enhanced semantic search failed' });
+      }
+    });
+
+    // Code intelligence endpoint
+    this.app.post('/code-intelligence', async (req: Request, res: Response) => {
+      try {
+        const { task, options = {}, projectPath, clientId } = req.body;
+        
+        if (!task) {
+          return res.status(400).json({ error: 'Task is required' });
+        }
+
+        const result = await this.centralizedHandlers!.handleCodeIntelligence({
+          task,
+          ...options,
+          projectPath,
+          clientId
+        });
+        
+        res.json(result);
+        
+      } catch (err) {
+        this.errors++;
+        error('Code intelligence failed', { error: err });
+        res.status(500).json({ error: 'Code intelligence failed' });
+      }
+    });
+
+    // Relationship analysis endpoint
+    this.app.post('/relationship-analysis', async (req: Request, res: Response) => {
+      try {
+        const { analysisType, options = {}, projectPath, clientId } = req.body;
+        
+        if (!analysisType) {
+          return res.status(400).json({ error: 'Analysis type is required' });
+        }
+
+        const result = await this.centralizedHandlers!.handleRelationshipAnalysis({
+          analysisType,
+          ...options,
+          projectPath,
+          clientId
+        });
+        
+        res.json(result);
+        
+      } catch (err) {
+        this.errors++;
+        error('Relationship analysis failed', { error: err });
+        res.status(500).json({ error: 'Relationship analysis failed' });
+      }
+    });
+
+    // Trace execution path endpoint
+    this.app.post('/trace-execution-path', async (req: Request, res: Response) => {
+      try {
+        const { entryPoint, options = {}, projectPath, clientId } = req.body;
+        
+        if (!entryPoint) {
+          return res.status(400).json({ error: 'Entry point is required' });
+        }
+
+        const result = await this.centralizedHandlers!.handleTraceExecutionPath({
+          entryPoint,
+          ...options,
+          projectPath,
+          clientId
+        });
+        
+        res.json(result);
+        
+      } catch (err) {
+        this.errors++;
+        error('Trace execution path failed', { error: err });
+        res.status(500).json({ error: 'Trace execution path failed' });
+      }
+    });
+
+    // Find code patterns endpoint
+    this.app.post('/find-code-patterns', async (req: Request, res: Response) => {
+      try {
+        const { pattern, patternType, options = {}, projectPath, clientId } = req.body;
+        
+        if (!pattern || !patternType) {
+          return res.status(400).json({ error: 'Pattern and pattern type are required' });
+        }
+
+        const result = await this.centralizedHandlers!.handleFindCodePatterns({
+          pattern,
+          patternType,
+          ...options,
+          projectPath,
+          clientId
+        });
+        
+        res.json(result);
+        
+      } catch (err) {
+        this.errors++;
+        error('Find code patterns failed', { error: err });
+        res.status(500).json({ error: 'Find code patterns failed' });
       }
     });
 
@@ -346,17 +414,13 @@ Status: ${status.processPool.activeProcesses > 0 ? '✅ OPERATIONAL' : '⚠️  
 
   async start(): Promise<void> {
     try {
-      // Initialize ProcessPool and ContextEnhancer
-      log('Initializing ProcessPool for centralized embedding...');
-      // TODO: Initialize actual ProcessPool
-      // this.processPool = new ProcessPoolEmbedder();
-      
-      log('Initializing Context Enhancement Layer...');
-      this.contextEnhancer = new ContextEnhancer();
+      await this.initialize();
       
       // Start HTTP server
       this.server = this.app.listen(this.port, () => {
-        log(`Cortex V3.0 Embedding Server started on port ${this.port}`);
+        log(`[CortexEmbeddingServer] Server started on port ${this.port}`);
+        log(`[CortexEmbeddingServer] Dashboard: http://localhost:${this.port}/dashboard`);
+        log(`[CortexEmbeddingServer] Status: http://localhost:${this.port}/status`);
       });
 
       // Graceful shutdown handling
@@ -369,23 +433,105 @@ Status: ${status.processPool.activeProcesses > 0 ? '✅ OPERATIONAL' : '⚠️  
     }
   }
 
-  private async shutdown(): Promise<void> {
-    log('Shutting down Cortex Embedding Server...');
-    
-    if (this.server) {
-      this.server.close();
+  /**
+   * Initialize all components
+   */
+  private async initialize(): Promise<void> {
+    if (this.isInitialized) {
+      return;
     }
+
+    log('[CortexEmbeddingServer] Initializing centralized embedding server...');
     
-    // TODO: Cleanup ProcessPool when implemented
+    // Initialize ProcessPool
+    log('[CortexEmbeddingServer] Initializing ProcessPool...');
+    this.processPool = new ProcessPoolEmbedder();
+    await this.processPool.initialize();
     
-    log('Cortex Embedding Server shutdown complete');
-    process.exit(0);
+    // Initialize Context Enhancement Layer
+    log('[CortexEmbeddingServer] Initializing Context Enhancement Layer...');
+    this.contextEnhancer = new ContextEnhancementLayer();
+    await this.contextEnhancer.initialize();
+    
+    // Initialize Centralized Handlers
+    log('[CortexEmbeddingServer] Initializing Centralized Handlers...');
+    this.centralizedHandlers = createCentralizedHandlers({
+      processPool: this.processPool,
+      contextEnhancer: this.contextEnhancer
+    });
+    
+    this.isInitialized = true;
+    log('[CortexEmbeddingServer] Initialization complete');
+  }
+
+  // IEmbedder interface implementation
+  async embedBatch(texts: string[], options?: EmbedOptions): Promise<EmbeddingResult> {
+    if (!this.processPool) {
+      throw new Error('ProcessPool not initialized');
+    }
+    return this.processPool.embedBatch(texts, options);
+  }
+
+  async getHealth(): Promise<ProviderHealth> {
+    if (!this.processPool) {
+      return {
+        status: 'unhealthy',
+        details: 'ProcessPool not initialized',
+        lastCheck: Date.now()
+      };
+    }
+    return this.processPool.getHealth();
+  }
+
+  async getMetrics(): Promise<ProviderMetrics> {
+    if (!this.processPool) {
+      throw new Error('ProcessPool not initialized');
+    }
+    return this.processPool.getMetrics();
+  }
+
+  private async shutdown(): Promise<void> {
+    log('[CortexEmbeddingServer] Shutting down gracefully...');
+    
+    try {
+      // Close HTTP server
+      if (this.server) {
+        await new Promise<void>((resolve) => {
+          this.server.close(() => {
+            log('[CortexEmbeddingServer] HTTP server closed');
+            resolve();
+          });
+        });
+      }
+      
+      // Shutdown ProcessPool
+      if (this.processPool) {
+        await this.processPool.shutdown();
+        log('[CortexEmbeddingServer] ProcessPool shutdown complete');
+      }
+      
+      log('[CortexEmbeddingServer] Graceful shutdown complete');
+      process.exit(0);
+      
+    } catch (err) {
+      error('[CortexEmbeddingServer] Error during shutdown:', err);
+      process.exit(1);
+    }
   }
 }
 
+// Export for use as a module
+export default CortexEmbeddingServer;
+
 // Main execution
 if (require.main === module) {
-  const port = parseInt(process.env.CORTEX_EMBEDDING_SERVER_PORT || '3001');
+  const port = parseInt(process.env.CORTEX_EMBEDDING_SERVER_PORT || '8766');
   const server = new CortexEmbeddingServer(port);
-  server.start();
+  
+  server.start().then(() => {
+    log('[CortexEmbeddingServer] Server started successfully');
+  }).catch((error) => {
+    error('[CortexEmbeddingServer] Failed to start server:', error);
+    process.exit(1);
+  });
 }

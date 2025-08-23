@@ -3,6 +3,8 @@ import { SemanticSearcher } from './searcher';
 import { CodebaseIndexer } from './indexer';
 import { cacheText, getCachedChunk, getNextChunk } from './utils/chunk-cache';
 import { ProjectManager, ProjectInfo } from './project-manager';
+import { EmbeddingClient } from './embedding-client';
+import { warn, error } from './logging-utils';
 
 export abstract class BaseHandler {
   abstract handle(params: any): Promise<any>;

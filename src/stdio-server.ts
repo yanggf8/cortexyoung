@@ -3,21 +3,13 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 
-// Import existing Cortex components
-import { CodebaseIndexer } from './indexer';
-import { SemanticSearcher } from './searcher';
+// Import lightweight components for V3.0 architecture
+import { createLocalEmbeddingClient, EmbeddingClient } from './embedding-client';
 import { ProjectManager } from './project-manager';
 import { CORTEX_TOOLS } from './mcp-tools';
 
-// Import handlers
+// Import lightweight handlers and standard handlers
 import { 
-  SemanticSearchHandler,
-  ContextualReadHandler,
-  CodeIntelligenceHandler,
-  RelationshipAnalysisHandler,
-  TraceExecutionPathHandler,
-  FindCodePatternsHandler,
-  RealTimeStatusHandler,
   FetchChunkHandler,
   NextChunkHandler,
   GetCurrentProjectHandler,
@@ -25,6 +17,16 @@ import {
   SwitchProjectHandler,
   AddProjectHandler
 } from './mcp-handlers';
+
+import { 
+  LightweightSemanticSearchHandler,
+  LightweightContextualReadHandler,
+  LightweightCodeIntelligenceHandler,
+  LightweightRelationshipAnalysisHandler,
+  LightweightTraceExecutionPathHandler,
+  LightweightFindCodePatternsHandler,
+  LightweightRealTimeStatusHandler
+} from './lightweight-handlers';
 
 // Import utilities
 import { conditionalLogger } from './utils/console-logger';
@@ -54,23 +56,24 @@ function getVersion(): string {
   }
 }
 
-class StdioCortexMCPServer {
+class LightweightStdioCortexMCPServer {
   private server: Server;
-  private indexer: CodebaseIndexer;
-  private searcher: SemanticSearcher;
+  private embeddingClient: EmbeddingClient;
   private projectManager: ProjectManager;
   private handlers: Map<string, any> = new Map();
+  private localCache: Map<string, { data: any; timestamp: number; ttl: number }> = new Map();
+  private fallbackMode: boolean = false;
+  private healthCheckInterval: NodeJS.Timeout | null = null;
 
   constructor(
-    indexer: CodebaseIndexer,
-    searcher: SemanticSearcher,
+    projectPath: string,
     projectManager: ProjectManager
   ) {
     // Create MCP server
     this.server = new Server(
       {
-        name: 'cortex-mcp-server',
-        version: '2.1.0',
+        name: 'cortex-lightweight-stdio-server',
+        version: '3.0.0',
       },
       {
         capabilities: {
@@ -79,29 +82,89 @@ class StdioCortexMCPServer {
       }
     );
     
-    this.indexer = indexer;
-    this.searcher = searcher;
+    // Create embedding client for centralized server communication
+    this.embeddingClient = createLocalEmbeddingClient(
+      `stdio-server-${process.pid}`,
+      projectPath
+    );
+    
     this.projectManager = projectManager;
     
     this.setupHandlers();
     this.setupEventHandlers();
+    this.initializeHealthChecking();
+  }
+
+  /**
+   * Initialize health checking for centralized server connection
+   */
+  private initializeHealthChecking(): void {
+    this.healthCheckInterval = setInterval(async () => {
+      try {
+        const isHealthy = await this.embeddingClient.testConnection();
+        if (!isHealthy && !this.fallbackMode) {
+          this.fallbackMode = true;
+        } else if (isHealthy && this.fallbackMode) {
+          this.fallbackMode = false;
+        }
+      } catch (error) {
+        // Ignore health check errors
+      }
+    }, 30000);
+  }
+
+  /**
+   * Cache management for performance optimization
+   */
+  public getCachedResult(key: string): any {
+    const cached = this.localCache.get(key);
+    if (!cached) return null;
+    
+    if (Date.now() > cached.timestamp + cached.ttl) {
+      this.localCache.delete(key);
+      return null;
+    }
+    
+    return cached.data;
+  }
+
+  public setCachedResult(key: string, data: any, ttlMs: number = 300000): void {
+    this.localCache.set(key, {
+      data,
+      timestamp: Date.now(),
+      ttl: ttlMs
+    });
+
+    // Clean up old cache entries
+    if (this.localCache.size > 1000) {
+      const now = Date.now();
+      for (const [k, v] of this.localCache.entries()) {
+        if (now > v.timestamp + v.ttl) {
+          this.localCache.delete(k);
+        }
+      }
+    }
+  }
+
+  public isInFallbackMode(): boolean {
+    return this.fallbackMode;
   }
 
   private setupHandlers(): void {
-    // Core semantic analysis handlers
-    this.handlers.set('semantic_search', new SemanticSearchHandler(this.searcher, this.projectManager));
-    this.handlers.set('contextual_read', new ContextualReadHandler(this.searcher, this.projectManager));
-    this.handlers.set('code_intelligence', new CodeIntelligenceHandler(this.searcher, this.projectManager));
-    this.handlers.set('relationship_analysis', new RelationshipAnalysisHandler(this.searcher, this.projectManager));
-    this.handlers.set('trace_execution_path', new TraceExecutionPathHandler(this.searcher, this.projectManager));
-    this.handlers.set('find_code_patterns', new FindCodePatternsHandler(this.searcher, this.projectManager));
-    this.handlers.set('real_time_status', new RealTimeStatusHandler(this.indexer));
+    // Lightweight semantic analysis handlers using HTTP client
+    this.handlers.set('semantic_search', new LightweightSemanticSearchHandler(this.embeddingClient, this.projectManager, this));
+    this.handlers.set('contextual_read', new LightweightContextualReadHandler(this.embeddingClient, this.projectManager, this));
+    this.handlers.set('code_intelligence', new LightweightCodeIntelligenceHandler(this.embeddingClient, this.projectManager, this));
+    this.handlers.set('relationship_analysis', new LightweightRelationshipAnalysisHandler(this.embeddingClient, this.projectManager, this));
+    this.handlers.set('trace_execution_path', new LightweightTraceExecutionPathHandler(this.embeddingClient, this.projectManager, this));
+    this.handlers.set('find_code_patterns', new LightweightFindCodePatternsHandler(this.embeddingClient, this.projectManager, this));
+    this.handlers.set('real_time_status', new LightweightRealTimeStatusHandler(this.embeddingClient, this));
     
-    // Chunking handlers
+    // Chunking handlers (unchanged)
     this.handlers.set('fetch_chunk', new FetchChunkHandler());
     this.handlers.set('next_chunk', new NextChunkHandler());
     
-    // Project management handlers
+    // Project management handlers (unchanged)
     this.handlers.set('get_current_project', new GetCurrentProjectHandler(this.projectManager));
     this.handlers.set('list_available_projects', new ListAvailableProjectsHandler(this.projectManager));
     this.handlers.set('switch_project', new SwitchProjectHandler(this.projectManager));
@@ -185,20 +248,20 @@ class StdioCortexMCPServer {
   }
 
   async stop(): Promise<void> {
-    conditionalLogger.start('🛑 Shutting down Cortex MCP Server (stdio)');
+    conditionalLogger.start('🛑 Shutting down Lightweight Cortex MCP Server (stdio)');
     
-    try {
-      // Disable real-time updates if enabled
-      await this.indexer.disableRealTimeUpdates();
-    } catch (error: any) {
-      conditionalLogger.warn('Error disabling real-time updates', { 
-        metadata: { error: error.message }
-      });
+    // Clear health check interval
+    if (this.healthCheckInterval) {
+      clearInterval(this.healthCheckInterval);
+      this.healthCheckInterval = null;
     }
+    
+    // Clear cache
+    this.localCache.clear();
 
     // Close server connection
     this.server.close();
-    conditionalLogger.ok('✅ Cortex MCP Server (stdio) Stopped');
+    conditionalLogger.ok('✅ Lightweight Cortex MCP Server (stdio) Stopped');
   }
 }
 
@@ -257,86 +320,33 @@ async function main() {
       }
     });
 
-    // Initialize indexer with intelligent mode detection
-    const indexer = new CodebaseIndexer(repoPath);
+    // V3.0 Lightweight Architecture - No heavy indexing processes
     
-    // Determine indexing mode
-    let indexMode: 'full' | 'incremental' | 'reindex';
-    if (forceReindex || cortexConfig.indexMode === 'reindex') {
-      indexMode = 'reindex';
-      conditionalLogger.warn('Force rebuild requested', { 
-        metadata: { mode: 'reindex' }
-      });
-    } else if (forceFullMode) {
-      indexMode = 'full';
-      conditionalLogger.ok('Full indexing mode requested', { 
-        metadata: { mode: 'full' }
-      });
-    } else if (cortexConfig.indexMode) {
-      indexMode = cortexConfig.indexMode as 'full' | 'incremental';
-      conditionalLogger.ok('Explicit indexing mode', { 
-        metadata: { mode: indexMode }
-      });
-    } else {
-      // Use intelligent mode detection
-      const hasValidIndex = await (indexer as any).vectorStore.hasValidIndex();
-      indexMode = hasValidIndex ? 'incremental' : 'full';
-      conditionalLogger.start(`🧠 Intelligent mode: Using ${indexMode} indexing`, {
-        metadata: { hasValidIndex, mode: indexMode }
-      });
-    }
-
-    // Index repository
-    conditionalLogger.start('📚 Indexing repository...', {
-      metadata: { mode: indexMode }
-    });
-    const indexResponse = await indexer.indexRepository({
-      repository_path: repoPath,
-      mode: indexMode
-    });
-
-    const deltaInfo = indexResponse.chunks_processed > 0 
-      ? `+${indexResponse.chunks_processed} chunks processed` 
-      : 'No changes detected, using cache';
-    
-    conditionalLogger.ok('📊 Indexing complete', { 
-      metadata: { 
-        chunks: indexResponse.chunks_processed,
-        time: `${indexResponse.time_taken_ms}ms`,
-        mode: deltaInfo
-      }
-    });
-
-    // Initialize searcher and project manager
-    const searcher = (indexer as any).searcher;
+    // Initialize project manager for multi-project support
     const projectManager = new ProjectManager();
     await projectManager.initializeWithCurrentDirectory();
 
-    // If in demo mode, exit after indexing is complete
+    // If in demo mode, show lightweight demo message and exit
     if (isDemoMode) {
-      conditionalLogger.ok('🎯 Demo mode complete - indexing finished successfully');
-      conditionalLogger.start(`📊 Processed ${indexResponse.chunks_processed} chunks in ${indexResponse.time_taken_ms}ms`);
+      conditionalLogger.ok('🎯 Lightweight stdio demo mode - No heavy indexing required');
+      conditionalLogger.start('📊 V3.0 architecture uses centralized embedding server instead of local processing');
       conditionalLogger.ok('✅ Demo completed, exiting...');
       process.exit(0);
     }
 
-    // Enable real-time file watching if requested
-    if (enableRealTime) {
-      conditionalLogger.start('🔄 Enabling real-time file watching...', {
-        metadata: { enabled: true }
-      });
-      try {
-        await indexer.enableRealTimeUpdates();
-        conditionalLogger.ok('✅ Real-time file watching enabled successfully');
-      } catch (error: any) {
-        conditionalLogger.warn('⚠️  Failed to enable real-time watching', { 
-          metadata: { error: error.message }
-        });
-      }
+    // Create and start lightweight stdio MCP server
+    const stdioServer = new LightweightStdioCortexMCPServer(repoPath, projectManager);
+    
+    // Test connection to centralized server
+    const embeddingClient = (stdioServer as any).embeddingClient;
+    const centralizedServerAvailable = await embeddingClient.testConnection();
+    
+    if (centralizedServerAvailable) {
+      conditionalLogger.ok('✅ Connected to centralized embedding server at localhost:8766');
+    } else {
+      conditionalLogger.warn('⚠️  Centralized embedding server not available - running in fallback mode');
     }
-
-    // Create and start stdio MCP server
-    const stdioServer = new StdioCortexMCPServer(indexer, searcher, projectManager);
+    
     await stdioServer.start();
 
     // Handle graceful shutdown
@@ -368,4 +378,4 @@ if (require.main === module) {
   });
 }
 
-export { StdioCortexMCPServer };
+export { LightweightStdioCortexMCPServer };
