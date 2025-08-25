@@ -69,15 +69,15 @@ node test-configuration-system.js               # Test configuration system with
 **Health Monitoring**: Available via `@cortex-multi_instance_health` and `@cortex-session_analysis`
 
 ### Quick Start (Working Now)
-**One-Command Installation:**
+**One-Command Global Installation:**
 ```bash
-claude mcp add cortex "node /home/yanggf/a/cortexyoung/cortex-multi-instance.js" --scope user
+claude mcp add cortex "/home/yanggf/a/cortexyoung/cortex-mcp.js" --scope user
 ```
 
 **Verify Connection:**
 ```bash
 claude mcp list
-# Shows: cortex: node /home/yanggf/a/cortexyoung/cortex-multi-instance.js - ✓ Multi-Instance Ready
+# Shows: cortex: /home/yanggf/a/cortexyoung/cortex-mcp.js - ✓ Connected
 ```
 
 **Start Using Immediately:**
@@ -105,8 +105,8 @@ claude mcp add cortex npx cortex-mcp --lightweight
 # 1. Remove old HTTP configuration
 claude mcp remove cortex
 
-# 2. Install new stdio version
-claude mcp add cortex npx cortex-mcp
+# 2. Install new global stdio version
+claude mcp add cortex "/home/yanggf/a/cortexyoung/cortex-mcp.js" --scope user
 
 # 3. Verify new installation
 claude mcp list
@@ -122,8 +122,8 @@ claude mcp list
 ```bash
 # OLD: HTTP transport (will be removed in future versions)
 claude mcp add --transport http cortex http://localhost:8765/mcp
-# NEW: stdio transport (recommended)
-claude mcp add cortex npx cortex-mcp
+# NEW: Global stdio transport (recommended and working)
+claude mcp add cortex "/home/yanggf/a/cortexyoung/cortex-mcp.js" --scope user
 ```
 
 ### Available MCP Tools
