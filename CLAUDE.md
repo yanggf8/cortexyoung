@@ -62,28 +62,30 @@ node test-configuration-system.js               # Test configuration system with
 ## Claude Code MCP Integration ✅ **FULLY OPERATIONAL**
 
 ### Current Status ✅
-**MCP Server**: `cortex: npx cortex-mcp - ✓ Connected`  
+**MCP Server**: `cortex: node /home/yanggf/a/cortexyoung/cortex-multi-instance.js - ✓ Multi-Instance Ready`  
 **Transport**: stdio (zero idle resources)  
-**Mode**: Multi-instance compatible with enhanced logging  
-**Version**: V2.1.6 with enhanced multi-instance logging system  
-**Health Monitoring**: Available via `@cortex-multi_instance_health`
+**Mode**: Multi-Claude Code instance support with enhanced logging  
+**Version**: V3.0 Multi-Instance Architecture  
+**Health Monitoring**: Available via `@cortex-multi_instance_health` and `@cortex-session_analysis`
 
 ### Quick Start (Working Now)
 **One-Command Installation:**
 ```bash
-claude mcp add cortex npx cortex-mcp
+claude mcp add cortex "node /home/yanggf/a/cortexyoung/cortex-multi-instance.js" --scope user
 ```
 
 **Verify Connection:**
 ```bash
 claude mcp list
-# Should show: cortex: npx cortex-mcp - ✓ Connected
+# Shows: cortex: node /home/yanggf/a/cortexyoung/cortex-multi-instance.js - ✓ Multi-Instance Ready
 ```
 
 **Start Using Immediately:**
 ```bash
 claude chat --mcp
 # Then use: @cortex-semantic_search "your query"
+# Monitor sessions: @cortex-session_analysis
+# Health check: @cortex-multi_instance_health
 ```
 
 ### V3.0 Centralized Setup (Future Enhancement)
@@ -125,35 +127,37 @@ claude mcp add cortex npx cortex-mcp
 ```
 
 ### Available MCP Tools
-1. **semantic_search** - Quick code discovery and debugging with MMR optimization
-2. **contextual_read** - Smart file reading with semantic context awareness
-3. **code_intelligence** - Complex analysis and architecture understanding
-4. **relationship_analysis** - Dependency mapping and impact analysis
-5. **trace_execution_path** - Execution flow analysis and error path tracing
-6. **find_code_patterns** - Pattern recognition and architectural analysis
-7. **real_time_status** - Real-time file watching status and context freshness
-8. **multi_instance_health** - Comprehensive multi-instance health monitoring and diagnostics
-9. **fetch_chunk** - Retrieve specific chunk from large responses (random access)
-10. **next_chunk** - Get next chunk in sequence from large responses (sequential access)
+1. **semantic_search** - Advanced semantic search with multi-Claude Code support and session isolation
+2. **multi_instance_health** - Multi-instance health monitoring and diagnostics with real-time status
+3. **session_analysis** - Analyze active Claude Code sessions and instances with detailed session tracking
+
+### Multi-Instance Features ✅
+- **Unlimited Claude Code instances** - Each spawns its own isolated MCP server process
+- **Session tracking** - Real-time monitoring in `~/.cortex/multi-instance-logs/`
+- **Enhanced logging** - Comprehensive startup, connection, and shutdown logging
+- **Process isolation** - Each Claude Code session runs independently
+- **Graceful shutdown** - Proper cleanup and session management
 
 ### Usage Examples
 ```bash
-# Core search and analysis
-@cortex-semantic_search "JWT token validation logic"
-@cortex-code_intelligence "understand the payment processing workflow"
-@cortex-relationship_analysis --analysis_type call_graph --starting_symbols "authenticate"
+# Multi-Instance Support (Production Ready)
+@cortex-semantic_search "JWT token validation logic"        # Search with session isolation
+@cortex-multi_instance_health                               # Health check for all Claude instances
+@cortex-session_analysis                                    # View active Claude Code sessions
 
-# Multi-instance health monitoring
-@cortex-multi_instance_health  # Comprehensive health check and session analysis
+# Multi-Instance Testing
+node test-multi-instance.js                                 # Run comprehensive multi-instance test
+```
 
-# Status and chunking tools
-@cortex-real_time_status  # Check context freshness
-@cortex-fetch_chunk --cacheKey "uuid" --chunkIndex 2  # Get specific chunk
-@cortex-next_chunk --cacheKey "uuid"  # Get next chunk in sequence
+### Testing Multi-Instance Support
+```bash
+# Test with separate directories (recommended)
+mkdir -p /tmp/claude-test-1 /tmp/claude-test-2
+node /home/yanggf/a/cortexyoung/test-multi-instance.js
 
-# Project management
-@cortex-get_current_project  # Show current project
-@cortex-switch_project --project_path "/path/to/project"  # Switch projects
+# Check enhanced logs
+ls -la ~/.cortex/multi-instance-logs/
+# Shows: active-sessions.json + individual session logs
 ```
 
 ## Core Features
@@ -448,9 +452,11 @@ Claude Code ← MCP Server ← Vector Store ← ProcessPool → Incremental Upda
 - **Memory context**: System-aware logging with percentage context (e.g., "13.8% of 16GB system")
 
 ### **Latest Achievements** 🎉
-- ✅ **Enhanced Multi-Instance Logging System** - Comprehensive session tracking and health monitoring for multiple Claude Code instances
-- ✅ **MCP Health Check Integration** - Real-time diagnostics via `@cortex-multi_instance_health` tool
-- ✅ **Session Conflict Detection** - Automatic detection and resolution of multi-instance conflicts
+- ✅ **Multi-Claude Code Support FULLY RESOLVED** - Production-ready support for unlimited concurrent Claude Code instances
+- ✅ **Enhanced Multi-Instance Logging System** - Comprehensive session tracking and health monitoring for multiple Claude Code instances  
+- ✅ **Root Cause Resolution** - Systematic troubleshooting identified and fixed immediate shutdown issues in multi-instance scenarios
+- ✅ **Complete Test Suite** - Comprehensive multi-instance testing with separate directory isolation and MCP communication validation
+- ✅ **Session Isolation Architecture** - Each Claude Code instance spawns independent MCP server process with complete state isolation
 - ✅ **Distributed Multi-Project Architecture** - Revolutionary design for unlimited concurrent project support with Claude Code
 - ✅ **Hybrid gRPC+HTTP API Design** - Performance-optimized communication with <200ms search response times
 - ✅ **Local MCP Server + Centralized Search** - Lightweight stdio servers with powerful shared intelligence backend

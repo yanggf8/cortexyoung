@@ -72,7 +72,7 @@ export class ContextEnhancementLayer {
       
       log('[ContextEnhancer] Context enhancement layer ready');
     } catch (error) {
-      error(`[ContextEnhancer] Failed to initialize: ${error.message}`);
+      console.error(`[ContextEnhancer] Failed to initialize: ${(error as Error).message}`);
       throw error;
     }
   }
@@ -116,7 +116,7 @@ export class ContextEnhancementLayer {
       };
       
     } catch (error) {
-      error(`[ContextEnhancer] Enhancement failed: ${error.message}`);
+      console.error(`[ContextEnhancer] Enhancement failed: ${(error as Error).message}`);
       
       // Fallback: return original results without enhancement
       return {
@@ -163,11 +163,11 @@ export class ContextEnhancementLayer {
       };
       
     } catch (error) {
-      error(`[ContextEnhancer] Code intelligence enhancement failed: ${error.message}`);
+      console.error(`[ContextEnhancer] Code intelligence enhancement failed: ${(error as Error).message}`);
       return {
         request,
         contextInjected: false,
-        error: error.message
+        error: (error as Error).message
       };
     }
   }
@@ -199,11 +199,11 @@ export class ContextEnhancementLayer {
       };
       
     } catch (error) {
-      error(`[ContextEnhancer] Relationship analysis enhancement failed: ${error.message}`);
+      console.error(`[ContextEnhancer] Relationship analysis enhancement failed: ${(error as Error).message}`);
       return {
         request,
         contextEnhanced: false,
-        error: error.message
+        error: (error as Error).message
       };
     }
   }
@@ -247,7 +247,7 @@ export class ContextEnhancementLayer {
           const content = fs.readFileSync(packageJsonPath, 'utf-8');
           packageJson = JSON.parse(content);
         } catch (error) {
-          warn(`[ContextEnhancer] Failed to parse package.json: ${error.message}`);
+          warn(`[ContextEnhancer] Failed to parse package.json: ${(error as Error).message}`);
         }
       }
 
@@ -276,7 +276,7 @@ export class ContextEnhancementLayer {
       };
 
     } catch (error) {
-      error(`[ContextEnhancer] Project analysis failed: ${error.message}`);
+      console.error(`[ContextEnhancer] Project analysis failed: ${(error as Error).message}`);
       return this.getDefaultContext();
     }
   }
@@ -341,7 +341,7 @@ export class ContextEnhancementLayer {
       return structure;
 
     } catch (error) {
-      warn(`[ContextEnhancer] Structure analysis failed: ${error.message}`);
+      warn(`[ContextEnhancer] Structure analysis failed: ${(error as Error).message}`);
       return structure;
     }
   }

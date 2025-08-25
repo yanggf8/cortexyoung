@@ -44,8 +44,16 @@
       "mcp__amazon-q-cli__ask_q",
       "mcp__rovodev__tap-rovodev",
       "mcp__amazon-q-cli__q_status",
-      "Bash(chmod:*)"
+      "Bash(chmod:*)",
+      "Bash(npm update:*)",
+      "Read(//home/yanggf/a/gemini-mcp-tool/src/**)",
+      "Read(//home/yanggf/a/gemini-mcp-tool/**)"
     ],
-    "deny": []
+    "deny": [],
+    "additionalDirectories": [
+      "/home/yanggf/.cortex/multi-instance-logs",
+      "/tmp/claude-test-1",
+      "/home/yanggf"
+    ]
   }
 }
