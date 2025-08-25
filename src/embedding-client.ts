@@ -216,7 +216,7 @@ export class EmbeddingClient {
       const response = await this.healthCheck();
       return response.success;
     } catch (error) {
-      warn(`[EmbeddingClient] Connection test failed: ${error.message}`);
+      warn(`[EmbeddingClient] Connection test failed: ${error instanceof Error ? error.message : String(error)}`);
       return false;
     }
   }
@@ -285,11 +285,11 @@ export class EmbeddingClient {
 
         if (attempt >= maxRetries) {
           const processingTime = Date.now() - startTime;
-          error(`[EmbeddingClient] Request failed after ${maxRetries} attempts: ${error.message}`);
+          error(`[EmbeddingClient] Request failed after ${maxRetries} attempts: ${error instanceof Error ? error.message : String(error)}`);
           
           return {
             success: false,
-            error: error.message,
+            error: error instanceof Error ? error.message : String(error),
             metadata: {
               processingTime,
               contextEnhanced: false,
@@ -315,7 +315,7 @@ export class EmbeddingClient {
       (config) => {
         // Add request ID for tracking
         config.headers['X-Request-Id'] = this.generateRequestId();
-        config.metadata = { startTime: Date.now() };
+        (config as any).metadata = { startTime: Date.now() };
         return config;
       },
       (error) => Promise.reject(error)

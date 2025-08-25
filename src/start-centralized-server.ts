@@ -93,11 +93,11 @@ async function startCentralizedServer(): Promise<void> {
     log(`[StartupScript]   Process: ${process.pid}`);
 
   } catch (err) {
-    error(`[StartupScript] Failed to start centralized server: ${err.message}`);
+    error(`[StartupScript] Failed to start centralized server: ${err instanceof Error ? err.message : String(err)}`);
     console.error(`
 ❌ Failed to Start Cortex V3.0 Centralized Server
 
-Error: ${err.message}
+Error: ${err instanceof Error ? err.message : String(err)}
 
 Common Issues:
   • Port ${process.env.CORTEX_EMBEDDING_SERVER_PORT || '8766'} already in use

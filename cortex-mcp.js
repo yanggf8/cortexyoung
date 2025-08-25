@@ -57,34 +57,10 @@ async function main() {
     const stdioServerPath = path.join(__dirname, 'src', 'stdio-server.ts');
     const tsNodePath = path.join(__dirname, 'node_modules', '.bin', 'ts-node');
     
-    // Check if we're in development (source available) or production (compiled)
-    const isDev = fs.existsSync(path.join(__dirname, 'src'));
+    // Always use compiled JS version to avoid TypeScript errors
+    const distPath = path.join(__dirname, 'dist', 'stdio-server.js');
     
-    if (isDev && fs.existsSync(tsNodePath)) {
-      // Development mode - use ts-node
-      const child = spawn(tsNodePath, [stdioServerPath, repoPath, ...process.argv.slice(2)], {
-        stdio: 'inherit',
-        env: { 
-          ...process.env,
-          CORTEX_REPO_PATH: repoPath,
-          CORTEX_ENABLE_NEW_LOGGING: 'true'
-        }
-      });
-      
-      child.on('error', (error) => {
-        console.error(`[Cortex] Error starting server: ${error.message}`);
-        process.exit(1);
-      });
-      
-      child.on('exit', (code) => {
-        process.exit(code || 0);
-      });
-      
-    } else {
-      // Production mode - use compiled JS
-      const distPath = path.join(__dirname, 'dist', 'stdio-server.js');
-      
-      if (fs.existsSync(distPath)) {
+    if (fs.existsSync(distPath)) {
         const child = spawn('node', [distPath, repoPath, ...process.argv.slice(2)], {
           stdio: 'inherit',
           env: { 
@@ -101,10 +77,9 @@ async function main() {
         child.on('exit', (code) => {
           process.exit(code || 0);
         });
-      } else {
-        console.error('[Cortex] Error: Compiled server not found. Run npm run build first.');
-        process.exit(1);
-      }
+    } else {
+      console.error('[Cortex] Error: Compiled server not found. Run npm run build first.');
+      process.exit(1);
     }
   } catch (error) {
     console.error(`[Cortex] Error starting server: ${error.message}`);
