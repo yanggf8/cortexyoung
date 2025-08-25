@@ -52,7 +52,6 @@
     "deny": [],
     "additionalDirectories": [
       "/home/yanggf/.cortex/multi-instance-logs",
-      "/tmp/claude-test-1",
       "/home/yanggf"
     ]
   }
