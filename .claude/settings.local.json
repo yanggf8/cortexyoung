@@ -47,7 +47,8 @@
       "Bash(chmod:*)",
       "Bash(npm update:*)",
       "Read(//home/yanggf/a/gemini-mcp-tool/src/**)",
-      "Read(//home/yanggf/a/gemini-mcp-tool/**)"
+      "Read(//home/yanggf/a/gemini-mcp-tool/**)",
+      "Bash(git push:*)"
     ],
     "deny": [],
     "additionalDirectories": [
