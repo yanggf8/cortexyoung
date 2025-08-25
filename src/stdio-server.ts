@@ -99,18 +99,23 @@ class LightweightStdioCortexMCPServer {
    * Initialize health checking for centralized server connection
    */
   private initializeHealthChecking(): void {
-    this.healthCheckInterval = setInterval(async () => {
-      try {
-        const isHealthy = await this.embeddingClient.testConnection();
-        if (!isHealthy && !this.fallbackMode) {
-          this.fallbackMode = true;
-        } else if (isHealthy && this.fallbackMode) {
-          this.fallbackMode = false;
+    // Skip health checking in multi-instance mode to prevent conflicts
+    const skipHealthCheck = process.env.MCP_MULTI_INSTANCE || process.env.CORTEX_SKIP_HEALTH_CHECK;
+    
+    if (!skipHealthCheck) {
+      this.healthCheckInterval = setInterval(async () => {
+        try {
+          const isHealthy = await this.embeddingClient.testConnection();
+          if (!isHealthy && !this.fallbackMode) {
+            this.fallbackMode = true;
+          } else if (isHealthy && this.fallbackMode) {
+            this.fallbackMode = false;
+          }
+        } catch (error) {
+          // Ignore health check errors
         }
-      } catch (error) {
-        // Ignore health check errors
-      }
-    }, 30000);
+      }, 30000);
+    }
   }
 
   /**
@@ -300,8 +305,14 @@ const repoPath = process.argv.find(arg => !arg.startsWith('--') && !arg.includes
 
 // Main startup function for stdio server
 async function main() {
-  // Clean up orphaned processes from previous crashed sessions
-  await cleanupOrphanedProcesses();
+  // Skip cleanup if multiple instances might be running
+  // This prevents conflicts when multiple Claude Code instances start simultaneously
+  const skipCleanup = process.env.CORTEX_SKIP_CLEANUP || process.env.MCP_MULTI_INSTANCE;
+  
+  if (!skipCleanup) {
+    // Clean up orphaned processes from previous crashed sessions
+    await cleanupOrphanedProcesses();
+  }
   
   try {
     // Startup metadata header

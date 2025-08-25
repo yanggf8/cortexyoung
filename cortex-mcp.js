@@ -57,15 +57,19 @@ async function main() {
     const stdioServerPath = path.join(__dirname, 'src', 'stdio-server.ts');
     const tsNodePath = path.join(__dirname, 'node_modules', '.bin', 'ts-node');
     
-    // Always use compiled JS version to avoid TypeScript errors
-    const distPath = path.join(__dirname, 'dist', 'stdio-server.js');
+    // Check for simple stdio server first, fallback to regular stdio server
+    const simpleDistPath = path.join(__dirname, 'dist', 'simple-stdio-server.js');
+    const regularDistPath = path.join(__dirname, 'dist', 'stdio-server.js');
+    const distPath = fs.existsSync(simpleDistPath) ? simpleDistPath : regularDistPath;
     
     if (fs.existsSync(distPath)) {
         const child = spawn('node', [distPath, repoPath, ...process.argv.slice(2)], {
           stdio: 'inherit',
           env: { 
             ...process.env,
-            CORTEX_REPO_PATH: repoPath
+            CORTEX_REPO_PATH: repoPath,
+            MCP_MULTI_INSTANCE: 'true',
+            CORTEX_SKIP_CLEANUP: 'true'
           }
         });
         
