@@ -423,9 +423,7 @@ Status: ${status.processPool.activeProcesses > 0 ? '✅ OPERATIONAL' : '⚠️  
         log(`[CortexEmbeddingServer] Status: http://localhost:${this.port}/status`);
       });
 
-      // Graceful shutdown handling
-      process.on('SIGINT', this.shutdown.bind(this));
-      process.on('SIGTERM', this.shutdown.bind(this));
+      // Note: Signal handlers are managed by startup script for proper cleanup coordination
 
     } catch (err) {
       error('Failed to start Cortex Embedding Server', { error: err });
@@ -490,7 +488,7 @@ Status: ${status.processPool.activeProcesses > 0 ? '✅ OPERATIONAL' : '⚠️  
     return this.processPool.getMetrics();
   }
 
-  private async shutdown(): Promise<void> {
+  async shutdown(): Promise<void> {
     log('[CortexEmbeddingServer] Shutting down gracefully...');
     
     try {
@@ -511,11 +509,10 @@ Status: ${status.processPool.activeProcesses > 0 ? '✅ OPERATIONAL' : '⚠️  
       }
       
       log('[CortexEmbeddingServer] Graceful shutdown complete');
-      process.exit(0);
       
     } catch (err) {
       error('[CortexEmbeddingServer] Error during shutdown:', err);
-      process.exit(1);
+      throw err;
     }
   }
 }

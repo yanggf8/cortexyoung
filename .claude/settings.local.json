@@ -48,7 +48,8 @@
       "Bash(npm update:*)",
       "Read(//home/yanggf/a/gemini-mcp-tool/src/**)",
       "Read(//home/yanggf/a/gemini-mcp-tool/**)",
-      "Bash(git push:*)"
+      "Bash(git push:*)",
+      "Bash(cat:*)"
     ],
     "deny": [],
     "additionalDirectories": [
