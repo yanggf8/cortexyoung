@@ -31,6 +31,8 @@ import {
 // Import utilities
 import { conditionalLogger } from './utils/console-logger';
 import { cortexConfig } from './env-config';
+import { getMultiInstanceLogger } from './multi-instance-logger';
+import { MCPHealthChecker } from './mcp-health-tools';
 import * as os from 'os';
 import { execSync } from 'child_process';
 import * as fs from 'fs';
@@ -64,11 +66,21 @@ class LightweightStdioCortexMCPServer {
   private localCache: Map<string, { data: any; timestamp: number; ttl: number }> = new Map();
   private fallbackMode: boolean = false;
   private healthCheckInterval: NodeJS.Timeout | null = null;
+  private logger: ReturnType<typeof getMultiInstanceLogger>;
 
   constructor(
     projectPath: string,
     projectManager: ProjectManager
   ) {
+    // Initialize multi-instance logger
+    this.logger = getMultiInstanceLogger(projectPath);
+    this.logger.logActivity('INIT', 'Initializing Lightweight Stdio Cortex MCP Server', {
+      projectPath,
+      pid: process.pid,
+      parentPid: process.ppid,
+      multiInstanceMode: !!process.env.MCP_MULTI_INSTANCE
+    });
+
     // Create MCP server
     this.server = new Server(
       {
@@ -103,18 +115,26 @@ class LightweightStdioCortexMCPServer {
     const skipHealthCheck = process.env.MCP_MULTI_INSTANCE || process.env.CORTEX_SKIP_HEALTH_CHECK;
     
     if (!skipHealthCheck) {
+      this.logger.logActivity('HEALTH_CHECK', 'Starting health check monitoring (30s interval)');
+      
       this.healthCheckInterval = setInterval(async () => {
         try {
           const isHealthy = await this.embeddingClient.testConnection();
+          this.logger.logHealthCheck(isHealthy);
+          
           if (!isHealthy && !this.fallbackMode) {
             this.fallbackMode = true;
+            this.logger.logActivity('MODE_CHANGE', 'Switched to fallback mode');
           } else if (isHealthy && this.fallbackMode) {
             this.fallbackMode = false;
+            this.logger.logActivity('MODE_CHANGE', 'Switched to centralized mode');
           }
         } catch (error) {
-          // Ignore health check errors
+          this.logger.logHealthCheck(false, error instanceof Error ? error.message : String(error));
         }
       }, 30000);
+    } else {
+      this.logger.logActivity('HEALTH_CHECK', 'Health check monitoring disabled (multi-instance mode)');
     }
   }
 
@@ -174,6 +194,19 @@ class LightweightStdioCortexMCPServer {
     this.handlers.set('list_available_projects', new ListAvailableProjectsHandler(this.projectManager));
     this.handlers.set('switch_project', new SwitchProjectHandler(this.projectManager));
     this.handlers.set('add_project', new AddProjectHandler(this.projectManager));
+    
+    // Multi-instance health check handler
+    this.handlers.set('multi_instance_health', {
+      handle: async (args: any) => {
+        try {
+          this.logger.logActivity('HEALTH_CHECK_REQUEST', 'Multi-instance health check requested');
+          return await MCPHealthChecker.handleHealthCheckTool(args);
+        } catch (error) {
+          this.logger.logActivity('ERROR', 'Health check failed', { error: error instanceof Error ? error.message : String(error) });
+          throw error;
+        }
+      }
+    });
   }
 
   private setupEventHandlers(): void {
@@ -235,6 +268,8 @@ class LightweightStdioCortexMCPServer {
   }
 
   async start(): Promise<void> {
+    const startTime = Date.now();
+    
     conditionalLogger.ready('🚀 Cortex MCP Server (stdio) Starting...', {
       metadata: {
         version: getVersion(),
@@ -245,20 +280,35 @@ class LightweightStdioCortexMCPServer {
       }
     });
 
-    // Create stdio transport and connect
-    const transport = new StdioServerTransport();
-    await this.server.connect(transport);
-    
-    conditionalLogger.ok('✅ Cortex MCP Server (stdio) Connected and Ready');
+    this.logger.logActivity('MCP_START', 'Starting MCP server connection');
+
+    try {
+      // Create stdio transport and connect
+      const transport = new StdioServerTransport();
+      await this.server.connect(transport);
+      
+      const startupTime = Date.now() - startTime;
+      this.logger.updateStatus('ready');
+      this.logger.logActivity('MCP_READY', `MCP server connected successfully`, { startupTimeMs: startupTime });
+      
+      conditionalLogger.ok('✅ Cortex MCP Server (stdio) Connected and Ready');
+    } catch (error) {
+      this.logger.updateStatus('error');
+      this.logger.logActivity('ERROR', 'Failed to start MCP server', { error: error instanceof Error ? error.message : String(error) });
+      throw error;
+    }
   }
 
   async stop(): Promise<void> {
     conditionalLogger.start('🛑 Shutting down Lightweight Cortex MCP Server (stdio)');
     
+    this.logger.logActivity('MCP_STOP', 'Shutting down MCP server');
+    
     // Clear health check interval
     if (this.healthCheckInterval) {
       clearInterval(this.healthCheckInterval);
       this.healthCheckInterval = null;
+      this.logger.logActivity('HEALTH_CHECK', 'Health check monitoring stopped');
     }
     
     // Clear cache
@@ -266,6 +316,8 @@ class LightweightStdioCortexMCPServer {
 
     // Close server connection
     this.server.close();
+    this.logger.updateStatus('disconnected');
+    
     conditionalLogger.ok('✅ Lightweight Cortex MCP Server (stdio) Stopped');
   }
 }

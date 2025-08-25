@@ -412,6 +412,16 @@ export const CORTEX_TOOLS = {
       },
       required: ['project_path']
     }
+  },
+
+  multi_instance_health: {
+    name: 'multi_instance_health',
+    description: 'HEALTH CHECK: Multi-instance health monitoring and diagnostics. WHEN TO USE: When experiencing MCP connection issues, multiple Claude Code instances, or need to diagnose startup problems. Provides comprehensive health status of all active Cortex MCP instances, session conflicts, resource usage, and troubleshooting recommendations. Essential for debugging multi-instance connection failures.',
+    inputSchema: {
+      type: 'object',
+      properties: {},
+      required: []
+    }
   }
 } as const;
 

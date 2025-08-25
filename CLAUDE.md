@@ -52,7 +52,9 @@ npm run test:cpu-memory         # Test CPU + memory adaptive scaling
 npm run test:cleanup           # Test process cleanup
 npm run benchmark             # Performance benchmarking
 
-# Enhanced Logging System Testing
+# Enhanced Multi-Instance Logging & Debugging
+node inject-logging.js                          # Inject enhanced logging into compiled server
+node enhanced-debug-cortex-mcp.js              # Run comprehensive multi-instance debug test
 CORTEX_ENABLE_NEW_LOGGING=true npm run demo    # Test enhanced logging with demo
 node test-configuration-system.js               # Test configuration system with all profiles
 ```
@@ -62,8 +64,9 @@ node test-configuration-system.js               # Test configuration system with
 ### Current Status ✅
 **MCP Server**: `cortex: npx cortex-mcp - ✓ Connected`  
 **Transport**: stdio (zero idle resources)  
-**Mode**: Fallback/Standalone (local processing)  
-**Version**: V2.1.6 with compiled JavaScript bypass
+**Mode**: Multi-instance compatible with enhanced logging  
+**Version**: V2.1.6 with enhanced multi-instance logging system  
+**Health Monitoring**: Available via `@cortex-multi_instance_health`
 
 ### Quick Start (Working Now)
 **One-Command Installation:**
@@ -129,8 +132,9 @@ claude mcp add cortex npx cortex-mcp
 5. **trace_execution_path** - Execution flow analysis and error path tracing
 6. **find_code_patterns** - Pattern recognition and architectural analysis
 7. **real_time_status** - Real-time file watching status and context freshness
-8. **fetch_chunk** - Retrieve specific chunk from large responses (random access)
-9. **next_chunk** - Get next chunk in sequence from large responses (sequential access)
+8. **multi_instance_health** - Comprehensive multi-instance health monitoring and diagnostics
+9. **fetch_chunk** - Retrieve specific chunk from large responses (random access)
+10. **next_chunk** - Get next chunk in sequence from large responses (sequential access)
 
 ### Usage Examples
 ```bash
@@ -138,6 +142,9 @@ claude mcp add cortex npx cortex-mcp
 @cortex-semantic_search "JWT token validation logic"
 @cortex-code_intelligence "understand the payment processing workflow"
 @cortex-relationship_analysis --analysis_type call_graph --starting_symbols "authenticate"
+
+# Multi-instance health monitoring
+@cortex-multi_instance_health  # Comprehensive health check and session analysis
 
 # Status and chunking tools
 @cortex-real_time_status  # Check context freshness
@@ -221,6 +228,33 @@ DEBUG=true CORTEX_ENABLE_NEW_LOGGING=true npm run server           # Debug profi
 - **4 Themes**: Enhanced visual output with colors and emojis
 - **Advanced Data Formatters**: JSON, tables, progress bars, boxes
 - **Environment Intelligence**: Auto-detection of NODE_ENV, CI, DEBUG flags
+
+### 🔍 Multi-Instance Logging & Health Monitoring
+Advanced session tracking and health monitoring for multiple Claude Code instances:
+
+```bash
+# Enhanced Multi-Instance Logging
+node inject-logging.js                    # Inject logging into compiled server
+node enhanced-debug-cortex-mcp.js        # Comprehensive debug analysis
+@cortex-multi_instance_health             # MCP health check tool
+```
+
+**Key Features**:
+- **Session Tracking**: Individual logs per Cortex instance with unique session IDs
+- **Health Monitoring**: Automatic health check logging and status tracking
+- **Claude Detection**: Identifies parent Claude Code processes and PIDs
+- **Environment Detection**: Detects multi-instance mode and configuration flags
+- **Conflict Resolution**: Identifies and reports session conflicts between instances
+- **Structured Logging**: JSON format logs with timestamps and metadata
+
+**Log Files Location**: `~/.cortex/multi-instance-logs/`
+- `active-sessions.json` - Live session registry
+- `cortex-[sessionId].log` - Individual session logs with startup/shutdown tracking
+
+**Multi-Instance Environment Variables**:
+- `MCP_MULTI_INSTANCE=true` - Enable multi-instance compatibility mode
+- `CORTEX_SKIP_CLEANUP=true` - Skip orphaned process cleanup to prevent conflicts
+- `CORTEX_SKIP_HEALTH_CHECK=true` - Disable health check monitoring
 
 ## Embedding Strategy Architecture
 
@@ -414,11 +448,13 @@ Claude Code ← MCP Server ← Vector Store ← ProcessPool → Incremental Upda
 - **Memory context**: System-aware logging with percentage context (e.g., "13.8% of 16GB system")
 
 ### **Latest Achievements** 🎉
+- ✅ **Enhanced Multi-Instance Logging System** - Comprehensive session tracking and health monitoring for multiple Claude Code instances
+- ✅ **MCP Health Check Integration** - Real-time diagnostics via `@cortex-multi_instance_health` tool
+- ✅ **Session Conflict Detection** - Automatic detection and resolution of multi-instance conflicts
 - ✅ **Distributed Multi-Project Architecture** - Revolutionary design for unlimited concurrent project support with Claude Code
 - ✅ **Hybrid gRPC+HTTP API Design** - Performance-optimized communication with <200ms search response times
 - ✅ **Local MCP Server + Centralized Search** - Lightweight stdio servers with powerful shared intelligence backend
-- ✅ **Production-Ready Architecture Plan** - Comprehensive solution incorporating expert review and best practices
-- ✅ **Complete MCP Testing Validation** - All 9 MCP tools comprehensively tested and verified working perfectly with ultra-minimal responses
+- ✅ **Complete MCP Testing Validation** - All 10 MCP tools comprehensively tested and verified working perfectly with ultra-minimal responses
 - ✅ **Ultra-Minimal MCP Responses** - ~95% size reduction while keeping 100% actionable information - no embeddings, no metadata bloat
 - ✅ **Intelligent Response Chunking** - Automatic large response handling with fetch_chunk and next_chunk tools (fixes token limit issues)
 - ✅ **Perfect Parameter Respect** - max_chunks and all parameters properly honored (request 3 chunks, get exactly 3 chunks)
