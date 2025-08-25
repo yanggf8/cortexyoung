@@ -247,7 +247,7 @@ class CortexMultiInstanceServer {
   }
 
   handleSemanticSearch(args) {
-    const query = args?.query || 'test';
+    const query = args?.query || 'search query';
     const maxChunks = args?.max_chunks || 5;
     
     return `## Multi-Instance Semantic Search: "${query}"

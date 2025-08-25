@@ -145,19 +145,18 @@ claude mcp add cortex "/home/yanggf/a/cortexyoung/cortex-mcp.js" --scope user
 @cortex-multi_instance_health                               # Health check for all Claude instances
 @cortex-session_analysis                                    # View active Claude Code sessions
 
-# Multi-Instance Testing
-node test-multi-instance.js                                 # Run comprehensive multi-instance test
+# Multi-Instance Testing (for development only)
+# node test-multi-instance.js                              # Developer test script
 ```
 
 ### Testing Multi-Instance Support
 ```bash
-# Test with separate directories (recommended)
-mkdir -p /tmp/claude-test-1 /tmp/claude-test-2
-node /home/yanggf/a/cortexyoung/test-multi-instance.js
-
 # Check enhanced logs
 ls -la ~/.cortex/multi-instance-logs/
 # Shows: active-sessions.json + individual session logs
+
+# Monitor real-time session activity  
+tail -f ~/.cortex/multi-instance-logs/cortex-*.log
 ```
 
 ## Core Features
@@ -452,6 +451,7 @@ Claude Code ← MCP Server ← Vector Store ← ProcessPool → Incremental Upda
 - **Memory context**: System-aware logging with percentage context (e.g., "13.8% of 16GB system")
 
 ### **Latest Achievements** 🎉
+- ✅ **Production Server Cleanup** - Removed all test references from MCP servers for clean startup messages
 - ✅ **Multi-Claude Code Support FULLY RESOLVED** - Production-ready support for unlimited concurrent Claude Code instances
 - ✅ **Enhanced Multi-Instance Logging System** - Comprehensive session tracking and health monitoring for multiple Claude Code instances  
 - ✅ **Root Cause Resolution** - Systematic troubleshooting identified and fixed immediate shutdown issues in multi-instance scenarios
