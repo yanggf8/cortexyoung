@@ -247,7 +247,7 @@ class CortexMultiInstanceServer {
   }
 
   handleSemanticSearch(args) {
-    const query = args?.query || 'test';
+    const query = args?.query || 'search query';
     const maxChunks = args?.max_chunks || 5;
     
     return `## Multi-Instance Semantic Search: "${query}"
@@ -384,8 +384,9 @@ If a second Claude Code fails to connect:
 
     // Monitor stdin/stdout for unexpected closure
     process.stdin.on('end', () => {
-      this.logger.logToFile('STDIN_END: stdin stream ended - this is normal when no MCP client is connected');
-      // Don't exit immediately - let the server stay alive for potential reconnections
+      this.logger.logToFile('STDIN_END: stdin stream ended - Claude Code disconnected, shutting down');
+      this.logger.cleanup();
+      process.exit(0);
     });
     
     process.stdin.on('error', (error) => {

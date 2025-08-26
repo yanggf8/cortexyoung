@@ -49,12 +49,13 @@
       "Read(//home/yanggf/a/gemini-mcp-tool/src/**)",
       "Read(//home/yanggf/a/gemini-mcp-tool/**)",
       "Bash(npm link:*)",
-      "Bash(npx cortex-mcp:*)"
+      "Bash(npx cortex-mcp:*)",
+      "Bash(git push:*)",
+      "Bash(cat:*)"
     ],
     "deny": [],
     "additionalDirectories": [
       "/home/yanggf/.cortex/multi-instance-logs",
-      "/tmp/claude-test-1",
       "/home/yanggf"
     ]
   }
