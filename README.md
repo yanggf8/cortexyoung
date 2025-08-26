@@ -48,6 +48,7 @@ User Query → Git Scanner/Chunker → Local Embeddings → Vector DB
 - **👀 Smart File Watching**: Real-time code intelligence updates with semantic change detection ✅ **IMPLEMENTED**
 - **🗂️ Dual-Mode File Tracking**: Git-tracked files processed directly, untracked files via intelligent staging ✅ **IMPLEMENTED**
 - **🔗 Smart Dependency Chains**: Context window optimization with automatic inclusion of complete function call graphs and dependency context ✅ **IMPLEMENTED**
+- **🎯 Enhanced Predictive Hysteresis**: Two-step lookahead with trend dampening prevents resource threshold oscillation - CPU 20% gap (69%→49%), Memory 9% gap (78%→69%) with automatic validation ✅ **IMPLEMENTED**
 
 ## Project Structure
 
@@ -127,6 +128,16 @@ npm run demo
 **Subsequent runs**: Uses cached model for instant startup
 
 ### Bug Fixes
+
+**v2.1.9 - Enhanced Predictive Hysteresis System** 🆕
+- **🎯 Two-Step Predictive Lookahead**: Enhanced prediction algorithm with weighted trend analysis using last 4 data points instead of 3
+- **🛡️ Trend Dampening**: Aggressive trends (>5%) dampened by 25% to prevent over-prediction and oscillation
+- **⚖️ Robust Hysteresis Validation**: Automatic validation of hysteresis gaps during initialization with warnings for gaps <10%
+- **🔄 Dual-Constraint Logic**: Enhanced STOP/RESUME conditions - STOP on current OR step1 prediction, RESUME only when current AND step2 prediction both safe
+- **📊 Enhanced Logging**: Detailed hysteresis status tracking with gap information, constraint states (CONSTRAINED/FREE), and prediction values
+- **🎛️ Optimized Thresholds**: CPU hysteresis 20% gap (69%→49%) excellent, Memory hysteresis 9% gap (78%→69%) with oscillation warning
+- **🧠 Intelligent Step2 Dampening**: Second prediction step dampened by 20% for additional stability in resource forecasting
+- **⚡ Production Validation**: Tested with 11 processes, 85ms graceful shutdown, prevents oscillation between resource thresholds
 
 **v2.1.8 - Centralized Storage Architecture & Compression** 🆕
 - **🏗️ Centralized Storage Constants**: New `storage-constants.ts` module for unified storage path management across all components
@@ -296,6 +307,7 @@ All server activity is logged to both console and file:
 - 🎯 **Zero orphaned processes** guaranteed through signal cascade system
 - 🎯 **Real-time CPU + memory monitoring** every 15 seconds
 - 🎯 **Intelligent embedding cache** with 95-98% performance improvement
+- 🎯 **Enhanced predictive hysteresis** with 20% CPU gap and 9% memory gap preventing oscillation
 
 ### File Watching Performance
 - 🎯 **Real-time updates**: File changes processed within seconds of semantic changes

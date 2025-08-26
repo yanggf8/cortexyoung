@@ -532,29 +532,62 @@ export class ProcessPoolEmbedder implements IEmbedder {
     return false; // Default to local environment
   }
 
-  // Predict resource usage for next 2 steps based on current trends
+  // Validate hysteresis gaps to prevent oscillation
+  private validateHysteresisGaps(): void {
+    const cpuGap = this.adaptivePool.cpuStopThreshold - this.adaptivePool.cpuResumeThreshold;
+    const memoryGap = this.adaptivePool.memoryStopThreshold - this.adaptivePool.memoryResumeThreshold;
+    
+    // Minimum recommended gap is 10% to prevent oscillation
+    const minRecommendedGap = 10;
+    
+    if (cpuGap < minRecommendedGap) {
+      warn(`[ProcessPool] CPU hysteresis gap ${cpuGap}% is below recommended ${minRecommendedGap}% - may cause oscillation`);
+    } else {
+      log(`[ProcessPool] CPU hysteresis gap ${cpuGap}% is sufficient (stop=${this.adaptivePool.cpuStopThreshold}% resume=${this.adaptivePool.cpuResumeThreshold}%)`);
+    }
+    
+    if (memoryGap < minRecommendedGap) {
+      warn(`[ProcessPool] Memory hysteresis gap ${memoryGap}% is below recommended ${minRecommendedGap}% - may cause oscillation`);
+    } else {
+      log(`[ProcessPool] Memory hysteresis gap ${memoryGap}% is sufficient (stop=${this.adaptivePool.memoryStopThreshold}% resume=${this.adaptivePool.memoryResumeThreshold}%)`);
+    }
+  }
+
+  // Enhanced predictive resource usage with improved two-step lookahead and hysteresis
   private predictResourceUsage(history: number[], currentUsage: number): { step1: number, step2: number } {
     if (history.length < 2) {
-      // Not enough history, assume current usage continues
+      // Not enough history, assume current usage continues (conservative)
       return { step1: currentUsage, step2: currentUsage };
     }
     
-    // Calculate trend from recent history
-    const recentHistory = history.slice(-3); // Use last 3 data points
+    // Calculate trend from recent history with weighted average
+    const recentHistory = history.slice(-4); // Use last 4 data points for better trend analysis
     let trend = 0;
     
     if (recentHistory.length >= 2) {
-      // Calculate average rate of change
+      // Calculate weighted average rate of change (more recent changes have higher weight)
       let totalChange = 0;
+      let totalWeight = 0;
+      
       for (let i = 1; i < recentHistory.length; i++) {
-        totalChange += recentHistory[i] - recentHistory[i-1];
+        const change = recentHistory[i] - recentHistory[i-1];
+        const weight = i; // More recent changes get higher weight
+        totalChange += change * weight;
+        totalWeight += weight;
       }
-      trend = totalChange / (recentHistory.length - 1);
+      
+      trend = totalWeight > 0 ? totalChange / totalWeight : 0;
+      
+      // Apply trend dampening to prevent over-prediction (hysteresis stability)
+      // Dampen aggressive trends by 25% to prevent oscillation
+      if (Math.abs(trend) > 5) { // Only dampen significant trends
+        trend *= 0.75;
+      }
     }
     
-    // Predict next two steps
+    // Predict next two steps with conservative bounds
     const step1 = Math.max(0, Math.min(100, currentUsage + trend));
-    const step2 = Math.max(0, Math.min(100, step1 + trend));
+    const step2 = Math.max(0, Math.min(100, step1 + (trend * 0.8))); // Slightly dampen step2 for stability
     
     return { step1, step2 };
   }
@@ -641,6 +674,9 @@ export class ProcessPoolEmbedder implements IEmbedder {
     log(`   CPU Thresholds: Stop at ${this.adaptivePool.cpuStopThreshold}%, Resume at ${this.adaptivePool.cpuResumeThreshold}%`);
     log(`   Growth Strategy: ${isCloud ? 'Multi-process start → Fast scaling' : 'Single process → 2-step prediction → Conservative scaling'}`);
     log(`✅ Strategy: ${isCloud ? 'Cloud-optimized' : 'Local-optimized'} process pool with predictive resource management`);
+    
+    // Validate hysteresis gaps to prevent oscillation
+    this.validateHysteresisGaps();
     
     // Initialize adaptive batching system (will be updated with accurate reading)
     this.systemMemoryMB = Math.round(os.totalmem() / (1024 * 1024));
@@ -735,47 +771,54 @@ export class ProcessPoolEmbedder implements IEmbedder {
       log(`[ProcessPool] Memory used=${memInfo.usedMB}MB total=${memInfo.totalMB}MB usage=${memInfo.usagePercent.toFixed(1)}%`);
       log(`[ProcessPool] CPU usage=${cpuInfo.usagePercent.toFixed(1)}% cores=${cpuInfo.coreCount} load=${cpuInfo.loadAverage1min.toFixed(2)}`);
       
-      // Show 2-step predictions for both CPU and memory
+      // Show 2-step predictions for both CPU and memory with hysteresis status
       if (this.adaptivePool.isLocal) {
         log(`[ProcessPool] 2-Step predictions:`);
         log(`[ProcessPool] CPU prediction current=${cpuInfo.usagePercent.toFixed(1)}% step1=${cpuPrediction.step1.toFixed(1)}% step2=${cpuPrediction.step2.toFixed(1)}%`);
         log(`[ProcessPool] Memory prediction current=${memInfo.usagePercent.toFixed(1)}% step1=${memoryPrediction.step1.toFixed(1)}% step2=${memoryPrediction.step2.toFixed(1)}%`);
+        log(`[ProcessPool] Hysteresis status: CPU=${this.adaptivePool.isCpuConstrained ? 'CONSTRAINED' : 'FREE'} Memory=${this.adaptivePool.isMemoryConstrained ? 'CONSTRAINED' : 'FREE'}`);
       }
       
       // Local environment: Conservative scaling with prediction-based surge protection
       if (this.adaptivePool.isLocal) {
         
-        // CPU surge protection: Stop at 69%, resume at 59%
+        // Enhanced CPU surge protection with two-step prediction and hysteresis
+        // STOP condition: Current OR step1 prediction exceeds threshold (69%)
         if (cpuInfo.usagePercent >= this.adaptivePool.cpuStopThreshold || cpuPrediction.step1 >= this.adaptivePool.cpuStopThreshold) {
           if (!this.adaptivePool.isCpuConstrained) {
             const reason = cpuInfo.usagePercent >= this.adaptivePool.cpuStopThreshold ? 
               `Current ${cpuInfo.usagePercent.toFixed(1)}%` : 
-              `Predicted ${cpuPrediction.step1.toFixed(1)}%`;
-            warn(`[ProcessPool] CPU surge protection activated ${reason}>=${this.adaptivePool.cpuStopThreshold}% stopping_growth=true`);
+              `Predicted step1 ${cpuPrediction.step1.toFixed(1)}%`;
+            warn(`[ProcessPool] CPU surge protection activated ${reason}>=${this.adaptivePool.cpuStopThreshold}% stopping_growth=true hysteresis_gap=${this.adaptivePool.cpuStopThreshold - this.adaptivePool.cpuResumeThreshold}%`);
             this.adaptivePool.isCpuConstrained = true;
             this.adaptivePool.growthPhase = 'constrained';
           }
-        } else if (cpuInfo.usagePercent <= this.adaptivePool.cpuResumeThreshold && 
-                   cpuPrediction.step2 <= this.adaptivePool.cpuResumeThreshold && 
-                   this.adaptivePool.isCpuConstrained) {
-          log(`[ProcessPool] CPU surge protection deactivated usage=${cpuInfo.usagePercent.toFixed(1)}% threshold=${this.adaptivePool.cpuResumeThreshold}% status=predicted_safe`);
+        } 
+        // RESUME condition: Current AND step2 prediction both below resume threshold (49%) - prevents oscillation
+        else if (cpuInfo.usagePercent <= this.adaptivePool.cpuResumeThreshold && 
+                 cpuPrediction.step2 <= this.adaptivePool.cpuResumeThreshold && 
+                 this.adaptivePool.isCpuConstrained) {
+          log(`[ProcessPool] CPU surge protection deactivated current=${cpuInfo.usagePercent.toFixed(1)}% step2=${cpuPrediction.step2.toFixed(1)}% threshold=${this.adaptivePool.cpuResumeThreshold}% status=predicted_safe_for_2_steps`);
           this.adaptivePool.isCpuConstrained = false;
         }
         
-        // Memory protection with same ratio-based control as CPU
+        // Enhanced Memory protection with identical hysteresis logic
+        // STOP condition: Current OR step1 prediction exceeds threshold (78%)
         if (memInfo.usagePercent >= this.adaptivePool.memoryStopThreshold || memoryPrediction.step1 >= this.adaptivePool.memoryStopThreshold) {
           if (!this.adaptivePool.isMemoryConstrained) {
             const reason = memInfo.usagePercent >= this.adaptivePool.memoryStopThreshold ? 
               `Current ${memInfo.usagePercent.toFixed(1)}%` : 
-              `Predicted ${memoryPrediction.step1.toFixed(1)}%`;
-            warn(`[ProcessPool] Memory protection activated ${reason}>=${this.adaptivePool.memoryStopThreshold}% stopping_growth=true`);
+              `Predicted step1 ${memoryPrediction.step1.toFixed(1)}%`;
+            warn(`[ProcessPool] Memory protection activated ${reason}>=${this.adaptivePool.memoryStopThreshold}% stopping_growth=true hysteresis_gap=${this.adaptivePool.memoryStopThreshold - this.adaptivePool.memoryResumeThreshold}%`);
             this.adaptivePool.isMemoryConstrained = true;
             this.adaptivePool.growthPhase = 'constrained';
           }
-        } else if (memInfo.usagePercent <= this.adaptivePool.memoryResumeThreshold && 
-                   memoryPrediction.step2 <= this.adaptivePool.memoryResumeThreshold && 
-                   this.adaptivePool.isMemoryConstrained) {
-          log(`[ProcessPool] Memory protection deactivated usage=${memInfo.usagePercent.toFixed(1)}% threshold=${this.adaptivePool.memoryResumeThreshold}% status=predicted_safe`);
+        } 
+        // RESUME condition: Current AND step2 prediction both below resume threshold (69%) - prevents oscillation
+        else if (memInfo.usagePercent <= this.adaptivePool.memoryResumeThreshold && 
+                 memoryPrediction.step2 <= this.adaptivePool.memoryResumeThreshold && 
+                 this.adaptivePool.isMemoryConstrained) {
+          log(`[ProcessPool] Memory protection deactivated current=${memInfo.usagePercent.toFixed(1)}% step2=${memoryPrediction.step2.toFixed(1)}% threshold=${this.adaptivePool.memoryResumeThreshold}% status=predicted_safe_for_2_steps`);
           this.adaptivePool.isMemoryConstrained = false;
         }
         

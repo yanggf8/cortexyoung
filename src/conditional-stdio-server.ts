@@ -4,7 +4,7 @@
  */
 
 import { claudeProcessDetector, ClaudeProcessInfo } from './claude-process-detector';
-import { StdioCortexMCPServer } from './stdio-server';
+import { LightweightStdioCortexMCPServer } from './stdio-server';
 import { CodebaseIndexer } from './indexer';
 import { ProjectManager } from './project-manager';
 import { conditionalLogger } from './utils/console-logger';
@@ -14,7 +14,7 @@ import * as fs from 'fs';
 import { execSync } from 'child_process';
 
 export class ConditionalStdioServer {
-  private mcpServer: StdioCortexMCPServer | null = null;
+  private mcpServer: LightweightStdioCortexMCPServer | null = null;
   private indexer: CodebaseIndexer | null = null;
   private projectManager: ProjectManager | null = null;
   private isServerActive = false;
@@ -182,7 +182,7 @@ export class ConditionalStdioServer {
     }
 
     // Create and start MCP server
-    this.mcpServer = new StdioCortexMCPServer(this.indexer, searcher, this.projectManager);
+    this.mcpServer = new LightweightStdioCortexMCPServer(this.repoPath, this.projectManager);
     await this.mcpServer.start();
 
     this.isServerActive = true;

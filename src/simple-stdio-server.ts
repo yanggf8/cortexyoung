@@ -31,8 +31,14 @@ import {
   LightweightRealTimeStatusHandler
 } from './lightweight-handlers';
 
+import { createLocalEmbeddingClient, EmbeddingClient } from './embedding-client';
+import { ProjectManager } from './project-manager';
+
 class SimpleCortexMCPServer {
   private server: Server;
+  private embeddingClient: EmbeddingClient;
+  private projectManager: ProjectManager;
+  private cache: Map<string, { data: any; timestamp: number; ttl: number }> = new Map();
 
   constructor() {
     this.server = new Server(
@@ -47,8 +53,26 @@ class SimpleCortexMCPServer {
       }
     );
 
+    // Initialize embedding client and project manager
+    this.embeddingClient = createLocalEmbeddingClient('simple-stdio-server', process.cwd());
+    this.projectManager = new ProjectManager();
+
     this.setupToolHandlers();
     this.setupErrorHandling();
+  }
+
+  // Cache methods for handler compatibility
+  setCachedResult(key: string, data: any, ttl: number): void {
+    this.cache.set(key, { data, timestamp: Date.now(), ttl });
+  }
+
+  getCachedResult(key: string): any {
+    const cached = this.cache.get(key);
+    if (cached && Date.now() - cached.timestamp < cached.ttl) {
+      return cached.data;
+    }
+    this.cache.delete(key);
+    return null;
   }
 
   private setupErrorHandling(): void {
@@ -82,31 +106,31 @@ class SimpleCortexMCPServer {
       try {
         switch (name) {
           case 'semantic_search':
-            return await LightweightSemanticSearchHandler(args);
+            return await new LightweightSemanticSearchHandler(this.embeddingClient, this.projectManager, this).handle(args);
           case 'contextual_read':
-            return await LightweightContextualReadHandler(args);
+            return await new LightweightContextualReadHandler(this.embeddingClient, this.projectManager, this).handle(args);
           case 'code_intelligence':
-            return await LightweightCodeIntelligenceHandler(args);
+            return await new LightweightCodeIntelligenceHandler(this.embeddingClient, this.projectManager, this).handle(args);
           case 'relationship_analysis':
-            return await LightweightRelationshipAnalysisHandler(args);
+            return await new LightweightRelationshipAnalysisHandler(this.embeddingClient, this.projectManager, this).handle(args);
           case 'trace_execution_path':
-            return await LightweightTraceExecutionPathHandler(args);
+            return await new LightweightTraceExecutionPathHandler(this.embeddingClient, this.projectManager, this).handle(args);
           case 'find_code_patterns':
-            return await LightweightFindCodePatternsHandler(args);
+            return await new LightweightFindCodePatternsHandler(this.embeddingClient, this.projectManager, this).handle(args);
           case 'real_time_status':
-            return await LightweightRealTimeStatusHandler(args);
+            return await new LightweightRealTimeStatusHandler(this.embeddingClient, this).handle(args);
           case 'fetch_chunk':
-            return await FetchChunkHandler(args);
+            return await new FetchChunkHandler().handle(args);
           case 'next_chunk':
-            return await NextChunkHandler(args);
+            return await new NextChunkHandler().handle(args);
           case 'get_current_project':
-            return await GetCurrentProjectHandler(args);
+            return await new GetCurrentProjectHandler(this.projectManager).handle(args);
           case 'list_available_projects':
-            return await ListAvailableProjectsHandler(args);
+            return await new ListAvailableProjectsHandler(this.projectManager).handle(args);
           case 'switch_project':
-            return await SwitchProjectHandler(args);
+            return await new SwitchProjectHandler(this.projectManager).handle(args);
           case 'add_project':
-            return await AddProjectHandler(args);
+            return await new AddProjectHandler(this.projectManager).handle(args);
           default:
             throw new Error(`Unknown tool: ${name}`);
         }

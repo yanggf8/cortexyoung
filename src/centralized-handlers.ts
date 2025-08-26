@@ -4,13 +4,13 @@ import { ContextEnhancementLayer } from './context-enhancement-layer';
 import { ProcessPoolEmbedder } from './process-pool-embedder';
 import { CodebaseIndexer } from './indexer';
 import { RelationshipTraversalEngine } from './relationship-traversal-engine';
-import { Searcher } from './searcher';
+import { SemanticSearcher } from './searcher';
 
 interface CentralizedHandlerOptions {
   processPool: ProcessPoolEmbedder;
   contextEnhancer: ContextEnhancementLayer;
   indexer?: CodebaseIndexer;
-  searcher?: Searcher;
+  searcher?: SemanticSearcher;
   relationshipEngine?: RelationshipTraversalEngine;
 }
 
@@ -80,7 +80,7 @@ export class CentralizedHandlers {
   private processPool: ProcessPoolEmbedder;
   private contextEnhancer: ContextEnhancementLayer;
   private indexer?: CodebaseIndexer;
-  private searcher?: Searcher;
+  private searcher?: SemanticSearcher;
   private relationshipEngine?: RelationshipTraversalEngine;
 
   constructor(options: CentralizedHandlerOptions) {
@@ -164,11 +164,12 @@ export class CentralizedHandlers {
 
     } catch (err) {
       const processingTime = Date.now() - startTime;
-      error(`[CentralizedHandlers] Semantic search failed: ${err.message}`);
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      error(`[CentralizedHandlers] Semantic search failed: ${errorMessage}`);
 
       return {
         success: false,
-        error: err.message,
+        error: errorMessage,
         metadata: {
           processingTime,
           contextEnhanced: false,
@@ -198,14 +199,14 @@ export class CentralizedHandlers {
         const searchRequest: QueryRequest = {
           task,
           max_chunks: maxChunks,
-          context_mode: 'comprehensive'
+          context_mode: 'adaptive'
         };
         
         const results = await this.searcher.search(searchRequest);
         analysisResults = {
           relevantChunks: results.chunks || [],
-          patterns: results.patterns || [],
-          relationships: results.relationships || []
+          patterns: results.relationship_paths || [],
+          relationships: results.relationship_paths || []
         };
       } else {
         // Generate mock analysis
@@ -241,11 +242,12 @@ export class CentralizedHandlers {
 
     } catch (err) {
       const processingTime = Date.now() - startTime;
-      error(`[CentralizedHandlers] Code intelligence failed: ${err.message}`);
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      error(`[CentralizedHandlers] Code intelligence failed: ${errorMessage}`);
 
       return {
         success: false,
-        error: err.message,
+        error: errorMessage,
         metadata: {
           processingTime,
           contextEnhanced: false,
@@ -271,11 +273,20 @@ export class CentralizedHandlers {
 
       if (this.relationshipEngine) {
         // Use relationship engine if available
-        relationshipResults = await this.relationshipEngine.analyzeRelationships({
-          type: analysisType,
-          symbols: startingSymbols,
-          maxDepth: request.maxDepth || 3,
-          includeTests: request.includeTests || false
+        relationshipResults = await this.relationshipEngine.executeRelationshipQuery({
+          baseQuery: analysisType,
+          relationshipTypes: [analysisType as any],
+          traversalOptions: {
+            maxDepth: request.maxDepth || 3,
+            relationshipTypes: ['calls', 'imports', 'exports'],
+            direction: 'both',
+            minStrength: 0.1,
+            minConfidence: 0.1,
+            includeTransitive: true,
+            pruneStrategy: 'relevance'
+          },
+          includeContext: true,
+          contextRadius: 5
         });
       } else {
         // Generate mock relationship analysis
@@ -310,11 +321,12 @@ export class CentralizedHandlers {
 
     } catch (err) {
       const processingTime = Date.now() - startTime;
-      error(`[CentralizedHandlers] Relationship analysis failed: ${err.message}`);
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      error(`[CentralizedHandlers] Relationship analysis failed: ${errorMessage}`);
 
       return {
         success: false,
-        error: err.message,
+        error: errorMessage,
         metadata: {
           processingTime,
           contextEnhanced: false,
@@ -365,11 +377,12 @@ export class CentralizedHandlers {
 
     } catch (err) {
       const processingTime = Date.now() - startTime;
-      error(`[CentralizedHandlers] Execution trace failed: ${err.message}`);
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      error(`[CentralizedHandlers] Execution trace failed: ${errorMessage}`);
 
       return {
         success: false,
-        error: err.message,
+        error: errorMessage,
         metadata: {
           processingTime,
           contextEnhanced: false,
@@ -431,11 +444,12 @@ export class CentralizedHandlers {
 
     } catch (err) {
       const processingTime = Date.now() - startTime;
-      error(`[CentralizedHandlers] Code patterns failed: ${err.message}`);
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      error(`[CentralizedHandlers] Code patterns failed: ${errorMessage}`);
 
       return {
         success: false,
-        error: err.message,
+        error: errorMessage,
         metadata: {
           processingTime,
           contextEnhanced: false,
@@ -476,11 +490,12 @@ export class CentralizedHandlers {
 
     } catch (err) {
       const processingTime = Date.now() - startTime;
-      error(`[CentralizedHandlers] Embedding generation failed: ${err.message}`);
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      error(`[CentralizedHandlers] Embedding generation failed: ${errorMessage}`);
 
       return {
         success: false,
-        error: err.message,
+        error: errorMessage,
         metadata: {
           processingTime,
           contextEnhanced: false,
@@ -509,9 +524,9 @@ export class CentralizedHandlers {
         },
         metrics: {
           requestCount: processPoolMetrics.requestCount,
-          avgResponseTime: processPoolMetrics.avgResponseTime,
-          throughput: processPoolMetrics.throughput,
-          memoryUsage: processPoolMetrics.memoryUsage
+          avgDuration: processPoolMetrics.avgDuration,
+          errorRate: processPoolMetrics.errorRate,
+          totalEmbeddings: processPoolMetrics.totalEmbeddings
         },
         contextEnhancer: {
           initialized: true,
@@ -533,11 +548,12 @@ export class CentralizedHandlers {
 
     } catch (err) {
       const processingTime = Date.now() - startTime;
-      error(`[CentralizedHandlers] Health check failed: ${err.message}`);
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      error(`[CentralizedHandlers] Health check failed: ${errorMessage}`);
 
       return {
         success: false,
-        error: err.message,
+        error: errorMessage,
         metadata: {
           processingTime,
           contextEnhanced: false,

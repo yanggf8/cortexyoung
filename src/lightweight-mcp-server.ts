@@ -644,4 +644,3 @@ if (require.main === module) {
   });
 }
 
-export { LightweightCortexMCPServer };

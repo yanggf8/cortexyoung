@@ -1,6 +1,6 @@
 import axios, { AxiosInstance, AxiosRequestConfig } from 'axios';
 import { CodeChunk, EmbedOptions, EmbeddingResult, ProviderHealth, ProviderMetrics } from './types';
-import { log, warn, error } from './logging-utils';
+import { log, warn, error as logError } from './logging-utils';
 
 interface ClientConfig {
   serverUrl: string;
@@ -279,17 +279,18 @@ export class EmbeddingClient {
 
         return response.data;
 
-      } catch (error) {
+      } catch (err) {
         attempt++;
         this.recordFailure();
 
         if (attempt >= maxRetries) {
           const processingTime = Date.now() - startTime;
-          error(`[EmbeddingClient] Request failed after ${maxRetries} attempts: ${error instanceof Error ? error.message : String(error)}`);
+          const errorMessage = err instanceof Error ? err.message : String(err);
+          logError(`[EmbeddingClient] Request failed after ${maxRetries} attempts: ${errorMessage}`);
           
           return {
             success: false,
-            error: error instanceof Error ? error.message : String(error),
+            error: errorMessage,
             metadata: {
               processingTime,
               contextEnhanced: false,
@@ -329,18 +330,18 @@ export class EmbeddingClient {
         log(`[EmbeddingClient] Response received in ${duration}ms`);
         return response;
       },
-      (error) => {
-        if (error.response) {
+      (err) => {
+        if (err.response) {
           // Server responded with error status
-          error(`[EmbeddingClient] Server error: ${error.response.status} ${error.response.statusText}`);
-        } else if (error.request) {
+          logError(`[EmbeddingClient] Server error: ${err.response.status} ${err.response.statusText}`);
+        } else if (err.request) {
           // No response received
-          error(`[EmbeddingClient] Network error: ${error.message}`);
+          logError(`[EmbeddingClient] Network error: ${err.message}`);
         } else {
           // Request configuration error
-          error(`[EmbeddingClient] Request error: ${error.message}`);
+          logError(`[EmbeddingClient] Request error: ${err.message}`);
         }
-        return Promise.reject(error);
+        return Promise.reject(err);
       }
     );
   }

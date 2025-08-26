@@ -17,6 +17,9 @@ import { conditionalLogger } from './utils/console-logger';
 import { CORTEX_TOOLS } from './mcp-tools';
 import { error, warn } from './logging-utils';
 import { cortexConfig } from './env-config';
+import { CodebaseIndexer } from './indexer';
+import { StartupStageTracker } from './startup-stages';
+import { IndexHealthChecker } from './index-health-checker';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
@@ -113,6 +116,8 @@ export class LightweightCortexMCPServer {
   private logger: Logger;
   private localCache: Map<string, { data: any; timestamp: number; ttl: number }> = new Map();
   private fallbackMode: boolean = false;
+  public indexer?: CodebaseIndexer;
+  public stageTracker: StartupStageTracker;
 
   constructor(
     projectPath: string,
@@ -132,6 +137,9 @@ export class LightweightCortexMCPServer {
     } else {
       this.logger = new Logger(loggerOrFile as string);
     }
+    
+    // Initialize stage tracker
+    this.stageTracker = new StartupStageTracker(this.logger);
     
     this.setupHandlers();
     this.setupIPC();

@@ -36,7 +36,8 @@ export abstract class LightweightBaseHandler extends BaseHandler {
 
     try {
       // Try centralized server request
-      const response = await this.embeddingClient[operation](...Object.values(params));
+      const method = this.embeddingClient[operation as keyof EmbeddingClient] as Function;
+      const response = await method.call(this.embeddingClient, ...Object.values(params));
       
       if (response.success && response.data) {
         // Cache successful response
