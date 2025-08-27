@@ -95,7 +95,7 @@ class SimpleCortexMCPServer {
     // List tools
     this.server.setRequestHandler(ListToolsRequestSchema, async () => {
       return {
-        tools: CORTEX_TOOLS,
+        tools: Object.values(CORTEX_TOOLS),
       };
     });
 
