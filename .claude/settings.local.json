@@ -51,7 +51,9 @@
       "Bash(npm link:*)",
       "Bash(npx cortex-mcp:*)",
       "Bash(git push:*)",
-      "Bash(cat:*)"
+      "Bash(cat:*)",
+      "Bash(git pull:*)",
+      "Bash(git log:*)"
     ],
     "deny": [],
     "additionalDirectories": [
