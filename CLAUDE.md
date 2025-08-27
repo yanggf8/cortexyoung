@@ -62,11 +62,12 @@ node test-configuration-system.js               # Test configuration system with
 ## Claude Code MCP Integration ✅ **FULLY OPERATIONAL**
 
 ### Current Status ✅
-**MCP Server**: `cortex: node /home/yanggf/a/cortexyoung/cortex-multi-instance.js - ✓ Multi-Instance Ready`  
+**MCP Server**: `cortex: /home/yanggf/a/cortexyoung/cortex-mcp.js - ✓ Connected`  
 **Transport**: stdio (zero idle resources)  
 **Mode**: Multi-Claude Code instance support with enhanced logging  
 **Version**: V3.0 Multi-Instance Architecture  
-**Health Monitoring**: Available via `@cortex-multi_instance_health` and `@cortex-session_analysis`
+**Health Monitoring**: Available via `@cortex-multi_instance_health` and `@cortex-session_analysis`  
+**Fix Applied**: Resolved MCP tools array validation issue ensuring proper protocol compliance
 
 ### Quick Start (Working Now)
 **One-Command Global Installation:**
