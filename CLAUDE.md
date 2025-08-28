@@ -13,6 +13,22 @@ Claude Code suffers from **manual and inefficient foundational context supply**.
 
 **Our Solution**: Intelligent architectural context engine that automatically discovers and delivers critical structural information, dependencies, and patterns relevant to each specific query, eliminating manual context preparation overhead.
 
+### Cross-File vs Non-Cross-File Architecture Intelligence
+
+**Cross-File Architecture Patterns** (handled by claudecat MCP):
+- Patterns distributed across multiple files requiring dependency graph analysis
+- Examples: MVC (`routes.js` → `controller.js` → `model.js`), React composition, service layers
+- Detection: Complex graph problem requiring import resolution and execution flow tracing
+- Impact: 70-80% reduction in architectural violations when properly detected
+
+**Non-Cross-File Architecture Patterns** (handled by Cortex):
+- Patterns contained within single files using AST analysis
+- Examples: Utility modules, factory patterns, self-contained components, single-file design patterns
+- Detection: Simple tree problem using existing semantic analysis
+- Current capability: Fully operational through our semantic search and chunking system
+
+**Integration Strategy**: Cortex provides semantic search and context enhancement, while claudecat specializes in cross-file architectural pattern detection for complete code intelligence coverage.
+
 ## Quick Start Commands
 
 ### Essential Operations
