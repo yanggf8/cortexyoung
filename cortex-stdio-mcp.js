@@ -66,27 +66,116 @@ class LightweightMCPClient {
         tools: [
           {
             name: "semantic_search",
-            description: "Advanced semantic search with context enhancement"
+            description: "BEST FOR: Quick code discovery, finding specific functions/patterns, debugging. Uses advanced semantic search with MMR optimization to find the most relevant code chunks while ensuring diversity.",
+            inputSchema: {
+              type: "object",
+              properties: {
+                query: {
+                  type: "string",
+                  description: "Natural language description of what you're looking for"
+                },
+                max_chunks: {
+                  type: "number",
+                  description: "Maximum number of code chunks to return",
+                  default: 20,
+                  minimum: 1,
+                  maximum: 100
+                }
+              },
+              required: ["query"]
+            }
           },
           {
             name: "code_intelligence",
-            description: "Intelligent code analysis and insights"
+            description: "BEST FOR: Complex development tasks, architecture understanding, feature implementation. When you need comprehensive analysis of large codebases or complex architectural patterns.",
+            inputSchema: {
+              type: "object",
+              properties: {
+                task: {
+                  type: "string",
+                  description: "High-level description of the development task"
+                },
+                max_context_tokens: {
+                  type: "number",
+                  description: "Maximum tokens for the complete context package",
+                  default: 4000,
+                  maximum: 16000,
+                  minimum: 1000
+                }
+              },
+              required: ["task"]
+            }
           },
           {
             name: "relationship_analysis",
-            description: "Analyze code relationships and dependencies"
+            description: "BEST FOR: Understanding code dependencies, impact analysis, refactoring planning. Before making changes, for impact analysis, or understanding how code components connect.",
+            inputSchema: {
+              type: "object",
+              properties: {
+                analysis_type: {
+                  type: "string",
+                  enum: ["call_graph", "dependency_chain", "data_flow", "error_propagation", "impact_analysis"],
+                  description: "Type of relationship analysis to perform"
+                },
+                starting_symbols: {
+                  type: "array",
+                  items: { type: "string" },
+                  description: "Starting points for analysis (function names, class names, file paths)"
+                }
+              },
+              required: ["analysis_type", "starting_symbols"]
+            }
           },
           {
             name: "real_time_status",
-            description: "Get real-time server and resource status"
+            description: "BEST FOR: Checking if context is up-to-date, verifying file watching status. Shows real-time file watching status and context freshness for the codebase.",
+            inputSchema: {
+              type: "object",
+              properties: {},
+              required: []
+            }
           },
           {
             name: "fetch_chunk",
-            description: "Fetch specific chunk from cached response"
+            description: "CHUNKING TOOL: Retrieves a specific chunk from large responses by index (random access). When a Cortex tool returns 'Response too large' with a cacheKey and you need to access a specific chunk number.",
+            inputSchema: {
+              type: "object",
+              properties: {
+                cacheKey: {
+                  type: "string",
+                  description: "The cache key provided in the 'Response too large' message from any Cortex tool"
+                },
+                chunkIndex: {
+                  type: "number",
+                  description: "Which chunk to retrieve (1-based index)",
+                  minimum: 1
+                }
+              },
+              required: ["cacheKey", "chunkIndex"]
+            }
           },
           {
             name: "next_chunk",
-            description: "Get next chunk in sequence from cached response"
+            description: "CHUNKING TOOL: Fetches the next chunk in sequence from large responses (sequential access). When a Cortex tool returns 'Response too large' with a cacheKey and you want to read through all chunks sequentially.",
+            inputSchema: {
+              type: "object",
+              properties: {
+                cacheKey: {
+                  type: "string",
+                  description: "The cache key from the 'Response too large' message from any Cortex tool"
+                }
+              },
+              required: ["cacheKey"]
+            }
+          },
+          {
+            name: "multi_instance_health",
+            description: "HEALTH CHECK: Multi-instance health monitoring and diagnostics. When experiencing MCP connection issues, multiple Claude Code instances, or need to diagnose startup problems.",
+            inputSchema: {
+              type: "object",
+              properties: {},
+              required: []
+            }
           }
         ]
       };
@@ -104,7 +193,8 @@ class LightweightMCPClient {
           'relationship_analysis': '/relationship-analysis',
           'real_time_status': '/health',
           'fetch_chunk': '/fetch-chunk',
-          'next_chunk': '/next-chunk'
+          'next_chunk': '/next-chunk',
+          'multi_instance_health': '/multi-instance-health'
         };
 
         const endpoint = endpointMap[name];

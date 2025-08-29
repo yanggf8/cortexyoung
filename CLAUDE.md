@@ -78,31 +78,37 @@ node test-configuration-system.js               # Test configuration system with
 ## Claude Code MCP Integration ✅ **FULLY OPERATIONAL**
 
 ### Current Status ✅
-**MCP Server**: `cortex: /home/yanggf/a/cortexyoung/cortex-mcp.js - ✓ Connected`  
+**MCP Server**: `cortex: /home/yanggf/a/cortexyoung/cortex-stdio-mcp.js - ✓ Connected`  
 **Transport**: stdio (zero idle resources)  
-**Mode**: Multi-Claude Code instance support with enhanced logging  
-**Version**: V3.0 Multi-Instance Architecture  
-**Health Monitoring**: Available via `@cortex-multi_instance_health` and `@cortex-session_analysis`  
-**Latest Fix Applied**: Resolved MCP tools array validation issue in `simple-stdio-server.ts` ensuring proper protocol compliance (2025-01-27)
+**Backend**: Centralized HTTP server (port 8766) with ProcessPool  
+**Mode**: V3.0 Centralized Architecture with 7 streamlined tools  
+**Management**: Command-line only (no configuration files to edit)  
+**Latest Update**: Streamlined to 7 essential tools with proper stdio MCP terminology (2025-08-29)
 
 ### Quick Start (Working Now)
-**One-Command Global Installation:**
+**Two-Step Installation:**
 ```bash
-claude mcp add cortex "/home/yanggf/a/cortexyoung/cortex-mcp.js" --scope user
+# 1. Start centralized HTTP server (backend)
+npm run start:centralized
+
+# 2. Add stdio MCP server (Claude Code interface)
+claude mcp add cortex "/home/yanggf/a/cortexyoung/cortex-stdio-mcp.js" --scope user
 ```
 
 **Verify Connection:**
 ```bash
 claude mcp list
-# Shows: cortex: /home/yanggf/a/cortexyoung/cortex-mcp.js - ✓ Connected
+# Shows: cortex: /home/yanggf/a/cortexyoung/cortex-stdio-mcp.js - ✓ Connected
 ```
 
 **Start Using Immediately:**
 ```bash
-claude chat --mcp
-# Then use: @cortex-semantic_search "your query"
-# Monitor sessions: @cortex-session_analysis
-# Health check: @cortex-multi_instance_health
+# All 7 tools available via @cortex-[tool_name] syntax:
+@cortex-semantic_search "your query"               # Advanced code search
+@cortex-code_intelligence "implement feature"      # Complex development tasks  
+@cortex-relationship_analysis "analyze auth"       # Dependency mapping
+@cortex-real_time_status                          # Context freshness check
+@cortex-multi_instance_health                     # System diagnostics
 ```
 
 ### V3.0 Centralized Setup ✅ **NOW AVAILABLE**
@@ -118,9 +124,9 @@ npm run start:centralized -- 8777  # Custom port
 - 📁 **PID Management** - Automatic stale process detection and cleanup
 - ⚡ **Fast Shutdown** - Graceful termination in <30ms
 
-**2. Install Lightweight MCP Client:**
+**2. Install stdio MCP Server:**
 ```bash
-claude mcp add cortex "/home/yanggf/a/cortexyoung/cortex-centralized-client.js" --scope user
+claude mcp add cortex "/home/yanggf/a/cortexyoung/cortex-stdio-mcp.js" --scope user
 ```
 
 **3. Verify Connection:**
@@ -138,8 +144,8 @@ claude mcp remove cortex -s local
 # 2. Start centralized server (one-time, runs continuously)
 npm run start:centralized &
 
-# 3. Install V3.0 lightweight client
-claude mcp add cortex "/home/yanggf/a/cortexyoung/cortex-centralized-client.js" --scope user
+# 3. Install V3.0 stdio MCP server
+claude mcp add cortex "/home/yanggf/a/cortexyoung/cortex-stdio-mcp.js" --scope user
 
 # 4. Verify connection
 claude mcp list  # Should show cortex: ✓ Connected
@@ -176,6 +182,7 @@ rm ~/.cortex/centralized-server.pid
 - 🔒 **Singleton Enforcement** - Prevents multiple servers and resource conflicts
 - ⚡ **Ultra Performance** - <200ms cached requests, 2ms average response time, <30ms shutdown
 - 🔄 **Production Ready** - PID management, graceful shutdown, automatic stale cleanup
+- 🎯 **Streamlined Tools** - 7 essential tools (50% reduction from 14) for better UX and maintenance
 
 ### Legacy HTTP Installation (Deprecated)
 ```bash
@@ -185,10 +192,13 @@ claude mcp add --transport http cortex http://localhost:8765/mcp
 claude mcp add cortex "/home/yanggf/a/cortexyoung/cortex-mcp.js" --scope user
 ```
 
-### Available MCP Tools
-1. **semantic_search** - Advanced semantic search with multi-Claude Code support and session isolation
-2. **multi_instance_health** - Multi-instance health monitoring and diagnostics with real-time status
-3. **session_analysis** - Analyze active Claude Code sessions and instances with detailed session tracking
+### Available MCP Tools (7 Streamlined Essentials)
+1. **semantic_search** - Advanced semantic search with MMR optimization and context enhancement
+2. **code_intelligence** - Complex development tasks and architecture understanding  
+3. **relationship_analysis** - Code dependencies, impact analysis, and refactoring planning
+4. **real_time_status** - File watching status and context freshness monitoring
+5. **multi_instance_health** - Multi-instance health monitoring and system diagnostics
+6. **fetch_chunk** / **next_chunk** - Large response handling with chunked access
 
 ### Multi-Instance Features ✅
 - **Unlimited Claude Code instances** - Each spawns its own isolated MCP server process
@@ -199,13 +209,14 @@ claude mcp add cortex "/home/yanggf/a/cortexyoung/cortex-mcp.js" --scope user
 
 ### Usage Examples
 ```bash
-# Multi-Instance Support (Production Ready)
-@cortex-semantic_search "JWT token validation logic"        # Search with session isolation
-@cortex-multi_instance_health                               # Health check for all Claude instances
-@cortex-session_analysis                                    # View active Claude Code sessions
-
-# Multi-Instance Testing (for development only)
-# node test-multi-instance.js                              # Developer test script
+# Core Tools (Production Ready)
+@cortex-semantic_search "JWT token validation logic"       # Advanced semantic search
+@cortex-code_intelligence "implement user authentication"  # Complex development analysis
+@cortex-relationship_analysis "analyze auth middleware"    # Dependency mapping & impact
+@cortex-real_time_status                                   # File watching & context status
+@cortex-multi_instance_health                              # System health diagnostics
+@cortex-fetch_chunk --cacheKey "abc123" --chunkIndex 2     # Access specific chunk
+@cortex-next_chunk --cacheKey "abc123"                     # Get next sequential chunk
 ```
 
 ### Testing Multi-Instance Support
