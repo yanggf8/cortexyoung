@@ -9,6 +9,9 @@ const { Server } = require('@modelcontextprotocol/sdk/server/index.js');
 const { StdioServerTransport } = require('@modelcontextprotocol/sdk/server/stdio.js');
 const { ListToolsRequestSchema, CallToolRequestSchema } = require('@modelcontextprotocol/sdk/types.js');
 const http = require('http');
+const { spawn } = require('child_process');
+const path = require('path');
+const fs = require('fs');
 
 const CENTRALIZED_SERVER_URL = 'http://localhost:8766';
 
@@ -29,32 +32,40 @@ class LightweightMCPClient {
       }
     );
 
+    // Generate unique client ID
+    this.clientId = `client-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    this.isRegistered = false;
+
     this.setupToolHandlers();
     this.setupProcessHandlers();
   }
 
   setupProcessHandlers() {
     // Clean exit when stdin closes (Claude Code disconnects)
-    process.stdin.on('end', () => {
+    process.stdin.on('end', async () => {
       console.error(`[${new Date().toISOString()}] STDIN_END: Claude Code disconnected, shutting down`);
+      await this.deregisterClient();
       process.exit(0);
     });
 
     // Handle other signals
     ['SIGINT', 'SIGTERM', 'SIGHUP'].forEach(signal => {
-      process.on(signal, () => {
+      process.on(signal, async () => {
         console.error(`[${new Date().toISOString()}] SIGNAL_${signal}: Shutting down gracefully`);
+        await this.deregisterClient();
         process.exit(0);
       });
     });
 
-    process.on('uncaughtException', (error) => {
+    process.on('uncaughtException', async (error) => {
       console.error(`[${new Date().toISOString()}] UNCAUGHT_EXCEPTION:`, error.message);
+      await this.deregisterClient();
       process.exit(1);
     });
 
-    process.on('unhandledRejection', (reason) => {
+    process.on('unhandledRejection', async (reason) => {
       console.error(`[${new Date().toISOString()}] UNHANDLED_REJECTION:`, reason);
+      await this.deregisterClient();
       process.exit(1);
     });
   }
@@ -194,7 +205,7 @@ class LightweightMCPClient {
           'real_time_status': '/health',
           'fetch_chunk': '/fetch-chunk',
           'next_chunk': '/next-chunk',
-          'multi_instance_health': '/multi-instance-health'
+          'multi_instance_health': '/embedding-health'
         };
 
         const endpoint = endpointMap[name];
@@ -230,13 +241,13 @@ class LightweightMCPClient {
 
   async makeHttpRequest(endpoint, data) {
     return new Promise((resolve, reject) => {
-      const isHealthCheck = endpoint === '/health';
+      const isGetRequest = endpoint === '/health' || endpoint === '/status';
       const options = {
         hostname: 'localhost',
         port: 8766,
         path: endpoint,
-        method: isHealthCheck ? 'GET' : 'POST',
-        headers: isHealthCheck ? {} : {
+        method: isGetRequest ? 'GET' : 'POST',
+        headers: isGetRequest ? {} : {
           'Content-Type': 'application/json'
         }
       };
@@ -272,7 +283,7 @@ class LightweightMCPClient {
       });
 
       // Send data for POST requests
-      if (!isHealthCheck && data) {
+      if (!isGetRequest && data) {
         req.write(JSON.stringify(data));
       }
 
@@ -280,19 +291,128 @@ class LightweightMCPClient {
     });
   }
 
+  async checkServerHealth() {
+    try {
+      await this.makeHttpRequest('/health', {});
+      return true;
+    } catch (error) {
+      return false;
+    }
+  }
+
+  async startCentralizedServer() {
+    console.error(`[${new Date().toISOString()}] Starting centralized server...`);
+    
+    return new Promise((resolve, reject) => {
+      // Use absolute path to Cortex installation (where this script is located)
+      const cortexRoot = path.dirname(__filename);
+      console.error(`[${new Date().toISOString()}] Using Cortex root directory: ${cortexRoot}`);
+      
+      // Verify package.json exists to ensure we're in the right directory
+      const packageJsonPath = path.join(cortexRoot, 'package.json');
+      if (!fs.existsSync(packageJsonPath)) {
+        reject(new Error(`package.json not found at ${packageJsonPath}. Cortex installation may be corrupted.`));
+        return;
+      }
+
+      const serverProcess = spawn('npm', ['run', 'start:centralized'], {
+        cwd: cortexRoot,
+        detached: true,
+        stdio: 'ignore'
+      });
+
+      serverProcess.on('error', (error) => {
+        reject(new Error(`Failed to spawn server process: ${error.message}`));
+      });
+
+      serverProcess.unref(); // Allow parent to exit independently
+
+      // Wait for server to be ready
+      const checkReady = async (attempts = 0) => {
+        if (attempts >= 30) { // 30 seconds timeout
+          reject(new Error('Centralized server failed to start within 30 seconds'));
+          return;
+        }
+
+        const isReady = await this.checkServerHealth();
+        if (isReady) {
+          console.error(`[${new Date().toISOString()}] Centralized server started successfully`);
+          resolve();
+        } else {
+          setTimeout(() => checkReady(attempts + 1), 1000);
+        }
+      };
+
+      setTimeout(() => checkReady(), 2000); // Initial 2s delay for startup
+    });
+  }
+
+  async registerClient() {
+    try {
+      const projectPath = process.cwd();
+      const response = await this.makeHttpRequest('/register-client', {
+        clientId: this.clientId,
+        project: projectPath,
+        pid: process.pid
+      });
+      
+      this.isRegistered = true;
+      console.error(`[${new Date().toISOString()}] Registered with centralized server: ${this.clientId} (Total clients: ${response.totalClients})`);
+    } catch (error) {
+      console.error(`[${new Date().toISOString()}] Failed to register with centralized server:`, error.message);
+      // Continue anyway - server will work without registration
+    }
+  }
+
+  async deregisterClient() {
+    if (!this.isRegistered) {
+      return;
+    }
+    
+    try {
+      const response = await this.makeHttpRequest('/deregister-client', {
+        clientId: this.clientId
+      });
+      
+      console.error(`[${new Date().toISOString()}] Deregistered from centralized server: ${this.clientId} (Remaining clients: ${response.totalClients})`);
+      this.isRegistered = false;
+    } catch (error) {
+      console.error(`[${new Date().toISOString()}] Failed to deregister from centralized server:`, error.message);
+      // Continue anyway
+    }
+  }
+
+  async ensureServerRunning() {
+    const isRunning = await this.checkServerHealth();
+    if (!isRunning) {
+      console.error(`[${new Date().toISOString()}] Centralized server not running, starting automatically...`);
+      try {
+        await this.startCentralizedServer();
+      } catch (error) {
+        console.error(`[${new Date().toISOString()}] Failed to auto-start centralized server:`, error.message);
+        console.error(`[${new Date().toISOString()}] Please start manually: npm run start:centralized`);
+        throw error;
+      }
+    }
+  }
+
   async run() {
     try {
-      // Test connection to centralized server
-      await this.makeHttpRequest('/health', {});
+      // Ensure centralized server is running (auto-start if needed)
+      await this.ensureServerRunning();
+      
       console.error(`[${new Date().toISOString()}] Connected to centralized server at ${CENTRALIZED_SERVER_URL}`);
+      
+      // Register this client with the centralized server
+      await this.registerClient();
       
       const transport = new StdioServerTransport();
       await this.server.connect(transport);
-      console.error(`[${new Date().toISOString()}] Lightweight MCP client ready`);
+      console.error(`[${new Date().toISOString()}] Lightweight MCP client ready (${this.clientId})`);
       
     } catch (error) {
-      console.error(`[${new Date().toISOString()}] Failed to connect to centralized server:`, error.message);
-      console.error(`[${new Date().toISOString()}] Make sure to start centralized server first: npm run start:centralized`);
+      console.error(`[${new Date().toISOString()}] Fatal error:`, error.message);
+      await this.deregisterClient();
       process.exit(1);
     }
   }

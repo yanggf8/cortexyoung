@@ -156,8 +156,8 @@ claude mcp list  # Should show cortex: ✓ Connected
 # Check if server is running
 ps aux | grep start-centralized-server
 
-# Check server status
-curl -X GET http://localhost:8766/health
+# Check server status and client count
+curl -X GET http://localhost:8766/status | jq '.clientCount, .autoShutdown'
 
 # Stop server gracefully
 pkill -SIGTERM -f start-centralized-server
@@ -168,6 +168,23 @@ cat ~/.cortex/centralized-server.pid
 # Remove stale PID file (if needed)
 rm ~/.cortex/centralized-server.pid
 ```
+
+**Auto-Shutdown Configuration:**
+```bash
+# Environment variables for auto-shutdown behavior
+CORTEX_AUTO_SHUTDOWN=false                  # Disable auto-shutdown (default: enabled)
+CORTEX_NO_CLIENTS_TIMEOUT=300000           # No clients timeout in ms (default: 5 minutes)
+CORTEX_IDLE_TIMEOUT=1800000               # Idle timeout in ms (default: 30 minutes)
+
+# Example: Start with custom 2-minute timeout
+CORTEX_NO_CLIENTS_TIMEOUT=120000 npm run start:centralized
+```
+
+**Auto-Shutdown Behavior:**
+- **Smart Sleep**: Server automatically shuts down when no MCP clients are connected
+- **Auto-Wake**: MCP clients automatically start server if not running
+- **Resource Efficient**: Zero idle resource consumption when not in use
+- **Seamless UX**: Users never need to manually manage server lifecycle
 
 **Troubleshooting:**
 - **"Server Already Running"**: Only one centralized server allowed per system
@@ -183,6 +200,7 @@ rm ~/.cortex/centralized-server.pid
 - ⚡ **Ultra Performance** - <200ms cached requests, 2ms average response time, <30ms shutdown
 - 🔄 **Production Ready** - PID management, graceful shutdown, automatic stale cleanup
 - 🎯 **Streamlined Tools** - 7 essential tools (50% reduction from 14) for better UX and maintenance
+- 💤 **Smart Auto-Sleep** - Server shuts down when no clients connected, auto-starts when needed
 
 ### Legacy HTTP Installation (Deprecated)
 ```bash

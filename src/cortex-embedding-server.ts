@@ -36,11 +36,19 @@ interface ServerStatus {
     project: string;
     lastActivity: string;
   }>;
+  clientCount: number;
   stats: {
     totalRequests: number;
     requestsToday: number;
     averageResponseTime: number;
     errorRate: number;
+  };
+  autoShutdown: {
+    enabled: boolean;
+    noClientsTimeout: number;
+    idleTimeout: number;
+    lastRequestTime: string;
+    shutdownScheduled: boolean;
   };
 }
 
@@ -56,6 +64,19 @@ interface SemanticSearchRequest {
   options: any;
   clientId?: string;
   projectPath?: string;
+}
+
+interface ClientInfo {
+  project: string;
+  lastActivity: Date;
+  registeredAt: Date;
+  pid?: number;
+}
+
+interface AutoShutdownConfig {
+  enabled: boolean;
+  noClientsTimeoutMs: number;  // Shutdown after no clients for this duration
+  idleTimeoutMs: number;       // Shutdown after no requests for this duration
 }
 
 /**
@@ -77,12 +98,19 @@ export class CortexEmbeddingServer implements IEmbedder {
   private centralizedHandlers?: CentralizedHandlers;
   private server: any;
   private startTime: number;
-  private activeClients: Map<string, { project: string; lastActivity: Date }> = new Map();
+  private activeClients: Map<string, ClientInfo> = new Map();
   private requestCount = 0;
   private requestsToday = 0;
   private responseTimes: number[] = [];
   private errors = 0;
   private isInitialized = false;
+  private lastRequestTime: Date = new Date();
+  private shutdownTimer: NodeJS.Timeout | null = null;
+  private autoShutdownConfig: AutoShutdownConfig = {
+    enabled: process.env.CORTEX_AUTO_SHUTDOWN !== 'false',
+    noClientsTimeoutMs: parseInt(process.env.CORTEX_NO_CLIENTS_TIMEOUT || '300000'), // 5 minutes
+    idleTimeoutMs: parseInt(process.env.CORTEX_IDLE_TIMEOUT || '1800000') // 30 minutes
+  };
 
   constructor(private port: number = 3001) {
     this.app = express();
@@ -103,10 +131,15 @@ export class CortexEmbeddingServer implements IEmbedder {
       
       // Track active clients
       if (clientId !== 'unknown') {
+        const now = new Date();
+        const existing = this.activeClients.get(clientId);
         this.activeClients.set(clientId, {
           project: projectPath,
-          lastActivity: new Date()
+          lastActivity: now,
+          registeredAt: existing?.registeredAt || now,
+          pid: existing?.pid
         });
+        this.lastRequestTime = now;
       }
       
       res.on('finish', () => {
@@ -135,6 +168,63 @@ export class CortexEmbeddingServer implements IEmbedder {
         processPool: this.processPool ? 'ready' : 'initializing'
       });
     });
+
+    // Client registration endpoint
+    this.app.post('/register-client', (req: Request, res: Response) => {
+      try {
+        const { clientId, project, pid } = req.body;
+        
+        if (!clientId) {
+          return res.status(400).json({ error: 'clientId is required' });
+        }
+        
+        const now = new Date();
+        this.activeClients.set(clientId, {
+          project: project || 'unknown',
+          lastActivity: now,
+          registeredAt: now,
+          pid: pid
+        });
+        
+        log(`Client registered: ${clientId} (PID: ${pid || 'unknown'}, Project: ${project || 'unknown'}) - Total clients: ${this.activeClients.size}`);
+        
+        // Cancel any pending shutdown since we have a new client
+        this.cancelShutdown();
+        
+        res.json({ success: true, clientId, registeredAt: now.toISOString(), totalClients: this.activeClients.size });
+        
+      } catch (err) {
+        error('Client registration failed', { error: err });
+        res.status(500).json({ error: 'Registration failed' });
+      }
+    });
+
+    // Client deregistration endpoint
+    this.app.post('/deregister-client', (req: Request, res: Response) => {
+      try {
+        const { clientId } = req.body;
+        
+        if (!clientId) {
+          return res.status(400).json({ error: 'clientId is required' });
+        }
+        
+        const wasRegistered = this.activeClients.has(clientId);
+        if (wasRegistered) {
+          this.activeClients.delete(clientId);
+          log(`Client deregistered: ${clientId} - Remaining clients: ${this.activeClients.size}`);
+          
+          // Check if we should shutdown after client removal
+          this.scheduleShutdownCheck();
+        }
+        
+        res.json({ success: true, clientId, wasRegistered, totalClients: this.activeClients.size });
+        
+      } catch (err) {
+        error('Client deregistration failed', { error: err });
+        res.status(500).json({ error: 'Deregistration failed' });
+      }
+    });
+
 
     // Core embedding generation endpoint
     this.app.post('/embed', async (req: Request, res: Response) => {
@@ -308,6 +398,18 @@ export class CortexEmbeddingServer implements IEmbedder {
       }
     });
 
+    // Embedding health monitoring endpoint
+    this.app.post('/embedding-health', (req: Request, res: Response) => {
+      try {
+        const healthData = this.getEmbeddingHealth();
+        res.json(healthData);
+      } catch (err) {
+        this.errors++;
+        error('Embedding health check failed', { error: err });
+        res.status(500).json({ error: 'Embedding health check failed' });
+      }
+    });
+
     // Server status endpoint for monitoring
     this.app.get('/status', (req: Request, res: Response) => {
       const status = this.getServerStatus();
@@ -357,6 +459,7 @@ export class CortexEmbeddingServer implements IEmbedder {
         project: client.project,
         lastActivity: client.lastActivity.toLocaleTimeString()
       })),
+      clientCount: this.activeClients.size,
       stats: {
         totalRequests: this.requestCount,
         requestsToday: this.requestsToday,
@@ -364,6 +467,13 @@ export class CortexEmbeddingServer implements IEmbedder {
           ? Math.round(this.responseTimes.reduce((a, b) => a + b, 0) / this.responseTimes.length)
           : 0,
         errorRate: this.requestCount > 0 ? (this.errors / this.requestCount) * 100 : 0
+      },
+      autoShutdown: {
+        enabled: this.autoShutdownConfig.enabled,
+        noClientsTimeout: this.autoShutdownConfig.noClientsTimeoutMs,
+        idleTimeout: this.autoShutdownConfig.idleTimeoutMs,
+        lastRequestTime: this.lastRequestTime.toISOString(),
+        shutdownScheduled: Boolean(this.shutdownTimer)
       }
     };
   }
@@ -410,6 +520,106 @@ Status: ${status.processPool.activeProcesses > 0 ? '✅ OPERATIONAL' : '⚠️  
     if (hours > 0) return `${hours}h ${minutes % 60}m ${seconds % 60}s`;
     if (minutes > 0) return `${minutes}m ${seconds % 60}s`;
     return `${seconds}s`;
+  }
+
+  private getEmbeddingHealth(): any {
+    const logsDir = path.join(os.homedir(), '.cortex', 'multi-instance-logs');
+    const activeSessionsFile = path.join(logsDir, 'active-sessions.json');
+    
+    try {
+      // Read active sessions if file exists
+      let activeSessions: any = {};
+      let totalSessions = 0;
+      let staleSessions = 0;
+      
+      if (fs.existsSync(activeSessionsFile)) {
+        const sessionsData = fs.readFileSync(activeSessionsFile, 'utf8');
+        activeSessions = JSON.parse(sessionsData);
+        totalSessions = Object.keys(activeSessions).length;
+        
+        // Count stale sessions (older than 5 minutes)
+        const fiveMinutesAgo = Date.now() - 5 * 60 * 1000;
+        staleSessions = Object.values(activeSessions).filter((session: any) => 
+          session.lastActivity < fiveMinutesAgo
+        ).length;
+      }
+
+      // Get log files count
+      let logFiles: string[] = [];
+      if (fs.existsSync(logsDir)) {
+        logFiles = fs.readdirSync(logsDir)
+          .filter(f => f.startsWith('cortex-') && f.endsWith('.log'))
+          .sort((a, b) => {
+            try {
+              const statA = fs.statSync(path.join(logsDir, a));
+              const statB = fs.statSync(path.join(logsDir, b));
+              return statB.mtime.getTime() - statA.mtime.getTime(); // Most recent first
+            } catch {
+              return 0;
+            }
+          });
+      }
+
+      // Prepare session summaries (only active ones)
+      const sessionSummaries = Object.entries(activeSessions)
+        .filter(([_, session]: [string, any]) => 
+          session.lastActivity >= Date.now() - 5 * 60 * 1000 // Only sessions active in last 5 minutes
+        )
+        .map(([sessionId, session]: [string, any]) => ({
+          sessionId,
+          claudeSession: session.claudeSession,
+          pid: session.pid,
+          parentPid: session.parentPid,
+          uptime: this.formatUptime(Date.now() - session.startTime),
+          status: session.status,
+          lastActivity: new Date(session.lastActivity).toISOString()
+        }));
+
+      return {
+        status: 'healthy',
+        multiInstanceEnabled: true,
+        logsDirectory: logsDir,
+        summary: {
+          totalActiveSessions: sessionSummaries.length,
+          totalHistoricalSessions: totalSessions,
+          staleSessions,
+          logFilesCount: logFiles.length
+        },
+        activeSessions: sessionSummaries,
+        recentLogFiles: logFiles.slice(0, 5), // Last 5 log files
+        diagnostics: {
+          centralizedServer: {
+            port: this.port,
+            uptime: this.formatUptime(Date.now() - this.startTime),
+            processPoolReady: Boolean(this.processPool)
+          },
+          environment: {
+            nodeVersion: process.version,
+            platform: os.platform(),
+            architecture: os.arch(),
+            totalMemory: Math.round(os.totalmem() / 1024 / 1024 / 1024) + 'GB'
+          }
+        },
+        timestamp: new Date().toISOString()
+      };
+
+    } catch (error) {
+      // Return error state if unable to read multi-instance data
+      return {
+        status: 'error',
+        multiInstanceEnabled: false,
+        error: error instanceof Error ? error.message : String(error),
+        logsDirectory: logsDir,
+        diagnostics: {
+          centralizedServer: {
+            port: this.port,
+            uptime: this.formatUptime(Date.now() - this.startTime),
+            processPoolReady: Boolean(this.processPool)
+          }
+        },
+        timestamp: new Date().toISOString()
+      };
+    }
   }
 
   async start(): Promise<void> {
@@ -460,6 +670,70 @@ Status: ${status.processPool.activeProcesses > 0 ? '✅ OPERATIONAL' : '⚠️  
     
     this.isInitialized = true;
     log('[CortexEmbeddingServer] Initialization complete');
+    
+    // Start shutdown monitoring if enabled
+    if (this.autoShutdownConfig.enabled) {
+      log(`[CortexEmbeddingServer] Auto-shutdown enabled: No clients timeout=${this.autoShutdownConfig.noClientsTimeoutMs/1000}s, Idle timeout=${this.autoShutdownConfig.idleTimeoutMs/1000}s`);
+    }
+  }
+
+  /**
+   * Cancel any pending shutdown
+   */
+  private cancelShutdown(): void {
+    if (this.shutdownTimer) {
+      clearTimeout(this.shutdownTimer);
+      this.shutdownTimer = null;
+      log('[CortexEmbeddingServer] Shutdown cancelled - clients are active');
+    }
+  }
+
+  /**
+   * Schedule a shutdown check after client disconnect
+   */
+  private scheduleShutdownCheck(): void {
+    if (!this.autoShutdownConfig.enabled) {
+      return;
+    }
+
+    // Cancel any existing timer
+    this.cancelShutdown();
+
+    // If no clients remain, start shutdown countdown
+    if (this.activeClients.size === 0) {
+      log(`[CortexEmbeddingServer] No clients remaining, scheduling shutdown in ${this.autoShutdownConfig.noClientsTimeoutMs/1000}s`);
+      
+      this.shutdownTimer = setTimeout(async () => {
+        if (this.activeClients.size === 0) {
+          log('[CortexEmbeddingServer] Auto-shutdown triggered: No active clients');
+          await this.gracefulShutdown();
+        } else {
+          log('[CortexEmbeddingServer] Auto-shutdown cancelled: New clients connected');
+        }
+      }, this.autoShutdownConfig.noClientsTimeoutMs);
+    }
+    
+    // Also check for idle timeout (no requests)
+    const timeSinceLastRequest = Date.now() - this.lastRequestTime.getTime();
+    if (timeSinceLastRequest > this.autoShutdownConfig.idleTimeoutMs) {
+      log('[CortexEmbeddingServer] Auto-shutdown triggered: Idle timeout exceeded');
+      setTimeout(() => this.gracefulShutdown(), 1000);
+    }
+  }
+
+  /**
+   * Perform graceful shutdown
+   */
+  private async gracefulShutdown(): Promise<void> {
+    log('[CortexEmbeddingServer] Initiating graceful shutdown...');
+    
+    try {
+      await this.shutdown();
+      process.exit(0);
+    } catch (err) {
+      error('[CortexEmbeddingServer] Error during graceful shutdown:', err);
+      process.exit(1);
+    }
   }
 
   // IEmbedder interface implementation

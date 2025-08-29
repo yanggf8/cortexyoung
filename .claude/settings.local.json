@@ -53,7 +53,12 @@
       "Bash(git push:*)",
       "Bash(cat:*)",
       "Bash(git pull:*)",
-      "Bash(git log:*)"
+      "Bash(git log:*)",
+      "Bash(git commit:*)",
+      "Bash(claude:*)",
+      "Bash(git rm:*)",
+      "mcp__cortex__multi_instance_health",
+      "Read(/tmp/**)"
     ],
     "deny": [],
     "additionalDirectories": [
