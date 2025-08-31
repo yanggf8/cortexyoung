@@ -117,8 +117,23 @@ export class CentralizedHandlers {
         const results = await this.searcher.search(searchRequest);
         searchResults = results.chunks || [];
       } else {
-        // Fallback: generate mock results for demonstration
-        searchResults = this.generateMockSearchResults(query, maxChunks);
+        // Load real index data and perform semantic search
+        try {
+          const { PersistentVectorStore } = await import('./persistent-vector-store');
+          const vectorStore = new PersistentVectorStore(process.cwd(), '.cortex');
+          
+          if (await vectorStore.loadPersistedIndex(false)) {
+            // Get query embedding using ProcessPool
+            const embeddingResult = await this.processPool.embedBatch([query]);
+            if (embeddingResult.embeddings.length > 0) {
+              searchResults = await vectorStore.similaritySearch(embeddingResult.embeddings[0], maxChunks);
+            }
+          } else {
+            log('[CentralizedHandlers] No persisted index found, returning empty results');
+          }
+        } catch (error) {
+          log(`[CentralizedHandlers] Error loading index: ${error}`);
+        }
       }
 
       // Apply context enhancement if project path provided

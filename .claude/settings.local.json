@@ -58,7 +58,8 @@
       "Bash(claude:*)",
       "Bash(git rm:*)",
       "mcp__cortex__multi_instance_health",
-      "Read(/tmp/**)"
+      "Read(/tmp/**)",
+      "Bash(jq:*)"
     ],
     "deny": [],
     "additionalDirectories": [

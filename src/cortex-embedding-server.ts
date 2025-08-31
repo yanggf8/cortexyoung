@@ -11,6 +11,9 @@ import { MemoryMappedCache } from './memory-mapped-cache';
 import { ContextEnhancementLayer } from './context-enhancement-layer';
 import { CentralizedHandlers, createCentralizedHandlers } from './centralized-handlers';
 import { ProcessPoolEmbedder } from './process-pool-embedder';
+import { CodebaseIndexer } from './indexer';
+import { SemanticSearcher } from './searcher';
+import { PersistentVectorStore } from './persistent-vector-store';
 
 interface ServerStatus {
   processPool: {
@@ -96,6 +99,8 @@ export class CortexEmbeddingServer implements IEmbedder {
   private processPool?: ProcessPoolEmbedder;
   private contextEnhancer?: ContextEnhancementLayer;
   private centralizedHandlers?: CentralizedHandlers;
+  private indexer?: CodebaseIndexer;
+  private searcher?: SemanticSearcher;
   private server: any;
   private startTime: number;
   private activeClients: Map<string, ClientInfo> = new Map();
@@ -660,6 +665,10 @@ Status: ${status.processPool.activeProcesses > 0 ? '✅ OPERATIONAL' : '⚠️  
     log('[CortexEmbeddingServer] Initializing Context Enhancement Layer...');
     this.contextEnhancer = new ContextEnhancementLayer();
     await this.contextEnhancer.initialize();
+    
+    // Initialize Indexer and Searcher
+    // For now, skip complex initialization and let centralized handlers work directly
+    log('[CortexEmbeddingServer] Skipping indexer/searcher initialization - will be handled by centralized logic');
     
     // Initialize Centralized Handlers
     log('[CortexEmbeddingServer] Initializing Centralized Handlers...');
