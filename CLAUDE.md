@@ -628,3 +628,75 @@ This revolutionary architecture solves Claude Code's resource contention problem
 7. **✅ Context Enhancement**: Project awareness layer initialized and ready
 8. **✅ Performance Metrics**: <200ms cached responses, 99.9% cache hit rate validated
 9. **✅ Enhanced Permissions**: Git operations fully integrated with `git pull:*` and `git log:*` permissions
+
+---
+
+## 🚀 V4.0 Cloud Architecture (Planned)
+
+### Overview
+
+V4.0 moves all heavy lifting to Cloudflare, creating a lightweight MCP client:
+
+```
+Claude Code → MCP (thin) → Remote API → Cloudflare Vector DB
+                                         ↓
+                                   Cloudflare AI
+                                   (embeddings)
+```
+
+### Key Changes
+
+| Component | V3.0 (Current) | V4.0 (Cloud) |
+|-----------|----------------|--------------|
+| MCP | Complex server with local state | Thin HTTP proxy |
+| Embeddings | Local ProcessPool | Cloudflare Workers AI |
+| Vector Store | Local + memory-mapped | Cloudflare Vector DB |
+| Indexing | Local watch + push | CLI push to cloud |
+| CLI | npm scripts | Standalone `cortex` binary |
+
+### Benefits
+
+- **Simpler MCP**: No local state, just proxies requests
+- **Unlimited Scale**: Cloudflare handles storage/compute
+- **Better Context Reduction**: Server-side optimization for Claude Code
+- **Easier Maintenance**: Less local complexity
+
+### Planned CLI Commands
+
+```bash
+# Indexing
+cortex index              # Index current project
+cortex index --watch    # Watch and sync
+cortex sync              # Sync pending changes
+
+# Search
+cortex search "query"   # CLI fallback
+
+# Management
+cortex status            # Cloud index status
+cortex projects         # List cloud projects
+cortex config           # Manage config
+```
+
+### MCP Tools (Simplified)
+
+- `semantic_search` - Vector search via Cloudflare
+- `contextual_read` - File read with cloud context
+- `relationship_analysis` - Query relationships from cloud
+- `list_projects` - List cloud-indexed projects
+- `get_project_status` - Check indexing status
+
+### Migration Plan
+
+1. **Phase 1**: Build Cloudflare Workers remote server
+2. **Phase 2**: Replace MCP with thin HTTP client
+3. **Phase 3**: Build standalone CLI
+4. **Phase 4**: Decommission V3.0 code
+
+### Documentation
+
+- Design doc: `docs/plans/2026-03-06-cortex-v4-cloud-design.md`
+
+---
+
+*V4.0 design approved: 2026-03-06*
