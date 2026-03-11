@@ -13,18 +13,28 @@ Cortex V2.1 addresses Claude Code's primary limitation: **50-70% token waste** d
 
 ## Architecture
 
-**Pure Node.js System** with local ML inference:
+**Hybrid Local + Cloudflare architecture:**
 
 ### Core Components
 
 ```
-Claude Code ← Node.js MCP Server ← fastembed-js (BGE model)
-     ↓                ↓                      ↓
-User Query → Git Scanner/Chunker → Local Embeddings → Vector DB
+Local Machine                         Cloudflare
+─────────────────────────────         ──────────────────────────
+File Watcher (chokidar)               Worker (cortex-embedder)
+    ↓                                     ↓
+Chunker (tree-sitter)       →embed→   CF AI (BGE-small-en-v1.5)
+    ↓                                     ↓
+Delta detection             ←──────── vector[]
+    ↓
+HTTP upsert                 →store→   Vectorize (shared index)
+    ↓
+Semantic search query       →search→  Vectorize (repoHash filter)
+                            ←──────── top-k results
 ```
 
-**Single Process**: Git operations, chunking, embeddings, MCP server, Claude integration  
-**Local ML**: BGE-small-en-v1.5 model via fastembed-js (384 dimensions)
+**Local pipeline**: Git operations, chunking, change detection, MCP server, Claude integration
+**Cloudflare**: BGE embedding generation (CF AI), vector storage and similarity search (Vectorize)
+**Storage**: `chunk-metadata.json` (chunks without embeddings, ~10× smaller than old `index.json`)
 
 ### Key Features
 
@@ -80,6 +90,21 @@ cortexyoung/
 ├── .fastembed_cache/              # Local ML model cache
 └── docs/                          # Documentation
 ```
+
+## Roadmap
+
+**Phase 5: Cloudflare Vectorize Migration** 🚧
+- [ ] Add `[[vectorize]]` binding to `wrangler.toml`
+- [ ] Create shared `cortex-vectors` Vectorize index (384-dim cosine)
+- [ ] Extend `cloudflare-worker.js` with `/upsert`, `/search`, `/delete`, `/embedAndUpsert` endpoints
+- [ ] Implement `src/cloudflare-vector-store.ts` (replaces `PersistentVectorStore`)
+- [ ] Backend switching via `CORTEX_VECTOR_BACKEND=cloudflare` env var
+- [ ] Migration script for existing local embeddings → Vectorize
+- [ ] Eliminate `index.json.gz` and `embedding-cache.json.gz`
+
+See [VECTORIZE-MIGRATION-PLAN.md](VECTORIZE-MIGRATION-PLAN.md) for full implementation plan.
+
+---
 
 ## Development Status
 
