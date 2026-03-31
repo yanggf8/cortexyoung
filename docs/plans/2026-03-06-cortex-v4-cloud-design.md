@@ -1,7 +1,8 @@
 # Cortex V4.0 Cloud Architecture Design
 
 **Date**: 2026-03-06
-**Status**: Draft for Approval
+**Status**: Approved
+**Approved**: 2026-03-06
 
 ## 1. Problem Statement
 
@@ -137,11 +138,13 @@ Claude Code → MCP semantic_search → Remote Server
 
 ## 8. Open Questions
 
-1. **D1 for metadata?** - Use Cloudflare D1 for project metadata?
-2. **Authentication** - How to secure remote API?
-3. **Multi-tenant** - Support multiple users/orgs?
-4. **Pricing** - Cloudflare billing considerations
+These must be resolved before Phase 1 implementation begins:
+
+1. **D1 for metadata?** — Use Cloudflare D1 for project metadata and user configs, or keep it in Vector DB metadata? D1 is simpler for relational queries but adds another service dependency.
+2. **Authentication** — Options: Cloudflare Access (zero-trust), API key per user, or OAuth. Need to decide single-user vs multi-user scope first.
+3. **Multi-tenant** — Start single-user (personal tool) or design for multi-tenant from day one? Affects Vector DB namespace strategy and auth complexity.
+4. **Pricing** — Cloudflare Workers AI has free tier (10k neurons/day). Vector DB pricing TBD. Need to estimate cost per indexed project to validate viability.
 
 ---
 
-**Next**: Get approval, then create implementation plan.
+**Next step**: Resolve open questions, then create Phase 1 implementation plan.
