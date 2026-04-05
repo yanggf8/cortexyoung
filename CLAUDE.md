@@ -10,7 +10,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **V3.0 (Legacy, still present)**: Local MCP server — ProcessPool embeddings, local vector store, ~34K LOC. Still shipped in the root package and still documented in parts of the repo, but intended to be removed once V5 is complete.
 
-**V5.0 (Implemented through most of Phase 2)**: CLI + Turso direct. Local embeddings (@xenova/transformers BGE-small-en-v1.5) → Turso (vectors via F32_BLOB/DiskANN + content + relationships). No Workers. The standalone package is `cli/`, with commands including `init`, `index`, `search`, `relationships`, `status`, `projects`, `delete`, and `config`. Claude Code skill delivery and V3 decommissioning are not done yet. Design doc: `docs/plans/2026-04-06-cortex-v5-direct-turso.md`
+**V5.0 (Feature-complete through Phase 2 surface)**: CLI + Turso direct. Local embeddings (@xenova/transformers BGE-small-en-v1.5) → Turso (vectors via F32_BLOB/DiskANN + content + relationships). No Workers. The standalone package is `cli/`, with commands including `init`, `index`, `search`, `relationships`, `status`, `projects`, `delete`, and `config`. Claude Code skill delivery, full end-to-end terminal validation, and V3 decommissioning are not done yet. Design doc: `docs/plans/2026-04-06-cortex-v5-direct-turso.md`
 
 ## Commands
 

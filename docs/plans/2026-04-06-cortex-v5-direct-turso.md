@@ -220,9 +220,10 @@ As of 2026-04-06, the codebase has moved beyond the original "next step: Phase 1
   - Status: implemented
   - Present in `cli/`: standalone CLI entry point, Turso client, schema application, config handling, local embeddings, and indexing flow
 - **Phase 2: Search + Relationships**
-  - Status: mostly implemented
+  - Status: feature-complete, pending end-to-end terminal validation
   - Present in `cli/`: semantic search, keyword search, relationships traversal, project status, project listing, deletion, config display
-  - Known caveat: project-scoped vector correctness currently relies on widening the Turso `vector_top_k()` fetch size when multiple projects share the same database
+  - Verified with `npm run build` and `npm run test:phase2-smoke` in `cli/`
+  - Remaining to fully close the original exit criterion: live terminal round-trip against Turso (`init/index/search/relationships/status/delete`)
 - **Phase 3: Skill**
   - Status: not started in this repository
   - The planned Claude Code skill/scripts are not yet present

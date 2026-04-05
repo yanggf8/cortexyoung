@@ -10,7 +10,7 @@ If you are working on the new architecture, start with `cli/src/index.ts` and `d
 ## Current Status
 
 - V5 Phase 1: implemented
-- V5 Phase 2: mostly implemented
+- V5 Phase 2: feature-complete, pending terminal validation
 - V5 Phase 3: not started
 - V5 Phase 4: not started
 
