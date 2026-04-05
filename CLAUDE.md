@@ -4,13 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**Cortex** is a semantic code intelligence MCP server for Claude Code. It solves Claude Code's context window problem by automatically discovering and delivering architectural context (dependencies, patterns, structures) relevant to each query.
+**Cortex** is a semantic code intelligence tool for Claude Code. It solves Claude Code's context window problem by automatically discovering and delivering architectural context (dependencies, patterns, structures) relevant to each query.
 
-**V3.0 (Current)**: Centralized architecture — a single HTTP embedding server (port 8766) shared by all Claude Code instances, with lightweight stdio MCP clients connecting to it.
+**Repo state (hybrid, April 2026)**: The repository currently contains both the legacy V3 MCP/server stack and the new V5 CLI implementation. The V5 code lives under `cli/` and is the active migration target; the root `src/` tree still contains the V3 server/MCP runtime and has not been decommissioned yet.
 
-**V4.0 (Obsolete)**: Cloudflare-only design, superseded by V5.0. See `docs/plans/2026-03-06-cortex-v4-cloud-design.md`
+**V3.0 (Legacy, still present)**: Local MCP server — ProcessPool embeddings, local vector store, ~34K LOC. Still shipped in the root package and still documented in parts of the repo, but intended to be removed once V5 is complete.
 
-**V5.0 (Planned)**: Skill + Cloud architecture — local embeddings (@xenova/transformers BGE-small-en-v1.5) + Cloudflare Worker API + Turso (content, vectors via native F32_BLOB/DiskANN, relationships). Replaces MCP with Claude Code skill. Design doc: `docs/plans/2026-04-01-cortex-v5-skill-cloud-design.md`
+**V5.0 (Implemented through most of Phase 2)**: CLI + Turso direct. Local embeddings (@xenova/transformers BGE-small-en-v1.5) → Turso (vectors via F32_BLOB/DiskANN + content + relationships). No Workers. The standalone package is `cli/`, with commands including `init`, `index`, `search`, `relationships`, `status`, `projects`, `delete`, and `config`. Claude Code skill delivery and V3 decommissioning are not done yet. Design doc: `docs/plans/2026-04-06-cortex-v5-direct-turso.md`
 
 ## Commands
 
@@ -23,6 +23,15 @@ npm run startup                        # Start server with health checks
 npm run shutdown                       # Clean shutdown with process cleanup
 npm run health                         # HTTP-based health check
 npm run status                         # Check server status
+```
+
+### V5 CLI
+```bash
+cd cli
+npm run build                          # Build standalone cortex CLI
+npm run dev -- init                    # Initialize Turso-backed V5 config/database
+npm run dev -- index .                 # Index current project into Turso
+npm run dev -- search "query"          # Semantic search via Turso vector_top_k()
 ```
 
 ### MCP Servers
@@ -65,6 +74,11 @@ Claude Code ← MCP Server ← Vector Store ← ProcessPool → Incremental Upda
 1. **Centralized Embedding Server** (`cortex-embedding-server.ts`) — HTTP server on port 8766 with ProcessPool, memory-mapped cache, and PersistentVectorStore. Singleton-enforced via PID file at `~/.cortex/centralized-server.pid`.
 2. **Lightweight MCP Clients** (`cortex-stdio-mcp.js`, `server.ts`, `stdio-server.ts`) — Thin clients that forward requests to the centralized server via HTTP. The stdio client auto-starts the server if not running.
 
+### V5.0 Direct CLI Architecture
+1. **Standalone CLI package** (`cli/src/index.ts`) — Node.js entry point for `init`, `index`, `search`, `relationships`, `status`, `projects`, `delete`, and `config`.
+2. **Direct Turso client** (`cli/src/turso.ts`) — schema management, chunk upsert, project metadata, FTS, relationships, and vector search via `@libsql/client`.
+3. **In-process embedding/chunking** (`cli/src/embedder.ts`, `cli/src/chunker.ts`) — local `@xenova/transformers` embeddings and local chunk generation.
+
 ### Key Source Files
 
 **Centralized Server Layer:**
@@ -103,6 +117,13 @@ Claude Code ← MCP Server ← Vector Store ← ProcessPool → Incremental Upda
 - `types.ts` — Core types (CodeChunk, ChunkType, etc.)
 - `env-config.ts` — Environment variable configuration (all `CORTEX_` prefixed vars with unprefixed fallback)
 - `scripts/` — Operational scripts: startup, shutdown, health checks, storage management
+
+**V5 CLI Package:**
+- `cli/src/index.ts` — standalone CLI entry point
+- `cli/src/turso.ts` — Turso schema and query layer
+- `cli/src/chunker.ts` — V5 chunking logic
+- `cli/src/embedder.ts` — local embedding runtime
+- `cli/src/config.ts` — `~/.cortex/config.json` management for V5
 
 ### MCP Integration
 ```bash

@@ -1,4 +1,22 @@
-# Cortex V2.1 - Semantic Code Intelligence for Claude Code
+# Cortex
+
+This repository is currently in a migration state.
+
+- `cli/` contains the new V5 implementation: a standalone CLI that embeds locally and talks directly to Turso.
+- The root `src/` tree still contains the older V3 MCP/server architecture and has not been decommissioned yet.
+
+If you are working on the new architecture, start with `cli/src/index.ts` and `docs/plans/2026-04-06-cortex-v5-direct-turso.md`.
+
+## Current Status
+
+- V5 Phase 1: implemented
+- V5 Phase 2: mostly implemented
+- V5 Phase 3: not started
+- V5 Phase 4: not started
+
+The remainder of this README largely describes the legacy V3 MCP/server system and should be treated as historical/legacy architecture documentation until it is rewritten.
+
+## Legacy Overview
 
 A semantic code intelligence server designed to enhance Claude Code's context window efficiency through intelligent code analysis and advanced relationship traversal. Provides 80-90% token reduction and reduces follow-up queries by 85%.
 
@@ -358,8 +376,6 @@ Cortex provides semantic tools via HTTP MCP server for Claude Code:
 - `contextual_read` → File reading with semantic context awareness  
 - `code_intelligence` → High-level semantic codebase analysis
 - `relationship_analysis` → Advanced code relationship discovery
-- `trace_execution_path` → Function call graph traversal
-- `find_code_patterns` → Pattern-based code discovery
 - `real_time_status` → Live context freshness monitoring
 
 **Production Results:**
