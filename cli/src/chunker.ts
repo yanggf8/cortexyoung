@@ -40,9 +40,12 @@ function hashContent(content: string): string {
   return createHash('sha256').update(content).digest('hex');
 }
 
+const CONTROL_FLOW = new Set(['if', 'else', 'for', 'while', 'do', 'switch', 'catch', 'return', 'throw', 'new', 'typeof', 'instanceof', 'delete', 'void']);
+
 function extractCalls(content: string): string[] {
   const matches = content.match(/(\w+)\s*\(/g);
-  return matches ? [...new Set(matches.map(m => m.replace(/\s*\(/, '')))] : [];
+  if (!matches) return [];
+  return [...new Set(matches.map(m => m.replace(/\s*\(/, '')).filter(m => !CONTROL_FLOW.has(m)))];
 }
 
 function extractImports(content: string): string[] {
@@ -421,6 +424,8 @@ export function chunkFile(projectId: string, filePath: string, content: string):
 }
 
 function isFunctionDecl(line: string): boolean {
+  // Exclude control-flow keywords that look like function calls
+  if (/^(if|else|for|while|do|switch|catch)\s*[\s(]/.test(line.trim())) return false;
   return /^(export\s+)?(async\s+)?function\s+\w+/.test(line) ||
     /^(export\s+)?const\s+\w+\s*=\s*(?:\([^)]*\)\s*)?=>/.test(line) ||
     /^\w+\s*\([^)]*\)\s*\{/.test(line);
