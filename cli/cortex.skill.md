@@ -25,7 +25,7 @@ node ~/a/cortexyoung/cli/dist/index.js search "$QUERY" --keyword
 ```
 
 Options:
-- `--top N` — number of results (default: 15)
+- `--top-k N` — number of results (default: 15)
 - `--offset N` — skip first N results for pagination
 - `--project ID` — search a specific project (default: current project)
 - `--keyword` — use FTS5 keyword search instead of semantic

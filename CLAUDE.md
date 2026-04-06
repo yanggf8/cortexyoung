@@ -21,6 +21,7 @@ npm run test                           # Phase 2 smoke tests
 ```bash
 cortex init                            # Create Turso DB, store config
 cortex index [path]                    # Chunk → embed → upload to Turso
+cortex index [path] --watch            # Index then watch for changes
 cortex search "query"                  # Semantic search (vector_top_k)
 cortex search "query" --keyword        # Keyword search (FTS5)
 cortex relationships "symbol"          # Recursive CTE traversal

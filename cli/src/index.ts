@@ -4,7 +4,7 @@ import { loadConfig, saveConfig, requireConfig, configPath, type CortexConfig } 
 import { applySchema, upsertChunks, upsertProject, deleteStaleProjectChunks, replaceProjectRelationships, projectExists, vectorSearch, keywordSearch, traverseRelationships, getProjectStatus, listProjects, deleteProject, type ChunkRow, type RelationshipRow } from './turso.js';
 import { embed, embedBatch, loadModel } from './embedder.js';
 import { chunkFile, contextPrefix, type Chunk } from './chunker.js';
-import { readFile, readdir, stat } from 'fs/promises';
+import { readFile, readdir, stat, watch } from 'fs/promises';
 import { resolve, relative, basename, dirname, extname } from 'path';
 import { createHash } from 'crypto';
 import { createInterface } from 'readline';
@@ -36,6 +36,7 @@ async function main() {
 Commands:
   init                     Set up Turso database and config
   index [path]             Index a directory (default: .)
+  index [path] --watch    Index then watch for changes
   search "query"           Semantic search
   search "query" --keyword Keyword search (FTS5)
   relationships "symbol"   Traverse relationships
@@ -205,6 +206,111 @@ async function cmdIndex() {
 
   if (hasFlag('--format', 'json')) {
     console.log(JSON.stringify({ project_id: projectId, chunks: totalChunks }));
+  }
+
+  // Watch mode: monitor for changes and re-index incrementally
+  if (hasFlag('--watch')) {
+    await watchAndReindex(config, targetPath, projectId, projectName, importResolver);
+  }
+}
+
+async function watchAndReindex(
+  config: CortexConfig,
+  targetPath: string,
+  projectId: string,
+  projectName: string,
+  importResolver: ImportResolver
+): Promise<void> {
+  const DEBOUNCE_MS = 500;
+  const pending = new Map<string, NodeJS.Timeout>();
+
+  async function reindexFile(filePath: string): Promise<void> {
+    const relPath = relative(targetPath, filePath);
+    try {
+      const content = await readFile(filePath, 'utf-8');
+      if (content.length === 0 || content.length > 100_000) return;
+
+      const chunks = chunkFile(projectId, relPath, content);
+      const embeddings = await embedBatch(chunks.map(c => contextPrefix(c) + '\n' + c.content));
+
+      const chunkRows: ChunkRow[] = [];
+      const pendingRels: PendingRelationship[] = [];
+      const symbolIndex = new Map<string, Set<string>>();
+      const fileIndex = new Map<string, string>();
+
+      for (let j = 0; j < chunks.length; j++) {
+        const c = chunks[j];
+        indexChunkTarget(symbolIndex, fileIndex, c);
+        chunkRows.push({
+          chunk_id: c.chunk_id,
+          project_id: projectId,
+          file_path: c.file_path,
+          symbol_name: c.symbol_name,
+          chunk_type: c.chunk_type,
+          start_line: c.start_line,
+          end_line: c.end_line,
+          content: c.content,
+          content_hash: c.content_hash,
+          language: c.language,
+          embedding: embeddings[j],
+        });
+
+        for (const called of c.calls) {
+          pendingRels.push({ source_chunk_id: c.chunk_id, source_file_path: c.file_path, target_ref: called, rel_type: 'calls' });
+        }
+        for (const imp of c.imports) {
+          pendingRels.push({ source_chunk_id: c.chunk_id, source_file_path: c.file_path, target_ref: imp, rel_type: 'imports' });
+        }
+        for (const exp of c.exports) {
+          pendingRels.push({ source_chunk_id: c.chunk_id, source_file_path: c.file_path, target_ref: exp, rel_type: 'exports' });
+        }
+      }
+
+      if (chunkRows.length > 0) {
+        await upsertChunks(config, chunkRows);
+        const resolvedRels = resolveRelationships(pendingRels, symbolIndex, fileIndex, importResolver);
+        // Note: per-file relationship replace is additive — full relationship rebuild requires full reindex
+        if (resolvedRels.length > 0) {
+          await replaceProjectRelationships(config, projectId, resolvedRels);
+        }
+      }
+
+      console.log(`  [watch] Reindexed ${relPath} (${chunkRows.length} chunks)`);
+    } catch (err: any) {
+      if (err.code === 'ENOENT') {
+        console.log(`  [watch] Deleted ${relPath}`);
+      } else if (err.code !== 'EISDIR') {
+        console.error(`  [watch] Error ${relPath}: ${err.message}`);
+      }
+    }
+  }
+
+  console.log(`\nWatching ${targetPath} for changes... (Ctrl+C to stop)`);
+
+  const ac = new AbortController();
+  process.on('SIGINT', () => { ac.abort(); process.exit(0); });
+
+  try {
+    const watcher = watch(targetPath, { recursive: true, signal: ac.signal });
+    for await (const event of watcher) {
+      if (!event.filename) continue;
+      const fullPath = resolve(targetPath, event.filename);
+      const ext = fullPath.substring(fullPath.lastIndexOf('.')).toLowerCase();
+
+      // Skip non-code files and ignored directories
+      if (!CODE_EXTS.has(ext)) continue;
+      if (event.filename.split('/').some(part => IGNORE_DIRS.has(part) || part.startsWith('.'))) continue;
+
+      // Debounce: clear previous timer for this file, set new one
+      const existing = pending.get(fullPath);
+      if (existing) clearTimeout(existing);
+      pending.set(fullPath, setTimeout(() => {
+        pending.delete(fullPath);
+        reindexFile(fullPath).catch(err => console.error(`  [watch] ${err.message}`));
+      }, DEBOUNCE_MS));
+    }
+  } catch (err: any) {
+    if (err.name !== 'AbortError') throw err;
   }
 }
 
