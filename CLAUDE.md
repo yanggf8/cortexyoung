@@ -41,7 +41,7 @@ Claude Code → Skill → cortex CLI → @xenova/transformers (local embed)
 ### Source Files (`cli/src/`)
 
 - `index.ts` — CLI entry point, 8 commands, import resolver, relationship resolution
-- `turso.ts` — Turso client: schema, upsert, vector search, FTS5, relationships CTE
+- `turso.ts` — Turso client: schema, upsert, vector search, FTS5, relationships CTE, per-file CRUD for watch mode
 - `chunker.ts` — JS/TS/Python/Markdown chunking, chunk_id: `${projectId}:${filePath}:${startLine}`
 - `embedder.ts` — `@xenova/transformers` wrapper for BGE-small-en-v1.5
 - `config.ts` — `~/.cortex/config.json` management
@@ -54,6 +54,7 @@ Claude Code → Skill → cortex CLI → @xenova/transformers (local embed)
 - **PRAGMA foreign_keys = ON**: Required per-connection for CASCADE behavior in libSQL.
 - **Over-fetch strategy**: When multi-project, fetch all chunks globally from vector_top_k then filter by project_id post-ANN.
 - **Two-pass relationship resolution**: First pass builds symbolIndex/fileIndex, second pass resolves pending relationships to real chunk_ids.
+- **Per-file watch operations**: Watch mode uses file-scoped delete/upsert (`deleteStaleFileChunks`, `replaceFileRelationships`) to avoid full-project rebuilds. Stale chunks are pruned by diffing current chunk_ids against DB; CASCADE handles relationship cleanup on file deletion.
 
 ## Development Notes
 

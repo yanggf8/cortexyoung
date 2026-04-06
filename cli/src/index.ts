@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { loadConfig, saveConfig, requireConfig, configPath, type CortexConfig } from './config.js';
-import { applySchema, upsertChunks, upsertProject, deleteStaleProjectChunks, replaceProjectRelationships, projectExists, vectorSearch, keywordSearch, traverseRelationships, getProjectStatus, listProjects, deleteProject, type ChunkRow, type RelationshipRow } from './turso.js';
+import { applySchema, upsertChunks, upsertProject, deleteStaleProjectChunks, replaceProjectRelationships, replaceFileRelationships, deleteFileChunks, deleteStaleFileChunks, projectExists, vectorSearch, keywordSearch, traverseRelationships, getProjectStatus, listProjects, deleteProject, type ChunkRow, type RelationshipRow } from './turso.js';
 import { embed, embedBatch, loadModel } from './embedder.js';
 import { chunkFile, contextPrefix, type Chunk } from './chunker.js';
 import { readFile, readdir, stat, watch } from 'fs/promises';
@@ -268,17 +268,21 @@ async function watchAndReindex(
 
       if (chunkRows.length > 0) {
         await upsertChunks(config, chunkRows);
+        const currentIds = chunkRows.map(c => c.chunk_id);
+        const staleDeleted = await deleteStaleFileChunks(config, projectId, relPath, currentIds);
         const resolvedRels = resolveRelationships(pendingRels, symbolIndex, fileIndex, importResolver);
-        // Note: per-file relationship replace is additive — full relationship rebuild requires full reindex
-        if (resolvedRels.length > 0) {
-          await replaceProjectRelationships(config, projectId, resolvedRels);
-        }
+        await replaceFileRelationships(config, projectId, relPath, resolvedRels);
+        console.log(`  [watch] Reindexed ${relPath} (${chunkRows.length} chunks${staleDeleted ? `, ${staleDeleted} stale removed` : ''})`);
+      } else {
+        // File became empty or too large — remove its chunks and relationships
+        const removed = await deleteFileChunks(config, projectId, relPath);
+        if (removed > 0) console.log(`  [watch] Cleared ${relPath} (${removed} chunks removed)`);
       }
-
-      console.log(`  [watch] Reindexed ${relPath} (${chunkRows.length} chunks)`);
     } catch (err: any) {
       if (err.code === 'ENOENT') {
-        console.log(`  [watch] Deleted ${relPath}`);
+        // File deleted — remove its chunks and relationships (CASCADE handles edges)
+        const removed = await deleteFileChunks(config, projectId, relPath);
+        console.log(`  [watch] Deleted ${relPath} (${removed} chunks removed)`);
       } else if (err.code !== 'EISDIR') {
         console.error(`  [watch] Error ${relPath}: ${err.message}`);
       }

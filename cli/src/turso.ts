@@ -263,6 +263,46 @@ export async function replaceProjectRelationships(config: CortexConfig, projectI
   }
 }
 
+export async function replaceFileRelationships(config: CortexConfig, projectId: string, filePath: string, rels: RelationshipRow[]): Promise<void> {
+  const db = getClient(config);
+  await db.execute('PRAGMA foreign_keys = ON');
+
+  await db.execute({
+    sql: `DELETE FROM relationships
+          WHERE source_chunk_id IN (
+            SELECT chunk_id FROM chunks WHERE project_id = ? AND file_path = ?
+          )`,
+    args: [projectId, filePath],
+  });
+
+  if (rels.length > 0) {
+    await upsertRelationships(config, rels);
+  }
+}
+
+export async function deleteFileChunks(config: CortexConfig, projectId: string, filePath: string): Promise<number> {
+  const db = getClient(config);
+  await db.execute('PRAGMA foreign_keys = ON');
+  const result = await db.execute({
+    sql: `DELETE FROM chunks WHERE project_id = ? AND file_path = ?`,
+    args: [projectId, filePath],
+  });
+  return result.rowsAffected;
+}
+
+export async function deleteStaleFileChunks(config: CortexConfig, projectId: string, filePath: string, currentChunkIds: string[]): Promise<number> {
+  if (currentChunkIds.length === 0) return 0;
+  const db = getClient(config);
+  await db.execute('PRAGMA foreign_keys = ON');
+  const placeholders = currentChunkIds.map(() => '?').join(', ');
+  const result = await db.execute({
+    sql: `DELETE FROM chunks
+          WHERE project_id = ? AND file_path = ? AND chunk_id NOT IN (${placeholders})`,
+    args: [projectId, filePath, ...currentChunkIds],
+  });
+  return result.rowsAffected;
+}
+
 export async function projectExists(config: CortexConfig, projectId: string): Promise<boolean> {
   const db = getClient(config);
   const result = await db.execute({
