@@ -18,6 +18,10 @@ export interface Chunk {
   exports: string[];
 }
 
+const TOKEN_LIMIT = 400;
+const MIN_TOKENS = 50;
+const estimateTokens = (s: string) => Math.ceil(s.length / 4);
+
 const CODE_EXTENSIONS = new Set(['.js', '.jsx', '.ts', '.tsx', '.py', '.go', '.rs', '.java', '.cpp', '.c', '.h']);
 
 const LANG_MAP: Record<string, string> = {
@@ -74,7 +78,112 @@ function makeChunk(projectId: string, filePath: string, content: string, startLi
   };
 }
 
-// JS/TS chunking by brace counting
+// --- Context prefix for embedding (not stored in DB) ---
+
+export function contextPrefix(chunk: Chunk): string {
+  const parts = chunk.file_path.split('/');
+  const shortPath = parts.length > 2 ? parts.slice(-2).join('/') : chunk.file_path;
+  const segments = [`file: ${shortPath}`];
+  if (chunk.symbol_name) segments.push(`${chunk.chunk_type}: ${chunk.symbol_name}`);
+  const prefix = `// ${segments.join(' | ')}`;
+  return prefix.length > 80 ? prefix.slice(0, 80) : prefix;
+}
+
+// --- Post-processing: split oversized, merge undersized ---
+
+function splitOversized(chunks: Chunk[]): Chunk[] {
+  const charLimit = TOKEN_LIMIT * 4;
+  const result: Chunk[] = [];
+  for (const chunk of chunks) {
+    if (estimateTokens(chunk.content) <= TOKEN_LIMIT) {
+      result.push(chunk);
+      continue;
+    }
+    const lines = chunk.content.split('\n');
+    // Single-line or unsplittable: hard truncate at char limit
+    if (lines.length <= 1) {
+      const truncated = chunk.content.slice(0, charLimit);
+      result.push(makeChunk(chunk.project_id, chunk.file_path, truncated, chunk.start_line, chunk.end_line, chunk.chunk_type, chunk.symbol_name || ''));
+      continue;
+    }
+    const mid = Math.floor(lines.length / 2);
+    // Find nearest blank line to midpoint
+    let splitAt = mid;
+    for (let offset = 0; offset <= mid; offset++) {
+      if (mid + offset < lines.length && lines[mid + offset].trim() === '') { splitAt = mid + offset; break; }
+      if (mid - offset >= 0 && lines[mid - offset].trim() === '') { splitAt = mid - offset; break; }
+    }
+    // Ensure we always make progress (never split at 0)
+    if (splitAt <= 0) splitAt = mid;
+    if (splitAt <= 0) splitAt = 1;
+    const firstHalf = lines.slice(0, splitAt).join('\n');
+    const secondHalf = lines.slice(splitAt).join('\n');
+    const firstEnd = chunk.start_line + splitAt - 1;
+    const secondStart = chunk.start_line + splitAt;
+    const baseName = chunk.symbol_name || '';
+    if (firstHalf.trim()) {
+      result.push(makeChunk(chunk.project_id, chunk.file_path, firstHalf, chunk.start_line, firstEnd, chunk.chunk_type, baseName ? `${baseName}:part_1` : ''));
+    }
+    if (secondHalf.trim()) {
+      result.push(makeChunk(chunk.project_id, chunk.file_path, secondHalf, secondStart, chunk.end_line, chunk.chunk_type, baseName ? `${baseName}:part_2` : ''));
+    }
+  }
+  // Recurse if any chunk is still oversized
+  if (result.some(c => estimateTokens(c.content) > TOKEN_LIMIT)) {
+    return splitOversized(result);
+  }
+  return result;
+}
+
+function mergeUndersized(chunks: Chunk[]): Chunk[] {
+  if (chunks.length < 2) return chunks;
+  const result: Chunk[] = [chunks[0]];
+  for (let i = 1; i < chunks.length; i++) {
+    const prev = result[result.length - 1];
+    const curr = chunks[i];
+    const prevTokens = estimateTokens(prev.content);
+    const currTokens = estimateTokens(curr.content);
+    const canMerge =
+      prevTokens < MIN_TOKENS &&
+      prev.chunk_type === curr.chunk_type &&
+      (!prev.symbol_name || !curr.symbol_name || prev.symbol_name === curr.symbol_name) &&
+      prevTokens + currTokens <= TOKEN_LIMIT;
+    if (canMerge) {
+      const merged = makeChunk(
+        prev.project_id, prev.file_path,
+        prev.content + '\n' + curr.content,
+        prev.start_line, curr.end_line,
+        curr.chunk_type, curr.symbol_name || prev.symbol_name || ''
+      );
+      result[result.length - 1] = merged;
+    } else {
+      result.push(curr);
+    }
+  }
+  return result;
+}
+
+function postProcess(chunks: Chunk[]): Chunk[] {
+  return mergeUndersized(splitOversized(chunks));
+}
+
+// --- Import line detection ---
+
+function isImportStart(line: string): boolean {
+  const trimmed = line.trim();
+  return /^import\s+/.test(trimmed) ||
+    /^export\s+\{/.test(trimmed) ||
+    /^export\s+type\s+\{/.test(trimmed) ||
+    /^export\s+\*\s+from\s+/.test(trimmed);
+}
+
+function isPyImportStart(line: string): boolean {
+  const trimmed = line.trim();
+  return /^import\s+/.test(trimmed) || /^from\s+\w/.test(trimmed);
+}
+
+// --- JS/TS chunking by brace counting ---
+
 function chunkJSTS(projectId: string, filePath: string, content: string): Chunk[] {
   const lines = content.split('\n');
   const chunks: Chunk[] = [];
@@ -84,10 +193,46 @@ function chunkJSTS(projectId: string, filePath: string, content: string): Chunk[
   let chunkType: ChunkType = 'function';
   let braceCount = 0;
   let inBlock = false;
+  let importBuffer = '';
+  let importStartLine = 0;
+  let inImportBlock = false;
+
+  function flushImports(beforeLine: number) {
+    if (importBuffer.trim()) {
+      chunks.push(makeChunk(projectId, filePath, importBuffer, importStartLine, beforeLine - 1, 'config', 'imports'));
+      importBuffer = '';
+    }
+    inImportBlock = false;
+  }
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     const trimmed = line.trim();
+
+    // Multiline import continuation: buffer until line ends with a complete statement
+    if (inImportBlock) {
+      importBuffer += line + '\n';
+      // Check if the import statement is complete (has closing quote or closing brace+from)
+      if (/['"]\s*;?\s*$/.test(trimmed) || /}\s*from\s+['"].*['"]\s*;?\s*$/.test(trimmed) || trimmed.endsWith(';')) {
+        inImportBlock = false;
+      }
+      continue;
+    }
+
+    if (!inBlock && isImportStart(trimmed)) {
+      if (!importBuffer) importStartLine = i + 1;
+      importBuffer += line + '\n';
+      // Check if this import spans multiple lines (no closing quote/semicolon on this line)
+      const isSingleLine = /['"]\s*;?\s*$/.test(trimmed) || trimmed.endsWith(';');
+      if (!isSingleLine) {
+        inImportBlock = true;
+      }
+      continue;
+    }
+
+    if (importBuffer && !isImportStart(trimmed)) {
+      flushImports(i + 1);
+    }
 
     if (isFunctionDecl(trimmed)) {
       if (current && inBlock) {
@@ -118,10 +263,12 @@ function chunkJSTS(projectId: string, filePath: string, content: string): Chunk[
         inBlock = false;
         braceCount = 0;
       }
-    } else if (/^(import\s+|export\s+|const\s+\w+\s*=|let\s+\w+\s*=)/.test(trimmed)) {
-      chunks.push(makeChunk(projectId, filePath, line, i + 1, i + 1, 'config', (trimmed.match(/(?:import|export).*?(\w+)/) || [])[1] || ''));
+    } else if (/^(export\s+)?(const\s+\w+\s*=|let\s+\w+\s*=)/.test(trimmed)) {
+      chunks.push(makeChunk(projectId, filePath, line, i + 1, i + 1, 'config', (trimmed.match(/(?:const|let)\s+(\w+)/) || [])[1] || ''));
     }
   }
+
+  flushImports(lines.length + 1);
 
   if (current && inBlock) {
     chunks.push(makeChunk(projectId, filePath, current, startLine, lines.length, chunkType, symbolName));
@@ -130,7 +277,8 @@ function chunkJSTS(projectId: string, filePath: string, content: string): Chunk[
   return chunks.length > 0 ? chunks : [makeChunk(projectId, filePath, content, 1, lines.length, 'function', '')];
 }
 
-// Python chunking by indentation
+// --- Python chunking by indentation ---
+
 function chunkPython(projectId: string, filePath: string, content: string): Chunk[] {
   const lines = content.split('\n');
   const chunks: Chunk[] = [];
@@ -140,11 +288,45 @@ function chunkPython(projectId: string, filePath: string, content: string): Chun
   let chunkType: ChunkType = 'function';
   let indentLevel = 0;
   let inBlock = false;
+  let importBuffer = '';
+  let importStartLine = 0;
+  let inPyImportBlock = false;
+
+  function flushImports(beforeLine: number) {
+    if (importBuffer.trim()) {
+      chunks.push(makeChunk(projectId, filePath, importBuffer, importStartLine, beforeLine - 1, 'config', 'imports'));
+      importBuffer = '';
+    }
+    inPyImportBlock = false;
+  }
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     const trimmed = line.trim();
     const indent = line.length - line.trimStart().length;
+
+    // Multiline Python import continuation: from pkg import (\n  a,\n  b\n)
+    if (inPyImportBlock) {
+      importBuffer += line + '\n';
+      if (trimmed.includes(')') || (!trimmed.endsWith('\\') && !trimmed.endsWith(','))) {
+        inPyImportBlock = false;
+      }
+      continue;
+    }
+
+    if (!inBlock && isPyImportStart(trimmed)) {
+      if (!importBuffer) importStartLine = i + 1;
+      importBuffer += line + '\n';
+      // Check for multiline: line has ( but no ) or ends with backslash
+      if ((trimmed.includes('(') && !trimmed.includes(')')) || trimmed.endsWith('\\')) {
+        inPyImportBlock = true;
+      }
+      continue;
+    }
+
+    if (importBuffer && !isPyImportStart(trimmed)) {
+      flushImports(i + 1);
+    }
 
     if (trimmed.startsWith('def ') || trimmed.startsWith('class ')) {
       if (current && inBlock) {
@@ -167,6 +349,8 @@ function chunkPython(projectId: string, filePath: string, content: string): Chun
     }
   }
 
+  flushImports(lines.length + 1);
+
   if (current && inBlock) {
     chunks.push(makeChunk(projectId, filePath, current, startLine, lines.length, chunkType, symbolName));
   }
@@ -174,7 +358,8 @@ function chunkPython(projectId: string, filePath: string, content: string): Chun
   return chunks.length > 0 ? chunks : [makeChunk(projectId, filePath, content, 1, lines.length, 'function', '')];
 }
 
-// Generic: 50-line windows
+// --- Generic: 50-line windows ---
+
 function chunkGeneric(projectId: string, filePath: string, content: string): Chunk[] {
   const lines = content.split('\n');
   const chunks: Chunk[] = [];
@@ -186,7 +371,8 @@ function chunkGeneric(projectId: string, filePath: string, content: string): Chu
   return chunks;
 }
 
-// Markdown: split by headers
+// --- Markdown: split by headers ---
+
 function chunkMarkdown(projectId: string, filePath: string, content: string): Chunk[] {
   const lines = content.split('\n');
   const chunks: Chunk[] = [];
@@ -209,24 +395,29 @@ function chunkMarkdown(projectId: string, filePath: string, content: string): Ch
   return chunks.length > 0 ? chunks : [makeChunk(projectId, filePath, content, 1, lines.length, 'documentation', '')];
 }
 
+// --- Main entry ---
+
 export function chunkFile(projectId: string, filePath: string, content: string): Chunk[] {
   const e = ext(filePath);
   const lang = LANG_MAP[e];
 
-  if (lang === 'typescript' || lang === 'javascript') return chunkJSTS(projectId, filePath, content);
-  if (lang === 'python') return chunkPython(projectId, filePath, content);
-  if (lang === 'markdown') return chunkMarkdown(projectId, filePath, content);
-  if (CODE_EXTENSIONS.has(e)) return chunkGeneric(projectId, filePath, content);
+  let chunks: Chunk[];
+  if (lang === 'typescript' || lang === 'javascript') chunks = chunkJSTS(projectId, filePath, content);
+  else if (lang === 'python') chunks = chunkPython(projectId, filePath, content);
+  else if (lang === 'markdown') chunks = chunkMarkdown(projectId, filePath, content);
+  else if (CODE_EXTENSIONS.has(e)) chunks = chunkGeneric(projectId, filePath, content);
+  else {
+    const paragraphs = content.split('\n\n').filter(p => p.trim());
+    let lineNum = 1;
+    chunks = paragraphs.map((p, i) => {
+      const endLine = lineNum + p.split('\n').length - 1;
+      const chunk = makeChunk(projectId, filePath, p, lineNum, endLine, 'documentation', `section_${i}`);
+      lineNum = endLine + 2;
+      return chunk;
+    });
+  }
 
-  // Document files: paragraph chunking
-  const paragraphs = content.split('\n\n').filter(p => p.trim());
-  let lineNum = 1;
-  return paragraphs.map((p, i) => {
-    const endLine = lineNum + p.split('\n').length - 1;
-    const chunk = makeChunk(projectId, filePath, p, lineNum, endLine, 'documentation', `section_${i}`);
-    lineNum = endLine + 2;
-    return chunk;
-  });
+  return postProcess(chunks);
 }
 
 function isFunctionDecl(line: string): boolean {

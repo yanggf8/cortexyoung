@@ -3,7 +3,7 @@
 import { loadConfig, saveConfig, requireConfig, configPath, type CortexConfig } from './config.js';
 import { applySchema, upsertChunks, upsertProject, deleteStaleProjectChunks, replaceProjectRelationships, projectExists, vectorSearch, keywordSearch, traverseRelationships, getProjectStatus, listProjects, deleteProject, type ChunkRow, type RelationshipRow } from './turso.js';
 import { embed, embedBatch, loadModel } from './embedder.js';
-import { chunkFile, type Chunk } from './chunker.js';
+import { chunkFile, contextPrefix, type Chunk } from './chunker.js';
 import { readFile, readdir, stat } from 'fs/promises';
 import { resolve, relative, basename, dirname, extname } from 'path';
 import { createHash } from 'crypto';
@@ -147,7 +147,7 @@ async function cmdIndex() {
         const chunks = chunkFile(projectId, relPath, content);
 
         // Embed all chunks
-        const embeddings = await embedBatch(chunks.map(c => c.content));
+        const embeddings = await embedBatch(chunks.map(c => contextPrefix(c) + '\n' + c.content));
 
         for (let j = 0; j < chunks.length; j++) {
           const c = chunks[j];
