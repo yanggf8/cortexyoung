@@ -214,26 +214,12 @@ cortex relationships "functionName"
 
 ## 7A. Current Implementation Status
 
-As of 2026-04-06, the codebase has moved beyond the original "next step: Phase 1" note.
+All four phases complete as of 2026-04-06.
 
-- **Phase 1: CLI Core**
-  - Status: implemented
-  - Present in `cli/`: standalone CLI entry point, Turso client, schema application, config handling, local embeddings, and indexing flow
-- **Phase 2: Search + Relationships**
-  - Status: feature-complete, pending end-to-end terminal validation
-  - Present in `cli/`: semantic search, keyword search, relationships traversal, project status, project listing, deletion, config display
-  - Verified with `npm run build` and `npm run test:phase2-smoke` in `cli/`
-  - Remaining to fully close the original exit criterion: live terminal round-trip against Turso (`init/index/search/relationships/status/delete`)
-- **Phase 3: Skill**
-  - Status: not started in this repository
-  - The planned Claude Code skill/scripts are not yet present
-- **Phase 4: Decommission V3.0**
-  - Status: not started
-  - Root MCP/server code and the `worker/` directory are still present
-
-This means the repository is currently hybrid:
-- `cli/` is the active V5 implementation
-- root `src/` remains the legacy V3 runtime
+- **Phase 1: CLI Core** — Complete. `cli/src/`: CLI entry point, Turso client, schema, config, embeddings, indexing.
+- **Phase 2: Search + Relationships** — Complete. Live terminal round-trip validated against Turso (`init/index/search/relationships/status/delete`). Bug fix: `vector_top_k()` returns only `id`, not `distance` — fixed with `vector_distance_cos()`.
+- **Phase 3: Skill** — Complete. `cli/cortex.skill.md` with 3 scripts (search, relationships, status). End-to-end tested.
+- **Phase 4: Decommission V3.0** — Complete. V3 archived to `archive/v3` branch. Root `src/`, `worker/`, all V3 scripts/tests/docs removed. Root `package.json` now a workspace pointing to `cli/`. `npm run build` succeeds with V5 only.
 
 ### Phase 1: CLI Core — 2 weeks
 1. Create `cortex` CLI entry point (Node.js)
@@ -304,10 +290,6 @@ No Cloudflare account needed. No Worker deployment. No KV. No Qdrant.
 
 ---
 
-**Open decisions**: 1
-- V3→V5 migration: Leaning "no, re-index only"
+**Open decisions**: 0
 
-**Next steps**:
-1. Finish Phase 3 by adding the Claude Code skill/scripts for the V5 CLI.
-2. Decide whether MCP remains as a compatibility layer or is removed entirely.
-3. Start Phase 4 by archiving or removing the legacy V3 MCP/server runtime once V5 is the primary path.
+**Resolved**: V3→V5 migration — re-index only (no data migration). MCP removed entirely (no compatibility layer).

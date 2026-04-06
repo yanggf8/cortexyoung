@@ -296,15 +296,16 @@ export async function vectorSearch(
     ? Math.min(projectChunkCount, topK + offset)
     : totalChunkCount;
 
+  const vectorJson = JSON.stringify(vector);
   const result = await db.execute({
     sql: `SELECT c.chunk_id, c.file_path, c.symbol_name, c.chunk_type,
                  c.start_line, c.end_line, c.content, c.language,
-                 v.distance
+                 vector_distance_cos(c.embedding, vector(?)) as distance
           FROM vector_top_k('idx_chunks_embedding', vector(?), ?) v
           JOIN chunks c ON c.rowid = v.id
           WHERE c.project_id = ?
-          ORDER BY v.distance`,
-    args: [JSON.stringify(vector), fetchCount, projectId],
+          ORDER BY distance`,
+    args: [vectorJson, vectorJson, fetchCount, projectId],
   });
 
   const allMatches = result.rows.map(row => ({

@@ -40,14 +40,10 @@ pids
 *.seed
 *.pid.lock
 
-# Nx
-.nx/cache
-.nx/workspace-data
+# Secrets
+.secrets
 
-# fastembed cache
-.fastembed_cache/
-
-# Vector database
+# Local databases
 *.db
 *.db-shm
 *.db-wal
