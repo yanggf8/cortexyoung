@@ -55,6 +55,9 @@ Claude Code → Skill → cortex CLI → @xenova/transformers (local embed)
 - **Over-fetch strategy**: When multi-project, fetch all chunks globally from vector_top_k then filter by project_id post-ANN.
 - **Two-pass relationship resolution**: First pass builds symbolIndex/fileIndex, second pass resolves pending relationships to real chunk_ids.
 - **Per-file watch operations**: Watch mode uses file-scoped delete/upsert (`deleteStaleFileChunks`, `replaceFileRelationships`) to avoid full-project rebuilds. Stale chunks are pruned by diffing current chunk_ids against DB; CASCADE handles relationship cleanup on file deletion.
+- **Edge confidence tags**: Relationships carry a `confidence` column — `EXTRACTED` (deterministic: imports/exports), `INFERRED` (single symbol-name match for `calls`), `AMBIGUOUS` (multi-target name collision or unresolved). `applySchema` runs ALTER TABLE for existing DBs and is invoked at the start of every `cortex index` to migrate forward.
+- **CORTEX_REPORT.md**: `cortex index` writes a one-page summary (god files, languages, chunk types, top symbols) to the project root for zero-tool-call orientation post-compact. Excluded from indexing via `IGNORE_FILES`. Best-effort write — read-only trees emit a warning instead of failing. Stale after `--watch` updates.
+- **PreToolUse nudge hook**: `.claude/hooks/cortex-nudge.sh` suggests `cortex search` over Grep when an index exists. Soft hint only.
 
 ## Development Notes
 

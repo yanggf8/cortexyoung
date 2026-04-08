@@ -59,6 +59,16 @@ Options:
 
 Output is JSON with project_id, name, chunk_count, relationship_count, last_indexed, languages.
 
+### index (with --watch)
+
+Index then watch for file changes, reindexing incrementally per-file. Generates `CORTEX_REPORT.md` in the project root on full index (not on watch updates).
+
+```bash
+node ~/a/cortexyoung/cli/dist/index.js index . --watch
+```
+
+Watch mode uses per-file delete/upsert — no full rebuild on each save. Ctrl+C to stop.
+
 ## Setup
 
 The project must be indexed first:

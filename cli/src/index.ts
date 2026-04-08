@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 
 import { loadConfig, saveConfig, requireConfig, configPath, type CortexConfig } from './config.js';
-import { applySchema, upsertChunks, upsertProject, deleteStaleProjectChunks, replaceProjectRelationships, replaceFileRelationships, deleteFileChunks, deleteStaleFileChunks, projectExists, vectorSearch, keywordSearch, traverseRelationships, getProjectStatus, listProjects, deleteProject, type ChunkRow, type RelationshipRow } from './turso.js';
+import { applySchema, upsertChunks, upsertProject, deleteStaleProjectChunks, replaceProjectRelationships, replaceFileRelationships, deleteFileChunks, deleteStaleFileChunks, projectExists, vectorSearch, keywordSearch, traverseRelationships, getProjectStatus, listProjects, deleteProject, type ChunkRow, type RelationshipRow, type RelationshipConfidence } from './turso.js';
 import { embed, embedBatch, loadModel } from './embedder.js';
 import { chunkFile, contextPrefix, type Chunk } from './chunker.js';
-import { readFile, readdir, stat, watch } from 'fs/promises';
+import { readFile, writeFile, readdir, stat, watch } from 'fs/promises';
 import { resolve, relative, basename, dirname, extname } from 'path';
 import { createHash } from 'crypto';
 import { createInterface } from 'readline';
@@ -15,6 +15,7 @@ const args = process.argv.slice(2);
 const command = args[0];
 
 const IGNORE_DIRS = new Set(['node_modules', '.git', '.cortex', 'dist', 'build', '.next', '__pycache__', '.venv', 'venv', 'coverage', '.cache']);
+const IGNORE_FILES = new Set(['CORTEX_REPORT.md']);
 const CODE_EXTS = new Set(['.ts', '.tsx', '.js', '.jsx', '.py', '.go', '.rs', '.java', '.cpp', '.c', '.h', '.md', '.json', '.yaml', '.yml']);
 type PendingRelationship = { source_chunk_id: string; source_file_path: string; target_ref: string; rel_type: RelationshipRow['rel_type'] };
 type ImportAliasRule = { findPrefix: string; findSuffix: string; replacements: { prefix: string; suffix: string }[] };
@@ -101,6 +102,9 @@ async function cmdInit() {
 async function cmdIndex() {
   const config = await loadConfig();
   requireConfig(config);
+
+  // Ensure schema is up-to-date (migrates existing DBs for new columns)
+  await applySchema(config);
 
   const targetPath = resolve(args[1] || '.');
   const projectId = createHash('sha256').update(targetPath).digest('hex').slice(0, 16);
@@ -204,6 +208,13 @@ async function cmdIndex() {
 
   console.log(`\nDone. ${totalChunks} chunks indexed.`);
 
+  // Generate report (best-effort — read-only trees shouldn't fail the whole index)
+  try {
+    await generateReport(targetPath, projectName, projectId, allChunkRows, resolvedRelationships);
+  } catch (err: any) {
+    console.error(`  Warning: could not write CORTEX_REPORT.md: ${err.message}`);
+  }
+
   if (hasFlag('--format', 'json')) {
     console.log(JSON.stringify({ project_id: projectId, chunks: totalChunks }));
   }
@@ -212,6 +223,105 @@ async function cmdIndex() {
   if (hasFlag('--watch')) {
     await watchAndReindex(config, targetPath, projectId, projectName, importResolver);
   }
+}
+
+async function generateReport(
+  targetPath: string,
+  projectName: string,
+  projectId: string,
+  allChunkRows: ChunkRow[],
+  resolvedRelationships: RelationshipRow[],
+): Promise<void> {
+  // Per-file chunk counts for god-file detection
+  const fileChunkCounts = new Map<string, number>();
+  const languageCounts = new Map<string, number>();
+  const chunkTypeCounts = new Map<string, number>();
+  const symbolNames: string[] = [];
+
+  for (const chunk of allChunkRows) {
+    fileChunkCounts.set(chunk.file_path, (fileChunkCounts.get(chunk.file_path) || 0) + 1);
+    if (chunk.language) languageCounts.set(chunk.language, (languageCounts.get(chunk.language) || 0) + 1);
+    if (chunk.chunk_type) chunkTypeCounts.set(chunk.chunk_type, (chunkTypeCounts.get(chunk.chunk_type) || 0) + 1);
+    if (chunk.symbol_name) symbolNames.push(chunk.symbol_name);
+  }
+
+  // God files: top 5 by chunk concentration
+  const sortedFiles = [...fileChunkCounts.entries()].sort((a, b) => b[1] - a[1]);
+  const godFiles = sortedFiles.slice(0, 5);
+  const totalFiles = sortedFiles.length;
+
+  // Relationship type counts
+  const relTypeCounts = new Map<string, number>();
+  for (const rel of resolvedRelationships) {
+    relTypeCounts.set(rel.rel_type, (relTypeCounts.get(rel.rel_type) || 0) + 1);
+  }
+
+  // Most-connected symbols (appear most in relationships as source or target)
+  const symbolEdgeCount = new Map<string, number>();
+  const chunkIdToSymbol = new Map<string, string>();
+  for (const chunk of allChunkRows) {
+    if (chunk.symbol_name) chunkIdToSymbol.set(chunk.chunk_id, chunk.symbol_name);
+  }
+  for (const rel of resolvedRelationships) {
+    const srcSym = chunkIdToSymbol.get(rel.source_chunk_id);
+    const tgtSym = chunkIdToSymbol.get(rel.target_chunk_id);
+    if (srcSym) symbolEdgeCount.set(srcSym, (symbolEdgeCount.get(srcSym) || 0) + 1);
+    if (tgtSym) symbolEdgeCount.set(tgtSym, (symbolEdgeCount.get(tgtSym) || 0) + 1);
+  }
+  const topSymbols = [...symbolEdgeCount.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10);
+
+  const now = new Date().toISOString();
+  const lines = [
+    `# Cortex Report: ${projectName}`,
+    ``,
+    `> Auto-generated by \`cortex index\` on ${now}. This file becomes stale after incremental (\`--watch\`) updates.`,
+    ``,
+    `## Summary`,
+    ``,
+    `| Metric | Value |`,
+    `|--------|-------|`,
+    `| Files | ${totalFiles} |`,
+    `| Chunks | ${allChunkRows.length} |`,
+    `| Relationships | ${resolvedRelationships.length} |`,
+    `| Languages | ${[...languageCounts.keys()].join(', ') || 'none'} |`,
+    ``,
+    `## Languages`,
+    ``,
+    ...[...languageCounts.entries()].sort((a, b) => b[1] - a[1]).map(([lang, count]) =>
+      `- **${lang}**: ${count} chunks`
+    ),
+    ``,
+    `## God Files (highest chunk concentration)`,
+    ``,
+    ...godFiles.map(([file, count]) => {
+      const pct = ((count / allChunkRows.length) * 100).toFixed(1);
+      return `- \`${file}\` — ${count} chunks (${pct}%)`;
+    }),
+    ``,
+    `## Chunk Types`,
+    ``,
+    ...[...chunkTypeCounts.entries()].sort((a, b) => b[1] - a[1]).map(([type, count]) =>
+      `- **${type}**: ${count}`
+    ),
+    ``,
+    `## Relationship Types`,
+    ``,
+    ...(relTypeCounts.size > 0
+      ? [...relTypeCounts.entries()].sort((a, b) => b[1] - a[1]).map(([type, count]) =>
+          `- **${type}**: ${count}`)
+      : ['- none']),
+    ``,
+    `## Most-Connected Symbols`,
+    ``,
+    ...(topSymbols.length > 0
+      ? topSymbols.map(([sym, count]) => `- \`${sym}\` — ${count} edges`)
+      : ['- none']),
+    ``,
+  ];
+
+  const reportPath = resolve(targetPath, 'CORTEX_REPORT.md');
+  await writeFile(reportPath, lines.join('\n'), 'utf-8');
+  console.log(`Report: ${reportPath}`);
 }
 
 async function watchAndReindex(
@@ -301,8 +411,9 @@ async function watchAndReindex(
       const fullPath = resolve(targetPath, event.filename);
       const ext = fullPath.substring(fullPath.lastIndexOf('.')).toLowerCase();
 
-      // Skip non-code files and ignored directories
+      // Skip non-code files, ignored filenames, and ignored directories
       if (!CODE_EXTS.has(ext)) continue;
+      if (IGNORE_FILES.has(basename(event.filename))) continue;
       if (event.filename.split('/').some(part => IGNORE_DIRS.has(part) || part.startsWith('.'))) continue;
 
       // Debounce: clear previous timer for this file, set new one
@@ -412,6 +523,7 @@ async function collectFiles(dir: string): Promise<string[]> {
       if (entry.isDirectory()) {
         await walk(full);
       } else if (entry.isFile()) {
+        if (IGNORE_FILES.has(entry.name)) continue;
         const e = full.substring(full.lastIndexOf('.')).toLowerCase();
         if (CODE_EXTS.has(e)) files.push(full);
       }
@@ -466,9 +578,21 @@ function resolveRelationships(
   const deduped = new Map<string, RelationshipRow>();
 
   for (const rel of pendingRelationships) {
-    const targetIds = rel.rel_type === 'imports'
-      ? resolveImportTargets(rel.target_ref, rel.source_file_path, fileIndex, importResolver)
-      : [...(symbolIndex.get(rel.target_ref) ?? [])];
+    let targetIds: string[];
+    let confidence: RelationshipConfidence;
+
+    if (rel.rel_type === 'imports') {
+      targetIds = resolveImportTargets(rel.target_ref, rel.source_file_path, fileIndex, importResolver);
+      // Imports resolved via alias rules or relative paths are deterministic
+      confidence = targetIds.length > 0 ? 'EXTRACTED' : 'AMBIGUOUS';
+    } else if (rel.rel_type === 'exports') {
+      targetIds = [...(symbolIndex.get(rel.target_ref) ?? [])];
+      confidence = 'EXTRACTED'; // export declarations are deterministic
+    } else {
+      // 'calls' — symbol name lookup; ambiguous if multiple targets (name collision)
+      targetIds = [...(symbolIndex.get(rel.target_ref) ?? [])];
+      confidence = targetIds.length === 1 ? 'INFERRED' : targetIds.length > 1 ? 'AMBIGUOUS' : 'AMBIGUOUS';
+    }
 
     for (const targetChunkId of targetIds) {
       const key = `${rel.source_chunk_id}:${targetChunkId}:${rel.rel_type}`;
@@ -476,6 +600,7 @@ function resolveRelationships(
         source_chunk_id: rel.source_chunk_id,
         target_chunk_id: targetChunkId,
         rel_type: rel.rel_type,
+        confidence,
       });
     }
   }

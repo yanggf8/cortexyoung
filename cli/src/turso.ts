@@ -74,6 +74,7 @@ CREATE TABLE IF NOT EXISTS relationships (
   source_chunk_id TEXT NOT NULL,
   target_chunk_id TEXT NOT NULL,
   rel_type TEXT NOT NULL,
+  confidence TEXT DEFAULT 'EXTRACTED',
   FOREIGN KEY (source_chunk_id) REFERENCES chunks(chunk_id) ON DELETE CASCADE,
   FOREIGN KEY (target_chunk_id) REFERENCES chunks(chunk_id) ON DELETE CASCADE,
   PRIMARY KEY (source_chunk_id, target_chunk_id, rel_type)
@@ -121,6 +122,12 @@ export async function applySchema(config: CortexConfig): Promise<void> {
   for (const stmt of statements) {
     await db.execute(stmt);
   }
+  // Migration: add confidence column to existing relationships tables
+  try {
+    await db.execute(`ALTER TABLE relationships ADD COLUMN confidence TEXT DEFAULT 'EXTRACTED'`);
+  } catch {
+    // Column already exists — ignore
+  }
 }
 
 export interface ChunkRow {
@@ -137,10 +144,13 @@ export interface ChunkRow {
   embedding?: number[];
 }
 
+export type RelationshipConfidence = 'EXTRACTED' | 'INFERRED' | 'AMBIGUOUS';
+
 export interface RelationshipRow {
   source_chunk_id: string;
   target_chunk_id: string;
   rel_type: string;
+  confidence: RelationshipConfidence;
 }
 
 const BATCH_SIZE = 50;
@@ -185,8 +195,8 @@ export async function upsertRelationships(config: CortexConfig, rels: Relationsh
   const db = getClient(config);
   await db.batch(
     rels.map(r => ({
-      sql: `INSERT OR IGNORE INTO relationships (source_chunk_id, target_chunk_id, rel_type) VALUES (?, ?, ?)`,
-      args: [r.source_chunk_id, r.target_chunk_id, r.rel_type],
+      sql: `INSERT OR IGNORE INTO relationships (source_chunk_id, target_chunk_id, rel_type, confidence) VALUES (?, ?, ?, ?)`,
+      args: [r.source_chunk_id, r.target_chunk_id, r.rel_type, r.confidence],
     })),
     'write'
   );
@@ -441,18 +451,18 @@ export async function traverseRelationships(
 
   const sql = `
     WITH RECURSIVE graph AS (
-      SELECT r.source_chunk_id, r.target_chunk_id, r.rel_type, 1 as depth
+      SELECT r.source_chunk_id, r.target_chunk_id, r.rel_type, r.confidence, 1 as depth
       FROM relationships r
       WHERE r.source_chunk_id IN (${startPlaceholders})
         AND r.rel_type IN (${relTypePlaceholders})
       UNION ALL
-      SELECT r.source_chunk_id, r.target_chunk_id, r.rel_type, g.depth + 1
+      SELECT r.source_chunk_id, r.target_chunk_id, r.rel_type, r.confidence, g.depth + 1
       FROM relationships r
       JOIN graph g ON r.source_chunk_id = g.target_chunk_id
       WHERE g.depth < ?
         AND r.rel_type IN (${relTypePlaceholders})
     )
-    SELECT DISTINCT g.source_chunk_id, g.target_chunk_id, g.rel_type FROM graph g
+    SELECT DISTINCT g.source_chunk_id, g.target_chunk_id, g.rel_type, g.confidence FROM graph g
   `;
 
   const edgesResult = await db.execute({ sql, args: cteParams });
@@ -465,6 +475,7 @@ export async function traverseRelationships(
       source: r.source_chunk_id as string,
       target: r.target_chunk_id as string,
       rel_type: r.rel_type as string,
+      confidence: (r.confidence as string) || 'EXTRACTED',
     };
   });
 
