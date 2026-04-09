@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 
 import { loadConfig, saveConfig, requireConfig, configPath, type CortexConfig } from './config.js';
-import { applySchema, upsertChunks, upsertProject, deleteStaleProjectChunks, replaceProjectRelationships, replaceFileRelationships, deleteFileChunks, deleteStaleFileChunks, projectExists, vectorSearch, keywordSearch, traverseRelationships, getProjectStatus, listProjects, deleteProject, type ChunkRow, type RelationshipRow, type RelationshipConfidence } from './turso.js';
+import { applySchema, upsertChunks, upsertProject, deleteStaleProjectChunks, replaceProjectRelationships, replaceFileRelationships, deleteFileChunks, deleteStaleFileChunks, getIndexedFilePaths, projectExists, vectorSearch, keywordSearch, traverseRelationships, getProjectStatus, getProjectMeta, listProjects, deleteProject, type ChunkRow, type RelationshipRow, type RelationshipConfidence } from './turso.js';
 import { embed, embedBatch, loadModel } from './embedder.js';
-import { chunkFile, contextPrefix, type Chunk } from './chunker.js';
+import { chunkFile, chunkFileAST, contextPrefix, type Chunk } from './chunker.js';
+import { initParser } from './ast-chunker.js';
+import { ensureGrammars, computeGrammarVersionHash, grammarStatus, installFromLocal, grammarsDir } from './grammars.js';
 import { readFile, writeFile, readdir, stat, watch } from 'fs/promises';
 import { resolve, relative, basename, dirname, extname } from 'path';
 import { createHash } from 'crypto';
@@ -15,7 +17,7 @@ const args = process.argv.slice(2);
 const command = args[0];
 
 const IGNORE_DIRS = new Set(['node_modules', '.git', '.cortex', 'dist', 'build', '.next', '__pycache__', '.venv', 'venv', 'coverage', '.cache']);
-const IGNORE_FILES = new Set(['CORTEX_REPORT.md']);
+const IGNORE_FILES = new Set(['CORTEX_REPORT.md', 'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml']);
 const CODE_EXTS = new Set(['.ts', '.tsx', '.js', '.jsx', '.py', '.go', '.rs', '.java', '.cpp', '.c', '.h', '.md', '.json', '.yaml', '.yml']);
 type PendingRelationship = { source_chunk_id: string; source_file_path: string; target_ref: string; rel_type: RelationshipRow['rel_type'] };
 type ImportAliasRule = { findPrefix: string; findSuffix: string; replacements: { prefix: string; suffix: string }[] };
@@ -31,20 +33,28 @@ async function main() {
     case 'projects': return cmdProjects();
     case 'delete': return cmdDelete();
     case 'config': return cmdConfig();
+    case 'grammars': return cmdGrammars();
     default:
       console.log(`Usage: cortex <command>
 
 Commands:
-  init                     Set up Turso database and config
-  index [path]             Index a directory (default: .)
-  index [path] --watch    Index then watch for changes
-  search "query"           Semantic search
-  search "query" --keyword Keyword search (FTS5)
-  relationships "symbol"   Traverse relationships
-  status                   Project status
-  projects                 List all projects
-  delete                   Delete current project
-  config                   Show config`);
+  init                       Set up Turso database and config
+  index [path]               Full index of a directory (default: .)
+  index [path] --watch       Index then watch for changes
+  index [path] --incremental Reindex only files changed since last run
+  search "query"             Semantic search
+  search "query" --keyword   Keyword search (FTS5)
+  relationships "symbol"     Traverse relationships
+  status                     Project status
+  projects                   List all projects
+  delete                     Delete current project
+  config                     Show config
+  grammars                   Show grammar status
+  grammars install <path>    Install grammars from local directory
+
+Flags:
+  --quiet                    Suppress staleness hint on search/status
+  CORTEX_QUIET=1             (env) Suppress staleness hint globally`);
   }
 }
 
@@ -110,29 +120,57 @@ async function cmdIndex() {
   const projectId = createHash('sha256').update(targetPath).digest('hex').slice(0, 16);
   const projectName = basename(targetPath);
 
+  // Incremental mode: diff against stored git sha / mtime, reindex only changed files.
+  if (hasFlag('--incremental')) {
+    const ran = await cmdIndexIncremental(config, targetPath, projectId, projectName);
+    if (ran) return;
+    console.log('Incremental not possible — falling back to full index.');
+  }
+
   console.log(`Indexing ${targetPath} (project: ${projectName})...`);
 
   // Collect files
   const files = await collectFiles(targetPath);
   console.log(`Found ${files.length} files`);
 
+  const gitHead = getGitHead(targetPath);
+  const indexStartedAt = Date.now();
+
   if (files.length === 0) {
     await deleteStaleProjectChunks(config, projectId, []);
     await replaceProjectRelationships(config, projectId, []);
-    await upsertProject(config, projectId, projectName, targetPath);
+    await upsertProject(config, projectId, projectName, targetPath, {
+      gitHead: gitHead ?? undefined,
+      lastIndexedAt: indexStartedAt,
+    });
     await setDefaultProject(config, projectId, targetPath);
     console.log('No indexable files found. Existing project chunks were cleared.');
     return;
   }
 
-  // Load embedding model
+  // Load embedding model + AST parser in parallel
   console.log('Loading embedding model...');
-  await loadModel();
+  const fileExts = new Set(files.map(f => f.substring(f.lastIndexOf('.')).toLowerCase()));
+  const [, , grammarResult] = await Promise.all([
+    loadModel(),
+    initParser(),
+    ensureGrammars(fileExts),
+  ]);
+  const grammarVersion = await computeGrammarVersionHash();
+  const astEnabled = grammarResult.available.length > 0;
+  if (astEnabled) {
+    console.log(`AST chunking enabled (${grammarResult.available.join(', ')})`);
+    if (grammarResult.missing.length > 0) console.log(`Grammars not found: ${grammarResult.missing.join(', ')} (regex fallback)`);
+  } else {
+    console.log('AST chunking not available (no grammars), using regex');
+  }
 
   const importResolver = await loadImportResolver(targetPath);
 
   // Process files
   let totalChunks = 0;
+  let astChunks = 0;
+  let regexChunks = 0;
   const allChunkRows: ChunkRow[] = [];
   const pendingRelationships: PendingRelationship[] = [];
   const symbolIndex = new Map<string, Set<string>>();
@@ -149,7 +187,15 @@ async function cmdIndex() {
         const content = await readFile(filePath, 'utf-8');
         if (content.length === 0 || content.length > 100_000) continue; // skip empty/huge files
 
-        const chunks = chunkFile(projectId, relPath, content);
+        const chunks = astEnabled
+          ? await chunkFileAST(projectId, relPath, content)
+          : chunkFile(projectId, relPath, content);
+
+        // Track AST vs regex usage
+        for (const c of chunks) {
+          if (c.chunk_source === 'ast') astChunks++;
+          else regexChunks++;
+        }
 
         // Embed all chunks
         const embeddings = await embedBatch(chunks.map(c => contextPrefix(c) + '\n' + c.content));
@@ -169,6 +215,7 @@ async function cmdIndex() {
             content_hash: c.content_hash,
             language: c.language,
             embedding: embeddings[j],
+            chunk_source: c.chunk_source,
           });
 
           // Build relationships from chunk analysis
@@ -203,14 +250,22 @@ async function cmdIndex() {
   await deleteStaleProjectChunks(config, projectId, currentChunkIds);
   await replaceProjectRelationships(config, projectId, resolvedRelationships);
 
-  await upsertProject(config, projectId, projectName, targetPath);
+  await upsertProject(config, projectId, projectName, targetPath, {
+    grammarVersion: grammarVersion || undefined,
+    gitHead: gitHead ?? undefined,
+    lastIndexedAt: indexStartedAt,
+  });
   await setDefaultProject(config, projectId, targetPath);
 
-  console.log(`\nDone. ${totalChunks} chunks indexed.`);
+  const sourceBreakdown = astChunks > 0 ? ` (AST: ${astChunks}, regex: ${regexChunks})` : '';
+  console.log(`\nDone. ${totalChunks} chunks indexed${sourceBreakdown}.`);
+  if (gitHead) {
+    console.log(`Indexed at: ${gitHead.slice(0, 12)}`);
+  }
 
   // Generate report (best-effort — read-only trees shouldn't fail the whole index)
   try {
-    await generateReport(targetPath, projectName, projectId, allChunkRows, resolvedRelationships);
+    await generateReport(targetPath, projectName, projectId, allChunkRows, resolvedRelationships, gitHead, indexStartedAt);
   } catch (err: any) {
     console.error(`  Warning: could not write CORTEX_REPORT.md: ${err.message}`);
   }
@@ -225,12 +280,127 @@ async function cmdIndex() {
   }
 }
 
+/**
+ * Incremental reindex path: uses git diff (or mtime fallback) to find changed files,
+ * then replays each through the per-file CRUD path. Returns false when incremental
+ * is not possible (no prior index, stored sha missing, nothing to do delegation).
+ */
+async function cmdIndexIncremental(
+  config: CortexConfig,
+  targetPath: string,
+  projectId: string,
+  projectName: string,
+): Promise<boolean> {
+  const meta = await getProjectMeta(config, projectId);
+  if (!meta) {
+    console.log('No prior index found. Run `cortex index` without --incremental first.');
+    return false;
+  }
+
+  const currentHead = getGitHead(targetPath);
+  const isGit = currentHead !== null;
+
+  // Collect current files + indexed file set for deletion detection
+  const allFiles = await collectFiles(targetPath);
+  const indexedPaths = await getIndexedFilePaths(config, projectId);
+  const plan = await computeIncrementalChanges(targetPath, meta.git_head, meta.last_indexed_at, allFiles, indexedPaths);
+
+  if (plan.method === 'full') {
+    console.log('No git sha and no prior timestamp to diff against — cannot run incremental.');
+    return false;
+  }
+
+  if (plan.changes.length === 0) {
+    console.log(`Nothing to reindex (${plan.method} diff found no changes).`);
+    // Still bump stored metadata so next run has a fresh baseline
+    const grammarVersion = await computeGrammarVersionHash();
+    await upsertProject(config, projectId, projectName, targetPath, {
+      grammarVersion: grammarVersion || undefined,
+      gitHead: currentHead ?? meta.git_head ?? undefined,
+      lastIndexedAt: Date.now(),
+    });
+    return true;
+  }
+
+  console.log(`Incremental reindex (${plan.method}): ${plan.changes.length} changed file(s)`);
+
+  // Load embedding model + parser + grammars (same as full index)
+  const fileExts = new Set(allFiles.map(f => f.substring(f.lastIndexOf('.')).toLowerCase()));
+  const [, , grammarResult] = await Promise.all([
+    loadModel(),
+    initParser(),
+    ensureGrammars(fileExts),
+  ]);
+  const grammarVersion = await computeGrammarVersionHash();
+  if (grammarResult.available.length === 0) {
+    console.log('AST chunking not available (no grammars), using regex');
+  }
+
+  const importResolver = await loadImportResolver(targetPath);
+
+  let reindexed = 0;
+  let deleted = 0;
+  let failed = 0;
+
+  for (const change of plan.changes) {
+    // Renames: delete the old path first, then index the new path
+    if (change.status === 'R' && change.oldPath) {
+      const removed = await deleteFileChunks(config, projectId, change.oldPath);
+      if (removed > 0) deleted++;
+    }
+
+    if (change.status === 'D') {
+      const removed = await deleteFileChunks(config, projectId, change.path);
+      if (removed > 0) {
+        deleted++;
+        console.log(`  - ${change.path} (${removed} chunks removed)`);
+      }
+      continue;
+    }
+
+    const abs = resolve(targetPath, change.path);
+    const result = await reindexOneFile(config, targetPath, projectId, importResolver, abs);
+    switch (result.status) {
+      case 'indexed':
+        reindexed++;
+        console.log(`  ~ ${result.relPath} (${result.chunks} chunks${result.staleRemoved ? `, ${result.staleRemoved} stale removed` : ''})`);
+        break;
+      case 'cleared':
+      case 'deleted':
+        deleted++;
+        console.log(`  - ${result.relPath} (${result.removed} chunks removed)`);
+        break;
+      case 'error':
+        failed++;
+        console.error(`  ! ${result.relPath}: ${result.error}`);
+        break;
+    }
+  }
+
+  // Update stored metadata with the new HEAD + timestamp
+  await upsertProject(config, projectId, projectName, targetPath, {
+    grammarVersion: grammarVersion || undefined,
+    gitHead: currentHead ?? meta.git_head ?? undefined,
+    lastIndexedAt: Date.now(),
+  });
+  await setDefaultProject(config, projectId, targetPath);
+
+  console.log(`\nIncremental done. ${reindexed} reindexed, ${deleted} deleted${failed ? `, ${failed} failed` : ''}.`);
+  if (isGit) {
+    console.log(`Indexed at: ${currentHead?.slice(0, 12) ?? 'unknown'}`);
+  }
+  console.log(`Note: CORTEX_REPORT.md is now stale — run \`cortex index\` for a refreshed report.`);
+  return true;
+}
+
 async function generateReport(
   targetPath: string,
   projectName: string,
   projectId: string,
   allChunkRows: ChunkRow[],
   resolvedRelationships: RelationshipRow[],
+  gitHead: string | null,
+  indexedAtEpochMs: number,
 ): Promise<void> {
   // Per-file chunk counts for god-file detection
   const fileChunkCounts = new Map<string, number>();
@@ -270,11 +440,16 @@ async function generateReport(
   }
   const topSymbols = [...symbolEdgeCount.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10);
 
-  const now = new Date().toISOString();
+  const indexedAtIso = new Date(indexedAtEpochMs).toISOString();
+  const indexedAtLine = gitHead
+    ? `Indexed at: \`${gitHead.slice(0, 12)}\` (${indexedAtIso})`
+    : `Indexed at: ${indexedAtIso}`;
   const lines = [
     `# Cortex Report: ${projectName}`,
     ``,
-    `> Auto-generated by \`cortex index\` on ${now}. This file becomes stale after incremental (\`--watch\`) updates.`,
+    `> Auto-generated by \`cortex index\` on ${indexedAtIso}. This file becomes stale after incremental (\`--watch\` or \`--incremental\`) updates.`,
+    ``,
+    `${indexedAtLine}`,
     ``,
     `## Summary`,
     ``,
@@ -324,6 +499,98 @@ async function generateReport(
   console.log(`Report: ${reportPath}`);
 }
 
+interface ReindexResult {
+  status: 'indexed' | 'cleared' | 'deleted' | 'skipped' | 'error';
+  relPath: string;
+  chunks?: number;
+  staleRemoved?: number;
+  removed?: number;
+  error?: string;
+}
+
+/**
+ * Re-index a single file: upsert chunks, delete stale chunks for that file,
+ * replace file-scoped relationships. Handles missing files (ENOENT → delete).
+ */
+async function reindexOneFile(
+  config: CortexConfig,
+  targetPath: string,
+  projectId: string,
+  importResolver: ImportResolver,
+  filePath: string,
+): Promise<ReindexResult> {
+  const relPath = relative(targetPath, filePath).replace(/\\/g, '/');
+  try {
+    const content = await readFile(filePath, 'utf-8');
+    if (content.length === 0 || content.length > 100_000) {
+      const removed = await deleteFileChunks(config, projectId, relPath);
+      return removed > 0
+        ? { status: 'cleared', relPath, removed }
+        : { status: 'skipped', relPath };
+    }
+
+    const chunks = await chunkFileAST(projectId, relPath, content);
+    if (chunks.length === 0) {
+      const removed = await deleteFileChunks(config, projectId, relPath);
+      return removed > 0
+        ? { status: 'cleared', relPath, removed }
+        : { status: 'skipped', relPath };
+    }
+
+    const embeddings = await embedBatch(chunks.map(c => contextPrefix(c) + '\n' + c.content));
+
+    const chunkRows: ChunkRow[] = [];
+    const pendingRels: PendingRelationship[] = [];
+    const symbolIndex = new Map<string, Set<string>>();
+    const fileIndex = new Map<string, string>();
+
+    for (let j = 0; j < chunks.length; j++) {
+      const c = chunks[j];
+      indexChunkTarget(symbolIndex, fileIndex, c);
+      chunkRows.push({
+        chunk_id: c.chunk_id,
+        project_id: projectId,
+        file_path: c.file_path,
+        symbol_name: c.symbol_name,
+        chunk_type: c.chunk_type,
+        start_line: c.start_line,
+        end_line: c.end_line,
+        content: c.content,
+        content_hash: c.content_hash,
+        language: c.language,
+        embedding: embeddings[j],
+        chunk_source: c.chunk_source,
+      });
+
+      for (const called of c.calls) {
+        pendingRels.push({ source_chunk_id: c.chunk_id, source_file_path: c.file_path, target_ref: called, rel_type: 'calls' });
+      }
+      for (const imp of c.imports) {
+        pendingRels.push({ source_chunk_id: c.chunk_id, source_file_path: c.file_path, target_ref: imp, rel_type: 'imports' });
+      }
+      for (const exp of c.exports) {
+        pendingRels.push({ source_chunk_id: c.chunk_id, source_file_path: c.file_path, target_ref: exp, rel_type: 'exports' });
+      }
+    }
+
+    await upsertChunks(config, chunkRows);
+    const currentIds = chunkRows.map(c => c.chunk_id);
+    const staleDeleted = await deleteStaleFileChunks(config, projectId, relPath, currentIds);
+    const resolvedRels = resolveRelationships(pendingRels, symbolIndex, fileIndex, importResolver);
+    await replaceFileRelationships(config, projectId, relPath, resolvedRels);
+    return { status: 'indexed', relPath, chunks: chunkRows.length, staleRemoved: staleDeleted };
+  } catch (err: any) {
+    if (err.code === 'ENOENT') {
+      const removed = await deleteFileChunks(config, projectId, relPath);
+      return { status: 'deleted', relPath, removed };
+    }
+    if (err.code === 'EISDIR') {
+      return { status: 'skipped', relPath };
+    }
+    return { status: 'error', relPath, error: err.message };
+  }
+}
+
 async function watchAndReindex(
   config: CortexConfig,
   targetPath: string,
@@ -335,67 +602,20 @@ async function watchAndReindex(
   const pending = new Map<string, NodeJS.Timeout>();
 
   async function reindexFile(filePath: string): Promise<void> {
-    const relPath = relative(targetPath, filePath);
-    try {
-      const content = await readFile(filePath, 'utf-8');
-      if (content.length === 0 || content.length > 100_000) return;
-
-      const chunks = chunkFile(projectId, relPath, content);
-      const embeddings = await embedBatch(chunks.map(c => contextPrefix(c) + '\n' + c.content));
-
-      const chunkRows: ChunkRow[] = [];
-      const pendingRels: PendingRelationship[] = [];
-      const symbolIndex = new Map<string, Set<string>>();
-      const fileIndex = new Map<string, string>();
-
-      for (let j = 0; j < chunks.length; j++) {
-        const c = chunks[j];
-        indexChunkTarget(symbolIndex, fileIndex, c);
-        chunkRows.push({
-          chunk_id: c.chunk_id,
-          project_id: projectId,
-          file_path: c.file_path,
-          symbol_name: c.symbol_name,
-          chunk_type: c.chunk_type,
-          start_line: c.start_line,
-          end_line: c.end_line,
-          content: c.content,
-          content_hash: c.content_hash,
-          language: c.language,
-          embedding: embeddings[j],
-        });
-
-        for (const called of c.calls) {
-          pendingRels.push({ source_chunk_id: c.chunk_id, source_file_path: c.file_path, target_ref: called, rel_type: 'calls' });
-        }
-        for (const imp of c.imports) {
-          pendingRels.push({ source_chunk_id: c.chunk_id, source_file_path: c.file_path, target_ref: imp, rel_type: 'imports' });
-        }
-        for (const exp of c.exports) {
-          pendingRels.push({ source_chunk_id: c.chunk_id, source_file_path: c.file_path, target_ref: exp, rel_type: 'exports' });
-        }
-      }
-
-      if (chunkRows.length > 0) {
-        await upsertChunks(config, chunkRows);
-        const currentIds = chunkRows.map(c => c.chunk_id);
-        const staleDeleted = await deleteStaleFileChunks(config, projectId, relPath, currentIds);
-        const resolvedRels = resolveRelationships(pendingRels, symbolIndex, fileIndex, importResolver);
-        await replaceFileRelationships(config, projectId, relPath, resolvedRels);
-        console.log(`  [watch] Reindexed ${relPath} (${chunkRows.length} chunks${staleDeleted ? `, ${staleDeleted} stale removed` : ''})`);
-      } else {
-        // File became empty or too large — remove its chunks and relationships
-        const removed = await deleteFileChunks(config, projectId, relPath);
-        if (removed > 0) console.log(`  [watch] Cleared ${relPath} (${removed} chunks removed)`);
-      }
-    } catch (err: any) {
-      if (err.code === 'ENOENT') {
-        // File deleted — remove its chunks and relationships (CASCADE handles edges)
-        const removed = await deleteFileChunks(config, projectId, relPath);
-        console.log(`  [watch] Deleted ${relPath} (${removed} chunks removed)`);
-      } else if (err.code !== 'EISDIR') {
-        console.error(`  [watch] Error ${relPath}: ${err.message}`);
-      }
+    const result = await reindexOneFile(config, targetPath, projectId, importResolver, filePath);
+    switch (result.status) {
+      case 'indexed':
+        console.log(`  [watch] Reindexed ${result.relPath} (${result.chunks} chunks${result.staleRemoved ? `, ${result.staleRemoved} stale removed` : ''})`);
+        break;
+      case 'cleared':
+        console.log(`  [watch] Cleared ${result.relPath} (${result.removed} chunks removed)`);
+        break;
+      case 'deleted':
+        console.log(`  [watch] Deleted ${result.relPath} (${result.removed} chunks removed)`);
+        break;
+      case 'error':
+        console.error(`  [watch] Error ${result.relPath}: ${result.error}`);
+        break;
     }
   }
 
@@ -438,6 +658,8 @@ async function cmdSearch() {
   if (!query) { console.error('Usage: cortex search "query"'); process.exit(1); }
 
   const projectId = await getProjectId(config);
+  await emitStalenessHint(config, projectId);
+
   const topK = parseInt(getFlag('--top-k') || '15');
   const offset = parseInt(getFlag('--offset') || '0');
 
@@ -472,6 +694,7 @@ async function cmdStatus() {
   requireConfig(config);
 
   const projectId = await getProjectId(config);
+  await emitStalenessHint(config, projectId);
   const status = await getProjectStatus(config, projectId);
   if (!status) { console.error('Project not found. Run: cortex index'); process.exit(1); }
   output(status);
@@ -506,6 +729,225 @@ async function cmdConfig() {
   const config = await loadConfig();
   console.log(`Config: ${configPath()}`);
   console.log(JSON.stringify({ ...config, turso_auth_token: config.turso_auth_token ? '***' : '' }, null, 2));
+}
+
+// --- grammars ---
+async function cmdGrammars() {
+  const sub = args[1];
+
+  if (sub === 'install') {
+    const sourcePath = args[2];
+    if (!sourcePath) {
+      console.error('Usage: cortex grammars install <path-to-wasm-directory>');
+      process.exit(1);
+    }
+    const installed = await installFromLocal(resolve(sourcePath));
+    if (installed.length > 0) {
+      console.log(`Installed grammars: ${installed.join(', ')}`);
+    } else {
+      console.log('No matching grammar files found in the specified path.');
+    }
+    return;
+  }
+
+  // Default: show status
+  const status = await grammarStatus();
+  const version = await computeGrammarVersionHash();
+  console.log(`Grammars directory: ${grammarsDir()}`);
+  console.log(`Grammar version hash: ${version || '(none)'}\n`);
+  for (const g of status) {
+    console.log(`  ${g.available ? `[ok]` : '[--]'} ${g.name}${g.available ? ` (${g.source})` : ''}`);
+  }
+  if (status.some(g => !g.available)) {
+    console.log('\nMissing grammars will be auto-downloaded on next `cortex index`.');
+    console.log('For offline install: cortex grammars install <path-to-wasm-directory>');
+  }
+}
+
+// --- git helpers ---
+
+/** Return current git HEAD sha, or null if not a git repo / git unavailable. */
+function getGitHead(cwd: string): string | null {
+  try {
+    const sha = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd,
+      stdio: ['ignore', 'pipe', 'ignore'],
+      encoding: 'utf-8',
+    }).trim();
+    return sha || null;
+  } catch {
+    return null;
+  }
+}
+
+/** Count commits between old..HEAD. Returns null if git diff fails. */
+function countCommitsBehind(cwd: string, oldSha: string): number | null {
+  try {
+    const out = execFileSync('git', ['rev-list', '--count', `${oldSha}..HEAD`], {
+      cwd,
+      stdio: ['ignore', 'pipe', 'ignore'],
+      encoding: 'utf-8',
+    }).trim();
+    const n = parseInt(out, 10);
+    return Number.isFinite(n) ? n : null;
+  } catch {
+    return null;
+  }
+}
+
+export interface FileChange {
+  status: 'A' | 'M' | 'D' | 'R';
+  path: string;
+  /** Set when status === 'R' — previous path before rename */
+  oldPath?: string;
+}
+
+/**
+ * Diff a stored sha against the current working tree, including untracked files.
+ * Returns null if git diff fails (e.g. stored sha no longer exists after history rewrite).
+ */
+function gitDiffAgainstWorkingTree(cwd: string, oldSha: string): FileChange[] | null {
+  try {
+    const out = execFileSync('git', ['diff', '--name-status', '-M', '-z', oldSha], {
+      cwd,
+      stdio: ['ignore', 'pipe', 'ignore'],
+      encoding: 'utf-8',
+    });
+    const changes = parseNameStatusZ(out);
+
+    // Supplement with untracked files (not yet git-added) so new files
+    // are picked up by --incremental without requiring `git add` first.
+    try {
+      const untracked = execFileSync('git', ['ls-files', '--others', '--exclude-standard', '-z'], {
+        cwd,
+        stdio: ['ignore', 'pipe', 'ignore'],
+        encoding: 'utf-8',
+      });
+      const alreadySeen = new Set(changes.map(c => c.path));
+      for (const path of untracked.split('\0')) {
+        if (path && !alreadySeen.has(path)) {
+          changes.push({ status: 'A', path });
+        }
+      }
+    } catch {
+      // If ls-files fails, proceed with tracked diff only
+    }
+
+    return changes;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Parse `git diff --name-status -z` output. The -z flag produces NUL-separated records:
+ *   <status>\0<path>\0                         for A/M/D
+ *   R<score>\0<old_path>\0<new_path>\0         for renames
+ */
+function parseNameStatusZ(output: string): FileChange[] {
+  const changes: FileChange[] = [];
+  const tokens = output.split('\0');
+  let i = 0;
+  while (i < tokens.length) {
+    const tok = tokens[i];
+    if (!tok) { i++; continue; }
+    const status = tok.charAt(0);
+    if (status === 'R' || status === 'C') {
+      const oldPath = tokens[i + 1];
+      const newPath = tokens[i + 2];
+      if (oldPath && newPath) {
+        changes.push({ status: 'R', path: newPath, oldPath });
+      }
+      i += 3;
+    } else if (status === 'A' || status === 'M' || status === 'D') {
+      const path = tokens[i + 1];
+      if (path) changes.push({ status: status as 'A' | 'M' | 'D', path });
+      i += 2;
+    } else {
+      i++;
+    }
+  }
+  return changes;
+}
+
+/** Resolve an incremental plan using git when possible, mtime fallback otherwise. */
+async function computeIncrementalChanges(
+  targetPath: string,
+  storedSha: string | null,
+  storedIndexedAt: number | null,
+  allFiles: string[],
+  indexedFilePaths?: Set<string>,
+): Promise<{ changes: FileChange[]; method: 'git' | 'mtime' | 'full' }> {
+  // Prefer git when we have a stored sha
+  if (storedSha) {
+    const changes = gitDiffAgainstWorkingTree(targetPath, storedSha);
+    if (changes !== null) {
+      // Filter to indexable files only
+      const filtered = changes.filter(c => {
+        const checkPath = c.status === 'R' ? c.path : c.path;
+        const e = checkPath.substring(checkPath.lastIndexOf('.')).toLowerCase();
+        if (!CODE_EXTS.has(e)) return false;
+        if (IGNORE_FILES.has(basename(checkPath))) return false;
+        if (checkPath.split('/').some(p => IGNORE_DIRS.has(p) || p.startsWith('.'))) return false;
+        return true;
+      });
+      return { changes: filtered, method: 'git' };
+    }
+  }
+
+  // mtime fallback: scan the files we already collected for mtimes newer than last_indexed_at
+  // Also detect deletions by comparing indexed file paths against current files on disk.
+  if (storedIndexedAt) {
+    const changes: FileChange[] = [];
+    const currentRelPaths = new Set<string>();
+    for (const abs of allFiles) {
+      const relPath = relative(targetPath, abs).replace(/\\/g, '/');
+      currentRelPaths.add(relPath);
+      try {
+        const st = await stat(abs);
+        if (st.mtimeMs > storedIndexedAt) {
+          changes.push({ status: 'M', path: relPath });
+        }
+      } catch {
+        // Skip unreadable files
+      }
+    }
+    // Detect deletions: files in the index but no longer on disk
+    if (indexedFilePaths) {
+      for (const indexed of indexedFilePaths) {
+        if (!currentRelPaths.has(indexed)) {
+          changes.push({ status: 'D', path: indexed });
+        }
+      }
+    }
+    return { changes, method: 'mtime' };
+  }
+
+  // No stored state at all — caller should do a full reindex
+  return { changes: [], method: 'full' };
+}
+
+/**
+ * Emit a one-line staleness hint to stderr when the index is behind HEAD.
+ * Suppressed by --quiet flag or CORTEX_QUIET=1 env var.
+ */
+async function emitStalenessHint(config: CortexConfig, projectId: string): Promise<void> {
+  if (hasFlag('--quiet')) return;
+  if (process.env.CORTEX_QUIET === '1') return;
+
+  const meta = await getProjectMeta(config, projectId);
+  if (!meta) return;
+
+  // Use the project's stored path (not cwd) so we compare against the right git repo.
+  const projectPath = meta.path ?? resolve('.');
+  const currentHead = getGitHead(projectPath);
+  if (!currentHead) return; // Not a git repo — nothing to compare
+
+  if (meta.git_head && meta.git_head !== currentHead) {
+    const behind = countCommitsBehind(projectPath, meta.git_head);
+    const count = behind != null ? `${behind} commit${behind === 1 ? '' : 's'}` : 'commits';
+    process.stderr.write(`[cortex] index is ${count} behind HEAD, run: cortex index --incremental\n`);
+  }
 }
 
 // --- helpers ---

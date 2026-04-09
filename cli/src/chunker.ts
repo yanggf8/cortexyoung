@@ -1,6 +1,7 @@
 import { createHash } from 'crypto';
 
 export type ChunkType = 'function' | 'class' | 'method' | 'documentation' | 'config';
+export type ChunkSource = 'ast' | 'regex';
 
 export interface Chunk {
   chunk_id: string;
@@ -16,6 +17,7 @@ export interface Chunk {
   calls: string[];
   imports: string[];
   exports: string[];
+  chunk_source?: ChunkSource;
 }
 
 const TOKEN_LIMIT = 400;
@@ -94,6 +96,35 @@ export function contextPrefix(chunk: Chunk): string {
 
 // --- Post-processing: split oversized, merge undersized ---
 
+/**
+ * Create a derivative chunk that inherits metadata (chunk_source, calls, imports, exports)
+ * from a parent. Used by split/merge so AST-extracted relationships survive post-processing.
+ */
+function deriveChunk(
+  parent: Chunk,
+  content: string,
+  startLine: number,
+  endLine: number,
+  symbolName: string
+): Chunk {
+  return {
+    chunk_id: `${parent.project_id}:${parent.file_path}:${startLine}`,
+    project_id: parent.project_id,
+    file_path: parent.file_path,
+    symbol_name: symbolName || undefined,
+    chunk_type: parent.chunk_type,
+    start_line: startLine,
+    end_line: endLine,
+    content: content.trim(),
+    content_hash: hashContent(content),
+    language: parent.language,
+    calls: parent.calls,
+    imports: parent.imports,
+    exports: parent.exports,
+    chunk_source: parent.chunk_source,
+  };
+}
+
 function splitOversized(chunks: Chunk[]): Chunk[] {
   const charLimit = TOKEN_LIMIT * 4;
   const result: Chunk[] = [];
@@ -106,7 +137,7 @@ function splitOversized(chunks: Chunk[]): Chunk[] {
     // Single-line or unsplittable: hard truncate at char limit
     if (lines.length <= 1) {
       const truncated = chunk.content.slice(0, charLimit);
-      result.push(makeChunk(chunk.project_id, chunk.file_path, truncated, chunk.start_line, chunk.end_line, chunk.chunk_type, chunk.symbol_name || ''));
+      result.push(deriveChunk(chunk, truncated, chunk.start_line, chunk.end_line, chunk.symbol_name || ''));
       continue;
     }
     const mid = Math.floor(lines.length / 2);
@@ -125,10 +156,10 @@ function splitOversized(chunks: Chunk[]): Chunk[] {
     const secondStart = chunk.start_line + splitAt;
     const baseName = chunk.symbol_name || '';
     if (firstHalf.trim()) {
-      result.push(makeChunk(chunk.project_id, chunk.file_path, firstHalf, chunk.start_line, firstEnd, chunk.chunk_type, baseName ? `${baseName}:part_1` : ''));
+      result.push(deriveChunk(chunk, firstHalf, chunk.start_line, firstEnd, baseName ? `${baseName}:part_1` : ''));
     }
     if (secondHalf.trim()) {
-      result.push(makeChunk(chunk.project_id, chunk.file_path, secondHalf, secondStart, chunk.end_line, chunk.chunk_type, baseName ? `${baseName}:part_2` : ''));
+      result.push(deriveChunk(chunk, secondHalf, secondStart, chunk.end_line, baseName ? `${baseName}:part_2` : ''));
     }
   }
   // Recurse if any chunk is still oversized
@@ -152,12 +183,23 @@ function mergeUndersized(chunks: Chunk[]): Chunk[] {
       (!prev.symbol_name || !curr.symbol_name || prev.symbol_name === curr.symbol_name) &&
       prevTokens + currTokens <= TOKEN_LIMIT;
     if (canMerge) {
-      const merged = makeChunk(
-        prev.project_id, prev.file_path,
-        prev.content + '\n' + curr.content,
-        prev.start_line, curr.end_line,
-        curr.chunk_type, curr.symbol_name || prev.symbol_name || ''
-      );
+      const mergedContent = prev.content + '\n' + curr.content;
+      const merged: Chunk = {
+        chunk_id: prev.chunk_id,
+        project_id: prev.project_id,
+        file_path: prev.file_path,
+        symbol_name: (curr.symbol_name || prev.symbol_name) || undefined,
+        chunk_type: curr.chunk_type,
+        start_line: prev.start_line,
+        end_line: curr.end_line,
+        content: mergedContent.trim(),
+        content_hash: hashContent(mergedContent),
+        language: prev.language,
+        calls: [...new Set([...prev.calls, ...curr.calls])],
+        imports: [...new Set([...prev.imports, ...curr.imports])],
+        exports: [...new Set([...prev.exports, ...curr.exports])],
+        chunk_source: prev.chunk_source ?? curr.chunk_source,
+      };
       result[result.length - 1] = merged;
     } else {
       result.push(curr);
@@ -400,7 +442,36 @@ function chunkMarkdown(projectId: string, filePath: string, content: string): Ch
 
 // --- Main entry ---
 
+/** Async chunk entry: tries AST chunking first, falls back to regex */
+export async function chunkFileAST(projectId: string, filePath: string, content: string): Promise<Chunk[]> {
+  const e = ext(filePath);
+
+  // Try AST chunking for supported languages
+  try {
+    const { astChunkFile } = await import('./ast-chunker.js');
+    const astChunks = await astChunkFile(projectId, filePath, content, e);
+    if (astChunks && astChunks.length > 0) {
+      return postProcess(astChunks);
+    }
+  } catch {
+    // AST not available or failed — fall through to regex
+  }
+
+  // Regex fallback
+  const chunks = chunkFileRegex(projectId, filePath, content);
+  // Tag regex chunks
+  for (const c of chunks) {
+    c.chunk_source = 'regex';
+  }
+  return chunks;
+}
+
+/** Synchronous regex-only chunking (original behavior) */
 export function chunkFile(projectId: string, filePath: string, content: string): Chunk[] {
+  return chunkFileRegex(projectId, filePath, content);
+}
+
+function chunkFileRegex(projectId: string, filePath: string, content: string): Chunk[] {
   const e = ext(filePath);
   const lang = LANG_MAP[e];
 

@@ -95,9 +95,9 @@ function testRelationshipResolution() {
   );
 
   assert.deepEqual(rels, [
-    { source_chunk_id: 'chunk-source', target_chunk_id: 'chunk-helper', rel_type: 'calls' },
-    { source_chunk_id: 'chunk-source', target_chunk_id: 'chunk-module', rel_type: 'imports' },
-    { source_chunk_id: 'chunk-source', target_chunk_id: 'chunk-export', rel_type: 'exports' },
+    { source_chunk_id: 'chunk-source', target_chunk_id: 'chunk-helper', rel_type: 'calls', confidence: 'INFERRED' },
+    { source_chunk_id: 'chunk-source', target_chunk_id: 'chunk-module', rel_type: 'imports', confidence: 'EXTRACTED' },
+    { source_chunk_id: 'chunk-source', target_chunk_id: 'chunk-export', rel_type: 'exports', confidence: 'EXTRACTED' },
   ]);
 }
 

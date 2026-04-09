@@ -128,6 +128,30 @@ export async function applySchema(config: CortexConfig): Promise<void> {
   } catch {
     // Column already exists — ignore
   }
+  // Migration: add grammar_version to projects table
+  try {
+    await db.execute(`ALTER TABLE projects ADD COLUMN grammar_version TEXT`);
+  } catch {
+    // Column already exists — ignore
+  }
+  // Migration: add chunk_source to chunks table
+  try {
+    await db.execute(`ALTER TABLE chunks ADD COLUMN chunk_source TEXT DEFAULT 'regex'`);
+  } catch {
+    // Column already exists — ignore
+  }
+  // Migration: add git_head to projects table
+  try {
+    await db.execute(`ALTER TABLE projects ADD COLUMN git_head TEXT`);
+  } catch {
+    // Column already exists — ignore
+  }
+  // Migration: add last_indexed_at (epoch ms) to projects table
+  try {
+    await db.execute(`ALTER TABLE projects ADD COLUMN last_indexed_at INTEGER`);
+  } catch {
+    // Column already exists — ignore
+  }
 }
 
 export interface ChunkRow {
@@ -142,6 +166,7 @@ export interface ChunkRow {
   content_hash: string;
   language?: string;
   embedding?: number[];
+  chunk_source?: string;
 }
 
 export type RelationshipConfidence = 'EXTRACTED' | 'INFERRED' | 'AMBIGUOUS';
@@ -164,8 +189,8 @@ export async function upsertChunks(config: CortexConfig, chunks: ChunkRow[]): Pr
     const batch = chunks.slice(i, i + BATCH_SIZE);
     await db.batch(
       batch.map(c => ({
-        sql: `INSERT INTO chunks (chunk_id, project_id, file_path, symbol_name, chunk_type, start_line, end_line, content, content_hash, language, embedding)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, vector(?))
+        sql: `INSERT INTO chunks (chunk_id, project_id, file_path, symbol_name, chunk_type, start_line, end_line, content, content_hash, language, embedding, chunk_source)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, vector(?), ?)
               ON CONFLICT(chunk_id) DO UPDATE SET
                 project_id = excluded.project_id,
                 file_path = excluded.file_path,
@@ -176,13 +201,15 @@ export async function upsertChunks(config: CortexConfig, chunks: ChunkRow[]): Pr
                 content = excluded.content,
                 content_hash = excluded.content_hash,
                 language = excluded.language,
-                embedding = excluded.embedding`,
+                embedding = excluded.embedding,
+                chunk_source = excluded.chunk_source`,
         args: [
           c.chunk_id, c.project_id, c.file_path,
           c.symbol_name ?? null, c.chunk_type ?? null,
           c.start_line, c.end_line, c.content, c.content_hash,
           c.language ?? null,
           c.embedding ? JSON.stringify(c.embedding) : null,
+          c.chunk_source ?? 'regex',
         ],
       })),
       'write'
@@ -202,17 +229,71 @@ export async function upsertRelationships(config: CortexConfig, rels: Relationsh
   );
 }
 
-export async function upsertProject(config: CortexConfig, projectId: string, name: string, path?: string): Promise<void> {
+export interface UpsertProjectOptions {
+  grammarVersion?: string;
+  gitHead?: string;
+  /** Unix epoch milliseconds; defaults to Date.now() when omitted */
+  lastIndexedAt?: number;
+}
+
+export async function upsertProject(
+  config: CortexConfig,
+  projectId: string,
+  name: string,
+  path?: string,
+  options: UpsertProjectOptions = {}
+): Promise<void> {
   const db = getClient(config);
+  const lastIndexedAt = options.lastIndexedAt ?? Date.now();
   await db.execute({
-    sql: `INSERT INTO projects (project_id, name, path, last_indexed)
-          VALUES (?, ?, ?, datetime('now'))
+    sql: `INSERT INTO projects (project_id, name, path, last_indexed, last_indexed_at, grammar_version, git_head)
+          VALUES (?, ?, ?, datetime('now'), ?, ?, ?)
           ON CONFLICT(project_id) DO UPDATE SET
             name = excluded.name,
             path = excluded.path,
-            last_indexed = datetime('now')`,
-    args: [projectId, name, path ?? null],
+            last_indexed = datetime('now'),
+            last_indexed_at = excluded.last_indexed_at,
+            grammar_version = excluded.grammar_version,
+            git_head = excluded.git_head`,
+    args: [
+      projectId,
+      name,
+      path ?? null,
+      lastIndexedAt,
+      options.grammarVersion ?? null,
+      options.gitHead ?? null,
+    ],
   });
+}
+
+export interface ProjectMeta {
+  project_id: string;
+  name: string;
+  path: string | null;
+  git_head: string | null;
+  last_indexed: string | null;
+  last_indexed_at: number | null;
+  grammar_version: string | null;
+}
+
+export async function getProjectMeta(config: CortexConfig, projectId: string): Promise<ProjectMeta | null> {
+  const db = getClient(config);
+  const result = await db.execute({
+    sql: `SELECT project_id, name, path, git_head, last_indexed, last_indexed_at, grammar_version
+          FROM projects WHERE project_id = ?`,
+    args: [projectId],
+  });
+  const row = result.rows[0];
+  if (!row) return null;
+  return {
+    project_id: row.project_id as string,
+    name: row.name as string,
+    path: (row.path as string | null) ?? null,
+    git_head: (row.git_head as string | null) ?? null,
+    last_indexed: (row.last_indexed as string | null) ?? null,
+    last_indexed_at: row.last_indexed_at != null ? Number(row.last_indexed_at) : null,
+    grammar_version: (row.grammar_version as string | null) ?? null,
+  };
 }
 
 export async function clearProjectChunks(config: CortexConfig, projectId: string): Promise<number> {
@@ -311,6 +392,16 @@ export async function deleteStaleFileChunks(config: CortexConfig, projectId: str
     args: [projectId, filePath, ...currentChunkIds],
   });
   return result.rowsAffected;
+}
+
+/** Get the set of distinct file_paths currently indexed for a project. */
+export async function getIndexedFilePaths(config: CortexConfig, projectId: string): Promise<Set<string>> {
+  const db = getClient(config);
+  const result = await db.execute({
+    sql: `SELECT DISTINCT file_path FROM chunks WHERE project_id = ?`,
+    args: [projectId],
+  });
+  return new Set(result.rows.map(r => r.file_path as string));
 }
 
 export async function projectExists(config: CortexConfig, projectId: string): Promise<boolean> {
@@ -507,11 +598,25 @@ export async function getProjectStatus(config: CortexConfig, projectId: string):
   const project = await db.execute({ sql: `SELECT * FROM projects WHERE project_id = ?`, args: [projectId] });
   if (project.rows.length === 0) return null;
 
-  const [chunks, rels, langs] = await Promise.all([
+  const [chunks, rels, langs, confidence] = await Promise.all([
     db.execute({ sql: `SELECT COUNT(*) as count FROM chunks WHERE project_id = ?`, args: [projectId] }),
     db.execute({ sql: `SELECT COUNT(*) as count FROM relationships r JOIN chunks c ON r.source_chunk_id = c.chunk_id WHERE c.project_id = ?`, args: [projectId] }),
     db.execute({ sql: `SELECT DISTINCT language FROM chunks WHERE project_id = ? AND language IS NOT NULL`, args: [projectId] }),
+    db.execute({
+      sql: `SELECT r.confidence, COUNT(*) as count
+            FROM relationships r
+            JOIN chunks c ON r.source_chunk_id = c.chunk_id
+            WHERE c.project_id = ?
+            GROUP BY r.confidence`,
+      args: [projectId],
+    }),
   ]);
+
+  const confidence_breakdown: Record<string, number> = { EXTRACTED: 0, INFERRED: 0, AMBIGUOUS: 0 };
+  for (const row of confidence.rows) {
+    const key = (row.confidence as string) || 'EXTRACTED';
+    confidence_breakdown[key] = Number(row.count);
+  }
 
   return {
     project_id: projectId,
@@ -519,7 +624,11 @@ export async function getProjectStatus(config: CortexConfig, projectId: string):
     chunk_count: chunks.rows[0].count,
     relationship_count: rels.rows[0].count,
     last_indexed: project.rows[0].last_indexed,
+    last_indexed_at: project.rows[0].last_indexed_at != null ? Number(project.rows[0].last_indexed_at) : null,
+    git_head: (project.rows[0].git_head as string | null) ?? null,
+    grammar_version: (project.rows[0].grammar_version as string | null) ?? null,
     languages: langs.rows.map(r => r.language),
+    confidence_breakdown,
   };
 }
 

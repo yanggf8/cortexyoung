@@ -22,27 +22,34 @@ npm run test                           # Phase 2 smoke tests
 cortex init                            # Create Turso DB, store config
 cortex index [path]                    # Chunk → embed → upload to Turso
 cortex index [path] --watch            # Index then watch for changes
+cortex index [path] --incremental      # Reindex only files changed since last run
 cortex search "query"                  # Semantic search (vector_top_k)
 cortex search "query" --keyword        # Keyword search (FTS5)
+cortex search "query" --quiet          # Suppress staleness hint
 cortex relationships "symbol"          # Recursive CTE traversal
 cortex status                          # Project stats
 cortex projects                        # List all indexed projects
 cortex delete                          # Remove current project
 cortex config                          # Show config
+cortex grammars                        # Show grammar status
+cortex grammars install <path>         # Install grammars from local dir
 ```
 
 ## Architecture
 
 ```
-Claude Code → Skill → cortex CLI → @xenova/transformers (local embed)
+Claude Code → Skill → cortex CLI → web-tree-sitter (AST chunking, WASM)
+                                   → @xenova/transformers (local embed)
                                    → @libsql/client → Turso (cloud DB)
 ```
 
 ### Source Files (`cli/src/`)
 
-- `index.ts` — CLI entry point, 8 commands, import resolver, relationship resolution
+- `index.ts` — CLI entry point, 9 commands, import resolver, relationship resolution
 - `turso.ts` — Turso client: schema, upsert, vector search, FTS5, relationships CTE, per-file CRUD for watch mode
-- `chunker.ts` — JS/TS/Python/Markdown chunking, chunk_id: `${projectId}:${filePath}:${startLine}`
+- `chunker.ts` — Regex-based JS/TS/Python/Markdown chunking (fallback), chunk_id: `${projectId}:${filePath}:${startLine}`
+- `ast-chunker.ts` — Tree-sitter AST-based chunking for TS/JS/TSX/Python (primary). Extracts real function/class/interface/import/export/call nodes.
+- `grammars.ts` — Grammar management: resolves WASM files from npm packages (`tree-sitter-javascript`, etc.) or `~/.cortex/grammars/` cache. Supports offline install.
 - `embedder.ts` — `@xenova/transformers` wrapper for BGE-small-en-v1.5
 - `config.ts` — `~/.cortex/config.json` management
 
@@ -58,11 +65,14 @@ Claude Code → Skill → cortex CLI → @xenova/transformers (local embed)
 - **Edge confidence tags**: Relationships carry a `confidence` column — `EXTRACTED` (deterministic: imports/exports), `INFERRED` (single symbol-name match for `calls`), `AMBIGUOUS` (multi-target name collision or unresolved). `applySchema` runs ALTER TABLE for existing DBs and is invoked at the start of every `cortex index` to migrate forward.
 - **CORTEX_REPORT.md**: `cortex index` writes a one-page summary (god files, languages, chunk types, top symbols) to the project root for zero-tool-call orientation post-compact. Excluded from indexing via `IGNORE_FILES`. Best-effort write — read-only trees emit a warning instead of failing. Stale after `--watch` updates.
 - **PreToolUse nudge hook**: `.claude/hooks/cortex-nudge.sh` suggests `cortex search` over Grep when an index exists. Soft hint only.
+- **AST-first chunking (v6)**: `chunkFileAST()` tries tree-sitter first, falls back to regex on failure or unsupported language. Grammar WASM files resolved from npm packages (`tree-sitter-javascript`, `tree-sitter-typescript`, `tree-sitter-python`) at zero download cost. Offline installs via `cortex grammars install <dir>` to `~/.cortex/grammars/`. Grammar version hash stored in `projects.grammar_version` for staleness detection. Each chunk carries `chunk_source` ('ast' or 'regex').
+- **Git HEAD staleness + incremental reindex (P2)**: `cortex index` stores `git_head` (SHA) and `last_indexed_at` (epoch ms) in the `projects` table. `cortex search` / `cortex status` compare stored HEAD to current and emit a one-line stderr hint when behind (suppressible via `--quiet` or `CORTEX_QUIET=1`). Staleness check resolves against the project's stored path (not cwd) so default-project cross-directory lookups compare the right repo. `cortex index --incremental` diffs `git diff --name-status -M` against stored SHA plus `git ls-files --others` for untracked files (or mtime fallback against `last_indexed_at` with deletion detection via DB file-path cross-reference). Replays only changed files through `reindexOneFile()` (shared with watch mode). Renames cascade: delete old-path chunks, index new path. Falls back to full index when no prior state exists.
 
 ## Development Notes
 
 - TypeScript strict mode, ES2022 target, ESM modules
 - Embedding model: BGE-small-en-v1.5 (384 dimensions) via `@xenova/transformers` (~200MB RSS, ~15ms/embed)
+- AST parsing: `web-tree-sitter` (WASM) + grammar packages for TS/JS/TSX/Python
 - Config: `~/.cortex/config.json` (Turso URL + auth token, 600 perms)
 - Turso: F32_BLOB(384) column, DiskANN index, FTS5 for keyword search, relationships with CASCADE delete
 - Skill file: `cli/cortex.skill.md` — loaded into Claude Code context
