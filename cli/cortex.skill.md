@@ -15,25 +15,73 @@ All commands below assume `cortex` is on PATH (`npm install -g` from the repo). 
 
 ### search
 
-Semantic search across the indexed codebase. Returns chunks ranked by relevance.
+Hybrid search (vector + FTS with Reciprocal Rank Fusion) across the indexed codebase. Returns chunks ranked by fused relevance.
 
 ```bash
 cortex search "$QUERY"
 ```
 
-For keyword/exact match search:
+For vector-only or keyword-only search:
 
 ```bash
-cortex search "$QUERY" --keyword
+cortex search "$QUERY" --vector    # vector-only (legacy)
+cortex search "$QUERY" --keyword   # FTS5 keyword-only
 ```
 
 Options:
 - `--top-k N` — number of results (default: 15)
 - `--offset N` — skip first N results for pagination
 - `--project ID` — search a specific project (default: current project)
-- `--keyword` — use FTS5 keyword search instead of semantic
+- `--vector` — vector-only semantic search
+- `--keyword` — FTS5 keyword-only search
+- `--rrf-k N` — RRF smoothing constant (default: 60)
 
-Output is JSON with `chunks[]` (chunk_id, file_path, symbol_name, chunk_type, start_line, end_line, content, language, score), `total_matches`, and `has_more`.
+Default output is JSON with `chunks[]` (chunk_id, file_path, symbol_name, chunk_type, start_line, end_line, content, language, rrf_score, source: `vec`|`fts`|`both`, vec_rank, fts_rank), `total_matches`.
+
+### context
+
+**Agent-first command.** Returns a minimal context pack for answering a code-understanding question. Combines symbol lookup, hybrid search, and depth-1 relationship neighbors into a single compact response.
+
+```bash
+cortex context "$SYMBOL_OR_QUERY"
+```
+
+Use this instead of composing search + relationships + file reads manually. One command replaces multiple tool calls.
+
+Output is JSON with:
+- `primary_matches[]` — best-matching chunks (symbol match preferred, hybrid search fallback)
+- `neighbor_chunks[]` — direct callers/callees/import/export neighbors with relationship metadata
+- `key_files[]` — unique files worth reading next
+- `confidence_notes[]` — ambiguity warnings, match type, staleness
+- `suggested_next_queries[]` — follow-up commands when output was truncated
+- `metadata` — `index_is_stale`, `index_staleness_reason`, `truncated`, `budget_tokens`
+
+**Output budget:** Capped at ~2000 tokens. Low-confidence neighbors are trimmed first. When truncated, `metadata.truncated` is true and `suggested_next_queries` suggests the next step.
+
+**Boundary:** `context` is depth-1, answer-the-question-now. For transitive blast radius or diff-rooted analysis, use `impact`.
+
+### impact
+
+**Agent-first command.** Aggregated blast-radius analysis. Two entry modes:
+
+```bash
+cortex impact --symbol "$NAME"       # what breaks if this symbol changes?
+cortex impact --from-diff [base-sha] # what's affected by the current diff?
+```
+
+`--symbol` mode: finds all transitive dependents (callers, importers) up to depth 3.
+`--from-diff` mode: identifies changed files via `git diff`, maps them to indexed chunks, then computes transitive impact. Uses stored `git_head` as default base SHA.
+
+Output is JSON with:
+- `affected_files[]` — files in the blast radius
+- `affected_symbols[]` — symbols with file and chunk_type
+- `edges[]` — relationship edges with confidence and depth
+- `changed_files[]` — (from-diff mode only) files changed in the diff with status
+- `depth_reached` — max traversal depth actually used
+- `confidence_notes[]` — ambiguity warnings, staleness
+- `metadata` — shared confidence schema
+
+**Boundary:** `impact` is transitive and aggregated. For a compact "best next read" pack, use `context`.
 
 ### relationships
 

@@ -23,9 +23,13 @@ cortex init                            # Create Turso DB, store config
 cortex index [path]                    # Chunk → embed → upload to Turso
 cortex index [path] --watch            # Index then watch for changes
 cortex index [path] --incremental      # Reindex only files changed since last run
-cortex search "query"                  # Semantic search (vector_top_k)
+cortex search "query"                  # Hybrid search (vector + FTS, RRF)
+cortex search "query" --vector         # Vector-only semantic search
 cortex search "query" --keyword        # Keyword search (FTS5)
 cortex search "query" --quiet          # Suppress staleness hint
+cortex context "symbol-or-query"       # Minimal context pack (depth-1 neighbors)
+cortex impact --symbol "name"          # Blast-radius analysis for a symbol
+cortex impact --from-diff [sha]        # Impact analysis from git diff
 cortex relationships "symbol"          # Recursive CTE traversal
 cortex status                          # Project stats
 cortex projects                        # List all indexed projects
@@ -45,8 +49,8 @@ Claude Code → Skill → cortex CLI → web-tree-sitter (AST chunking, WASM)
 
 ### Source Files (`cli/src/`)
 
-- `index.ts` — CLI entry point, 9 commands, import resolver, relationship resolution
-- `turso.ts` — Turso client: schema, upsert, vector search, FTS5, relationships CTE, per-file CRUD for watch mode
+- `index.ts` — CLI entry point, 11 commands (including `context` and `impact`), import resolver, relationship resolution
+- `turso.ts` — Turso client: schema, upsert, vector/FTS/hybrid search, relationships CTE, neighbor lookup, transitive impact, per-file CRUD for watch mode
 - `chunker.ts` — Regex-based JS/TS/Python/Markdown chunking (fallback), chunk_id: `${projectId}:${filePath}:${startLine}`
 - `ast-chunker.ts` — Tree-sitter AST-based chunking for TS/JS/TSX/Python (primary). Extracts real function/class/interface/import/export/call nodes.
 - `grammars.ts` — Grammar management: resolves WASM files from npm packages (`tree-sitter-javascript`, etc.) or `~/.cortex/grammars/` cache. Supports offline install.
@@ -67,6 +71,10 @@ Claude Code → Skill → cortex CLI → web-tree-sitter (AST chunking, WASM)
 - **PreToolUse nudge hook**: `.claude/hooks/cortex-nudge.sh` suggests `cortex search` over Grep when an index exists. Soft hint only.
 - **AST-first chunking (v6)**: `chunkFileAST()` tries tree-sitter first, falls back to regex on failure or unsupported language. Grammar WASM files resolved from npm packages (`tree-sitter-javascript`, `tree-sitter-typescript`, `tree-sitter-python`) at zero download cost. Offline installs via `cortex grammars install <dir>` to `~/.cortex/grammars/`. Grammar version hash stored in `projects.grammar_version` for staleness detection. Each chunk carries `chunk_source` ('ast' or 'regex').
 - **Git HEAD staleness + incremental reindex (P2)**: `cortex index` stores `git_head` (SHA) and `last_indexed_at` (epoch ms) in the `projects` table. `cortex search` / `cortex status` compare stored HEAD to current and emit a one-line stderr hint when behind (suppressible via `--quiet` or `CORTEX_QUIET=1`). Staleness check resolves against the project's stored path (not cwd) so default-project cross-directory lookups compare the right repo. `cortex index --incremental` diffs `git diff --name-status -M` against stored SHA plus `git ls-files --others` for untracked files (or mtime fallback against `last_indexed_at` with deletion detection via DB file-path cross-reference). Replays only changed files through `reindexOneFile()` (shared with watch mode). Renames cascade: delete old-path chunks, index new path. Falls back to full index when no prior state exists.
+- **Hybrid search (V6.1)**: Default `cortex search` runs both vector and FTS5 in parallel, fusing results via Reciprocal Rank Fusion (rank-based only, no raw-score normalization). Each result tagged with `source: vec|fts|both` and rank positions from each branch. Pagination (`--offset`, `has_more`) preserved on the hybrid path via over-fetch + slice. Escape hatches: `--vector` for vector-only, `--keyword` for FTS-only, `--rrf-k N` to tune the smoothing constant (default 60).
+- **FTS query sanitization (V6.1)**: Raw user queries routinely contain FTS5 syntax characters (`.`, `(`, `-`, `/`) that would otherwise throw a parse error and tear down the whole hybrid search inside `Promise.all`. `sanitizeFtsQuery()` tokenizes on `[A-Za-z0-9_]+`, wraps each token as a phrase, and OR-joins for recall (`useEffect(` → `"useEffect"`; `foo.bar` → `"foo" OR "bar"`). The FTS branch is also wrapped in a `.catch()` fallback so any remaining edge case degrades gracefully to vector-only instead of failing the call.
+- **Agent-first `context` command (V6.1)**: `cortex context "query"` returns a compact context pack (budget: <2000 tokens). Tries exact symbol match first, falls back to hybrid search. Fetches depth-1 relationship neighbors via `getDirectNeighbors()`. Trims low-confidence (AMBIGUOUS) neighbors first when over budget, then returns `truncated: true` with `suggested_next_queries`. Inherits git-staleness contract from search. Shared `ConfidenceMetadata` schema with `impact`.
+- **Agent-first `impact` command (V6.1)**: Two entry modes — `--symbol` (transitive dependents via reverse CTE, depth 3) and `--from-diff [sha]` (git diff → chunk lookup → transitive impact). Uses `getTransitiveDependents()` for reverse-edge traversal. For `--from-diff`, seeds are looked up under the path they had at index time: `D` uses `change.path` (the DB still holds the chunks about to disappear — that's the blast-radius case), `R` uses `change.oldPath` (new path not yet indexed), `A`/`M` use `change.path`. Shares `ConfidenceMetadata` output schema with `context`. `context` is depth-1 "answer now"; `impact` is transitive "what else breaks".
 
 ## Development Notes
 

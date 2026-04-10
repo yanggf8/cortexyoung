@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { loadConfig, saveConfig, requireConfig, configPath, type CortexConfig } from './config.js';
-import { applySchema, upsertChunks, upsertProject, deleteStaleProjectChunks, replaceProjectRelationships, replaceFileRelationships, deleteFileChunks, deleteStaleFileChunks, getIndexedFilePaths, projectExists, vectorSearch, keywordSearch, traverseRelationships, getProjectStatus, getProjectMeta, listProjects, deleteProject, type ChunkRow, type RelationshipRow, type RelationshipConfidence } from './turso.js';
+import { applySchema, upsertChunks, upsertProject, deleteStaleProjectChunks, replaceProjectRelationships, replaceFileRelationships, deleteFileChunks, deleteStaleFileChunks, getIndexedFilePaths, projectExists, vectorSearch, keywordSearch, hybridSearch, traverseRelationships, getDirectNeighbors, getTransitiveDependents, findChunksBySymbol, findChunksByFile, getProjectStatus, getProjectMeta, listProjects, deleteProject, type ChunkRow, type RelationshipRow, type RelationshipConfidence } from './turso.js';
 import { embed, embedBatch, loadModel } from './embedder.js';
 import { chunkFile, chunkFileAST, contextPrefix, type Chunk } from './chunker.js';
 import { initParser } from './ast-chunker.js';
@@ -28,6 +28,8 @@ async function main() {
     case 'init': return cmdInit();
     case 'index': return cmdIndex();
     case 'search': return cmdSearch();
+    case 'context': return cmdContext();
+    case 'impact': return cmdImpact();
     case 'relationships': return cmdRelationships();
     case 'status': return cmdStatus();
     case 'projects': return cmdProjects();
@@ -42,8 +44,12 @@ Commands:
   index [path]               Full index of a directory (default: .)
   index [path] --watch       Index then watch for changes
   index [path] --incremental Reindex only files changed since last run
-  search "query"             Semantic search
-  search "query" --keyword   Keyword search (FTS5)
+  search "query"             Hybrid search (vector + FTS, RRF fusion)
+  search "query" --vector    Vector-only semantic search
+  search "query" --keyword   Keyword-only search (FTS5)
+  context "symbol-or-query"  Minimal context pack for a symbol or query
+  impact --symbol "name"     Blast-radius analysis for a symbol
+  impact --from-diff [sha]   Impact analysis from git diff
   relationships "symbol"     Traverse relationships
   status                     Project status
   projects                   List all projects
@@ -54,6 +60,7 @@ Commands:
 
 Flags:
   --quiet                    Suppress staleness hint on search/status
+  --rrf-k N                  RRF smoothing constant (default: 60)
   CORTEX_QUIET=1             (env) Suppress staleness hint globally`);
   }
 }
@@ -664,14 +671,480 @@ async function cmdSearch() {
   const offset = parseInt(getFlag('--offset') || '0');
 
   if (hasFlag('--keyword')) {
+    // FTS-only mode
     const result = await keywordSearch(config, query, projectId, topK, offset);
     output(result);
-  } else {
+  } else if (hasFlag('--vector')) {
+    // Vector-only mode (legacy default)
     console.error('Loading model...');
     const vector = await embed(query);
     const result = await vectorSearch(config, vector, projectId, topK, offset);
     output(result);
+  } else {
+    // Hybrid mode (new default): vector + FTS with RRF fusion
+    const rrfK = parseInt(getFlag('--rrf-k') || '60');
+    console.error('Loading model...');
+    const vector = await embed(query);
+    const result = await hybridSearch(config, vector, query, projectId, topK, rrfK, offset);
+    output(result);
   }
+}
+
+// --- Shared output schema for agent-first commands ---
+interface ConfidenceMetadata {
+  index_is_stale: boolean;
+  index_staleness_reason: string | null;
+  truncated: boolean;
+  budget_tokens: number;
+}
+
+function estimateTokens(text: string): number {
+  return Math.ceil(text.length / 4);
+}
+
+async function getStalenessInfo(config: CortexConfig, projectId: string): Promise<{ is_stale: boolean; reason: string | null }> {
+  const meta = await getProjectMeta(config, projectId);
+  if (!meta) return { is_stale: false, reason: null };
+
+  const projectPath = meta.path ?? resolve('.');
+  const currentHead = getGitHead(projectPath);
+  if (!currentHead) return { is_stale: false, reason: null };
+
+  if (meta.git_head && meta.git_head !== currentHead) {
+    const behind = countCommitsBehind(projectPath, meta.git_head);
+    const count = behind != null ? `${behind} commit${behind === 1 ? '' : 's'}` : 'commits';
+    return { is_stale: true, reason: `index is ${count} behind HEAD` };
+  }
+  return { is_stale: false, reason: null };
+}
+
+// --- context ---
+async function cmdContext() {
+  const config = await loadConfig();
+  requireConfig(config);
+
+  const query = args[1];
+  if (!query) { console.error('Usage: cortex context "symbol-or-query"'); process.exit(1); }
+
+  const projectId = await getProjectId(config);
+  const BUDGET_TOKENS = 2000;
+
+  // Staleness check
+  const staleness = await getStalenessInfo(config, projectId);
+
+  // Try exact symbol match first, then fall back to hybrid search
+  console.error('Loading model...');
+  const [symbolMatches, vector] = await Promise.all([
+    findChunksBySymbol(config, projectId, query),
+    embed(query),
+  ]);
+
+  let primaryMatches: any[];
+  if (symbolMatches.length > 0) {
+    // Exact symbol match — use these as primary
+    primaryMatches = symbolMatches.slice(0, 5).map((c, i) => ({
+      chunk_id: c.chunk_id,
+      file_path: c.file_path,
+      symbol_name: c.symbol_name,
+      chunk_type: c.chunk_type,
+      start_line: c.start_line,
+      end_line: c.end_line,
+      content: c.content,
+      language: c.language,
+      match_type: 'symbol',
+      rank: i + 1,
+    }));
+  } else {
+    // Hybrid search fallback
+    const searchResult = await hybridSearch(config, vector, query, projectId, 5);
+    primaryMatches = searchResult.chunks.map((c, i) => ({
+      chunk_id: c.chunk_id,
+      file_path: c.file_path,
+      symbol_name: c.symbol_name,
+      chunk_type: c.chunk_type,
+      start_line: c.start_line,
+      end_line: c.end_line,
+      content: c.content,
+      language: c.language,
+      match_type: c.source,
+      rank: i + 1,
+    }));
+  }
+
+  if (primaryMatches.length === 0) {
+    output({
+      primary_matches: [],
+      neighbor_chunks: [],
+      key_files: [],
+      confidence_notes: [],
+      suggested_next_queries: [],
+      metadata: {
+        index_is_stale: staleness.is_stale,
+        index_staleness_reason: staleness.reason,
+        truncated: false,
+        budget_tokens: BUDGET_TOKENS,
+      } satisfies ConfidenceMetadata,
+    });
+    return;
+  }
+
+  // Get depth-1 neighbors
+  const primaryIds = primaryMatches.map((m: any) => m.chunk_id);
+  const neighbors = await getDirectNeighbors(config, primaryIds, 15);
+
+  // Budget tracking: start trimming if output gets too large
+  let usedTokens = 0;
+  for (const m of primaryMatches) {
+    usedTokens += estimateTokens(m.content ?? '') + 30; // 30 for metadata fields
+  }
+
+  // Trim neighbors by confidence: keep EXTRACTED first, then INFERRED, drop AMBIGUOUS first
+  const confidenceOrder: Record<string, number> = { EXTRACTED: 0, INFERRED: 1, AMBIGUOUS: 2 };
+  const sortedEdges = [...neighbors.edges].sort(
+    (a, b) => (confidenceOrder[a.confidence] ?? 2) - (confidenceOrder[b.confidence] ?? 2)
+  );
+
+  // Only keep neighbor nodes that are referenced by surviving edges
+  const neighborNodeMap = new Map(neighbors.nodes.map((n: any) => [n.chunk_id, n]));
+  const keptNeighborIds = new Set<string>();
+  const keptEdges: any[] = [];
+  let truncated = false;
+
+  for (const edge of sortedEdges) {
+    const neighborId = primaryIds.includes(edge.source) ? edge.target : edge.source;
+    const node = neighborNodeMap.get(neighborId);
+    const edgeTokenCost = 20 + (node ? 15 : 0);
+
+    if (usedTokens + edgeTokenCost > BUDGET_TOKENS) {
+      truncated = true;
+      break;
+    }
+
+    keptEdges.push(edge);
+    keptNeighborIds.add(neighborId);
+    usedTokens += edgeTokenCost;
+  }
+
+  const neighborChunks = [...keptNeighborIds]
+    .map(id => neighborNodeMap.get(id))
+    .filter(Boolean)
+    .map((n: any) => ({
+      chunk_id: n.chunk_id,
+      file_path: n.file_path,
+      symbol_name: n.symbol_name,
+      chunk_type: n.chunk_type,
+      start_line: n.start_line,
+      end_line: n.end_line,
+      relationship: keptEdges
+        .filter(e => e.source === n.chunk_id || e.target === n.chunk_id)
+        .map(e => ({ rel_type: e.rel_type, confidence: e.confidence, direction: e.target === n.chunk_id ? 'outgoing' : 'incoming' })),
+    }));
+
+  // Key files: unique files from primary + neighbor matches
+  const fileSet = new Set<string>();
+  for (const m of primaryMatches) fileSet.add(m.file_path);
+  for (const n of neighborChunks) fileSet.add(n.file_path);
+  const keyFiles = [...fileSet].slice(0, 8);
+
+  // Confidence notes
+  const confidenceNotes: string[] = [];
+  const ambiguousEdges = keptEdges.filter(e => e.confidence === 'AMBIGUOUS');
+  if (ambiguousEdges.length > 0) {
+    confidenceNotes.push(`${ambiguousEdges.length} neighbor edge(s) are AMBIGUOUS — may be name collisions`);
+  }
+  if (primaryMatches[0]?.match_type !== 'symbol') {
+    confidenceNotes.push('no exact symbol match — results are from hybrid search');
+  }
+  if (staleness.is_stale) {
+    confidenceNotes.push(`index is stale: ${staleness.reason}`);
+  }
+
+  // Suggested next queries
+  const suggestedNextQueries: string[] = [];
+  if (truncated) {
+    suggestedNextQueries.push(`cortex impact --symbol "${query}" (for full blast radius)`);
+  }
+  if (primaryMatches.length > 0) {
+    const topFile = primaryMatches[0].file_path;
+    suggestedNextQueries.push(`Read ${topFile}:${primaryMatches[0].start_line} for full source`);
+  }
+
+  // Strip content from primary matches to save tokens (agent can read the file if needed)
+  const compactPrimary = primaryMatches.map((m: any) => ({
+    chunk_id: m.chunk_id,
+    file_path: m.file_path,
+    symbol_name: m.symbol_name,
+    chunk_type: m.chunk_type,
+    start_line: m.start_line,
+    end_line: m.end_line,
+    language: m.language,
+    match_type: m.match_type,
+    rank: m.rank,
+    content_preview: (m.content ?? '').slice(0, 300),
+  }));
+
+  output({
+    primary_matches: compactPrimary,
+    neighbor_chunks: neighborChunks,
+    key_files: keyFiles,
+    confidence_notes: confidenceNotes,
+    suggested_next_queries: suggestedNextQueries,
+    metadata: {
+      index_is_stale: staleness.is_stale,
+      index_staleness_reason: staleness.reason,
+      truncated,
+      budget_tokens: BUDGET_TOKENS,
+    } satisfies ConfidenceMetadata,
+  });
+}
+
+// --- impact ---
+async function cmdImpact() {
+  const config = await loadConfig();
+  requireConfig(config);
+
+  const projectId = await getProjectId(config);
+  const staleness = await getStalenessInfo(config, projectId);
+
+  if (hasFlag('--from-diff')) {
+    await cmdImpactFromDiff(config, projectId, staleness);
+  } else if (hasFlag('--symbol')) {
+    const symbol = getFlag('--symbol');
+    if (!symbol) { console.error('Usage: cortex impact --symbol "name"'); process.exit(1); }
+    await cmdImpactSymbol(config, projectId, symbol, staleness);
+  } else {
+    // Default: treat first positional arg as symbol
+    const symbol = args[1];
+    if (!symbol) {
+      console.error('Usage: cortex impact --symbol "name" | cortex impact --from-diff [sha]');
+      process.exit(1);
+    }
+    await cmdImpactSymbol(config, projectId, symbol, staleness);
+  }
+}
+
+async function cmdImpactSymbol(
+  config: CortexConfig,
+  projectId: string,
+  symbol: string,
+  staleness: { is_stale: boolean; reason: string | null },
+) {
+  // Find seed chunks by symbol name
+  const seeds = await findChunksBySymbol(config, projectId, symbol);
+  if (seeds.length === 0) {
+    // Fall back to hybrid search
+    console.error('Loading model...');
+    const vector = await embed(symbol);
+    const searchResult = await hybridSearch(config, vector, symbol, projectId, 3);
+    if (searchResult.chunks.length === 0) {
+      output({
+        symbol,
+        mode: 'symbol',
+        affected_files: [],
+        affected_symbols: [],
+        edges: [],
+        confidence_notes: ['no matching symbol or chunk found'],
+        metadata: {
+          index_is_stale: staleness.is_stale,
+          index_staleness_reason: staleness.reason,
+          truncated: false,
+          budget_tokens: 0,
+        } satisfies ConfidenceMetadata,
+      });
+      return;
+    }
+    // Use search results as seeds
+    const seedIds = searchResult.chunks.map(c => c.chunk_id);
+    const impact = await getTransitiveDependents(config, projectId, seedIds, 3, 30);
+    outputImpactResult(symbol, 'symbol', impact, staleness, ['seed resolved via search, not exact symbol match']);
+    return;
+  }
+
+  const seedIds = seeds.map(s => s.chunk_id);
+  const impact = await getTransitiveDependents(config, projectId, seedIds, 3, 30);
+  outputImpactResult(symbol, 'symbol', impact, staleness, []);
+}
+
+async function cmdImpactFromDiff(
+  config: CortexConfig,
+  projectId: string,
+  staleness: { is_stale: boolean; reason: string | null },
+) {
+  const meta = await getProjectMeta(config, projectId);
+  const projectPath = meta?.path ?? resolve('.');
+
+  // Determine base SHA: explicit arg after --from-diff, or stored git_head
+  const flagIdx = args.indexOf('--from-diff');
+  const explicitSha = flagIdx >= 0 && flagIdx + 1 < args.length && !args[flagIdx + 1].startsWith('--')
+    ? args[flagIdx + 1]
+    : null;
+  const baseSha = explicitSha ?? meta?.git_head ?? null;
+
+  if (!baseSha) {
+    console.error('No base SHA available. Provide one: cortex impact --from-diff <sha>');
+    process.exit(1);
+  }
+
+  // Get changed files from git diff
+  const changes = gitDiffAgainstWorkingTree(projectPath, baseSha);
+  if (!changes || changes.length === 0) {
+    output({
+      mode: 'from-diff',
+      base_sha: baseSha,
+      changed_files: [],
+      affected_files: [],
+      affected_symbols: [],
+      edges: [],
+      confidence_notes: ['no changes detected against base SHA'],
+      metadata: {
+        index_is_stale: staleness.is_stale,
+        index_staleness_reason: staleness.reason,
+        truncated: false,
+        budget_tokens: 0,
+      } satisfies ConfidenceMetadata,
+    });
+    return;
+  }
+
+  // Filter to indexable files
+  const indexableChanges = changes.filter(c => {
+    const e = c.path.substring(c.path.lastIndexOf('.')).toLowerCase();
+    if (!CODE_EXTS.has(e)) return false;
+    if (IGNORE_FILES.has(basename(c.path))) return false;
+    if (c.path.split('/').some(p => IGNORE_DIRS.has(p) || p.startsWith('.'))) return false;
+    return true;
+  });
+
+  // Find all chunks in changed files, then compute transitive dependents.
+  //
+  // The DB reflects the indexed base, not the working tree, so we must look up
+  // chunks under the path they had at index time:
+  //   - A/M: chunks live at change.path (if already indexed; new files may be empty).
+  //   - D:   chunks still live at change.path — this is exactly the "what depends on
+  //          the thing about to disappear?" case that impact analysis exists for.
+  //   - R:   chunks still live at change.oldPath; the new path is not yet indexed.
+  const seedChunkIds: string[] = [];
+  for (const change of indexableChanges) {
+    const lookupPath = change.status === 'R' ? change.oldPath : change.path;
+    if (!lookupPath) continue;
+    const fileChunks = await findChunksByFile(config, projectId, lookupPath);
+    for (const c of fileChunks) seedChunkIds.push(c.chunk_id);
+  }
+
+  const impact = seedChunkIds.length > 0
+    ? await getTransitiveDependents(config, projectId, seedChunkIds, 3, 30)
+    : { nodes: [], edges: [], depth_reached: 0 };
+
+  // Summarize changed files
+  const changedFiles = indexableChanges.map(c => ({
+    path: c.path,
+    status: c.status,
+    old_path: c.oldPath ?? null,
+  }));
+
+  // Collect affected files and symbols from impact graph
+  const affectedFiles = new Set<string>();
+  const affectedSymbols: { symbol: string; file: string; chunk_type: string | null }[] = [];
+  for (const node of impact.nodes) {
+    affectedFiles.add(node.file_path);
+    if (node.symbol_name) {
+      affectedSymbols.push({
+        symbol: node.symbol_name,
+        file: node.file_path,
+        chunk_type: node.chunk_type,
+      });
+    }
+  }
+
+  // Deduplicate affected symbols
+  const seenSymbols = new Set<string>();
+  const uniqueSymbols = affectedSymbols.filter(s => {
+    const key = `${s.file}:${s.symbol}`;
+    if (seenSymbols.has(key)) return false;
+    seenSymbols.add(key);
+    return true;
+  });
+
+  const confidenceNotes: string[] = [];
+  const ambiguousEdges = impact.edges.filter(e => e.confidence === 'AMBIGUOUS');
+  if (ambiguousEdges.length > 0) {
+    confidenceNotes.push(`${ambiguousEdges.length} edge(s) are AMBIGUOUS — impact may be overstated`);
+  }
+  if (staleness.is_stale) {
+    confidenceNotes.push(`index is stale: ${staleness.reason}`);
+  }
+
+  output({
+    mode: 'from-diff',
+    base_sha: baseSha,
+    changed_files: changedFiles,
+    affected_files: [...affectedFiles].sort(),
+    affected_symbols: uniqueSymbols.slice(0, 30),
+    edges: impact.edges.slice(0, 50),
+    depth_reached: impact.depth_reached,
+    confidence_notes: confidenceNotes,
+    metadata: {
+      index_is_stale: staleness.is_stale,
+      index_staleness_reason: staleness.reason,
+      truncated: impact.edges.length > 50,
+      budget_tokens: 0,
+    } satisfies ConfidenceMetadata,
+  });
+}
+
+function outputImpactResult(
+  label: string,
+  mode: string,
+  impact: { nodes: any[]; edges: any[]; depth_reached: number },
+  staleness: { is_stale: boolean; reason: string | null },
+  extraNotes: string[],
+) {
+  const affectedFiles = new Set<string>();
+  const affectedSymbols: { symbol: string; file: string; chunk_type: string | null }[] = [];
+
+  for (const node of impact.nodes) {
+    affectedFiles.add(node.file_path);
+    if (node.symbol_name) {
+      affectedSymbols.push({
+        symbol: node.symbol_name,
+        file: node.file_path,
+        chunk_type: node.chunk_type,
+      });
+    }
+  }
+
+  const seenSymbols = new Set<string>();
+  const uniqueSymbols = affectedSymbols.filter(s => {
+    const key = `${s.file}:${s.symbol}`;
+    if (seenSymbols.has(key)) return false;
+    seenSymbols.add(key);
+    return true;
+  });
+
+  const confidenceNotes = [...extraNotes];
+  const ambiguousEdges = impact.edges.filter(e => e.confidence === 'AMBIGUOUS');
+  if (ambiguousEdges.length > 0) {
+    confidenceNotes.push(`${ambiguousEdges.length} edge(s) are AMBIGUOUS — impact may be overstated`);
+  }
+  if (staleness.is_stale) {
+    confidenceNotes.push(`index is stale: ${staleness.reason}`);
+  }
+
+  output({
+    symbol: label,
+    mode,
+    affected_files: [...affectedFiles].sort(),
+    affected_symbols: uniqueSymbols.slice(0, 30),
+    edges: impact.edges.slice(0, 50),
+    depth_reached: impact.depth_reached,
+    confidence_notes: confidenceNotes,
+    metadata: {
+      index_is_stale: staleness.is_stale,
+      index_staleness_reason: staleness.reason,
+      truncated: impact.edges.length > 50,
+      budget_tokens: 0,
+    } satisfies ConfidenceMetadata,
+  });
 }
 
 // --- relationships ---

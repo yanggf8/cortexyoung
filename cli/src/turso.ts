@@ -646,6 +646,297 @@ export async function listProjects(config: CortexConfig): Promise<any[]> {
   }));
 }
 
+// Hybrid search: vector + FTS fused via Reciprocal Rank Fusion
+export interface HybridSearchResult {
+  chunk_id: string;
+  file_path: string;
+  symbol_name: string | null;
+  chunk_type: string | null;
+  start_line: number;
+  end_line: number;
+  content: string;
+  language: string | null;
+  rrf_score: number;
+  source: 'vec' | 'fts' | 'both';
+  vec_rank: number | null;
+  fts_rank: number | null;
+}
+
+/**
+ * Sanitize a free-form search query into a valid FTS5 MATCH expression.
+ *
+ * FTS5 treats `. ( ) - / "` and other punctuation as syntax, so raw queries like
+ * `useEffect(`, `foo.bar`, or `my-component` throw a parse error. We extract
+ * alphanumeric/underscore tokens and wrap each as a phrase, joined with OR for
+ * higher recall. Returns null when nothing indexable remains.
+ */
+export function sanitizeFtsQuery(query: string): string | null {
+  const tokens = query.match(/[A-Za-z0-9_]+/g);
+  if (!tokens || tokens.length === 0) return null;
+  // Quote each token as an FTS5 phrase (double-quotes inside are impossible because we stripped them)
+  // and OR-join for recall. FTS5 phrase syntax: "word"
+  return tokens.map(t => `"${t}"`).join(' OR ');
+}
+
+export async function hybridSearch(
+  config: CortexConfig,
+  vector: number[],
+  query: string,
+  projectId: string,
+  topK: number = 15,
+  rrfK: number = 60,
+  offset: number = 0,
+): Promise<{ chunks: HybridSearchResult[]; total_matches: number; has_more: boolean }> {
+  // Over-fetch enough from each branch so offset-based slicing has headroom.
+  // Both branches contribute, so topK*2 + offset gives the fused set enough candidates.
+  const fetchSize = (topK + offset) * 2;
+
+  // Vector branch: always runs
+  const vecPromise = vectorSearch(config, vector, projectId, fetchSize);
+
+  // FTS branch: sanitize, and fall back to empty on any error so a malformed
+  // query never tears down the whole hybrid path.
+  const ftsQuery = sanitizeFtsQuery(query);
+  const ftsPromise: Promise<{ chunks: any[]; total: number }> = ftsQuery
+    ? keywordSearch(config, ftsQuery, projectId, fetchSize).catch(() => ({ chunks: [], total: 0 }))
+    : Promise.resolve({ chunks: [], total: 0 });
+
+  const [vecResult, ftsResult] = await Promise.all([vecPromise, ftsPromise]);
+
+  // Build rank maps (1-indexed)
+  const vecRank = new Map<string, number>();
+  vecResult.chunks.forEach((c: any, i: number) => vecRank.set(c.chunk_id, i + 1));
+
+  const ftsRank = new Map<string, number>();
+  ftsResult.chunks.forEach((c: any, i: number) => ftsRank.set(c.chunk_id, i + 1));
+
+  // Collect all unique chunk_ids and their data
+  const chunkData = new Map<string, any>();
+  for (const c of vecResult.chunks) chunkData.set(c.chunk_id, c);
+  for (const c of ftsResult.chunks) {
+    if (!chunkData.has(c.chunk_id)) chunkData.set(c.chunk_id, c);
+  }
+
+  // Compute RRF scores
+  const scored: HybridSearchResult[] = [];
+  for (const [chunkId, data] of chunkData) {
+    const vr = vecRank.get(chunkId) ?? null;
+    const fr = ftsRank.get(chunkId) ?? null;
+
+    let rrfScore = 0;
+    if (vr !== null) rrfScore += 1 / (rrfK + vr);
+    if (fr !== null) rrfScore += 1 / (rrfK + fr);
+
+    const source: 'vec' | 'fts' | 'both' =
+      vr !== null && fr !== null ? 'both' :
+      vr !== null ? 'vec' : 'fts';
+
+    scored.push({
+      chunk_id: chunkId,
+      file_path: data.file_path,
+      symbol_name: data.symbol_name ?? null,
+      chunk_type: data.chunk_type ?? null,
+      start_line: data.start_line,
+      end_line: data.end_line,
+      content: data.content,
+      language: data.language ?? null,
+      rrf_score: rrfScore,
+      source,
+      vec_rank: vr,
+      fts_rank: fr,
+    });
+  }
+
+  // Sort by RRF score descending, then paginate
+  scored.sort((a, b) => b.rrf_score - a.rrf_score);
+  const paged = scored.slice(offset, offset + topK);
+
+  return {
+    chunks: paged,
+    total_matches: scored.length,
+    has_more: offset + topK < scored.length,
+  };
+}
+
+// Neighbor lookup for context command: direct relationships of given chunk_ids
+export async function getDirectNeighbors(
+  config: CortexConfig,
+  chunkIds: string[],
+  maxNeighbors: number = 10,
+): Promise<{ nodes: any[]; edges: any[] }> {
+  if (chunkIds.length === 0) return { nodes: [], edges: [] };
+  const db = getClient(config);
+
+  const placeholders = chunkIds.map(() => '?').join(',');
+
+  // Get edges where source or target is in our set
+  const edgesResult = await db.execute({
+    sql: `SELECT r.source_chunk_id, r.target_chunk_id, r.rel_type, r.confidence
+          FROM relationships r
+          WHERE r.source_chunk_id IN (${placeholders})
+             OR r.target_chunk_id IN (${placeholders})
+          LIMIT ?`,
+    args: [...chunkIds, ...chunkIds, maxNeighbors * 2],
+  });
+
+  const neighborIds = new Set<string>();
+  const edges = edgesResult.rows.map(r => {
+    neighborIds.add(r.source_chunk_id as string);
+    neighborIds.add(r.target_chunk_id as string);
+    return {
+      source: r.source_chunk_id as string,
+      target: r.target_chunk_id as string,
+      rel_type: r.rel_type as string,
+      confidence: (r.confidence as string) || 'EXTRACTED',
+    };
+  });
+
+  // Remove primary chunk ids from neighbor set — we already have those
+  for (const id of chunkIds) neighborIds.delete(id);
+
+  if (neighborIds.size === 0) return { nodes: [], edges };
+
+  const neighborPlaceholders = [...neighborIds].map(() => '?').join(',');
+  const nodesResult = await db.execute({
+    sql: `SELECT chunk_id, file_path, symbol_name, chunk_type, start_line, end_line
+          FROM chunks WHERE chunk_id IN (${neighborPlaceholders})`,
+    args: [...neighborIds] as any[],
+  });
+
+  return {
+    nodes: nodesResult.rows.map(r => ({
+      chunk_id: r.chunk_id,
+      file_path: r.file_path,
+      symbol_name: r.symbol_name,
+      chunk_type: r.chunk_type,
+      start_line: r.start_line,
+      end_line: r.end_line,
+    })),
+    edges,
+  };
+}
+
+// Impact analysis: transitive dependents (fan-in) for a symbol or file
+export async function getTransitiveDependents(
+  config: CortexConfig,
+  projectId: string,
+  seedChunkIds: string[],
+  maxDepth: number = 3,
+  maxResults: number = 30,
+): Promise<{ nodes: any[]; edges: any[]; depth_reached: number }> {
+  if (seedChunkIds.length === 0) return { nodes: [], edges: [], depth_reached: 0 };
+  const db = getClient(config);
+
+  const seedPlaceholders = seedChunkIds.map(() => '?').join(',');
+
+  // Traverse reverse edges: who depends on these chunks?
+  const sql = `
+    WITH RECURSIVE impact AS (
+      SELECT r.source_chunk_id, r.target_chunk_id, r.rel_type, r.confidence, 1 as depth
+      FROM relationships r
+      WHERE r.target_chunk_id IN (${seedPlaceholders})
+      UNION ALL
+      SELECT r.source_chunk_id, r.target_chunk_id, r.rel_type, r.confidence, i.depth + 1
+      FROM relationships r
+      JOIN impact i ON r.target_chunk_id = i.source_chunk_id
+      WHERE i.depth < ?
+    )
+    SELECT DISTINCT source_chunk_id, target_chunk_id, rel_type, confidence, MIN(depth) as depth
+    FROM impact
+    GROUP BY source_chunk_id, target_chunk_id, rel_type
+    LIMIT ?
+  `;
+
+  const edgesResult = await db.execute({
+    sql,
+    args: [...seedChunkIds, maxDepth, maxResults * 3],
+  });
+
+  const allChunkIds = new Set<string>(seedChunkIds);
+  let maxDepthReached = 0;
+  const edges = edgesResult.rows.map(r => {
+    allChunkIds.add(r.source_chunk_id as string);
+    allChunkIds.add(r.target_chunk_id as string);
+    const d = Number(r.depth);
+    if (d > maxDepthReached) maxDepthReached = d;
+    return {
+      source: r.source_chunk_id as string,
+      target: r.target_chunk_id as string,
+      rel_type: r.rel_type as string,
+      confidence: (r.confidence as string) || 'EXTRACTED',
+      depth: d,
+    };
+  });
+
+  if (allChunkIds.size === 0) return { nodes: [], edges: [], depth_reached: 0 };
+
+  const idPlaceholders = [...allChunkIds].map(() => '?').join(',');
+  const nodesResult = await db.execute({
+    sql: `SELECT chunk_id, file_path, symbol_name, chunk_type, start_line, end_line
+          FROM chunks WHERE chunk_id IN (${idPlaceholders}) AND project_id = ?`,
+    args: [...allChunkIds, projectId] as any[],
+  });
+
+  return {
+    nodes: nodesResult.rows.map(r => ({
+      chunk_id: r.chunk_id,
+      file_path: r.file_path,
+      symbol_name: r.symbol_name,
+      chunk_type: r.chunk_type,
+      start_line: r.start_line,
+      end_line: r.end_line,
+    })),
+    edges,
+    depth_reached: maxDepthReached,
+  };
+}
+
+// Find chunks by symbol name (used by context/impact to seed lookups)
+export async function findChunksBySymbol(
+  config: CortexConfig,
+  projectId: string,
+  symbol: string,
+): Promise<any[]> {
+  const db = getClient(config);
+  const result = await db.execute({
+    sql: `SELECT chunk_id, file_path, symbol_name, chunk_type, start_line, end_line, content, language
+          FROM chunks WHERE project_id = ? AND symbol_name = ?`,
+    args: [projectId, symbol],
+  });
+  return result.rows.map(r => ({
+    chunk_id: r.chunk_id,
+    file_path: r.file_path,
+    symbol_name: r.symbol_name,
+    chunk_type: r.chunk_type,
+    start_line: r.start_line,
+    end_line: r.end_line,
+    content: r.content,
+    language: r.language,
+  }));
+}
+
+// Find chunks by file path (used by impact --from-diff)
+export async function findChunksByFile(
+  config: CortexConfig,
+  projectId: string,
+  filePath: string,
+): Promise<any[]> {
+  const db = getClient(config);
+  const result = await db.execute({
+    sql: `SELECT chunk_id, file_path, symbol_name, chunk_type, start_line, end_line
+          FROM chunks WHERE project_id = ? AND file_path = ?`,
+    args: [projectId, filePath],
+  });
+  return result.rows.map(r => ({
+    chunk_id: r.chunk_id,
+    file_path: r.file_path,
+    symbol_name: r.symbol_name,
+    chunk_type: r.chunk_type,
+    start_line: r.start_line,
+    end_line: r.end_line,
+  }));
+}
+
 export async function deleteProject(config: CortexConfig, projectId: string): Promise<number> {
   const db = getClient(config);
   await db.execute('PRAGMA foreign_keys = ON');
