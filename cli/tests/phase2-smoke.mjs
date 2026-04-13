@@ -5,6 +5,8 @@ import {
   resolveImportTargetsForTest,
   getFileKeysForTest,
   createImportResolverForTest,
+  parseQueryFilters,
+  hasFilters,
 } from '../dist/index.js';
 
 function testProjectSelection() {
@@ -95,10 +97,49 @@ function testRelationshipResolution() {
   );
 
   assert.deepEqual(rels, [
-    { source_chunk_id: 'chunk-source', target_chunk_id: 'chunk-helper', rel_type: 'calls', confidence: 'INFERRED' },
-    { source_chunk_id: 'chunk-source', target_chunk_id: 'chunk-module', rel_type: 'imports', confidence: 'EXTRACTED' },
-    { source_chunk_id: 'chunk-source', target_chunk_id: 'chunk-export', rel_type: 'exports', confidence: 'EXTRACTED' },
+    { source_chunk_id: 'chunk-source', target_chunk_id: 'chunk-helper', rel_type: 'calls', confidence: 'INFERRED', confidence_score: 0.5599999999999999, confidence_reasoning: 'single symbol-name match (0.70) × INFERRED (0.8) = 0.56' },
+    { source_chunk_id: 'chunk-source', target_chunk_id: 'chunk-module', rel_type: 'imports', confidence: 'EXTRACTED', confidence_score: 1, confidence_reasoning: 'file-index resolution (1.00) × EXTRACTED (1.0) = 1.00' },
+    { source_chunk_id: 'chunk-source', target_chunk_id: 'chunk-export', rel_type: 'exports', confidence: 'EXTRACTED', confidence_score: 0.7, confidence_reasoning: 'single symbol-name match (0.70) × EXTRACTED (1.0) = 0.70' },
   ]);
+}
+
+function testParseQueryFiltersBasic() {
+  const { textQuery, filters } = parseQueryFilters('useEffect kind:function lang:ts');
+  assert.equal(textQuery, 'useEffect');
+  assert.equal(filters.kind, 'function');
+  assert.equal(filters.language, 'typescript');
+  assert.equal(filters.symbolGlob, undefined);
+  assert.equal(filters.fileGlob, undefined);
+  assert.equal(hasFilters(filters), true);
+}
+
+function testParseQueryFiltersGlob() {
+  const { textQuery, filters } = parseQueryFilters('name:parse* file:src/auth/**');
+  assert.equal(textQuery, '');
+  assert.equal(filters.symbolGlob, 'parse%');
+  assert.equal(filters.fileGlob, 'src/auth/%');
+}
+
+function testParseQueryFiltersAliases() {
+  // `method` aliases to `function`; `interface` aliases to `config`; py → python.
+  const { filters } = parseQueryFilters('foo kind:method lang:py');
+  assert.equal(filters.kind, 'function');
+  assert.equal(filters.language, 'python');
+
+  const { filters: configFilters } = parseQueryFilters('foo kind:interface');
+  assert.equal(configFilters.kind, 'config');
+}
+
+function testParseQueryFiltersEscapesLikeWildcards() {
+  // SQL LIKE wildcards in raw input must be escaped, not pass through.
+  const { filters } = parseQueryFilters('name:foo_bar%baz');
+  assert.equal(filters.symbolGlob, 'foo\\_bar\\%baz');
+}
+
+function testParseQueryFiltersNoFilters() {
+  const { textQuery, filters } = parseQueryFilters('plain query');
+  assert.equal(textQuery, 'plain query');
+  assert.equal(hasFilters(filters), false);
 }
 
 testProjectSelection();
@@ -106,5 +147,10 @@ testRelativeImportResolution();
 testBareImportDoesNotResolveToLocalFile();
 testAliasImportResolvesToLocalFile();
 testRelationshipResolution();
+testParseQueryFiltersBasic();
+testParseQueryFiltersGlob();
+testParseQueryFiltersAliases();
+testParseQueryFiltersEscapesLikeWildcards();
+testParseQueryFiltersNoFilters();
 
 console.log('phase2 smoke tests passed');

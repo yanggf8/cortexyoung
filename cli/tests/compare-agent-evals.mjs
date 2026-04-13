@@ -59,7 +59,7 @@ function summarize(rows) {
     median_tool_calls: median(passed.map(row => row.tool_calls)),
     median_raw_file_reads: median(passed.map(row => row.raw_file_reads)),
     median_latency_ms: median(passed.map(row => row.latency_ms)),
-    tokens_per_success: passed.length === 0 ? 0 : rows.reduce((sum, row) => sum + row.total_tokens, 0) / passed.length,
+    tokens_per_success: passed.length === 0 ? 0 : passed.reduce((sum, row) => sum + row.total_tokens, 0) / passed.length,
   };
 }
 

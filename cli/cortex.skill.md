@@ -28,6 +28,21 @@ cortex search "$QUERY" --vector    # vector-only (legacy)
 cortex search "$QUERY" --keyword   # FTS5 keyword-only
 ```
 
+**AST-aware filter tokens** can be mixed inline with the query — they are stripped before ranking and applied as SQL filters:
+- `kind:function|class|config` — match `chunks.chunk_type` (`method` aliases to `function`; `interface`/`type`/`enum` alias to `config`)
+- `lang:ts|tsx|js|py|go|rust|...` — match `chunks.language`
+- `name:parse*` — glob on symbol name (`*` → SQL `%`)
+- `file:src/auth/**` — glob on file path
+
+Examples:
+```bash
+cortex search "useEffect kind:function lang:ts"
+cortex search "name:handle* file:src/api/**"
+cortex search "auth middleware kind:function"
+```
+
+A grammar-drift warning prints to stderr if `kind:`/`lang:` filters are used and the indexed grammar version no longer matches the current bundle.
+
 Options:
 - `--top-k N` — number of results (default: 15)
 - `--offset N` — skip first N results for pagination
@@ -47,6 +62,8 @@ cortex context "$SYMBOL_OR_QUERY"
 ```
 
 Use this instead of composing search + relationships + file reads manually. One command replaces multiple tool calls.
+
+The same `kind:` / `lang:` / `name:` / `file:` filter tokens described under `search` work here too — when filters are present, the exact-symbol short-circuit is skipped so the agent gets filtered hits.
 
 Output is JSON with:
 - `primary_matches[]` — best-matching chunks (symbol match preferred, hybrid search fallback)
@@ -93,11 +110,12 @@ cortex relationships "$SYMBOL"
 
 Options:
 - `--depth N` — traversal depth (default: 2). Use `--depth 1` when `cortex status` shows a high AMBIGUOUS edge count — deeper traversal through ambiguous edges explodes noise.
+- `--verbose` — include `confidence_reasoning` on each edge (explains how the score was computed)
 - `--project ID` — specific project
 
-Output is JSON with `nodes[]` (chunk_id, file_path, symbol_name, chunk_type) and `edges[]` (source, target, rel_type, confidence).
+Output is JSON with `nodes[]` (chunk_id, file_path, symbol_name, chunk_type) and `edges[]` (source, target, rel_type, confidence, confidence_score). Edges sorted by `confidence_score` descending.
 
-**Edge confidence**: `EXTRACTED` (deterministic, e.g. imports/exports), `INFERRED` (single symbol-name match for `calls`), `AMBIGUOUS` (multi-target name collision or unresolved). Prefer EXTRACTED edges; treat AMBIGUOUS as noisy and filter them out unless you need a broad graph view.
+**Edge confidence**: `EXTRACTED` (deterministic, e.g. imports/exports), `INFERRED` (single symbol-name match for `calls`), `AMBIGUOUS` (multi-target name collision or unresolved). Each edge also carries a numeric `confidence_score` (0–1) computed as `resolution_quality × source_multiplier`. Higher scores = more reliable. Prefer edges with score ≥ 0.5; treat low-score edges as noisy.
 
 ### status
 

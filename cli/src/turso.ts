@@ -152,6 +152,17 @@ export async function applySchema(config: CortexConfig): Promise<void> {
   } catch {
     // Column already exists — ignore
   }
+  // Migration: add confidence_score and confidence_reasoning to relationships table
+  try {
+    await db.execute(`ALTER TABLE relationships ADD COLUMN confidence_score REAL`);
+  } catch {
+    // Column already exists — ignore
+  }
+  try {
+    await db.execute(`ALTER TABLE relationships ADD COLUMN confidence_reasoning TEXT`);
+  } catch {
+    // Column already exists — ignore
+  }
 }
 
 export interface ChunkRow {
@@ -176,6 +187,8 @@ export interface RelationshipRow {
   target_chunk_id: string;
   rel_type: string;
   confidence: RelationshipConfidence;
+  confidence_score?: number;
+  confidence_reasoning?: string;
 }
 
 const BATCH_SIZE = 50;
@@ -222,8 +235,8 @@ export async function upsertRelationships(config: CortexConfig, rels: Relationsh
   const db = getClient(config);
   await db.batch(
     rels.map(r => ({
-      sql: `INSERT OR IGNORE INTO relationships (source_chunk_id, target_chunk_id, rel_type, confidence) VALUES (?, ?, ?, ?)`,
-      args: [r.source_chunk_id, r.target_chunk_id, r.rel_type, r.confidence],
+      sql: `INSERT OR IGNORE INTO relationships (source_chunk_id, target_chunk_id, rel_type, confidence, confidence_score, confidence_reasoning) VALUES (?, ?, ?, ?, ?, ?)`,
+      args: [r.source_chunk_id, r.target_chunk_id, r.rel_type, r.confidence, r.confidence_score ?? null, r.confidence_reasoning ?? null],
     })),
     'write'
   );
@@ -413,13 +426,65 @@ export async function projectExists(config: CortexConfig, projectId: string): Pr
   return result.rows.length > 0;
 }
 
+// --- P5: AST-aware filter clause builder ---
+
+/**
+ * Optional structured filters for `vectorSearch` / `keywordSearch` /
+ * `hybridSearch`. All four fields are AND-combined when present. `symbolGlob`
+ * and `fileGlob` use SQL LIKE patterns (with `%` already substituted from `*`)
+ * — `index.ts:globToLike` is the canonical builder. SQL LIKE wildcards in the
+ * raw value must be backslash-escaped before being passed in.
+ */
+export interface SearchFilters {
+  kind?: string;
+  language?: string;
+  symbolGlob?: string;
+  fileGlob?: string;
+}
+
+/**
+ * Build the trailing WHERE clause for a query that JOINs `chunks` aliased as
+ * `<alias>`. Returns `{ sql: '', args: [] }` when no filters are set.
+ *
+ * Note: returned `sql` always begins with ` AND ` (or is empty), so the caller
+ * just appends it after an existing WHERE.
+ */
+function buildFilterClause(filters: SearchFilters | undefined, alias: string = 'c'): { sql: string; args: any[] } {
+  if (!filters) return { sql: '', args: [] };
+  const conds: string[] = [];
+  const args: any[] = [];
+  if (filters.kind) {
+    conds.push(`${alias}.chunk_type = ?`);
+    args.push(filters.kind);
+  }
+  if (filters.language) {
+    conds.push(`${alias}.language = ?`);
+    args.push(filters.language);
+  }
+  if (filters.symbolGlob) {
+    conds.push(`${alias}.symbol_name LIKE ? ESCAPE '\\'`);
+    args.push(filters.symbolGlob);
+  }
+  if (filters.fileGlob) {
+    conds.push(`${alias}.file_path LIKE ? ESCAPE '\\'`);
+    args.push(filters.fileGlob);
+  }
+  return { sql: conds.length ? ' AND ' + conds.join(' AND ') : '', args };
+}
+
+export function searchFiltersActive(filters: SearchFilters | undefined): boolean {
+  if (!filters) return false;
+  return filters.kind != null || filters.language != null || filters.symbolGlob != null || filters.fileGlob != null;
+}
+
 // Vector search
 export async function vectorSearch(
   config: CortexConfig,
   vector: number[],
   projectId: string,
   topK: number,
-  offset: number = 0
+  offset: number = 0,
+  filters?: SearchFilters,
 ): Promise<{ chunks: any[]; total_matches: number; has_more: boolean }> {
   const db = getClient(config);
   const [projectCountResult, totalCountResult] = await Promise.all([
@@ -433,10 +498,14 @@ export async function vectorSearch(
   }
 
   const totalChunkCount = Number(totalCountResult.rows[0]?.count ?? 0);
+  // When filters are active, post-ANN WHERE filters can drop most results, so
+  // over-fetch aggressively to avoid returning a near-empty page.
+  const filterMultiplier = searchFiltersActive(filters) ? 10 : 1;
   const fetchCount = totalChunkCount === projectChunkCount
-    ? Math.min(projectChunkCount, topK + offset)
+    ? Math.min(projectChunkCount, (topK + offset) * filterMultiplier)
     : totalChunkCount;
 
+  const filterClause = buildFilterClause(filters);
   const vectorJson = JSON.stringify(vector);
   const result = await db.execute({
     sql: `SELECT c.chunk_id, c.file_path, c.symbol_name, c.chunk_type,
@@ -444,9 +513,9 @@ export async function vectorSearch(
                  vector_distance_cos(c.embedding, vector(?)) as distance
           FROM vector_top_k('idx_chunks_embedding', vector(?), ?) v
           JOIN chunks c ON c.rowid = v.id
-          WHERE c.project_id = ?
+          WHERE c.project_id = ?${filterClause.sql}
           ORDER BY distance`,
-    args: [vectorJson, vectorJson, fetchCount, projectId],
+    args: [vectorJson, vectorJson, fetchCount, projectId, ...filterClause.args],
   });
 
   const allMatches = result.rows.map(row => ({
@@ -475,25 +544,27 @@ export async function keywordSearch(
   query: string,
   projectId: string,
   limit: number = 15,
-  offset: number = 0
+  offset: number = 0,
+  filters?: SearchFilters,
 ): Promise<{ chunks: any[]; total: number }> {
   const db = getClient(config);
+  const filterClause = buildFilterClause(filters);
   const result = await db.execute({
     sql: `SELECT c.chunk_id, c.file_path, c.symbol_name, c.chunk_type,
                  c.start_line, c.end_line, c.content, c.language, rank
           FROM chunks_fts f
           JOIN chunks c ON c.rowid = f.rowid
-          WHERE chunks_fts MATCH ? AND c.project_id = ?
+          WHERE chunks_fts MATCH ? AND c.project_id = ?${filterClause.sql}
           ORDER BY rank
           LIMIT ? OFFSET ?`,
-    args: [query, projectId, limit, offset],
+    args: [query, projectId, ...filterClause.args, limit, offset],
   });
 
   const countResult = await db.execute({
     sql: `SELECT COUNT(*) as total FROM chunks_fts f
           JOIN chunks c ON c.rowid = f.rowid
-          WHERE chunks_fts MATCH ? AND c.project_id = ?`,
-    args: [query, projectId],
+          WHERE chunks_fts MATCH ? AND c.project_id = ?${filterClause.sql}`,
+    args: [query, projectId, ...filterClause.args],
   });
 
   return {
@@ -542,18 +613,24 @@ export async function traverseRelationships(
 
   const sql = `
     WITH RECURSIVE graph AS (
-      SELECT r.source_chunk_id, r.target_chunk_id, r.rel_type, r.confidence, 1 as depth
+      SELECT r.source_chunk_id, r.target_chunk_id, r.rel_type, r.confidence, r.confidence_score, r.confidence_reasoning, 1 as depth
       FROM relationships r
       WHERE r.source_chunk_id IN (${startPlaceholders})
         AND r.rel_type IN (${relTypePlaceholders})
       UNION ALL
-      SELECT r.source_chunk_id, r.target_chunk_id, r.rel_type, r.confidence, g.depth + 1
+      SELECT r.source_chunk_id, r.target_chunk_id, r.rel_type, r.confidence, r.confidence_score, r.confidence_reasoning, g.depth + 1
       FROM relationships r
       JOIN graph g ON r.source_chunk_id = g.target_chunk_id
       WHERE g.depth < ?
         AND r.rel_type IN (${relTypePlaceholders})
     )
-    SELECT DISTINCT g.source_chunk_id, g.target_chunk_id, g.rel_type, g.confidence FROM graph g
+    SELECT DISTINCT g.source_chunk_id, g.target_chunk_id, g.rel_type, g.confidence, g.confidence_score, g.confidence_reasoning FROM graph g
+    ORDER BY COALESCE(g.confidence_score,
+                      CASE g.confidence
+                        WHEN 'EXTRACTED' THEN 0.9
+                        WHEN 'INFERRED'  THEN 0.55
+                        ELSE 0.35
+                      END) DESC
   `;
 
   const edgesResult = await db.execute({ sql, args: cteParams });
@@ -567,6 +644,8 @@ export async function traverseRelationships(
       target: r.target_chunk_id as string,
       rel_type: r.rel_type as string,
       confidence: (r.confidence as string) || 'EXTRACTED',
+      confidence_score: r.confidence_score != null ? Number(r.confidence_score) : null,
+      confidence_reasoning: (r.confidence_reasoning as string | null) ?? null,
     };
   });
 
@@ -686,19 +765,22 @@ export async function hybridSearch(
   topK: number = 15,
   rrfK: number = 60,
   offset: number = 0,
+  filters?: SearchFilters,
 ): Promise<{ chunks: HybridSearchResult[]; total_matches: number; has_more: boolean }> {
   // Over-fetch enough from each branch so offset-based slicing has headroom.
   // Both branches contribute, so topK*2 + offset gives the fused set enough candidates.
   const fetchSize = (topK + offset) * 2;
 
   // Vector branch: always runs
-  const vecPromise = vectorSearch(config, vector, projectId, fetchSize);
+  const vecPromise = vectorSearch(config, vector, projectId, fetchSize, 0, filters);
 
   // FTS branch: sanitize, and fall back to empty on any error so a malformed
-  // query never tears down the whole hybrid path.
+  // query never tears down the whole hybrid path. When the user only supplied
+  // filter tokens (no free text), the sanitized query is null — in that case
+  // skip FTS and let the vector branch carry the filters alone.
   const ftsQuery = sanitizeFtsQuery(query);
   const ftsPromise: Promise<{ chunks: any[]; total: number }> = ftsQuery
-    ? keywordSearch(config, ftsQuery, projectId, fetchSize).catch(() => ({ chunks: [], total: 0 }))
+    ? keywordSearch(config, ftsQuery, projectId, fetchSize, 0, filters).catch(() => ({ chunks: [], total: 0 }))
     : Promise.resolve({ chunks: [], total: 0 });
 
   const [vecResult, ftsResult] = await Promise.all([vecPromise, ftsPromise]);
@@ -771,10 +853,16 @@ export async function getDirectNeighbors(
 
   // Get edges where source or target is in our set
   const edgesResult = await db.execute({
-    sql: `SELECT r.source_chunk_id, r.target_chunk_id, r.rel_type, r.confidence
+    sql: `SELECT r.source_chunk_id, r.target_chunk_id, r.rel_type, r.confidence, r.confidence_score, r.confidence_reasoning
           FROM relationships r
           WHERE r.source_chunk_id IN (${placeholders})
              OR r.target_chunk_id IN (${placeholders})
+          ORDER BY COALESCE(r.confidence_score,
+                            CASE r.confidence
+                              WHEN 'EXTRACTED' THEN 0.9
+                              WHEN 'INFERRED'  THEN 0.55
+                              ELSE 0.35
+                            END) DESC
           LIMIT ?`,
     args: [...chunkIds, ...chunkIds, maxNeighbors * 2],
   });
@@ -788,6 +876,8 @@ export async function getDirectNeighbors(
       target: r.target_chunk_id as string,
       rel_type: r.rel_type as string,
       confidence: (r.confidence as string) || 'EXTRACTED',
+      confidence_score: r.confidence_score != null ? Number(r.confidence_score) : null,
+      confidence_reasoning: (r.confidence_reasoning as string | null) ?? null,
     };
   });
 
@@ -832,18 +922,24 @@ export async function getTransitiveDependents(
   // Traverse reverse edges: who depends on these chunks?
   const sql = `
     WITH RECURSIVE impact AS (
-      SELECT r.source_chunk_id, r.target_chunk_id, r.rel_type, r.confidence, 1 as depth
+      SELECT r.source_chunk_id, r.target_chunk_id, r.rel_type, r.confidence, r.confidence_score, r.confidence_reasoning, 1 as depth
       FROM relationships r
       WHERE r.target_chunk_id IN (${seedPlaceholders})
       UNION ALL
-      SELECT r.source_chunk_id, r.target_chunk_id, r.rel_type, r.confidence, i.depth + 1
+      SELECT r.source_chunk_id, r.target_chunk_id, r.rel_type, r.confidence, r.confidence_score, r.confidence_reasoning, i.depth + 1
       FROM relationships r
       JOIN impact i ON r.target_chunk_id = i.source_chunk_id
       WHERE i.depth < ?
     )
-    SELECT DISTINCT source_chunk_id, target_chunk_id, rel_type, confidence, MIN(depth) as depth
+    SELECT DISTINCT source_chunk_id, target_chunk_id, rel_type, confidence, confidence_score, confidence_reasoning, MIN(depth) as depth
     FROM impact
     GROUP BY source_chunk_id, target_chunk_id, rel_type
+    ORDER BY COALESCE(confidence_score,
+                      CASE confidence
+                        WHEN 'EXTRACTED' THEN 0.9
+                        WHEN 'INFERRED'  THEN 0.55
+                        ELSE 0.35
+                      END) DESC
     LIMIT ?
   `;
 
@@ -864,6 +960,8 @@ export async function getTransitiveDependents(
       target: r.target_chunk_id as string,
       rel_type: r.rel_type as string,
       confidence: (r.confidence as string) || 'EXTRACTED',
+      confidence_score: r.confidence_score != null ? Number(r.confidence_score) : null,
+      confidence_reasoning: (r.confidence_reasoning as string | null) ?? null,
       depth: d,
     };
   });

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { loadConfig, saveConfig, requireConfig, configPath, type CortexConfig } from './config.js';
-import { applySchema, upsertChunks, upsertProject, deleteStaleProjectChunks, replaceProjectRelationships, replaceFileRelationships, deleteFileChunks, deleteStaleFileChunks, getIndexedFilePaths, projectExists, vectorSearch, keywordSearch, hybridSearch, traverseRelationships, getDirectNeighbors, getTransitiveDependents, findChunksBySymbol, findChunksByFile, getProjectStatus, getProjectMeta, listProjects, deleteProject, type ChunkRow, type RelationshipRow, type RelationshipConfidence } from './turso.js';
+import { applySchema, upsertChunks, upsertProject, deleteStaleProjectChunks, replaceProjectRelationships, replaceFileRelationships, deleteFileChunks, deleteStaleFileChunks, getIndexedFilePaths, projectExists, vectorSearch, keywordSearch, hybridSearch, traverseRelationships, getDirectNeighbors, getTransitiveDependents, findChunksBySymbol, findChunksByFile, getProjectStatus, getProjectMeta, listProjects, deleteProject, sanitizeFtsQuery, type ChunkRow, type RelationshipRow, type RelationshipConfidence, type SearchFilters } from './turso.js';
 import { embed, embedBatch, loadModel } from './embedder.js';
 import { chunkFile, chunkFileAST, contextPrefix, type Chunk } from './chunker.js';
 import { initParser } from './ast-chunker.js';
@@ -115,13 +115,98 @@ async function cmdInit() {
   console.log(`Database: ${url}`);
 }
 
+// Ensure the Turso schema (including ALTER TABLE migrations for newly added
+// columns) is applied before any read or write. Memoized per process so read
+// commands pay the cost at most once. Read commands must call this because
+// the P4 migration added `confidence_score` / `confidence_reasoning` columns
+// that are SELECTed unconditionally in turso.ts — without this, upgrading
+// users would hit "no such column" until they manually reran `cortex index`.
+let schemaEnsured = false;
+async function ensureSchema(config: CortexConfig): Promise<void> {
+  if (schemaEnsured) return;
+  await applySchema(config);
+  schemaEnsured = true;
+}
+
+// --- P5: AST-aware query filters ---
+// SearchFilters interface lives in turso.ts (shared with the SQL layer).
+
+const LANG_ALIAS: Record<string, string> = {
+  ts: 'typescript', tsx: 'typescript', typescript: 'typescript',
+  js: 'javascript', jsx: 'javascript', javascript: 'javascript',
+  py: 'python', python: 'python',
+  go: 'go', rs: 'rust', rust: 'rust',
+  java: 'java', cpp: 'cpp', c: 'c',
+  md: 'markdown', markdown: 'markdown',
+};
+
+// `interface` chunks are stored as 'config' by the AST chunker — alias for usability.
+const KIND_ALIAS: Record<string, string> = {
+  method: 'function',
+  interface: 'config',
+  type: 'config',
+  enum: 'config',
+};
+
+/** Convert a user glob (`*`, `**`) to a SQL LIKE pattern. */
+function globToLike(glob: string): string {
+  // Escape SQL LIKE wildcards already present in the user input
+  const escaped = glob.replace(/[\\%_]/g, c => '\\' + c);
+  // Then convert glob `*`/`**` to SQL `%`
+  return escaped.replace(/\*+/g, '%');
+}
+
+/**
+ * Parse `kind:`, `lang:`, `name:`, `file:` filter tokens out of a free-form
+ * search query. Returns the filters and the remaining text query.
+ *
+ * Examples:
+ *   "useEffect kind:function lang:ts" → { textQuery: "useEffect", filters: {kind:'function',language:'typescript'} }
+ *   "name:parse* file:src/auth/**"    → { textQuery: "",          filters: {symbolGlob:'parse%',fileGlob:'src/auth/%'} }
+ */
+export function parseQueryFilters(query: string): { textQuery: string; filters: SearchFilters } {
+  const filters: SearchFilters = {};
+  const remaining: string[] = [];
+
+  // Split on whitespace, preserving quoted phrases.
+  const tokens = query.match(/(?:[^\s"]+|"[^"]*")+/g) ?? [];
+
+  for (const tok of tokens) {
+    const m = tok.match(/^(kind|lang|name|file):(.+)$/);
+    if (!m) {
+      remaining.push(tok);
+      continue;
+    }
+    const [, field, rawValue] = m;
+    // Strip surrounding quotes if present
+    const value = rawValue.replace(/^"(.*)"$/, '$1');
+
+    if (field === 'kind') {
+      filters.kind = KIND_ALIAS[value.toLowerCase()] ?? value.toLowerCase();
+    } else if (field === 'lang') {
+      filters.language = LANG_ALIAS[value.toLowerCase()] ?? value.toLowerCase();
+    } else if (field === 'name') {
+      filters.symbolGlob = globToLike(value);
+    } else if (field === 'file') {
+      filters.fileGlob = globToLike(value);
+    }
+  }
+
+  return { textQuery: remaining.join(' ').trim(), filters };
+}
+
+/** True if the SearchFilters object has any active filter. */
+export function hasFilters(f: SearchFilters): boolean {
+  return f.kind != null || f.language != null || f.symbolGlob != null || f.fileGlob != null;
+}
+
 // --- index ---
 async function cmdIndex() {
   const config = await loadConfig();
   requireConfig(config);
 
   // Ensure schema is up-to-date (migrates existing DBs for new columns)
-  await applySchema(config);
+  await ensureSchema(config);
 
   const targetPath = resolve(args[1] || '.');
   const projectId = createHash('sha256').update(targetPath).digest('hex').slice(0, 16);
@@ -660,32 +745,49 @@ async function watchAndReindex(
 async function cmdSearch() {
   const config = await loadConfig();
   requireConfig(config);
+  await ensureSchema(config);
 
-  const query = args[1];
-  if (!query) { console.error('Usage: cortex search "query"'); process.exit(1); }
+  const rawQuery = args[1];
+  if (!rawQuery) { console.error('Usage: cortex search "query"'); process.exit(1); }
+
+  // Parse out kind:/lang:/name:/file: filter tokens before embedding/FTS.
+  const { textQuery, filters } = parseQueryFilters(rawQuery);
+  const filtersActive = hasFilters(filters);
 
   const projectId = await getProjectId(config);
   await emitStalenessHint(config, projectId);
+  if (filtersActive) {
+    await emitGrammarVersionWarning(config, projectId, filters);
+  }
 
   const topK = parseInt(getFlag('--top-k') || '15');
   const offset = parseInt(getFlag('--offset') || '0');
 
+  // If filters were used but no free text remained, we still need *some*
+  // signal for vector/FTS. Fall back to the raw query in that edge case so
+  // the embedder gets a deterministic input.
+  const queryForRanking = textQuery.length > 0 ? textQuery : rawQuery;
+
   if (hasFlag('--keyword')) {
-    // FTS-only mode
-    const result = await keywordSearch(config, query, projectId, topK, offset);
+    // FTS-only mode. Sanitize the free-form query first so punctuation or
+    // stripped filter tokens do not trigger an FTS5 parse error.
+    const ftsQuery = sanitizeFtsQuery(queryForRanking);
+    const result = ftsQuery
+      ? await keywordSearch(config, ftsQuery, projectId, topK, offset, filters)
+      : { chunks: [], total: 0 };
     output(result);
   } else if (hasFlag('--vector')) {
     // Vector-only mode (legacy default)
     console.error('Loading model...');
-    const vector = await embed(query);
-    const result = await vectorSearch(config, vector, projectId, topK, offset);
+    const vector = await embed(queryForRanking);
+    const result = await vectorSearch(config, vector, projectId, topK, offset, filters);
     output(result);
   } else {
     // Hybrid mode (new default): vector + FTS with RRF fusion
     const rrfK = parseInt(getFlag('--rrf-k') || '60');
     console.error('Loading model...');
-    const vector = await embed(query);
-    const result = await hybridSearch(config, vector, query, projectId, topK, rrfK, offset);
+    const vector = await embed(queryForRanking);
+    const result = await hybridSearch(config, vector, queryForRanking, projectId, topK, rrfK, offset, filters);
     output(result);
   }
 }
@@ -722,20 +824,32 @@ async function getStalenessInfo(config: CortexConfig, projectId: string): Promis
 async function cmdContext() {
   const config = await loadConfig();
   requireConfig(config);
+  await ensureSchema(config);
 
-  const query = args[1];
-  if (!query) { console.error('Usage: cortex context "symbol-or-query"'); process.exit(1); }
+  const rawQuery = args[1];
+  if (!rawQuery) { console.error('Usage: cortex context "symbol-or-query"'); process.exit(1); }
+
+  // P5: extract filter tokens before symbol lookup / embedding.
+  const { textQuery, filters } = parseQueryFilters(rawQuery);
+  const filtersActive = hasFilters(filters);
+  // Symbol lookup needs a clean name; fall back to raw if filters consumed everything.
+  const query = textQuery.length > 0 ? textQuery : rawQuery;
 
   const projectId = await getProjectId(config);
   const BUDGET_TOKENS = 2000;
 
   // Staleness check
   const staleness = await getStalenessInfo(config, projectId);
+  if (filtersActive) {
+    await emitGrammarVersionWarning(config, projectId, filters);
+  }
 
-  // Try exact symbol match first, then fall back to hybrid search
+  // Try exact symbol match first, then fall back to hybrid search.
+  // When filters are active, skip the symbol short-circuit — the user is asking
+  // for filtered results, not "the chunk literally named X".
   console.error('Loading model...');
   const [symbolMatches, vector] = await Promise.all([
-    findChunksBySymbol(config, projectId, query),
+    filtersActive ? Promise.resolve([] as any[]) : findChunksBySymbol(config, projectId, query),
     embed(query),
   ]);
 
@@ -755,8 +869,8 @@ async function cmdContext() {
       rank: i + 1,
     }));
   } else {
-    // Hybrid search fallback
-    const searchResult = await hybridSearch(config, vector, query, projectId, 5);
+    // Hybrid search fallback (with P5 filters threaded through)
+    const searchResult = await hybridSearch(config, vector, query, projectId, 5, 60, 0, filters);
     primaryMatches = searchResult.chunks.map((c, i) => ({
       chunk_id: c.chunk_id,
       file_path: c.file_path,
@@ -798,11 +912,14 @@ async function cmdContext() {
     usedTokens += estimateTokens(m.content ?? '') + 30; // 30 for metadata fields
   }
 
-  // Trim neighbors by confidence: keep EXTRACTED first, then INFERRED, drop AMBIGUOUS first
-  const confidenceOrder: Record<string, number> = { EXTRACTED: 0, INFERRED: 1, AMBIGUOUS: 2 };
-  const sortedEdges = [...neighbors.edges].sort(
-    (a, b) => (confidenceOrder[a.confidence] ?? 2) - (confidenceOrder[b.confidence] ?? 2)
-  );
+  // Trim neighbors by effective confidence score (highest first). Legacy edges
+  // from pre-P4 indexes have null scores; map them to tier defaults so they
+  // sort comparably with freshly-scored edges. This matches the SQL ordering
+  // in getDirectNeighbors / getTransitiveDependents / traverseRelationships.
+  const tierDefault: Record<string, number> = { EXTRACTED: 0.9, INFERRED: 0.55, AMBIGUOUS: 0.35 };
+  const effectiveScore = (e: any): number =>
+    e.confidence_score != null ? e.confidence_score : (tierDefault[e.confidence] ?? 0.35);
+  const sortedEdges = [...neighbors.edges].sort((a, b) => effectiveScore(b) - effectiveScore(a));
 
   // Only keep neighbor nodes that are referenced by surviving edges
   const neighborNodeMap = new Map(neighbors.nodes.map((n: any) => [n.chunk_id, n]));
@@ -837,7 +954,7 @@ async function cmdContext() {
       end_line: n.end_line,
       relationship: keptEdges
         .filter(e => e.source === n.chunk_id || e.target === n.chunk_id)
-        .map(e => ({ rel_type: e.rel_type, confidence: e.confidence, direction: e.target === n.chunk_id ? 'outgoing' : 'incoming' })),
+        .map(e => ({ rel_type: e.rel_type, confidence: e.confidence, confidence_score: e.confidence_score ?? null, direction: e.target === n.chunk_id ? 'outgoing' : 'incoming' })),
     }));
 
   // Key files: unique files from primary + neighbor matches
@@ -902,6 +1019,7 @@ async function cmdContext() {
 async function cmdImpact() {
   const config = await loadConfig();
   requireConfig(config);
+  await ensureSchema(config);
 
   const projectId = await getProjectId(config);
   const staleness = await getStalenessInfo(config, projectId);
@@ -1151,13 +1269,24 @@ function outputImpactResult(
 async function cmdRelationships() {
   const config = await loadConfig();
   requireConfig(config);
+  await ensureSchema(config);
 
   const symbol = args[1];
   if (!symbol) { console.error('Usage: cortex relationships "symbol"'); process.exit(1); }
 
   const projectId = await getProjectId(config);
   const depth = parseInt(getFlag('--depth') || '2');
+  const verbose = hasFlag('--verbose');
   const result = await traverseRelationships(config, projectId, symbol, depth);
+
+  // Strip reasoning unless --verbose
+  if (!verbose) {
+    result.edges = result.edges.map((e: any) => {
+      const { confidence_reasoning, ...rest } = e;
+      return rest;
+    });
+  }
+
   output(result);
 }
 
@@ -1165,6 +1294,7 @@ async function cmdRelationships() {
 async function cmdStatus() {
   const config = await loadConfig();
   requireConfig(config);
+  await ensureSchema(config);
 
   const projectId = await getProjectId(config);
   await emitStalenessHint(config, projectId);
@@ -1423,6 +1553,35 @@ async function emitStalenessHint(config: CortexConfig, projectId: string): Promi
   }
 }
 
+/**
+ * P5: When `kind:` or `lang:` filters are in play, the result quality depends on
+ * the AST chunker output stored in the index. If the indexed grammar version
+ * differs from the current grammar bundle, surface a one-line warning so the
+ * agent knows results may be inaccurate. Suppressed by --quiet / CORTEX_QUIET=1.
+ */
+async function emitGrammarVersionWarning(
+  config: CortexConfig,
+  projectId: string,
+  filters: SearchFilters,
+): Promise<void> {
+  if (hasFlag('--quiet')) return;
+  if (process.env.CORTEX_QUIET === '1') return;
+  // Only kind: and lang: depend on the AST chunker output.
+  if (!filters.kind && !filters.language) return;
+
+  const meta = await getProjectMeta(config, projectId);
+  if (!meta || !meta.grammar_version) return;
+
+  const currentVersion = await computeGrammarVersionHash().catch(() => null);
+  if (!currentVersion) return;
+
+  if (meta.grammar_version !== currentVersion) {
+    process.stderr.write(
+      `[cortex] grammar version drift detected (indexed=${meta.grammar_version.slice(0, 7)}, current=${currentVersion.slice(0, 7)}); kind:/lang: filters may be inaccurate. Run: cortex index\n`,
+    );
+  }
+}
+
 // --- helpers ---
 
 async function collectFiles(dir: string): Promise<string[]> {
@@ -1484,6 +1643,53 @@ function indexChunkTarget(symbolIndex: Map<string, Set<string>>, fileIndex: Map<
   }
 }
 
+/**
+ * Compute confidence score for a relationship edge.
+ *
+ * score = resolution_quality × source_multiplier
+ *
+ * Resolution quality:
+ *   - File-index resolution (imports): 1.0
+ *   - Single symbol-name match: 0.7
+ *   - Multi-candidate (N matches): 1/N
+ *
+ * Source multiplier:
+ *   - EXTRACTED (imports/exports from AST): ×1.0
+ *   - INFERRED (single name match for calls): ×0.8
+ *   - AMBIGUOUS (multi-target or unresolved): ×0.5
+ */
+function scoreRelationship(
+  confidence: RelationshipConfidence,
+  candidateCount: number,
+  viaFileIndex: boolean,
+): { score: number; reasoning: string } {
+  // Resolution quality
+  let quality: number;
+  let qualityLabel: string;
+  if (viaFileIndex && candidateCount >= 1) {
+    quality = 1.0;
+    qualityLabel = 'file-index resolution';
+  } else if (candidateCount === 1) {
+    quality = 0.7;
+    qualityLabel = 'single symbol-name match';
+  } else if (candidateCount > 1) {
+    quality = 1 / candidateCount;
+    qualityLabel = `${candidateCount}-way name collision`;
+  } else {
+    quality = 0.2;
+    qualityLabel = 'unresolved';
+  }
+
+  // Source multiplier
+  const multipliers: Record<string, number> = { EXTRACTED: 1.0, INFERRED: 0.8, AMBIGUOUS: 0.5 };
+  const mult = multipliers[confidence] ?? 0.5;
+
+  const score = Math.max(0, Math.min(1, quality * mult));
+  const reasoning = `${qualityLabel} (${quality.toFixed(2)}) × ${confidence} (${mult.toFixed(1)}) = ${score.toFixed(2)}`;
+
+  return { score, reasoning };
+}
+
 function resolveRelationships(
   pendingRelationships: PendingRelationship[],
   symbolIndex: Map<string, Set<string>>,
@@ -1495,19 +1701,22 @@ function resolveRelationships(
   for (const rel of pendingRelationships) {
     let targetIds: string[];
     let confidence: RelationshipConfidence;
+    let viaFileIndex = false;
 
     if (rel.rel_type === 'imports') {
       targetIds = resolveImportTargets(rel.target_ref, rel.source_file_path, fileIndex, importResolver);
-      // Imports resolved via alias rules or relative paths are deterministic
       confidence = targetIds.length > 0 ? 'EXTRACTED' : 'AMBIGUOUS';
+      viaFileIndex = targetIds.length > 0;
     } else if (rel.rel_type === 'exports') {
       targetIds = [...(symbolIndex.get(rel.target_ref) ?? [])];
-      confidence = 'EXTRACTED'; // export declarations are deterministic
+      confidence = 'EXTRACTED';
     } else {
       // 'calls' — symbol name lookup; ambiguous if multiple targets (name collision)
       targetIds = [...(symbolIndex.get(rel.target_ref) ?? [])];
       confidence = targetIds.length === 1 ? 'INFERRED' : targetIds.length > 1 ? 'AMBIGUOUS' : 'AMBIGUOUS';
     }
+
+    const { score, reasoning } = scoreRelationship(confidence, targetIds.length, viaFileIndex);
 
     for (const targetChunkId of targetIds) {
       const key = `${rel.source_chunk_id}:${targetChunkId}:${rel.rel_type}`;
@@ -1516,6 +1725,8 @@ function resolveRelationships(
         target_chunk_id: targetChunkId,
         rel_type: rel.rel_type,
         confidence,
+        confidence_score: score,
+        confidence_reasoning: reasoning,
       });
     }
   }

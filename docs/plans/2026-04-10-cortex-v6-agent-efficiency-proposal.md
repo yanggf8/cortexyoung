@@ -1,7 +1,7 @@
 # Cortex V6.1 — Agent Efficiency Proposal
 
 **Date**: 2026-04-10
-**Status**: Proposed
+**Status**: ✅ Absorbed into `2026-04-09-cortex-v6-intelligence-upgrade.md` (v3). P1 (hybrid RRF), P2 (`context`), P3 (`impact`), and P0 (eval harness) all shipped in commit `ed1c647`. P5 (cluster summaries) remains deferred per the consolidated plan. This document is retained as historical context; see the consolidated v6 plan for current status and remaining work.
 **Review Target**: Gemini architecture review
 **Depends on**: `2026-04-09-cortex-v6-intelligence-upgrade.md`
 **Companion docs**:
