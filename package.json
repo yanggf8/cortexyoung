@@ -1,6 +1,6 @@
 {
   "name": "cortexyoung",
-  "version": "5.0.0",
+  "version": "6.0.0",
   "private": true,
   "description": "Semantic code intelligence CLI — local embeddings + Turso cloud",
   "workspaces": ["cli"],
