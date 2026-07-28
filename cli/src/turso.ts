@@ -1035,6 +1035,42 @@ export async function findChunksByFile(
   }));
 }
 
+// Graph data for Louvain clustering
+export interface ProjectGraphData {
+  chunks: Array<{ chunk_id: string; file_path: string; symbol_name: string | null; chunk_type: string | null }>;
+  relationships: Array<{ source_chunk_id: string; target_chunk_id: string; confidence_score: number | null }>;
+}
+
+export async function getProjectGraphData(config: CortexConfig, projectId: string): Promise<ProjectGraphData> {
+  const db = getClient(config);
+  const [chunksResult, relsResult] = await Promise.all([
+    db.execute({
+      sql: `SELECT chunk_id, file_path, symbol_name, chunk_type FROM chunks WHERE project_id = ?`,
+      args: [projectId],
+    }),
+    db.execute({
+      sql: `SELECT r.source_chunk_id, r.target_chunk_id, r.confidence_score
+            FROM relationships r
+            JOIN chunks c ON r.source_chunk_id = c.chunk_id
+            WHERE c.project_id = ?`,
+      args: [projectId],
+    }),
+  ]);
+  return {
+    chunks: chunksResult.rows.map(r => ({
+      chunk_id: r.chunk_id as string,
+      file_path: r.file_path as string,
+      symbol_name: (r.symbol_name as string | null),
+      chunk_type: (r.chunk_type as string | null),
+    })),
+    relationships: relsResult.rows.map(r => ({
+      source_chunk_id: r.source_chunk_id as string,
+      target_chunk_id: r.target_chunk_id as string,
+      confidence_score: r.confidence_score != null ? Number(r.confidence_score) : null,
+    })),
+  };
+}
+
 export async function deleteProject(config: CortexConfig, projectId: string): Promise<number> {
   const db = getClient(config);
   await db.execute('PRAGMA foreign_keys = ON');

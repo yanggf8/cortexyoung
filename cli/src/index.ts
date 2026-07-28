@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 
 import { loadConfig, saveConfig, requireConfig, configPath, type CortexConfig } from './config.js';
-import { applySchema, upsertChunks, upsertProject, deleteStaleProjectChunks, replaceProjectRelationships, replaceFileRelationships, deleteFileChunks, deleteStaleFileChunks, getIndexedFilePaths, projectExists, vectorSearch, keywordSearch, hybridSearch, traverseRelationships, getDirectNeighbors, getTransitiveDependents, findChunksBySymbol, findChunksByFile, getProjectStatus, getProjectMeta, listProjects, deleteProject, sanitizeFtsQuery, type ChunkRow, type RelationshipRow, type RelationshipConfidence, type SearchFilters } from './turso.js';
+import { applySchema, upsertChunks, upsertProject, deleteStaleProjectChunks, replaceProjectRelationships, replaceFileRelationships, deleteFileChunks, deleteStaleFileChunks, getIndexedFilePaths, projectExists, vectorSearch, keywordSearch, hybridSearch, traverseRelationships, getDirectNeighbors, getTransitiveDependents, findChunksBySymbol, findChunksByFile, getProjectStatus, getProjectMeta, listProjects, deleteProject, getProjectGraphData, sanitizeFtsQuery, type ChunkRow, type RelationshipRow, type RelationshipConfidence, type SearchFilters } from './turso.js';
+import { clusterProject } from './clusterer.js';
 import { embed, embedBatch, loadModel } from './embedder.js';
 import { chunkFile, chunkFileAST, contextPrefix, type Chunk } from './chunker.js';
 import { initParser } from './ast-chunker.js';
@@ -36,6 +37,7 @@ async function main() {
     case 'delete': return cmdDelete();
     case 'config': return cmdConfig();
     case 'grammars': return cmdGrammars();
+    case 'modules': return cmdModules();
     default:
       console.log(`Usage: cortex <command>
 
@@ -55,6 +57,8 @@ Commands:
   projects                   List all projects
   delete                     Delete current project
   config                     Show config
+  modules                    Detect subsystem modules via Louvain clustering
+  modules --min-size N       Only show modules with ≥ N files (default: 1)
   grammars                   Show grammar status
   grammars install <path>    Install grammars from local directory
 
@@ -1288,6 +1292,35 @@ async function cmdRelationships() {
   }
 
   output(result);
+}
+
+// --- modules ---
+async function cmdModules() {
+  const config = await loadConfig();
+  requireConfig(config);
+  await ensureSchema(config);
+
+  const projectId = await getProjectId(config);
+  const minSize = parseInt(getFlag('--min-size') ?? '1');
+
+  await emitStalenessHint(config, projectId);
+
+  console.error('Loading project graph...');
+  const graphData = await getProjectGraphData(config, projectId);
+
+  if (graphData.chunks.length === 0) {
+    console.error('No chunks found. Run: cortex index');
+    process.exit(1);
+  }
+
+  const result = clusterProject(graphData.chunks, graphData.relationships);
+
+  if (minSize > 1) {
+    result.modules = result.modules.filter(m => m.file_count >= minSize);
+    result.module_count = result.modules.length;
+  }
+
+  output({ project_id: projectId, ...result });
 }
 
 // --- status ---

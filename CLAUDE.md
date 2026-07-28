@@ -34,6 +34,8 @@ cortex context "symbol-or-query"       # Minimal context pack (depth-1 neighbors
 cortex impact --symbol "name"          # Blast-radius analysis for a symbol
 cortex impact --from-diff [sha]        # Impact analysis from git diff
 cortex relationships "symbol"          # Recursive CTE traversal
+cortex modules                         # Detect subsystem modules (Louvain clustering)
+cortex modules --min-size N            # Only show modules with ≥ N files
 cortex status                          # Project stats
 cortex projects                        # List all indexed projects
 cortex delete                          # Remove current project
@@ -93,3 +95,4 @@ Claude Code → Skill → cortex CLI → web-tree-sitter (AST chunking, WASM)
 - **Test export convention**: functions exported as `*ForTest` (e.g., `resolveRelationshipsForTest`, `parseQueryFilters`) are wired in `cli/src/index.ts` for import by `cli/tests/phase2-smoke.mjs`. The smoke test imports from `../dist/index.js` (the built output), so `npm run build` must precede test runs (the `test:phase2-smoke` script handles this).
 - **Chunk type values**: `function | class | method | documentation | config` — the AST chunker stores `interface`, `type`, and `enum` declarations as `config`.
 - **Requirements**: Node.js 20+, Turso CLI (`turso`), Turso account (free tier: 9GB, 500M reads/mo)
+- **Louvain module detection (`cortex modules`)**: `getProjectGraphData()` fetches all chunks + cross-file relationships; `clusterProject()` in `clusterer.ts` builds an undirected, confidence-weighted file-level graph and runs Louvain Phase 1 (greedy modularity optimisation, no external deps). Outputs ranked modules with `label` (longest non-generic common directory segment), `hub_files` (highest degree), `key_symbols` (top symbols from hub files), and `file_count`. `--min-size N` filters out modules smaller than N files. Isolated files with no relationships each become singleton modules (id = own community).
