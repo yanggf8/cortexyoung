@@ -267,7 +267,7 @@ cort status / cort projects / cort delete
 
 | Codex 指摘 | 修法 |
 |------------|------|
-| Parser：scan「無 JSON → unparsed」vs 未限定的「malformed JSON line >10% abort」同一條件衝突 | §2 合約表 / §6 Index / §7 子行程：10% abort **只**適用 `struct` 的 `ast-grep run --json=stream`；index `scan` 的 malformed line 按檔計為該檔 `unparsed` fallback（FTS-only），**不 abort 整個 index** |
+| Parser：scan「無 JSON → unparsed」vs 未限定的「malformed JSON line >10% abort」同一條件衝突 | §2 合約表 / §6 Index / §7 子行程：10% abort 適用 `run` 路徑（struct 與 rewrite）的 `ast-grep run --json=stream`；index `scan` 的 malformed line 按檔計為該檔 `unparsed` fallback（FTS-only），**不 abort 整個 index** |
 | `file_content_hash` 只涵蓋 chunk contents，scan 同時抽關係，關係抽出變更未覆蓋 | §4 DDL 註解 + §4 公式 + §7 stale：`file_content_hash = sha256(concat(sorted chunk contents + sorted relationship edge strings))`；`extractor_version` 仍管 pack YAML |
 | 零命中承諾 `confidence_reasoning="unresolved: <symbol>"` 但 DDL 無 `unresolved_refs` 表 | §4/§6/§7：不建表；0 target 不寫列；reasoning 由 `context`/`impact` on-the-fly 內聯 JSON、不帶 FK |
 | §13「多解/無解標 AMBIGUOUS」vs §7「零命中不寫列」 | §13 改為「多解標 `AMBIGUOUS`，無解不寫列（on-the-fly unresolved）」 |
