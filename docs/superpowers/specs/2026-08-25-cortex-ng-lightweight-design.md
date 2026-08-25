@@ -1,7 +1,7 @@
 # Cortex NG 輕量版設計 — AST + Graph + FTS（`cort` CLI，離線 SQLite）
 
 - **日期**: 2026-08-25
-- **狀態**: Draft v3 → 修 Codex 二次審查 4 項 PARTIALLY FIXED 後重送審核
+- **狀態**: Draft v4 → 修 Codex 三次審查 2 項 STILL BROKEN（Parser JSON 失敗語義、Freshness/graph hash 與 unresolved on-the-fly）後重送審核
 - **前代**: `v6-final` (5a02c6e3) 歸檔；`de8638fd` 為 xgrep 精簡版
 - **決策**: 輕量派 — 保留 AST + Graph + FTS，拔掉 embeddings/Turso/DiskANN；`ast-grep` 子行程為**唯一** parser 權威，`cort` 為 canonical CLI 名稱（內部固定調 `ast-grep`，不接受 `sg` alias）
 
@@ -32,7 +32,7 @@ agent → cort CLI (Node.js, ESM) → SQLite (better-sqlite3, WAL, busy_timeout 
                               └─→ Louvain (process 內，檔案級鄰接，僅 Phase 1 greedy)
 ```
 
-- **唯一 Parser 權威**：索引與查詢皆由 `ast-grep` 子行程提供結構。支援語言 = `ast-grep` 支援的語言（與 V6 的 TS/JS/TSX/Python 為交集，未來隨 ast-grep 擴充）；版本檢查 `ast-grep --version == 0.45.0`，不符則 fail-closed。exit≠0 分兩案：① **index 的 per-file `ast-grep scan` 失敗**（該檔 exit≠0 或無 JSON）→ 只把**該檔** chunks 標 `chunk_source=unparsed`（FTS-only），其餘檔繼續；② **query 的 `ast-grep run` pattern parse 失敗**（exit≠0 且 stderr 含 `parse error` / `--debug-query`）→ 回全域結構化錯誤 `{error:"parse_failed", detail}`，**不產出**部分 struct 結果、不假裝 0 筆命中。`--debug-query` 用於診斷。**不使用 `web-tree-sitter` in-process 解析**，避免雙重真理。
+- **唯一 Parser 權威**：索引與查詢皆由 `ast-grep` 子行程提供結構。支援語言 = `ast-grep` 支援的語言（與 V6 的 TS/JS/TSX/Python 為交集，未來隨 ast-grep 擴充）；版本檢查 `ast-grep --version == 0.45.0`，不符則 fail-closed。exit≠0 分兩案：① **index 的 per-file `ast-grep scan` 失敗**（該檔 exit≠0、無 JSON、或該檔 JSON lines 皆 malformed）→ 只把**該檔** chunks 標 `chunk_source=unparsed`（FTS-only），其餘檔繼續，**不因單檔 malformed 中止整個 index**；② **query 的 `ast-grep run` pattern parse 失敗**（exit≠0 且 stderr 含 `parse error` / `--debug-query`）→ 回全域結構化錯誤 `{error:"parse_failed", detail}`，**不產出**部分 struct 結果、不假裝 0 筆命中。`--debug-query` 用於診斷。malformed JSON line 的 10% abort **只**適用 `struct` 的 `ast-grep run --json=stream`，**不**適用 index `scan`。**不使用 `web-tree-sitter` in-process 解析**，避免雙重真理。
 - **Graph 自己擁有、Matcher 去租**：`cort` 擁有 `chunks`/`file_state`/`relationships` 的寫入與交易；`ast-grep` 只提供 matches。index 期用版本化 YAML extractor pack（每檔單一 `scan --config <pack>/sgconfig.yml`）建圖；query 期 `ast-grep run --json=stream` 再 containment join；rewrite 期先 dry-run。
 - **存放**：`better-sqlite3` **唯一** driver（測試用 in-memory `better-sqlite3`，**不**用 `node:sqlite` 備援），WAL + `busy_timeout=5000`，`~/.cache/cortex-ng/` 單庫 per project。不用 JSON sidecar（無 CTE/watch）、不用 Turso/libSQL（向量以外無理由、FTS 實驗性、RTT 成本）。
 
@@ -40,8 +40,8 @@ agent → cort CLI (Node.js, ESM) → SQLite (better-sqlite3, WAL, busy_timeout 
 
 | 階段 | 命令 | 輸入 | 輸出 | 失敗 |
 |------|------|------|------|------|
-| index | `ast-grep scan --json=stream --config <pack>/sgconfig.yml <file>`（**每檔單一 scan**，同時抽 chunk 與關係；不是「無 config 的 scan + 第二次 scan」） | 單檔 | JSON lines: `{file, range:{start,end}, kind, text, meta}` | 該檔 exit≠0 或無 JSON → 只標該檔 `chunk_source=unparsed`（FTS-only），不視為全域 parse 失敗 |
-| struct | `ast-grep run --json=stream -p '<pattern>' --strictness ast <paths>` | pattern (argv, 單引號), globs | 同上 + `pattern` 匹配的 node 範圍 | exit≠0 且 stderr 含 `parse error` / `--debug-query` → `{error:"parse_failed", detail}`，不產出部分 struct 結果 |
+| index | `ast-grep scan --json=stream --config <pack>/sgconfig.yml <file>`（**每檔單一 scan**，同時抽 chunk 與關係；不是「無 config 的 scan + 第二次 scan」） | 單檔 | JSON lines: `{file, range:{start,end}, kind, text, meta}` | 該檔 exit≠0、無 JSON、或無任何可 parse 的 JSON line（含「全部行為 malformed」）→ 只標該檔 `chunk_source=unparsed`（FTS-only）。malformed line 跳過並**按檔計數**，**不 abort 整個 index**。10% abort **不適用** scan |
+| struct | `ast-grep run --json=stream -p '<pattern>' --strictness ast <paths>` | pattern (argv, 單引號), globs | 同上 + `pattern` 匹配的 node 範圍 | exit≠0 且 stderr 含 `parse error` / `--debug-query` → `{error:"parse_failed", detail}`，不產出部分 struct 結果。malformed JSON line（**僅此 `run` 路徑**）→ 跳過並計數，超過該次輸出行 10% 則 abort **該次 struct 查詢** |
 | rewrite | `ast-grep run --json=stream -p '<pat>' --rewrite '<repl>' <paths>` | 同上 + rewrite 模板 | diff JSON (range + replacement) | 同 struct；`--interactive` 由 `cort` 封裝 |
 
 不接受 `sg` binary；`command -v ast-grep` 不存在 → 安裝失敗，不 fallback。
@@ -54,9 +54,9 @@ agent → cort CLI (Node.js, ESM) → SQLite (better-sqlite3, WAL, busy_timeout 
 | `incremental` | `extractor_version` 比對 → `git diff --name-status -M` + `ls-files --others` → `file_content_hash` 去重 → per-file 序列化重建（每檔一筆 transaction） | `cort index --incremental` | git, better-sqlite3 |
 | `fts` | FTS5 儲存與查詢（unicode61, `remove_diacritics 1`, `tokenchars "._$"`），`sanitizeFtsQuery` 對 `" ( ) - /` 做 `""` 轉義，超長 OR 截斷 20 詞，malformed 大聲失敗 | 內部 `keywordSearch` | SQLite FTS5 |
 | `struct` | `ast-grep run --json=stream` → **containment join** (`match.range` ⊆ `chunk.range`) → 回傳 file/symbol + ≤3 `EXTRACTED` edges + confidence | `cort struct -p '<pat>'` | ast-grep |
-| `graph` | `relationships` CRUD、target 解析（檔內 import map → 專案 symbol index）、confidence 單一常數（`EXTRACTED:1.0 / INFERRED:0.7 / AMBIGUOUS:0.5 × 1/N`（N≥1，N=已解析 target 數）；0 個 target 不寫列）、鄰居查詢 | 內部 `getNeighbors`/`getTransitiveDependents` | better-sqlite3 |
-| `context` | exact `symbol_name` 命中或 FTS 候選（**不依賴 `struct`**）→ depth-1 鄰居 → 實際輸出算 budget 修剪 → `index_is_stale`/`truncated` | `cort context <q>` | graph, FTS |
-| `impact` | 反向 CTE depth 3 | `cort impact --symbol` | better-sqlite3 CTE |
+| `graph` | `relationships` CRUD、target 解析（檔內 import map → 專案 symbol index）、confidence 單一常數（`EXTRACTED:1.0 / INFERRED:0.7 / AMBIGUOUS:0.5 × 1/N`（N≥1，N=已解析 target 數）；0 個 target 不寫列，unresolved 由 `context`/`impact` on-the-fly 內聯回傳、不入庫）、鄰居查詢 | 內部 `getNeighbors`/`getTransitiveDependents` | better-sqlite3 |
+| `context` | exact `symbol_name` 命中或 FTS 候選（**不依賴 `struct`**）→ depth-1 鄰居 → 實際輸出算 budget 修剪 → `index_is_stale`/`truncated`；0 target 不讀 relationship 列，on-the-fly 內聯 `unresolved` JSON | `cort context <q>` | graph, FTS |
+| `impact` | 反向 CTE depth 3；unresolved 同樣 on-the-fly 內聯，不入庫 | `cort impact --symbol` | better-sqlite3 CTE |
 | `modules` | 取 cross-file `relationships` 建無向加權圖 → Louvain Phase 1 greedy（無 aggregation phase） | `cort modules --min-size` | clusterer (移植 V6 `clusterer.ts:109-181`) |
 | `rewrite` | `ast-grep --rewrite` 包裝：dry-run JSON → 限縮至 `impact` 檔案清單 → `--interactive` 預設 | `cort rewrite -p … --rewrite …` | ast-grep |
 
@@ -93,7 +93,7 @@ CREATE TABLE IF NOT EXISTS chunks (
   start_line INTEGER NOT NULL,
   end_line INTEGER NOT NULL,
   content TEXT NOT NULL,
-  content_hash TEXT NOT NULL,           -- sha256(content) per-chunk；檔級 freshness 用 file_state.file_content_hash
+  content_hash TEXT NOT NULL,           -- sha256(content) per-chunk；檔級 freshness 用 file_state.file_content_hash（chunks + edges）
   language TEXT,
   chunk_source TEXT NOT NULL CHECK(chunk_source IN ('ast','unparsed')),
   created_at TEXT DEFAULT (datetime('now')),
@@ -106,7 +106,7 @@ CREATE INDEX IF NOT EXISTS idx_chunks_symbol ON chunks(project_id, symbol_name);
 CREATE TABLE IF NOT EXISTS file_state (
   project_id TEXT NOT NULL REFERENCES projects(project_id) ON DELETE CASCADE,
   file_path TEXT NOT NULL,
-  file_content_hash TEXT NOT NULL,  -- sha256(concat of extracted chunk contents, order by start_line)
+  file_content_hash TEXT NOT NULL,  -- sha256(concat(sorted chunk contents + sorted relationship edge strings for this file))
   updated_at TEXT DEFAULT (datetime('now')),
   PRIMARY KEY (project_id, file_path)
 );
@@ -122,6 +122,8 @@ CREATE TABLE IF NOT EXISTS relationships (
 );
 CREATE INDEX IF NOT EXISTS idx_rel_source ON relationships(source_chunk_id);
 CREATE INDEX IF NOT EXISTS idx_rel_target ON relationships(target_chunk_id);
+-- 不建 unresolved_refs 表。0 個 target 不寫 relationships 列；
+-- unresolved reasoning 由 context/impact on-the-fly 內聯於 JSON，不入庫、不帶 FK。
 
 -- FTS5 with unicode61, triggers mirror V6
 CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
@@ -146,7 +148,8 @@ END;
 ```
 
 - `chunk_id` 採用 V6 公式 `project_id:file_path:start_line`（audit 已知「同行不動則穩定」的限制，見 `5a02c6e3:docs/2026-08-25-audit-and-repositioning.md:78`；未來三臂 RRF 時仍以此為穩定鍵，移動的行視為新 chunk）。
-- `extractor_version = sha256(concat(sorted YAML pack files))`，`ensureSchema` 冪等遷移，`_cortex_meta` 存 `SCHEMA_VERSION`。
+- `extractor_version = sha256(concat(sorted YAML pack files))`，`ensureSchema` 冪等遷移，`_cortex_meta` 存 `SCHEMA_VERSION`。pack YAML 變更走 `extractor_version` mismatch → 全量重建（graph 與 chunks 皆重建）。
+- `file_state.file_content_hash = sha256(concat(依 start_line 排序的 chunk contents + 該檔 scan 抽出的 relationship edge strings 詞典序排序))`。edge string 正規式：`${rel_type}\t${source_symbol}\t${raw_target}`（scan 抽出、**target 解析前**的名字，含後來因 0 命中而不寫列的邊）。chunk 內容或關係抽出任一變更都會改 hash；**freshness 訊號分工**：`file_content_hash` 管單檔抽出物（chunks + edges）是否 stale，`extractor_version` 管 pack 規則變更。
 - **交易邊界**：全量 `cort index` 包在**單一** SQLite transaction（全部檔的 chunks / file_state / relationships / `projects.git_head` / `_cortex_meta.extractor_version` 一起 commit）。`cort index --incremental` 用 **per-file transaction**（`BEGIN; deleteStaleFileChunks; insert chunks; upsert file_state; replace 該檔 relationships; COMMIT`）；中斷時**已 commit 的檔保留**（視為增量進度，不是「沒有半套索引」），未 commit 的當前檔 rollback。incremental **全部檔跑完後**，另開**最後一筆 transaction** 原子更新 `projects.git_head` 與 `_cortex_meta.extractor_version`。未來可加 generation swap（寫至 `*.db.tmp` 再 `rename`）。
 
 ## 5. CLI 規格
@@ -168,23 +171,23 @@ cort status / cort projects / cort delete
 
 ## 6. 關鍵流程
 
-**Index（全量）**：掃描（忽略集沿用 `v6-final:cli/src/index.ts:20-22`：`node_modules`, `dist`, `build`, `.git`, `__pycache__` 等）→ **每檔一次** `ast-grep scan --json=stream --config <pack>/sgconfig.yml <file>`（同一 scan 抽 chunk 與關係，不是無 config 的 scan 再加第二次 scan）→ 該檔 scan 失敗則寫 `chunk_source=unparsed`（FTS-only）並算 `file_content_hash` → 單一 transaction 批次寫 `chunks`/`chunks_fts`/`file_state` → 依 target 解析規則寫 `relationships`（單一 confidence 常數）→ 同一 transaction 寫 `projects.git_head`/`extractor_version` + `_cortex_meta`。
+**Index（全量）**：掃描（忽略集沿用 `v6-final:cli/src/index.ts:20-22`：`node_modules`, `dist`, `build`, `.git`, `__pycache__` 等）→ **每檔一次** `ast-grep scan --json=stream --config <pack>/sgconfig.yml <file>`（同一 scan 抽 chunk 與關係，不是無 config 的 scan 再加第二次 scan）→ 該檔 scan 失敗（exit≠0、無 JSON、或無任何可 parse 的 JSON line，含全部行為 malformed）則寫 `chunk_source=unparsed`（FTS-only）；malformed line 跳過並按檔計數，**不 abort 整個 index**。通過的檔依抽出的 chunks + relationship edge strings 算 `file_content_hash` → 單一 transaction 批次寫 `chunks`/`chunks_fts`/`file_state` → 依 target 解析規則寫 `relationships`（單一 confidence 常數；0 target 不寫列）→ 同一 transaction 寫 `projects.git_head`/`extractor_version` + `_cortex_meta`。
 
 **Incremental**：先比對 `extractor_version` — **mismatch → 強制全量重建**（graph 與 chunks 皆重建，因 extractor 改變可能影響兩者），並在 stderr 提示 `extractor_version mismatch: <old> -> <new>, full reindex required`；match 才走 `git diff --name-status -M` + `git ls-files --others` + per-file `file_content_hash` 比對 → per-file 序列化重建（`better-sqlite3` transaction per file；中斷保留已 commit 檔的增量進度；全部完成後最後一筆 transaction 原子更新 `projects.git_head` 與 `_cortex_meta.extractor_version`。`inFlight` map 僅用於未來的 `--watch`，不套用於 incremental）。
 
-**Target 解析**（寫 `relationships.target_chunk_id`）：對每個抽出的符號參照，先查**檔內 import map**，再查**專案 symbol index**（`chunks.symbol_name`）。單一命中 → 寫一列，`confidence=INFERRED`（score 0.7；pack 已直接給出可解析 target 則 `EXTRACTED` / 1.0）；多命中 → 對每個已解析 target 寫一列，`confidence=AMBIGUOUS`、`confidence_score=0.5 × 1/N`（**僅當 N≥1**；N = 已解析 target 數）；零命中（unresolved）→ **不寫 relationship 列**（因 `target_chunk_id` 為 NOT NULL FK），改在 `context`/`impact` 輸出 `confidence_score=0.5`、`confidence_reasoning="unresolved: <symbol>"`，不帶 FK。
+**Target 解析**（寫 `relationships.target_chunk_id`）：對每個抽出的符號參照，先查**檔內 import map**，再查**專案 symbol index**（`chunks.symbol_name`）。單一命中 → 寫一列，`confidence=INFERRED`（score 0.7；pack 已直接給出可解析 target 則 `EXTRACTED` / 1.0）；多命中 → 對每個已解析 target 寫一列，`confidence=AMBIGUOUS`、`confidence_score=0.5 × 1/N`（**僅當 N≥1**；N = 已解析 target 數）；零命中（unresolved）→ **不寫 relationship 列**（因 `target_chunk_id` 為 NOT NULL FK），**不建 `unresolved_refs` 表**。`confidence_reasoning="unresolved: <symbol>"` **不入庫**：`context`/`impact` 組 JSON 時**當場**（on-the-fly）對該次查詢的符號跑同一套 target 解析（檔內 import map → 專案 symbol index）；0 個 target 則內聯回傳 `confidence_score=0.5`、`confidence_reasoning="unresolved: <symbol>"`，**不帶 FK、不寫列**。
 
 **Struct**：`ast-grep run --json=stream --strictness ast -p '<pat>' <paths>` → 每個 match 依 **containment**（`match.range.start >= chunk.start && match.range.end <= chunk.end`）join 最近的 `chunk_id`（若跨多 chunk 取最小包含者）→ 附 ≤3 `EXTRACTED` 鄰居 + confidence → 實際輸出算 budget（目標 ≤1500 tokens），回 `index_is_stale`/`truncated`。
 
-**Context**：exact `symbol_name` 命中，否則 FTS 候選（**不調 `struct`**，解耦 stage 依賴）→ depth-1 鄰居 → 預設丟 `AMBIGUOUS`（`--include-ambiguous` 才保留）→ 信心分數單一常數；`impact` 反向 CTE 3 層。
+**Context**：exact `symbol_name` 命中，否則 FTS 候選（**不調 `struct`**，解耦 stage 依賴）→ depth-1 鄰居（僅已寫入的 `relationships` 列）→ 對該次查詢符號 on-the-fly 做 target 解析，0 命中則內聯 `confidence_reasoning="unresolved: <symbol>"`（無 FK）→ 預設丟 `AMBIGUOUS`（`--include-ambiguous` 才保留）→ 信心分數單一常數；`impact` 反向 CTE 3 層（同樣 on-the-fly 處理 unresolved，不讀不存在的 relationship 列）。
 
 ## 7. 錯誤處理與邊界
 
 - **$META/引號**：`ast-grep -p "$FOO"` 會被 shell 展開 — 全走 `argv` 陣列，不經 shell 插值。`ast-grep run` pattern parse 失敗（exit≠0 且 stderr 含 `parse error` / `--debug-query`）回 `{error:"parse_failed", detail}`，**不產出部分 struct 結果、不回 0 筆命中**。
-- **子行程**：`ast-grep` 不存在 / 版本不符 / 超時 (30s) → 結構化錯誤。`ast-grep scan`（index）單檔 exit≠0 或無 JSON → 該檔 `chunk_source=unparsed`（FTS-only），不是全域錯誤。`ast-grep run`（struct/rewrite）exit≠0 且 parse error → `{error:"parse_failed", detail}`。無匹配且 exit=0 才是 0 筆。malformed JSON line → 跳過並計數，超過 10% 失敗則 abort。
+- **子行程**：`ast-grep` 不存在 / 版本不符 / 超時 (30s) → 結構化錯誤。`ast-grep scan`（index）單檔 exit≠0、無 JSON、或無任何可 parse 的 JSON line（含全部行為 malformed）→ 該檔 `chunk_source=unparsed`（FTS-only），不是全域錯誤；malformed line 跳過並**按檔計數**，**不 abort 整個 index**（10% abort **不適用 scan**）。`ast-grep run`（struct/rewrite）exit≠0 且 parse error → `{error:"parse_failed", detail}`。無匹配且 exit=0 才是 0 筆。malformed JSON line 的 10% abort **只**適用 `struct` 查詢的 `ast-grep run --json=stream`：跳過該行並計數，超過該次輸出行 10% 則 abort **該次 struct 查詢**。
 - **FTS5**：`sanitizeFtsQuery` 對 `" ( ) - /` 做 `""` 轉義；tokenizer `unicode61` 支援 CJK；查詢詞 >20 個 OR → 截斷並回 `truncated_query:true`；malformed 仍拋錯 → 上層大聲失敗（無 embeddings 可退化，故不靜默）。
-- **Confidence**：單一常數來源 `EXTRACTED:1.0 / INFERRED:0.7 / AMBIGUOUS:0.5 × 1/N`（JS 與 SQL 同 `CASE`）。`× 1/N` **僅當 N≥1** 套用；N = **已解析 target 數**。多解（N≥2）寫 N 列 `AMBIGUOUS`；**零命中不寫 relationship 列**（避免 NOT NULL FK），改在 `context`/`impact` 回 `confidence_score=0.5`、`confidence_reasoning="unresolved: <symbol>"`（無 FK）。不拿 `AMBIGUOUS`/unresolved 墊 token 預算。
-- **Staleness（防 false-positive）**：回答前比對**檔級** `file_content_hash`（`sha256` of concatenated extracted chunk contents，order by `start_line`，存於 `file_state`），非僅 Git dirty、也不是拿 chunk 的 `content_hash` 去比 raw disk bytes。`git diff --name-status -M` + `ls-files --others` 僅決定候選檔。刪除規則：`deleted_files = db_files − disk_files`（`db_files` = `file_state.file_path`，`disk_files` = `projects.path` 下現存檔）；`deleted_files` 非空 → stale。最終 `index_is_stale = deleted_files.nonempty OR file_content_hash != sha256(disk 檔抽出的 chunks)`。剛索引完但仍 dirty 的檔，只要抽出 chunks 的 concat hash 不變，不會誤判 stale。比對基準為 `projects.path`（非 cwd）。
+- **Confidence**：單一常數來源 `EXTRACTED:1.0 / INFERRED:0.7 / AMBIGUOUS:0.5 × 1/N`（JS 與 SQL 同 `CASE`）。`× 1/N` **僅當 N≥1** 套用；N = **已解析 target 數**。多解（N≥2）寫 N 列 `AMBIGUOUS`；**零命中不寫 relationship 列**（避免 NOT NULL FK），也**不建 `unresolved_refs` 表**。unresolved 由 `context`/`impact` **on-the-fly** 計算：當場跑同一套 target 解析，0 個 target 則在回傳 JSON 內聯 `confidence_score=0.5`、`confidence_reasoning="unresolved: <symbol>"`（無 FK、不寫列）。不拿 `AMBIGUOUS`/unresolved 墊 token 預算。
+- **Staleness（防 false-positive）**：回答前比對**檔級** `file_content_hash`（`sha256(concat(依 start_line 排序的 chunk contents + 該檔 scan 抽出的 relationship edge strings 詞典序排序))`，存於 `file_state`），非僅 Git dirty、也不是拿 chunk 的 `content_hash` 去比 raw disk bytes。`git diff --name-status -M` + `ls-files --others` 僅決定候選檔。刪除規則：`deleted_files = db_files − disk_files`（`db_files` = `file_state.file_path`，`disk_files` = `projects.path` 下現存檔）；`deleted_files` 非空 → stale。最終 `index_is_stale = deleted_files.nonempty OR file_content_hash != sha256(disk 檔抽出的 chunks + relationship edge strings)`。剛索引完但仍 dirty 的檔，只要抽出 chunks **與** relationship edge strings 的 concat hash 不變，不會誤判 stale。比對基準為 `projects.path`（非 cwd）。**freshness 訊號分工**：`file_content_hash` 覆蓋單檔 chunk 與關係抽出物；pack 規則變更由 `extractor_version` 覆蓋（mismatch → 全量重建）。
 - **DB/中斷**：`better-sqlite3` `busy_timeout` 5s，`SQLITE_BUSY` 重試 3 次；`SQLITE_FULL`/`SQLITE_CORRUPT` → 回 `{error:"storage_full"}` 並保留舊庫。全量 `cort index` 中斷 → rollback **整筆** transaction，舊庫不變。`--incremental` 中斷 → rollback 當前檔，**已 commit 的檔保留為增量進度**。測試用 in-memory `better-sqlite3`（不用 `node:sqlite`）。
 - **非 Git 根**：無 `.git` 時 `incremental` 退化為全量；`status` 回 `git_head:null`。
 - **大庫成本**：`context`/`impact` 限 depth 3、`modules` 取樣上限 5k edges、`struct` 需 `-g` 限縮，未限縮的大庫掃描拒絕並提示加 glob。
@@ -248,7 +251,7 @@ cort status / cort projects / cort delete
 | Manifest 錯映射 | §10 明確 `xg_bin→legacy_xg_bin`/`skill→skill_xgrep` + `manifest_version=2` |
 | SHA warning 通過 | §10 定 `fail closed`，`§2` 同步 |
 | `chunk_id` 穩定性謊言 | §4 承認 V6 限制，維持 `project:file:line` 作為穩定鍵的取捨說明 |
-| `AMBIGUOUS` 退化 | §7 明確多解/無解標 `AMBIGUOUS`，不墊預算 |
+| `AMBIGUOUS` 退化 | §7 明確多解標 `AMBIGUOUS`，無解不寫列（on-the-fly unresolved），不墊預算 |
 | FTS/CJK、failure cases、Louvain、eval 不足 | §3/§6/§7 補 tokenizer/截斷/operational 錯誤、Phase 1 only 註記、§9 補 `tool-return tokens`/`stale-read` |
 
 ## 14. 修訂對照（v2 → v3，Codex 二次審查 PARTIALLY FIXED）
@@ -259,3 +262,12 @@ cort status / cort projects / cort delete
 | 交易 vs「無半套索引」矛盾；`node:sqlite` 備援 | §2/§4/§6/§7：全量單一 tx；incremental per-file 中斷保留增量進度；完成後原子寫 `git_head`/`extractor_version`；測試用 in-memory `better-sqlite3` |
 | file hash 層級錯、刪檔不 stale、AMBIGUOUS 0 解無 FK、`× 1/N` 未定義 | §4 加 `file_state.file_content_hash`；§7 stale 公式與 `deleted_files = db_files − disk_files`；§6 target 解析（import map → symbol index）；unresolved 不寫列 |
 | Manifest 缺 `cort_bin` | §10 加入 `cort_bin`，uninstall 按 v2 鍵刪 owned 項目（含 cort） |
+
+## 15. 修訂對照（v3 → v4，Codex 三次審查 STILL BROKEN）
+
+| Codex 指摘 | 修法 |
+|------------|------|
+| Parser：scan「無 JSON → unparsed」vs 未限定的「malformed JSON line >10% abort」同一條件衝突 | §2 合約表 / §6 Index / §7 子行程：10% abort **只**適用 `struct` 的 `ast-grep run --json=stream`；index `scan` 的 malformed line 按檔計為該檔 `unparsed` fallback（FTS-only），**不 abort 整個 index** |
+| `file_content_hash` 只涵蓋 chunk contents，scan 同時抽關係，關係抽出變更未覆蓋 | §4 DDL 註解 + §4 公式 + §7 stale：`file_content_hash = sha256(concat(sorted chunk contents + sorted relationship edge strings))`；`extractor_version` 仍管 pack YAML |
+| 零命中承諾 `confidence_reasoning="unresolved: <symbol>"` 但 DDL 無 `unresolved_refs` 表 | §4/§6/§7：不建表；0 target 不寫列；reasoning 由 `context`/`impact` on-the-fly 內聯 JSON、不帶 FK |
+| §13「多解/無解標 AMBIGUOUS」vs §7「零命中不寫列」 | §13 改為「多解標 `AMBIGUOUS`，無解不寫列（on-the-fly unresolved）」 |
