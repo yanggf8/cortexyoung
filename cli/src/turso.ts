@@ -113,7 +113,16 @@ CREATE TRIGGER IF NOT EXISTS chunks_fts_update AFTER UPDATE ON chunks BEGIN
 END;
 
 CREATE INDEX IF NOT EXISTS idx_chunks_embedding ON chunks(libsql_vector_idx(embedding));
+
+CREATE TABLE IF NOT EXISTS _cortex_meta (
+  key TEXT PRIMARY KEY,
+  value TEXT
+);
 `;
+
+// Bump whenever SCHEMA_SQL or the ALTER TABLE migrations below change, so
+// ensureSchema() can skip the full DDL pass on databases that are current.
+export const SCHEMA_VERSION = '6';
 
 export async function applySchema(config: CortexConfig): Promise<void> {
   const db = getClient(config);
@@ -122,47 +131,25 @@ export async function applySchema(config: CortexConfig): Promise<void> {
   for (const stmt of statements) {
     await db.execute(stmt);
   }
-  // Migration: add confidence column to existing relationships tables
-  try {
-    await db.execute(`ALTER TABLE relationships ADD COLUMN confidence TEXT DEFAULT 'EXTRACTED'`);
-  } catch {
-    // Column already exists — ignore
-  }
-  // Migration: add grammar_version to projects table
-  try {
-    await db.execute(`ALTER TABLE projects ADD COLUMN grammar_version TEXT`);
-  } catch {
-    // Column already exists — ignore
-  }
-  // Migration: add chunk_source to chunks table
-  try {
-    await db.execute(`ALTER TABLE chunks ADD COLUMN chunk_source TEXT DEFAULT 'regex'`);
-  } catch {
-    // Column already exists — ignore
-  }
-  // Migration: add git_head to projects table
-  try {
-    await db.execute(`ALTER TABLE projects ADD COLUMN git_head TEXT`);
-  } catch {
-    // Column already exists — ignore
-  }
-  // Migration: add last_indexed_at (epoch ms) to projects table
-  try {
-    await db.execute(`ALTER TABLE projects ADD COLUMN last_indexed_at INTEGER`);
-  } catch {
-    // Column already exists — ignore
-  }
-  // Migration: add confidence_score and confidence_reasoning to relationships table
-  try {
-    await db.execute(`ALTER TABLE relationships ADD COLUMN confidence_score REAL`);
-  } catch {
-    // Column already exists — ignore
-  }
-  try {
-    await db.execute(`ALTER TABLE relationships ADD COLUMN confidence_reasoning TEXT`);
-  } catch {
-    // Column already exists — ignore
-  }
+  // Migrations only run on databases whose recorded schema_version is behind,
+  // so each ALTER below fires at most once per migration per database.
+  // Only "column already exists" errors are expected — anything else
+  // (network blip, auth failure) must propagate, or later SELECTs would fail
+  // with a confusing "no such column".
+  const addColumnIfMissing = async (table: string, ddl: string): Promise<void> => {
+    try {
+      await db.execute(ddl);
+    } catch (err: any) {
+      if (!/duplicate column/i.test(err?.message ?? String(err))) throw err;
+    }
+  };
+  await addColumnIfMissing('relationships', `ALTER TABLE relationships ADD COLUMN confidence TEXT DEFAULT 'EXTRACTED'`);
+  await addColumnIfMissing('projects', `ALTER TABLE projects ADD COLUMN grammar_version TEXT`);
+  await addColumnIfMissing('chunks', `ALTER TABLE chunks ADD COLUMN chunk_source TEXT DEFAULT 'regex'`);
+  await addColumnIfMissing('projects', `ALTER TABLE projects ADD COLUMN git_head TEXT`);
+  await addColumnIfMissing('projects', `ALTER TABLE projects ADD COLUMN last_indexed_at INTEGER`);
+  await addColumnIfMissing('relationships', `ALTER TABLE relationships ADD COLUMN confidence_score REAL`);
+  await addColumnIfMissing('relationships', `ALTER TABLE relationships ADD COLUMN confidence_reasoning TEXT`);
 }
 
 export interface ChunkRow {
@@ -487,23 +474,22 @@ export async function vectorSearch(
   filters?: SearchFilters,
 ): Promise<{ chunks: any[]; total_matches: number; has_more: boolean }> {
   const db = getClient(config);
-  const [projectCountResult, totalCountResult] = await Promise.all([
-    db.execute({ sql: `SELECT COUNT(*) as count FROM chunks WHERE project_id = ?`, args: [projectId] }),
-    db.execute({ sql: `SELECT COUNT(*) as count FROM chunks`, args: [] }),
-  ]);
+  const projectCountResult = await db.execute({
+    sql: `SELECT COUNT(*) as count FROM chunks WHERE project_id = ?`,
+    args: [projectId],
+  });
 
   const projectChunkCount = Number(projectCountResult.rows[0]?.count ?? 0);
   if (projectChunkCount === 0) {
     return { chunks: [], total_matches: 0, has_more: false };
   }
 
-  const totalChunkCount = Number(totalCountResult.rows[0]?.count ?? 0);
   // When filters are active, post-ANN WHERE filters can drop most results, so
-  // over-fetch aggressively to avoid returning a near-empty page.
-  const filterMultiplier = searchFiltersActive(filters) ? 10 : 1;
-  const fetchCount = totalChunkCount === projectChunkCount
-    ? Math.min(projectChunkCount, (topK + offset) * filterMultiplier)
-    : totalChunkCount;
+  // over-fetch aggressively to avoid returning a near-empty page. Never ask
+  // vector_top_k for k = the whole DB though — on shared multi-project
+  // databases that turns DiskANN into a brute-force scan of every project.
+  const pageMultiplier = searchFiltersActive(filters) ? 100 : 10;
+  const fetchCount = Math.min(projectChunkCount, (topK + offset) * pageMultiplier);
 
   const filterClause = buildFilterClause(filters);
   const vectorJson = JSON.stringify(vector);
@@ -774,13 +760,22 @@ export async function hybridSearch(
   // Vector branch: always runs
   const vecPromise = vectorSearch(config, vector, projectId, fetchSize, 0, filters);
 
-  // FTS branch: sanitize, and fall back to empty on any error so a malformed
-  // query never tears down the whole hybrid path. When the user only supplied
-  // filter tokens (no free text), the sanitized query is null — in that case
-  // skip FTS and let the vector branch carry the filters alone.
+  // FTS branch: sanitize, and fall back to empty so a malformed query never
+  // tears down the whole hybrid path — but never silently. A syntax error is
+  // expected (reported tersely); anything else (outage, auth expiry) means the
+  // user is about to see vector-only results thinking they are fused, which
+  // must be loud on stderr.
   const ftsQuery = sanitizeFtsQuery(query);
   const ftsPromise: Promise<{ chunks: any[]; total: number }> = ftsQuery
-    ? keywordSearch(config, ftsQuery, projectId, fetchSize, 0, filters).catch(() => ({ chunks: [], total: 0 }))
+    ? keywordSearch(config, ftsQuery, projectId, fetchSize, 0, filters).catch((err: any) => {
+        const msg = err?.message ?? String(err);
+        if (/fts5/i.test(msg) && /syntax/i.test(msg)) {
+          console.error(`[cortex] fts branch skipped (query syntax): ${msg}`);
+        } else {
+          console.error(`[cortex] fts branch unavailable (${msg}) — results are VECTOR-ONLY, not hybrid`);
+        }
+        return { chunks: [], total: 0 };
+      })
     : Promise.resolve({ chunks: [], total: 0 });
 
   const [vecResult, ftsResult] = await Promise.all([vecPromise, ftsPromise]);

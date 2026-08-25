@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { loadConfig, saveConfig, requireConfig, configPath, type CortexConfig } from './config.js';
-import { applySchema, upsertChunks, upsertProject, deleteStaleProjectChunks, replaceProjectRelationships, replaceFileRelationships, deleteFileChunks, deleteStaleFileChunks, getIndexedFilePaths, projectExists, vectorSearch, keywordSearch, hybridSearch, traverseRelationships, getDirectNeighbors, getTransitiveDependents, findChunksBySymbol, findChunksByFile, getProjectStatus, getProjectMeta, listProjects, deleteProject, getProjectGraphData, sanitizeFtsQuery, type ChunkRow, type RelationshipRow, type RelationshipConfidence, type SearchFilters } from './turso.js';
+import { applySchema, SCHEMA_VERSION, getClient, upsertChunks, upsertProject, deleteStaleProjectChunks, replaceProjectRelationships, replaceFileRelationships, deleteFileChunks, deleteStaleFileChunks, getIndexedFilePaths, projectExists, vectorSearch, keywordSearch, hybridSearch, traverseRelationships, getDirectNeighbors, getTransitiveDependents, findChunksBySymbol, findChunksByFile, getProjectStatus, getProjectMeta, listProjects, deleteProject, getProjectGraphData, sanitizeFtsQuery, type ChunkRow, type RelationshipRow, type RelationshipConfidence, type SearchFilters } from './turso.js';
 import { clusterProject } from './clusterer.js';
 import { embed, embedBatch, loadModel } from './embedder.js';
 import { chunkFile, chunkFileAST, contextPrefix, type Chunk } from './chunker.js';
@@ -120,15 +120,31 @@ async function cmdInit() {
 }
 
 // Ensure the Turso schema (including ALTER TABLE migrations for newly added
-// columns) is applied before any read or write. Memoized per process so read
-// commands pay the cost at most once. Read commands must call this because
-// the P4 migration added `confidence_score` / `confidence_reasoning` columns
-// that are SELECTed unconditionally in turso.ts — without this, upgrading
-// users would hit "no such column" until they manually reran `cortex index`.
+// columns) is applied before any read or write. Memoized per process, AND
+// version-gated via the `_cortex_meta` table: once a database is at
+// SCHEMA_VERSION, later invocations skip the full DDL pass entirely instead of
+// replaying ~22 statements on every command. Databases behind the version
+// (fresh or legacy) get the full applySchema, then record the version.
 let schemaEnsured = false;
 async function ensureSchema(config: CortexConfig): Promise<void> {
   if (schemaEnsured) return;
-  await applySchema(config);
+  const db = getClient(config);
+  await db.execute('PRAGMA foreign_keys = ON');
+  let currentVersion: string | null = null;
+  try {
+    const r = await db.execute(`SELECT value FROM _cortex_meta WHERE key = 'schema_version'`);
+    currentVersion = (r.rows[0]?.value as string) ?? null;
+  } catch {
+    // _cortex_meta doesn't exist yet — fresh or pre-meta legacy DB.
+  }
+  if (currentVersion !== SCHEMA_VERSION) {
+    await applySchema(config);
+    await db.execute({
+      sql: `INSERT INTO _cortex_meta (key, value) VALUES ('schema_version', ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+      args: [SCHEMA_VERSION],
+    });
+  }
   schemaEnsured = true;
 }
 
@@ -696,29 +712,51 @@ async function watchAndReindex(
 ): Promise<void> {
   const DEBOUNCE_MS = 500;
   const pending = new Map<string, NodeJS.Timeout>();
+  // Serialize per-path: a second save of the same file while a slow
+  // (embedding + upload) reindex is still running must WAIT, not run
+  // concurrently — otherwise the older read can finish last and clobber
+  // fresh chunks with stale ones.
+  const inFlight = new Map<string, Promise<void>>();
 
-  async function reindexFile(filePath: string): Promise<void> {
-    const result = await reindexOneFile(config, targetPath, projectId, importResolver, filePath);
-    switch (result.status) {
-      case 'indexed':
-        console.log(`  [watch] Reindexed ${result.relPath} (${result.chunks} chunks${result.staleRemoved ? `, ${result.staleRemoved} stale removed` : ''})`);
-        break;
-      case 'cleared':
-        console.log(`  [watch] Cleared ${result.relPath} (${result.removed} chunks removed)`);
-        break;
-      case 'deleted':
-        console.log(`  [watch] Deleted ${result.relPath} (${result.removed} chunks removed)`);
-        break;
-      case 'error':
-        console.error(`  [watch] Error ${result.relPath}: ${result.error}`);
-        break;
-    }
+  function reindexFile(filePath: string): Promise<void> {
+    const prev = inFlight.get(filePath) ?? Promise.resolve();
+    const job = prev
+      .catch(() => {}) // a failed earlier job must not block the next one
+      .then(async () => {
+        const result = await reindexOneFile(config, targetPath, projectId, importResolver, filePath);
+        switch (result.status) {
+          case 'indexed':
+            console.log(`  [watch] Reindexed ${result.relPath} (${result.chunks} chunks${result.staleRemoved ? `, ${result.staleRemoved} stale removed` : ''})`);
+            break;
+          case 'cleared':
+            console.log(`  [watch] Cleared ${result.relPath} (${result.removed} chunks removed)`);
+            break;
+          case 'deleted':
+            console.log(`  [watch] Deleted ${result.relPath} (${result.removed} chunks removed)`);
+            break;
+          case 'error':
+            console.error(`  [watch] Error ${result.relPath}: ${result.error}`);
+            break;
+        }
+      });
+    inFlight.set(filePath, job);
+    return job;
   }
 
   console.log(`\nWatching ${targetPath} for changes... (Ctrl+C to stop)`);
 
   const ac = new AbortController();
-  process.on('SIGINT', () => { ac.abort(); process.exit(0); });
+  process.on('SIGINT', () => {
+    // Flush debounce timers so just-saved files are not silently dropped:
+    // fire their reindex immediately, then wait for these AND any
+    // still-in-flight uploads before exiting.
+    ac.abort();
+    const debouncedPaths = Array.from(pending.keys());
+    for (const timer of pending.values()) clearTimeout(timer);
+    pending.clear();
+    const flushJobs = debouncedPaths.map(p => reindexFile(p).catch(() => {}));
+    void Promise.allSettled([...inFlight.values(), ...flushJobs]).finally(() => process.exit(0));
+  });
 
   try {
     const watcher = watch(targetPath, { recursive: true, signal: ac.signal });
@@ -1107,9 +1145,30 @@ async function cmdImpactFromDiff(
     process.exit(1);
   }
 
-  // Get changed files from git diff
+  // Get changed files from git diff. null means git itself failed (bad SHA,
+  // broken repo) — that must not masquerade as a clean empty diff, or impact
+  // analysis would report "nothing depends on this" for the wrong reason.
   const changes = gitDiffAgainstWorkingTree(projectPath, baseSha);
-  if (!changes || changes.length === 0) {
+  if (changes === null) {
+    output({
+      mode: 'from-diff',
+      base_sha: baseSha,
+      changed_files: [],
+      affected_files: [],
+      affected_symbols: [],
+      edges: [],
+      confidence_notes: ['git diff failed against base SHA — cannot determine changed files; run `cortex index --incremental` or verify the SHA exists'],
+      metadata: {
+        index_is_stale: staleness.is_stale,
+        index_staleness_reason: staleness.reason,
+        truncated: false,
+        budget_tokens: 0,
+      } satisfies ConfidenceMetadata,
+    });
+    process.exitCode = 1;
+    return;
+  }
+  if (changes.length === 0) {
     output({
       mode: 'from-diff',
       base_sha: baseSha,

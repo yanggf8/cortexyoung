@@ -59,5 +59,9 @@ temp/
 # Cortex-specific cache and storage
 .cortex/
 
+# Machine-local Claude Code settings and generated reports — never commit
+.claude/settings.local.json
+CORTEX_REPORT.md
+
 # Performance reports (system-specific)
 performance-reports/
