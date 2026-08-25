@@ -1,7 +1,7 @@
 # Cortex NG 輕量版設計 — AST + Graph + FTS（`cort` CLI，離線 SQLite）
 
 - **日期**: 2026-08-25
-- **狀態**: Draft v2 → 修 Codex 5 項 blocker 後重送審核
+- **狀態**: Draft v3 → 修 Codex 二次審查 4 項 PARTIALLY FIXED 後重送審核
 - **前代**: `v6-final` (5a02c6e3) 歸檔；`de8638fd` 為 xgrep 精簡版
 - **決策**: 輕量派 — 保留 AST + Graph + FTS，拔掉 embeddings/Turso/DiskANN；`ast-grep` 子行程為**唯一** parser 權威，`cort` 為 canonical CLI 名稱（內部固定調 `ast-grep`，不接受 `sg` alias）
 
@@ -25,24 +25,24 @@
 ```
 agent → cort CLI (Node.js, ESM) → SQLite (better-sqlite3, WAL, busy_timeout 5s, 0600)
                               │    ~/.cache/cortex-ng/<sha256(realpath)>.db
-                              ├─→ ast-grep (子行程，唯一 parser) — index: scan --json=stream
+                              ├─→ ast-grep (子行程，唯一 parser) — index: scan --json=stream --config <pack>/sgconfig.yml（每檔一次）
                               │                                    query: run --json=stream
                               │                                    rewrite: run --rewrite --json=stream (dry-run)
                               ├─→ FTS5 (SQLite, unicode61) — 關鍵字召回
                               └─→ Louvain (process 內，檔案級鄰接，僅 Phase 1 greedy)
 ```
 
-- **唯一 Parser 權威**：索引與查詢皆由 `ast-grep` 子行程提供結構。支援語言 = `ast-grep` 支援的語言（與 V6 的 TS/JS/TSX/Python 為交集，未來隨 ast-grep 擴充）；版本檢查 `ast-grep --version == 0.45.0`，不符則 fail-closed；exit code 非 0 或 stderr 含 `parse error` → 回結構化錯誤，不回 0 筆；`--debug-query` 用於診斷。**不使用 `web-tree-sitter` in-process 解析**，避免雙重真理。
-- **Graph 自己擁有、Matcher 去租**：`cort` 擁有 `chunks`/`relationships` 的寫入與交易；`ast-grep` 只提供 matches。index 期用版本化 YAML extractor pack 建圖；query 期 `ast-grep run --json=stream` 再 containment join；rewrite 期先 dry-run。
-- **存放**：`better-sqlite3` 唯一 driver（`node:sqlite` 備援僅測試用），WAL + `busy_timeout=5000`，`~/.cache/cortex-ng/` 單庫 per project。不用 JSON sidecar（無 CTE/watch）、不用 Turso/libSQL（向量以外無理由、FTS 實驗性、RTT 成本）。
+- **唯一 Parser 權威**：索引與查詢皆由 `ast-grep` 子行程提供結構。支援語言 = `ast-grep` 支援的語言（與 V6 的 TS/JS/TSX/Python 為交集，未來隨 ast-grep 擴充）；版本檢查 `ast-grep --version == 0.45.0`，不符則 fail-closed。exit≠0 分兩案：① **index 的 per-file `ast-grep scan` 失敗**（該檔 exit≠0 或無 JSON）→ 只把**該檔** chunks 標 `chunk_source=unparsed`（FTS-only），其餘檔繼續；② **query 的 `ast-grep run` pattern parse 失敗**（exit≠0 且 stderr 含 `parse error` / `--debug-query`）→ 回全域結構化錯誤 `{error:"parse_failed", detail}`，**不產出**部分 struct 結果、不假裝 0 筆命中。`--debug-query` 用於診斷。**不使用 `web-tree-sitter` in-process 解析**，避免雙重真理。
+- **Graph 自己擁有、Matcher 去租**：`cort` 擁有 `chunks`/`file_state`/`relationships` 的寫入與交易；`ast-grep` 只提供 matches。index 期用版本化 YAML extractor pack（每檔單一 `scan --config <pack>/sgconfig.yml`）建圖；query 期 `ast-grep run --json=stream` 再 containment join；rewrite 期先 dry-run。
+- **存放**：`better-sqlite3` **唯一** driver（測試用 in-memory `better-sqlite3`，**不**用 `node:sqlite` 備援），WAL + `busy_timeout=5000`，`~/.cache/cortex-ng/` 單庫 per project。不用 JSON sidecar（無 CTE/watch）、不用 Turso/libSQL（向量以外無理由、FTS 實驗性、RTT 成本）。
 
 **ast-grep 子行程合約（精確）**：
 
 | 階段 | 命令 | 輸入 | 輸出 | 失敗 |
 |------|------|------|------|------|
-| index | `ast-grep scan --json=stream --config <pack>/sgconfig.yml <file>` | 單檔 | JSON lines: `{file, range:{start,end}, kind, text, meta}` | exit≠0 或無 JSON → 標 `chunk_source=unparsed`，僅 FTS |
-| struct | `ast-grep run --json=stream -p '<pattern>' --strictness ast <paths>` | pattern (argv, 單引號), globs | 同上 + `pattern` 匹配的 node 範圍 | `--debug-query` 回結構化錯誤 |
-| rewrite | `ast-grep run --json=stream -p '<pat>' --rewrite '<repl>' <paths>` | 同上 + rewrite 模板 | diff JSON (range + replacement) | 同上，`--interactive` 由 `cort` 封裝 |
+| index | `ast-grep scan --json=stream --config <pack>/sgconfig.yml <file>`（**每檔單一 scan**，同時抽 chunk 與關係；不是「無 config 的 scan + 第二次 scan」） | 單檔 | JSON lines: `{file, range:{start,end}, kind, text, meta}` | 該檔 exit≠0 或無 JSON → 只標該檔 `chunk_source=unparsed`（FTS-only），不視為全域 parse 失敗 |
+| struct | `ast-grep run --json=stream -p '<pattern>' --strictness ast <paths>` | pattern (argv, 單引號), globs | 同上 + `pattern` 匹配的 node 範圍 | exit≠0 且 stderr 含 `parse error` / `--debug-query` → `{error:"parse_failed", detail}`，不產出部分 struct 結果 |
+| rewrite | `ast-grep run --json=stream -p '<pat>' --rewrite '<repl>' <paths>` | 同上 + rewrite 模板 | diff JSON (range + replacement) | 同 struct；`--interactive` 由 `cort` 封裝 |
 
 不接受 `sg` binary；`command -v ast-grep` 不存在 → 安裝失敗，不 fallback。
 
@@ -50,11 +50,11 @@ agent → cort CLI (Node.js, ESM) → SQLite (better-sqlite3, WAL, busy_timeout 
 
 | 元件 | 職責 | 介面 | 依賴 |
 |------|------|------|------|
-| `indexer` | 掃檔 → `ast-grep scan` 抽 chunk → 寫 `chunks`/`chunks_fts` → 調 extractor pack 建 `relationships` | `cort index [path]` / `--incremental` | ast-grep (scan), better-sqlite3 |
-| `incremental` | `extractor_version` 比對 → `git diff --name-status -M` + `ls-files --others` → `content_hash` 去重 → per-file 序列化重建 | `cort index --incremental` | git, better-sqlite3 |
+| `indexer` | 掃檔 → 每檔一次 `ast-grep scan --config <pack>/sgconfig.yml` 抽 chunk+關係 → 寫 `chunks`/`chunks_fts`/`file_state` → target 解析後寫 `relationships` | `cort index [path]` / `--incremental` | ast-grep (scan), better-sqlite3 |
+| `incremental` | `extractor_version` 比對 → `git diff --name-status -M` + `ls-files --others` → `file_content_hash` 去重 → per-file 序列化重建（每檔一筆 transaction） | `cort index --incremental` | git, better-sqlite3 |
 | `fts` | FTS5 儲存與查詢（unicode61, `remove_diacritics 1`, `tokenchars "._$"`），`sanitizeFtsQuery` 對 `" ( ) - /` 做 `""` 轉義，超長 OR 截斷 20 詞，malformed 大聲失敗 | 內部 `keywordSearch` | SQLite FTS5 |
 | `struct` | `ast-grep run --json=stream` → **containment join** (`match.range` ⊆ `chunk.range`) → 回傳 file/symbol + ≤3 `EXTRACTED` edges + confidence | `cort struct -p '<pat>'` | ast-grep |
-| `graph` | `relationships` CRUD、confidence 單一常數（`EXTRACTED:1.0 / INFERRED:0.7 / AMBIGUOUS:0.5 × 1/N`）、鄰居查詢 | 內部 `getNeighbors`/`getTransitiveDependents` | better-sqlite3 |
+| `graph` | `relationships` CRUD、target 解析（檔內 import map → 專案 symbol index）、confidence 單一常數（`EXTRACTED:1.0 / INFERRED:0.7 / AMBIGUOUS:0.5 × 1/N`（N≥1，N=已解析 target 數）；0 個 target 不寫列）、鄰居查詢 | 內部 `getNeighbors`/`getTransitiveDependents` | better-sqlite3 |
 | `context` | exact `symbol_name` 命中或 FTS 候選（**不依賴 `struct`**）→ depth-1 鄰居 → 實際輸出算 budget 修剪 → `index_is_stale`/`truncated` | `cort context <q>` | graph, FTS |
 | `impact` | 反向 CTE depth 3 | `cort impact --symbol` | better-sqlite3 CTE |
 | `modules` | 取 cross-file `relationships` 建無向加權圖 → Louvain Phase 1 greedy（無 aggregation phase） | `cort modules --min-size` | clusterer (移植 V6 `clusterer.ts:109-181`) |
@@ -93,7 +93,7 @@ CREATE TABLE IF NOT EXISTS chunks (
   start_line INTEGER NOT NULL,
   end_line INTEGER NOT NULL,
   content TEXT NOT NULL,
-  content_hash TEXT NOT NULL,           -- sha256(content)
+  content_hash TEXT NOT NULL,           -- sha256(content) per-chunk；檔級 freshness 用 file_state.file_content_hash
   language TEXT,
   chunk_source TEXT NOT NULL CHECK(chunk_source IN ('ast','unparsed')),
   created_at TEXT DEFAULT (datetime('now')),
@@ -102,6 +102,14 @@ CREATE TABLE IF NOT EXISTS chunks (
 CREATE INDEX IF NOT EXISTS idx_chunks_project ON chunks(project_id);
 CREATE INDEX IF NOT EXISTS idx_chunks_file ON chunks(project_id, file_path);
 CREATE INDEX IF NOT EXISTS idx_chunks_symbol ON chunks(project_id, symbol_name);
+
+CREATE TABLE IF NOT EXISTS file_state (
+  project_id TEXT NOT NULL REFERENCES projects(project_id) ON DELETE CASCADE,
+  file_path TEXT NOT NULL,
+  file_content_hash TEXT NOT NULL,  -- sha256(concat of extracted chunk contents, order by start_line)
+  updated_at TEXT DEFAULT (datetime('now')),
+  PRIMARY KEY (project_id, file_path)
+);
 
 CREATE TABLE IF NOT EXISTS relationships (
   source_chunk_id TEXT NOT NULL REFERENCES chunks(chunk_id) ON DELETE CASCADE,
@@ -139,7 +147,7 @@ END;
 
 - `chunk_id` 採用 V6 公式 `project_id:file_path:start_line`（audit 已知「同行不動則穩定」的限制，見 `5a02c6e3:docs/2026-08-25-audit-and-repositioning.md:78`；未來三臂 RRF 時仍以此為穩定鍵，移動的行視為新 chunk）。
 - `extractor_version = sha256(concat(sorted YAML pack files))`，`ensureSchema` 冪等遷移，`_cortex_meta` 存 `SCHEMA_VERSION`。
-- **交易邊界**：全量 `index` 包在單一 SQLite transaction；`--incremental` 每檔一個 transaction（`BEGIN; deleteStaleFileChunks; insert chunks; replace relationships; COMMIT`）；中斷則 rollback，不暴露半套索引。未來可加 generation swap（寫至 `*.db.tmp` 再 `rename`）。
+- **交易邊界**：全量 `cort index` 包在**單一** SQLite transaction（全部檔的 chunks / file_state / relationships / `projects.git_head` / `_cortex_meta.extractor_version` 一起 commit）。`cort index --incremental` 用 **per-file transaction**（`BEGIN; deleteStaleFileChunks; insert chunks; upsert file_state; replace 該檔 relationships; COMMIT`）；中斷時**已 commit 的檔保留**（視為增量進度，不是「沒有半套索引」），未 commit 的當前檔 rollback。incremental **全部檔跑完後**，另開**最後一筆 transaction** 原子更新 `projects.git_head` 與 `_cortex_meta.extractor_version`。未來可加 generation swap（寫至 `*.db.tmp` 再 `rename`）。
 
 ## 5. CLI 規格
 
@@ -160,9 +168,11 @@ cort status / cort projects / cort delete
 
 ## 6. 關鍵流程
 
-**Index（全量）**：掃描（忽略集沿用 `v6-final:cli/src/index.ts:20-22`：`node_modules`, `dist`, `build`, `.git`, `__pycache__` 等）→ per-file `ast-grep scan --json=stream` 抽 chunk → `content_hash` 去重 → 單一 transaction 批次寫 `chunks`/`chunks_fts` → 跑 extractor pack（`ast-grep scan --config <pack>`）→ 按 `rel_type` 寫 `relationships`（單一 confidence 常數）→ 寫 `projects.git_head`/`extractor_version` + `_cortex_meta`。
+**Index（全量）**：掃描（忽略集沿用 `v6-final:cli/src/index.ts:20-22`：`node_modules`, `dist`, `build`, `.git`, `__pycache__` 等）→ **每檔一次** `ast-grep scan --json=stream --config <pack>/sgconfig.yml <file>`（同一 scan 抽 chunk 與關係，不是無 config 的 scan 再加第二次 scan）→ 該檔 scan 失敗則寫 `chunk_source=unparsed`（FTS-only）並算 `file_content_hash` → 單一 transaction 批次寫 `chunks`/`chunks_fts`/`file_state` → 依 target 解析規則寫 `relationships`（單一 confidence 常數）→ 同一 transaction 寫 `projects.git_head`/`extractor_version` + `_cortex_meta`。
 
-**Incremental**：先比對 `extractor_version` — **mismatch → 強制全量重建**（graph 與 chunks 皆重建，因 extractor 改變可能影響兩者），並在 stderr 提示 `extractor_version mismatch: <old> -> <new>, full reindex required`；match 才走 `git diff --name-status -M` + `git ls-files --others` + per-file `content_hash` 比對 → per-file 序列化重建（`better-sqlite3` transaction per file，`inFlight` map 僅用於未來的 `--watch`，不套用於 incremental）。
+**Incremental**：先比對 `extractor_version` — **mismatch → 強制全量重建**（graph 與 chunks 皆重建，因 extractor 改變可能影響兩者），並在 stderr 提示 `extractor_version mismatch: <old> -> <new>, full reindex required`；match 才走 `git diff --name-status -M` + `git ls-files --others` + per-file `file_content_hash` 比對 → per-file 序列化重建（`better-sqlite3` transaction per file；中斷保留已 commit 檔的增量進度；全部完成後最後一筆 transaction 原子更新 `projects.git_head` 與 `_cortex_meta.extractor_version`。`inFlight` map 僅用於未來的 `--watch`，不套用於 incremental）。
+
+**Target 解析**（寫 `relationships.target_chunk_id`）：對每個抽出的符號參照，先查**檔內 import map**，再查**專案 symbol index**（`chunks.symbol_name`）。單一命中 → 寫一列，`confidence=INFERRED`（score 0.7；pack 已直接給出可解析 target 則 `EXTRACTED` / 1.0）；多命中 → 對每個已解析 target 寫一列，`confidence=AMBIGUOUS`、`confidence_score=0.5 × 1/N`（**僅當 N≥1**；N = 已解析 target 數）；零命中（unresolved）→ **不寫 relationship 列**（因 `target_chunk_id` 為 NOT NULL FK），改在 `context`/`impact` 輸出 `confidence_score=0.5`、`confidence_reasoning="unresolved: <symbol>"`，不帶 FK。
 
 **Struct**：`ast-grep run --json=stream --strictness ast -p '<pat>' <paths>` → 每個 match 依 **containment**（`match.range.start >= chunk.start && match.range.end <= chunk.end`）join 最近的 `chunk_id`（若跨多 chunk 取最小包含者）→ 附 ≤3 `EXTRACTED` 鄰居 + confidence → 實際輸出算 budget（目標 ≤1500 tokens），回 `index_is_stale`/`truncated`。
 
@@ -170,18 +180,18 @@ cort status / cort projects / cort delete
 
 ## 7. 錯誤處理與邊界
 
-- **$META/引號**：`ast-grep -p "$FOO"` 會被 shell 展開 — 全走 `argv` 陣列，不經 shell 插值；parse 失敗回 `{error:"parse_failed", detail: <debug-query output>}`，不回 0 筆。
-- **子行程**：`ast-grep` 不存在 / 版本不符 / 超時 (30s) / 非 0 exit（除無匹配的 0 筆外）→ 結構化錯誤；malformed JSON line → 跳過並計數，超過 10% 失敗則 abort。
+- **$META/引號**：`ast-grep -p "$FOO"` 會被 shell 展開 — 全走 `argv` 陣列，不經 shell 插值。`ast-grep run` pattern parse 失敗（exit≠0 且 stderr 含 `parse error` / `--debug-query`）回 `{error:"parse_failed", detail}`，**不產出部分 struct 結果、不回 0 筆命中**。
+- **子行程**：`ast-grep` 不存在 / 版本不符 / 超時 (30s) → 結構化錯誤。`ast-grep scan`（index）單檔 exit≠0 或無 JSON → 該檔 `chunk_source=unparsed`（FTS-only），不是全域錯誤。`ast-grep run`（struct/rewrite）exit≠0 且 parse error → `{error:"parse_failed", detail}`。無匹配且 exit=0 才是 0 筆。malformed JSON line → 跳過並計數，超過 10% 失敗則 abort。
 - **FTS5**：`sanitizeFtsQuery` 對 `" ( ) - /` 做 `""` 轉義；tokenizer `unicode61` 支援 CJK；查詢詞 >20 個 OR → 截斷並回 `truncated_query:true`；malformed 仍拋錯 → 上層大聲失敗（無 embeddings 可退化，故不靜默）。
-- **Confidence**：單一常數來源 `EXTRACTED:1.0 / INFERRED:0.7 / AMBIGUOUS:0.5 × 1/N`（JS 與 SQL 同 `CASE`），`calls` 的多解/無解標 `AMBIGUOUS`（沿用 `5a02c6e3:cli/src/index.ts:1805-1809`），不拿 `AMBIGUOUS` 墊 token 預算。
-- **Staleness（防 false-positive）**：回答前比對 `content_hash`，非僅 Git dirty。`git diff --name-status -M` + `ls-files --others` 僅決定候選檔，最終 `index_is_stale = exists(file) && sha256(disk_content) != stored content_hash`；剛索引完但仍 dirty 的檔不會誤判 stale。比對基準為 `projects.path`（非 cwd）。
-- **DB/中斷**：`better-sqlite3` `busy_timeout` 5s，`SQLITE_BUSY` 重試 3 次；`SQLITE_FULL`/`SQLITE_CORRUPT` → 回 `{error:"storage_full"}` 並保留舊庫；index 中斷則 rollback 當前 transaction，不污染舊索引。
+- **Confidence**：單一常數來源 `EXTRACTED:1.0 / INFERRED:0.7 / AMBIGUOUS:0.5 × 1/N`（JS 與 SQL 同 `CASE`）。`× 1/N` **僅當 N≥1** 套用；N = **已解析 target 數**。多解（N≥2）寫 N 列 `AMBIGUOUS`；**零命中不寫 relationship 列**（避免 NOT NULL FK），改在 `context`/`impact` 回 `confidence_score=0.5`、`confidence_reasoning="unresolved: <symbol>"`（無 FK）。不拿 `AMBIGUOUS`/unresolved 墊 token 預算。
+- **Staleness（防 false-positive）**：回答前比對**檔級** `file_content_hash`（`sha256` of concatenated extracted chunk contents，order by `start_line`，存於 `file_state`），非僅 Git dirty、也不是拿 chunk 的 `content_hash` 去比 raw disk bytes。`git diff --name-status -M` + `ls-files --others` 僅決定候選檔。刪除規則：`deleted_files = db_files − disk_files`（`db_files` = `file_state.file_path`，`disk_files` = `projects.path` 下現存檔）；`deleted_files` 非空 → stale。最終 `index_is_stale = deleted_files.nonempty OR file_content_hash != sha256(disk 檔抽出的 chunks)`。剛索引完但仍 dirty 的檔，只要抽出 chunks 的 concat hash 不變，不會誤判 stale。比對基準為 `projects.path`（非 cwd）。
+- **DB/中斷**：`better-sqlite3` `busy_timeout` 5s，`SQLITE_BUSY` 重試 3 次；`SQLITE_FULL`/`SQLITE_CORRUPT` → 回 `{error:"storage_full"}` 並保留舊庫。全量 `cort index` 中斷 → rollback **整筆** transaction，舊庫不變。`--incremental` 中斷 → rollback 當前檔，**已 commit 的檔保留為增量進度**。測試用 in-memory `better-sqlite3`（不用 `node:sqlite`）。
 - **非 Git 根**：無 `.git` 時 `incremental` 退化為全量；`status` 回 `git_head:null`。
 - **大庫成本**：`context`/`impact` 限 depth 3、`modules` 取樣上限 5k edges、`struct` 需 `-g` 限縮，未限縮的大庫掃描拒絕並提示加 glob。
 
 ## 8. 分階段交付（照順序出貨）
 
-1. `index` / `index --incremental`（含 `extractor_version` 強制全量 + per-file transaction）
+1. `index` / `index --incremental`（含 `extractor_version` 強制全量；全量單一 transaction、incremental per-file transaction）
 2. `struct`（`ast-grep` run + containment join，≤3 `EXTRACTED` edges）
 3. `context`（FTS-only depth-1 + 實際輸出 budget）
 4. `impact --symbol`（反向 CTE depth 3）
@@ -191,7 +201,7 @@ cort status / cort projects / cort delete
 
 ## 9. 測試與量測
 
-- **Smoke（離線，必過）**：`tests/install-smoke.sh` 擴充 — `app-<target>.zip` 四平台對應（`x86_64-unknown-linux-gnu`/`aarch64-unknown-linux-gnu`/`x86_64-apple-darwin`/`aarch64-apple-darwin`，`app-` 前綴 ZIP）、SHA **硬失敗**（mismatch → exit 1，不 warning）、`ast-grep` 誤判（`sg` binary 存在但非 `ast-grep` 則拒絕）、ZIP 內容校驗（解壓後含 `ast-grep` binary）、cargo 版本不匹配（`ast-grep 0.45.x` 需 Rust 1.88，不符則提示）、多 skill 碰撞回滾（`ast-grep` 與 `xgrep` 分鍵）、**manifest v2 遷移**（見 §10）、冪等與 uninstall 擁有權、DB 交易中斷復原（kill 後舊庫仍可讀）。
+- **Smoke（離線，必過）**：`tests/install-smoke.sh` 擴充 — `app-<target>.zip` 四平台對應（`x86_64-unknown-linux-gnu`/`aarch64-unknown-linux-gnu`/`x86_64-apple-darwin`/`aarch64-apple-darwin`，`app-` 前綴 ZIP）、SHA **硬失敗**（mismatch → exit 1，不 warning）、`ast-grep` 誤判（`sg` binary 存在但非 `ast-grep` 則拒絕）、ZIP 內容校驗（解壓後含 `ast-grep` binary）、cargo 版本不匹配（`ast-grep 0.45.x` 需 Rust 1.88，不符則提示）、多 skill 碰撞回滾（`ast-grep` 與 `xgrep` 分鍵）、**manifest v2 遷移**（見 §10）、冪等與 uninstall 擁有權、DB 交易中斷復原（全量 kill 後舊庫仍可讀；incremental kill 後已 commit 檔保留）。單元測試用 in-memory `better-sqlite3`（不用 `node:sqlite`）。
 - **Agent Eval**：沿用 `v6-final:docs/agent-eval-plan.md` 協定但**補齊**：同任務同模型完整 trace，arms：`(rg+Read)` vs `(ast-grep+Read)` vs `(cort struct+context)`，指標：成功率、總 tokens、**tool-return tokens**、turns、`Read` 次數、**stale-read 事故**；micro：index 秒數、`context` p95、實際輸出 tokens（≤1500）、`impact` vs 人標 precision。原 eval 缺 `tool-return tokens` 與 stale 定義（`5a02c6e3:docs/agent-eval-plan.md:3-27`），本設計補上。
 
 ## 10. 安裝與遷移
@@ -200,15 +210,16 @@ cort status / cort projects / cort delete
 - **Manifest v2**：
   ```
   manifest_version=2
+  cort_bin=/home/.../.local/bin/cort           # cort binary 擁有權
   ast_grep_bin=/home/.../.cargo/bin/ast-grep   # 新
   skill_ast_grep=/home/.../.claude/skills/ast-grep/SKILL.md
   skill_xgrep=/home/.../.claude/skills/xgrep/SKILL.md
   legacy_xg_bin=/home/.../.cargo/bin/xg        # 舊 xg_bin 遷移至此
   profile=/home/.../.zshrc                     # PATH block 位置
   ```
-  遷移：`xg_bin → legacy_xg_bin`、`skill → skill_xgrep`（若存在），新增 `manifest_version=2`；pre-existing binary（無 manifest 記錄）不認領；舊有 `xg` 不主動刪除，僅 `--uninstall` 時按 v2 鍵刪除 owned 項目。預設新安裝只裝 `cort` + `ast-grep`，`xg` 用 `--with-xgrep` 才裝。
+  遷移：`xg_bin → legacy_xg_bin`、`skill → skill_xgrep`（若存在），新增 `manifest_version=2` 與 `cort_bin`（cort binary 路徑）；pre-existing binary（無 manifest 記錄）不認領；舊有 `xg` 不主動刪除，僅 `--uninstall` 時按 v2 鍵刪除 owned 項目（含 `cort_bin`）。預設新安裝只裝 `cort` + `ast-grep`，`xg` 用 `--with-xgrep` 才裝。
 - **交易式安裝**：preflight 全部碰撞（兩個 skill 分鍵檢查）→ 下載到 tmp → 驗 SHA（**硬失敗**）與 `ast-grep --version` / `cort --version` → 原子安裝 binary/skill（`install -m 755` + `mv`）→ 最後寫 manifest。多 skill 碰撞時整批 rollback，不留半套。
-- **Atomic commit**：installer + 兩個 skill + README/CLAUDE/THIRD_PARTY + 煙測 + CI 同一 commit；`v6-final` 釘在 `5a02c6e3` 不動，NG 另起新 tag（`cort-v0.1.0`）待 CI 綠燈再打。DB 索引原子性由 §4/§6 的 per-file transaction 保障。
+- **Atomic commit**：installer + 兩個 skill + README/CLAUDE/THIRD_PARTY + 煙測 + CI 同一 commit；`v6-final` 釘在 `5a02c6e3` 不動，NG 另起新 tag（`cort-v0.1.0`）待 CI 綠燈再打。DB 索引原子性見 §4/§6：全量單一 transaction；incremental per-file + 完成後原子更新 `git_head`/`extractor_version`。
 
 ## 11. 未來擴充插槽（不做，僅保留）
 
@@ -239,3 +250,12 @@ cort status / cort projects / cort delete
 | `chunk_id` 穩定性謊言 | §4 承認 V6 限制，維持 `project:file:line` 作為穩定鍵的取捨說明 |
 | `AMBIGUOUS` 退化 | §7 明確多解/無解標 `AMBIGUOUS`，不墊預算 |
 | FTS/CJK、failure cases、Louvain、eval 不足 | §3/§6/§7 補 tokenizer/截斷/operational 錯誤、Phase 1 only 註記、§9 補 `tool-return tokens`/`stale-read` |
+
+## 14. 修訂對照（v2 → v3，Codex 二次審查 PARTIALLY FIXED）
+
+| Codex 指摘 | 修法 |
+|------------|------|
+| Parser exit≠0 雙語義衝突；index 寫成兩次 scan | §2/§6/§7 拆 scan 單檔 `unparsed` vs run `{error:"parse_failed"}`；index 每檔單一 `scan --config <pack>/sgconfig.yml` |
+| 交易 vs「無半套索引」矛盾；`node:sqlite` 備援 | §2/§4/§6/§7：全量單一 tx；incremental per-file 中斷保留增量進度；完成後原子寫 `git_head`/`extractor_version`；測試用 in-memory `better-sqlite3` |
+| file hash 層級錯、刪檔不 stale、AMBIGUOUS 0 解無 FK、`× 1/N` 未定義 | §4 加 `file_state.file_content_hash`；§7 stale 公式與 `deleted_files = db_files − disk_files`；§6 target 解析（import map → symbol index）；unresolved 不寫列 |
+| Manifest 缺 `cort_bin` | §10 加入 `cort_bin`，uninstall 按 v2 鍵刪 owned 項目（含 cort） |
