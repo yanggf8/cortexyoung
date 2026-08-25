@@ -6,7 +6,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Cortex** is a semantic code intelligence tool for Claude Code. It chunks source files, embeds them locally (BGE-small-en-v1.5, 384-dim), and stores everything in Turso (vectors via F32_BLOB/DiskANN, content, relationships). One local process, one cloud database, no servers.
 
-**Current version: V6** (P1–P5 + A0–A2 shipped). Design doc: `docs/plans/2026-04-09-cortex-v6-intelligence-upgrade.md`. V5 base: `docs/plans/2026-04-06-cortex-v5-direct-turso.md`. V3 legacy code archived on `archive/v3` branch.
+**Current version: V6** (P1–P5 + A0–A2 shipped). Design doc: `docs/plans/2026-04-09-cortex-v6-intelligence-upgrade.md`. V5 base: `docs/plans/2026-04-06-cortex-v5-direct-turso.md`.
+
+> **2026-08-25 audit & direction note**: A full source review + engineering-health audit + external Codex consultation (`docs/2026-08-25-audit-and-repositioning.md`) concluded that agents primarily find code via Grep/Glob/Read loops, so Cortex should NOT compete head-on as a semantic-search CLI. Working direction: keep the AST chunker + relationship graph served as transparent artifacts (repo maps/sidecars, worktree-fresh overlays, annotations on lexical hits); embeddings are droppable pending an eval; P0 hygiene fixes (untrack `.claude/settings.local.json`, README/docs drift) and P1 perf/correctness fixes are listed in the audit's roadmap. Read that doc before planning new features.
 
 ## Commands
 
