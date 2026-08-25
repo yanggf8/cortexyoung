@@ -1,0 +1,31 @@
+name: ci
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+jobs:
+  lint-and-smoke:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: bash -n (syntax check)
+        run: |
+          bash -n install.sh
+          bash -n tests/install-smoke.sh
+
+      - name: shellcheck
+        uses: ludeeus/action-shellcheck@master
+        with:
+          scandir: .
+          severity: warning
+        env:
+          SHELLCHECK_OPTS: -e SC2143 -e SC1091
+
+      - name: offline install smoke test
+        run: bash tests/install-smoke.sh

@@ -1,67 +1,14 @@
-# Dependencies
+# Keep until manual cleanup of archived tree (v6-final)
 node_modules/
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-
-# Alternative package managers (keep package-lock.json for npm)
-yarn.lock
-pnpm-lock.yaml
-
-# Build outputs
 dist/
 build/
 *.tsbuildinfo
-
-# Environment files
-.env
-.env.local
-.env.development.local
-.env.test.local
-.env.production.local
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Logs
-logs
-*.log
-
-# Runtime data
-pids
-*.pid
-*.seed
-*.pid.lock
-
-# Secrets
-.secrets
-
-# Local databases
-*.db
-*.db-shm
-*.db-wal
-
-# Coverage
-coverage/
-*.lcov
-
-# Temporary files
-tmp/
-temp/
-
-# Cortex-specific cache and storage
-.cortex/
 
 # Machine-local Claude Code settings and generated reports — never commit
 .claude/settings.local.json
 CORTEX_REPORT.md
 
-# Performance reports (system-specific)
-performance-reports/
+# OS / editor (minimal)
+.DS_Store
+*.swp
+*.swo
