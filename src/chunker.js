@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { execAstGrep } from './ast-grep.js';
+import { CortError } from './errors.js';
 import { SGCONFIG } from './pack.js';
 
 const CHUNK_TAG = 'chunk:';
@@ -59,8 +60,19 @@ function unparsedResult({ projectId, filePath, source, malformed }) {
   };
 }
 
-export function extractFile({ bin, projectId, filePath, absPath, source }) {
-  const r = execAstGrep(bin, ['scan', '--json=stream', '--config', SGCONFIG, absPath]);
+export function extractFile({ bin, projectId, filePath, absPath, source, timeoutMs }) {
+  let r;
+  try {
+    r = execAstGrep(bin, ['scan', '--json=stream', '--config', SGCONFIG, absPath], { timeoutMs });
+  } catch (err) {
+    // A per-file scan timeout (e.g. a huge minified bundle) degrades that file to
+    // unparsed — the index must not abort on one file. Environment-wide spawn
+    // failures stay loud.
+    if (err instanceof CortError && err.code === 'ast_grep_timeout') {
+      return unparsedResult({ projectId, filePath, source, malformed: 0 });
+    }
+    throw err;
+  }
   if (r.code !== 0) return unparsedResult({ projectId, filePath, source, malformed: 0 });
 
   const { records, malformed } = parseScanStream(r.stdout);

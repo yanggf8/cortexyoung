@@ -131,3 +131,33 @@ test('a 90%-malformed scan stream still indexes the surviving record — scan ne
     if (prev === undefined) delete process.env.FAKE_AG_MODE; else process.env.FAKE_AG_MODE = prev;
   }
 });
+
+test('a scan that times out degrades that file to unparsed instead of aborting', () => {
+  const body = 'export function big() {}\n'.repeat(500);
+  const abs = tmpFile('huge.ts', body);
+  const prev = process.env.FAKE_AG_MODE;
+  process.env.FAKE_AG_MODE = 'hang';
+  try {
+    const fake = path.join(process.cwd(), 'tests/fixtures/fake-ast-grep.js');
+    const out = extractFile({
+      bin: fake, projectId: 'p', filePath: 'huge.ts', absPath: abs, source: body, timeoutMs: 200,
+    });
+    assert.equal(out.unparsed, true, 'a timed-out scan must degrade, never abort the index');
+    assert.equal(out.chunks.length, 1);
+    assert.equal(out.chunks[0].chunk_source, 'unparsed');
+    assert.equal(out.chunks[0].content, body);
+    assert.deepEqual(out.edges, []);
+    assert.match(out.file_content_hash, /^[0-9a-f]{64}$/);
+  } finally {
+    if (prev === undefined) delete process.env.FAKE_AG_MODE; else process.env.FAKE_AG_MODE = prev;
+  }
+});
+
+test('a spawn failure still propagates — only timeout degrades to unparsed', () => {
+  const body = 'export function x() {}\n';
+  const abs = tmpFile('x.ts', body);
+  assert.throws(() => extractFile({
+    bin: '/nonexistent/ast-grep-binary', projectId: 'p', filePath: 'x.ts', absPath: abs, source: body,
+  }), (e) => e.code === 'ast_grep_spawn_failed',
+  'environment-wide failures must stay loud; per-file timeouts are the only silent degrade');
+});
