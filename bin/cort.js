@@ -4,6 +4,7 @@ import { CortError } from '../src/errors.js';
 import { resolveAstGrepBin, assertAstGrepVersion } from '../src/ast-grep.js';
 import { openDb, ensureSchema, projectIdFor, dbPathFor, listProjects, deleteProject, withBusyRetry } from '../src/db.js';
 import { fullIndex, statusOf } from '../src/indexer.js';
+import { incrementalIndex } from '../src/incremental.js';
 
 export function parseArgs(argv) {
   const out = { _: [], flags: {} };
@@ -36,18 +37,9 @@ async function main() {
     const bin = resolveAstGrepBin();
     assertAstGrepVersion(bin);
     const { real, projectId, db } = openProject(positional[1] ?? process.cwd());
-    if (flags.incremental) {
-      try {
-        const { incrementalIndex } = await import('../src/incremental.js');
-        emit(withBusyRetry(() => incrementalIndex({ db, bin, root: real, projectId })));
-      } catch (err) {
-        if (err && err.code === 'ERR_MODULE_NOT_FOUND') {
-          emit(withBusyRetry(() => fullIndex({ db, bin, root: real, projectId })));
-        } else throw err;
-      }
-    } else {
-      emit(withBusyRetry(() => fullIndex({ db, bin, root: real, projectId })));
-    }
+    emit(withBusyRetry(() => flags.incremental
+      ? incrementalIndex({ db, bin, root: real, projectId })
+      : fullIndex({ db, bin, root: real, projectId })));
     return;
   }
 
