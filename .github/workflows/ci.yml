@@ -37,6 +37,9 @@ jobs:
         with:
           scandir: .
           severity: warning
+          # node_modules holds vendored dependency scripts we neither own nor can fix
+          # (e.g. better-sqlite3/deps/download.sh). Lint only our own shell.
+          ignore_paths: node_modules
         env:
           SHELLCHECK_OPTS: -e SC2143 -e SC1091
 

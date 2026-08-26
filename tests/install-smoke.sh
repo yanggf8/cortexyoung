@@ -101,7 +101,6 @@ echo "    manifest lines: $MANIFEST_LINES"
 
 # ── 2. identical rerun (idempotent) ──────────────────────────────
 echo "--- Test 2: identical rerun (idempotent) ---"
-MANIFEST_BEFORE="$(cat "$HOME/.local/share/cortexyoung/manifest" 2>/dev/null || true)"
 # Count marker occurrences before
 MARKER_COUNT_BEFORE=0
 for p in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
@@ -311,17 +310,28 @@ if [ ! -x "$HOST_AG" ]; then HOST_AG="$(which ast-grep 2>/dev/null || true)"; fi
 # Prefer host ast-grep if fake is still shadowing; resolve via REAL_PATH
 HOST_AG_REAL="$(PATH="$REAL_PATH" command -v ast-grep 2>/dev/null || echo "$HOST_AG")"
 if [ -x "$HOST_AG_REAL" ]; then HOST_AG="$HOST_AG_REAL"; fi
-# Run index with real PATH (without fakebin's ast-grep)
-( PATH="$REAL_PATH" CORT_AST_GREP_BIN="$HOST_AG" node "$REPO_ROOT/bin/cort.js" index . > /dev/null 2>&1 ) 2>&1 || true
-# Actually run in PROJ with clean env
+# Index the fixture project with the host ast-grep (fakebin must not shadow it)
 ( cd "$PROJ" && PATH="$REAL_PATH" CORT_AST_GREP_BIN="$HOST_AG" node "$REPO_ROOT/bin/cort.js" index . > /dev/null 2>&1 )
-BEFORE=$( cd "$PROJ" && PATH="$REAL_PATH" CORT_AST_GREP_BIN="$HOST_AG" node "$REPO_ROOT/bin/cort.js" status . | grep -c '"chunks"' )
+chunk_count() {
+  ( cd "$PROJ" && PATH="$REAL_PATH" CORT_AST_GREP_BIN="$HOST_AG" \
+      node "$REPO_ROOT/bin/cort.js" status . 2>/dev/null ) \
+    | sed -n 's/.*"chunks": *\([0-9][0-9]*\).*/\1/p' | head -1
+}
+BEFORE="$(chunk_count)"
+if [ -n "$BEFORE" ] && [ "$BEFORE" -gt 0 ]; then
+  pass "baseline index readable ($BEFORE chunks)"
+else
+  fail "baseline index readable (got '$BEFORE')"
+fi
 for i in $(seq 1 40); do printf 'export function f%d() { return %d; }\n' "$i" "$i" > "$PROJ/src/f$i.ts"; done
 ( cd "$PROJ" && PATH="$REAL_PATH" CORT_AST_GREP_BIN="$HOST_AG" node "$REPO_ROOT/bin/cort.js" index . > /dev/null 2>&1 & IDX=$!; sleep 0.2; kill -9 $IDX 2>/dev/null; wait $IDX 2>/dev/null ) || true
-if ( cd "$PROJ" && PATH="$REAL_PATH" CORT_AST_GREP_BIN="$HOST_AG" node "$REPO_ROOT/bin/cort.js" status . > /dev/null 2>&1 ); then
-  pass "db still readable after a killed index"
+AFTER="$(chunk_count)"
+# A killed full index either rolled back (AFTER == BEFORE) or had already committed
+# (AFTER > BEFORE). What must never happen is an unreadable or truncated database.
+if [ -n "$AFTER" ] && [ "$AFTER" -ge "$BEFORE" ]; then
+  pass "db intact after a killed index (before=$BEFORE after=$AFTER)"
 else
-  fail "db still readable after a killed index"
+  fail "db intact after a killed index (before=$BEFORE after='$AFTER')"
 fi
 
 # ── summary ──────────────────────────────────────────────────────

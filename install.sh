@@ -323,7 +323,8 @@ deploy_skill_at() {
         rm -f "$tmp"
         info "adopted unmanaged skill (hash-equal): $dest"
       else
-        local bak="${dest}.bak.$(date +%Y%m%d%H%M%S)"
+        local bak
+        bak="${dest}.bak.$(date +%Y%m%d%H%M%S)"
         cp "$dest" "$bak"
         info "backed up unmanaged skill to $bak"
         {
