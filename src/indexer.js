@@ -4,6 +4,7 @@ import path from 'node:path';
 import { extractFile } from './chunker.js';
 import { extractorVersion } from './pack.js';
 import { setMeta } from './db.js';
+import { relationshipRowsForFile } from './graph.js';
 
 export const IGNORE_DIRS = new Set([
   'node_modules', 'dist', 'build', '.git', '__pycache__', '.venv', 'venv',
@@ -61,6 +62,7 @@ export function fullIndex({ db, bin, root, projectId }) {
 
   let chunkCount = 0;
   let unparsedCount = 0;
+  let relCount = 0;
 
   const run = db.transaction(() => {
     db.prepare(`INSERT INTO projects (project_id, name, path, git_head, last_indexed_at, extractor_version)
@@ -84,6 +86,17 @@ export function fullIndex({ db, bin, root, projectId }) {
       insertState.run(projectId, rel, result.file_content_hash);
     }
 
+    const insertRel = db.prepare(`INSERT INTO relationships
+      (source_chunk_id, target_chunk_id, rel_type, confidence, confidence_score, confidence_reasoning)
+      VALUES (@source_chunk_id, @target_chunk_id, @rel_type, @confidence, @confidence_score, @confidence_reasoning)
+      ON CONFLICT(source_chunk_id, target_chunk_id, rel_type) DO NOTHING`);
+    for (const { rel, result } of extracted) {
+      const rows = relationshipRowsForFile({
+        db, projectId, filePath: rel, chunks: result.chunks, edges: result.edges,
+      });
+      for (const row of rows) { insertRel.run(row); relCount += 1; }
+    }
+
     setMeta(db, 'extractor_version', version);
   });
 
@@ -91,7 +104,7 @@ export function fullIndex({ db, bin, root, projectId }) {
 
   return {
     files: files.length, chunks: chunkCount, unparsed: unparsedCount,
-    relationships: 0, elapsed_ms: Date.now() - started,
+    relationships: relCount, elapsed_ms: Date.now() - started,
   };
 }
 
