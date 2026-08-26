@@ -7,6 +7,8 @@ import { fullIndex, statusOf } from '../src/indexer.js';
 import { incrementalIndex } from '../src/incremental.js';
 import { computeStale } from '../src/staleness.js';
 import { structCommand } from '../src/struct.js';
+import { contextCommand } from '../src/context.js';
+import { impactCommand } from '../src/impact.js';
 
 export function parseArgs(argv) {
   const out = { _: [], flags: {} };
@@ -78,7 +80,31 @@ async function main() {
     return;
   }
 
-  throw new CortError('unknown_command', { command: command ?? null, known: ['index', 'status', 'projects', 'delete', 'struct'] });
+  if (command === 'context') {
+    const query = positional[1];
+    if (typeof query !== 'string') throw new CortError('missing_query', { hint: 'cort context <symbol|query>' });
+    const bin = resolveAstGrepBin();
+    assertAstGrepVersion(bin);
+    const { real, projectId, db } = openProject(process.cwd());
+    emit(contextCommand({
+      db, bin, root: real, projectId, query,
+      budget: Number(flags.budget ?? 1500),
+      includeAmbiguous: flags['include-ambiguous'] === true,
+    }));
+    return;
+  }
+
+  if (command === 'impact') {
+    const symbol = flags.symbol;
+    if (typeof symbol !== 'string') throw new CortError('missing_symbol', { hint: 'cort impact --symbol <name>' });
+    const bin = resolveAstGrepBin();
+    assertAstGrepVersion(bin);
+    const { real, projectId, db } = openProject(process.cwd());
+    emit(impactCommand({ db, bin, root: real, projectId, symbol, depth: Number(flags.depth ?? 3) }));
+    return;
+  }
+
+  throw new CortError('unknown_command', { command: command ?? null, known: ['index', 'status', 'projects', 'delete', 'struct', 'context', 'impact'] });
 }
 
 main().catch((err) => {
