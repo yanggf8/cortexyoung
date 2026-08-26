@@ -52,6 +52,8 @@ CREATE TABLE IF NOT EXISTS relationships (
 CREATE INDEX IF NOT EXISTS idx_rel_source ON relationships(source_chunk_id);
 CREATE INDEX IF NOT EXISTS idx_rel_target ON relationships(target_chunk_id);
 
+-- NOTE: spec §4 requires tokenize='unicode61 "remove_diacritics 1" "tokenchars ._$"' but bundled SQLite 3.49.2 (better-sqlite3 11.10.0) rejects any parameterized unicode61 (parse error in tokenize directive) — only bare 'unicode61' passes. Downgraded to bare; revert to spec string when CI SQLite supports it. See task-2-report.md.
+
 CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
   content, symbol_name, file_path,
   content=chunks, content_rowid=rowid,
