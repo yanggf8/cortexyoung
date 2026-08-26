@@ -14,8 +14,12 @@ export function projectIdFor(realPath) {
   return createHash('sha256').update(realPath).digest('hex');
 }
 
+export function cacheDir() {
+  return process.env.CORT_CACHE_DIR ?? path.join(os.homedir(), '.cache', 'cortex-ng');
+}
+
 export function dbPathFor(realPath) {
-  return path.join(os.homedir(), '.cache', 'cortex-ng', `${projectIdFor(realPath)}.db`);
+  return path.join(cacheDir(), `${projectIdFor(realPath)}.db`);
 }
 
 export function openDb(dbPath) {
@@ -45,6 +49,30 @@ export function getMeta(db, key) {
 export function setMeta(db, key, value) {
   db.prepare(`INSERT INTO _cortex_meta (key, value) VALUES (?, ?)
               ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run(key, value);
+}
+
+export function listProjects() {
+  const dir = cacheDir();
+  if (!fs.existsSync(dir)) return [];
+  const out = [];
+  for (const name of fs.readdirSync(dir).sort()) {
+    if (!name.endsWith('.db')) continue;
+    const dbPath = path.join(dir, name);
+    const db = new Database(dbPath, { readonly: true });
+    try {
+      const row = db.prepare('SELECT project_id, name, path, git_head, last_indexed_at FROM projects').get();
+      if (row) out.push({ ...row, db_path: dbPath });
+    } catch { /* not a cort db, or schema not created yet */ }
+    finally { db.close(); }
+  }
+  return out;
+}
+
+export function deleteProject(realPath) {
+  const dbPath = dbPathFor(realPath);
+  if (!fs.existsSync(dbPath)) return { deleted: false, db_path: dbPath };
+  for (const suffix of ['', '-wal', '-shm']) fs.rmSync(`${dbPath}${suffix}`, { force: true });
+  return { deleted: true, db_path: dbPath };
 }
 
 export function withBusyRetry(fn) {

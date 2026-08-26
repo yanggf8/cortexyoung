@@ -1,9 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
   SCHEMA_VERSION, projectIdFor, dbPathFor, openDb, ensureSchema, getMeta, setMeta,
+  listProjects, deleteProject, withBusyRetry,
 } from '../src/db.js';
 
 function fresh() { const db = openDb(':memory:'); ensureSchema(db); return db; }
@@ -64,4 +66,71 @@ test('zero-target relationships are impossible: target_chunk_id is NOT NULL', ()
   const notNull = db.prepare('PRAGMA table_info(relationships)').all()
     .find((r) => r.name === 'target_chunk_id').notnull;
   assert.equal(notNull, 1);
+});
+
+test('listProjects enumerates every indexed project in the cache dir', () => {
+  const cache = fs.mkdtempSync(path.join(os.tmpdir(), 'cort-cache-'));
+  const prev = process.env.CORT_CACHE_DIR;
+  process.env.CORT_CACHE_DIR = cache;
+  try {
+    assert.deepEqual(listProjects(), []);
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cort-p-'));
+    const db = openDb(dbPathFor(root));
+    ensureSchema(db);
+    db.prepare(`INSERT INTO projects (project_id, name, path, extractor_version)
+                VALUES (?, ?, ?, 'v')`).run(projectIdFor(root), path.basename(root), root);
+    db.close();
+    const rows = listProjects();
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].path, root);
+    assert.ok(rows[0].db_path.endsWith(`${projectIdFor(root)}.db`));
+  } finally {
+    if (prev === undefined) delete process.env.CORT_CACHE_DIR; else process.env.CORT_CACHE_DIR = prev;
+  }
+});
+
+test('deleteProject removes only that project db and reports what it did', () => {
+  const cache = fs.mkdtempSync(path.join(os.tmpdir(), 'cort-cache2-'));
+  const prev = process.env.CORT_CACHE_DIR;
+  process.env.CORT_CACHE_DIR = cache;
+  try {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cort-p2-'));
+    const dbPath = dbPathFor(root);
+    openDb(dbPath).close();
+    assert.equal(fs.existsSync(dbPath), true);
+    assert.deepEqual(deleteProject(root), { deleted: true, db_path: dbPath });
+    assert.equal(fs.existsSync(dbPath), false);
+    assert.deepEqual(deleteProject(root), { deleted: false, db_path: dbPath });
+  } finally {
+    if (prev === undefined) delete process.env.CORT_CACHE_DIR; else process.env.CORT_CACHE_DIR = prev;
+  }
+});
+
+test('withBusyRetry retries SQLITE_BUSY and gives up after three retries', () => {
+  let calls = 0;
+  const value = withBusyRetry(() => {
+    calls += 1;
+    if (calls < 3) { const e = new Error('busy'); e.code = 'SQLITE_BUSY'; throw e; }
+    return 'ok';
+  });
+  assert.equal(value, 'ok');
+  assert.equal(calls, 3);
+
+  let always = 0;
+  assert.throws(() => withBusyRetry(() => {
+    always += 1; const e = new Error('busy'); e.code = 'SQLITE_BUSY'; throw e;
+  }), (err) => {
+    assert.equal(err.code, 'storage_busy');
+    return true;
+  });
+  assert.equal(always, 4, 'one attempt plus three retries');
+});
+
+test('withBusyRetry converts a full or corrupt db into storage_full', () => {
+  assert.throws(() => withBusyRetry(() => {
+    const e = new Error('disk full'); e.code = 'SQLITE_FULL'; throw e;
+  }), (err) => {
+    assert.equal(err.code, 'storage_full');
+    return true;
+  });
 });
