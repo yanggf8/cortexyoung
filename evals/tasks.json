@@ -1,0 +1,7 @@
+[
+  { "id": "who-calls-extractfile", "prompt": "Which functions call extractFile?", "expected_symbols": ["fullIndex", "reindexOneFile", "computeStale", "unresolvedFor", "impactCommand"] },
+  { "id": "blast-radius-parsescanstream", "prompt": "What breaks if parseScanStream changes its return shape?", "expected_symbols": ["extractFile", "runPattern"] },
+  { "id": "where-is-confidence-set", "prompt": "Where is the AMBIGUOUS confidence score computed?", "expected_symbols": ["relationshipRowsForFile"] },
+  { "id": "find-all-transactions", "prompt": "Which functions open a SQLite transaction?", "expected_symbols": ["fullIndex", "reindexOneFile", "removeFile", "incrementalIndex"] },
+  { "id": "trace-staleness", "prompt": "How does index_is_stale get computed and who consumes it?", "expected_symbols": ["computeStale", "structCommand", "contextCommand", "impactCommand"] }
+]
