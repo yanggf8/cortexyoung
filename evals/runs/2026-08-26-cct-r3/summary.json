@@ -1,0 +1,26 @@
+{
+  "by_arm": {
+    "ast-grep+Read": {
+      "runs": 3,
+      "success_rate": 1,
+      "mean_total_tokens": 391883.3333333333,
+      "mean_tool_return_tokens": 0,
+      "mean_turns": 13,
+      "mean_read_calls": 0,
+      "stale_reads": 0
+    },
+    "cort": {
+      "runs": 3,
+      "success_rate": 1,
+      "mean_total_tokens": 2194373,
+      "mean_tool_return_tokens": 0,
+      "mean_turns": 70,
+      "mean_read_calls": 0,
+      "stale_reads": 0
+    }
+  },
+  "verdict": {
+    "cort_beats_ast_grep": false,
+    "next_action": "STOP: do not add features until cort wins"
+  }
+}
