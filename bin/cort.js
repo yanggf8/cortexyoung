@@ -5,6 +5,7 @@ import { resolveAstGrepBin, assertAstGrepVersion } from '../src/ast-grep.js';
 import { openDb, ensureSchema, projectIdFor, dbPathFor, listProjects, deleteProject, withBusyRetry } from '../src/db.js';
 import { fullIndex, statusOf } from '../src/indexer.js';
 import { incrementalIndex } from '../src/incremental.js';
+import { computeStale } from '../src/staleness.js';
 
 export function parseArgs(argv) {
   const out = { _: [], flags: {} };
@@ -45,7 +46,11 @@ async function main() {
 
   if (command === 'status') {
     const { real, projectId, db } = openProject(positional[1] ?? process.cwd());
-    emit(statusOf({ db, root: real, projectId }));
+    const base = statusOf({ db, root: real, projectId });
+    if (!base.indexed) { emit(base); return; }
+    const bin = resolveAstGrepBin();
+    assertAstGrepVersion(bin);
+    emit({ ...base, ...computeStale({ db, bin, root: real, projectId }) });
     return;
   }
 
