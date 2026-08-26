@@ -64,6 +64,25 @@ Alternative install (same pin, same fail-closed version check):
 cargo install ast-grep --version 0.45.2 --locked  # requires Rust 1.88+
 ```
 
+## Eval results (2026-08-26)
+
+Three three-arm agent evaluations were run with the shipped harness (`rg+Read` vs `ast-grep+Read` vs `cort`,
+fresh subagent per task, strict tool policies, hand-verified labels):
+
+| venue | success (rg / ag / cort) | mean tokens (rg / ag / cort) | verdict |
+|---|---|---|---|
+| this repo (76 chunks) | .80 / .80 / .80 | 186k / 200k / 388k | STOP |
+| cct (2,531 chunks) | 1.00 / 1.00 / 1.00 | 180k / 486k / 656k | STOP |
+| cct, heaviest 3 cells after ergonomics fixes | 1.00 / 1.00 | 392k / 2.19M* | STOP |
+
+\* one cort run spiralled into a 171-turn verification loop — single-seed cells are dominated by agent
+behavioural variance; excluding it entirely still leaves cort above baseline.
+
+Reading: answer quality is identical across arms once labels are clean; `rg` + Read is the cheapest arm in
+every round because current models are grep-native. Cort's graph adds correctness nowhere and costs 2-3.6x
+in total context under multi-query interaction. **Positioning: cort is an interactive human tool, not an
+agent token-saver.** Full evidence: `evals/runs/2026-08-26{,-cct,-cct-r3}/`.
+
 ## Documented limitations (contracts, not apologies)
 
 1. **Index staleness:** the index lags unsaved edits and brand-new untracked files. Every `cort` command returns JSON with `index_is_stale`; when `true`, run `cort index --incremental` before trusting the answer, or fall back to `rg`. A brand-new untracked file is invisible to `cort` until the next index. `cort index` must have been run once for the project.
@@ -75,7 +94,7 @@ cargo install ast-grep --version 0.45.2 --locked  # requires Rust 1.88+
 
 ## What is deliberately not built
 
-Until the eval harness verdict says otherwise (spec section 8), these are deferred and must not appear:
+The eval harness verdict has spoken — three rounds, every one `STOP` — so these stay deferred and must not appear (spec section 8):
 
 - `rewrite` (`cort rewrite` / `ast-grep --rewrite` wiring, dry-run, `--interactive`, `--update-all`)
 - `modules` (`cort modules` Louvain Phase-1 greedy community detection)
