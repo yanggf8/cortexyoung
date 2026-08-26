@@ -1,0 +1,29 @@
+id: cort-tsx-chunk-function
+language: Tsx
+severity: hint
+message: chunk:function
+rule: { kind: function_declaration, has: { field: name, pattern: $NAME } }
+---
+id: cort-tsx-chunk-class
+language: Tsx
+severity: hint
+message: chunk:class
+rule: { kind: class_declaration, has: { field: name, pattern: $NAME } }
+---
+id: cort-tsx-chunk-method
+language: Tsx
+severity: hint
+message: chunk:method
+rule: { kind: method_definition, has: { field: name, pattern: $NAME } }
+---
+id: cort-tsx-edge-imports
+language: Tsx
+severity: hint
+message: edge:imports
+rule: { kind: import_statement, has: { field: source, pattern: $SRC } }
+---
+id: cort-tsx-edge-calls
+language: Tsx
+severity: hint
+message: edge:calls
+rule: { kind: call_expression, has: { field: function, pattern: $CALLEE } }

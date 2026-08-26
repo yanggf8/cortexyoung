@@ -1,0 +1,29 @@
+id: cort-js-chunk-function
+language: JavaScript
+severity: hint
+message: chunk:function
+rule: { kind: function_declaration, has: { field: name, pattern: $NAME } }
+---
+id: cort-js-chunk-class
+language: JavaScript
+severity: hint
+message: chunk:class
+rule: { kind: class_declaration, has: { field: name, pattern: $NAME } }
+---
+id: cort-js-chunk-method
+language: JavaScript
+severity: hint
+message: chunk:method
+rule: { kind: method_definition, has: { field: name, pattern: $NAME } }
+---
+id: cort-js-edge-imports
+language: JavaScript
+severity: hint
+message: edge:imports
+rule: { kind: import_statement, has: { field: source, pattern: $SRC } }
+---
+id: cort-js-edge-calls
+language: JavaScript
+severity: hint
+message: edge:calls
+rule: { kind: call_expression, has: { field: function, pattern: $CALLEE } }

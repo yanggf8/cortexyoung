@@ -1,0 +1,26 @@
+id: cort-py-chunk-function
+language: Python
+severity: hint
+message: chunk:function
+rule: { kind: function_definition, has: { field: name, pattern: $NAME } }
+---
+id: cort-py-chunk-class
+language: Python
+severity: hint
+message: chunk:class
+rule: { kind: class_definition, has: { field: name, pattern: $NAME } }
+---
+id: cort-py-edge-imports
+language: Python
+severity: hint
+message: edge:imports
+rule:
+  any:
+    - { kind: import_statement, has: { field: name, pattern: $SRC } }
+    - { kind: import_from_statement, has: { field: module_name, pattern: $SRC } }
+---
+id: cort-py-edge-calls
+language: Python
+severity: hint
+message: edge:calls
+rule: { kind: call, has: { field: function, pattern: $CALLEE } }
