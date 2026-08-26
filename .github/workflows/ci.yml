@@ -14,6 +14,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: install deps
+        run: npm ci
+
+      - name: install pinned ast-grep
+        run: bash install.sh --check || bash install.sh
+
+      - name: unit tests
+        run: npm test
+
       - name: bash -n (syntax check)
         run: |
           bash -n install.sh
