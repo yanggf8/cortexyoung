@@ -1,0 +1,167 @@
+[
+  {
+    "run_id": "a41f9d1f6599c6d24",
+    "arm": "rg+Read",
+    "task": "who-calls-extractfile",
+    "assistant_msgs": 14,
+    "input": 34776,
+    "cache_creation": 0,
+    "cache_read": 127552,
+    "output": 2267,
+    "total_context": 164595
+  },
+  {
+    "run_id": "a5bd42080006744dc",
+    "arm": "rg+Read",
+    "task": "blast-radius-parsescanstream",
+    "assistant_msgs": 9,
+    "input": 36979,
+    "cache_creation": 0,
+    "cache_read": 112896,
+    "output": 1667,
+    "total_context": 151542
+  },
+  {
+    "run_id": "ad68c4345ce20f027",
+    "arm": "rg+Read",
+    "task": "where-is-confidence-set",
+    "assistant_msgs": 8,
+    "input": 28028,
+    "cache_creation": 0,
+    "cache_read": 65152,
+    "output": 1004,
+    "total_context": 94184
+  },
+  {
+    "run_id": "a754e91638979652c",
+    "arm": "rg+Read",
+    "task": "find-all-transactions",
+    "assistant_msgs": 15,
+    "input": 17380,
+    "cache_creation": 0,
+    "cache_read": 166656,
+    "output": 1829,
+    "total_context": 185865
+  },
+  {
+    "run_id": "a7df52b06d736a305",
+    "arm": "rg+Read",
+    "task": "trace-staleness",
+    "assistant_msgs": 19,
+    "input": 77056,
+    "cache_creation": 0,
+    "cache_read": 250944,
+    "output": 3433,
+    "total_context": 331433
+  },
+  {
+    "run_id": "a0db192c8027d77e4",
+    "arm": "ast-grep+Read",
+    "task": "who-calls-extractfile",
+    "assistant_msgs": 19,
+    "input": 28457,
+    "cache_creation": 0,
+    "cache_read": 193536,
+    "output": 4237,
+    "total_context": 226230
+  },
+  {
+    "run_id": "aad474d679af49c3e",
+    "arm": "ast-grep+Read",
+    "task": "blast-radius-parsescanstream",
+    "assistant_msgs": 22,
+    "input": 20029,
+    "cache_creation": 0,
+    "cache_read": 187008,
+    "output": 5501,
+    "total_context": 212538
+  },
+  {
+    "run_id": "a24c22b34d9dc7ec7",
+    "arm": "ast-grep+Read",
+    "task": "where-is-confidence-set",
+    "assistant_msgs": 13,
+    "input": 16290,
+    "cache_creation": 0,
+    "cache_read": 188736,
+    "output": 2337,
+    "total_context": 207363
+  },
+  {
+    "run_id": "a84dbeb9cfddd83a4",
+    "arm": "ast-grep+Read",
+    "task": "find-all-transactions",
+    "assistant_msgs": 13,
+    "input": 16335,
+    "cache_creation": 0,
+    "cache_read": 115840,
+    "output": 1985,
+    "total_context": 134160
+  },
+  {
+    "run_id": "a71575c562b667a1f",
+    "arm": "ast-grep+Read",
+    "task": "trace-staleness",
+    "assistant_msgs": 18,
+    "input": 19375,
+    "cache_creation": 0,
+    "cache_read": 195904,
+    "output": 3150,
+    "total_context": 218429
+  },
+  {
+    "run_id": "a5e362f0f9b3f3f08",
+    "arm": "cort",
+    "task": "who-calls-extractfile",
+    "assistant_msgs": 46,
+    "input": 36982,
+    "cache_creation": 0,
+    "cache_read": 640000,
+    "output": 6036,
+    "total_context": 683018
+  },
+  {
+    "run_id": "aa05182d47d3219e0",
+    "arm": "cort",
+    "task": "blast-radius-parsescanstream",
+    "assistant_msgs": 17,
+    "input": 20283,
+    "cache_creation": 0,
+    "cache_read": 206976,
+    "output": 3287,
+    "total_context": 230546
+  },
+  {
+    "run_id": "a2f128a3b517c8215",
+    "arm": "cort",
+    "task": "where-is-confidence-set",
+    "assistant_msgs": 22,
+    "input": 22913,
+    "cache_creation": 0,
+    "cache_read": 281728,
+    "output": 2745,
+    "total_context": 307386
+  },
+  {
+    "run_id": "abf98f42c72b0ca95",
+    "arm": "cort",
+    "task": "find-all-transactions",
+    "assistant_msgs": 20,
+    "input": 14878,
+    "cache_creation": 0,
+    "cache_read": 237312,
+    "output": 2006,
+    "total_context": 254196
+  },
+  {
+    "run_id": "add6a2e7315269367",
+    "arm": "cort",
+    "task": "trace-staleness",
+    "assistant_msgs": 24,
+    "input": 48913,
+    "cache_creation": 0,
+    "cache_read": 410304,
+    "output": 4913,
+    "total_context": 464130
+  }
+]

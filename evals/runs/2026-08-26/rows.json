@@ -1,0 +1,448 @@
+[
+  {
+    "arm": "rg+Read",
+    "task": "who-calls-extractfile",
+    "success": false,
+    "coverage": 0.8,
+    "total_tokens": 164595,
+    "output_tokens": 2267,
+    "tool_return_tokens": null,
+    "turns": 7,
+    "read_calls": null,
+    "stale_reads": 0,
+    "answered_symbols": [
+      "computeStale",
+      "extractAll",
+      "unresolvedFor",
+      "impactCommand",
+      "reindexOneFile"
+    ],
+    "expected_symbols": [
+      "fullIndex",
+      "reindexOneFile",
+      "computeStale",
+      "unresolvedFor",
+      "impactCommand"
+    ],
+    "covered_symbols": [
+      "reindexOneFile",
+      "computeStale",
+      "unresolvedFor",
+      "impactCommand"
+    ],
+    "transcript_run_id": "a41f9d1f6599c6d24",
+    "grading_rule": "success = every expected symbol appears (substring) in answered symbols; extras allowed",
+    "label_caveat": "all three arms answered extractAll (the direct caller); the hand label expects fullIndex (the transitive caller via extractAll) — identical 4/5 miss on every arm, so it measures the label, not the arm"
+  },
+  {
+    "arm": "rg+Read",
+    "task": "blast-radius-parsescanstream",
+    "success": true,
+    "coverage": 1.0,
+    "total_tokens": 151542,
+    "output_tokens": 1667,
+    "tool_return_tokens": null,
+    "turns": 3,
+    "read_calls": null,
+    "stale_reads": 0,
+    "answered_symbols": [
+      "extractFile",
+      "runPattern"
+    ],
+    "expected_symbols": [
+      "extractFile",
+      "runPattern"
+    ],
+    "covered_symbols": [
+      "extractFile",
+      "runPattern"
+    ],
+    "transcript_run_id": "a5bd42080006744dc",
+    "grading_rule": "success = every expected symbol appears (substring) in answered symbols; extras allowed"
+  },
+  {
+    "arm": "rg+Read",
+    "task": "where-is-confidence-set",
+    "success": true,
+    "coverage": 1.0,
+    "total_tokens": 94184,
+    "output_tokens": 1004,
+    "tool_return_tokens": null,
+    "turns": 2,
+    "read_calls": null,
+    "stale_reads": 0,
+    "answered_symbols": [
+      "relationshipRowsForFile"
+    ],
+    "expected_symbols": [
+      "relationshipRowsForFile"
+    ],
+    "covered_symbols": [
+      "relationshipRowsForFile"
+    ],
+    "transcript_run_id": "ad68c4345ce20f027",
+    "grading_rule": "success = every expected symbol appears (substring) in answered symbols; extras allowed"
+  },
+  {
+    "arm": "rg+Read",
+    "task": "find-all-transactions",
+    "success": true,
+    "coverage": 1.0,
+    "total_tokens": 185865,
+    "output_tokens": 1829,
+    "tool_return_tokens": null,
+    "turns": 5,
+    "read_calls": null,
+    "stale_reads": 0,
+    "answered_symbols": [
+      "removeFile",
+      "reindexOneFile",
+      "incrementalIndex",
+      "fullIndex"
+    ],
+    "expected_symbols": [
+      "fullIndex",
+      "reindexOneFile",
+      "removeFile",
+      "incrementalIndex"
+    ],
+    "covered_symbols": [
+      "fullIndex",
+      "reindexOneFile",
+      "removeFile",
+      "incrementalIndex"
+    ],
+    "transcript_run_id": "a754e91638979652c",
+    "grading_rule": "success = every expected symbol appears (substring) in answered symbols; extras allowed"
+  },
+  {
+    "arm": "rg+Read",
+    "task": "trace-staleness",
+    "success": true,
+    "coverage": 1.0,
+    "total_tokens": 331433,
+    "output_tokens": 3433,
+    "tool_return_tokens": null,
+    "turns": 10,
+    "read_calls": null,
+    "stale_reads": 0,
+    "answered_symbols": [
+      "computeStale",
+      "structCommand",
+      "contextCommand",
+      "impactCommand"
+    ],
+    "expected_symbols": [
+      "computeStale",
+      "structCommand",
+      "contextCommand",
+      "impactCommand"
+    ],
+    "covered_symbols": [
+      "computeStale",
+      "structCommand",
+      "contextCommand",
+      "impactCommand"
+    ],
+    "transcript_run_id": "a7df52b06d736a305",
+    "grading_rule": "success = every expected symbol appears (substring) in answered symbols; extras allowed"
+  },
+  {
+    "arm": "ast-grep+Read",
+    "task": "who-calls-extractfile",
+    "success": false,
+    "coverage": 0.8,
+    "total_tokens": 226230,
+    "output_tokens": 4237,
+    "tool_return_tokens": null,
+    "turns": 9,
+    "read_calls": null,
+    "stale_reads": 0,
+    "answered_symbols": [
+      "reindexOneFile",
+      "unresolvedFor",
+      "computeStale",
+      "impactCommand",
+      "extractAll"
+    ],
+    "expected_symbols": [
+      "fullIndex",
+      "reindexOneFile",
+      "computeStale",
+      "unresolvedFor",
+      "impactCommand"
+    ],
+    "covered_symbols": [
+      "reindexOneFile",
+      "computeStale",
+      "unresolvedFor",
+      "impactCommand"
+    ],
+    "transcript_run_id": "a0db192c8027d77e4",
+    "grading_rule": "success = every expected symbol appears (substring) in answered symbols; extras allowed",
+    "label_caveat": "all three arms answered extractAll (the direct caller); the hand label expects fullIndex (the transitive caller via extractAll) — identical 4/5 miss on every arm, so it measures the label, not the arm"
+  },
+  {
+    "arm": "ast-grep+Read",
+    "task": "blast-radius-parsescanstream",
+    "success": true,
+    "coverage": 1.0,
+    "total_tokens": 212538,
+    "output_tokens": 5501,
+    "tool_return_tokens": null,
+    "turns": 10,
+    "read_calls": null,
+    "stale_reads": 0,
+    "answered_symbols": [
+      "extractFile",
+      "runPattern"
+    ],
+    "expected_symbols": [
+      "extractFile",
+      "runPattern"
+    ],
+    "covered_symbols": [
+      "extractFile",
+      "runPattern"
+    ],
+    "transcript_run_id": "aad474d679af49c3e",
+    "grading_rule": "success = every expected symbol appears (substring) in answered symbols; extras allowed"
+  },
+  {
+    "arm": "ast-grep+Read",
+    "task": "where-is-confidence-set",
+    "success": true,
+    "coverage": 1.0,
+    "total_tokens": 207363,
+    "output_tokens": 2337,
+    "tool_return_tokens": null,
+    "turns": 5,
+    "read_calls": null,
+    "stale_reads": 0,
+    "answered_symbols": [
+      "relationshipRowsForFile"
+    ],
+    "expected_symbols": [
+      "relationshipRowsForFile"
+    ],
+    "covered_symbols": [
+      "relationshipRowsForFile"
+    ],
+    "transcript_run_id": "a24c22b34d9dc7ec7",
+    "grading_rule": "success = every expected symbol appears (substring) in answered symbols; extras allowed"
+  },
+  {
+    "arm": "ast-grep+Read",
+    "task": "find-all-transactions",
+    "success": true,
+    "coverage": 1.0,
+    "total_tokens": 134160,
+    "output_tokens": 1985,
+    "tool_return_tokens": null,
+    "turns": 5,
+    "read_calls": null,
+    "stale_reads": 0,
+    "answered_symbols": [
+      "fullIndex",
+      "removeFile",
+      "reindexOneFile",
+      "incrementalIndex"
+    ],
+    "expected_symbols": [
+      "fullIndex",
+      "reindexOneFile",
+      "removeFile",
+      "incrementalIndex"
+    ],
+    "covered_symbols": [
+      "fullIndex",
+      "reindexOneFile",
+      "removeFile",
+      "incrementalIndex"
+    ],
+    "transcript_run_id": "a84dbeb9cfddd83a4",
+    "grading_rule": "success = every expected symbol appears (substring) in answered symbols; extras allowed"
+  },
+  {
+    "arm": "ast-grep+Read",
+    "task": "trace-staleness",
+    "success": true,
+    "coverage": 1.0,
+    "total_tokens": 218429,
+    "output_tokens": 3150,
+    "tool_return_tokens": null,
+    "turns": 11,
+    "read_calls": null,
+    "stale_reads": 0,
+    "answered_symbols": [
+      "computeStale",
+      "structCommand",
+      "contextCommand",
+      "impactCommand"
+    ],
+    "expected_symbols": [
+      "computeStale",
+      "structCommand",
+      "contextCommand",
+      "impactCommand"
+    ],
+    "covered_symbols": [
+      "computeStale",
+      "structCommand",
+      "contextCommand",
+      "impactCommand"
+    ],
+    "transcript_run_id": "a71575c562b667a1f",
+    "grading_rule": "success = every expected symbol appears (substring) in answered symbols; extras allowed"
+  },
+  {
+    "arm": "cort",
+    "task": "who-calls-extractfile",
+    "success": false,
+    "coverage": 0.8,
+    "total_tokens": 683018,
+    "output_tokens": 6036,
+    "tool_return_tokens": null,
+    "turns": 20,
+    "read_calls": null,
+    "stale_reads": 0,
+    "answered_symbols": [
+      "impactCommand",
+      "extractAll",
+      "unresolvedFor",
+      "computeStale",
+      "reindexOneFile"
+    ],
+    "expected_symbols": [
+      "fullIndex",
+      "reindexOneFile",
+      "computeStale",
+      "unresolvedFor",
+      "impactCommand"
+    ],
+    "covered_symbols": [
+      "reindexOneFile",
+      "computeStale",
+      "unresolvedFor",
+      "impactCommand"
+    ],
+    "transcript_run_id": "a5e362f0f9b3f3f08",
+    "grading_rule": "success = every expected symbol appears (substring) in answered symbols; extras allowed",
+    "label_caveat": "all three arms answered extractAll (the direct caller); the hand label expects fullIndex (the transitive caller via extractAll) — identical 4/5 miss on every arm, so it measures the label, not the arm"
+  },
+  {
+    "arm": "cort",
+    "task": "blast-radius-parsescanstream",
+    "success": true,
+    "coverage": 1.0,
+    "total_tokens": 230546,
+    "output_tokens": 3287,
+    "tool_return_tokens": null,
+    "turns": 7,
+    "read_calls": null,
+    "stale_reads": 0,
+    "answered_symbols": [
+      "extractFile",
+      "runPattern"
+    ],
+    "expected_symbols": [
+      "extractFile",
+      "runPattern"
+    ],
+    "covered_symbols": [
+      "extractFile",
+      "runPattern"
+    ],
+    "transcript_run_id": "aa05182d47d3219e0",
+    "grading_rule": "success = every expected symbol appears (substring) in answered symbols; extras allowed"
+  },
+  {
+    "arm": "cort",
+    "task": "where-is-confidence-set",
+    "success": true,
+    "coverage": 1.0,
+    "total_tokens": 307386,
+    "output_tokens": 2745,
+    "tool_return_tokens": null,
+    "turns": 8,
+    "read_calls": null,
+    "stale_reads": 0,
+    "answered_symbols": [
+      "relationshipRowsForFile",
+      "unresolvedInline"
+    ],
+    "expected_symbols": [
+      "relationshipRowsForFile"
+    ],
+    "covered_symbols": [
+      "relationshipRowsForFile"
+    ],
+    "transcript_run_id": "a2f128a3b517c8215",
+    "grading_rule": "success = every expected symbol appears (substring) in answered symbols; extras allowed"
+  },
+  {
+    "arm": "cort",
+    "task": "find-all-transactions",
+    "success": true,
+    "coverage": 1.0,
+    "total_tokens": 254196,
+    "output_tokens": 2006,
+    "tool_return_tokens": null,
+    "turns": 8,
+    "read_calls": null,
+    "stale_reads": 0,
+    "answered_symbols": [
+      "fullIndex",
+      "removeFile",
+      "reindexOneFile",
+      "incrementalIndex"
+    ],
+    "expected_symbols": [
+      "fullIndex",
+      "reindexOneFile",
+      "removeFile",
+      "incrementalIndex"
+    ],
+    "covered_symbols": [
+      "fullIndex",
+      "reindexOneFile",
+      "removeFile",
+      "incrementalIndex"
+    ],
+    "transcript_run_id": "abf98f42c72b0ca95",
+    "grading_rule": "success = every expected symbol appears (substring) in answered symbols; extras allowed"
+  },
+  {
+    "arm": "cort",
+    "task": "trace-staleness",
+    "success": true,
+    "coverage": 1.0,
+    "total_tokens": 464130,
+    "output_tokens": 4913,
+    "tool_return_tokens": null,
+    "turns": 13,
+    "read_calls": null,
+    "stale_reads": 0,
+    "answered_symbols": [
+      "computeStale",
+      "main-status-command",
+      "structCommand",
+      "contextCommand",
+      "impactCommand"
+    ],
+    "expected_symbols": [
+      "computeStale",
+      "structCommand",
+      "contextCommand",
+      "impactCommand"
+    ],
+    "covered_symbols": [
+      "computeStale",
+      "structCommand",
+      "contextCommand",
+      "impactCommand"
+    ],
+    "transcript_run_id": "add6a2e7315269367",
+    "grading_rule": "success = every expected symbol appears (substring) in answered symbols; extras allowed"
+  }
+]

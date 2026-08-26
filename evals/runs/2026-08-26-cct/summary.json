@@ -1,0 +1,35 @@
+{
+  "by_arm": {
+    "rg+Read": {
+      "runs": 5,
+      "success_rate": 1,
+      "mean_total_tokens": 179977.4,
+      "mean_tool_return_tokens": 0,
+      "mean_turns": 7.4,
+      "mean_read_calls": 0,
+      "stale_reads": 0
+    },
+    "ast-grep+Read": {
+      "runs": 5,
+      "success_rate": 1,
+      "mean_total_tokens": 486379.4,
+      "mean_tool_return_tokens": 0,
+      "mean_turns": 13.4,
+      "mean_read_calls": 0,
+      "stale_reads": 0
+    },
+    "cort": {
+      "runs": 5,
+      "success_rate": 1,
+      "mean_total_tokens": 655875.6,
+      "mean_tool_return_tokens": 0,
+      "mean_turns": 16.6,
+      "mean_read_calls": 0,
+      "stale_reads": 0
+    }
+  },
+  "verdict": {
+    "cort_beats_ast_grep": false,
+    "next_action": "STOP: do not add features until cort wins"
+  }
+}

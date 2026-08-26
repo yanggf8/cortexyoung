@@ -1,0 +1,36 @@
+{
+  "task": {
+    "id": "blast-radius-parsescanstream",
+    "prompt": "What breaks if parseScanStream changes its return shape?",
+    "expected_symbols": [
+      "extractFile",
+      "runPattern"
+    ]
+  },
+  "result": {
+    "arm": "rg+Read",
+    "task": "blast-radius-parsescanstream",
+    "success": true,
+    "coverage": 1.0,
+    "total_tokens": 151542,
+    "output_tokens": 1667,
+    "tool_return_tokens": null,
+    "turns": 3,
+    "read_calls": null,
+    "stale_reads": 0,
+    "answered_symbols": [
+      "extractFile",
+      "runPattern"
+    ],
+    "expected_symbols": [
+      "extractFile",
+      "runPattern"
+    ],
+    "covered_symbols": [
+      "extractFile",
+      "runPattern"
+    ],
+    "transcript_run_id": "a5bd42080006744dc",
+    "grading_rule": "success = every expected symbol appears (substring) in answered symbols; extras allowed"
+  }
+}

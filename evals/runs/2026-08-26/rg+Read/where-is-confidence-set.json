@@ -1,0 +1,32 @@
+{
+  "task": {
+    "id": "where-is-confidence-set",
+    "prompt": "Where is the AMBIGUOUS confidence score computed?",
+    "expected_symbols": [
+      "relationshipRowsForFile"
+    ]
+  },
+  "result": {
+    "arm": "rg+Read",
+    "task": "where-is-confidence-set",
+    "success": true,
+    "coverage": 1.0,
+    "total_tokens": 94184,
+    "output_tokens": 1004,
+    "tool_return_tokens": null,
+    "turns": 2,
+    "read_calls": null,
+    "stale_reads": 0,
+    "answered_symbols": [
+      "relationshipRowsForFile"
+    ],
+    "expected_symbols": [
+      "relationshipRowsForFile"
+    ],
+    "covered_symbols": [
+      "relationshipRowsForFile"
+    ],
+    "transcript_run_id": "ad68c4345ce20f027",
+    "grading_rule": "success = every expected symbol appears (substring) in answered symbols; extras allowed"
+  }
+}

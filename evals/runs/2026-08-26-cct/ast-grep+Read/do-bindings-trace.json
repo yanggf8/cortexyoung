@@ -1,0 +1,35 @@
+{
+  "task": {
+    "id": "do-bindings-trace",
+    "prompt": "Which Durable Object classes does wrangler.toml bind, and which class names answer this? List just the class names."
+  },
+  "result": {
+    "arm": "ast-grep+Read",
+    "task": "do-bindings-trace",
+    "success": true,
+    "coverage": 1.0,
+    "total_tokens": 56827,
+    "output_tokens": 385,
+    "tool_return_tokens": null,
+    "turns": 1,
+    "read_calls": null,
+    "stale_reads": 0,
+    "answered_symbols": [
+      "CacheDurableObject",
+      "RateLimiterDO",
+      "PortfolioDO"
+    ],
+    "expected_symbols": [
+      "CacheDurableObject",
+      "RateLimiterDO",
+      "PortfolioDO"
+    ],
+    "covered_symbols": [
+      "CacheDurableObject",
+      "RateLimiterDO",
+      "PortfolioDO"
+    ],
+    "transcript_run_id": "acd30b8ed068cdd53",
+    "grading_rule": "success = every expected symbol appears (substring) in answered symbols; extras allowed"
+  }
+}

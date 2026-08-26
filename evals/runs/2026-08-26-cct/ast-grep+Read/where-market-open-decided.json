@@ -1,0 +1,29 @@
+{
+  "task": {
+    "id": "where-market-open-decided",
+    "prompt": "In src/modules/trading-calendar.ts, which exported function decides whether the US stock market is currently open?"
+  },
+  "result": {
+    "arm": "ast-grep+Read",
+    "task": "where-market-open-decided",
+    "success": true,
+    "coverage": 1.0,
+    "total_tokens": 217467,
+    "output_tokens": 1669,
+    "tool_return_tokens": null,
+    "turns": 5,
+    "read_calls": null,
+    "stale_reads": 0,
+    "answered_symbols": [
+      "isMarketHours"
+    ],
+    "expected_symbols": [
+      "isMarketHours"
+    ],
+    "covered_symbols": [
+      "isMarketHours"
+    ],
+    "transcript_run_id": "a2510a15c3289ab23",
+    "grading_rule": "success = every expected symbol appears (substring) in answered symbols; extras allowed"
+  }
+}

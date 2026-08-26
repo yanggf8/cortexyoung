@@ -1,0 +1,44 @@
+{
+  "task": {
+    "id": "find-all-transactions",
+    "prompt": "Which functions open a SQLite transaction?",
+    "expected_symbols": [
+      "fullIndex",
+      "reindexOneFile",
+      "removeFile",
+      "incrementalIndex"
+    ]
+  },
+  "result": {
+    "arm": "ast-grep+Read",
+    "task": "find-all-transactions",
+    "success": true,
+    "coverage": 1.0,
+    "total_tokens": 134160,
+    "output_tokens": 1985,
+    "tool_return_tokens": null,
+    "turns": 5,
+    "read_calls": null,
+    "stale_reads": 0,
+    "answered_symbols": [
+      "fullIndex",
+      "removeFile",
+      "reindexOneFile",
+      "incrementalIndex"
+    ],
+    "expected_symbols": [
+      "fullIndex",
+      "reindexOneFile",
+      "removeFile",
+      "incrementalIndex"
+    ],
+    "covered_symbols": [
+      "fullIndex",
+      "reindexOneFile",
+      "removeFile",
+      "incrementalIndex"
+    ],
+    "transcript_run_id": "a84dbeb9cfddd83a4",
+    "grading_rule": "success = every expected symbol appears (substring) in answered symbols; extras allowed"
+  }
+}

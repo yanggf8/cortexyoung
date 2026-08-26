@@ -1,0 +1,44 @@
+{
+  "task": {
+    "id": "trace-staleness",
+    "prompt": "How does index_is_stale get computed and who consumes it?",
+    "expected_symbols": [
+      "computeStale",
+      "structCommand",
+      "contextCommand",
+      "impactCommand"
+    ]
+  },
+  "result": {
+    "arm": "rg+Read",
+    "task": "trace-staleness",
+    "success": true,
+    "coverage": 1.0,
+    "total_tokens": 331433,
+    "output_tokens": 3433,
+    "tool_return_tokens": null,
+    "turns": 10,
+    "read_calls": null,
+    "stale_reads": 0,
+    "answered_symbols": [
+      "computeStale",
+      "structCommand",
+      "contextCommand",
+      "impactCommand"
+    ],
+    "expected_symbols": [
+      "computeStale",
+      "structCommand",
+      "contextCommand",
+      "impactCommand"
+    ],
+    "covered_symbols": [
+      "computeStale",
+      "structCommand",
+      "contextCommand",
+      "impactCommand"
+    ],
+    "transcript_run_id": "a7df52b06d736a305",
+    "grading_rule": "success = every expected symbol appears (substring) in answered symbols; extras allowed"
+  }
+}

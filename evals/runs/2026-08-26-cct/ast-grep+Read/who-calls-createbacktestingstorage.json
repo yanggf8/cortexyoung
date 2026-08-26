@@ -1,0 +1,71 @@
+{
+  "task": {
+    "id": "who-calls-createbacktestingstorage",
+    "prompt": "Which functions in src/ directly call createBacktestingStorage?"
+  },
+  "result": {
+    "arm": "ast-grep+Read",
+    "task": "who-calls-createbacktestingstorage",
+    "success": true,
+    "coverage": 1.0,
+    "total_tokens": 866960,
+    "output_tokens": 17948,
+    "tool_return_tokens": null,
+    "turns": 20,
+    "read_calls": null,
+    "stale_reads": 0,
+    "answered_symbols": [
+      "getBacktestRunStatus",
+      "getStoredBacktestResults",
+      "getStoredPerformanceMetrics",
+      "listBacktestHistory",
+      "cleanupOldBacktestData",
+      "handleRunBacktest",
+      "handleBacktestStatus",
+      "handleGetBacktestResults",
+      "handleGetPerformanceMetrics",
+      "handleBacktestHistory",
+      "runValidationInBackground",
+      "runWalkForwardInBackground",
+      "runMonteCarloInBackground",
+      "handleModelValidation",
+      "handleMonteCarloSimulationDirect"
+    ],
+    "expected_symbols": [
+      "getBacktestRunStatus",
+      "getStoredBacktestResults",
+      "getStoredPerformanceMetrics",
+      "listBacktestHistory",
+      "cleanupOldBacktestData",
+      "handleRunBacktest",
+      "handleBacktestStatus",
+      "handleGetBacktestResults",
+      "handleGetPerformanceMetrics",
+      "handleBacktestHistory",
+      "runValidationInBackground",
+      "runWalkForwardInBackground",
+      "runMonteCarloInBackground",
+      "handleModelValidation",
+      "handleMonteCarloSimulationDirect"
+    ],
+    "covered_symbols": [
+      "getBacktestRunStatus",
+      "getStoredBacktestResults",
+      "getStoredPerformanceMetrics",
+      "listBacktestHistory",
+      "cleanupOldBacktestData",
+      "handleRunBacktest",
+      "handleBacktestStatus",
+      "handleGetBacktestResults",
+      "handleGetPerformanceMetrics",
+      "handleBacktestHistory",
+      "runValidationInBackground",
+      "runWalkForwardInBackground",
+      "runMonteCarloInBackground",
+      "handleModelValidation",
+      "handleMonteCarloSimulationDirect"
+    ],
+    "transcript_run_id": "ae0179f21728bb381",
+    "grading_rule": "success = every expected symbol appears (substring) in answered symbols; extras allowed"
+  }
+}

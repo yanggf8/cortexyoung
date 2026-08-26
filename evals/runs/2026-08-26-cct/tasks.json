@@ -1,0 +1,68 @@
+[
+  {
+    "id": "who-calls-batchdualai",
+    "prompt": "Which functions in src/ directly call batchDualAIAnalysis?",
+    "expected_symbols": [
+      "runCompleteAnalysisPipeline",
+      "enhancedBatchDualAIAnalysis",
+      "IntradayDataBridge",
+      "handleSentimentAnalysis",
+      "handleSymbolSentiment",
+      "handleSectorSentiment",
+      "handleFineGrainedSymbol",
+      "handleFineGrainedBatch",
+      "PreMarketDataBridge",
+      "BacktestingEngine",
+      "runDualAIAnalysisEnhanced"
+    ]
+  },
+  {
+    "id": "blast-radius-getcurrenttimeet",
+    "prompt": "What breaks if getCurrentTimeET changes its return shape? Name every function that consumes it.",
+    "expected_symbols": [
+      "handlePreMarketBriefing",
+      "handleEndOfDaySummary",
+      "getLastNTradingDays",
+      "isMarketHours",
+      "getCurrentDateET"
+    ],
+    "label_correction": "initial heuristic labels fetchJobStageLog/formatDateET were wrong; verified by reading end-of-day-handlers.ts:72(createHandler const) and trading-calendar.ts:79(getLastNTradingDays). Original: ['formatDateET', 'isMarketHours', 'getCurrentDateET', 'fetchJobStageLog', 'handlePreMarketBriefing']"
+  },
+  {
+    "id": "where-market-open-decided",
+    "prompt": "In src/modules/trading-calendar.ts, which exported function decides whether the US stock market is currently open?",
+    "expected_symbols": [
+      "isMarketHours"
+    ]
+  },
+  {
+    "id": "who-calls-createbacktestingstorage",
+    "prompt": "Which functions in src/ directly call createBacktestingStorage?",
+    "expected_symbols": [
+      "getBacktestRunStatus",
+      "getStoredBacktestResults",
+      "getStoredPerformanceMetrics",
+      "listBacktestHistory",
+      "cleanupOldBacktestData",
+      "handleRunBacktest",
+      "handleBacktestStatus",
+      "handleGetBacktestResults",
+      "handleGetPerformanceMetrics",
+      "handleBacktestHistory",
+      "runValidationInBackground",
+      "runWalkForwardInBackground",
+      "runMonteCarloInBackground",
+      "handleModelValidation",
+      "handleMonteCarloSimulationDirect"
+    ]
+  },
+  {
+    "id": "do-bindings-trace",
+    "prompt": "Which Durable Object classes does wrangler.toml bind, and which class names answer this? List just the class names.",
+    "expected_symbols": [
+      "CacheDurableObject",
+      "RateLimiterDO",
+      "PortfolioDO"
+    ]
+  }
+]

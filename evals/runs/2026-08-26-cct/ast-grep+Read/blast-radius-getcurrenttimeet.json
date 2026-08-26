@@ -1,0 +1,41 @@
+{
+  "task": {
+    "id": "blast-radius-getcurrenttimeet",
+    "prompt": "What breaks if getCurrentTimeET changes its return shape? Name every function that consumes it."
+  },
+  "result": {
+    "arm": "ast-grep+Read",
+    "task": "blast-radius-getcurrenttimeet",
+    "success": true,
+    "coverage": 1.0,
+    "total_tokens": 627657,
+    "output_tokens": 11570,
+    "tool_return_tokens": null,
+    "turns": 16,
+    "read_calls": null,
+    "stale_reads": 0,
+    "answered_symbols": [
+      "handlePreMarketBriefing",
+      "handleEndOfDaySummary",
+      "getLastNTradingDays",
+      "isMarketHours",
+      "getCurrentDateET"
+    ],
+    "expected_symbols": [
+      "handlePreMarketBriefing",
+      "handleEndOfDaySummary",
+      "getLastNTradingDays",
+      "isMarketHours",
+      "getCurrentDateET"
+    ],
+    "covered_symbols": [
+      "handlePreMarketBriefing",
+      "handleEndOfDaySummary",
+      "getLastNTradingDays",
+      "isMarketHours",
+      "getCurrentDateET"
+    ],
+    "transcript_run_id": "a3e748d333fc67646",
+    "grading_rule": "success = every expected symbol appears (substring) in answered symbols; extras allowed"
+  }
+}

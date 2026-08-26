@@ -1,0 +1,16 @@
+# dispatch order -> (arm, task)  |  repo HEAD at dispatch: d3cbff00
+rg+Read      who-calls-extractfile
+rg+Read      blast-radius-parsescanstream
+rg+Read      where-is-confidence-set
+rg+Read      find-all-transactions
+rg+Read      trace-staleness
+ast-grep+Read who-calls-extractfile
+ast-grep+Read blast-radius-parsescanstream
+ast-grep+Read where-is-confidence-set
+ast-grep+Read find-all-transactions
+ast-grep+Read trace-staleness
+cort         who-calls-extractfile
+cort         blast-radius-parsescanstream
+cort         where-is-confidence-set
+cort         find-all-transactions
+cort         trace-staleness

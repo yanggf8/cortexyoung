@@ -1,0 +1,48 @@
+{
+  "task": {
+    "id": "who-calls-extractfile",
+    "prompt": "Which functions call extractFile?",
+    "expected_symbols": [
+      "fullIndex",
+      "reindexOneFile",
+      "computeStale",
+      "unresolvedFor",
+      "impactCommand"
+    ]
+  },
+  "result": {
+    "arm": "ast-grep+Read",
+    "task": "who-calls-extractfile",
+    "success": false,
+    "coverage": 0.8,
+    "total_tokens": 226230,
+    "output_tokens": 4237,
+    "tool_return_tokens": null,
+    "turns": 9,
+    "read_calls": null,
+    "stale_reads": 0,
+    "answered_symbols": [
+      "reindexOneFile",
+      "unresolvedFor",
+      "computeStale",
+      "impactCommand",
+      "extractAll"
+    ],
+    "expected_symbols": [
+      "fullIndex",
+      "reindexOneFile",
+      "computeStale",
+      "unresolvedFor",
+      "impactCommand"
+    ],
+    "covered_symbols": [
+      "reindexOneFile",
+      "computeStale",
+      "unresolvedFor",
+      "impactCommand"
+    ],
+    "transcript_run_id": "a0db192c8027d77e4",
+    "grading_rule": "success = every expected symbol appears (substring) in answered symbols; extras allowed",
+    "label_caveat": "all three arms answered extractAll (the direct caller); the hand label expects fullIndex (the transitive caller via extractAll) — identical 4/5 miss on every arm, so it measures the label, not the arm"
+  }
+}

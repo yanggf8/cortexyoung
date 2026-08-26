@@ -1,0 +1,617 @@
+[
+  {
+    "arm": "rg+Read",
+    "task": "who-calls-batchdualai",
+    "success": true,
+    "coverage": 1.0,
+    "total_tokens": 261885,
+    "output_tokens": 3971,
+    "tool_return_tokens": null,
+    "turns": 14,
+    "read_calls": null,
+    "stale_reads": 0,
+    "answered_symbols": [
+      "runCompleteAnalysisPipeline",
+      "runDualAIAnalysisEnhanced",
+      "enhancedBatchDualAIAnalysis",
+      "BacktestingEngine",
+      "IntradayDataBridge",
+      "PreMarketDataBridge",
+      "handleSentimentAnalysis",
+      "handleSymbolSentiment",
+      "handleSectorSentiment",
+      "handleFineGrainedSymbol",
+      "handleFineGrainedBatch"
+    ],
+    "expected_symbols": [
+      "runCompleteAnalysisPipeline",
+      "enhancedBatchDualAIAnalysis",
+      "IntradayDataBridge",
+      "handleSentimentAnalysis",
+      "handleSymbolSentiment",
+      "handleSectorSentiment",
+      "handleFineGrainedSymbol",
+      "handleFineGrainedBatch",
+      "PreMarketDataBridge",
+      "BacktestingEngine",
+      "runDualAIAnalysisEnhanced"
+    ],
+    "covered_symbols": [
+      "runCompleteAnalysisPipeline",
+      "enhancedBatchDualAIAnalysis",
+      "IntradayDataBridge",
+      "handleSentimentAnalysis",
+      "handleSymbolSentiment",
+      "handleSectorSentiment",
+      "handleFineGrainedSymbol",
+      "handleFineGrainedBatch",
+      "PreMarketDataBridge",
+      "BacktestingEngine",
+      "runDualAIAnalysisEnhanced"
+    ],
+    "transcript_run_id": "ae858fb6b2614535b",
+    "grading_rule": "success = every expected symbol appears (substring) in answered symbols; extras allowed"
+  },
+  {
+    "arm": "rg+Read",
+    "task": "blast-radius-getcurrenttimeet",
+    "success": true,
+    "coverage": 1.0,
+    "total_tokens": 176165,
+    "output_tokens": 5033,
+    "tool_return_tokens": null,
+    "turns": 7,
+    "read_calls": null,
+    "stale_reads": 0,
+    "answered_symbols": [
+      "handlePreMarketBriefing",
+      "handleEndOfDaySummary",
+      "getLastNTradingDays",
+      "isMarketHours",
+      "getCurrentDateET"
+    ],
+    "expected_symbols": [
+      "handlePreMarketBriefing",
+      "handleEndOfDaySummary",
+      "getLastNTradingDays",
+      "isMarketHours",
+      "getCurrentDateET"
+    ],
+    "covered_symbols": [
+      "handlePreMarketBriefing",
+      "handleEndOfDaySummary",
+      "getLastNTradingDays",
+      "isMarketHours",
+      "getCurrentDateET"
+    ],
+    "transcript_run_id": "a86feea0508d12efd",
+    "grading_rule": "success = every expected symbol appears (substring) in answered symbols; extras allowed"
+  },
+  {
+    "arm": "rg+Read",
+    "task": "where-market-open-decided",
+    "success": true,
+    "coverage": 1.0,
+    "total_tokens": 91995,
+    "output_tokens": 1029,
+    "tool_return_tokens": null,
+    "turns": 1,
+    "read_calls": null,
+    "stale_reads": 0,
+    "answered_symbols": [
+      "isMarketHours"
+    ],
+    "expected_symbols": [
+      "isMarketHours"
+    ],
+    "covered_symbols": [
+      "isMarketHours"
+    ],
+    "transcript_run_id": "a43e756e94c1bff40",
+    "grading_rule": "success = every expected symbol appears (substring) in answered symbols; extras allowed"
+  },
+  {
+    "arm": "rg+Read",
+    "task": "who-calls-createbacktestingstorage",
+    "success": true,
+    "coverage": 1.0,
+    "total_tokens": 259380,
+    "output_tokens": 3996,
+    "tool_return_tokens": null,
+    "turns": 14,
+    "read_calls": null,
+    "stale_reads": 0,
+    "answered_symbols": [
+      "getBacktestRunStatus",
+      "getStoredBacktestResults",
+      "getStoredPerformanceMetrics",
+      "listBacktestHistory",
+      "cleanupOldBacktestData",
+      "handleRunBacktest",
+      "handleBacktestStatus",
+      "handleGetBacktestResults",
+      "handleGetPerformanceMetrics",
+      "handleBacktestHistory",
+      "runValidationInBackground",
+      "runWalkForwardInBackground",
+      "runMonteCarloInBackground",
+      "handleModelValidation",
+      "handleMonteCarloSimulationDirect"
+    ],
+    "expected_symbols": [
+      "getBacktestRunStatus",
+      "getStoredBacktestResults",
+      "getStoredPerformanceMetrics",
+      "listBacktestHistory",
+      "cleanupOldBacktestData",
+      "handleRunBacktest",
+      "handleBacktestStatus",
+      "handleGetBacktestResults",
+      "handleGetPerformanceMetrics",
+      "handleBacktestHistory",
+      "runValidationInBackground",
+      "runWalkForwardInBackground",
+      "runMonteCarloInBackground",
+      "handleModelValidation",
+      "handleMonteCarloSimulationDirect"
+    ],
+    "covered_symbols": [
+      "getBacktestRunStatus",
+      "getStoredBacktestResults",
+      "getStoredPerformanceMetrics",
+      "listBacktestHistory",
+      "cleanupOldBacktestData",
+      "handleRunBacktest",
+      "handleBacktestStatus",
+      "handleGetBacktestResults",
+      "handleGetPerformanceMetrics",
+      "handleBacktestHistory",
+      "runValidationInBackground",
+      "runWalkForwardInBackground",
+      "runMonteCarloInBackground",
+      "handleModelValidation",
+      "handleMonteCarloSimulationDirect"
+    ],
+    "transcript_run_id": "ad2493f91b4a85c71",
+    "grading_rule": "success = every expected symbol appears (substring) in answered symbols; extras allowed"
+  },
+  {
+    "arm": "rg+Read",
+    "task": "do-bindings-trace",
+    "success": true,
+    "coverage": 1.0,
+    "total_tokens": 110462,
+    "output_tokens": 2928,
+    "tool_return_tokens": null,
+    "turns": 1,
+    "read_calls": null,
+    "stale_reads": 0,
+    "answered_symbols": [
+      "CacheDurableObject",
+      "RateLimiterDO",
+      "PortfolioDO"
+    ],
+    "expected_symbols": [
+      "CacheDurableObject",
+      "RateLimiterDO",
+      "PortfolioDO"
+    ],
+    "covered_symbols": [
+      "CacheDurableObject",
+      "RateLimiterDO",
+      "PortfolioDO"
+    ],
+    "transcript_run_id": "a68c4e78e2b85c7c5",
+    "grading_rule": "success = every expected symbol appears (substring) in answered symbols; extras allowed"
+  },
+  {
+    "arm": "ast-grep+Read",
+    "task": "who-calls-batchdualai",
+    "success": true,
+    "coverage": 1.0,
+    "total_tokens": 662986,
+    "output_tokens": 7010,
+    "tool_return_tokens": null,
+    "turns": 25,
+    "read_calls": null,
+    "stale_reads": 0,
+    "answered_symbols": [
+      "BacktestingEngine",
+      "runDualAIAnalysisEnhanced",
+      "runCompleteAnalysisPipeline",
+      "PreMarketDataBridge",
+      "enhancedBatchDualAIAnalysis",
+      "IntradayDataBridge",
+      "handleSentimentAnalysis",
+      "handleSymbolSentiment",
+      "handleSectorSentiment",
+      "handleFineGrainedSymbol",
+      "handleFineGrainedBatch"
+    ],
+    "expected_symbols": [
+      "runCompleteAnalysisPipeline",
+      "enhancedBatchDualAIAnalysis",
+      "IntradayDataBridge",
+      "handleSentimentAnalysis",
+      "handleSymbolSentiment",
+      "handleSectorSentiment",
+      "handleFineGrainedSymbol",
+      "handleFineGrainedBatch",
+      "PreMarketDataBridge",
+      "BacktestingEngine",
+      "runDualAIAnalysisEnhanced"
+    ],
+    "covered_symbols": [
+      "runCompleteAnalysisPipeline",
+      "enhancedBatchDualAIAnalysis",
+      "IntradayDataBridge",
+      "handleSentimentAnalysis",
+      "handleSymbolSentiment",
+      "handleSectorSentiment",
+      "handleFineGrainedSymbol",
+      "handleFineGrainedBatch",
+      "PreMarketDataBridge",
+      "BacktestingEngine",
+      "runDualAIAnalysisEnhanced"
+    ],
+    "transcript_run_id": "a4640e5c2adb1f6ba",
+    "grading_rule": "success = every expected symbol appears (substring) in answered symbols; extras allowed"
+  },
+  {
+    "arm": "ast-grep+Read",
+    "task": "blast-radius-getcurrenttimeet",
+    "success": true,
+    "coverage": 1.0,
+    "total_tokens": 627657,
+    "output_tokens": 11570,
+    "tool_return_tokens": null,
+    "turns": 16,
+    "read_calls": null,
+    "stale_reads": 0,
+    "answered_symbols": [
+      "handlePreMarketBriefing",
+      "handleEndOfDaySummary",
+      "getLastNTradingDays",
+      "isMarketHours",
+      "getCurrentDateET"
+    ],
+    "expected_symbols": [
+      "handlePreMarketBriefing",
+      "handleEndOfDaySummary",
+      "getLastNTradingDays",
+      "isMarketHours",
+      "getCurrentDateET"
+    ],
+    "covered_symbols": [
+      "handlePreMarketBriefing",
+      "handleEndOfDaySummary",
+      "getLastNTradingDays",
+      "isMarketHours",
+      "getCurrentDateET"
+    ],
+    "transcript_run_id": "a3e748d333fc67646",
+    "grading_rule": "success = every expected symbol appears (substring) in answered symbols; extras allowed"
+  },
+  {
+    "arm": "ast-grep+Read",
+    "task": "where-market-open-decided",
+    "success": true,
+    "coverage": 1.0,
+    "total_tokens": 217467,
+    "output_tokens": 1669,
+    "tool_return_tokens": null,
+    "turns": 5,
+    "read_calls": null,
+    "stale_reads": 0,
+    "answered_symbols": [
+      "isMarketHours"
+    ],
+    "expected_symbols": [
+      "isMarketHours"
+    ],
+    "covered_symbols": [
+      "isMarketHours"
+    ],
+    "transcript_run_id": "a2510a15c3289ab23",
+    "grading_rule": "success = every expected symbol appears (substring) in answered symbols; extras allowed"
+  },
+  {
+    "arm": "ast-grep+Read",
+    "task": "who-calls-createbacktestingstorage",
+    "success": true,
+    "coverage": 1.0,
+    "total_tokens": 866960,
+    "output_tokens": 17948,
+    "tool_return_tokens": null,
+    "turns": 20,
+    "read_calls": null,
+    "stale_reads": 0,
+    "answered_symbols": [
+      "getBacktestRunStatus",
+      "getStoredBacktestResults",
+      "getStoredPerformanceMetrics",
+      "listBacktestHistory",
+      "cleanupOldBacktestData",
+      "handleRunBacktest",
+      "handleBacktestStatus",
+      "handleGetBacktestResults",
+      "handleGetPerformanceMetrics",
+      "handleBacktestHistory",
+      "runValidationInBackground",
+      "runWalkForwardInBackground",
+      "runMonteCarloInBackground",
+      "handleModelValidation",
+      "handleMonteCarloSimulationDirect"
+    ],
+    "expected_symbols": [
+      "getBacktestRunStatus",
+      "getStoredBacktestResults",
+      "getStoredPerformanceMetrics",
+      "listBacktestHistory",
+      "cleanupOldBacktestData",
+      "handleRunBacktest",
+      "handleBacktestStatus",
+      "handleGetBacktestResults",
+      "handleGetPerformanceMetrics",
+      "handleBacktestHistory",
+      "runValidationInBackground",
+      "runWalkForwardInBackground",
+      "runMonteCarloInBackground",
+      "handleModelValidation",
+      "handleMonteCarloSimulationDirect"
+    ],
+    "covered_symbols": [
+      "getBacktestRunStatus",
+      "getStoredBacktestResults",
+      "getStoredPerformanceMetrics",
+      "listBacktestHistory",
+      "cleanupOldBacktestData",
+      "handleRunBacktest",
+      "handleBacktestStatus",
+      "handleGetBacktestResults",
+      "handleGetPerformanceMetrics",
+      "handleBacktestHistory",
+      "runValidationInBackground",
+      "runWalkForwardInBackground",
+      "runMonteCarloInBackground",
+      "handleModelValidation",
+      "handleMonteCarloSimulationDirect"
+    ],
+    "transcript_run_id": "ae0179f21728bb381",
+    "grading_rule": "success = every expected symbol appears (substring) in answered symbols; extras allowed"
+  },
+  {
+    "arm": "ast-grep+Read",
+    "task": "do-bindings-trace",
+    "success": true,
+    "coverage": 1.0,
+    "total_tokens": 56827,
+    "output_tokens": 385,
+    "tool_return_tokens": null,
+    "turns": 1,
+    "read_calls": null,
+    "stale_reads": 0,
+    "answered_symbols": [
+      "CacheDurableObject",
+      "RateLimiterDO",
+      "PortfolioDO"
+    ],
+    "expected_symbols": [
+      "CacheDurableObject",
+      "RateLimiterDO",
+      "PortfolioDO"
+    ],
+    "covered_symbols": [
+      "CacheDurableObject",
+      "RateLimiterDO",
+      "PortfolioDO"
+    ],
+    "transcript_run_id": "acd30b8ed068cdd53",
+    "grading_rule": "success = every expected symbol appears (substring) in answered symbols; extras allowed"
+  },
+  {
+    "arm": "cort",
+    "task": "who-calls-batchdualai",
+    "success": true,
+    "coverage": 1.0,
+    "total_tokens": 546770,
+    "output_tokens": 10565,
+    "tool_return_tokens": null,
+    "turns": 17,
+    "read_calls": null,
+    "stale_reads": 0,
+    "answered_symbols": [
+      "enhancedBatchDualAIAnalysis",
+      "runDualAIAnalysisEnhanced",
+      "runCompleteAnalysisPipeline",
+      "handleSentimentAnalysis",
+      "handleSymbolSentiment",
+      "handleSectorSentiment",
+      "handleFineGrainedSymbol",
+      "handleFineGrainedBatch",
+      "BacktestingEngine",
+      "IntradayDataBridge",
+      "PreMarketDataBridge"
+    ],
+    "expected_symbols": [
+      "runCompleteAnalysisPipeline",
+      "enhancedBatchDualAIAnalysis",
+      "IntradayDataBridge",
+      "handleSentimentAnalysis",
+      "handleSymbolSentiment",
+      "handleSectorSentiment",
+      "handleFineGrainedSymbol",
+      "handleFineGrainedBatch",
+      "PreMarketDataBridge",
+      "BacktestingEngine",
+      "runDualAIAnalysisEnhanced"
+    ],
+    "covered_symbols": [
+      "runCompleteAnalysisPipeline",
+      "enhancedBatchDualAIAnalysis",
+      "IntradayDataBridge",
+      "handleSentimentAnalysis",
+      "handleSymbolSentiment",
+      "handleSectorSentiment",
+      "handleFineGrainedSymbol",
+      "handleFineGrainedBatch",
+      "PreMarketDataBridge",
+      "BacktestingEngine",
+      "runDualAIAnalysisEnhanced"
+    ],
+    "transcript_run_id": "a733ed17d9065aa89",
+    "grading_rule": "success = every expected symbol appears (substring) in answered symbols; extras allowed"
+  },
+  {
+    "arm": "cort",
+    "task": "blast-radius-getcurrenttimeet",
+    "success": true,
+    "coverage": 1.0,
+    "total_tokens": 736878,
+    "output_tokens": 9435,
+    "tool_return_tokens": null,
+    "turns": 22,
+    "read_calls": null,
+    "stale_reads": 0,
+    "answered_symbols": [
+      "getLastNTradingDays",
+      "isMarketHours",
+      "getCurrentDateET",
+      "handleEndOfDaySummary",
+      "handlePreMarketBriefing"
+    ],
+    "expected_symbols": [
+      "handlePreMarketBriefing",
+      "handleEndOfDaySummary",
+      "getLastNTradingDays",
+      "isMarketHours",
+      "getCurrentDateET"
+    ],
+    "covered_symbols": [
+      "handlePreMarketBriefing",
+      "handleEndOfDaySummary",
+      "getLastNTradingDays",
+      "isMarketHours",
+      "getCurrentDateET"
+    ],
+    "transcript_run_id": "aed92c21d7585e82b",
+    "grading_rule": "success = every expected symbol appears (substring) in answered symbols; extras allowed"
+  },
+  {
+    "arm": "cort",
+    "task": "where-market-open-decided",
+    "success": true,
+    "coverage": 1.0,
+    "total_tokens": 933606,
+    "output_tokens": 6154,
+    "tool_return_tokens": null,
+    "turns": 20,
+    "read_calls": null,
+    "stale_reads": 0,
+    "answered_symbols": [
+      "isMarketHours"
+    ],
+    "expected_symbols": [
+      "isMarketHours"
+    ],
+    "covered_symbols": [
+      "isMarketHours"
+    ],
+    "transcript_run_id": "a59c01add8f57b577",
+    "grading_rule": "success = every expected symbol appears (substring) in answered symbols; extras allowed"
+  },
+  {
+    "arm": "cort",
+    "task": "who-calls-createbacktestingstorage",
+    "success": true,
+    "coverage": 1.0,
+    "total_tokens": 974340,
+    "output_tokens": 9241,
+    "tool_return_tokens": null,
+    "turns": 22,
+    "read_calls": null,
+    "stale_reads": 0,
+    "answered_symbols": [
+      "getBacktestRunStatus",
+      "getStoredBacktestResults",
+      "getStoredPerformanceMetrics",
+      "listBacktestHistory",
+      "cleanupOldBacktestData",
+      "handleRunBacktest",
+      "handleBacktestStatus",
+      "handleGetBacktestResults",
+      "handleGetPerformanceMetrics",
+      "handleBacktestHistory",
+      "runValidationInBackground",
+      "runWalkForwardInBackground",
+      "runMonteCarloInBackground",
+      "handleModelValidation",
+      "handleMonteCarloSimulationDirect"
+    ],
+    "expected_symbols": [
+      "getBacktestRunStatus",
+      "getStoredBacktestResults",
+      "getStoredPerformanceMetrics",
+      "listBacktestHistory",
+      "cleanupOldBacktestData",
+      "handleRunBacktest",
+      "handleBacktestStatus",
+      "handleGetBacktestResults",
+      "handleGetPerformanceMetrics",
+      "handleBacktestHistory",
+      "runValidationInBackground",
+      "runWalkForwardInBackground",
+      "runMonteCarloInBackground",
+      "handleModelValidation",
+      "handleMonteCarloSimulationDirect"
+    ],
+    "covered_symbols": [
+      "getBacktestRunStatus",
+      "getStoredBacktestResults",
+      "getStoredPerformanceMetrics",
+      "listBacktestHistory",
+      "cleanupOldBacktestData",
+      "handleRunBacktest",
+      "handleBacktestStatus",
+      "handleGetBacktestResults",
+      "handleGetPerformanceMetrics",
+      "handleBacktestHistory",
+      "runValidationInBackground",
+      "runWalkForwardInBackground",
+      "runMonteCarloInBackground",
+      "handleModelValidation",
+      "handleMonteCarloSimulationDirect"
+    ],
+    "transcript_run_id": "a6fb83c46ca253f4c",
+    "grading_rule": "success = every expected symbol appears (substring) in answered symbols; extras allowed"
+  },
+  {
+    "arm": "cort",
+    "task": "do-bindings-trace",
+    "success": true,
+    "coverage": 1.0,
+    "total_tokens": 87784,
+    "output_tokens": 803,
+    "tool_return_tokens": null,
+    "turns": 2,
+    "read_calls": null,
+    "stale_reads": 0,
+    "answered_symbols": [
+      "CacheDurableObject",
+      "RateLimiterDO",
+      "PortfolioDO"
+    ],
+    "expected_symbols": [
+      "CacheDurableObject",
+      "RateLimiterDO",
+      "PortfolioDO"
+    ],
+    "covered_symbols": [
+      "CacheDurableObject",
+      "RateLimiterDO",
+      "PortfolioDO"
+    ],
+    "transcript_run_id": "a60602a7f9a4113ee",
+    "grading_rule": "success = every expected symbol appears (substring) in answered symbols; extras allowed"
+  }
+]

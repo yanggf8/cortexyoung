@@ -1,0 +1,17 @@
+# round 2 venue: /home/yanggf/a/cct (180 files, 2531 chunks, 1792 rels)
+# dispatch order -> (arm, task)
+rg+Read       who-calls-batchdualai
+rg+Read       blast-radius-getcurrenttimeet
+rg+Read       where-market-open-decided
+rg+Read       who-calls-createbacktestingstorage
+rg+Read       do-bindings-trace
+ast-grep+Read who-calls-batchdualai
+ast-grep+Read blast-radius-getcurrenttimeet
+ast-grep+Read where-market-open-decided
+ast-grep+Read who-calls-createbacktestingstorage
+ast-grep+Read do-bindings-trace
+cort          who-calls-batchdualai
+cort          blast-radius-getcurrenttimeet
+cort          where-market-open-decided
+cort          who-calls-createbacktestingstorage
+cort          do-bindings-trace
