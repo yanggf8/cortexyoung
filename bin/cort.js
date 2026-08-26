@@ -6,6 +6,7 @@ import { openDb, ensureSchema, projectIdFor, dbPathFor, listProjects, deleteProj
 import { fullIndex, statusOf } from '../src/indexer.js';
 import { incrementalIndex } from '../src/incremental.js';
 import { computeStale } from '../src/staleness.js';
+import { structCommand } from '../src/struct.js';
 
 export function parseArgs(argv) {
   const out = { _: [], flags: {} };
@@ -61,7 +62,23 @@ async function main() {
     return;
   }
 
-  throw new CortError('unknown_command', { command: command ?? null, known: ['index', 'status', 'projects', 'delete'] });
+  if (command === 'struct') {
+    const pattern = flags.p ?? flags.pattern;
+    const lang = flags.lang;
+    if (typeof pattern !== 'string') throw new CortError('missing_pattern', { hint: "cort struct -p '<pattern>' --lang ts" });
+    if (typeof lang !== 'string') throw new CortError('missing_lang', { hint: 'pre-flight pattern validation requires --lang' });
+    const bin = resolveAstGrepBin();
+    assertAstGrepVersion(bin);
+    const { real, projectId, db } = openProject(process.cwd());
+    const globs = typeof flags.g === 'string' ? [flags.g] : [];
+    emit(structCommand({
+      db, bin, root: real, projectId, pattern, lang, globs,
+      budget: Number(flags.budget ?? 1500),
+    }));
+    return;
+  }
+
+  throw new CortError('unknown_command', { command: command ?? null, known: ['index', 'status', 'projects', 'delete', 'struct'] });
 }
 
 main().catch((err) => {
