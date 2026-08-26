@@ -8,6 +8,7 @@ import { computeStale } from './staleness.js';
 
 export const DEFAULT_BUDGET = 1500;
 export const NEIGHBORS_PER_SEED = 8;
+export const CONTENT_HEAD_LINES = 12;
 const MAX_SEEDS = 5;
 
 function exactSymbolSeeds(db, projectId, query) {
@@ -37,7 +38,7 @@ function unresolvedFor({ db, bin, root, projectId, seed }) {
   return out;
 }
 
-export function contextCommand({ db, bin, root, projectId, query, budget = DEFAULT_BUDGET, includeAmbiguous = false }) {
+export function contextCommand({ db, bin, root, projectId, query, budget = DEFAULT_BUDGET, includeAmbiguous = false, fullContent = false }) {
   let resolution = 'exact_symbol';
   let seedRows = exactSymbolSeeds(db, projectId, query);
   let truncatedQuery = false;
@@ -53,6 +54,12 @@ export function contextCommand({ db, bin, root, projectId, query, budget = DEFAU
     const neighbors = getNeighbors(db, row.chunk_id, NEIGHBORS_PER_SEED)
       .filter((n) => includeAmbiguous || n.confidence !== 'AMBIGUOUS');
     const unresolved = unresolvedFor({ db, bin, root, projectId, seed: row });
+    // Seed bodies dominate packet size; keep a head by default (--content full restores).
+    const lines = String(row.content ?? '').split('\n');
+    const contentTruncated = !fullContent && lines.length > CONTENT_HEAD_LINES;
+    const content = contentTruncated
+      ? lines.slice(0, CONTENT_HEAD_LINES).join('\n') + '\n…'
+      : row.content;
     return {
       chunk_id: row.chunk_id,
       file_path: row.file_path,
@@ -60,7 +67,8 @@ export function contextCommand({ db, bin, root, projectId, query, budget = DEFAU
       chunk_type: row.chunk_type,
       start_line: row.start_line,
       end_line: row.end_line,
-      content: row.content,
+      content,
+      content_truncated: contentTruncated,
       neighbors,
       unresolved,
     };

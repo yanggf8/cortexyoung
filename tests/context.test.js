@@ -96,3 +96,30 @@ test('context never invokes struct', async () => {
   assert.ok(!src.includes("from './struct.js'"), 'stage 3 must not depend on stage 2');
   assert.equal(typeof mod.contextCommand, 'function');
 });
+
+test('seed content is truncated by default and restorable with fullContent', () => {
+  const body = ['export function bigThing() {',
+    ...Array.from({ length: 40 }, (_, i) => `  // filler line ${i}`),
+    '}', ''].join('\n');
+  const { root, db, projectId, bin } = indexed({ 'src/big.ts': body });
+
+  const trimmed = contextCommand({ db, bin, root, projectId, query: 'bigThing', budget: DEFAULT_BUDGET });
+  assert.equal(trimmed.seeds[0].content_truncated, true);
+  const lineCount = trimmed.seeds[0].content.split('\n').length;
+  assert.ok(lineCount <= 13, `expected at most 12 kept lines + marker, got ${lineCount}`);
+  assert.ok(trimmed.seeds[0].content.endsWith('…'), 'truncation marker expected');
+
+  const full = contextCommand({ db, bin, root, projectId, query: 'bigThing', budget: DEFAULT_BUDGET, fullContent: true });
+  assert.equal(full.seeds[0].content_truncated, false);
+  // ast-grep's function_declaration node excludes the `export` keyword from rec.text.
+  assert.ok(full.seeds[0].content.includes('// filler line 39'), 'full content must reach the last line');
+  assert.ok(full.seeds[0].content.trimEnd().endsWith('}'));
+  assert.ok(full.seeds[0].content.length > trimmed.seeds[0].content.length);
+});
+
+test('short content is untouched and not flagged', () => {
+  const { root, db, projectId, bin } = indexed();
+  const out = contextCommand({ db, bin, root, projectId, query: 'helper', budget: DEFAULT_BUDGET });
+  assert.equal(out.seeds[0].content_truncated, false);
+  assert.ok(!out.seeds[0].content.endsWith('…'));
+});

@@ -6,7 +6,8 @@ Four shipped commands (plus `status`/`projects`/`delete` utilities):
 
 - `cort index [--incremental] [path]` — build or incrementally refresh the index (`ast-grep` + SQLite)
 - `cort struct -p '<pattern>' --lang <lang>` — structural search joined to enclosing symbols + 3 neighbours
-- `cort context <symbol-or-query>` — "what else deals with X" (exact symbol or FTS recall, depth-1 neighbours, ~1500-token budget)
+- `cort context <symbol-or-query>` — "what else deals with X" (exact symbol or FTS recall, depth-1 neighbours, ~1500-token budget; seed bodies are head-truncated to 12 lines, pass `--content full` for the whole body)
+- `cort impact --symbol <name[,name2,...]>` — reverse dependents (depth 3); accepts a comma-separated batch
 - `cort impact --symbol <name>` — "what breaks if I change X" (reverse dependents, depth 3)
 
 Routing for agents is in `skills/ast-grep/SKILL.md` — it states when to use `rg`, `ast-grep run`, `cort struct`/`context`/`impact`, and `xg`.

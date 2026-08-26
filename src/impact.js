@@ -7,10 +7,13 @@ import { computeStale } from './staleness.js';
 export const DEFAULT_DEPTH = 3;
 
 export function impactCommand({ db, bin, root, projectId, symbol, depth = DEFAULT_DEPTH }) {
-  const seeds = db.prepare(`
+  // --symbol accepts a comma-separated batch: one call answers multi-symbol questions.
+  const names = String(symbol ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+  const seeds = names.length === 0 ? [] : db.prepare(`
     SELECT chunk_id, file_path, symbol_name, start_line, end_line
-      FROM chunks WHERE project_id = ? AND symbol_name = ? ORDER BY file_path, start_line`)
-    .all(projectId, symbol);
+      FROM chunks WHERE project_id = ? AND symbol_name IN (${names.map(() => '?').join(',')})
+     ORDER BY file_path, start_line`)
+    .all(projectId, ...names);
 
   const merged = new Map();
   for (const seed of seeds) {

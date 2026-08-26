@@ -90,6 +90,7 @@ async function main() {
       db, bin, root: real, projectId, query,
       budget: Number(flags.budget ?? 1500),
       includeAmbiguous: flags['include-ambiguous'] === true,
+      fullContent: flags.content === 'full',
     }));
     return;
   }

@@ -80,3 +80,12 @@ test('the packet reports index staleness', () => {
   const out = impactCommand({ db, bin, root, projectId, symbol: 'd', depth: DEFAULT_DEPTH });
   assert.equal(out.index_is_stale, false);
 });
+
+test('symbol accepts a comma-separated batch and merges dependents at min hop', () => {
+  const { root, db, projectId, bin } = indexed(CHAIN);
+  const out = impactCommand({ db, bin, root, projectId, symbol: 'd,c', depth: DEFAULT_DEPTH });
+  assert.equal(out.seed_count, 2);
+  const byName = Object.fromEntries(out.dependents.map((x) => [x.symbol_name, x.hop]));
+  assert.deepEqual(byName, { b: 1, a: 2 },
+    'b is hop-1 from seed c, a is hop-2; seeds themselves are excluded');
+});
