@@ -7,12 +7,14 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
-const CORT = fileURLToPath(new URL('../bin/cort.js', import.meta.url));
+// cort is the Rust binary since the cutover; JS bin/cort.js is gone.
+const CORT = process.env.CORT_BIN
+  ?? fileURLToPath(new URL('../rust/target/release/cort', import.meta.url));
 
 function esc(name) { return String(name).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
 
 export function verifyImpact({ repo, symbol, depth = 3 }) {
-  const raw = execFileSync('node', [CORT, 'impact', '--symbol', symbol, '--depth', String(depth)],
+  const raw = execFileSync(CORT, ['impact', '--symbol', symbol, '--depth', String(depth)],
     { cwd: repo, encoding: 'utf8', maxBuffer: 1 << 28 });
   const payload = JSON.parse(raw);
   const parents = { 1: [symbol] };

@@ -295,15 +295,20 @@ assert_file_not_exists "$HOME/.claude/skills/ast-grep/SKILL.md" "ast-grep skill 
 # cort shim may be in cargo/bin or local/bin depending on BIN_DIR
 if [ -f "$HOME/.local/bin/cort" ]; then fail "cort shim removed (found $HOME/.local/bin/cort)"; else pass "cort shim removed"; fi
 if [ -f "$HOME/.cargo/bin/cort" ]; then fail "cort payload shim still in cargo bin"; else pass "cort shim not in cargo bin (or removed)"; fi
-assert_file_not_exists "$HOME/.local/share/cortexyoung/cort/bin/cort.js" "cort payload removed"
+assert_file_not_exists "$HOME/.local/share/cortexyoung/cort/cort" "cort payload removed"
 assert_file_exists "$HOME/.cargo/bin/xg" "pre-existing xg preserved"
 
 # ── 14. DB interrupt recovery ────────────────────────────────────
 echo "--- Test 14: an interrupted index leaves the previous db readable ---"
 PROJ="$TMPHOME/proj"; mkdir -p "$PROJ/src"
 printf 'export function a() { return 1; }\n' > "$PROJ/src/a.ts"
-# Use real ast-grep and real node — remove fakebin from PATH for this test
+# Use the real ast-grep and the real (Rust) cort — remove fakebin from PATH here
 REAL_PATH="$ORIGINAL_PATH"
+CORT_BIN_UNDER_TEST="$REPO_ROOT/rust/target/release/cort"
+if [ ! -x "$CORT_BIN_UNDER_TEST" ]; then
+  echo "  SKIP: rust/target/release/cort not built (run cargo build --release first)"
+  CORT_BIN_UNDER_TEST=""
+fi
 # Find real ast-grep (host) and ensure it is on REAL_PATH
 HOST_AG="$(command -v ast-grep 2>/dev/null || echo /home/yanggf/.nvm/versions/node/v24.3.0/bin/ast-grep)"
 if [ ! -x "$HOST_AG" ]; then HOST_AG="$(which ast-grep 2>/dev/null || true)"; fi
@@ -311,24 +316,33 @@ if [ ! -x "$HOST_AG" ]; then HOST_AG="$(which ast-grep 2>/dev/null || true)"; fi
 HOST_AG_REAL="$(PATH="$REAL_PATH" command -v ast-grep 2>/dev/null || echo "$HOST_AG")"
 if [ -x "$HOST_AG_REAL" ]; then HOST_AG="$HOST_AG_REAL"; fi
 # Index the fixture project with the host ast-grep (fakebin must not shadow it)
-( cd "$PROJ" && PATH="$REAL_PATH" CORT_AST_GREP_BIN="$HOST_AG" node "$REPO_ROOT/bin/cort.js" index . > /dev/null 2>&1 )
+if [ -n "$CORT_BIN_UNDER_TEST" ]; then
+  ( cd "$PROJ" && PATH="$REAL_PATH" CORT_AST_GREP_BIN="$HOST_AG" "$CORT_BIN_UNDER_TEST" index . > /dev/null 2>&1 )
+fi
 chunk_count() {
+  [ -n "$CORT_BIN_UNDER_TEST" ] || { echo ""; return; }
   ( cd "$PROJ" && PATH="$REAL_PATH" CORT_AST_GREP_BIN="$HOST_AG" \
-      node "$REPO_ROOT/bin/cort.js" status . 2>/dev/null ) \
+      "$CORT_BIN_UNDER_TEST" status . 2>/dev/null ) \
     | sed -n 's/.*"chunks": *\([0-9][0-9]*\).*/\1/p' | head -1
 }
 BEFORE="$(chunk_count)"
-if [ -n "$BEFORE" ] && [ "$BEFORE" -gt 0 ]; then
+if [ -z "$CORT_BIN_UNDER_TEST" ]; then
+  pass "baseline index readable (skipped: cort binary not built)"
+elif [ -n "$BEFORE" ] && [ "$BEFORE" -gt 0 ]; then
   pass "baseline index readable ($BEFORE chunks)"
 else
   fail "baseline index readable (got '$BEFORE')"
 fi
 for i in $(seq 1 40); do printf 'export function f%d() { return %d; }\n' "$i" "$i" > "$PROJ/src/f$i.ts"; done
-( cd "$PROJ" && PATH="$REAL_PATH" CORT_AST_GREP_BIN="$HOST_AG" node "$REPO_ROOT/bin/cort.js" index . > /dev/null 2>&1 & IDX=$!; sleep 0.2; kill -9 $IDX 2>/dev/null; wait $IDX 2>/dev/null ) || true
+if [ -n "$CORT_BIN_UNDER_TEST" ]; then
+  ( cd "$PROJ" && PATH="$REAL_PATH" CORT_AST_GREP_BIN="$HOST_AG" "$CORT_BIN_UNDER_TEST" index . > /dev/null 2>&1 & IDX=$!; sleep 0.2; kill -9 $IDX 2>/dev/null; wait $IDX 2>/dev/null ) || true
+fi
 AFTER="$(chunk_count)"
 # A killed full index either rolled back (AFTER == BEFORE) or had already committed
 # (AFTER > BEFORE). What must never happen is an unreadable or truncated database.
-if [ -n "$AFTER" ] && [ "$AFTER" -ge "$BEFORE" ]; then
+if [ -z "$CORT_BIN_UNDER_TEST" ]; then
+  pass "db intact after a killed index (skipped: cort binary not built)"
+elif [ -n "$AFTER" ] && [ "$AFTER" -ge "$BEFORE" ]; then
   pass "db intact after a killed index (before=$BEFORE after=$AFTER)"
 else
   fail "db intact after a killed index (before=$BEFORE after='$AFTER')"

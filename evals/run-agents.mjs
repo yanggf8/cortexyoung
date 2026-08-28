@@ -14,7 +14,9 @@ import { fileURLToPath } from 'node:url';
 import { parseStream } from './agent-stream.mjs';
 import { ANSWER_CONTRACT, GATE, gradeAnswer } from './grade.mjs';
 
-export const CORT_BIN = fileURLToPath(new URL('../bin/cort.js', import.meta.url));
+// cort is the Rust binary since the cutover; JS bin/cort.js is gone.
+export const CORT_BIN = process.env.CORT_BIN
+  ?? fileURLToPath(new URL('../rust/target/release/cort', import.meta.url));
 
 // Shipped guidance, not a hint invented for the eval: this is what skills/ast-grep/SKILL.md tells
 // any agent that has cort. Withholding it would measure a tool nobody was told how to use — but
@@ -22,7 +24,7 @@ export const CORT_BIN = fileURLToPath(new URL('../bin/cort.js', import.meta.url)
 const CORT_GUIDANCE = [
   'You have an offline code-intelligence CLI. Run it exactly like this, copying the path verbatim:',
   '',
-  `node ${CORT_BIN} impact --symbol <name> --depth <n> -f lean`,
+  `${CORT_BIN} impact --symbol <name> --depth <n> -f lean`,
   '',
   'It answers relationship questions — who reaches a symbol, and in how many hops — from a',
   'pre-built index, in one call per query. `-f lean` keeps the answer small. Its lean output',
@@ -35,7 +37,7 @@ export const AGENT_ARMS = {
     guidance: null,
   },
   cort: {
-    allowedTools: ['Read', `Bash(node ${CORT_BIN}:*)`],
+    allowedTools: ['Read', `Bash(${CORT_BIN}:*)`],
     guidance: CORT_GUIDANCE,
   },
 };
