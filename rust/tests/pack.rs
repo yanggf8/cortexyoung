@@ -1,0 +1,209 @@
+//! C1-1..C1-5 — tests/pack.test.js (frozen JS reference)
+
+use cort::ast_grep::{exec_ast_grep, resolve_ast_grep_bin, ExecOpts};
+use cort::pack::{extractor_version, pack_dir, pack_files, sgconfig};
+use std::fs;
+use std::path::PathBuf;
+use std::sync::{Mutex, MutexGuard};
+
+static PACK_LOCK: Mutex<()> = Mutex::new(());
+
+fn pack_guard() -> MutexGuard<'static, ()> {
+    PACK_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// C1-1
+#[test]
+fn pack_files_are_enumerated_in_sorted_order_and_hash_deterministically() {
+    let _g = pack_guard();
+    let files = pack_files();
+    assert!(files.len() >= 5);
+    let mut sorted = files.clone();
+    sorted.sort();
+    assert_eq!(files, sorted);
+    assert!(files.iter().all(|f| f.is_absolute()));
+    let v = extractor_version();
+    assert!(
+        v.len() == 64
+            && v.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+        "expected 64 lowercase hex, got {v}"
+    );
+    assert_eq!(v, extractor_version());
+}
+
+/// C1-2
+#[test]
+fn extractor_version_changes_when_any_pack_file_changes() {
+    let _g = pack_guard();
+    let target = pack_files()
+        .into_iter()
+        .find(|f| f.ends_with("typescript.yml"))
+        .expect("typescript.yml in pack");
+    let before = fs::read(&target).expect("read typescript.yml");
+    let v1 = extractor_version();
+    struct Restore {
+        path: PathBuf,
+        original: Vec<u8>,
+    }
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let _ = fs::write(&self.path, &self.original);
+        }
+    }
+    let restore = Restore {
+        path: target.clone(),
+        original: before.clone(),
+    };
+    let mut probe = before.clone();
+    probe.extend_from_slice(b"\n# probe\n");
+    fs::write(&target, &probe).expect("write probe");
+    assert_ne!(extractor_version(), v1);
+    drop(restore);
+    assert_eq!(extractor_version(), v1);
+}
+
+/// C1-3
+#[test]
+fn the_pack_extracts_chunks_and_edges_from_typescript_with_the_expected_tags() {
+    let _g = pack_guard();
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("k.ts");
+    fs::write(
+        &file,
+        [
+            "import { helper } from './helper';",
+            "export function alpha(a: number) { return helper(a) + 1; }",
+            "export class Beta {",
+            "  go() { return alpha(2); }",
+            "}",
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+    let bin = resolve_ast_grep_bin().expect("ast-grep on PATH");
+    let sg = sgconfig();
+    let r = exec_ast_grep(
+        &bin,
+        &[
+            "scan",
+            "--json=stream",
+            "--config",
+            sg.to_str().unwrap(),
+            file.to_str().unwrap(),
+        ],
+        ExecOpts::default(),
+    )
+    .unwrap();
+    assert_eq!(r.code, 0);
+    let recs: Vec<serde_json::Value> = r
+        .stdout
+        .trim()
+        .split('\n')
+        .filter(|l| !l.is_empty())
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let mut tags: Vec<String> = recs
+        .iter()
+        .map(|x| x["message"].as_str().unwrap().to_string())
+        .collect();
+    tags.sort();
+    assert_eq!(
+        tags,
+        [
+            "chunk:class",
+            "chunk:function",
+            "chunk:method",
+            "edge:calls",
+            "edge:calls",
+            "edge:imports"
+        ]
+    );
+    let fn_rec = recs
+        .iter()
+        .find(|x| x["message"] == "chunk:function")
+        .unwrap();
+    assert_eq!(fn_rec["metaVariables"]["single"]["NAME"]["text"], "alpha");
+    let imp = recs
+        .iter()
+        .find(|x| x["message"] == "edge:imports")
+        .unwrap();
+    // unquote lives in chunker, not pack — $SRC still carries quotes.
+    assert_eq!(imp["metaVariables"]["single"]["SRC"]["text"], "'./helper'");
+}
+
+/// C1-4
+#[test]
+fn the_pack_extracts_chunks_and_edges_from_python() {
+    let _g = pack_guard();
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("k.py");
+    fs::write(
+        &file,
+        [
+            "import os",
+            "from helper import assist",
+            "def alpha(a):",
+            "    return assist(a) + 1",
+            "class Beta:",
+            "    def go(self):",
+            "        return alpha(2)",
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+    let bin = resolve_ast_grep_bin().expect("ast-grep on PATH");
+    let sg = sgconfig();
+    let r = exec_ast_grep(
+        &bin,
+        &[
+            "scan",
+            "--json=stream",
+            "--config",
+            sg.to_str().unwrap(),
+            file.to_str().unwrap(),
+        ],
+        ExecOpts::default(),
+    )
+    .unwrap();
+    let recs: Vec<serde_json::Value> = r
+        .stdout
+        .trim()
+        .split('\n')
+        .filter(|l| !l.is_empty())
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let mut imports: Vec<String> = recs
+        .iter()
+        .filter(|x| x["message"] == "edge:imports")
+        .map(|x| {
+            x["metaVariables"]["single"]["SRC"]["text"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
+        .collect();
+    imports.sort();
+    assert_eq!(imports, ["helper", "os"]);
+    assert_eq!(
+        recs.iter()
+            .filter(|x| x["message"] == "chunk:class")
+            .count(),
+        1
+    );
+    assert_eq!(
+        recs.iter()
+            .filter(|x| x["message"] == "chunk:function")
+            .count(),
+        2
+    );
+}
+
+/// C1-5
+#[test]
+fn pack_dir_points_at_a_real_directory_containing_sgconfig_yml() {
+    let _g = pack_guard();
+    let dir = pack_dir();
+    assert!(dir.is_dir());
+    assert!(sgconfig().is_file());
+}

@@ -1,0 +1,24 @@
+[package]
+name = "cort"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "cort"
+path = "src/lib.rs"
+
+[[bin]]
+name = "cort"
+path = "src/main.rs"
+
+[dependencies]
+# bundled SQLite already compiles SQLITE_ENABLE_FTS5 (libsqlite3-sys build.rs).
+# There is no rusqlite `fts5` cargo feature on 0.32; do not add extra crates.
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+clap = { version = "4", features = ["derive"] }
+
+[dev-dependencies]
+tempfile = "3"
