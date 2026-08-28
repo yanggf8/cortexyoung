@@ -9,6 +9,7 @@ import { computeStale } from '../src/staleness.js';
 import { structCommand } from '../src/struct.js';
 import { contextCommand } from '../src/context.js';
 import { impactCommand } from '../src/impact.js';
+import { parseFormat, render, FORMAT } from '../src/render.js';
 
 export function parseArgs(argv) {
   const out = { _: [], flags: {} };
@@ -23,7 +24,15 @@ export function parseArgs(argv) {
   return out;
 }
 
-function emit(value) { process.stdout.write(`${JSON.stringify(value, null, 2)}\n`); }
+function resolveFormat(flags) {
+  const format = parseFormat(flags.f ?? flags.format);
+  if (format === null) throw new CortError('unknown_format', { hint: '--format json|lean' });
+  return format;
+}
+
+function emit(value, format = FORMAT.JSON, command = null) {
+  process.stdout.write(render(command, format, value));
+}
 
 function openProject(root) {
   const real = fs.realpathSync(root);
@@ -73,10 +82,11 @@ async function main() {
     assertAstGrepVersion(bin);
     const { real, projectId, db } = openProject(process.cwd());
     const globs = typeof flags.g === 'string' ? [flags.g] : [];
+    const format = resolveFormat(flags);
     emit(structCommand({
       db, bin, root: real, projectId, pattern, lang, globs,
       budget: Number(flags.budget ?? 1500),
-    }));
+    }), format, 'struct');
     return;
   }
 
@@ -86,12 +96,13 @@ async function main() {
     const bin = resolveAstGrepBin();
     assertAstGrepVersion(bin);
     const { real, projectId, db } = openProject(process.cwd());
+    const format = resolveFormat(flags);
     emit(contextCommand({
       db, bin, root: real, projectId, query,
       budget: Number(flags.budget ?? 1500),
       includeAmbiguous: flags['include-ambiguous'] === true,
       fullContent: flags.content === 'full',
-    }));
+    }), format, 'context');
     return;
   }
 
@@ -101,7 +112,8 @@ async function main() {
     const bin = resolveAstGrepBin();
     assertAstGrepVersion(bin);
     const { real, projectId, db } = openProject(process.cwd());
-    emit(impactCommand({ db, bin, root: real, projectId, symbol, depth: Number(flags.depth ?? 3) }));
+    const format = resolveFormat(flags);
+    emit(impactCommand({ db, bin, root: real, projectId, symbol, depth: Number(flags.depth ?? 3) }), format, 'impact');
     return;
   }
 
