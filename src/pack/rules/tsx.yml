@@ -27,3 +27,21 @@ language: Tsx
 severity: hint
 message: edge:calls
 rule: { kind: call_expression, has: { field: function, pattern: $CALLEE } }
+---
+id: cort-tsx-chunk-const-function
+language: Tsx
+severity: hint
+message: chunk:function
+rule:
+  kind: variable_declarator
+  all:
+    - has: { field: name, kind: identifier, pattern: $NAME }
+    - any:
+        - has: { field: value, kind: arrow_function }
+        - has: { field: value, kind: function_expression }
+        - has:
+            field: value
+            kind: call_expression
+            all:
+              - has: { field: function, kind: identifier }
+              - has: { kind: arguments, has: { kind: arrow_function } }

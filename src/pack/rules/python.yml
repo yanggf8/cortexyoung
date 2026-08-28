@@ -24,3 +24,13 @@ language: Python
 severity: hint
 message: edge:calls
 rule: { kind: call, has: { field: function, pattern: $CALLEE } }
+---
+id: cort-py-chunk-const-function
+language: Python
+severity: hint
+message: chunk:function
+rule:
+  kind: assignment
+  all:
+    - has: { field: left, kind: identifier, pattern: $NAME }
+    - has: { field: right, kind: lambda }

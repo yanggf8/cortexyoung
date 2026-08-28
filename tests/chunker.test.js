@@ -161,3 +161,43 @@ test('a spawn failure still propagates — only timeout degrades to unparsed', (
   }), (e) => e.code === 'ast_grep_spawn_failed',
   'environment-wide failures must stay loud; per-file timeouts are the only silent degrade');
 });
+
+const CONST_FN = [
+  "import { helper } from './helper';",
+  'export const alpha = (a: number) => helper(a) + 1;',
+  'const beta = function () { return helper(2); };',
+  'const gamma = helper;                       // not a function value',
+  'const rows = [1, 2, 3].map((n) => helper(n)); // data, not a named function',
+  'export const handler = createHandler("x", async (req: Request) => { return helper(1); });',
+].join('\n') + '\n';
+
+function constFnChunks() {
+  const abs = tmpFile('cf.ts', CONST_FN);
+  return extractFile({
+    bin: resolveAstGrepBin(), projectId: 'p', filePath: 'cf.ts', absPath: abs, source: CONST_FN,
+  });
+}
+
+test('const-bound arrow and function expressions become function chunks', () => {
+  const out = constFnChunks();
+  assert.equal(out.unparsed, false);
+  const names = out.chunks.map((c) => c.symbol_name);
+  assert.deepEqual(names.slice().sort(), ['alpha', 'beta', 'handler']);
+  for (const name of ['alpha', 'beta', 'handler']) {
+    const c = out.chunks.find((x) => x.symbol_name === name);
+    assert.equal(c.chunk_type, 'function');
+    assert.equal(c.chunk_source, 'ast');
+  }
+});
+
+test('collection transforms and bare aliases do not become chunks', () => {
+  const names = constFnChunks().chunks.map((c) => c.symbol_name);
+  assert.ok(!names.includes('rows'), 'x.map(n => ...) must not make `rows` a symbol');
+  assert.ok(!names.includes('gamma'), 'an alias to a function must not make `gamma` a symbol');
+});
+
+test('calls inside a const-bound handler get the handler as their source symbol', () => {
+  const { edges } = constFnChunks();
+  const inside = edges.filter((e) => e.source_symbol === 'handler' && e.rel_type === 'calls');
+  assert.ok(inside.some((e) => e.raw_target === 'helper'), 'handler body must resolve to its caller chunk');
+});
