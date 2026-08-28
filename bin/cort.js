@@ -24,6 +24,31 @@ export function parseArgs(argv) {
   return out;
 }
 
+const KNOWN_COMMANDS = ['index', 'status', 'projects', 'delete', 'struct', 'context', 'impact'];
+
+// `--help` parses into a flag like any other, so without this every command would run its own
+// side effects and ignore it — `cort index --help` indexed the cwd instead of explaining itself.
+const USAGE = {
+  usage: 'cort <command> [options]',
+  commands: {
+    index: 'cort index [root] [--incremental]',
+    status: 'cort status [root]',
+    projects: 'cort projects',
+    delete: 'cort delete [root]',
+    struct: "cort struct -p '<pattern>' --lang <lang> [-g <glob>] [--budget <n>] [-f json|lean]",
+    context: 'cort context <symbol|query> [--budget <n>] [--include-ambiguous] [--content full] [-f json|lean]',
+    impact: 'cort impact --symbol <name> [--depth <n>] [-f json|lean]',
+  },
+  env: {
+    CORT_CACHE_DIR: 'where indexes live (default ~/.cache/cortex-ng)',
+  },
+  note: 'Commands read the project at the cwd unless they take a root argument.',
+};
+
+function wantsHelp(positional, flags) {
+  return positional[0] === 'help' || 'help' in flags || 'h' in flags;
+}
+
 function resolveFormat(flags) {
   const format = parseFormat(flags.f ?? flags.format);
   if (format === null) throw new CortError('unknown_format', { hint: '--format json|lean' });
@@ -45,6 +70,8 @@ function openProject(root) {
 async function main() {
   const { _: positional, flags } = parseArgs(process.argv.slice(2));
   const command = positional[0];
+
+  if (wantsHelp(positional, flags)) { emit(USAGE); return; }
 
   if (command === 'index') {
     const bin = resolveAstGrepBin();
@@ -117,7 +144,7 @@ async function main() {
     return;
   }
 
-  throw new CortError('unknown_command', { command: command ?? null, known: ['index', 'status', 'projects', 'delete', 'struct', 'context', 'impact'] });
+  throw new CortError('unknown_command', { command: command ?? null, known: KNOWN_COMMANDS });
 }
 
 main().catch((err) => {
