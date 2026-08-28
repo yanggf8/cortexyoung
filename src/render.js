@@ -65,10 +65,25 @@ export function renderContext(payload) {
   return `${lines.join('\n')}\n`;
 }
 
+export function renderRead(payload) {
+  return `# read ${payload.file_path}:${payload.start_line}-${payload.end_line} source=${payload.source} reads=${payload.read_count}\n${payload.content}\n`;
+}
+
+export function renderRecall(payload) {
+  const lines = [`# recall ${payload.query} readings=${payload.reading_count} truncated_query=${payload.truncated_query}`];
+  for (const reading of payload.readings ?? []) {
+    lines.push(`${reading.file_path}:${reading.start_line}-${reading.end_line}\treads=${reading.read_count}`);
+    if (reading.content) lines.push(reading.content);
+  }
+  return `${lines.join('\n')}\n`;
+}
+
 export function render(command, format, payload) {
   if (format !== FORMAT.LEAN) return `${JSON.stringify(payload, null, 2)}\n`;
   if (command === 'impact') return renderImpact(payload);
   if (command === 'struct') return renderStruct(payload);
   if (command === 'context') return renderContext(payload);
+  if (command === 'read') return renderRead(payload);
+  if (command === 'recall') return renderRecall(payload);
   return `${JSON.stringify(payload, null, 2)}\n`;
 }

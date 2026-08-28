@@ -7,12 +7,13 @@ description: Route structural code questions to ast-grep and cort instead of gre
 
 Pick the narrowest tool that answers the question.
 
-- **Find a string, a definition, or a fresh unsaved edit** — native Grep (`rg`). `cort`'s index lags; `rg` never does. If you would use `cort context <query>` on a name you already know, grep instead.
+- **Find a string, a definition, or a fresh unsaved edit** — native Grep (`rg`). `cort`'s index lags; `rg` never does. Exception: for a known symbol in a large indexed Rust file, use `cort context <symbol> --content full -f lean` to return only that function or method.
 - **The same literal string many times over a large repo** — `xg "PATTERN" --max-count 20`, only when `command -v xg` succeeds.
 - **One structural shape, one language, no cross-file context** — `ast-grep run -p '<pattern>' --lang <lang>`.
 - **That shape plus who touches it** — `cort struct -p '<pattern>' --lang <lang> -f lean`.
 - **"What breaks if I change X" / "who reaches this" / "what must change to remove X"** — `cort impact --symbol <name[,name2]> --depth <n> -f lean`. This is `cort`'s reason to exist: each extra hop costs `cort` one query and costs `rg` a fresh grep *plus* a read of every hit to learn the next hop's names. Use `--depth 3` (default) for real blast radius; `--depth 1` for direct callers.
 - **"What else deals with X", narrowly** — `cort context <symbol-or-query> -f lean`, budgeted to about 1500 tokens. Pass `--content full` only when you need the whole body.
+- **Read a file or line range that may be needed again** — `cort read <file> [--start N] [--end N] -f lean`. The first read is persisted; an unchanged repeat reports `source=store` and is returned from SQLite. Use `cort recall <query> -f lean` to FTS-search only what has already been read. Both require one prior `cort index`.
 
 Always pass `-f lean`: it is the same answer at about a fifth of the tokens (one row per result, no ids). Omit it only when you need machine-parseable JSON.
 

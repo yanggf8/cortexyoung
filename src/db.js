@@ -6,7 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CortError } from './errors.js';
 
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 const SCHEMA_SQL = fs.readFileSync(fileURLToPath(new URL('./schema.sql', import.meta.url)), 'utf8');
 
@@ -36,6 +36,7 @@ export function ensureSchema(db) {
   db.exec(SCHEMA_SQL);
   const existing = getMeta(db, 'SCHEMA_VERSION');
   if (existing === null) setMeta(db, 'SCHEMA_VERSION', String(SCHEMA_VERSION));
+  else if (existing === '1' && SCHEMA_VERSION === 2) setMeta(db, 'SCHEMA_VERSION', String(SCHEMA_VERSION));
   else if (existing !== String(SCHEMA_VERSION)) {
     throw new CortError('schema_version_mismatch', { found: existing, expected: SCHEMA_VERSION });
   }

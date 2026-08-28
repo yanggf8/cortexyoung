@@ -62,6 +62,37 @@ test('extractFile produces 1-indexed lines and V6-shaped chunk ids', () => {
   assert.ok(out.chunks.every((c) => c.start_line >= 1));
 });
 
+test('Rust functions and impl methods are symbol-scoped AST chunks', () => {
+  const body = [
+    'fn alpha(x: i32) -> i32 {',
+    '    x + 1',
+    '}',
+    '',
+    'struct Worker;',
+    'impl Worker {',
+    '    pub async fn work(&self) -> i32 {',
+    '        alpha(1)',
+    '    }',
+    '}',
+    '',
+  ].join('\n');
+  const abs = tmpFile('main.rs', body);
+  const out = extractFile({
+    bin: resolveAstGrepBin(), projectId: 'p', filePath: 'main.rs', absPath: abs, source: body,
+  });
+  assert.equal(out.unparsed, false);
+  const alpha = out.chunks.find((c) => c.symbol_name === 'alpha');
+  const work = out.chunks.find((c) => c.symbol_name === 'work');
+  assert.equal(alpha.start_line, 1);
+  assert.equal(alpha.end_line, 3);
+  assert.equal(alpha.language, 'Rust');
+  assert.equal(alpha.content, 'fn alpha(x: i32) -> i32 {\n    x + 1\n}');
+  assert.equal(work.start_line, 7);
+  assert.equal(work.end_line, 9);
+  assert.ok(work.content.includes('async fn work'));
+  assert.ok(out.chunks.every((c) => c.chunk_source === 'ast'));
+});
+
 test('edges are attributed to the innermost containing chunk', () => {
   const abs = tmpFile('k.ts', TS);
   const out = extractFile({

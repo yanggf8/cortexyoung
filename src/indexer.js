@@ -11,7 +11,7 @@ export const IGNORE_DIRS = new Set([
   'target', 'coverage', '.next', '.cache',
 ]);
 
-export const SOURCE_EXT = new Set(['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.py']);
+export const SOURCE_EXT = new Set(['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.py', '.rs']);
 
 export function walkFiles(root) {
   const out = [];
@@ -117,6 +117,7 @@ export function statusOf({ db, root, projectId }) {
     indexed: true,
     files: db.prepare('SELECT COUNT(*) c FROM file_state WHERE project_id = ?').get(projectId).c,
     chunks: db.prepare('SELECT COUNT(*) c FROM chunks WHERE project_id = ?').get(projectId).c,
+    readings: db.prepare('SELECT COUNT(*) c FROM reading_notes WHERE project_id = ?').get(projectId).c,
     relationships: db.prepare(`SELECT COUNT(*) c FROM relationships r
       JOIN chunks s ON s.chunk_id = r.source_chunk_id WHERE s.project_id = ?`).get(projectId).c,
     extractor_version: proj.extractor_version,

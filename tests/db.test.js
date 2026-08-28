@@ -29,6 +29,18 @@ test('ensureSchema is idempotent and records the schema version', () => {
   assert.equal(getMeta(db, 'SCHEMA_VERSION'), String(SCHEMA_VERSION));
 });
 
+test('ensureSchema upgrades a v1 database with the reading-notes FTS layer', () => {
+  const db = openDb(':memory:');
+  db.exec(`CREATE TABLE _cortex_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    INSERT INTO _cortex_meta (key, value) VALUES ('SCHEMA_VERSION', '1');`);
+  ensureSchema(db);
+  assert.equal(getMeta(db, 'SCHEMA_VERSION'), String(SCHEMA_VERSION));
+  const tables = db.prepare("SELECT name FROM sqlite_master WHERE type IN ('table', 'view')").all()
+    .map((row) => row.name);
+  assert.ok(tables.includes('reading_notes'));
+  assert.ok(tables.includes('reading_notes_fts'));
+});
+
 test('schema uses the V6 column names required by the spec', () => {
   const db = fresh();
   const cols = (t) => db.prepare(`PRAGMA table_info(${t})`).all().map((r) => r.name);
@@ -38,6 +50,9 @@ test('schema uses the V6 column names required by the spec', () => {
   assert.ok(!cols('chunks').includes('embedding'));
   assert.ok(cols('relationships').includes('rel_type'));
   assert.ok(cols('file_state').includes('file_content_hash'));
+  assert.ok(cols('reading_notes').includes('source_hash'));
+  assert.ok(cols('reading_notes').includes('ends_at_eof'));
+  assert.ok(cols('reading_notes').includes('read_count'));
   const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((r) => r.name);
   assert.ok(!tables.includes('unresolved_refs'));
 });

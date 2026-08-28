@@ -123,3 +123,22 @@ test('short content is untouched and not flagged', () => {
   assert.equal(out.seeds[0].content_truncated, false);
   assert.ok(!out.seeds[0].content.endsWith('…'));
 });
+
+test('a Rust symbol returns only its function body, not the rest of a large file', () => {
+  const body = [
+    'fn wanted() -> i32 {',
+    '    1',
+    '}',
+    '',
+    'fn unrelated_secret() -> i32 {',
+    '    999',
+    '}',
+    '',
+  ].join('\n');
+  const { root, db, projectId, bin } = indexed({ 'src/main.rs': body });
+  const out = contextCommand({ db, bin, root, projectId, query: 'wanted', fullContent: true });
+  assert.equal(out.resolution, 'exact_symbol');
+  assert.equal(out.seeds.length, 1);
+  assert.equal(out.seeds[0].content, 'fn wanted() -> i32 {\n    1\n}');
+  assert.ok(!out.seeds[0].content.includes('unrelated_secret'));
+});

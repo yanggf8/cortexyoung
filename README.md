@@ -2,16 +2,27 @@
 
 `cort` is an offline code-intelligence CLI built on `ast-grep` (the only parser, never `sg`) and SQLite. One repo checkout, one SQLite index per project, no embeddings, no cloud DB, no servers.
 
-Four shipped commands (plus `status`/`projects`/`delete` utilities):
+Six shipped commands (plus `status`/`projects`/`delete` utilities):
 
 - `cort index [--incremental] [path]` — build or incrementally refresh the index (`ast-grep` + SQLite)
 - `cort struct -p '<pattern>' --lang <lang>` — structural search joined to enclosing symbols + 3 neighbours
 - `cort context <symbol-or-query>` — "what else deals with X" (exact symbol or FTS recall, depth-1 neighbours, ~1500-token budget; seed bodies are head-truncated to 12 lines, pass `--content full` for the whole body)
 - `cort impact --symbol <name[,name2,...]>` — reverse dependents (depth 3); accepts a comma-separated batch
 - `cort impact --symbol <name>` — "what breaks if I change X" (reverse dependents, depth 3)
+- `cort read <file> [--start N] [--end N]` — read a file or line range and persist it as a reading note; unchanged repeats come from SQLite
+- `cort recall <query>` — FTS lookup over previously read files/fragments (default 12-line heads; pass `--content full` for stored bodies)
 
-All three query verbs take `-f lean`: the same answer as one tab-separated row per result, at about a
+All query/read verbs take `-f lean`: the same answer in a compact agent-oriented format, at about a
 fifth of the tokens of the default JSON. Agents should pass it; see "Token cost" below.
+
+Rust (`.rs`) is indexed through the pinned `ast-grep` 0.45.2 rule pack. Top-level functions and `impl`
+methods are stored as symbol-scoped chunks, so `cort context <symbol> --content full -f lean` returns one
+function body rather than forcing an agent to read a large source file.
+
+Reading notes are content-addressed and project-local. `cort read` records the exact file/range on first
+use and reports `source:"store"` on an unchanged repeat. Each entry carries file hash, size, and mtime;
+`cort recall` validates them and removes entries whose source changed, so stale text is never returned as
+a remembered reading. Run `cort index` once before using either command.
 
 Routing for agents is in `skills/ast-grep/SKILL.md` — it states when to use `rg`, `ast-grep run`, `cort struct`/`context`/`impact`, and `xg`.
 
@@ -152,6 +163,9 @@ has been run yet.
 5. **Name-based target resolution:** relationship targets are resolved by symbol name. A same-named symbol in an unimported file can still surface as `AMBIGUOUS`, even if it is not actually imported.
 6. **`--lang` is required on `struct`:** `cort struct -p '<pattern>' --lang <lang>` fails with `{"error":"missing_lang"}` if `--lang` is absent. It also drives the pattern pre-flight that turns a malformed pattern into `{"error":"parse_failed"}` instead of a silent empty result. The binary is `ast-grep`, never `sg`.
 7. **FTS tokenizer is bare `unicode61`:** the design calls for `unicode61 "remove_diacritics 1" "tokenchars ._$"`, but the bundled SQLite (3.49.2 via `better-sqlite3` 11.10.0) rejects every parameterised `unicode61` form. Consequence: `cort context` keyword recall splits identifiers on `.`, `_` and `$` — searching `foo.bar` matches `foo` and `bar` separately, and diacritics are not folded. CJK still tokenizes. `src/schema.sql` carries a `NOTE` and reverting is one line once a SQLite build accepts the parameters.
+8. **Reading recall is lexical and source-validated:** `cort recall` searches only fragments previously
+   captured by `cort read`; it is FTS5, not semantic memory. Changed or deleted source files invalidate
+   their stored readings. Reading notes survive full and incremental re-indexing when the source is unchanged.
 
 ## What is deliberately not built
 

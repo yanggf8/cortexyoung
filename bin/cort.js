@@ -9,6 +9,7 @@ import { computeStale } from '../src/staleness.js';
 import { structCommand } from '../src/struct.js';
 import { contextCommand } from '../src/context.js';
 import { impactCommand } from '../src/impact.js';
+import { readFragment, recallReadings } from '../src/readings.js';
 import { parseFormat, render, FORMAT } from '../src/render.js';
 
 export function parseArgs(argv) {
@@ -24,7 +25,7 @@ export function parseArgs(argv) {
   return out;
 }
 
-const KNOWN_COMMANDS = ['index', 'status', 'projects', 'delete', 'struct', 'context', 'impact'];
+const KNOWN_COMMANDS = ['index', 'status', 'projects', 'delete', 'struct', 'context', 'impact', 'read', 'recall'];
 
 // `--help` parses into a flag like any other, so without this every command would run its own
 // side effects and ignore it — `cort index --help` indexed the cwd instead of explaining itself.
@@ -38,6 +39,8 @@ const USAGE = {
     struct: "cort struct -p '<pattern>' --lang <lang> [-g <glob>] [--budget <n>] [-f json|lean]",
     context: 'cort context <symbol|query> [--budget <n>] [--include-ambiguous] [--content full] [-f json|lean]',
     impact: 'cort impact --symbol <name> [--depth <n>] [-f json|lean]',
+    read: 'cort read <file> [--start <line>] [--end <line>] [-f json|lean]',
+    recall: 'cort recall <query> [--limit <n>] [--content full] [-f json|lean]',
   },
   env: {
     CORT_CACHE_DIR: 'where indexes live (default ~/.cache/cortex-ng)',
@@ -141,6 +144,29 @@ async function main() {
     const { real, projectId, db } = openProject(process.cwd());
     const format = resolveFormat(flags);
     emit(impactCommand({ db, bin, root: real, projectId, symbol, depth: Number(flags.depth ?? 3) }), format, 'impact');
+    return;
+  }
+
+  if (command === 'read') {
+    const filePath = positional[1];
+    const { real, projectId, db } = openProject(process.cwd());
+    const format = resolveFormat(flags);
+    emit(withBusyRetry(() => readFragment({
+      db, root: real, projectId, filePath,
+      startLine: flags.start, endLine: flags.end,
+    })), format, 'read');
+    return;
+  }
+
+  if (command === 'recall') {
+    const query = positional[1];
+    if (typeof query !== 'string') throw new CortError('missing_query', { hint: 'cort recall <query>' });
+    const { real, projectId, db } = openProject(process.cwd());
+    const format = resolveFormat(flags);
+    emit(withBusyRetry(() => recallReadings({
+      db, root: real, projectId, query,
+      limit: flags.limit ?? 5, fullContent: flags.content === 'full',
+    })), format, 'recall');
     return;
   }
 

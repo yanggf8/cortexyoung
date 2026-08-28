@@ -20,6 +20,20 @@ test('walkFiles skips ignored dirs and non-source extensions', () => {
   assert.deepEqual(walkFiles(root), ['src/alpha.ts', 'src/helper.ts']);
 });
 
+test('walkFiles includes Rust sources and fullIndex stores function fragments', () => {
+  const { root, db, projectId, bin } = setup({
+    'src/main.rs': 'fn small() -> i32 {\n    1\n}\n\nfn other() -> i32 {\n    2\n}\n',
+    'README.md': 'not source',
+  });
+  assert.deepEqual(walkFiles(root), ['src/main.rs']);
+  const stats = fullIndex({ db, bin, root, projectId });
+  assert.equal(stats.files, 1);
+  assert.equal(stats.unparsed, 0);
+  const chunks = db.prepare("SELECT * FROM chunks WHERE file_path = 'src/main.rs' ORDER BY start_line").all();
+  assert.deepEqual(chunks.map((c) => c.symbol_name), ['small', 'other']);
+  assert.equal(chunks[0].content, 'fn small() -> i32 {\n    1\n}');
+});
+
 test('a full index writes chunks, fts rows, file_state and meta', () => {
   const { root, db, projectId, bin } = setup();
   const stats = fullIndex({ db, bin, root, projectId });
@@ -105,6 +119,7 @@ test('statusOf reports the indexed project without touching ast-grep', () => {
   assert.equal(s.project_id, projectId);
   assert.equal(s.path, root);
   assert.equal(s.files, 2);
+  assert.equal(s.readings, 0);
   assert.equal(s.extractor_version, extractorVersion());
   assert.equal(s.git_head, null, 'the fixture is not a git repo');
 });

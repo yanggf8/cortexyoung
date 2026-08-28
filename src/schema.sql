@@ -73,3 +73,42 @@ CREATE TRIGGER IF NOT EXISTS chunks_fts_update AFTER UPDATE ON chunks BEGIN
   INSERT INTO chunks_fts(rowid, content, symbol_name, file_path)
     VALUES (NEW.rowid, NEW.content, NEW.symbol_name, NEW.file_path);
 END;
+
+CREATE TABLE IF NOT EXISTS reading_notes (
+  reading_id INTEGER PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(project_id) ON DELETE CASCADE,
+  file_path TEXT NOT NULL,
+  start_line INTEGER NOT NULL CHECK(start_line >= 1),
+  end_line INTEGER NOT NULL CHECK(end_line >= start_line),
+  ends_at_eof INTEGER NOT NULL CHECK(ends_at_eof IN (0, 1)),
+  content TEXT NOT NULL,
+  source_hash TEXT NOT NULL,
+  source_mtime_ms REAL NOT NULL,
+  source_size INTEGER NOT NULL,
+  read_count INTEGER NOT NULL DEFAULT 1,
+  first_read_at INTEGER NOT NULL,
+  last_read_at INTEGER NOT NULL,
+  UNIQUE(project_id, file_path, start_line, end_line)
+);
+CREATE INDEX IF NOT EXISTS idx_reading_notes_file
+  ON reading_notes(project_id, file_path, start_line, end_line);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS reading_notes_fts USING fts5(
+  content, file_path,
+  content=reading_notes, content_rowid=reading_id,
+  tokenize='unicode61'
+);
+CREATE TRIGGER IF NOT EXISTS reading_notes_fts_insert AFTER INSERT ON reading_notes BEGIN
+  INSERT INTO reading_notes_fts(rowid, content, file_path)
+    VALUES (NEW.reading_id, NEW.content, NEW.file_path);
+END;
+CREATE TRIGGER IF NOT EXISTS reading_notes_fts_delete AFTER DELETE ON reading_notes BEGIN
+  INSERT INTO reading_notes_fts(reading_notes_fts, rowid, content, file_path)
+    VALUES('delete', OLD.reading_id, OLD.content, OLD.file_path);
+END;
+CREATE TRIGGER IF NOT EXISTS reading_notes_fts_update AFTER UPDATE ON reading_notes BEGIN
+  INSERT INTO reading_notes_fts(reading_notes_fts, rowid, content, file_path)
+    VALUES('delete', OLD.reading_id, OLD.content, OLD.file_path);
+  INSERT INTO reading_notes_fts(rowid, content, file_path)
+    VALUES (NEW.reading_id, NEW.content, NEW.file_path);
+END;

@@ -1,0 +1,40 @@
+id: cort-rust-chunk-free-function
+language: Rust
+severity: hint
+message: chunk:function
+rule:
+  kind: function_item
+  all:
+    - has: { field: name, pattern: $NAME }
+    - not:
+        inside:
+          stopBy: end
+          any:
+            - { kind: impl_item }
+            - { kind: trait_item }
+---
+id: cort-rust-chunk-impl-method
+language: Rust
+severity: hint
+message: chunk:method
+rule:
+  kind: function_item
+  all:
+    - has: { field: name, pattern: $NAME }
+    - inside:
+        kind: impl_item
+        stopBy: end
+        has: { field: type, pattern: $OWNER }
+---
+id: cort-rust-chunk-trait-default-method
+language: Rust
+severity: hint
+message: chunk:method
+rule:
+  kind: function_item
+  all:
+    - has: { field: name, pattern: $NAME }
+    - inside:
+        kind: trait_item
+        stopBy: end
+        has: { field: name, pattern: $OWNER }

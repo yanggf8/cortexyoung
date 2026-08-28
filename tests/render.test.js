@@ -90,3 +90,20 @@ test('unknown commands and json format fall through to the JSON contract', () =>
   assert.equal(render('status', FORMAT.LEAN, payload), `${JSON.stringify(payload, null, 2)}\n`);
   assert.equal(render('impact', FORMAT.JSON, payload), `${JSON.stringify(payload, null, 2)}\n`);
 });
+
+test('lean reading output identifies cache provenance and keeps stored content', () => {
+  const reading = {
+    file_path: 'src/main.rs', start_line: 10, end_line: 12,
+    source: 'store', read_count: 2, content: 'fn work() {\n}',
+  };
+  const out = render('read', FORMAT.LEAN, reading);
+  assert.match(out, /^# read src\/main\.rs:10-12 source=store reads=2$/m);
+  assert.ok(out.includes('fn work()'));
+
+  const recall = render('recall', FORMAT.LEAN, {
+    query: 'work', reading_count: 1, truncated_query: false,
+    readings: [{ ...reading, content_truncated: false, last_read_at: 1 }],
+  });
+  assert.match(recall, /^# recall work readings=1 truncated_query=false$/m);
+  assert.match(recall, /^src\/main\.rs:10-12\treads=2$/m);
+});

@@ -66,3 +66,17 @@ test('index without --help still indexes, so the guard did not swallow the comma
   assert.ok(payload.chunks > 0);
   assert.equal(fs.readdirSync(cache).length, 1);
 });
+
+test('read persists a fragment and recall finds it through FTS', () => {
+  const { cwd, cache } = sandbox();
+  assert.equal(runCort(['index'], { cwd, cache }).code, 0);
+  const first = runCort(['read', 'src/alpha.ts', '--start', '2', '--end', '2'], { cwd, cache });
+  assert.equal(first.code, 0);
+  assert.equal(first.payload.source, 'filesystem');
+  const second = runCort(['read', 'src/alpha.ts', '--start', '2', '--end', '2'], { cwd, cache });
+  assert.equal(second.payload.source, 'store');
+  const recalled = runCort(['recall', 'alpha'], { cwd, cache });
+  assert.equal(recalled.code, 0);
+  assert.equal(recalled.payload.reading_count, 1);
+  assert.equal(recalled.payload.readings[0].file_path, 'src/alpha.ts');
+});
