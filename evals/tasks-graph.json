@@ -1,0 +1,321 @@
+{
+  "venue": "/home/yanggf/a/cct",
+  "note": "Graph-required tasks. Unlike evals/tasks.json (single-hop or literal-answerable), these cannot be answered without a transitive relationship walk, so they are the cells the stop/go gate was supposed to run on.",
+  "tasks": [
+    {
+      "id": "blast-radius-3hop-getcurrenttimeet",
+      "prompt": "What breaks if getCurrentTimeET changes its return shape? Name every function that reaches it within 3 hops, and say how far each one is.",
+      "venue": "/home/yanggf/a/cct",
+      "seed_symbol": "getCurrentTimeET",
+      "min_hops_required": 3,
+      "expected_symbols": [
+        "handlePreMarketBriefing",
+        "handleEndOfDaySummary",
+        "isMarketHours",
+        "getCurrentDateET",
+        "getLastNTradingDays",
+        "handleDirectRequest",
+        "handleReportsStatus",
+        "handleReportRoutes"
+      ],
+      "by_hop": {
+        "1": [
+          "handlePreMarketBriefing",
+          "handleEndOfDaySummary",
+          "isMarketHours",
+          "getCurrentDateET",
+          "getLastNTradingDays"
+        ],
+        "2": [
+          "handleDirectRequest",
+          "handleReportsStatus"
+        ],
+        "3": [
+          "handleReportRoutes"
+        ]
+      },
+      "expected_files": [
+        "src/modules/handlers/briefing-handlers.ts",
+        "src/modules/handlers/end-of-day-handlers.ts",
+        "src/modules/trading-calendar.ts",
+        "src/modules/enhanced-request-handler.ts",
+        "src/routes/report-routes.ts"
+      ],
+      "why_graph_required": "Hops 2 and 3 are not textual neighbours of getCurrentTimeET: each hop hands back names that must be searched again, and every hit has to be opened to learn which symbol encloses it.",
+      "label_provenance": "Answer set from the shipped pack; every dependent independently textually confirmed by evals/verify-impact.mjs at precision 1.0."
+    },
+    {
+      "id": "transitive-chain-lastntradingdays",
+      "prompt": "List the full transitive chain of functions that depend on getLastNTradingDays within 3 hops, ordered by hop distance.",
+      "venue": "/home/yanggf/a/cct",
+      "seed_symbol": "getLastNTradingDays",
+      "min_hops_required": 3,
+      "expected_symbols": [
+        "handleReportsStatus",
+        "handleReportRoutes",
+        "handleApiV1Request"
+      ],
+      "by_hop": {
+        "1": [
+          "handleReportsStatus"
+        ],
+        "2": [
+          "handleReportRoutes"
+        ],
+        "3": [
+          "handleApiV1Request"
+        ]
+      },
+      "expected_files": [
+        "src/routes/report-routes.ts",
+        "src/routes/api-v1.ts"
+      ],
+      "why_graph_required": "Hops 2 and 3 are not textual neighbours of getLastNTradingDays: each hop hands back names that must be searched again, and every hit has to be opened to learn which symbol encloses it.",
+      "label_provenance": "Answer set from the shipped pack; every dependent independently textually confirmed by evals/verify-impact.mjs at precision 1.0."
+    },
+    {
+      "id": "route-blast-radius-reportsstatus",
+      "prompt": "If handleReportsStatus is deleted, which handlers and routes must change? Include indirect dependents out to 3 hops.",
+      "venue": "/home/yanggf/a/cct",
+      "seed_symbol": "handleReportsStatus",
+      "min_hops_required": 3,
+      "expected_symbols": [
+        "handleReportRoutes",
+        "handleApiV1Request",
+        "handleDirectRequest"
+      ],
+      "by_hop": {
+        "1": [
+          "handleReportRoutes"
+        ],
+        "2": [
+          "handleApiV1Request"
+        ],
+        "3": [
+          "handleDirectRequest"
+        ]
+      },
+      "expected_files": [
+        "src/routes/report-routes.ts",
+        "src/routes/api-v1.ts",
+        "src/modules/enhanced-request-handler.ts"
+      ],
+      "why_graph_required": "Hops 2 and 3 are not textual neighbours of handleReportsStatus: each hop hands back names that must be searched again, and every hit has to be opened to learn which symbol encloses it.",
+      "label_provenance": "Answer set from the shipped pack; every dependent independently textually confirmed by evals/verify-impact.mjs at precision 1.0."
+    },
+    {
+      "id": "storage-blast-radius-backtesting",
+      "prompt": "Which functions reach createBacktestingStorage within 3 hops? Group them by hop distance.",
+      "venue": "/home/yanggf/a/cct",
+      "seed_symbol": "createBacktestingStorage",
+      "min_hops_required": 3,
+      "expected_symbols": [
+        "getBacktestRunStatus",
+        "getStoredBacktestResults",
+        "getStoredPerformanceMetrics",
+        "listBacktestHistory",
+        "cleanupOldBacktestData",
+        "runValidationInBackground",
+        "runWalkForwardInBackground",
+        "runMonteCarloInBackground",
+        "handleModelValidation",
+        "handleMonteCarloSimulationDirect",
+        "handleRunBacktest",
+        "handleBacktestStatus",
+        "handleGetBacktestResults",
+        "handleGetPerformanceMetrics",
+        "handleBacktestHistory",
+        "handleBacktestingRoutes",
+        "handleGetValidationResults",
+        "handleWalkForwardOptimization",
+        "handleMonteCarloSimulation",
+        "handleApiV1Request"
+      ],
+      "by_hop": {
+        "1": [
+          "getBacktestRunStatus",
+          "getStoredBacktestResults",
+          "getStoredPerformanceMetrics",
+          "listBacktestHistory",
+          "cleanupOldBacktestData",
+          "runValidationInBackground",
+          "runWalkForwardInBackground",
+          "runMonteCarloInBackground",
+          "handleModelValidation",
+          "handleMonteCarloSimulationDirect",
+          "handleRunBacktest",
+          "handleBacktestStatus",
+          "handleGetBacktestResults",
+          "handleGetPerformanceMetrics",
+          "handleBacktestHistory"
+        ],
+        "2": [
+          "handleBacktestingRoutes",
+          "handleGetValidationResults",
+          "handleWalkForwardOptimization",
+          "handleMonteCarloSimulation"
+        ],
+        "3": [
+          "handleApiV1Request"
+        ]
+      },
+      "expected_files": [
+        "src/modules/backtesting-storage.ts",
+        "src/routes/backtesting-routes.ts",
+        "src/routes/api-v1.ts"
+      ],
+      "why_graph_required": "Hops 2 and 3 are not textual neighbours of createBacktestingStorage: each hop hands back names that must be searched again, and every hit has to be opened to learn which symbol encloses it.",
+      "label_provenance": "Answer set from the shipped pack; every dependent independently textually confirmed by evals/verify-impact.mjs at precision 1.0."
+    },
+    {
+      "id": "hub-blast-radius-loginfo",
+      "prompt": "What is the 3-hop blast radius of making logInfo take a required context object as its first argument? Group the answer by hop.",
+      "venue": "/home/yanggf/a/cct",
+      "seed_symbol": "logInfo",
+      "min_hops_required": 3,
+      "expected_symbols": [
+        "getFactTableData",
+        "getFactTableDataWithRange",
+        "batchStoreAnalysisResults",
+        "trackCronHealth",
+        "getSymbolAnalysisByDate",
+        "getRealActualPrice",
+        "validateDirectionAccuracy",
+        "performDualAIComparison",
+        "batchDualAIAnalysis",
+        "runEnhancedAnalysis",
+        "runSentimentFirstAnalysis",
+        "runDualAIAnalysisEnhanced",
+        "runEnhancedPreMarketAnalysis",
+        "validateSentimentEnhancement",
+        "analyzeSymbolWithFallback",
+        "batchAnalyzeSymbolsForCron",
+        "runCompleteAnalysisPipeline",
+        "analyzeSingleSymbol",
+        "gatherComprehensiveNewsForSymbol",
+        "performDualAISentimentAnalysis",
+        "analyzeSymbolWithFineGrainedSentiment",
+        "storeFactTableData",
+        "storeSymbolAnalysis",
+        "performDualAIComparisonWithRetry",
+        "enhancedBatchDualAIAnalysis",
+        "analyzeBatch",
+        "analyzeSymbol",
+        "runBasicAnalysis",
+        "processAnalysisDataForDate",
+        "handleScheduledEvent",
+        "getModelPrediction",
+        "generateIntradayAnalysis",
+        "generateMarketPulse",
+        "getSymbolSentimentData",
+        "handleSentimentAnalysis",
+        "handleSymbolSentiment",
+        "handleSectorSentiment",
+        "handleFineGrainedSymbol",
+        "handleFineGrainedBatch",
+        "runWeeklyMarketCloseAnalysis",
+        "runPreMarketAnalysis",
+        "scheduled",
+        "handleJobTrigger",
+        "handleSentimentRoutes"
+      ],
+      "by_hop": {
+        "1": [
+          "getFactTableData",
+          "getFactTableDataWithRange",
+          "batchStoreAnalysisResults",
+          "trackCronHealth",
+          "getSymbolAnalysisByDate",
+          "getRealActualPrice",
+          "validateDirectionAccuracy",
+          "performDualAIComparison",
+          "batchDualAIAnalysis",
+          "runEnhancedAnalysis",
+          "runSentimentFirstAnalysis",
+          "runDualAIAnalysisEnhanced",
+          "runEnhancedPreMarketAnalysis",
+          "validateSentimentEnhancement",
+          "analyzeSymbolWithFallback",
+          "batchAnalyzeSymbolsForCron",
+          "runCompleteAnalysisPipeline",
+          "analyzeSingleSymbol",
+          "gatherComprehensiveNewsForSymbol",
+          "performDualAISentimentAnalysis",
+          "analyzeSymbolWithFineGrainedSentiment",
+          "getFactTableData",
+          "getFactTableDataWithRange",
+          "storeFactTableData",
+          "storeSymbolAnalysis",
+          "batchStoreAnalysisResults",
+          "trackCronHealth",
+          "getRealActualPrice",
+          "validateDirectionAccuracy",
+          "performDualAIComparisonWithRetry",
+          "enhancedBatchDualAIAnalysis",
+          "performDualAIComparison",
+          "batchDualAIAnalysis",
+          "runEnhancedAnalysis",
+          "runDualAIAnalysisEnhanced",
+          "runEnhancedPreMarketAnalysis",
+          "validateSentimentEnhancement",
+          "analyzeBatch",
+          "analyzeSymbol",
+          "analyzeSymbolWithFineGrainedSentiment",
+          "gatherComprehensiveNewsForSymbol",
+          "analyzeSymbolWithFallback",
+          "batchAnalyzeSymbolsForCron",
+          "runCompleteAnalysisPipeline",
+          "analyzeSingleSymbol"
+        ],
+        "2": [
+          "runBasicAnalysis",
+          "processAnalysisDataForDate",
+          "handleScheduledEvent",
+          "analyzeSingleSymbol",
+          "getModelPrediction",
+          "processAnalysisDataForDate",
+          "generateIntradayAnalysis",
+          "generateMarketPulse",
+          "getSymbolSentimentData",
+          "handleScheduledEvent",
+          "handleSentimentAnalysis",
+          "handleSymbolSentiment",
+          "handleSectorSentiment",
+          "handleFineGrainedSymbol",
+          "handleFineGrainedBatch"
+        ],
+        "3": [
+          "runWeeklyMarketCloseAnalysis",
+          "runPreMarketAnalysis",
+          "scheduled",
+          "runBasicAnalysis",
+          "handleJobTrigger",
+          "handleSentimentRoutes"
+        ]
+      },
+      "expected_files": [
+        "archive/legacy-js-modules/data.js",
+        "archive/legacy-js-modules/dual-ai-analysis.js",
+        "archive/legacy-js-modules/enhanced_analysis.js",
+        "archive/legacy-js-modules/per_symbol_analysis.js",
+        "src/modules/data.ts",
+        "src/modules/dual-ai-analysis.ts",
+        "src/modules/enhanced_analysis.ts",
+        "src/modules/optimized-ai-analysis.ts",
+        "src/modules/per_symbol_analysis.ts",
+        "archive/legacy-js-modules/analysis.js",
+        "archive/legacy-js-modules/scheduler.js",
+        "src/modules/analysis.ts",
+        "src/modules/backtesting-engine.ts",
+        "src/modules/intraday-data-bridge.ts",
+        "src/modules/pre-market-data-bridge.ts",
+        "src/modules/scheduler.ts",
+        "src/routes/sentiment-routes.ts",
+        "src/index.ts",
+        "src/routes/jobs-routes.ts"
+      ],
+      "why_graph_required": "Hops 2 and 3 are not textual neighbours of logInfo: each hop hands back names that must be searched again, and every hit has to be opened to learn which symbol encloses it.",
+      "label_provenance": "Answer set from the shipped pack; every dependent independently textually confirmed by evals/verify-impact.mjs at precision 1.0."
+    }
+  ]
+}
