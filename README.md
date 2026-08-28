@@ -132,6 +132,13 @@ across 5 chains (`evals/verify-impact.mjs`).
 strings.** The claim "graph adds correctness nowhere" is withdrawn; it was only ever tested where the graph
 could not apply.
 
+What is still unproven, and the prerequisites for the end-to-end run that would settle it, are recorded in
+`docs/2026-08-28-end-to-end-eval-wip.md`: the metric-capture path exists (`claude -p --output-format
+stream-json` exposes every `tool_result` payload and `permission_denials`), the agent config must be isolated
+or 16,067 tokens of hooks/plugin text enter every cell and swamp a ~1.1k lean payload, and `projectId` is
+derived from `cwd` — running `impact` for the `cct` venue from this repo silently returns `seeds=0`. No cell
+has been run yet.
+
 ## Documented limitations (contracts, not apologies)
 
 1. **Index staleness:** the index lags unsaved edits and brand-new untracked files. Every `cort` command returns JSON with `index_is_stale`; when `true`, run `cort index --incremental` before trusting the answer, or fall back to `rg`. A brand-new untracked file is invisible to `cort` until the next index. `cort index` must have been run once for the project.
