@@ -12,14 +12,17 @@ use cort::impact::{impact_command, DEFAULT_DEPTH};
 use cort::incremental::incremental_index;
 use cort::indexer::{canonicalize_root, full_index, status_of, CanonicalRoot, IndexError};
 use cort::r#struct::{struct_command, StructOptions};
-use cort::readings::{parse_content_mode, read_fragment, recall_readings};
+use cort::readings::{parse_content_mode, read_fragment, recall_readings, ContentMode};
 use cort::render::{parse_format, render, render_error, Format};
 use cort::staleness::compute_stale;
+use cort::usage::{self, CommandRecord};
+use rusqlite::{params, Connection, OpenFlags};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
-const KNOWN_COMMANDS: [&str; 9] = [
+const KNOWN_COMMANDS: [&str; 10] = [
     "index", "status", "projects", "delete", "struct", "context", "impact", "read", "recall",
+    "usage",
 ];
 
 fn usage_value() -> Value {
@@ -35,6 +38,7 @@ fn usage_value() -> Value {
             "impact": "cort impact --symbol <name> [--depth <n>] [-f json|lean]",
             "read": "cort read <file> [--start <line>] [--end <line>] [-f json|lean]",
             "recall": "cort recall <query> [--limit <n>] [--content full] [-f json|lean]",
+            "usage": "cort usage [days] [-f json|lean]",
         },
         "env": {
             "CORT_CACHE_DIR": "where indexes live (default ~/.cache/cortex-ng)",
@@ -101,13 +105,108 @@ fn unwrap_busy<T, E: SqliteErrorCode + std::fmt::Display>(
     }
 }
 
-fn open_project(root: &Path) -> Result<(CanonicalRoot, Db), CortError> {
-    let canon = canonicalize_root(root).map_err(map_index)?;
-    let db = open_db(db_path_for(&canon.path_str)).map_err(|e| {
-        CortError::new("storage_busy", json!({ "message": e.to_string() }))
-    })?;
-    ensure_schema(&db)?;
-    Ok((canon, db))
+fn open_project_tracked(
+    root: &Path,
+    usage: &mut UsageEvent,
+) -> Result<(CanonicalRoot, Db), CortError> {
+    match canonicalize_root(root) {
+        Ok(canon) => {
+            usage.project_id = Some(canon.project_id.clone());
+            let db = open_db(db_path_for(&canon.path_str)).map_err(|e| {
+                CortError::new("storage_busy", json!({ "message": e.to_string() }))
+            })?;
+            ensure_schema(&db)?;
+            Ok((canon, db))
+        }
+        Err(e) => {
+            usage.project_id = Some("_unknown".into());
+            Err(map_index(e))
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct UsageEvent {
+    command: String,
+    project_id: Option<String>,
+    args_summary: String,
+    read_source: Option<String>,
+    requested_content_mode: Option<String>,
+    effective_content_mode: Option<String>,
+    receipt_hit: Option<bool>,
+    index_stale: Option<bool>,
+    saved_bytes: i64,
+}
+
+struct Emit {
+    render_command: Option<&'static str>,
+    format: Format,
+    payload: Value,
+}
+
+fn usage_from_args(args: &[String]) -> UsageEvent {
+    let raw = args.first().map(String::as_str).unwrap_or("");
+    let command = if KNOWN_COMMANDS.contains(&raw) {
+        raw
+    } else {
+        "unknown"
+    };
+    UsageEvent {
+        command: command.to_string(),
+        project_id: None,
+        args_summary: usage::args_summary(None, None, None, None),
+        read_source: None,
+        requested_content_mode: None,
+        effective_content_mode: None,
+        receipt_hit: None,
+        index_stale: None,
+        saved_bytes: 0,
+    }
+}
+
+fn fill_stale(usage: &mut UsageEvent, payload: &Value) {
+    usage.index_stale = payload.get("index_is_stale").and_then(Value::as_bool);
+}
+
+fn stored_omitted_len(db: &Db, project_id: &str, file: &str, start: i64, end: i64) -> i64 {
+    let row = db.query_row(
+        "SELECT content, start_line FROM reading_notes
+          WHERE project_id = ?1 AND file_path = ?2 AND start_line <= ?3 AND end_line >= ?4
+          ORDER BY start_line DESC LIMIT 1",
+        params![project_id, file, start, end],
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+    );
+    match row {
+        Ok((content, note_start)) => usage::omitted_body_len(&content, note_start, start, end),
+        Err(_) => 0,
+    }
+}
+
+fn finish_record(ev: &UsageEvent, status: &str, error_code: Option<&str>, bytes_out: usize) {
+    let rec = CommandRecord {
+        now_ms: usage::now_ms(),
+        project_id: ev.project_id.clone(),
+        command: ev.command.clone(),
+        args_summary: ev.args_summary.clone(),
+        status: status.to_string(),
+        error_code: error_code.map(str::to_string),
+        read_source: ev.read_source.clone(),
+        requested_content_mode: ev.requested_content_mode.clone(),
+        effective_content_mode: ev.effective_content_mode.clone(),
+        receipt_hit: ev.receipt_hit,
+        index_stale: ev.index_stale,
+        bytes_out: bytes_out as i64,
+        saved_bytes: ev.saved_bytes,
+    };
+    usage::record_command(&rec);
+}
+
+fn render_emit(emit: &Emit) -> String {
+    if emit.render_command == Some("usage") && emit.format == Format::Lean {
+        usage::render_usage_lean(&emit.payload)
+    } else {
+        render(emit.render_command, emit.format, &emit.payload)
+    }
 }
 
 fn resolve_fmt(raw: Option<&str>) -> Result<Format, CortError> {
@@ -150,8 +249,12 @@ fn clap_fail(err: clap::Error) -> CortError {
     )
 }
 
-fn emit(command: Option<&str>, format: Format, payload: &Value) {
-    print!("{}", render(command, format, payload));
+fn content_mode_name(mode: ContentMode) -> &'static str {
+    match mode {
+        ContentMode::Auto => "auto",
+        ContentMode::Receipt => "receipt",
+        ContentMode::Full => "full",
+    }
 }
 
 fn cwd() -> PathBuf {
@@ -249,24 +352,34 @@ struct RecallArgs {
     format: Option<String>,
 }
 
+#[derive(Parser, Debug)]
+#[command(no_binary_name = true, disable_help_flag = true, disable_version_flag = true)]
+struct UsageArgs {
+    #[arg(allow_hyphen_values = true)]
+    days: Option<String>,
+    #[arg(short = 'f', long = "format")]
+    format: Option<String>,
+}
+
 fn pin_bin() -> Result<String, CortError> {
     let bin = resolve_ast_grep_bin()?;
     assert_ast_grep_version(&bin)?;
     Ok(bin)
 }
 
-fn dispatch(args: &[String]) -> Result<(), CortError> {
+fn dispatch(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError> {
     let command = args.first().map(String::as_str);
     match command {
-        Some("index") => cmd_index(&args[1..]),
-        Some("status") => cmd_status(&args[1..]),
-        Some("projects") => cmd_projects(&args[1..]),
-        Some("delete") => cmd_delete(&args[1..]),
-        Some("struct") => cmd_struct(&args[1..]),
-        Some("context") => cmd_context(&args[1..]),
-        Some("impact") => cmd_impact(&args[1..]),
-        Some("read") => cmd_read(&args[1..]),
-        Some("recall") => cmd_recall(&args[1..]),
+        Some("index") => cmd_index(&args[1..], usage),
+        Some("status") => cmd_status(&args[1..], usage),
+        Some("projects") => cmd_projects(&args[1..], usage),
+        Some("delete") => cmd_delete(&args[1..], usage),
+        Some("struct") => cmd_struct(&args[1..], usage),
+        Some("context") => cmd_context(&args[1..], usage),
+        Some("impact") => cmd_impact(&args[1..], usage),
+        Some("read") => cmd_read(&args[1..], usage),
+        Some("recall") => cmd_recall(&args[1..], usage),
+        Some("usage") => cmd_usage(&args[1..], usage),
         other => Err(CortError::new(
             "unknown_command",
             json!({
@@ -277,11 +390,11 @@ fn dispatch(args: &[String]) -> Result<(), CortError> {
     }
 }
 
-fn cmd_index(args: &[String]) -> Result<(), CortError> {
+fn cmd_index(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError> {
     let a = IndexArgs::try_parse_from(args.iter()).map_err(clap_fail)?;
     let bin = pin_bin()?;
     let root = a.root.unwrap_or_else(cwd);
-    let (canon, mut db) = open_project(&root)?;
+    let (canon, mut db) = open_project_tracked(&root, usage)?;
     let stats = unwrap_busy(
         with_busy_retry(|| {
             if a.incremental {
@@ -333,33 +446,58 @@ fn cmd_index(args: &[String]) -> Result<(), CortError> {
             "elapsed_ms": stats.elapsed_ms,
         })
     };
-    emit(None, Format::Json, &payload);
-    Ok(())
+    Ok(Emit {
+        render_command: None,
+        format: Format::Json,
+        payload,
+    })
 }
 
-fn cmd_status(args: &[String]) -> Result<(), CortError> {
+fn cmd_status(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError> {
     let a = RootArgs::try_parse_from(args.iter()).map_err(clap_fail)?;
     let root = a.root.unwrap_or_else(cwd);
-    let (canon, db) = open_project(&root)?;
+    let canon = match canonicalize_root(&root) {
+        Ok(c) => c,
+        Err(e) => {
+            usage.project_id = Some("_unknown".into());
+            return Err(map_index(e));
+        }
+    };
+    usage.project_id = Some(canon.project_id.clone());
+    let db_path = db_path_for(&canon.path_str);
+    if !db_path.exists() {
+        return Ok(Emit {
+            render_command: None,
+            format: Format::Json,
+            payload: json!({
+                "project_id": canon.project_id,
+                "path": canon.path_str,
+                "indexed": false,
+            }),
+        });
+    }
+    let db = Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(
+        |e| CortError::new("storage_busy", json!({ "message": e.to_string() })),
+    )?;
     let st = status_of(&db, &canon.path).map_err(map_index)?;
     if !st.indexed {
-        emit(
-            None,
-            Format::Json,
-            &json!({
+        return Ok(Emit {
+            render_command: None,
+            format: Format::Json,
+            payload: json!({
                 "project_id": st.project_id,
                 "path": st.path,
                 "indexed": false,
             }),
-        );
-        return Ok(());
+        });
     }
     let bin = pin_bin()?;
     let stale = compute_stale(&db, &bin, &canon.path, &st.project_id).map_err(map_index)?;
-    emit(
-        None,
-        Format::Json,
-        &json!({
+    usage.index_stale = Some(stale.index_is_stale);
+    Ok(Emit {
+        render_command: None,
+        format: Format::Json,
+        payload: json!({
             "project_id": st.project_id,
             "path": st.path,
             "indexed": true,
@@ -374,11 +512,10 @@ fn cmd_status(args: &[String]) -> Result<(), CortError> {
             "deleted_files": stale.deleted_files,
             "changed_files": stale.changed_files,
         }),
-    );
-    Ok(())
+    })
 }
 
-fn cmd_projects(args: &[String]) -> Result<(), CortError> {
+fn cmd_projects(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, CortError> {
     let _a = FormatOnlyArgs::try_parse_from(args.iter()).map_err(clap_fail)?;
     let rows: Vec<Value> = list_projects()
         .into_iter()
@@ -393,24 +530,33 @@ fn cmd_projects(args: &[String]) -> Result<(), CortError> {
             })
         })
         .collect();
-    emit(None, Format::Json, &Value::Array(rows));
-    Ok(())
+    Ok(Emit {
+        render_command: None,
+        format: Format::Json,
+        payload: Value::Array(rows),
+    })
 }
 
-fn cmd_delete(args: &[String]) -> Result<(), CortError> {
+fn cmd_delete(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError> {
     let a = RootArgs::try_parse_from(args.iter()).map_err(clap_fail)?;
     let root = a.root.unwrap_or_else(cwd);
-    let canon = canonicalize_root(&root).map_err(map_index)?;
+    let canon = match canonicalize_root(&root) {
+        Ok(c) => c,
+        Err(e) => {
+            usage.project_id = Some("_unknown".into());
+            return Err(map_index(e));
+        }
+    };
+    usage.project_id = Some(canon.project_id.clone());
     let r = delete_project(&canon.path_str);
-    emit(
-        None,
-        Format::Json,
-        &json!({ "deleted": r.deleted, "db_path": r.db_path }),
-    );
-    Ok(())
+    Ok(Emit {
+        render_command: None,
+        format: Format::Json,
+        payload: json!({ "deleted": r.deleted, "db_path": r.db_path }),
+    })
 }
 
-fn cmd_struct(args: &[String]) -> Result<(), CortError> {
+fn cmd_struct(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError> {
     let a = StructArgs::try_parse_from(args.iter()).map_err(clap_fail)?;
     let pattern = a.pattern.filter(|s| !s.is_empty()).ok_or_else(|| {
         CortError::new(
@@ -426,7 +572,7 @@ fn cmd_struct(args: &[String]) -> Result<(), CortError> {
     })?;
     let format = resolve_fmt(a.format.as_deref())?;
     let bin = pin_bin()?;
-    let (canon, db) = open_project(&cwd())?;
+    let (canon, db) = open_project_tracked(&cwd(), usage)?;
     let globs = match a.g {
         Some(g) => vec![g],
         None => Vec::new(),
@@ -441,11 +587,15 @@ fn cmd_struct(args: &[String]) -> Result<(), CortError> {
         &lang,
         StructOptions { globs, budget, file_limit: None },
     )?;
-    emit(Some("struct"), format, &out);
-    Ok(())
+    fill_stale(usage, &out);
+    Ok(Emit {
+        render_command: Some("struct"),
+        format,
+        payload: out,
+    })
 }
 
-fn cmd_context(args: &[String]) -> Result<(), CortError> {
+fn cmd_context(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError> {
     let a = ContextArgs::try_parse_from(args.iter()).map_err(clap_fail)?;
     let query = a.query.ok_or_else(|| {
         CortError::new(
@@ -455,7 +605,7 @@ fn cmd_context(args: &[String]) -> Result<(), CortError> {
     })?;
     let format = resolve_fmt(a.format.as_deref())?;
     let bin = pin_bin()?;
-    let (canon, db) = open_project(&cwd())?;
+    let (canon, db) = open_project_tracked(&cwd(), usage)?;
     let budget = parse_usize_flag(a.budget.as_deref(), DEFAULT_BUDGET);
     let full_content = a.content.as_deref() == Some("full");
     let out = context_command(
@@ -466,11 +616,18 @@ fn cmd_context(args: &[String]) -> Result<(), CortError> {
         &query,
         ContextOptions { budget, include_ambiguous: a.include_ambiguous, full_content },
     )?;
-    emit(Some("context"), format, &out);
-    Ok(())
+    fill_stale(usage, &out);
+    if out.get("resolution").and_then(Value::as_str) == Some("exact_symbol") {
+        usage.args_summary = usage::args_summary(Some(&query), None, None, None);
+    }
+    Ok(Emit {
+        render_command: Some("context"),
+        format,
+        payload: out,
+    })
 }
 
-fn cmd_impact(args: &[String]) -> Result<(), CortError> {
+fn cmd_impact(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError> {
     let a = ImpactArgs::try_parse_from(args.iter()).map_err(clap_fail)?;
     let symbol = a.symbol.filter(|s| !s.is_empty()).ok_or_else(|| {
         CortError::new(
@@ -480,17 +637,22 @@ fn cmd_impact(args: &[String]) -> Result<(), CortError> {
     })?;
     let format = resolve_fmt(a.format.as_deref())?;
     let bin = pin_bin()?;
-    let (canon, db) = open_project(&cwd())?;
+    let (canon, db) = open_project_tracked(&cwd(), usage)?;
     let depth = parse_i64_flag(a.depth.as_deref(), DEFAULT_DEPTH);
     let out = impact_command(&db, &bin, &canon.path, &canon.project_id, &symbol, depth)?;
-    emit(Some("impact"), format, &out);
-    Ok(())
+    fill_stale(usage, &out);
+    usage.args_summary = usage::args_summary(Some(&symbol), None, None, None);
+    Ok(Emit {
+        render_command: Some("impact"),
+        format,
+        payload: out,
+    })
 }
 
-fn cmd_read(args: &[String]) -> Result<(), CortError> {
+fn cmd_read(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError> {
     let a = ReadArgs::try_parse_from(args.iter()).map_err(clap_fail)?;
     let format = resolve_fmt(a.format.as_deref())?;
-    let (canon, db) = open_project(&cwd())?;
+    let (canon, db) = open_project_tracked(&cwd(), usage)?;
     let file = a.file.unwrap_or_default();
     let start = parse_line_flag(a.start.as_deref(), "start")?;
     let end = parse_line_flag(a.end.as_deref(), "end")?;
@@ -514,11 +676,37 @@ fn cmd_read(args: &[String]) -> Result<(), CortError> {
         |w| w.0,
     )?;
     let value = serde_json::to_value(&payload).unwrap_or(Value::Null);
-    emit(Some("read"), format, &value);
-    Ok(())
+    let source = value.get("source").and_then(Value::as_str);
+    let effective = value.get("content_mode").and_then(Value::as_str);
+    usage.read_source = source.map(str::to_string);
+    usage.requested_content_mode = Some(content_mode_name(mode).to_string());
+    usage.effective_content_mode = effective.map(str::to_string);
+    usage.receipt_hit = match mode {
+        ContentMode::Auto => Some(source == Some("store") && effective == Some("receipt")),
+        ContentMode::Full | ContentMode::Receipt => None,
+    };
+    let start_line = value.get("start_line").and_then(Value::as_i64);
+    let end_line = value.get("end_line").and_then(Value::as_i64);
+    let rel = value.get("file_path").and_then(Value::as_str);
+    usage.args_summary = usage::args_summary(None, rel, start_line, end_line);
+    if usage.receipt_hit == Some(true) {
+        let omitted = stored_omitted_len(
+            &db,
+            &canon.project_id,
+            rel.unwrap_or(""),
+            start_line.unwrap_or(1),
+            end_line.unwrap_or(1),
+        );
+        usage.saved_bytes = usage::saved_bytes_for(source, effective, omitted);
+    }
+    Ok(Emit {
+        render_command: Some("read"),
+        format,
+        payload: value,
+    })
 }
 
-fn cmd_recall(args: &[String]) -> Result<(), CortError> {
+fn cmd_recall(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError> {
     let a = RecallArgs::try_parse_from(args.iter()).map_err(clap_fail)?;
     let query = a.query.ok_or_else(|| {
         CortError::new(
@@ -527,7 +715,7 @@ fn cmd_recall(args: &[String]) -> Result<(), CortError> {
         )
     })?;
     let format = resolve_fmt(a.format.as_deref())?;
-    let (canon, db) = open_project(&cwd())?;
+    let (canon, db) = open_project_tracked(&cwd(), usage)?;
     let limit = a
         .limit
         .as_deref()
@@ -548,8 +736,26 @@ fn cmd_recall(args: &[String]) -> Result<(), CortError> {
         |w| w.0,
     )?;
     let value = serde_json::to_value(&payload).unwrap_or(Value::Null);
-    emit(Some("recall"), format, &value);
-    Ok(())
+    Ok(Emit {
+        render_command: Some("recall"),
+        format,
+        payload: value,
+    })
+}
+
+fn cmd_usage(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, CortError> {
+    let a = UsageArgs::try_parse_from(args.iter()).map_err(clap_fail)?;
+    let days = usage::parse_usage_days(a.days.as_deref())?;
+    let format = resolve_fmt(a.format.as_deref())?;
+    let payload = match usage::usage_db_path() {
+        Some(path) => usage::query_usage_at(&path, days, usage::now_ms())?,
+        None => usage::empty_report(days),
+    };
+    Ok(Emit {
+        render_command: Some("usage"),
+        format,
+        payload,
+    })
 }
 
 fn peek_format(args: &[String]) -> Format {
@@ -578,14 +784,21 @@ fn peek_format(args: &[String]) -> Format {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if wants_help(&args) {
-        emit(None, Format::Json, &usage_value());
+        print!("{}", render(None, Format::Json, &usage_value()));
         return;
     }
-    match dispatch(&args) {
-        Ok(()) => {}
+    let mut usage_ev = usage_from_args(&args);
+    match dispatch(&args, &mut usage_ev) {
+        Ok(emitted) => {
+            let rendered = render_emit(&emitted);
+            print!("{rendered}");
+            finish_record(&usage_ev, "ok", None, rendered.len());
+        }
         Err(err) => {
             let format = peek_format(&args);
-            print!("{}", render_error(format, &err));
+            let rendered = render_error(format, &err);
+            print!("{rendered}");
+            finish_record(&usage_ev, "error", Some(&err.code), rendered.len());
             std::process::exit(1);
         }
     }

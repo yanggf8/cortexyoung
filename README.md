@@ -11,6 +11,7 @@ Six shipped commands (plus `status`/`projects`/`delete` utilities):
 - `cort impact --symbol <name>` — "what breaks if I change X" (reverse dependents, depth 3)
 - `cort read <file> [--start N] [--end N]` — read a file or line range and persist it as a reading note; unchanged repeats come from SQLite
 - `cort recall <query>` — FTS lookup over previously read files/fragments (default 12-line heads; pass `--content full` for stored bodies)
+- `cort usage [days]` — local per-machine usage stats (best-effort; 1–90 days, default 30)
 
 All query/read verbs take `-f lean`: the same answer in a compact agent-oriented format, at about a
 fifth of the tokens of the default JSON. Agents should pass it; see "Token cost" below.

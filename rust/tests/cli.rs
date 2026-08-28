@@ -170,7 +170,14 @@ fn index_without_help_still_indexes_so_the_guard_did_not_swallow_the_command() {
     assert_eq!(r.code, 0, "stderr={}", r.stderr);
     let p = payload(&r);
     assert!(p["chunks"].as_i64().unwrap() > 0);
-    assert_eq!(fs::read_dir(&cache).unwrap().count(), 1);
+    let names: Vec<String> = fs::read_dir(&cache)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        names.iter().any(|n| n.ends_with(".db") && n != "usage.db"),
+        "index must write a project db, names={names:?}"
+    );
 }
 
 /// D-47 — second auto-read is store/receipt (proposal §1); recall still finds it.

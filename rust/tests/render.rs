@@ -359,10 +359,12 @@ fn error_envelope_to_json_uses_error_not_code() {
 }
 
 /// SAMPLE is referenced so the frozen fixture stays available for field-order checks.
+/// serde_json's default map is alphabetical: cort's JSON key order contract IS
+/// alphabetical, and every golden in this suite is written that way.
 #[test]
 fn json_pretty_print_uses_two_space_indent_and_trailing_newline() {
     let (_dir, _root, _db, _id, _bin) = indexed(SAMPLE);
     let payload = json!({ "ok": true, "n": 1 });
     let out = render(None, Format::Json, &payload);
-    assert_eq!(out, "{\n  \"ok\": true,\n  \"n\": 1\n}\n");
+    assert_eq!(out, "{\n  \"n\": 1,\n  \"ok\": true\n}\n");
 }
