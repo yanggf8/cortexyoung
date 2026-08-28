@@ -1,24 +1,23 @@
 ---
 name: ast-grep
-description: Route structural code questions to ast-grep and cort instead of grepping and reading files
+description: Route code lookup, reusable reads, structural search, and impact questions to rg, ast-grep, or cort
 ---
 
-`cort` answers **relationship** questions. It does not beat `rg` at finding text — measured on a 2,676-chunk TypeScript repo, answering a 3-hop blast-radius question costs `cort impact -f lean` about 1.1k tokens, while `rg` + reads to reach the same answer set costs about 125k. The same question at depth 1 costs about 0.9k vs 16k. The gap is the graph; do not use `cort` where there is no graph to walk.
+Route by the narrowest output that answers the question. In 1,565 real user prompts, none asked for a code relationship graph, while file finding and reading consumed 61.5% of tool-output tokens. On a 27,296-estimated-token Rust file, `cort context main --content full -f lean` returned the exact function in 89 tokens (99.67% less); an unchanged repeat read returned a 21-token receipt instead of 27,295 tokens (99.92% less). These are separate savings, not additive.
 
-Pick the narrowest tool that answers the question.
+Use this order for everyday work:
 
-- **Find a string, a definition, or a fresh unsaved edit** — native Grep (`rg`). `cort`'s index lags; `rg` never does. Exception: for a known symbol in a large indexed Rust file, use `cort context <symbol> --content full -f lean` to return only that function or method.
-- **The same literal string many times over a large repo** — `xg "PATTERN" --max-count 20`, only when `command -v xg` succeeds.
-- **One structural shape, one language, no cross-file context** — `ast-grep run -p '<pattern>' --lang <lang>`.
-- **That shape plus who touches it** — `cort struct -p '<pattern>' --lang <lang> -f lean`.
-- **"What breaks if I change X" / "who reaches this" / "what must change to remove X"** — `cort impact --symbol <name[,name2]> --depth <n> -f lean`. This is `cort`'s reason to exist: each extra hop costs `cort` one query and costs `rg` a fresh grep *plus* a read of every hit to learn the next hop's names. Use `--depth 3` (default) for real blast radius; `--depth 1` for direct callers.
-- **"What else deals with X", narrowly** — `cort context <symbol-or-query> -f lean`, budgeted to about 1500 tokens. Pass `--content full` only when you need the whole body.
-- **Read a file or line range that may be needed again** — `cort read <file> [--start N] [--end N] -f lean`. The first read is persisted; an unchanged repeat reports `source=store` and is returned from SQLite. Use `cort recall <query> -f lean` to FTS-search only what has already been read. Both require one prior `cort index`.
+1. **Read one known function or method in a large indexed Rust file** — `cort context '<symbol>' --content full -f lean`. For methods, qualify the owner as `Type::method` (or `crate::path::Type::method`) to distinguish same-named methods. Check the header for `resolution=exact_symbol`; if an unqualified name returns multiple seeds, do not assume which one is intended.
+2. **Read a file or line range you may need again** — `cort read <file> [--start N] [--end N] -f lean`. The first default read returns and persists the body. An unchanged repeat of the same range defaults to a one-line `source=store content=receipt` with no body; add `--content full` when you need the body again. Search only prior readings with `cort recall <query> -f lean`; add `--content full` for the complete stored fragment. Both commands validate the source, and require one prior `cort index`.
+3. **Find a string, locate an unknown definition, or inspect a fresh edit** — `rg`. It sees working-tree changes immediately and is the right default for literal search. For the same literal string many times over a large repo, use `xg "PATTERN" --max-count 20` only when `command -v xg` succeeds.
+4. **Trace callers or blast radius** — only for an explicit relationship question, use `cort impact --symbol <name[,name2]> --depth <n> -f lean`. Use `--depth 1` for direct callers and the default depth 3 for a genuinely transitive question. Do not route ordinary lookup here merely because a graph is available.
 
-Always pass `-f lean`: it is the same answer at about a fifth of the tokens (one row per result, no ids). Omit it only when you need machine-parseable JSON.
+For structural syntax questions, use `ast-grep run -p '<pattern>' --lang <lang>` for one shape in one language. Use `cort struct -p '<pattern>' --lang <lang> -f lean` only when the answer also needs the enclosing symbols and their neighbours.
 
-Every `cort` command reports `stale=` in lean output, `index_is_stale` in JSON. When true, run `cort index --incremental` first, or fall back to `rg`. `cort index` must have been run once; a brand-new untracked file is invisible until then.
+Always pass `-f lean`: it gives the same answer at about a fifth of JSON's tokens. Omit it only when machine-parseable JSON is needed.
 
-Relationships resolve by symbol name, so a common name (a logging or fetch helper) can be a hub and pull in same-named symbols from unimported files. Trust `--depth 1` sets you can spot-check; treat deeper hops as candidates to confirm, not verdicts.
+Before trusting indexed answers, check `stale=` in lean output or `index_is_stale` in JSON. If true, run `cort index --incremental` first or fall back to `rg`. A new untracked file is invisible until indexed. `cort read` and `cort recall` do not use that field; they validate stored readings against the source instead.
 
-The binary is `ast-grep`, never `sg`: on Linux `/usr/bin/sg` is setgroups(1) and is a different program.
+Relationship resolution is name-based. A common unqualified name such as a logging or fetch helper can become a hub and pull in same-named symbols from unrelated files. Prefer owner-qualified Rust methods, spot-check depth-1 results, and treat deeper hops as candidates to confirm rather than verdicts.
+
+The binary is `ast-grep`, never `sg`: on Linux `/usr/bin/sg` is setgroups(1), a different program.
