@@ -1,6 +1,6 @@
 # WIP：端對端圖評測的前置（2026-08-28）
 
-> 狀態：**前置全部探通，一個 eval cell 都還沒跑，花費 0 美元。**
+> 狀態：**前置全部探通。一個 eval cell 都還沒跑；已花的只有 5 次單字級探測（合計 < $0.40）。**
 > 本檔是接續用的工作紀錄，不是結論。結論要等 `evals/run-agents.mjs` 真的跑出兩臂數字之後，
 > 寫進 `docs/2026-08-28-graph-cost-reanalysis.md` 的後續版本。
 > 這裡記的是「已經用實測買到的事實」與「跑之前必須鎖住的偏差」，兩者都付過代價。
@@ -146,7 +146,7 @@ printf '{ "model": "opus", "hooks": {}, "enabledPlugins": {} }' > /tmp/cc-eval/s
 ## 6. 本輪**沒有**做的事
 
 - 沒寫任何 repo 內的評測程式碼（`evals/run-agents.mjs` 不存在）。
-- 沒跑任何 eval cell；沒有新的 `evals/runs/` 目錄。
+- 沒跑任何 eval cell（5 次探測都是單字提示，不屬評測資料）；沒有新的 `evals/runs/` 目錄。
 - 沒碰 `relationships` schema，也沒碰 `impact` 輸出。
 - 規格 §8 的凍結清單（`rewrite`、`modules`、`--watch`、`impact --from-diff`、`cort search`、
   embedding/RRF）照常未動。
