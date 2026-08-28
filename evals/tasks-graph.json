@@ -1,6 +1,6 @@
 {
   "venue": "/home/yanggf/a/cct",
-  "note": "Graph-required tasks. Unlike evals/tasks.json (single-hop or literal-answerable), these cannot be answered without a transitive relationship walk, so they are the cells the stop/go gate was supposed to run on.",
+  "note": "Graph-required tasks. Unlike evals/tasks.json (single-hop or literal-answerable), these cannot be answered without a transitive relationship walk, so they are the cells the stop/go gate was supposed to run on. Labels regenerated 2026-08-28 against cct 86a5ee6; re-run this regeneration when the venue HEAD or the indexer changes, or the gate will punish a correct answer.",
   "tasks": [
     {
       "id": "blast-radius-3hop-getcurrenttimeet",
@@ -11,38 +11,70 @@
       "expected_symbols": [
         "handlePreMarketBriefing",
         "handleEndOfDaySummary",
+        "getLastNTradingDays",
         "isMarketHours",
         "getCurrentDateET",
-        "getLastNTradingDays",
         "handleDirectRequest",
+        "generatePreMarketAnalysis",
+        "getSymbolSentimentData",
+        "refreshPreMarketAnalysis",
+        "hasPreMarketAnalysis",
+        "getCurrentPreMarketAnalysis",
+        "handleJobsLatest",
+        "handlePreMarketJob",
+        "handleIntradayJob",
+        "handleScheduleCheck",
+        "marketToday",
         "handleReportsStatus",
-        "handleReportRoutes"
+        "handleJobsRoutes",
+        "handleReportRoutes",
+        "handleWeeklyReport",
+        "handlePreMarketReport",
+        "handleIntradayReport",
+        "handleEndOfDayReport"
       ],
       "by_hop": {
         "1": [
           "handlePreMarketBriefing",
           "handleEndOfDaySummary",
+          "getLastNTradingDays",
           "isMarketHours",
-          "getCurrentDateET",
-          "getLastNTradingDays"
+          "getCurrentDateET"
         ],
         "2": [
           "handleDirectRequest",
+          "generatePreMarketAnalysis",
+          "getSymbolSentimentData",
+          "refreshPreMarketAnalysis",
+          "hasPreMarketAnalysis",
+          "getCurrentPreMarketAnalysis",
+          "handleJobsLatest",
+          "handlePreMarketJob",
+          "handleIntradayJob",
+          "handleScheduleCheck",
+          "marketToday",
           "handleReportsStatus"
         ],
         "3": [
-          "handleReportRoutes"
+          "handleJobsRoutes",
+          "handleReportRoutes",
+          "handleWeeklyReport",
+          "handlePreMarketReport",
+          "handleIntradayReport",
+          "handleEndOfDayReport"
         ]
       },
       "expected_files": [
+        "src/modules/enhanced-request-handler.ts",
         "src/modules/handlers/briefing-handlers.ts",
         "src/modules/handlers/end-of-day-handlers.ts",
+        "src/modules/pre-market-data-bridge.ts",
         "src/modules/trading-calendar.ts",
-        "src/modules/enhanced-request-handler.ts",
+        "src/routes/jobs-routes.ts",
         "src/routes/report-routes.ts"
       ],
       "why_graph_required": "Hops 2 and 3 are not textual neighbours of getCurrentTimeET: each hop hands back names that must be searched again, and every hit has to be opened to learn which symbol encloses it.",
-      "label_provenance": "Answer set from the shipped pack; every dependent independently textually confirmed by evals/verify-impact.mjs at precision 1.0."
+      "label_provenance": "Regenerated 2026-08-28 from cort impact --depth 3 against cct 86a5ee6 (index /tmp/cort-exp, 2577 chunks); every one of 23 edges independently textually confirmed by evals/verify-impact.mjs at precision 1.0. Distance is the shortest path: 0 symbols reach the seed by more than one path."
     },
     {
       "id": "transitive-chain-lastntradingdays",
@@ -53,7 +85,8 @@
       "expected_symbols": [
         "handleReportsStatus",
         "handleReportRoutes",
-        "handleApiV1Request"
+        "handleApiV1Request",
+        "reports"
       ],
       "by_hop": {
         "1": [
@@ -63,15 +96,17 @@
           "handleReportRoutes"
         ],
         "3": [
-          "handleApiV1Request"
+          "handleApiV1Request",
+          "reports"
         ]
       },
       "expected_files": [
+        "src/routes/api-v1.ts",
         "src/routes/report-routes.ts",
-        "src/routes/api-v1.ts"
+        "tests/validation/test-business-date-envelope.mjs"
       ],
       "why_graph_required": "Hops 2 and 3 are not textual neighbours of getLastNTradingDays: each hop hands back names that must be searched again, and every hit has to be opened to learn which symbol encloses it.",
-      "label_provenance": "Answer set from the shipped pack; every dependent independently textually confirmed by evals/verify-impact.mjs at precision 1.0."
+      "label_provenance": "Regenerated 2026-08-28 from cort impact --depth 3 against cct 86a5ee6 (index /tmp/cort-exp, 2577 chunks); every one of 4 edges independently textually confirmed by evals/verify-impact.mjs at precision 1.0. Distance is the shortest path: 0 symbols reach the seed by more than one path."
     },
     {
       "id": "route-blast-radius-reportsstatus",
@@ -82,6 +117,7 @@
       "expected_symbols": [
         "handleReportRoutes",
         "handleApiV1Request",
+        "reports",
         "handleDirectRequest"
       ],
       "by_hop": {
@@ -89,19 +125,21 @@
           "handleReportRoutes"
         ],
         "2": [
-          "handleApiV1Request"
+          "handleApiV1Request",
+          "reports"
         ],
         "3": [
           "handleDirectRequest"
         ]
       },
       "expected_files": [
-        "src/routes/report-routes.ts",
+        "src/modules/enhanced-request-handler.ts",
         "src/routes/api-v1.ts",
-        "src/modules/enhanced-request-handler.ts"
+        "src/routes/report-routes.ts",
+        "tests/validation/test-business-date-envelope.mjs"
       ],
       "why_graph_required": "Hops 2 and 3 are not textual neighbours of handleReportsStatus: each hop hands back names that must be searched again, and every hit has to be opened to learn which symbol encloses it.",
-      "label_provenance": "Answer set from the shipped pack; every dependent independently textually confirmed by evals/verify-impact.mjs at precision 1.0."
+      "label_provenance": "Regenerated 2026-08-28 from cort impact --depth 3 against cct 86a5ee6 (index /tmp/cort-exp, 2577 chunks); every one of 4 edges independently textually confirmed by evals/verify-impact.mjs at precision 1.0. Distance is the shortest path: 0 symbols reach the seed by more than one path."
     },
     {
       "id": "storage-blast-radius-backtesting",
@@ -115,16 +153,16 @@
         "getStoredPerformanceMetrics",
         "listBacktestHistory",
         "cleanupOldBacktestData",
-        "runValidationInBackground",
-        "runWalkForwardInBackground",
-        "runMonteCarloInBackground",
-        "handleModelValidation",
-        "handleMonteCarloSimulationDirect",
         "handleRunBacktest",
         "handleBacktestStatus",
         "handleGetBacktestResults",
         "handleGetPerformanceMetrics",
         "handleBacktestHistory",
+        "runValidationInBackground",
+        "runWalkForwardInBackground",
+        "runMonteCarloInBackground",
+        "handleModelValidation",
+        "handleMonteCarloSimulationDirect",
         "handleBacktestingRoutes",
         "handleGetValidationResults",
         "handleWalkForwardOptimization",
@@ -138,16 +176,16 @@
           "getStoredPerformanceMetrics",
           "listBacktestHistory",
           "cleanupOldBacktestData",
-          "runValidationInBackground",
-          "runWalkForwardInBackground",
-          "runMonteCarloInBackground",
-          "handleModelValidation",
-          "handleMonteCarloSimulationDirect",
           "handleRunBacktest",
           "handleBacktestStatus",
           "handleGetBacktestResults",
           "handleGetPerformanceMetrics",
-          "handleBacktestHistory"
+          "handleBacktestHistory",
+          "runValidationInBackground",
+          "runWalkForwardInBackground",
+          "runMonteCarloInBackground",
+          "handleModelValidation",
+          "handleMonteCarloSimulationDirect"
         ],
         "2": [
           "handleBacktestingRoutes",
@@ -161,11 +199,11 @@
       },
       "expected_files": [
         "src/modules/backtesting-storage.ts",
-        "src/routes/backtesting-routes.ts",
-        "src/routes/api-v1.ts"
+        "src/routes/api-v1.ts",
+        "src/routes/backtesting-routes.ts"
       ],
       "why_graph_required": "Hops 2 and 3 are not textual neighbours of createBacktestingStorage: each hop hands back names that must be searched again, and every hit has to be opened to learn which symbol encloses it.",
-      "label_provenance": "Answer set from the shipped pack; every dependent independently textually confirmed by evals/verify-impact.mjs at precision 1.0."
+      "label_provenance": "Regenerated 2026-08-28 from cort impact --depth 3 against cct 86a5ee6 (index /tmp/cort-exp, 2577 chunks); every one of 20 edges independently textually confirmed by evals/verify-impact.mjs at precision 1.0. Distance is the shortest path: 0 symbols reach the seed by more than one path."
     },
     {
       "id": "hub-blast-radius-loginfo",
@@ -188,19 +226,19 @@
         "runDualAIAnalysisEnhanced",
         "runEnhancedPreMarketAnalysis",
         "validateSentimentEnhancement",
+        "analyzeSymbolWithFineGrainedSentiment",
+        "gatherComprehensiveNewsForSymbol",
+        "performDualAISentimentAnalysis",
         "analyzeSymbolWithFallback",
         "batchAnalyzeSymbolsForCron",
         "runCompleteAnalysisPipeline",
         "analyzeSingleSymbol",
-        "gatherComprehensiveNewsForSymbol",
-        "performDualAISentimentAnalysis",
-        "analyzeSymbolWithFineGrainedSentiment",
         "storeFactTableData",
         "storeSymbolAnalysis",
         "performDualAIComparisonWithRetry",
         "enhancedBatchDualAIAnalysis",
-        "analyzeBatch",
         "analyzeSymbol",
+        "analyzeBatch",
         "runBasicAnalysis",
         "processAnalysisDataForDate",
         "handleScheduledEvent",
@@ -235,49 +273,28 @@
           "runDualAIAnalysisEnhanced",
           "runEnhancedPreMarketAnalysis",
           "validateSentimentEnhancement",
+          "analyzeSymbolWithFineGrainedSentiment",
+          "gatherComprehensiveNewsForSymbol",
+          "performDualAISentimentAnalysis",
           "analyzeSymbolWithFallback",
           "batchAnalyzeSymbolsForCron",
           "runCompleteAnalysisPipeline",
           "analyzeSingleSymbol",
-          "gatherComprehensiveNewsForSymbol",
-          "performDualAISentimentAnalysis",
-          "analyzeSymbolWithFineGrainedSentiment",
-          "getFactTableData",
-          "getFactTableDataWithRange",
           "storeFactTableData",
           "storeSymbolAnalysis",
-          "batchStoreAnalysisResults",
-          "trackCronHealth",
-          "getRealActualPrice",
-          "validateDirectionAccuracy",
           "performDualAIComparisonWithRetry",
           "enhancedBatchDualAIAnalysis",
-          "performDualAIComparison",
-          "batchDualAIAnalysis",
-          "runEnhancedAnalysis",
-          "runDualAIAnalysisEnhanced",
-          "runEnhancedPreMarketAnalysis",
-          "validateSentimentEnhancement",
-          "analyzeBatch",
           "analyzeSymbol",
-          "analyzeSymbolWithFineGrainedSentiment",
-          "gatherComprehensiveNewsForSymbol",
-          "analyzeSymbolWithFallback",
-          "batchAnalyzeSymbolsForCron",
-          "runCompleteAnalysisPipeline",
-          "analyzeSingleSymbol"
+          "analyzeBatch"
         ],
         "2": [
           "runBasicAnalysis",
           "processAnalysisDataForDate",
           "handleScheduledEvent",
-          "analyzeSingleSymbol",
           "getModelPrediction",
-          "processAnalysisDataForDate",
           "generateIntradayAnalysis",
           "generateMarketPulse",
           "getSymbolSentimentData",
-          "handleScheduledEvent",
           "handleSentimentAnalysis",
           "handleSymbolSentiment",
           "handleSectorSentiment",
@@ -288,34 +305,33 @@
           "runWeeklyMarketCloseAnalysis",
           "runPreMarketAnalysis",
           "scheduled",
-          "runBasicAnalysis",
           "handleJobTrigger",
           "handleSentimentRoutes"
         ]
       },
       "expected_files": [
+        "archive/legacy-js-modules/analysis.js",
         "archive/legacy-js-modules/data.js",
         "archive/legacy-js-modules/dual-ai-analysis.js",
         "archive/legacy-js-modules/enhanced_analysis.js",
         "archive/legacy-js-modules/per_symbol_analysis.js",
+        "archive/legacy-js-modules/scheduler.js",
+        "src/index.ts",
+        "src/modules/analysis.ts",
+        "src/modules/backtesting-engine.ts",
         "src/modules/data.ts",
         "src/modules/dual-ai-analysis.ts",
         "src/modules/enhanced_analysis.ts",
+        "src/modules/intraday-data-bridge.ts",
         "src/modules/optimized-ai-analysis.ts",
         "src/modules/per_symbol_analysis.ts",
-        "archive/legacy-js-modules/analysis.js",
-        "archive/legacy-js-modules/scheduler.js",
-        "src/modules/analysis.ts",
-        "src/modules/backtesting-engine.ts",
-        "src/modules/intraday-data-bridge.ts",
         "src/modules/pre-market-data-bridge.ts",
         "src/modules/scheduler.ts",
-        "src/routes/sentiment-routes.ts",
-        "src/index.ts",
-        "src/routes/jobs-routes.ts"
+        "src/routes/jobs-routes.ts",
+        "src/routes/sentiment-routes.ts"
       ],
       "why_graph_required": "Hops 2 and 3 are not textual neighbours of logInfo: each hop hands back names that must be searched again, and every hit has to be opened to learn which symbol encloses it.",
-      "label_provenance": "Answer set from the shipped pack; every dependent independently textually confirmed by evals/verify-impact.mjs at precision 1.0."
+      "label_provenance": "Regenerated 2026-08-28 from cort impact --depth 3 against cct 86a5ee6 (index /tmp/cort-exp, 2577 chunks); every one of 66 edges independently textually confirmed by evals/verify-impact.mjs at precision 1.0. Distance is the shortest path: 21 symbols reach the seed by more than one path."
     }
   ]
 }

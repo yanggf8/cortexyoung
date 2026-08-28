@@ -44,3 +44,19 @@ test('summarize returns a stop verdict when cort loses on tokens', () => {
   ];
   assert.equal(summarize(results).verdict.cort_beats_ast_grep, false);
 });
+
+test('every graph task labels each symbol exactly once, at one distance', () => {
+  const doc = JSON.parse(fs.readFileSync(new URL('../evals/tasks-graph.json', import.meta.url), 'utf8'));
+  assert.ok(doc.tasks.length >= 5);
+  for (const t of doc.tasks) {
+    const flat = Object.values(t.by_hop).flat();
+    // by_hop was once built from raw impact rows, so a symbol reachable by several paths was
+    // listed two or three times, at odds with expected_symbols and with itself.
+    assert.equal(new Set(flat).size, flat.length, `${t.id}: by_hop repeats a symbol`);
+    assert.equal(new Set(t.expected_symbols).size, t.expected_symbols.length, `${t.id}: expected_symbols repeats`);
+    assert.deepEqual(new Set(flat), new Set(t.expected_symbols), `${t.id}: by_hop and expected_symbols disagree`);
+    for (const hop of Object.keys(t.by_hop)) {
+      assert.ok(Number(hop) <= t.min_hops_required, `${t.id}: labelled beyond the declared depth`);
+    }
+  }
+});
