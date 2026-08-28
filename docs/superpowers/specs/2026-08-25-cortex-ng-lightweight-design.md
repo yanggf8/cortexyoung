@@ -3,6 +3,7 @@
 - **日期**: 2026-08-25
 - **狀態**: Draft v4.2 — v4.1 經 Codex 第七次審查六項全 PASS（內部一致性）；v4.2 為**實機驗證**修正：`parse_failed` 偵測機制與版本釘死改為對 `ast-grep 0.45.2` 實測結果（見 §16）
 - **實作**: 已完成（`a2f41625`）。§8 的四個交付階段 `index → struct → context → impact` 全數落地，`npm test` 107/107、`tests/install-smoke.sh` 39/39。實作計畫與四項偏離記錄見 `docs/superpowers/plans/2026-08-25-cortex-ng.md`。**唯一與本設計稿不符處**：§4 DDL 要求的 `tokenize='unicode61 "remove_diacritics 1" "tokenchars ._$"'` 因 bundled SQLite 3.49.2 拒絕任何參數化 `unicode61`，降級為 bare `unicode61`（`src/schema.sql` 有 NOTE，一行可還原）。`cort-v0.1.0` tag 已於 CI 雙平台綠燈後打下。**§8 閘門已執行**：三輪三臂評測（2026-08-26）全部回報 STOP——品質三臂無差異、token 成本 cort 為基線 2–3.6 倍——延期功能維持凍結，證據見 `evals/runs/`。
+  **（2026-08-28 補充）** 該三輪的 `tool_return_tokens` 為 30/30 未記錄，且十個任務全為單跳或字面查找，故 STOP 僅否決「`cort` 作 grep 用」，未被否決的是多跳關係查詢。計價與標籤覆驗見 `docs/2026-08-28-graph-cost-reanalysis.md`；下一輪 gate 應改跑 `evals/tasks-graph.json`。延期功能仍維持凍結。
 - **前代**: `v6-final` (5a02c6e3) 歸檔；`de8638fd` 為 xgrep 精簡版
 - **決策**: 輕量派 — 保留 AST + Graph + FTS，拔掉 embeddings/Turso/DiskANN；`ast-grep` 子行程為**唯一** parser 權威，`cort` 為 canonical CLI 名稱（內部固定調 `ast-grep`，不接受 `sg` alias）
 
