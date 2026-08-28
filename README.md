@@ -40,12 +40,12 @@ Routing for agents is in `skills/ast-grep/SKILL.md` — it states when to use `r
 **What it does (default, without `--with-xgrep`):**
 
 - Downloads pinned `ast-grep` v0.45.2 prebuilt `app-<target>.zip` for your platform (Linux x86_64/aarch64, macOS x86_64/arm64) from GitHub Releases and verifies SHA-256 (repo-maintained; upstream publishes no checksums) — fail-closed: an empty or mismatched checksum refuses to install. Falls back to `cargo install ast-grep --version 0.45.2 --locked` (requires Rust 1.88+).
-- Installs `cort` from this checkout to `~/.local/share/cortexyoung/cort` via `npm ci --omit=dev` (Node >= 22, `better-sqlite3` is the only runtime dependency) and shims `~/.cargo/bin/cort` or `~/.local/bin/cort`.
+- Builds `cort` from `rust/` (`cargo build --release`, done once if `rust/target/release/cort` is absent) and installs the binary plus its ast-grep pack (`src/pack`, located at runtime via `CORT_PACK_DIR`) to `~/.local/share/cortexyoung/cort`, shimming `~/.cargo/bin/cort` or `~/.local/bin/cort`.
 - Deploys `skills/ast-grep/SKILL.md` to `~/.claude/skills/ast-grep/SKILL.md` with a managed marker. Preflights collisions before mutating: skips if hash-equal, replaces if managed, refuses unmanaged collisions (use `--force` to backup and replace).
 - Adds a single bounded idempotent `PATH` block to your shell profile (`.bashrc`/`.zshrc`/`.profile`) so `cort` and `ast-grep` are on `PATH`; removed on `--uninstall`.
 - Records ownership in `~/.local/share/cortexyoung/manifest` (v2 `key:value` lines) — uninstall only removes what it installed, never a pre-existing binary.
 
-**Requirements:** `curl` or `wget`, `tar`, `unzip`, `sha256sum`/`shasum`. Node >= 22. Rust only needed for the cargo fallback.
+**Requirements:** `curl` or `wget`, `tar`, `unzip`, `sha256sum`/`shasum`. Rust (cargo) — cort is the Rust binary; `--with-rustup` bootstraps rustup if cargo is missing.
 
 ## Update
 
@@ -162,7 +162,7 @@ has been run yet.
    before this rule adds ~1% chunks and ~2% relationships; `cort index` (full) is required once.
 5. **Name-based target resolution:** relationship targets are resolved by symbol name. A same-named symbol in an unimported file can still surface as `AMBIGUOUS`, even if it is not actually imported.
 6. **`--lang` is required on `struct`:** `cort struct -p '<pattern>' --lang <lang>` fails with `{"error":"missing_lang"}` if `--lang` is absent. It also drives the pattern pre-flight that turns a malformed pattern into `{"error":"parse_failed"}` instead of a silent empty result. The binary is `ast-grep`, never `sg`.
-7. **FTS tokenizer is bare `unicode61`:** the design calls for `unicode61 "remove_diacritics 1" "tokenchars ._$"`, but the bundled SQLite (3.49.2 via `better-sqlite3` 11.10.0) rejects every parameterised `unicode61` form. Consequence: `cort context` keyword recall splits identifiers on `.`, `_` and `$` — searching `foo.bar` matches `foo` and `bar` separately, and diacritics are not folded. CJK still tokenizes. `src/schema.sql` carries a `NOTE` and reverting is one line once a SQLite build accepts the parameters.
+7. **FTS tokenizer is bare `unicode61`:** the design calls for `unicode61 "remove_diacritics 1" "tokenchars ._$"`, but the bundled SQLite that ships with rusqlite 0.32 rejects every parameterised `unicode61` form (the JS reference via `better-sqlite3` had the same limit). Consequence: `cort context` keyword recall splits identifiers on `.`, `_` and `$` — searching `foo.bar` matches `foo` and `bar` separately, and diacritics are not folded. CJK still tokenizes. `src/schema.sql` carries a `NOTE` and reverting is one line once a SQLite build accepts the parameters.
 8. **Reading recall is lexical and source-validated:** `cort recall` searches only fragments previously
    captured by `cort read`; it is FTS5, not semantic memory. Changed or deleted source files invalidate
    their stored readings. Reading notes survive full and incremental re-indexing when the source is unchanged.
@@ -202,7 +202,7 @@ break-even so an agent does not route a string question into a graph tool.
 ## Upstream credits
 
 - [`ast-grep`](https://github.com/ast-grep/ast-grep) v0.45.2 — MIT, installed from GitHub Releases `app-<target>.zip` (repo-maintained SHA-256) or `cargo install ast-grep --version 0.45.2 --locked`.
-- [`better-sqlite3`](https://github.com/WiseLibs/better-sqlite3) — MIT, the only runtime npm dependency of `cort`.
+
 - [`xgrep` (momokun7/xgrep)](https://github.com/momokun7/xgrep) — MIT/Apache-2.0, optional `--with-xgrep` extra (`xg` v0.7.0, `xgrep-search` on crates.io).
 - [`ripgrep`](https://github.com/BurntSushi/ripgrep) — MIT OR Unlicense, not installed by this repo; expected on the host.
 

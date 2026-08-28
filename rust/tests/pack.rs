@@ -207,3 +207,52 @@ fn pack_dir_points_at_a_real_directory_containing_sgconfig_yml() {
     assert!(dir.is_dir());
     assert!(sgconfig().is_file());
 }
+
+// Cutover: the installed binary cannot rely on CARGO_MANIFEST_DIR (a compile-time
+// path valid only on the build machine). It must honour CORT_PACK_DIR and, failing
+// that, refuse to run rather than silently hash nothing.
+#[test]
+fn cort_pack_dir_override_points_somewhere_else() {
+    let _g = pack_guard();
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("pack");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("sgconfig.yml"), "languageGlobs: {}\n").unwrap();
+    std::fs::write(dir.join("rules.yml"), "id: x\nlanguage: Tsx\n").unwrap();
+    set_pack_env(Some(dir.to_str().unwrap()));
+    assert_eq!(pack_dir(), dir);
+    assert!(sgconfig().ends_with("pack/sgconfig.yml"));
+    let files = pack_files();
+    assert_eq!(files.len(), 2);
+    // the override pack hashes differently from the repo pack
+    let overridden = extractor_version();
+    set_pack_env(None);
+    assert_ne!(overridden, extractor_version());
+}
+
+/// Env mutation that survives a panicking assertion inside the scope: the var is
+/// removed on the unwind path too, or it poisons every later test in this binary.
+fn set_pack_env(value: Option<&str>) {
+    match value {
+        Some(v) => std::env::set_var("CORT_PACK_DIR", v),
+        None => std::env::remove_var("CORT_PACK_DIR"),
+    }
+}
+
+#[test]
+fn an_override_pack_dir_without_sgconfig_fails_closed() {
+    let _g = pack_guard();
+    let tmp = tempfile::tempdir().unwrap();
+    set_pack_env(Some(tmp.path().to_str().unwrap()));
+    let result = std::panic::catch_unwind(cort::pack::sgconfig);
+    set_pack_env(None);
+    // sgconfig must fail closed: the override dir has no sgconfig.yml
+    assert!(result.is_err(), "sgconfig() must refuse an override pack without sgconfig.yml");
+}
+
+#[test]
+fn without_the_override_the_default_is_the_repo_pack() {
+    let _g = pack_guard();
+    set_pack_env(None);
+    assert!(pack_dir().join("sgconfig.yml").exists());
+}

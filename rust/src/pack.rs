@@ -5,8 +5,19 @@ use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// Absolute path of repo `src/pack` (JS `import.meta.url` of `src/pack.js`).
+/// Absolute path of the ast-grep pack directory.
+///
+/// The installed binary cannot lean on `CARGO_MANIFEST_DIR` — that is a compile-time
+/// path, valid only on the machine that built it. The installer therefore sets
+/// `CORT_PACK_DIR`; without it the build-tree layout is the fallback, and a caller
+/// that sets the variable to a directory without an `sgconfig.yml` gets a
+/// fail-closed error from `sgconfig()` instead of an empty hash over nothing.
 pub fn pack_dir() -> PathBuf {
+    if let Ok(over) = std::env::var("CORT_PACK_DIR") {
+        if !over.is_empty() {
+            return PathBuf::from(over);
+        }
+    }
     let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("src")
@@ -14,9 +25,15 @@ pub fn pack_dir() -> PathBuf {
     fs::canonicalize(&p).unwrap_or(p)
 }
 
-/// Absolute path of `src/pack/sgconfig.yml`.
 pub fn sgconfig() -> PathBuf {
-    pack_dir().join("sgconfig.yml")
+    let p = pack_dir().join("sgconfig.yml");
+    if !p.is_file() {
+        panic!(
+            "cort pack is missing {}: the installer must deploy src/pack (see CORT_PACK_DIR)",
+            p.display()
+        );
+    }
+    p
 }
 
 /// Recurse `pack_dir()`, keep files whose path ends with `.yml`, sort.

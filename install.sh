@@ -465,28 +465,33 @@ install_ast_grep() {
 }
 
 install_cort() {
-  command -v node >/dev/null 2>&1 || die "cort needs Node.js >= 22"
-  local major; major="$(node -p 'process.versions.node.split(".")[0]')"
-  [ "$major" -ge 22 ] || die "cort needs Node.js >= 22 (found $(node -v))"
+  local crate_bin="$SCRIPT_DIR/rust/target/release/cort"
+  [ -x "$crate_bin" ] || {
+    info "cort binary not found — building (cargo build --release)"
+    command -v cargo >/dev/null 2>&1 || die "cort needs cargo (rustup) to build — rerun with --with-rustup"
+    ( cd "$SCRIPT_DIR/rust" && cargo build --release ) || die "cargo build --release failed"
+    [ -x "$crate_bin" ] || die "cort binary missing after build: $crate_bin"
+  }
 
   rm -rf "$CORT_HOME"
   mkdir -p "$CORT_HOME"
-  cp -R "$SCRIPT_DIR/bin" "$SCRIPT_DIR/src" "$SCRIPT_DIR/package.json" "$CORT_HOME/"
-  [ -f "$SCRIPT_DIR/package-lock.json" ] && cp "$SCRIPT_DIR/package-lock.json" "$CORT_HOME/"
-  ( cd "$CORT_HOME" && npm ci --omit=dev --silent ) || die "npm ci failed in $CORT_HOME"
+  # The binary locates its ast-grep pack via CORT_PACK_DIR: ship the pack next to it.
+  cp "$crate_bin" "$CORT_HOME/cort"
+  cp -R "$SCRIPT_DIR/src/pack" "$CORT_HOME/pack"
+  chmod 755 "$CORT_HOME/cort"
 
   mkdir -p "$BIN_DIR"
   local shim="$BIN_DIR/cort"
   cat > "$shim.tmp" <<SHIM
 #!/usr/bin/env bash
-if [ "\$1" = "--version" ]; then echo "cort $CORT_VERSION"; exit 0; fi
-exec node "$CORT_HOME/bin/cort.js" "\$@"
+if [ "\$1" = "--version" ]; then echo "cort $CORT_VERSION (rust)"; exit 0; fi
+CORT_PACK_DIR="$CORT_HOME/pack" exec "$CORT_HOME/cort" "\$@"
 SHIM
   chmod 755 "$shim.tmp"
   mv "$shim.tmp" "$shim"
   record_manifest "cort_bin" "$shim"
-  "$shim" status >/dev/null 2>&1 || true
-  info "installed cort $CORT_VERSION -> $shim"
+  ( cd / && "$shim" status >/dev/null 2>&1 || true )
+  info "installed cort $CORT_VERSION (rust) -> $shim"
 }
 
 # ═══════════════════════════════════════════════════════════════════
