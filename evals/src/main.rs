@@ -26,6 +26,88 @@ fn has(argv: &[String], name: &str) -> bool {
     argv.iter().any(|a| a == name)
 }
 
+// Options are looked up by exact name, so a token nobody recognises used to be *ignored*: `cort-evals
+// run-agents --help` silently started the default 5-task eval into the default output directory,
+// which is how a request for help nearly spent a sampling window. The same trap catches `--out=x`,
+// which reads as an unknown token and would otherwise be dropped while `--out` fell back to its
+// default. Options are therefore whitelisted per subcommand, and `--flag=value` is refused rather
+// than quietly discarded.
+const RUN_AGENTS_FLAGS: &[&str] = &[
+    "--tasks",
+    "--only",
+    "--arms",
+    "--max-turns",
+    "--config-dir",
+    "--cache-dir",
+    "--jail-dir",
+    "--jail",
+    "--out",
+    "--concurrency",
+    "--delay-secs",
+];
+const VERIFY_IMPACT_FLAGS: &[&str] = &["--repo", "--depth", "--symbols"];
+const SUMMARIZE_FLAGS: &[&str] = &["--strict"];
+
+const USAGE_RUN_AGENTS: &str = "usage: cort-evals run-agents [--tasks FILE] [--only ID[,ID...]] [--arms a,b] [--max-turns N] [--config-dir DIR] [--cache-dir DIR] [--jail-dir DIR] [--jail] [--out DIR] [--concurrency N] [--delay-secs N]";
+const USAGE_VERIFY_IMPACT: &str =
+    "usage: cort-evals verify-impact --repo DIR --symbols A,B [--depth N]";
+const USAGE_SUMMARIZE: &str = "usage: cort-evals summarize [--strict] rows.json [rows.json...]";
+
+/// The provider gates a sampling run on a rolling window, so "run these cells after the window
+/// resets" is part of the experiment, not shell glue. Seconds rather than a wall-clock time: the
+/// caller decides *when* and the runner only waits, which keeps no timezone parsing in here.
+fn delay_secs(argv: &[String]) -> Result<u64, String> {
+    let raw = at(argv, "--delay-secs", "0");
+    raw.parse::<u64>().map_err(|_| {
+        format!("--delay-secs must be a non-negative whole number of seconds (got {raw})")
+    })
+}
+
+fn split_only(only: &str) -> Vec<String> {
+    only.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn only_matches(only: &[String], id: &str) -> bool {
+    only.is_empty() || only.iter().any(|want| want == id)
+}
+
+fn wants_help(argv: &[String]) -> bool {
+    argv.iter().any(|a| a == "--help" || a == "-h")
+}
+
+fn check_flags(argv: &[String], known: &[&str], usage: &str) -> Result<(), String> {
+    for arg in argv {
+        if !arg.starts_with("--") {
+            continue;
+        }
+        let name = match arg.split_once('=') {
+            Some(_) => {
+                return Err(format!(
+                    "{arg} is not supported, options take a separate value\n{usage}"
+                ))
+            }
+            None => arg.as_str(),
+        };
+        if !known.contains(&name) {
+            return Err(format!("unknown option {arg}\n{usage}"));
+        }
+    }
+    Ok(())
+}
+
+/// Refuse unknown options before any work happens; print usage and succeed for `--help`.
+fn guard_options(argv: &[String], known: &[&str], usage: &str) -> Result<(), String> {
+    if wants_help(argv) {
+        println!("{usage}");
+        std::process::exit(0);
+    }
+    check_flags(argv, known, usage)
+}
+
 fn sanitize(arm: &str) -> String {
     arm.chars()
         .map(|c| {
@@ -87,12 +169,14 @@ fn run_cell(
 }
 
 fn run_agents(argv: &[String]) -> Result<(), String> {
+    guard_options(argv, RUN_AGENTS_FLAGS, USAGE_RUN_AGENTS)?;
     let tasks_path = at(argv, "--tasks", "evals/tasks-graph.json");
     let doc = load_tasks(&tasks_path)?;
     let only = at(argv, "--only", "");
+    let only_ids = split_only(&only);
     let tasks: Vec<Task> = doc
         .into_iter()
-        .filter(|t| only.is_empty() || t.id == only)
+        .filter(|t| only_matches(&only_ids, &t.id))
         .collect();
     if tasks.is_empty() {
         return Err(format!("no task matched --only {only} in {tasks_path}"));
@@ -135,6 +219,25 @@ fn run_agents(argv: &[String]) -> Result<(), String> {
                 &arms::arm_binaries(arm),
             )?;
         }
+    }
+
+    let delay = delay_secs(argv)?;
+    if delay > 0 {
+        println!(
+            "delaying {delay}s before the first cell ({} tasks x {} arms); nothing has run yet",
+            tasks.len(),
+            arms.len()
+        );
+        let mut left = delay;
+        while left > 0 {
+            let step = left.min(60);
+            std::thread::sleep(std::time::Duration::from_secs(step));
+            left -= step;
+            if left % 600 == 0 {
+                eprintln!("delay: {left}s remaining");
+            }
+        }
+        eprintln!("delay: window reached, starting cells");
     }
 
     let head = venue_head(&tasks[0].venue)?;
@@ -236,6 +339,7 @@ fn run_agents(argv: &[String]) -> Result<(), String> {
 }
 
 fn verify_impact_main(argv: &[String]) -> Result<(), String> {
+    guard_options(argv, VERIFY_IMPACT_FLAGS, USAGE_VERIFY_IMPACT)?;
     let repo = at(argv, "--repo", ".");
     let depth: i64 = at(argv, "--depth", "3")
         .parse()
@@ -263,6 +367,7 @@ fn verify_impact_main(argv: &[String]) -> Result<(), String> {
 }
 
 fn summarize_main(argv: &[String]) -> Result<(), String> {
+    guard_options(argv, SUMMARIZE_FLAGS, USAGE_SUMMARIZE)?;
     // Accepts several row files so a multi-run experiment aggregates in one call, which is what
     // the two-question review actually needs: 5 tasks x 2 arms landed in 5 directories.
     let paths: Vec<String> = argv
@@ -301,5 +406,107 @@ fn main() {
     if let Err(err) = result {
         eprintln!("{err}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod option_guard {
+    use super::*;
+
+    fn v(args: &[&str]) -> Vec<String> {
+        args.iter().map(|a| a.to_string()).collect()
+    }
+
+    #[test]
+    fn a_help_flag_is_not_mistaken_for_a_run() {
+        // Before the guard this invocation started the default eval instead of printing help.
+        assert!(wants_help(&v(&["--help"])));
+        assert!(wants_help(&v(&["--tasks", "x.json", "-h"])));
+        assert!(!wants_help(&v(&["--only", "task-a"])));
+    }
+
+    #[test]
+    fn unknown_options_are_refused_with_the_subcommand_usage() {
+        let err = check_flags(&v(&["--help-x"]), RUN_AGENTS_FLAGS, USAGE_RUN_AGENTS).unwrap_err();
+        assert!(err.starts_with("unknown option --help-x"), "{err}");
+        assert!(err.contains("usage: cort-evals run-agents"), "{err}");
+    }
+
+    #[test]
+    fn every_recognised_option_is_listed() {
+        // A new `at(argv, "--flag")` that is not whitelisted would be silently unusable.
+        for flag in RUN_AGENTS_FLAGS {
+            assert!(check_flags(&v(&[flag, "x"]), RUN_AGENTS_FLAGS, USAGE_RUN_AGENTS).is_ok());
+        }
+        assert!(check_flags(
+            &v(&["--strict", "rows.json"]),
+            SUMMARIZE_FLAGS,
+            USAGE_SUMMARIZE
+        )
+        .is_ok());
+        assert!(check_flags(&v(&[]), VERIFY_IMPACT_FLAGS, USAGE_VERIFY_IMPACT).is_ok());
+    }
+
+    #[test]
+    fn equals_form_is_refused_rather_than_dropped() {
+        // "--out=dir" would otherwise be ignored while --out silently kept its default.
+        let err = check_flags(&v(&["--out=dir"]), RUN_AGENTS_FLAGS, USAGE_RUN_AGENTS).unwrap_err();
+        assert!(err.contains("separate value"), "{err}");
+    }
+
+    #[test]
+    fn bare_flags_are_matched_exactly() {
+        assert!(check_flags(&v(&["--jail"]), RUN_AGENTS_FLAGS, USAGE_RUN_AGENTS).is_ok());
+        // "--jail" is the switch; "--jailed" is nobody's option.
+        assert!(check_flags(&v(&["--jailed"]), RUN_AGENTS_FLAGS, USAGE_RUN_AGENTS).is_err());
+    }
+
+    #[test]
+    fn positionals_stay_positionals() {
+        assert!(check_flags(&v(&["a/b/rows.json"]), SUMMARIZE_FLAGS, USAGE_SUMMARIZE).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod sampling_window {
+    use super::*;
+
+    fn v(args: &[&str]) -> Vec<String> {
+        args.iter().map(|a| a.to_string()).collect()
+    }
+
+    #[test]
+    fn only_selects_several_tasks_at_once() {
+        // Three refused tasks are one invocation, not three shell invocations glued together.
+        let ids = split_only("a, b ,,c");
+        assert_eq!(ids, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+        assert!(only_matches(&ids, "b"));
+        assert!(!only_matches(&ids, "d"));
+        assert!(only_matches(&split_only(""), "anything"), "empty means all");
+        assert_eq!(split_only("a").len(), 1);
+    }
+
+    #[test]
+    fn a_refused_typo_selects_nothing_rather_than_everything() {
+        let ids = split_only("transitive-chain-lastntradingdys");
+        assert!(!only_matches(&ids, "transitive-chain-lastntradingdays"));
+    }
+
+    #[test]
+    fn delay_defaults_to_no_wait() {
+        assert_eq!(delay_secs(&v(&[])).unwrap(), 0);
+        assert_eq!(delay_secs(&v(&["--delay-secs", "0"])).unwrap(), 0);
+        assert_eq!(delay_secs(&v(&["--delay-secs", "3600"])).unwrap(), 3600);
+    }
+
+    #[test]
+    fn delay_refuses_nonsense_instead_of_running_immediately() {
+        // A silent fallback to "0" would fire the cells straight into the closed window.
+        for bad in ["-5", "abc", "10.5", ""] {
+            assert!(
+                delay_secs(&v(&["--delay-secs", bad])).is_err(),
+                "accepted {bad:?}"
+            );
+        }
     }
 }

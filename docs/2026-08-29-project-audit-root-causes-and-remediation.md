@@ -98,6 +98,7 @@ GitHub Actions 正確，這三者必須分別驗證。
 | F-11 | P1 | `--allowedTools Bash(...)` 在 headless 下不約束 Bash，評測臂的「白名單即實驗組」只是標籤 | 兩臂 A/B 的基線臂實際用了 `grep`/`sed`，比較不成立 |
 | F-12 | P1 | 評測器是 6 個 `.mjs`，違反「本 repo 純 Rust」契約，同時也是唯一沒有型別、沒有 lint、沒有 gate 的部分 | 已移植為 `evals/` crate，JS 全部移除 |
 | F-16 | P1 | `install.sh` 把 managed marker 寫成 SKILL.md 的**第一行**，frontmatter 被擠到第二行 | Codex/Claude 載入器判定 `missing YAML frontmatter delimited by ---` 並整個跳過該 skill：§13g 部署的 3 份引導全在盤上、0 份進得了 agent context；smoke 只驗「marker 存在」，53/53 綠燈照常漏 |
+| F-17 | P2 | `cort-evals` 不驗證選項，未知選項（含 `--help`）被當成不存在 | `run-agents --help` 以**全套預設值**啟動 5 任務 × 2 臂的真實取樣，並準備寫進 `evals/runs/2026-08-30-graph`；`--out=x` 之類也會靜默退回預設目錄 |
 | F-15 | P1 | 被額度拒絕的 cell 仍被寫成 `total_tokens=0 / coverage=0` 的測量值 | 第二輪 5 個任務裡有 3 個（6 格）根本沒跑，卻進入了聚合；已改為丟例外且不落 row |
 | F-14 | **已修** | 假 parser fixture 是 46 行 Python，抵觸純 Rust 契約 | 已移植為 Rust bin `fake_ast_grep`（模式語法不變）+ 7 個自身測試 |
 | F-13 | **已修** | `cort` 只靠 PATH 找 `ast-grep`，而 agent 的 Bash PATH 會被正規化 | 見 §13e：候選探測 + 版本優先 + probed/hint 錯誤；5 個回歸測試，端到端已證 |
@@ -660,6 +661,34 @@ Codex 與 Claude Code 都要求 YAML frontmatter 的 `---` 從第一行開始。
 這條 oracle 在写完的當下就抓到我自己把它接錯：probe 的 `CODEX_HOME` 指向 temp home 本身而不是 `$HOME/.codex`，
 於是對一份正確的檔案也宣稱看不到 skill——一次假失敗，但正是這類斷言該有的灵敏度。
 
+## 13j. F-17：`run-agents --help` 曾經是一次真的運算
+
+`main.rs` 用 `at(argv, "--flag", default)` 逐個查選項，未知選項從不報錯。結果是
+
+```
+$ cort-evals run-agents --help
+```
+
+不印 usage，而是**以全套預設值啟動評測**（`--tasks evals/tasks-graph.json`、`--out evals/runs/2026-08-30-graph`），
+也就是朝倉庫工作區寫一批「真實測量」。這次它卡在第一個 cell（沙箱沒網路），被我中止；
+`find -newermt` 確認 `evals/runs/` 與 `/tmp/cort-eval-runs` 都沒有新檔落地、`git status` 只剩預期的兩個 bash 檔變更。
+同樣一行打在一個有額度、有網路的終端裡，就是一次沒人要求的取樣——而且會蓋掉既有 out 目錄。
+
+同一個洞也吞得下 `--out=dir`：`at()` 找不到 `--out=dir` 這個 key，`--out` 靜默回到預設目錄，
+「我明明指定了輸出目錄」變成往別處寫。
+
+修法：每個子命令白名單化自己的選項（`RUN_AGENTS_FLAGS`／`VERIFY_IMPACT_FLAGS`／`SUMMARIZE_FLAGS`），
+`guard_options()` 在**任何動作之前**擋下未知選項並連同該子命令的 usage 一起報；`--help`/`-h` 印 usage 後 exit 0；
+`--flag=value` 直接拒絕並說明要分開傳值，而不是讓它無聲地退成預設值。新增 6 項測試釘住這些行為
+（其中一項要求 whitelist 涵蓋所有已recognised 選項，未来新增 `at(argv, "--x")` 卻忘記登記時會立刻顯形）。
+
+順帶把 §13i「剩下的 3 個任務」真正需要的事放進同一個子命令，不必用 bash 串：
+
+- `--only` 接受逗號清單（3 任務 × 2 臂 = 一次呼叫、一份 rows.json、6 cells）；選錯 id 仍然 fail closed，
+  `--only nope` 得到 `no task matched --only nope` 而不是「跑了全部 5 個任務」；
+- `--delay-secs N` 讓 runner 自己等額度窗口重置，不需要外層 `sleep`。等待發生在讀 venue HEAD 與任何 cell 之前，
+  因此 HEAD 仍是開跑當時那個；只收 0 與正整數，`-5`／`10.5`／空字串一律拒——靜默退回 0 等於把 cell 直接打进還關著的窗口。
+
 ## 13i. 第二輪取樣：額度攔截、F-15，與「正確度穩定 / 成本不穩定」
 
 ### 加了 1 輪重複取樣，結果是兩件事
@@ -874,6 +903,7 @@ Bash 只准留在 `install.sh` 與 `tests/install-smoke.sh`（平台需求），
 | F-08 | **部分已修** | README 能力表把 `context/read/recall` 列為主要能力、`impact` 標明語言邊界 | 完整 Stable/Experimental/Deferred 分級仍待一次文件整理 |
 | F-09 | **僅文件化** | README 限制 #9 說明 `status.unparsed` 也包含「合法零符號檔案」 | 程式層面需區分 `no_symbols` 與 parse failure，屬 P3 |
 | F-16 | **已修** | marker 移到 frontmatter 內部第二行（`with_managed_marker`）；up-to-date 的條件從「內容相同」改成「內容相同**且**第一行是 `---`」，舊形状走 `repaired skill frontmatter` 分支重寫 | smoke 53 → 62：fence 在第一行、marker 正好在第二行、`grep -vxF marker` 後與來源 `cmp` 逐字節相同、legacy 形状必須被 repair、外加**真載入器 oracle**（`codex debug prompt-input`，缺 codex 時明確 SKIP 不冒充 PASS）；實測 3 份部署檔 repaired 後可見 |
+| F-17 | **已修** | 每個子命令白名單化選項，`guard_options()` 在任何動作前擋下未知選項；`--help`/`-h` 印 usage 並 exit 0；`--flag=value` 直接拒絕 | 新增 6 項測試（help 不再等於執行、未知選項附 usage、whitelist 覆蓋、`=` 形式被拒、`--jail`/`--jailed` 可區分、位置參數不误殺）；evals 測試 20 → 30 |
 | F-10 | **已修** | C2-22（會改行程 CWD 的測試）拆到獨立 target `rust/tests/staleness_cwd.rs` | 修正前 HEAD 基線 10/20 失敗；修正後 `--test staleness` 20/20 通過、整輪 218/218 連續 3 次 |
 
 ### 過程中發現並一併處理的兩件事
