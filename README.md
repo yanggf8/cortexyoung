@@ -2,6 +2,10 @@
 
 `cort` is an offline code-intelligence CLI built on `ast-grep` (the only parser, never `sg`) and SQLite. One repo checkout, one SQLite index per project, no embeddings, no cloud DB, no servers.
 
+The repository is pure Rust: the product crate lives in [`rust/`](rust/), the dev-only agent-eval
+harness in [`evals/`](evals/), and no JavaScript, TypeScript or Python exists as executable code. Bash
+appears only in `install.sh` and `tests/install-smoke.sh`, where the platform requires a shell.
+
 Six shipped commands (plus `status`/`projects`/`delete` utilities):
 
 - `cort index [--incremental] [path]` — build or incrementally refresh the index (`ast-grep` + SQLite)
@@ -177,7 +181,8 @@ Measured on tasks that require a relationship walk (deterministic probe, no mode
 2,713 chunks; medians over 6 auto-picked multi-hop symbols). **Provenance:** that probe was
 `evals/relation-cost.mjs`, which lived in the JS tree and was deleted by the Rust cutover
 (`1a4052cc`), so these numbers are historical evidence, not a reproducible command; recover it with
-`git show 1a4052cc^:evals/relation-cost.mjs` or re-price it with a Rust-native probe:
+`git show 1a4052cc^:evals/relation-cost.mjs`, or re-price it as a `cort-evals` subcommand (the
+harness is Rust now, so that probe belongs in `evals/`):
 
 | hops | `cort impact -f lean` | `rg` + reads to reach the same set | ratio | share of rg cost that is reads | rg hit precision |
 |---|---|---|---|---|---|
@@ -193,7 +198,8 @@ expensive case, because the name is everywhere and most of that "everywhere" is 
 is nearly flat in depth because the walk is one recursive SQL query.
 
 Soundness of those same answers, checked independently against file text: 100/100 dependents confirmed
-across 5 chains (`evals/verify-impact.mjs`).
+across 5 chains (`cort-evals verify-impact`, re-run on the current binary — see
+[`evals/README.md`](evals/README.md)).
 
 **Corrected positioning: `cort` is an agent tool for relationships, and `rg`/`xg` stay the right tool for
 strings.** The claim "graph adds correctness nowhere" is withdrawn; it was only ever tested where the graph

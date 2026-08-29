@@ -95,6 +95,9 @@ GitHub Actions 正確，這三者必須分別驗證。
 | F-08 | P2 | 產品定位文件存在互相衝突的歷史結論 | 使用者可能把實驗性 graph 當成主要可靠能力 |
 | F-09 | P3 | 零 rule 命中的檔案也被標成 `unparsed` | `status.unparsed` 與「解析失敗」混淆，誤導排障 |
 | F-10 | P1 | 既有測試在平行執行下約 40% 機率失敗（**HEAD 既存**，非本輪引入） | 新 CI 的 `cargo test` gate 會隨機紅，等於沒有 gate |
+| F-11 | P1 | `--allowedTools Bash(...)` 在 headless 下不約束 Bash，評測臂的「白名單即實驗組」只是標籤 | 兩臂 A/B 的基線臂實際用了 `grep`/`sed`，比較不成立 |
+| F-12 | P1 | 評測器是 6 個 `.mjs`，違反「本 repo 純 Rust」契約，同時也是唯一沒有型別、沒有 lint、沒有 gate 的部分 | 已移植為 `evals/` crate，JS 全部移除 |
+| F-13 | P1 | `cort` 只靠 PATH 找 `ast-grep`，而 agent 的 Bash PATH 會被正規化 | 在 Claude Code 會話內 cort 直接 `ast_grep_missing`，對其主要使用者不可用 |
 
 ## 5. F-01：incremental index 會產生 fresh-but-wrong graph
 
@@ -377,11 +380,11 @@ Rust 已有 compiler/rust-analyzer 可提供比 name graph 更精確的資訊，
 
 ### 9.1 問題清單
 
-1. [`evals/run-agents.mjs`](../evals/run-agents.mjs) 已改用 Rust `CORT_BIN`，但 `cort_calls` 仍以
+1. `evals/run-agents.mjs`（現為 [`evals/src/arms.rs`](../evals/src/arms.rs)） 已改用 Rust `CORT_BIN`，但 `cort_calls` 仍以
    `command.includes('cort.js')` 計數，因此 Rust arm 的 cort calls 會被記成 0。
 2. [`evals/README.md`](../evals/README.md) 還要求執行已刪除的 `bin/cort.js`。
 3. README 引用的 `evals/relation-cost.mjs` 已不在 repository，決定性成本數據不能依目前 tree 重跑。
-4. 新 `run-agents.mjs` 產生兩臂 rows，但舊 [`evals/run-eval.mjs`](../evals/run-eval.mjs) 仍是三臂
+4. 新 `run-agents.mjs` 產生兩臂 rows，但舊 `evals/run-eval.mjs`（現為 [`evals/src/summary.rs`](../evals/src/summary.rs)） 仍是三臂
    `rg+Read / ast-grep+Read / cort` gate，欄位還包含新 rows 沒有的 `stale_reads`；兩者未真正接線。
    實測餵入 runner 形狀的 row 之後，`summarize()` 的 `stale_reads` 變成 `NaN`、經 JSON 序列化成 `null`，
    而且不丟例外。也就是說文件承諾已修掉的「null 指標」失效模式，在 summary 路徑上仍然存在。
@@ -562,6 +565,100 @@ Deferred:     rewrite, modules, watch, diff impact, embeddings
 爭用有效，且依賴每個測試都確實取鎖。後續若再出現罕見 flake，優先懷疑這條路徑；更根本的做法是把這些
 環境依賴改為顯式參數注入（較大重構，暫不在此輪）。
 
+## 13e. F-13：agent 的 PATH 被正規化後，cort 找不到它唯一的 parser
+
+### 實測
+
+jail 那次跑出的 cort 臂 20 turns 全毀，工具輸出是：
+
+```json
+{ "error": "ast_grep_missing", "detail": { "candidate": "ast-grep" } }
+```
+
+`rust/src/ast_grep.rs` 的 `candidate_bin()` 只有兩種可能：`CORT_AST_GREP_BIN`，或裸名 `ast-grep`（靠
+PATH 查）。而 Claude Code 給 Bash 工具的 PATH 會被正規化成
+`/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin`。本機 ast-grep 位在 nvm 的 bin 目錄；`install.sh` 預設
+則把 ast-grep 裝進 `$CARGO_HOME/bin`（`~/.cargo/bin`）。兩者都不在那個正規化清單裡。
+
+所以這不是評測器的邊角問題，而是：**用 `install.sh` 正常安裝的 cort，在 agent 會話裡執行任何需要解析器的
+命令都會失敗**，而且錯誤訊息只說 `candidate: "ast-grep"`，不告訴使用者该設定什麼。
+
+### 建議解法（動到產品碼，尚未實作，等你核准）
+
+1. `resolve_ast_grep_bin()` 依序嘗試候選清單，並保留 fail-closed 的版本檢查：
+   `CORT_AST_GREP_BIN` → PATH → cort executable 同目錄與其 `../bin` → `$CORT_HOME/bin` →
+   `$HOME/.local/bin` → `$HOME/.cargo/bin` → `$CARGO_HOME/bin` → `/usr/local/bin` → `/opt/homebrew/bin`。
+2. `ast_grep_missing` 的 detail 帶上「查過哪些位置」與 `CORT_AST_GREP_BIN` 提示，讓 agent 能自我修復。
+3. `install.sh` 在 `~/.local/bin` 可用時優先裝到那裡（它幾乎總在 agent 的 PATH 內）；`cort status`
+   顯示實際解析到的 parser 路徑。
+4. 回歸測試：PATH 清空但 `~/.local/bin` 有可用 ast-grep 時解析成功；全部缺席時仍 `ast_grep_missing`
+   （不得退化成 in-process parser，那是設計紅線）；版本不符仍 fail closed。
+
+在此之前，評測器由 `build_env` 把父行程解析到的路徑注入 `CORT_AST_GREP_BIN`，讓被測的 cort 與使用者
+跑的確實是同一個工具——這是量測效度的要求，不是對產品缺陷的掩蓋。
+
+## 13d. F-12：評測器移植為 Rust，repo 恢復單一語言
+
+規則（已寫進 `CLAUDE.md`）：**本 repo 是純 Rust**，JS/TS/Python 不得以可執行碼存在，工具與測試也不例外。
+Bash 只准留在 `install.sh` 與 `tests/install-smoke.sh`（平台需求），邏輯不得落在 shell 裡。
+
+`evals/` 現在是獨立 crate（`cort-evals`，dev-only，`install.sh` 永不建置或安裝它），依賴只有產品端
+已 vendor 的 `serde_json`（加 dev 用 `tempfile`），因此離線可建：
+
+| JS（813 行，已全部刪除） | Rust |
+|---|---|
+| `agent-stream.mjs` | `src/stream.rs`（`estimate_tokens`、`parse_stream`，指標非數字即 `Err`） |
+| `grade.mjs` | `src/grade.rs`（contract、GATE、`grade_answer`、tasks 載入） |
+| `run-eval.mjs` | `src/summary.rs`（`summarize(rows, strict)`，未量測指標計數而非平均成 NaN） |
+| `run-agents.mjs` | `src/arms.rs`（arm 定義、PATH jail、`arm_held`、`build_row`）+ `src/main.rs`（`run-agents`） |
+| `verify-impact.mjs` | `src/verify.rs`（不引入 regex crate，自行實作 `name`） |
+| `harness.test.mjs`（14） | `tests/harness.rs`（16） |
+
+### 移植時刻意做的三處收緊
+
+1. **絕對路徑不再算受管制**：JS 的 `armHeld` 比 basename，因此 `/opt/cort`、`/usr/local/bin/rg` 會被放過。
+   Rust 版規定：帶 `/` 的 token 必須「正好等於」該臂設定的 binary，裸名才認（裸名只能透過 jail 的 PATH 取得）。
+2. **驗證器的限制寫明**：`contains_word` 是文字比對，註解裡提到某個識別字也算「確認」，所以
+   `verify-impact` 是防捏造的 soundness screen，不是呼叫關係的證明；精度 1.0 時要記住這點。
+3. **轉錄解析不再靜默**：JS 用 `JSON.parse` 逐行，壞行會整個 throw；Rust 版把「非 JSON 行」變成帶行信息的
+   `Err`，並保留 `no result event` / `no usage` / `not a number` 三道拒絕。
+
+### 等價性與驗證（不花模型額度的部分）
+
+- `cort-evals summarize evals/runs/2026-08-26/rows.json` 重現 JS 的三份平均：
+  `rg+Read 185,523.8` / `ast-grep+Read 199,744.0` / `cort 387,855.2`，verdict 仍是 STOP ✓
+- 未量測指標現在是 `null` + `metrics_missing` 計數（JS 是 NaN 靜默變 null），`--strict` 直接拒絕並退出 1 ✓
+- `cort-evals verify-impact` 在 cct 上重跑 3 條鏈：4/4、4/4、20/20 確認，precision 1.0 ✓（與文件宣稱一致）
+- `cargo test --manifest-path evals/Cargo.toml --all-targets`：16 passed / 0 failed；
+  `cargo fmt --check`、`cargo clippy --all-targets --all-features -- -D warnings` 全清 ✓
+- CI 改為 `rust` + `evals` 兩 crate 的 matrix（各跑 fmt/clippy/test），`actions/setup-node` 與所有
+  `node` 步驟移除。
+
+## 13c. F-11：評測臂的白名單從來沒有生效（第一個真實 cell 暴露）
+
+推送後第一次跑 smoke cell（1 任務 × 2 臂）時，基線臂出現自相矛盾的 row：11 turns、12,846 bytes
+工具回傳，卻 `rg_calls=0`、`read_calls=0`、`permission_denials=0`。翻查 transcript 發現它 10 次 Bash
+呼叫全是 `grep -rn ...` 與 `sed -n ...`——`rg` 與 `Read` 一次都沒用，而且**沒有被拒**。
+
+单独探测确认（`--allowedTools "Bash(rg:*)"` 下要求它跑 `grep -c '' package.json`）：命令執行成功、
+`permission_denials: []`。也就是說 `Bash(prefix:*)` 在 headless `-p` 模式下並不約束 shell 內容。
+
+影響：評測設計寫著「工具白名單即實驗組」，但那是個標籤不是管制。cell 出來的 `rg+Read` 其实是
+「agent 拿到的整個 shell」。這不代表數據無用——它恰好是「cort vs agent 自然行為」的答案，而且我們的
+真實 session 分析本來就說過 agent 是 grep-native——但它**不能**被解讀成「cort vs rg」。
+
+修正（`evals/run-agents.mjs`）：
+
+- `ARM_BINARIES` + `makeJail()`：每個臂改用只含其獲准 binary 的 PATH jail（純 JS 解析 PATH，
+  不 spawn `which`，否則沙箱下會 EPERM）。預設開啟，`--no-jail` 可跑「真實 shell」對照組。
+- row 新增 `shells_used`、`arm_held`、`jailed`，列為 REQUIRED_FIELDS。`arm_held=false` 的 cell
+  不能當作比較來讀，且這個值現在由資料自己說出來，不需要事後翻 transcript 才發現。
+- 4 個新測試（不需要模型）：jail 後 `rg` 可用而 `grep`/`sed` 不存在；`armHeld` 精確標出上述
+  那次外洩；cort 臂偷偷用 `rg` 也要被抓到。`node evals/harness.test.mjs` 14/14。
+
+同時保留的誠實記錄：第一輪 smoke 的 cort 臂數據是可信的（`cort_calls=1`、114 tokens 工具回傳、
+2 turns、coverage/precision/hop 全 1），外洩的只有基線臂的身分。
+
 ## 13b. 實作狀態（2026-08-29 開工後）
 
 本節記錄已落地內容、驗收證據，以及仍未處理的項目。
@@ -572,6 +669,7 @@ Deferred:     rewrite, modules, watch, diff impact, embeddings
 | F-02 | **已修** | `install_cort` 改為每次 `cargo build --release --locked`（把 build 提到 `rm -rf $CORT_HOME` 之前，失敗時保留舊安裝） | 新 smoke Test 15（用可記錄呼叫的假 cargo 驗證「prebuilt 存在時仍必須 build」）；`tests/install-smoke.sh` 42/42；實測 no-op build 0.04s、有變更 6.7s |
 | F-03 | **已修** | CI 改為 Rust gate：`rustfmt`、`clippy -D warnings`、`cargo test --locked --all-targets`、release build、`bash -n`、直接安裝 shellcheck 執行 lint、install smoke、評測 `node --check` + `node --test` | YAML 結構可解析；`package.json`/`npm` 相依全部移除 |
 | F-04 | **已文件化（未實作 Rust edges）** | README 新增「各語言實際能力表」；skill 明確指示 Rust 不要走 `impact`，改用 `rg`/`cargo check` | 能力表 + 限制 #8；實測本專案 Rust 545 chunks / 0 outgoing edges |
+| F-12 | **已修** | `evals/` crate 取代 6 個 `.mjs`；`CLAUDE.md` 寫下純 Rust 契約；CI 改跑兩 crate 且移除 Node | JS 813 行刪除；Rust 16 tests、fmt/clippy 全清；summarize 與 verify-impact 對同一份歷史資料等價；CI 無 node 引用 |
 | F-05 | **部分已修** | `cort_calls` 改用 `isCortCommand()`（比對 Rust `CORT_BIN`，也接受 `cort`/`…/bin/cort`）；`summarize()` 改為計數未量測指標、`strict` 模式直接丟例外、指標缺失時 verdict fail closed；新增 `evals/harness.test.mjs`（10 tests，純 Node，無需 npm）；`evals/README.md` 的 `bin/cort.js`／已刪測試路徑全部校正 | `node --test evals/harness.test.mjs` 10/10 |
 | F-06 | **已修** | 執行 `cargo fmt --all` 並把 `cargo fmt --all -- --check` 放進 CI | 98 處 diff → 0；Clippy 同時通過 |
 | F-07 | **未修（維持既有契約）** | 僅在文件層面保留「candidates 需查證」的語意 | 需 CLI 契約變更（多 seed 時 fail closed 或 `--file` 消歧），影響現有輸出格式，另行提案 |
