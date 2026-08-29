@@ -67,7 +67,11 @@ jobs:
           bash -n tests/install-smoke.sh
 
       - name: shellcheck
-        run: shellcheck -e SC2143 -e SC1091 install.sh tests/install-smoke.sh
+        # --severity=warning reproduces the old ludeeus/action-shellcheck bar exactly: that
+        # action filtered style/info findings, and the direct invocation does not, so without it
+        # pre-existing SC2002/SC2015 notes in the smoke script fail the gate. Same rules, same
+        # severity, no silent loosening.
+        run: shellcheck --severity=warning -e SC2143 -e SC1091 install.sh tests/install-smoke.sh
 
       - name: offline install smoke test
         run: bash tests/install-smoke.sh
