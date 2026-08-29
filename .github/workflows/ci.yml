@@ -8,78 +8,101 @@ on:
 # The repo is pure Rust: the product crate in rust/ and the dev-only eval harness in evals/.
 # Nothing here installs or runs Node — the harness was ported, and `install.sh` ships only the
 # product crate plus the pinned ast-grep pack.
+#
+# Two jobs rather than one matrix over nested objects: a step-level
+# `if: matrix.crate.dir == 'rust'` silently skipped the ast-grep install, and the product suite
+# then died on `ast_grep_missing` — cort resolves its only parser through PATH, so it has to be
+# present before `cargo test` (see audit F-13).
+
 jobs:
-  rust:
+  product:
+    name: cort (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        crate:
-          - { dir: rust,   name: cort }
-          - { dir: evals,  name: cort-evals }
-    name: ${{ matrix.crate.name }} (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    env:
-      CRATE_DIR: ${{ matrix.crate.dir }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: install shell tools
+      - name: install shellcheck (Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y shellcheck
 
-      - name: install shell tools (macOS)
+      - name: install shellcheck (macOS)
         if: runner.os == 'macOS'
         run: brew install shellcheck
 
-      # GitHub runners ship rustup + stable; add the two lint components rather than
-      # re-installing a toolchain.
       - name: ensure rustfmt + clippy
         run: rustup component add rustfmt clippy
 
       - name: toolchain versions
         run: rustc --version && cargo --version
 
-      - name: rustfmt
-        working-directory: ${{ matrix.crate.dir }}
-        run: cargo fmt --all -- --check
-
-      - name: clippy (warnings are errors)
-        working-directory: ${{ matrix.crate.dir }}
-        run: cargo clippy --all-targets --all-features -- -D warnings
-
-      - name: cargo test
-        working-directory: ${{ matrix.crate.dir }}
-        run: cargo test --locked --all-targets
-
-      # The product crate carries the installer and smoke suite; run them once per OS.
-      - name: install pinned ast-grep + cort
-        if: matrix.crate.dir == 'rust'
+      # Installs the pinned ast-grep 0.45.2 and builds+installs cort. It has to come before the
+      # tests: several of them resolve the real binary on purpose. This is also the end-to-end
+      # check that the installer works from a clean clone.
+      - name: install via installer (pinned ast-grep + cort)
         run: bash install.sh
 
       - name: installer self-check
-        if: matrix.crate.dir == 'rust'
         run: bash install.sh --check
 
+      - name: rustfmt
+        working-directory: rust
+        run: cargo fmt --all -- --check
+
+      - name: clippy (warnings are errors)
+        working-directory: rust
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: cargo test
+        working-directory: rust
+        run: cargo test --locked --all-targets
+
       - name: release build (needed by smoke tests 14-15)
-        if: matrix.crate.dir == 'rust'
         working-directory: rust
         run: cargo build --release --locked
 
       - name: bash -n (syntax check)
-        if: matrix.crate.dir == 'rust'
         run: |
           bash -n install.sh
           bash -n tests/install-smoke.sh
 
       - name: shellcheck
-        # --severity=warning reproduces the old ludeeus/action-shellcheck bar exactly: that
-        # action filtered style/info findings, and the direct invocation does not, so without it
-        # pre-existing SC2002/SC2015 notes in the smoke script fail the gate. Same rules, same
-        # severity, no silent loosening.
-        if: matrix.crate.dir == 'rust'
+        # --severity=warning reproduces the old ludeeus/action-shellcheck bar exactly: that action
+        # filtered style/info findings and the direct invocation does not, so without it pre-existing
+        # SC2002/SC2015 notes in the smoke script fail the gate. Same rules, same severity.
         run: shellcheck --severity=warning -e SC2143 -e SC1091 install.sh tests/install-smoke.sh
 
       - name: offline install smoke test
-        if: matrix.crate.dir == 'rust'
         run: bash tests/install-smoke.sh
+
+  harness:
+    name: cort-evals (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: ensure rustfmt + clippy
+        run: rustup component add rustfmt clippy
+
+      - name: rustfmt
+        working-directory: evals
+        run: cargo fmt --all -- --check
+
+      - name: clippy (warnings are errors)
+        working-directory: evals
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: cargo test
+        working-directory: evals
+        run: cargo test --locked --all-targets
+
+      - name: evals release build
+        working-directory: evals
+        run: cargo build --release --locked
