@@ -1,0 +1,58 @@
+{
+  "answer_block": true,
+  "answered_symbols": [
+    "handleReportsStatus",
+    "handleReportRoutes",
+    "handleApiV1Request"
+  ],
+  "arm": "rg+Read",
+  "arm_held": false,
+  "cache_creation": 22320,
+  "cache_read": 282687,
+  "cort_calls": 0,
+  "cost_usd": 0.4168185,
+  "coverage": 0.75,
+  "covered_symbols": [
+    "handleReportsStatus",
+    "handleReportRoutes",
+    "handleApiV1Request"
+  ],
+  "estimator": "ascii/4 + non-ascii*1 (v1)",
+  "expected_symbols": [
+    "handleReportsStatus",
+    "handleReportRoutes",
+    "handleApiV1Request",
+    "reports"
+  ],
+  "guidance_given": false,
+  "hit_turn_cap": false,
+  "hop_accuracy": 1.0,
+  "input_tokens": 20,
+  "jailed": false,
+  "output_tokens": 2043,
+  "permission_denials": 0,
+  "precision": 1.0,
+  "read_calls": 0,
+  "rg_calls": 0,
+  "session_id": "80fda108-d2d6-4e71-bfd6-7340a63f7ca1",
+  "shells_used": [
+    "grep",
+    "grep",
+    "sed",
+    "grep",
+    "sed",
+    "grep",
+    "sed",
+    "sed",
+    "grep"
+  ],
+  "spurious_symbols": [],
+  "success": false,
+  "task": "transitive-chain-lastntradingdays",
+  "tool_return_bytes": 10491,
+  "tool_return_tokens": 2627,
+  "total_tokens": 307070,
+  "turns": 10,
+  "venue_head": "86a5ee6",
+  "wrong_hop": []
+}

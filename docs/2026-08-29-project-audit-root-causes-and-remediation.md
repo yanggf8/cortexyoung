@@ -565,6 +565,52 @@ Deferred:     rewrite, modules, watch, diff impact, embeddings
 爭用有效，且依賴每個測試都確實取鎖。後續若再出現罕見 flake，優先懷疑這條路徑；更根本的做法是把這些
 環境依賴改為顯式參數注入（較大重構，暫不在此輪）。
 
+## 13f. 端對端 graph 評測：第一批可信數據（2026-08-30，10 cells）
+
+5 個 graph-required 任務 × 2 臂，全部由 `cort-evals run-agents` 跑出，`--strict` 驗證過
+`metrics_missing` 為空（這是前三輪做不到的：那時 `tool_return_tokens` 與 `read_calls` 30 格全 null）。
+venue 為 cct `86a5ee6`，隔離 `CLAUDE_CONFIG_DIR`，索引由目前 release binary 建立（`stale=false`）。
+
+| 任務 | 臂 | coverage | precision | turns | tool 回傳 | 會話 total | `arm_held` |
+|---|---|---|---|---|---|---|---|
+| transitive-chain-lastntradingdays | cort | 1.0 | 1.0 | 3 | 336 | 85,510 | true |
+| transitive-chain-lastntradingdays | shell | 0.75 | 1.0 | 10 | 2,627 | 307,070 | false |
+| route-blast-radius-reportsstatus | cort | 1.0 | 1.0 | 3 | 431 | 86,018 | true |
+| route-blast-radius-reportsstatus | shell | 0.75 | 0.2 | 21 | 9,809 | 476,138 | false |
+| storage-blast-radius-backtesting | cort | 1.0 | 1.0 | 3 | 576 | 86,563 | true |
+| storage-blast-radius-backtesting | shell | 1.0 | 1.0 | 13 | 2,728 | 324,173 | false |
+| hub-blast-radius-loginfo | cort | 1.0 | 1.0 | 3 | 1,325 | 91,214 | true |
+| hub-blast-radius-loginfo | shell | 0.886 | 0.848 | 20 | 14,783 | 683,286 | false |
+| blast-radius-3hop-getcurrenttimeet | cort | 1.0 | 1.0 | 8 | 2,176 | 250,224 | **false** |
+| blast-radius-3hop-getcurrenttimeet | shell | 0.957 | 0.88 | 21 | 8,387 | 573,203 | false |
+
+聚合并透過 gate（`cort-evals summarize --strict`）：
+
+```text
+cort      runs=5 success=1.0  mean_total=119,905.8  mean_tool_return=968.8   mean_turns=4.0
+rg+Read   runs=5 success=0.4  mean_total=472,774.0  mean_tool_return=7,666.8 mean_turns=17.0
+verdict: baseline_arm=rg+Read, cort_beats_ast_grep=true → continue to deferred features
+```
+
+也就是 spec §8 那個從未被滿足的條件，第一次在**有度量**的前提下成立：cort 臂 5/5 全對、會話成本
+約 3.9 倍便宜、工具 payload 約 7.9 倍小；基線臂 2/5 過 gate（三次是漏符號、兩次是混入不相關符號）。
+
+### 這批數據不能說什麼（必須一起讀）
+
+1. **基線不是「rg+Read」，是「agent 的整個 shell」。** 6/10 格 `arm_held=false`；連 cort 臂都有一格
+   在 cort 之外又 `grep` 了三次來自我驗證（`arm_held=false`）。所以這是「cort vs 現實中 agent 會做的事」，
+   不是「cort vs rg」。想量後者需要能真正束縛工具的 driver。
+2. **每格 n=1。** 單一 seed、單一模型（opus）、無重複；前三輪已證明單一格子會被 agent 行為變異主導
+   （曾出現 171 turns 的格子）。要拿它當決策依據，至少需要 3 次重複取中位數。
+3. **成本是名目等值。** 10 格 `cost_usd` 合計 $5.209，但憑證是訂閱（claudeAiOauth），實際付出是額度與
+   速率限制，不是帳單；且 7 天窗口在量測時已用掉 85%。
+4. `stale_reads` 仍無人量測（因此已從 `METRICS` 移除，不再讓 `--strict` 永遠失敗）。
+5. 標竿是「標籤 = cort 自家產出後再逐條對原始碼驗證」的圖；它排除了捏造，但**不是**編譯器級真相，
+   所以 coverage 1.0 的意義是「與已驗證的圖一致」，不是「不漏任何間接影響」。
+
+資料以 metrics-only 形式保存在 `evals/runs/2026-08-30-graph/`（不含 transcript，避免把 venue 的原始碼
+片段帶進本 repo）。
+
 ## 13e. F-13：agent 的 PATH 被正規化後，cort 找不到它唯一的 parser
 
 ### 實測
@@ -712,7 +758,9 @@ Bash 只准留在 `install.sh` 與 `tests/install-smoke.sh`（平台需求），
 - F-07 的消歧契約變更、`chunk_id` 穩定 ID、FTS `tokenchars`。
 - Rust `edge:calls`/`edge:imports` 規則（需要 module/`use` 解析與 trait dispatch 決策，且要先有真實需求）。
 - `call-site line` + `rel_type` 進 lean 輸出（原 §6.2 信任成本）。
-- 端對端 graph 評測的實際執行（需要 agent cells 與隔離 `CLAUDE_CONFIG_DIR`）。
+- ~~端對端 graph 評測的實際執行~~ → 已完成 10 格，見 §13f；仍缺**重複取樣**（每格目前 n=1）與
+  一個能真正束縛工具的 driver（若要回答「cort vs rg」而非「cort vs agent 的 shell」）。
+- `stale_reads` 目前無人量測（要實作需比對「回答當時磁碟內容」）。
 - shellcheck 未在本機執行（此主機沒有 shellcheck），僅在 CI 中安裝執行；新增 shell 已照 `-e SC2143 -e SC1091` 規則手動對齊。
 
 ## 14. 建議執行順序
