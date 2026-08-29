@@ -5,27 +5,61 @@ on:
     branches: [master, main]
   pull_request:
 
+# cort is Rust-only since the cutover: the release gate is cargo, not npm. The Node pieces
+# that remain (evals/*.mjs) are linted for syntax only, never installed or executed.
 jobs:
-  lint-and-smoke:
+  rust:
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
+      - name: install shell tools
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+
+      - name: install shell tools (macOS)
+        if: runner.os == 'macOS'
+        run: brew install shellcheck
+
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
 
-      - name: install deps
-        run: npm ci
+      # GitHub runners ship rustup + stable; add the two lint components rather than
+      # re-installing a toolchain.
+      - name: ensure rustfmt + clippy
+        run: rustup component add rustfmt clippy
 
-      - name: install pinned ast-grep
-        run: bash install.sh --check || bash install.sh
+      - name: toolchain versions
+        run: rustc --version && cargo --version && node --version
 
-      - name: unit tests
-        run: npm test
+      # Installs the pinned ast-grep 0.45.2 and builds+installs cort; this is also the
+      # end-to-end check that the installer works from a clean clone.
+      - name: install via installer (pinned ast-grep + cort)
+        run: bash install.sh
+
+      - name: installer self-check
+        run: bash install.sh --check
+
+      - name: rustfmt
+        working-directory: rust
+        run: cargo fmt --all -- --check
+
+      - name: clippy (warnings are errors)
+        working-directory: rust
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: cargo test
+        working-directory: rust
+        run: cargo test --locked --all-targets
+
+      - name: release build (needed by smoke tests 14-15)
+        working-directory: rust
+        run: cargo build --release --locked
 
       - name: bash -n (syntax check)
         run: |
@@ -33,15 +67,12 @@ jobs:
           bash -n tests/install-smoke.sh
 
       - name: shellcheck
-        uses: ludeeus/action-shellcheck@master
-        with:
-          scandir: .
-          severity: warning
-          # node_modules holds vendored dependency scripts we neither own nor can fix
-          # (e.g. better-sqlite3/deps/download.sh). Lint only our own shell.
-          ignore_paths: node_modules
-        env:
-          SHELLCHECK_OPTS: -e SC2143 -e SC1091
+        run: shellcheck -e SC2143 -e SC1091 install.sh tests/install-smoke.sh
 
       - name: offline install smoke test
         run: bash tests/install-smoke.sh
+
+      - name: eval harness tests
+        run: |
+          for f in evals/*.mjs; do node --check "$f"; done
+          node --test evals/harness.test.mjs
