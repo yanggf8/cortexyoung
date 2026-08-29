@@ -11,6 +11,13 @@ path = "src/lib.rs"
 name = "cort"
 path = "src/main.rs"
 
+# Dev-only stand-in for the ast-grep CLI, so the pathological parser tests do not need a scripting
+# runtime (the repo is pure Rust). Always built — `cargo test` must work with no special feature —
+# but never installed: install.sh copies `cort` and the pack only.
+[[bin]]
+name = "fake_ast_grep"
+path = "src/bin/fake_ast_grep.rs"
+
 [dependencies]
 # bundled SQLite already compiles SQLITE_ENABLE_FTS5 (libsqlite3-sys build.rs).
 # There is no rusqlite `fts5` cargo feature on 0.32; do not add extra crates.

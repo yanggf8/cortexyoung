@@ -29,7 +29,8 @@ fn env_guard() -> MutexGuard<'static, ()> {
 }
 
 fn fake_ag() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-ast-grep")
+    // Built by cargo as part of this package (see Cargo.toml [[bin]] fake_ast_grep).
+    PathBuf::from(env!("CARGO_BIN_EXE_fake_ast_grep"))
 }
 
 fn with_vars(pairs: &[(&str, Option<&str>)], f: impl FnOnce()) {

@@ -93,6 +93,13 @@ assert_file_exists "$HOME/.local/share/cortexyoung/manifest" "manifest created"
 assert_contains "$HOME/.local/share/cortexyoung/manifest" "manifest_version:2" "manifest version 2 recorded"
 assert_contains "$HOME/.local/share/cortexyoung/manifest" "skill_ast_grep:" "skill_ast_grep recorded"
 assert_contains "$HOME/.local/share/cortexyoung/manifest" "cort_bin:" "cort_bin recorded"
+# `fake_ast_grep` is a test double that cargo builds alongside cort; shipping it would be a
+# second executable in the payload that nobody owns.
+if find "$HOME/.local/share/cortexyoung/cort" -name 'fake_ast_grep' -print -quit | grep -q .; then
+  fail "dev-only fixture stays out of the installed payload"
+else
+  pass "dev-only fixture stays out of the installed payload"
+fi
 # profile block — installer picks one candidate; check any of them
 PROFILE_HIT=0
 for p in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile" "$HOME/.config/fish/config.fish"; do

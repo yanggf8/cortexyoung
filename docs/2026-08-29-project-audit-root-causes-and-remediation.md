@@ -97,7 +97,7 @@ GitHub Actions 正確，這三者必須分別驗證。
 | F-10 | P1 | 既有測試在平行執行下約 40% 機率失敗（**HEAD 既存**，非本輪引入） | 新 CI 的 `cargo test` gate 會隨機紅，等於沒有 gate |
 | F-11 | P1 | `--allowedTools Bash(...)` 在 headless 下不約束 Bash，評測臂的「白名單即實驗組」只是標籤 | 兩臂 A/B 的基線臂實際用了 `grep`/`sed`，比較不成立 |
 | F-12 | P1 | 評測器是 6 個 `.mjs`，違反「本 repo 純 Rust」契約，同時也是唯一沒有型別、沒有 lint、沒有 gate 的部分 | 已移植為 `evals/` crate，JS 全部移除 |
-| F-14 | P2 | `rust/tests/fixtures/fake-ast-grep` 是 46 行 Python，被 5 個測試當假 parser 用，抵觸純 Rust 契約 | 已在 `AGENTS.md` 標為「不得擴大的已知例外」；待移植成 Rust fixture bin |
+| F-14 | **已修** | 假 parser fixture 是 46 行 Python，抵觸純 Rust 契約 | 已移植為 Rust bin `fake_ast_grep`（模式語法不變）+ 7 個自身測試 |
 | F-13 | **已修** | `cort` 只靠 PATH 找 `ast-grep`，而 agent 的 Bash PATH 會被正規化 | 見 §13e：候選探測 + 版本優先 + probed/hint 錯誤；5 個回歸測試，端到端已證 |
 
 ## 5. F-01：incremental index 會產生 fresh-but-wrong graph
@@ -611,6 +611,27 @@ verdict: baseline_arm=rg+Read, cort_beats_ast_grep=true → continue to deferred
 
 資料以 metrics-only 形式保存在 `evals/runs/2026-08-30-graph/`（不含 transcript，避免把 venue 的原始碼
 片段帶進本 repo）。
+
+## 13h. F-14：ast-grep 測試替身移植為 Rust
+
+原本的 `rust/tests/fixtures/fake-ast-grep` 是 46 行 Python，被 4 個測試檔、10 個呼叫點當成假 parser
+使用（`hang` / `streams` / `empty` / `emit:<base64>` / `preflight-*` / `version:<x>`）。它是倉庫裡最後
+一個非 Rust 的**可執行邏輯**（`*.py` 掃不到，因為檔名沒有副檔名）。
+
+移植成 `rust/src/bin/fake_ast_grep.rs`（`[[bin]] fake_ast_grep`），**模式語法完全不變**，所以既有測試
+只需把 `fake_ag()` 從「倉庫裡的路徑」改成 `env!("CARGO_BIN_EXE_fake_ast_grep")`，10 個呼叫點的斷言一行
+都沒動。選擇「維持語法」而不是「順手簡化 base64」，是為了讓這次移植可被證明等價：移植前後 4 個測試檔
+的 60 個測試結果完全相同。
+
+新增 `rust/tests/fixture.rs`（7 項）測這個替身自己：預設回報 pin 版本、`streams` 同時寫兩條 pipe 且
+exit 1、`empty` 與真實零命中**逐位元組不可區分**（这正是設計要求 pre-flight 的理由）、`emit:` 含換行的
+位元組級還原、`preflight-*` 能区分壞 pattern 與好 pattern、未知模式安靜 exit 0。
+
+過程中該測試立刻抓到實作太寬鬆：`emit:YQ===`（壞 padding）會被解成 `"a"`，讓「malformed stream」測試
+可能因為「什麼都沒輸出」而假性通過。已讓解碼器嚴格檢查長度與 padding 並回 exit 2。
+
+它仍是 build 產物之一，所以 smoke 新增一條：安裝後的 payload 目錄 (`~/.local/share/cortexyoung/cort`)
+不得出現 `fake_ast_grep`——開發用雙重身份不得進入部署。`AGENTS.md` 裡的「已知例外」段落同時移除。
 
 ## 13g. Agent 引導的連動（skill / AGENTS.md / Codex）
 
