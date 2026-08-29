@@ -636,7 +636,77 @@ verdict: baseline_arm=rg+Read, cort_beats_ast_grep=true → continue to deferred
 `rows.json` 與 `run-status.json` 在任何一顆 cell 開跑之前就落地（內容 `[]`），
 所以「還在等窗口」與「跑過但全被擋」在盤上長得不一樣。
 
+## 13m. F-19：frontmatter 是封閉鍵集，安裝器的帳目不在裡面
+
+F-16 把 marker 從第一行移進 frontmatter 內部，修好了「skill 完全不可見」，但結論本身是錯的，
+而錯誤被寫進了 README 與本文件。使用者指出來之前，我們自己沒有再去看第二遍。
+
+實測（`codex debug prompt-input`，每種形狀單獨建一個 skills 目錄，看它會不會出現在 model-visible
+prompt 裡）：
+
+| 形狀 | 載入？ |
+|---|---|
+| fence 在第 1 行，fence 內只有 key | 是 |
+| fence 內多一行 `# managed by cortexyoung install.sh`（F-16 形狀） | 是 |
+| 註解放在結尾 fence **之後** | 是 |
+| frontmatter 多一個文件外的 key | 是 |
+| fence **之前**有任何文字（F-15 形狀） | **否** |
+
+兩條結論。第一，F-16 有效：載入器只要求 fence 從 byte 0 開始，「marker 必須留在區塊內」則是把
+「不能放上面」誤推成「必須放裡面」，沒有任何一侧的解析器要求這點。第二，官方文件的 frontmatter
+鍵集是**封閉**的（`name`/`description`/`license`/`allowed-tools`/`metadata`），註解在 YAML 合法、
+在 Codex 也過得了，但它不是這個格式允許存在的內容——倉庫裡其他每一個 skill（含 Codex 內建的
+`.system/*`）第二行都是 `name:`，只有我們塞了東西。
+
+真正的根因比「放錯哪一行」更上層一層：**安裝器在改寫一個自己不擁有格式的檔案。** F-15 與 F-16
+只是同一件事的兩個位置，所以換位置只會把問題推給下一個形狀。只要帳目還在文件裡，就永遠需要一段
+「先把那行刪掉才比得出 hash」的補丁邏輯（`grep -vF` 後 `cmp`），而讀它的人必須先有一個
+「記得先刪掉再比」的心智模型才不會誤判。
+
+修法是把帳目整個移出文件：
+
+- `install.sh` 在 SKILL.md **旁邊**寫 `.cortexyoung-managed`，內容是簽名加上**部署當時的 SHA-256**；
+- 部署不再插入任何位元組，agent 家目錄看到的與 `skills/<name>/SKILL.md` 逐字節相同（`cmp` 可證）；
+- `skill_is_managed()` 兩段式：檔內任何位置出現簽名＝舊安裝器寫的，認領並**升級**；否則用 stamp 的
+  hash 認領；
+- 所有權自此追蹤內容：**手改已部署的 SKILL.md 會被當作 collision 拒絕**（舊行為是只要 marker 還在
+  就無聲蓋掉使用者的修改，那是比較糟的那一種）；`--force` 照舊備份後替換並重新宣稱；
+- 七個 uninstall 位點都要連 stamp 一起刪——孤兒 stamp 會宣稱擁有別人之後寫在該目錄裡的 SKILL.md；
+- `preflight_skill_at()` 先验**來源**的形狀（fence 在第 1 行、有結尾、內無註解），來源壞掉直接 die，
+  不会再出現「安裝回報成功、agent 什麼都沒收到」。
+
+防再次漏掉的閘門是 `rust/tests/skill_format.rs`。F-15/F-16 能一路綠，是因為**沒有任何東西按消費者
+的方式解析過這個檔案**；smoke 的 62 項問的都是「檔案在不在」、「marker 在不在」。現在 `cargo test`
+會解析 `skills/*/SKILL.md`：fence 必須在 byte 0（BOM 也算失敗）、必須有結尾、block 內只能是文件化的
+鍵（註解、空行、重複鍵都拒）、`name` 必須等於目錄名且 ≤64、`description` 非空 ≤1024 且不含未加引號
+的 `:`（那會讓 YAML 把它讀成 mapping 而整份解析失敗）、fence 後要有內文、全文不得出現安裝器簽名。
+閘門本身也被證明會失敗：`negative_shapes_are_rejected_by_the_same_gates` 在 `rust/tests/.gate-probe/`
+臨時建出六種被禁止的形狀（fence 內註解、fence 前有文字、文件外的鍵、`name` 不等於目錄名、未加引號
+含 `:` 的 description、沒有內文），逐一跑同一組 gate 函式並要求它們拒絕、且以**對的理由**拒絕
+（比對 panic 訊息裡的关键字）。這個機制當場就证明了自己有用：第一版把 probe 目錄取名成
+`.gate-probe`，六個案例全被 `name` 不等於目錄名這一條擋下，測試以「rejected for the wrong reason」
+失敗，而不是假裝通過。smoke 側對應的是 `assert_frontmatter_keys_only_rejects`。
+
+smoke 62 → 81：部署檔不得含安裝器帳目、fence 內只有鍵、stamp 的 hash 等於檔案 hash、來源與部署檔
+`cmp` 逐字節相同、`--force` 後重新宣稱、uninstall 不留孤兒 stamp（manifest 路徑與 codex 路徑各一）、
+手改已部署檔案被拒、以及**兩種**舊形狀（marker 在第 1 行／在 fence 內）都被 repaired 並升級成
+pristine。F-16 那條真載入器 oracle 保留。
+
+升級路徑由 Test 17 在 temp HOME 內驗證；使用者的真實家目錄（三份 F-16 形狀的部署檔）要等
+`./install.sh` 重跑才會變成 pristine＋stamp，這是 `AGENTS.md` 規定不由 agent 自動執行的事。
+
+同一次改動顺手清掉的另一個 node 殘留：Test 14 原本在找不到 ast-grep 時回退到寫死的
+另一個開發者機器上的 nvm 安裝目錄（`<home>/.nvm/versions/node/<ver>/bin/ast-grep`）。現在它只從 PATH 解析（避開自己塞的假 binary），
+找不到就明確印 `SKIP:` 並讓該測試轉為跳過，另外多驗一條「解析到的必須是 pin 住的 0.45.2」；
+fixture 從 `.ts` 換成 `.rs`，這是倉庫裡最後一個 TypeScript 字串。倉庫側現在 `*.js/*.ts/*.py`
+與 node 路徑皆為 0。這台機器的 ast-grep 仍是由 npm 交付的（版本剛好等於 pin 值，所以 `install.sh`
+的既有檢查直接沿用），要換成 `install.sh` 自己下載的原生資產或 `cargo install`，需要先決定再動家目錄。
+
 ## 13k. F-16：部署到 agent 家目錄的 SKILL.md，agent 從來沒看過
+**〔本節最後那段「marker 進 frontmatter 內部」的結論已被 F-19（§13m）取代。〕**「兩個載入器都把
+fence 錨定在第一行，所以 marker 不能放上面」是對的；「所以 marker 必須放裡面」是錯的推論，
+它把「不能放在檔案外」當成「必須放在格式內」。以下原文保留，因為觀察部分是實測得來的。
+
 
 §13g 的原則是「改動若不會到達 agent 眼前，等於沒改」。這一條被 `install.sh` 自己打破了，而且破了整個 §13g 的成果。
 
@@ -937,7 +1007,8 @@ Bash 只准留在 `install.sh` 與 `tests/install-smoke.sh`（平台需求），
 | F-08 | **部分已修** | README 能力表把 `context/read/recall` 列為主要能力、`impact` 標明語言邊界 | 完整 Stable/Experimental/Deferred 分級仍待一次文件整理 |
 | F-09 | **僅文件化** | README 限制 #9 說明 `status.unparsed` 也包含「合法零符號檔案」 | 程式層面需區分 `no_symbols` 與 parse failure，屬 P3 |
 | F-18 | **已修** | 每格量到當下就重寫 `rows.json`（排序後整個覆寫，線程完成順序不影響檔內容）；`RunStatus` guard 在**包括提前 return 在內**的每一條出口寫 `run-status.json`，記 planned/written/complete | 2 項新測試（部分批次必須自報 incomplete、rows 排序與完成順序無關）；evals 測試 30 → 32；實際取樣中可在跑完前直接看到 rows.json/run-status.json 長大 |
-| F-16 | **已修** | marker 移到 frontmatter 內部第二行（`with_managed_marker`）；up-to-date 的條件從「內容相同」改成「內容相同**且**第一行是 `---`」，舊形状走 `repaired skill frontmatter` 分支重寫 | smoke 53 → 62：fence 在第一行、marker 正好在第二行、`grep -vxF marker` 後與來源 `cmp` 逐字節相同、legacy 形状必須被 repair、外加**真載入器 oracle**（`codex debug prompt-input`，缺 codex 時明確 SKIP 不冒充 PASS）；實測 3 份部署檔 repaired 後可見 |
+| F-19 | **已修** | 安裝器帳目整個移出 SKILL.md：改寫同目錄的 `.cortexyoung-managed`（簽名＋部署當時的 SHA-256），部署檔與來源逐字節相同；`preflight` 先驗來源 frontmatter 形狀；新增 `rust/tests/skill_format.rs` 以消費者角度解析 `skills/*/SKILL.md` | 負向驗證內建在 `negative_shapes_are_rejected_by_the_same_gates`（六種被禁止的形狀）；smoke 62 → 81（含兩種舊形狀升級、孤兒 stamp、手改被拒）；Test 14 移除寫死的 nvm 路徑與最後一個 `.ts` fixture |
+| F-16 | **已修** | marker 移到 frontmatter 內部第二行（`with_managed_marker`）；up-to-date 的條件從「內容相同」改成「內容相同**且**第一行是 `---`」，舊形状走 `repaired skill frontmatter` 分支重寫 | smoke 53 → 62：fence 在第一行、marker 正好在第二行、`grep -vxF marker` 後與來源 `cmp` 逐字節相同、legacy 形状必須被 repair、外加**真載入器 oracle**（`codex debug prompt-input`，缺 codex 時明確 SKIP 不冒充 PASS）；實測 3 份部署檔 repaired 後可見 |〔結論已被 **F-19** 取代：marker 不進文件，改寫旁邊的 stamp〕
 | F-17 | **已修** | 每個子命令白名單化選項，`guard_options()` 在任何動作前擋下未知選項；`--help`/`-h` 印 usage 並 exit 0；`--flag=value` 直接拒絕 | 新增 6 項測試（help 不再等於執行、未知選項附 usage、whitelist 覆蓋、`=` 形式被拒、`--jail`/`--jailed` 可區分、位置參數不误殺）；evals 測試 20 → 30 |
 | F-10 | **已修** | C2-22（會改行程 CWD 的測試）拆到獨立 target `rust/tests/staleness_cwd.rs` | 修正前 HEAD 基線 10/20 失敗；修正後 `--test staleness` 20/20 通過、整輪 218/218 連續 3 次 |
 

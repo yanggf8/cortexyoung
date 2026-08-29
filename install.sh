@@ -13,7 +13,11 @@ AST_GREP_VERSION="0.45.2"
 AST_GREP_REPO="ast-grep/ast-grep"
 AST_GREP_CRATE="ast-grep"
 CORT_VERSION="0.1.0"
-MANAGED_MARKER="# managed by cortexyoung install.sh"
+# Ownership text, written into a stamp file NEXT TO a deployed SKILL.md. It is deliberately not
+# written into SKILL.md itself (F-19): that document is input to two third-party frontmatter
+# parsers, so every byte the installer inserted there was a byte it had to subtract again before
+# comparing, and a comment inside the YAML block is bookkeeping in a format we do not own.
+MANAGED_SIGNATURE="managed by cortexyoung install.sh"
 MANIFEST_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/cortexyoung"
 MANIFEST_FILE="$MANIFEST_DIR/manifest"
 SKILL_SRC_REL="skills/xgrep/SKILL.md"
@@ -155,28 +159,58 @@ resolve_bin_dir() {
 }
 
 # ── skill helpers (used in preflight + deploy) ─────────────────────
+# The stamp file lives in the same directory as the SKILL.md it claims, one directory per skill.
+MANAGED_STAMP_NAME=".cortexyoung-managed"
+
+skill_stamp_for() {
+  printf '%s/%s' "$(dirname "$1")" "$MANAGED_STAMP_NAME"
+}
+
+# skill_is_managed: is this SKILL.md ours? Two answers, in this order:
+#   1. the file still carries the in-file marker written by install.sh before F-19 (above the
+#      fence, or as a YAML comment inside it) -- it is ours and deploy_skill_at repairs the shape;
+#   2. the stamp beside it records the SHA-256 of the file we wrote. Ownership tracks content, so a
+#      hand-edit of a deployed skill is an unmanaged collision, not a licence to overwrite it.
 skill_is_managed() {
-  [ -f "$1" ] && head -n 5 "$1" 2>/dev/null | grep -qF "$MANAGED_MARKER"
-}
-
-# skill_frontmatter_intact: a SKILL.md is only loaded when its YAML frontmatter fence starts on
-# line 1. Codex enforces exactly that and otherwise skips the whole skill with
-# "missing YAML frontmatter delimited by ---" — the file sits on disk and no agent ever sees it.
-# Claude Code parses frontmatter the same way. So the marker belongs inside the block, never above it.
-skill_frontmatter_intact() {
-  [ "$(head -n 1 "$1" 2>/dev/null)" = "---" ]
-}
-
-# with_managed_marker: emit "$1" with the managed marker on line 2, i.e. as a YAML comment inside
-# the frontmatter block. Deleting that single line reproduces the source byte-for-byte, so the hash
-# comparison in deploy_skill_at stays exact. A file with no frontmatter at all keeps the legacy
-# placement, because there is nothing there to displace.
-with_managed_marker() {
-  if skill_frontmatter_intact "$1"; then
-    { head -n 1 "$1"; echo "$MANAGED_MARKER"; tail -n +2 "$1"; }
-  else
-    { echo "$MANAGED_MARKER"; cat "$1"; }
+  if [ ! -f "$1" ]; then
+    return 1
   fi
+  if grep -qF "$MANAGED_SIGNATURE" "$1"; then
+    return 0
+  fi
+  local stamp
+  stamp="$(skill_stamp_for "$1")"
+  if [ ! -f "$stamp" ]; then
+    return 1
+  fi
+  grep -qF "skill_sha256:$(skill_hash "$1")" "$stamp"
+}
+
+# ensure_skill_stamp: claim "$1", a SKILL.md we just wrote, in the stamp file beside it.
+ensure_skill_stamp() {
+  printf '%s\nskill_sha256:%s\n' "$MANAGED_SIGNATURE" "$(skill_hash "$1")" > "$(skill_stamp_for "$1")"
+}
+
+# write_skill: publish "$1" to "$2" byte-for-byte, then claim it. Nothing is inserted into the
+# document -- what lands in an agent home directory is exactly what is in skills/<name>/SKILL.md.
+write_skill() {
+  cat "$1" > "$2"
+  ensure_skill_stamp "$2"
+}
+
+# skill_frontmatter_intact: the shape both loaders require. Codex skips a skill whose fence does not
+# open at byte 0 (measured with `codex debug prompt-input`: text above the fence makes the whole
+# skill invisible, a comment inside it does not), and Claude Code 2.1.251 matches a fence anchored
+# to line 1 and, on no match, returns an empty frontmatter with no diagnostic at all. Neither
+# format asks for a comment inside the block, so install.sh treats one as what it is: a file
+# something else has been editing. Indented continuation lines are legal YAML and are left alone.
+skill_frontmatter_intact() {
+  awk '
+    NR == 1 { if ($0 != "---") exit 1; next }
+    $0 == "---" { closed = 1; exit 0 }
+    /^[ \t]*#/ { exit 1 }
+    END { if (!closed) exit 1 }
+  ' "$1" 2>/dev/null
 }
 
 skill_hash() {
@@ -276,6 +310,10 @@ migrate_manifest_v2() {
 # ═══════════════════════════════════════════════════════════════════
 preflight_skill_at() {
   local src="$1" dest="$2"
+  # A source no loader can read is worth failing on before any mutation, not after a "success".
+  if [ -f "$src" ] && ! skill_frontmatter_intact "$src"; then
+    die "skill source has no usable YAML frontmatter (the fence must open on line 1 and close before the body): $src"
+  fi
   if [ ! -f "$dest" ]; then
     return 0
   fi
@@ -296,7 +334,9 @@ preflight_skill_at() {
   fi
   cat >&2 <<EOF
 error: unmanaged skill collision at $dest
-  The destination exists but is not managed by this installer.
+  The destination is not a file this installer wrote and still owns: it was never installed here,
+  or it has been edited since. Ownership is the SHA-256 in $MANAGED_STAMP_NAME beside the file.
+  Edit skills/<name>/SKILL.md in the repo instead, so both agent homes get the same change.
   Refusing to overwrite. Options:
     ./install.sh --force   # backup to SKILL.md.bak.<timestamp> and replace
     rm "$dest"       # remove manually, then re-run
@@ -304,12 +344,14 @@ EOF
   exit 1
 }
 
-# remove_skill_at: delete a skill this installer owns, and nothing else. An unmanaged file at the
-# same path is reported and left alone — uninstall must never eat someone else's config.
+# remove_managed_skill_at: delete a skill this installer owns, and nothing else. An unmanaged file
+# at the same path is reported and left alone — uninstall must never eat someone else's config.
+# The stamp is removed with the document: an orphan stamp in a leftover directory would claim
+# ownership of whatever SKILL.md someone writes there next.
 remove_managed_skill_at() {
   local path="$1" label="$2"
   if [ -f "$path" ] && skill_is_managed "$path"; then
-    rm -f "$path"
+    rm -f "$path" "$(skill_stamp_for "$path")"
     info "removed $path"
     rmdir "$(dirname "$path")" 2>/dev/null || true
   elif [ -f "$path" ]; then
@@ -331,46 +373,38 @@ deploy_skill_at() {
     return 0
   fi
   mkdir -p "$(dirname "$dest")"
+  local src_hash dest_hash
+  src_hash="$(skill_hash "$src")"
   if [ -f "$dest" ]; then
+    dest_hash="$(skill_hash "$dest")"
     if skill_is_managed "$dest"; then
-      local dest_stripped
-      dest_stripped="$(mktemp)"
-      grep -vF "$MANAGED_MARKER" "$dest" > "$dest_stripped" 2>/dev/null || true
-      local stripped_hash src_hash
-      stripped_hash="$(skill_hash "$dest_stripped")"
-      src_hash="$(skill_hash "$src")"
-      rm -f "$dest_stripped"
-      # Content equality alone is not enough: a file written by an older installer carries the
-      # marker on line 1, which is precisely what hides it from both agents. Repair the shape too.
-      if [ "$stripped_hash" = "$src_hash" ] && skill_frontmatter_intact "$dest"; then
+      if [ "$dest_hash" = "$src_hash" ]; then
+        ensure_skill_stamp "$dest"
         info "skill up to date: $dest"
-      elif [ "$stripped_hash" = "$src_hash" ]; then
-        with_managed_marker "$src" > "$dest"
-        info "repaired skill frontmatter: $dest"
+      elif grep -qF "$MANAGED_SIGNATURE" "$dest"; then
+        # Written by an older installer, which put the marker inside the document. Identical apart
+        # from that one line, so repair the shape instead of reporting a clean run.
+        write_skill "$src" "$dest"
+        info "repaired skill: $dest (installer marker moved out of the document)"
       else
-        with_managed_marker "$src" > "$dest"
+        write_skill "$src" "$dest"
         info "updated skill: $dest"
       fi
     else
-      local src_hash dest_hash
-      src_hash="$(skill_hash "$src")"
-      dest_hash="$(skill_hash "$dest")"
       if [ "$src_hash" = "$dest_hash" ]; then
-        local tmp; tmp="$(mktemp)"
-        with_managed_marker "$dest" > "$tmp" && cat "$tmp" > "$dest"
-        rm -f "$tmp"
+        ensure_skill_stamp "$dest"
         info "adopted unmanaged skill (hash-equal): $dest"
       else
         local bak
         bak="${dest}.bak.$(date +%Y%m%d%H%M%S)"
         cp "$dest" "$bak"
         info "backed up unmanaged skill to $bak"
-        with_managed_marker "$src" > "$dest"
+        write_skill "$src" "$dest"
         info "replaced skill: $dest"
       fi
     fi
   else
-    with_managed_marker "$src" > "$dest"
+    write_skill "$src" "$dest"
     info "installed skill: $dest"
   fi
   record_manifest "$key" "$dest"
@@ -686,14 +720,14 @@ do_uninstall() {
 
     if [ -n "$skill_ag" ] && [ -f "$skill_ag" ]; then
       if skill_is_managed "$skill_ag"; then
-        rm -f "$skill_ag"
+        rm -f "$skill_ag" "$(skill_stamp_for "$skill_ag")"
         info "removed $skill_ag"
         rmdir "$(dirname "$skill_ag")" 2>/dev/null || true
       else
         info "skill_ast_grep no longer managed — skipping: $skill_ag"
       fi
     elif [ -f "$AST_GREP_SKILL_DEST" ] && skill_is_managed "$AST_GREP_SKILL_DEST"; then
-      rm -f "$AST_GREP_SKILL_DEST"
+      rm -f "$AST_GREP_SKILL_DEST" "$(skill_stamp_for "$AST_GREP_SKILL_DEST")"
       info "removed $AST_GREP_SKILL_DEST"
       rmdir "$(dirname "$AST_GREP_SKILL_DEST")" 2>/dev/null || true
     else
@@ -702,14 +736,14 @@ do_uninstall() {
 
     if [ -n "$skill_xg" ] && [ -f "$skill_xg" ]; then
       if skill_is_managed "$skill_xg"; then
-        rm -f "$skill_xg"
+        rm -f "$skill_xg" "$(skill_stamp_for "$skill_xg")"
         info "removed $skill_xg"
         rmdir "$(dirname "$skill_xg")" 2>/dev/null || true
       else
         info "skill_xgrep no longer managed — skipping: $skill_xg"
       fi
     elif [ -f "$SKILL_DEST" ] && skill_is_managed "$SKILL_DEST"; then
-      rm -f "$SKILL_DEST"
+      rm -f "$SKILL_DEST" "$(skill_stamp_for "$SKILL_DEST")"
       info "removed $SKILL_DEST"
       rmdir "$(dirname "$SKILL_DEST")" 2>/dev/null || true
     else
@@ -722,14 +756,14 @@ do_uninstall() {
     info "uninstall complete"
   else
     if [ -f "$SKILL_DEST" ] && skill_is_managed "$SKILL_DEST"; then
-      rm -f "$SKILL_DEST"
+      rm -f "$SKILL_DEST" "$(skill_stamp_for "$SKILL_DEST")"
       info "removed $SKILL_DEST (managed)"
       rmdir "$(dirname "$SKILL_DEST")" 2>/dev/null || true
     else
       info "no manifest and skill not managed — nothing to remove for skill"
     fi
     if [ -f "$AST_GREP_SKILL_DEST" ] && skill_is_managed "$AST_GREP_SKILL_DEST"; then
-      rm -f "$AST_GREP_SKILL_DEST"
+      rm -f "$AST_GREP_SKILL_DEST" "$(skill_stamp_for "$AST_GREP_SKILL_DEST")"
       info "removed $AST_GREP_SKILL_DEST (managed)"
       rmdir "$(dirname "$AST_GREP_SKILL_DEST")" 2>/dev/null || true
     fi

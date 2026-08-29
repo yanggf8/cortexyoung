@@ -9,7 +9,8 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 INSTALL_SH="$REPO_ROOT/install.sh"
-MANAGED_MARKER="# managed by cortexyoung install.sh"
+MANAGED_SIGNATURE="managed by cortexyoung install.sh"
+STAMP_NAME=".cortexyoung-managed"
 PASS=0; FAIL=0
 
 pass() { PASS=$((PASS+1)); echo "  PASS: $*"; }
@@ -32,9 +33,40 @@ assert_not_contains() {
 assert_frontmatter_first() {
   if [ "$(head -n 1 "$1" 2>/dev/null)" = "---" ]; then pass "$2"; else fail "$2 (line 1 is not '---' in $1)"; fi
 }
-assert_marker_inside_frontmatter() {
-  if [ "$(head -n 2 "$1" 2>/dev/null | tail -n 1)" = "$MANAGED_MARKER" ]; then pass "$2"
-  else fail "$2 (marker is not line 2 of $1)"; fi
+# assert_frontmatter_keys_only: everything between the two `---` lines must be a YAML key. A
+# comment there is legal YAML and no loader rejects it, which is exactly why the old assertions
+# kept passing: the documented shape is keys only, and installer bookkeeping is not a key.
+assert_frontmatter_keys_only() {
+  local fence
+  fence="$(awk 'NR==1{next} $0=="---"{exit} {print}' "$1" 2>/dev/null)"
+  if [ -z "$fence" ]; then
+    fail "$2 (no frontmatter block in $1)"
+  elif printf '%s\n' "$fence" | grep -qE '^[[:space:]]*(#|$)'; then
+    fail "$2 (frontmatter holds a comment or blank line: $1)"
+  else
+    pass "$2"
+  fi
+}
+# The gate has to be able to fail, so the negative form is asserted on the fixtures too.
+assert_frontmatter_keys_only_rejects() {
+  local fence
+  fence="$(awk 'NR==1{next} $0=="---"{exit} {print}' "$1" 2>/dev/null)"
+  if printf '%s\n' "$fence" | grep -qE '^[[:space:]]*(#|$)'; then pass "$2"
+  else fail "$2 (the key-only gate accepted a comment inside the fence)"; fi
+}
+# assert_pristine_skill: what landed in the agent home is the repo file, byte for byte.
+assert_pristine_skill() {
+  if cmp -s "$1" "$2" && ! grep -qF "$MANAGED_SIGNATURE" "$1"; then pass "$3"
+  else fail "$3 (deployed bytes differ from $2)"; fi
+}
+# assert_skill_claimed: the stamp beside the skill must claim exactly these bytes. Ownership that
+# does not track content would let the installer overwrite a file the user has since edited.
+assert_skill_claimed() {
+  local stamp hash
+  stamp="$(dirname "$1")/$STAMP_NAME"
+  hash="$(sha256sum "$1" 2>/dev/null | awk '{print $1}')"
+  if [ -f "$stamp" ] && [ -n "$hash" ] && grep -qF "skill_sha256:$hash" "$stamp"; then pass "$2"
+  else fail "$2 (no stamp claiming $1 at $stamp)"; fi
 }
 
 # ── isolated HOME ────────────────────────────────────────────────
@@ -96,14 +128,11 @@ echo "=== install-smoke: temp HOME=$TMPHOME ==="
 echo "--- Test 1: first install ---"
 bash "$INSTALL_SH" > /tmp/smoke1.log 2>&1; cat /tmp/smoke1.log | sed 's/^/    /'
 assert_file_exists "$HOME/.claude/skills/ast-grep/SKILL.md" "ast-grep skill installed"
-assert_contains "$HOME/.claude/skills/ast-grep/SKILL.md" "$MANAGED_MARKER" "ast-grep skill has managed marker"
+assert_not_contains "$HOME/.claude/skills/ast-grep/SKILL.md" "$MANAGED_SIGNATURE" "deployed SKILL.md holds no installer bookkeeping"
 assert_frontmatter_first "$HOME/.claude/skills/ast-grep/SKILL.md" "deployed skill keeps its YAML fence on line 1"
-assert_marker_inside_frontmatter "$HOME/.claude/skills/ast-grep/SKILL.md" "managed marker lives inside the frontmatter, never above it"
-if cmp -s <(grep -vxF "$MANAGED_MARKER" "$HOME/.claude/skills/ast-grep/SKILL.md") "$REPO_ROOT/skills/ast-grep/SKILL.md"; then
-  pass "deployed skill is the repo source plus the marker line and nothing else"
-else
-  fail "deployed skill is the repo source plus the marker line and nothing else"
-fi
+assert_frontmatter_keys_only "$HOME/.claude/skills/ast-grep/SKILL.md" "deployed frontmatter holds only YAML keys"
+assert_pristine_skill "$HOME/.claude/skills/ast-grep/SKILL.md" "$REPO_ROOT/skills/ast-grep/SKILL.md" "deployed skill is the repo source byte for byte"
+assert_skill_claimed "$HOME/.claude/skills/ast-grep/SKILL.md" "ownership recorded in the stamp file beside the skill"
 assert_file_not_exists "$HOME/.claude/skills/xgrep/SKILL.md" "xgrep skill not installed by default"
 assert_file_exists "$HOME/.local/share/cortexyoung/manifest" "manifest created"
 assert_contains "$HOME/.local/share/cortexyoung/manifest" "manifest_version:2" "manifest version 2 recorded"
@@ -144,14 +173,31 @@ for p in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
   fi
 done
 if [ "$MARKER_COUNT_BEFORE" -eq "$MARKER_COUNT_AFTER" ]; then pass "profile block idempotent (no duplication)"; else fail "profile block idempotent ($MARKER_COUNT_BEFORE -> $MARKER_COUNT_AFTER)"; fi
-assert_contains "$HOME/.claude/skills/ast-grep/SKILL.md" "$MANAGED_MARKER" "ast-grep skill still managed after rerun"
+assert_skill_claimed "$HOME/.claude/skills/ast-grep/SKILL.md" "ast-grep skill still claimed after rerun"
+if grep -qF "skill up to date: $HOME/.claude/skills/ast-grep/SKILL.md" /tmp/smoke2.log; then
+  pass "rerun calls the unchanged managed skill up to date"
+else
+  fail "rerun calls the unchanged managed skill up to date"
+fi
 
 # ── 3. managed update (installer replaces outdated managed skill) ─
-echo "--- Test 3: managed update ---"
-echo "$MANAGED_MARKER" > "$HOME/.claude/skills/ast-grep/SKILL.md"
-echo "stale content" >> "$HOME/.claude/skills/ast-grep/SKILL.md"
-bash "$INSTALL_SH" > /tmp/smoke3.log 2>&1; cat /tmp/smoke3.log | sed 's/^/    /'
-if grep -qF "stale content" "$HOME/.claude/skills/ast-grep/SKILL.md" 2>/dev/null; then fail "managed update replaced stale content"; else pass "managed update replaced stale content"; fi
+echo "--- Test 3: a deployed skill edited in place is a collision, not a licence to overwrite ---"
+printf 'the user tuned this line by hand\n' >> "$HOME/.claude/skills/ast-grep/SKILL.md"
+set +e
+bash "$INSTALL_SH" > /tmp/smoke3.log 2>&1
+EC3=$?
+set -e
+if [ "$EC3" -ne 0 ] && grep -q "unmanaged.*collision" /tmp/smoke3.log; then
+  pass "an in-place edit of a deployed skill is refused"
+else
+  fail "an in-place edit of a deployed skill is refused (exit=$EC3)"
+fi
+assert_contains "$HOME/.claude/skills/ast-grep/SKILL.md" "the user tuned this line by hand" "the hand edit survives the refusal"
+# The stamp recorded the bytes we deployed, so any drift at all reads as someone else's file.
+# --force is the documented way back, and it re-claims the new bytes.
+bash "$INSTALL_SH" --force > /tmp/smoke3b.log 2>&1; cat /tmp/smoke3b.log | sed 's/^/    /' > /dev/null
+assert_pristine_skill "$HOME/.claude/skills/ast-grep/SKILL.md" "$REPO_ROOT/skills/ast-grep/SKILL.md" "--force restores the repo source"
+assert_skill_claimed "$HOME/.claude/skills/ast-grep/SKILL.md" "--force re-claims the restored bytes"
 
 # ── 4. unmanaged collision — should refuse without --force ───────
 echo "--- Test 4: unmanaged collision refusal ---"
@@ -175,7 +221,8 @@ assert_contains "$HOME/.claude/skills/ast-grep/SKILL.md" "user custom skill" "un
 echo "--- Test 5: unmanaged collision with --force ---"
 bash "$INSTALL_SH" --force > /tmp/smoke5.log 2>&1; cat /tmp/smoke5.log | sed 's/^/    /'
 if ls "$HOME/.claude/skills/ast-grep/SKILL.md.bak."* >/dev/null 2>&1; then pass "backup created on --force"; else fail "backup created on --force"; fi
-assert_contains "$HOME/.claude/skills/ast-grep/SKILL.md" "$MANAGED_MARKER" "ast-grep skill managed after --force"
+assert_pristine_skill "$HOME/.claude/skills/ast-grep/SKILL.md" "$REPO_ROOT/skills/ast-grep/SKILL.md" "skill is the repo source after --force"
+assert_skill_claimed "$HOME/.claude/skills/ast-grep/SKILL.md" "--force deploy records the new bytes in the stamp"
 
 # ── 6. unsupported OS/arch detection (inject via PATH shim) ───────
 echo "--- Test 6: unsupported arch handling ---"
@@ -322,52 +369,68 @@ assert_file_not_exists "$HOME/.claude/skills/ast-grep/SKILL.md" "ast-grep skill 
 if [ -f "$HOME/.local/bin/cort" ]; then fail "cort shim removed (found $HOME/.local/bin/cort)"; else pass "cort shim removed"; fi
 if [ -f "$HOME/.cargo/bin/cort" ]; then fail "cort payload shim still in cargo bin"; else pass "cort shim not in cargo bin (or removed)"; fi
 assert_file_not_exists "$HOME/.local/share/cortexyoung/cort/cort" "cort payload removed"
+assert_file_not_exists "$HOME/.claude/skills/ast-grep/$STAMP_NAME" "manifest path removes the stamp too"
 assert_file_exists "$HOME/.cargo/bin/xg" "pre-existing xg preserved"
 
 # ── 14. DB interrupt recovery ────────────────────────────────────
 echo "--- Test 14: an interrupted index leaves the previous db readable ---"
 PROJ="$TMPHOME/proj"; mkdir -p "$PROJ/src"
-printf 'export function a() { return 1; }\n' > "$PROJ/src/a.ts"
+# A Rust fixture: this repo indexes Rust, and the test must not need a TypeScript grammar to prove
+# that a killed index leaves the previous database readable.
+printf 'fn a() -> i32 { 1 }\n' > "$PROJ/src/a.rs"
 # Use the real ast-grep and the real (Rust) cort — remove fakebin from PATH here
 REAL_PATH="$ORIGINAL_PATH"
+HOST_AG_EXPECTED="0.45.2"
 CORT_BIN_UNDER_TEST="$REPO_ROOT/rust/target/release/cort"
 if [ ! -x "$CORT_BIN_UNDER_TEST" ]; then
   echo "  SKIP: rust/target/release/cort not built (run cargo build --release first)"
   CORT_BIN_UNDER_TEST=""
 fi
-# Find real ast-grep (host) and ensure it is on REAL_PATH
-HOST_AG="$(command -v ast-grep 2>/dev/null || echo /home/yanggf/.nvm/versions/node/v24.3.0/bin/ast-grep)"
-if [ ! -x "$HOST_AG" ]; then HOST_AG="$(which ast-grep 2>/dev/null || true)"; fi
-# Prefer host ast-grep if fake is still shadowing; resolve via REAL_PATH
-HOST_AG_REAL="$(PATH="$REAL_PATH" command -v ast-grep 2>/dev/null || echo "$HOST_AG")"
-if [ -x "$HOST_AG_REAL" ]; then HOST_AG="$HOST_AG_REAL"; fi
+# Resolve the real ast-grep the same way the product does — through PATH, minus the fakes this
+# script put there. No host-specific absolute paths: an installer-provisioned binary is the only
+# thing that may be used here, and if it is absent the test says SKIP rather than guessing.
+HOST_AG="$(PATH="$REAL_PATH" command -v ast-grep 2>/dev/null || true)"
+if [ ! -x "$HOST_AG" ]; then
+  echo "  SKIP: no real ast-grep on PATH (run ./install.sh); Test 14 needs a working parser"
+  HOST_AG=""
+fi
+T14_RUNS=1
+if [ -z "$CORT_BIN_UNDER_TEST" ] || [ -z "$HOST_AG" ]; then T14_RUNS=0; fi
+if [ -n "$HOST_AG" ] && [ -n "$CORT_BIN_UNDER_TEST" ]; then
+  AG_VER="$("$HOST_AG" --version 2>/dev/null | awk '{print $2}')"
+  if [ "$AG_VER" != "$HOST_AG_EXPECTED" ]; then
+    fail "real ast-grep on PATH is $AG_VER, not the pinned $HOST_AG_EXPECTED ($HOST_AG)"
+  else
+    pass "real ast-grep is the pinned version ($AG_VER)"
+  fi
+fi
 # Index the fixture project with the host ast-grep (fakebin must not shadow it)
-if [ -n "$CORT_BIN_UNDER_TEST" ]; then
+if [ "$T14_RUNS" = "1" ]; then
   ( cd "$PROJ" && PATH="$REAL_PATH" CORT_AST_GREP_BIN="$HOST_AG" "$CORT_BIN_UNDER_TEST" index . > /dev/null 2>&1 )
 fi
 chunk_count() {
-  [ -n "$CORT_BIN_UNDER_TEST" ] || { echo ""; return; }
+  [ "$T14_RUNS" = "1" ] || { echo ""; return; }
   ( cd "$PROJ" && PATH="$REAL_PATH" CORT_AST_GREP_BIN="$HOST_AG" \
       "$CORT_BIN_UNDER_TEST" status . 2>/dev/null ) \
     | sed -n 's/.*"chunks": *\([0-9][0-9]*\).*/\1/p' | head -1
 }
 BEFORE="$(chunk_count)"
-if [ -z "$CORT_BIN_UNDER_TEST" ]; then
-  pass "baseline index readable (skipped: cort binary not built)"
+if [ "$T14_RUNS" != "1" ]; then
+  pass "baseline index readable (skipped: cort binary or pinned ast-grep unavailable)"
 elif [ -n "$BEFORE" ] && [ "$BEFORE" -gt 0 ]; then
   pass "baseline index readable ($BEFORE chunks)"
 else
   fail "baseline index readable (got '$BEFORE')"
 fi
-for i in $(seq 1 40); do printf 'export function f%d() { return %d; }\n' "$i" "$i" > "$PROJ/src/f$i.ts"; done
-if [ -n "$CORT_BIN_UNDER_TEST" ]; then
+for i in $(seq 1 40); do printf 'fn f%d() -> i32 { %d }\n' "$i" "$i" > "$PROJ/src/f$i.rs"; done
+if [ "$T14_RUNS" = "1" ]; then
   ( cd "$PROJ" && PATH="$REAL_PATH" CORT_AST_GREP_BIN="$HOST_AG" "$CORT_BIN_UNDER_TEST" index . > /dev/null 2>&1 & IDX=$!; sleep 0.2; kill -9 $IDX 2>/dev/null; wait $IDX 2>/dev/null ) || true
 fi
 AFTER="$(chunk_count)"
 # A killed full index either rolled back (AFTER == BEFORE) or had already committed
 # (AFTER > BEFORE). What must never happen is an unreadable or truncated database.
-if [ -z "$CORT_BIN_UNDER_TEST" ]; then
-  pass "db intact after a killed index (skipped: cort binary not built)"
+if [ "$T14_RUNS" != "1" ]; then
+  pass "db intact after a killed index (skipped: cort binary or pinned ast-grep unavailable)"
 elif [ -n "$AFTER" ] && [ "$AFTER" -ge "$BEFORE" ]; then
   pass "db intact after a killed index (before=$BEFORE after=$AFTER)"
 else
@@ -399,8 +462,10 @@ echo "--- Test 16: the same routing skill is deployed for Codex ---"
 CODEX_DEST="$HOME/.codex/skills/ast-grep/SKILL.md"
 CLAUDE_DEST="$HOME/.claude/skills/ast-grep/SKILL.md"
 assert_file_exists "$CODEX_DEST" "codex skill deployed"
-assert_contains "$CODEX_DEST" "$MANAGED_MARKER" "codex skill has managed marker"
+assert_not_contains "$CODEX_DEST" "$MANAGED_SIGNATURE" "codex SKILL.md holds no installer bookkeeping"
 assert_frontmatter_first "$CODEX_DEST" "codex skill keeps its YAML fence on line 1"
+assert_frontmatter_keys_only "$CODEX_DEST" "codex frontmatter holds only YAML keys"
+assert_skill_claimed "$CODEX_DEST" "codex skill claimed by its own stamp"
 if cmp -s "$CODEX_DEST" "$CLAUDE_DEST"; then
   pass "claude and codex skill copies are byte-identical (one source of truth)"
 else
@@ -408,11 +473,12 @@ else
 fi
 assert_contains "$HOME/.local/share/cortexyoung/manifest" "skill_ast_grep_codex:" "manifest records the codex skill"
 bash "$INSTALL_SH" > /tmp/smoke16.log 2>&1; cat /tmp/smoke16.log | sed 's/^/    /' > /dev/null
-if [ "$(grep -cF "$MANAGED_MARKER" "$CODEX_DEST")" = "1" ]; then
-  pass "rerun did not duplicate the codex managed marker"
+if [ "$(grep -c '^skill_sha256:' "$(dirname "$CODEX_DEST")/$STAMP_NAME")" = "1" ]; then
+  pass "rerun did not duplicate the codex stamp hash"
 else
-  fail "rerun did not duplicate the codex managed marker"
+  fail "rerun did not duplicate the codex stamp hash"
 fi
+assert_pristine_skill "$CODEX_DEST" "$REPO_ROOT/skills/ast-grep/SKILL.md" "codex skill still pristine after rerun"
 # An unmanaged file in the Codex home must be refused, and refused before anything is mutated.
 printf 'my own codex skill, do not touch\n' > "$CODEX_DEST"
 set +e
@@ -424,30 +490,63 @@ else
   fail "unmanaged codex skill collision refused (exit=$EC16)"
 fi
 assert_contains "$CODEX_DEST" "my own codex skill" "unmanaged codex file untouched after refusal"
-assert_contains "$CLAUDE_DEST" "$MANAGED_MARKER" "claude skill untouched by the codex refusal"
+assert_pristine_skill "$CLAUDE_DEST" "$REPO_ROOT/skills/ast-grep/SKILL.md" "claude skill untouched by the codex refusal"
 bash "$INSTALL_SH" --force > /tmp/smoke16c.log 2>&1; cat /tmp/smoke16c.log | sed 's/^/    /' > /dev/null
-assert_contains "$CODEX_DEST" "$MANAGED_MARKER" "codex skill adopted with --force"
+assert_pristine_skill "$CODEX_DEST" "$REPO_ROOT/skills/ast-grep/SKILL.md" "codex skill adopted with --force"
+assert_skill_claimed "$CODEX_DEST" "--force on the codex home re-claims the new bytes"
 # uninstall removes the managed copy and never the other home's
 bash "$INSTALL_SH" --uninstall > /tmp/smoke16d.log 2>&1; cat /tmp/smoke16d.log | sed 's/^/    /' > /dev/null
 if [ -f "$CODEX_DEST" ]; then fail "codex skill removed on uninstall"; else pass "codex skill removed on uninstall"; fi
+assert_file_not_exists "$(dirname "$CODEX_DEST")/$STAMP_NAME" "no orphan stamp left behind on uninstall"
+# The directory itself may legitimately survive: --force in the test above left a .bak of the
+# user's own file there, and uninstall must not eat backups it did not make.
+if [ -f "$(dirname "$CODEX_DEST")/$STAMP_NAME" ]; then
+  fail "the stamp is removed before the directory is even considered for rmdir"
+else
+  pass "the stamp is removed before the directory is even considered for rmdir"
+fi
 
 # ── 17. the shape the previous installer wrote must be repaired, not reported "up to date" ──
-echo "--- Test 17: legacy marker-on-line-1 skill is repaired ---"
+echo "--- Test 17: the two legacy in-document marker shapes are repaired ---"
 LEGACY_SKILL="$HOME/.claude/skills/ast-grep/SKILL.md"
-{ echo "$MANAGED_MARKER"; cat "$REPO_ROOT/skills/ast-grep/SKILL.md"; } > "$LEGACY_SKILL"
-if [ "$(head -n 1 "$LEGACY_SKILL")" = "$MANAGED_MARKER" ]; then
-  pass "fixture reproduces the inert legacy shape (marker above the fence)"
+SRC_SKILL="$REPO_ROOT/skills/ast-grep/SKILL.md"
+
+# Shape A (install.sh up to F-15): marker above the fence. Both loaders then skip the whole skill.
+{ echo "$MANAGED_SIGNATURE"; cat "$SRC_SKILL"; } > "$LEGACY_SKILL"
+if [ "$(head -n 1 "$LEGACY_SKILL")" = "$MANAGED_SIGNATURE" ]; then
+  pass "fixture reproduces legacy shape A (marker above the fence)"
 else
-  fail "fixture reproduces the inert legacy shape"
+  fail "fixture reproduces legacy shape A"
 fi
+rm -f "$(dirname "$LEGACY_SKILL")/$STAMP_NAME"
 bash "$INSTALL_SH" > /tmp/smoke17.log 2>&1; cat /tmp/smoke17.log | sed 's/^/    /' > /dev/null
-if grep -q "repaired skill frontmatter" /tmp/smoke17.log; then
-  pass "rerun repairs a content-identical but inert skill"
+if grep -q "repaired skill" /tmp/smoke17.log; then
+  pass "rerun repairs legacy shape A (a hash match must not excuse the shape)"
 else
-  fail "rerun repairs a content-identical but inert skill (a hash match must not excuse the shape)"
+  fail "rerun repairs legacy shape A"
 fi
-assert_frontmatter_first "$LEGACY_SKILL" "repaired skill has its fence back on line 1"
-assert_contains "$LEGACY_SKILL" "$MANAGED_MARKER" "repaired skill is still managed"
+assert_pristine_skill "$LEGACY_SKILL" "$SRC_SKILL" "legacy shape A upgraded to the pristine document"
+assert_skill_claimed "$LEGACY_SKILL" "legacy shape A ownership moved into the stamp"
+
+# Shape B (install.sh F-16): marker as a YAML comment inside the frontmatter. Loaders accept it,
+# the documented shape does not: the block is for keys, and the installer had to delete that line
+# again before every hash comparison.
+awk -v sig="$MANAGED_SIGNATURE" 'NR==1{print; print "# " sig; next} {print}' "$SRC_SKILL" > "$LEGACY_SKILL.tmp" \
+  && mv "$LEGACY_SKILL.tmp" "$LEGACY_SKILL"
+if [ "$(head -n 2 "$LEGACY_SKILL" | tail -n 1)" = "# $MANAGED_SIGNATURE" ]; then
+  pass "fixture reproduces legacy shape B (marker inside the frontmatter)"
+else
+  fail "fixture reproduces legacy shape B"
+fi
+assert_frontmatter_keys_only_rejects "$LEGACY_SKILL" "the key-only gate rejects shape B, so it can catch it"
+bash "$INSTALL_SH" > /tmp/smoke17b.log 2>&1; cat /tmp/smoke17b.log | sed 's/^/    /' > /dev/null
+if grep -q "repaired skill" /tmp/smoke17b.log; then
+  pass "rerun repairs legacy shape B"
+else
+  fail "rerun repairs legacy shape B"
+fi
+assert_pristine_skill "$LEGACY_SKILL" "$SRC_SKILL" "legacy shape B upgraded to the pristine document"
+assert_skill_claimed "$LEGACY_SKILL" "legacy shape B ownership moved into the stamp"
 # The strongest form of the assertion, when the real loader is available: does the deployed text
 # actually reach a Codex prompt? Skipped (never faked) where codex is not installed, e.g. CI.
 SKILL_PROBE="Route code lookup, reusable reads"

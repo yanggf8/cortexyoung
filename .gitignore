@@ -1,8 +1,11 @@
-# Keep until manual cleanup of archived tree (v6-final)
-node_modules/
+# Rust/editor output. Deliberately NO node_modules/ or *.tsbuildinfo: this repo is pure Rust, and
+# an ignore rule would hide exactly the evidence we want `git status` to surface if a Node tree
+# ever reappears.
 dist/
 build/
-*.tsbuildinfo
+
+# Scratch directory the skill-format negative test builds and removes inside `cargo test`.
+rust/tests/.gate-probe/
 
 # Machine-local Claude Code settings and generated reports — never commit
 .claude/settings.local.json
