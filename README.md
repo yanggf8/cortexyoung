@@ -86,7 +86,7 @@ never appears in its own report.
 
 - Downloads pinned `ast-grep` v0.45.2 prebuilt `app-<target>.zip` for your platform (Linux x86_64/aarch64, macOS x86_64/arm64) from GitHub Releases and verifies SHA-256 (repo-maintained; upstream publishes no checksums) — fail-closed: an empty or mismatched checksum refuses to install. Falls back to `cargo install ast-grep --version 0.45.2 --locked` (requires Rust 1.88+).
 - Builds `cort` from `rust/` with `cargo build --release --locked` on **every** run and installs the binary plus its ast-grep pack (`src/pack`, located at runtime via `CORT_PACK_DIR`) to `~/.local/share/cortexyoung/cort`, shimming `~/.cargo/bin/cort` or `~/.local/bin/cort`.
-- Deploys `skills/ast-grep/SKILL.md` to `~/.claude/skills/ast-grep/SKILL.md` with a managed marker. Preflights collisions before mutating: skips if hash-equal, replaces if managed, refuses unmanaged collisions (use `--force` to backup and replace).
+- Deploys `skills/ast-grep/SKILL.md` to **both** agent homes — `~/.claude/skills/ast-grep/SKILL.md` and `~/.codex/skills/ast-grep/SKILL.md` (honouring `CODEX_HOME`) — byte-identical, each with a managed marker. Preflights collisions before mutating: skips if hash-equal, replaces if managed, refuses unmanaged collisions (use `--force` to backup and replace). Uninstall removes only the copies it owns.
 - Adds a single bounded idempotent `PATH` block to your shell profile (`.bashrc`/`.zshrc`/`.profile`) so `cort` and `ast-grep` are on `PATH`; removed on `--uninstall`.
 - Records ownership in `~/.local/share/cortexyoung/manifest` (v2 `key:value` lines) — uninstall only removes what it installed, never a pre-existing binary.
 
@@ -120,7 +120,7 @@ from the pre-upgrade graph and `index_is_stale` is `true`.
 ## Uninstall
 
 ```bash
-./install.sh --uninstall  # removes managed cort + ast-grep binaries, CORT_HOME, skills, PATH block, manifest
+./install.sh --uninstall  # removes managed cort + ast-grep binaries, CORT_HOME, skills (claude + codex), PATH block, manifest
 ```
 
 Pre-existing binaries and unmanaged skills are never removed. With `--with-xgrep`, the managed `xg` binary and `xgrep` skill are also removed if owned.

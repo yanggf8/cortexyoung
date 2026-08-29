@@ -372,6 +372,41 @@ else
   fi
 fi
 
+echo "--- Test 16: the same routing skill is deployed for Codex ---"
+CODEX_DEST="$HOME/.codex/skills/ast-grep/SKILL.md"
+CLAUDE_DEST="$HOME/.claude/skills/ast-grep/SKILL.md"
+assert_file_exists "$CODEX_DEST" "codex skill deployed"
+assert_contains "$CODEX_DEST" "$MANAGED_MARKER" "codex skill has managed marker"
+if cmp -s "$CODEX_DEST" "$CLAUDE_DEST"; then
+  pass "claude and codex skill copies are byte-identical (one source of truth)"
+else
+  fail "claude and codex skill copies are byte-identical"
+fi
+assert_contains "$HOME/.local/share/cortexyoung/manifest" "skill_ast_grep_codex:" "manifest records the codex skill"
+bash "$INSTALL_SH" > /tmp/smoke16.log 2>&1; cat /tmp/smoke16.log | sed 's/^/    /' > /dev/null
+if [ "$(grep -cF "$MANAGED_MARKER" "$CODEX_DEST")" = "1" ]; then
+  pass "rerun did not duplicate the codex managed marker"
+else
+  fail "rerun did not duplicate the codex managed marker"
+fi
+# An unmanaged file in the Codex home must be refused, and refused before anything is mutated.
+printf 'my own codex skill, do not touch\n' > "$CODEX_DEST"
+set +e
+bash "$INSTALL_SH" > /tmp/smoke16b.log 2>&1; EC16=$?
+set -e
+if [ "$EC16" -ne 0 ] && grep -q "unmanaged.*collision" /tmp/smoke16b.log; then
+  pass "unmanaged codex skill collision refused"
+else
+  fail "unmanaged codex skill collision refused (exit=$EC16)"
+fi
+assert_contains "$CODEX_DEST" "my own codex skill" "unmanaged codex file untouched after refusal"
+assert_contains "$CLAUDE_DEST" "$MANAGED_MARKER" "claude skill untouched by the codex refusal"
+bash "$INSTALL_SH" --force > /tmp/smoke16c.log 2>&1; cat /tmp/smoke16c.log | sed 's/^/    /' > /dev/null
+assert_contains "$CODEX_DEST" "$MANAGED_MARKER" "codex skill adopted with --force"
+# uninstall removes the managed copy and never the other home's
+bash "$INSTALL_SH" --uninstall > /tmp/smoke16d.log 2>&1; cat /tmp/smoke16d.log | sed 's/^/    /' > /dev/null
+if [ -f "$CODEX_DEST" ]; then fail "codex skill removed on uninstall"; else pass "codex skill removed on uninstall"; fi
+
 # ── summary ──────────────────────────────────────────────────────
 echo ""
 echo "=== smoke results: $PASS passed, $FAIL failed ==="

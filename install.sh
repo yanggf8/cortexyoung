@@ -20,7 +20,11 @@ SKILL_SRC_REL="skills/xgrep/SKILL.md"
 SKILL_DEST="$HOME/.claude/skills/xgrep/SKILL.md"
 CORT_HOME="$MANIFEST_DIR/cort"
 AST_GREP_SKILL_SRC_REL="skills/ast-grep/SKILL.md"
-AST_GREP_SKILL_DEST="$HOME/.claude/skills/ast-grep/SKILL.md"
+AST_GREP_SKILL_DEST="${CLAUDE_SKILL_HOME:-$HOME/.claude}/skills/ast-grep/SKILL.md"
+# The same routing guidance is deployed for Codex (it reads $CODEX_HOME/skills, default
+# ~/.codex/skills). One source of truth in the repo, two agent homes — an agent that never sees the
+# skill routes ordinary lookups into the graph and re-reads whole files.
+CODEX_SKILL_DEST="${CODEX_HOME:-$HOME/.codex}/skills/ast-grep/SKILL.md"
 WITH_XGREP=0
 
 sha256_for_ast_grep_asset() {
@@ -278,6 +282,21 @@ error: unmanaged skill collision at $dest
     rm "$dest"       # remove manually, then re-run
 EOF
   exit 1
+}
+
+# remove_skill_at: delete a skill this installer owns, and nothing else. An unmanaged file at the
+# same path is reported and left alone — uninstall must never eat someone else's config.
+remove_managed_skill_at() {
+  local path="$1" label="$2"
+  if [ -f "$path" ] && skill_is_managed "$path"; then
+    rm -f "$path"
+    info "removed $path"
+    rmdir "$(dirname "$path")" 2>/dev/null || true
+  elif [ -f "$path" ]; then
+    info "$label not managed — skipping: $path"
+  else
+    info "$label not present — nothing to remove"
+  fi
 }
 
 # legacy single-skill wrapper for backwards compat (no longer used in install path)
@@ -573,6 +592,17 @@ do_check() {
     echo "skill_ast_grep: $AST_GREP_SKILL_DEST (NOT INSTALLED)"
     ok=0
   fi
+  if [ -f "$CODEX_SKILL_DEST" ]; then
+    if skill_is_managed "$CODEX_SKILL_DEST"; then
+      echo "skill_codex: $CODEX_SKILL_DEST (managed)"
+    else
+      echo "skill_codex: $CODEX_SKILL_DEST (UNMANAGED)"
+      ok=0
+    fi
+  else
+    echo "skill_codex: $CODEX_SKILL_DEST (NOT INSTALLED)"
+    ok=0
+  fi
   if [ -f "$MANIFEST_FILE" ]; then
     echo "manifest: $MANIFEST_FILE"
     cat "$MANIFEST_FILE" | sed 's/^/  /'
@@ -637,6 +667,9 @@ do_uninstall() {
     else
       info "xg binary not owned by this installer — skipping (was pre-existing)"
     fi
+
+    skill_ag_codex="$(manifest_get skill_ast_grep_codex || true)"
+    remove_managed_skill_at "${skill_ag_codex:-$CODEX_SKILL_DEST}" skill_ast_grep_codex
 
     if [ -n "$skill_ag" ] && [ -f "$skill_ag" ]; then
       if skill_is_managed "$skill_ag"; then
@@ -712,8 +745,9 @@ do_install() {
   detect_platform
   resolve_bin_dir
 
-  # Preflight both skills before any mutation — atomic rollback
+  # Preflight every destination (claude + codex skill, optional xgrep) before any mutation
   preflight_skill_at "$SCRIPT_DIR/$AST_GREP_SKILL_SRC_REL" "$AST_GREP_SKILL_DEST"
+  preflight_skill_at "$SCRIPT_DIR/$AST_GREP_SKILL_SRC_REL" "$CODEX_SKILL_DEST"
   if [ "$WITH_XGREP" -eq 1 ]; then
     if [ ! -f "$SCRIPT_DIR/$SKILL_SRC_REL" ]; then
       die "skill source not found: $SCRIPT_DIR/$SKILL_SRC_REL (run from repo root)"
@@ -727,6 +761,7 @@ do_install() {
     install_xg
   fi
   deploy_skill_at "$SCRIPT_DIR/$AST_GREP_SKILL_SRC_REL" "$AST_GREP_SKILL_DEST" "skill_ast_grep"
+  deploy_skill_at "$SCRIPT_DIR/$AST_GREP_SKILL_SRC_REL" "$CODEX_SKILL_DEST" "skill_ast_grep_codex"
   if [ "$WITH_XGREP" -eq 1 ]; then
     deploy_skill_at "$SCRIPT_DIR/$SKILL_SRC_REL" "$SKILL_DEST" "skill_xgrep"
   fi
@@ -735,6 +770,7 @@ do_install() {
 
   echo ""
   echo "Done. Verify with: cort --version && ast-grep --version && cat $AST_GREP_SKILL_DEST | head -5"
+  echo "Skill also deployed for Codex: $CODEX_SKILL_DEST"
   if [ "$WITH_XGREP" -eq 1 ]; then
     echo "Also: xg --version && cat $SKILL_DEST | head -5"
   fi
