@@ -1,7 +1,7 @@
 //! Staleness: `index_is_stale` signalling. JS `src/staleness.js`.
 //! Compared extraction hash, not git dirty and not raw file bytes (spec §7.5).
 
-use crate::db::Db;
+use crate::db::{get_meta, Db};
 use crate::incremental::git_candidates;
 use crate::indexer::{canonicalize_root, extract_one, walk_files, IndexError};
 use rusqlite::{params, OptionalExtension};
@@ -87,8 +87,13 @@ pub fn compute_stale(
         }
     }
 
+    // The per-file hash comparison above cannot see a half-rebuilt graph: every file hash can
+    // match while cross-file edges are missing. `graph_pending` is the derived-state equivalent
+    // of staleness, and it must surface through the same field agents already check.
+    let graph_pending = get_meta(db, "graph_pending")?.as_deref() == Some("1");
+
     Ok(StaleReport {
-        index_is_stale: !deleted.is_empty() || !changed_files.is_empty(),
+        index_is_stale: graph_pending || !deleted.is_empty() || !changed_files.is_empty(),
         deleted_files: deleted,
         changed_files,
     })

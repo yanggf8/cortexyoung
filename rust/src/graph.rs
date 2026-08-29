@@ -225,14 +225,25 @@ pub fn relationship_rows_for_file(
     chunks: &[Chunk],
     edges: &[Edge],
 ) -> rusqlite::Result<Vec<RelationshipRow>> {
-    let import_map = build_import_map(edges);
     let mut chunk_by_symbol: HashMap<String, String> = HashMap::new();
     for c in chunks {
         if let Some(name) = &c.symbol_name {
             chunk_by_symbol.insert(name.clone(), c.chunk_id.clone());
         }
     }
+    relationship_rows_for_symbol_map(db, project_id, file_path, &chunk_by_symbol, edges)
+}
 
+/// Same resolution, but the caller owns the symbol→chunk map. The global rebuild loads that
+/// map straight from `chunks` instead of materialising every chunk body.
+pub fn relationship_rows_for_symbol_map(
+    db: &Db,
+    project_id: &str,
+    file_path: &str,
+    chunk_by_symbol: &HashMap<String, String>,
+    edges: &[Edge],
+) -> rusqlite::Result<Vec<RelationshipRow>> {
+    let import_map = build_import_map(edges);
     let mut rows = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     for e in edges {
@@ -378,4 +389,106 @@ pub fn containment_join(
         })),
         None => Ok(None),
     }
+}
+
+const INSERT_REL: &str = "INSERT INTO relationships
+  (source_chunk_id, target_chunk_id, rel_type, confidence, confidence_score, confidence_reasoning)
+  VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+  ON CONFLICT(source_chunk_id, target_chunk_id, rel_type) DO NOTHING";
+
+pub fn insert_relationship(db: &Db, row: &RelationshipRow) -> rusqlite::Result<bool> {
+    Ok(db.execute(
+        INSERT_REL,
+        params![
+            row.source_chunk_id,
+            row.target_chunk_id,
+            row.rel_type,
+            row.confidence,
+            row.confidence_score,
+            row.confidence_reasoning,
+        ],
+    )? > 0)
+}
+
+/// Rebuild the project's whole `relationships` table from persisted chunks + raw edges.
+///
+/// The graph is derived state: resolving one edge needs the *target* file's chunks, which a
+/// per-file update cannot see. Recomputing every edge is what makes an incremental re-index of
+/// a callee keep its callers' edges (audit F-01). Resolution is pure SQL over state already in
+/// the database, so no ast-grep subprocess is involved and it stays cheap enough to run on
+/// every index.
+pub fn rebuild_relationships(db: &Db, project_id: &str) -> rusqlite::Result<i64> {
+    let mut files: Vec<String> = {
+        let mut stmt = db.prepare(
+            "SELECT DISTINCT file_path FROM raw_edges WHERE project_id = ?1 ORDER BY file_path",
+        )?;
+        let rows = stmt.query_map(params![project_id], |r| r.get::<_, String>(0))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    files.sort();
+    files.dedup();
+
+    db.execute(
+        "DELETE FROM relationships WHERE source_chunk_id IN
+           (SELECT chunk_id FROM chunks WHERE project_id = ?1)",
+        params![project_id],
+    )?;
+
+    let mut count = 0i64;
+    for file_path in &files {
+        let mut chunk_by_symbol: HashMap<String, String> = HashMap::new();
+        {
+            let mut stmt = db.prepare(
+                "SELECT symbol_name, chunk_id FROM chunks
+                  WHERE project_id = ?1 AND file_path = ?2 AND symbol_name IS NOT NULL
+                  ORDER BY start_line, chunk_id",
+            )?;
+            let rows = stmt.query_map(params![project_id, file_path], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?;
+            for row in rows {
+                let (symbol, chunk_id) = row?;
+                chunk_by_symbol.insert(symbol, chunk_id);
+            }
+        }
+
+        let mut edges: Vec<Edge> = Vec::new();
+        {
+            let mut stmt = db.prepare(
+                "SELECT source_symbol, raw_target, rel_type, start_line FROM raw_edges
+                  WHERE project_id = ?1 AND file_path = ?2
+                  ORDER BY start_line, raw_target, rel_type",
+            )?;
+            let rows = stmt.query_map(params![project_id, file_path], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, i64>(3)?,
+                ))
+            })?;
+            for row in rows {
+                let (source_symbol, raw_target, rel_type, start_line) = row?;
+                edges.push(Edge {
+                    rel_type,
+                    source_symbol: if source_symbol.is_empty() {
+                        None
+                    } else {
+                        Some(source_symbol)
+                    },
+                    raw_target,
+                    start_line,
+                });
+            }
+        }
+
+        let rows =
+            relationship_rows_for_symbol_map(db, project_id, file_path, &chunk_by_symbol, &edges)?;
+        for row in rows {
+            if insert_relationship(db, &row)? {
+                count += 1;
+            }
+        }
+    }
+    Ok(count)
 }

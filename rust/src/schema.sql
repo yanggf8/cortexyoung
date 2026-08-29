@@ -52,6 +52,22 @@ CREATE TABLE IF NOT EXISTS relationships (
 CREATE INDEX IF NOT EXISTS idx_rel_source ON relationships(source_chunk_id);
 CREATE INDEX IF NOT EXISTS idx_rel_target ON relationships(target_chunk_id);
 
+-- F-01: `relationships` is derived state that spans files. Rebuilding it after a per-file
+-- chunk update needs the unresolved matches persisted, because ON DELETE CASCADE takes an
+-- edge with it as soon as the *target* chunk is replaced by a re-index of another file.
+-- `source_symbol` is '' for file-level edges (imports), which must be distinct from NULL so
+-- the primary key actually deduplicates them.
+CREATE TABLE IF NOT EXISTS raw_edges (
+  project_id TEXT NOT NULL REFERENCES projects(project_id) ON DELETE CASCADE,
+  file_path TEXT NOT NULL,
+  source_symbol TEXT NOT NULL DEFAULT '',
+  raw_target TEXT NOT NULL,
+  rel_type TEXT NOT NULL CHECK(rel_type IN ('imports','exports','calls')),
+  start_line INTEGER NOT NULL,
+  PRIMARY KEY (project_id, file_path, rel_type, raw_target, source_symbol, start_line)
+);
+CREATE INDEX IF NOT EXISTS idx_raw_edges_file ON raw_edges(project_id, file_path);
+
 -- NOTE: spec §4 requires tokenize='unicode61 "remove_diacritics 1" "tokenchars ._$"' but bundled SQLite 3.49.2 (better-sqlite3 11.10.0) rejects any parameterized unicode61 (parse error in tokenize directive) — only bare 'unicode61' passes. Downgraded to bare; revert to spec string when CI SQLite supports it. See task-2-report.md.
 
 CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(

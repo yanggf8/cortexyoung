@@ -88,7 +88,7 @@ fn ensure_schema_is_idempotent_and_records_the_schema_version() {
     ensure_schema(&db).unwrap();
     assert_eq!(
         get_meta(&db, "SCHEMA_VERSION").unwrap().as_deref(),
-        Some("2")
+        Some(SCHEMA_VERSION.to_string().as_str())
     );
 }
 
@@ -104,7 +104,7 @@ fn ensure_schema_upgrades_a_v1_database_with_the_reading_notes_fts_layer() {
     ensure_schema(&db).unwrap();
     assert_eq!(
         get_meta(&db, "SCHEMA_VERSION").unwrap().as_deref(),
-        Some("2")
+        Some(SCHEMA_VERSION.to_string().as_str())
     );
     let tables: Vec<String> = db
         .prepare("SELECT name FROM sqlite_master WHERE type IN ('table', 'view')")

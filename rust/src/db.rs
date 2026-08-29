@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 const SCHEMA_SQL: &str = include_str!("schema.sql");
 
@@ -91,12 +91,17 @@ pub fn ensure_schema(db: &Db) -> Result<(), CortError> {
         .expect("schema.sql (JS rethrows raw sqlite errors)");
     let existing = get_meta(db, "SCHEMA_VERSION").expect("getMeta");
     let expected = SCHEMA_VERSION.to_string();
-    // Spec §3 copies JS verbatim: null → write '2'; existing === '1' && VERSION === 2 →
-    // write '2'. Bodies match today on purpose — collapsing would hide the v1→v2 branch.
-    #[allow(clippy::if_same_then_else)]
+    let upgrading = existing
+        .as_deref()
+        .and_then(|v| v.parse::<i64>().ok())
+        .is_some_and(|v| v < SCHEMA_VERSION);
     if existing.is_none() {
         set_meta(db, "SCHEMA_VERSION", &expected).expect("setMeta");
-    } else if existing.as_deref() == Some("1") && SCHEMA_VERSION == 2 {
+    } else if upgrading {
+        // v3 adds `raw_edges`. An older database has chunks but no raw-edge layer, so a
+        // rebuild would resolve zero edges and silently wipe the graph. Mark it pending:
+        // `status` reports stale and the next incremental index falls back to a full one.
+        set_meta(db, "graph_pending", "1").expect("setMeta");
         set_meta(db, "SCHEMA_VERSION", &expected).expect("setMeta");
     } else if existing.as_deref() != Some(expected.as_str()) {
         return Err(CortError::new(

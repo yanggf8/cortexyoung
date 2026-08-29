@@ -3,7 +3,8 @@
 //! C1 contract (spec §1.4 / §1.13 / §1.15), snake_case like Job B:
 //! - `pack::extractor_version() -> String`
 //! - `chunker::extract_file(ExtractFileArgs) -> Result<ExtractResult, CortError>`
-//! - `graph::relationship_rows_for_file(...) -> rusqlite::Result<Vec<RelationshipRow>>`
+//! - `graph::rebuild_relationships(db, project_id) -> rusqlite::Result<i64>` (from persisted
+//!   chunks + `raw_edges`, because resolution spans files)
 //!
 //! Plan §7 B-gap: index/status entry points canonicalize `root` before
 //! `cort::db::project_id_for`.
@@ -38,10 +39,11 @@ const INSERT_CHUNK: &str =
   start_line, end_line, content, content_hash, language, chunk_source)
   VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)";
 
-const INSERT_REL: &str = "INSERT INTO relationships
-  (source_chunk_id, target_chunk_id, rel_type, confidence, confidence_score, confidence_reasoning)
+const INSERT_RAW_EDGE: &str = "INSERT INTO raw_edges
+  (project_id, file_path, source_symbol, raw_target, rel_type, start_line)
   VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-  ON CONFLICT(source_chunk_id, target_chunk_id, rel_type) DO NOTHING";
+  ON CONFLICT(project_id, file_path, rel_type, raw_target, source_symbol, start_line)
+  DO NOTHING";
 
 #[derive(Debug)]
 pub enum IndexError {
@@ -268,21 +270,41 @@ pub(crate) fn insert_chunk(conn: &Connection, c: &crate::chunker::Chunk) -> rusq
     Ok(())
 }
 
-pub(crate) fn insert_rel(
+pub(crate) fn insert_raw_edge(
     conn: &Connection,
-    row: &crate::graph::RelationshipRow,
+    project_id: &str,
+    file_path: &str,
+    edge: &crate::chunker::Edge,
 ) -> rusqlite::Result<()> {
     conn.execute(
-        INSERT_REL,
+        INSERT_RAW_EDGE,
         params![
-            row.source_chunk_id,
-            row.target_chunk_id,
-            row.rel_type,
-            row.confidence,
-            row.confidence_score,
-            row.confidence_reasoning,
+            project_id,
+            file_path,
+            edge.source_symbol.clone().unwrap_or_default(),
+            edge.raw_target,
+            edge.rel_type,
+            edge.start_line,
         ],
     )?;
+    Ok(())
+}
+
+/// File-level and symbol-scoped matches both live in `raw_edges`; the empty string stands for
+/// "no enclosing symbol" so the primary key can deduplicate repeated imports.
+pub(crate) fn replace_file_raw_edges(
+    conn: &Connection,
+    project_id: &str,
+    file_path: &str,
+    edges: &[crate::chunker::Edge],
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "DELETE FROM raw_edges WHERE project_id = ?1 AND file_path = ?2",
+        params![project_id, file_path],
+    )?;
+    for edge in edges {
+        insert_raw_edge(conn, project_id, file_path, edge)?;
+    }
     Ok(())
 }
 
@@ -303,7 +325,6 @@ pub fn full_index(
 
     let mut chunk_count = 0i64;
     let mut unparsed_count = 0i64;
-    let mut rel_count = 0i64;
 
     let tx = db.transaction()?;
     tx.execute(
@@ -330,11 +351,21 @@ pub fn full_index(
         "DELETE FROM file_state WHERE project_id = ?1",
         params![canon.project_id],
     )?;
+    tx.execute(
+        "DELETE FROM raw_edges WHERE project_id = ?1",
+        params![canon.project_id],
+    )?;
 
     for extracted_file in &extracted {
         if extracted_file.result.unparsed {
             unparsed_count += 1;
         }
+        replace_file_raw_edges(
+            &tx,
+            &canon.project_id,
+            &extracted_file.rel,
+            &extracted_file.result.edges,
+        )?;
         for c in &extracted_file.result.chunks {
             insert_chunk(&tx, c)?;
             chunk_count += 1;
@@ -351,21 +382,13 @@ pub fn full_index(
         )?;
     }
 
-    for extracted_file in &extracted {
-        let rows = crate::graph::relationship_rows_for_file(
-            &tx,
-            &canon.project_id,
-            &extracted_file.rel,
-            &extracted_file.result.chunks,
-            &extracted_file.result.edges,
-        )?;
-        for row in rows {
-            insert_rel(&tx, &row)?;
-            rel_count += 1;
-        }
-    }
+    // Every chunk and raw edge for this run is in place, so the derived graph can be
+    // recomputed as one unit. This replaces the old per-file pass, which could only see the
+    // re-indexed file's own edges (audit F-01).
+    let rel_count = crate::graph::rebuild_relationships(&tx, &canon.project_id)?;
 
     set_meta(&tx, "extractor_version", &version)?;
+    set_meta(&tx, "graph_pending", "0")?;
     tx.commit()?;
 
     Ok(FullIndexStats {

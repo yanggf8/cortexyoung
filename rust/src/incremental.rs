@@ -5,9 +5,10 @@
 //!   git -C root ls-files --others --exclude-standard
 
 use crate::db::{get_meta, set_meta, Db};
+use crate::graph::rebuild_relationships;
 use crate::indexer::{
-    canonicalize_root, extract_one, full_index, git_head_of, insert_chunk, insert_rel, now_ms,
-    FullIndexStats, IndexError, IGNORE_DIRS, SOURCE_EXT,
+    canonicalize_root, extract_one, full_index, git_head_of, insert_chunk, now_ms,
+    replace_file_raw_edges, FullIndexStats, IndexError, IGNORE_DIRS, SOURCE_EXT,
 };
 use rusqlite::{params, OptionalExtension};
 use std::collections::BTreeSet;
@@ -102,7 +103,6 @@ pub fn git_candidates(root: impl AsRef<Path>) -> GitCandidates {
 pub struct ReindexOneResult {
     pub chunks: i64,
     pub unparsed: i64,
-    pub relationships: i64,
     pub skipped: bool,
     pub removed: bool,
 }
@@ -117,6 +117,13 @@ pub fn remove_file(db: &mut Db, project_id: &str, file_path: &str) -> Result<(),
         "DELETE FROM file_state WHERE project_id = ?1 AND file_path = ?2",
         params![project_id, file_path],
     )?;
+    tx.execute(
+        "DELETE FROM raw_edges WHERE project_id = ?1 AND file_path = ?2",
+        params![project_id, file_path],
+    )?;
+    // The graph is derived from every file's raw edges, so it is recomputed once for the whole
+    // project after the last candidate lands — not per file. Mark it until then.
+    set_meta(&tx, "graph_pending", "1")?;
     tx.commit()?;
     Ok(())
 }
@@ -134,7 +141,6 @@ pub fn reindex_one_file(
         return Ok(ReindexOneResult {
             chunks: 0,
             unparsed: 0,
-            relationships: 0,
             skipped: false,
             removed: true,
         });
@@ -154,13 +160,11 @@ pub fn reindex_one_file(
         return Ok(ReindexOneResult {
             chunks: 0,
             unparsed: 0,
-            relationships: 0,
             skipped: true,
             removed: false,
         });
     }
 
-    let mut relationships = 0i64;
     let tx = db.transaction()?;
     tx.execute(
         "DELETE FROM chunks WHERE project_id = ?1 AND file_path = ?2",
@@ -169,29 +173,23 @@ pub fn reindex_one_file(
     for c in &result.chunks {
         insert_chunk(&tx, c)?;
     }
+    replace_file_raw_edges(&tx, project_id, file_path, &result.edges)?;
     tx.execute(
         "INSERT INTO file_state (project_id, file_path, file_content_hash) VALUES (?1, ?2, ?3)
          ON CONFLICT(project_id, file_path) DO UPDATE SET
            file_content_hash = excluded.file_content_hash, updated_at = datetime('now')",
         params![project_id, file_path, result.file_content_hash],
     )?;
-    let rows = crate::graph::relationship_rows_for_file(
-        &tx,
-        project_id,
-        file_path,
-        &result.chunks,
-        &result.edges,
-    )?;
-    for row in rows {
-        insert_rel(&tx, &row)?;
-        relationships += 1;
-    }
+    // Relationship resolution deliberately does NOT happen here: it needs the chunks of every
+    // other file (an edge's target usually lives elsewhere), so a single file can only ever
+    // rebuild its own outgoing edges and would drop everyone else's incoming ones. The project
+    // graph is recomputed once, after the last candidate file has landed.
+    set_meta(&tx, "graph_pending", "1")?;
     tx.commit()?;
 
     Ok(ReindexOneResult {
         chunks: result.chunks.len() as i64,
         unparsed: i64::from(result.unparsed),
-        relationships,
         skipped: false,
         removed: false,
     })
@@ -245,6 +243,14 @@ pub fn incremental_index(
         }
     }
 
+    // A pending graph means a previous run changed chunks without rebuilding the derived
+    // relationships (interrupt), or the database predates the raw-edge layer (schema upgrade).
+    // Either way only a full re-extraction can be trusted to repopulate it.
+    if get_meta(db, "graph_pending")?.as_deref() == Some("1") {
+        let full = full_index(db, bin, &canon.path)?;
+        return Ok(from_full(full, started));
+    }
+
     let cands = git_candidates(&canon.path);
     if !cands.git_available {
         let full = full_index(db, bin, &canon.path)?;
@@ -254,7 +260,6 @@ pub fn incremental_index(
     let mut reindexed = 0i64;
     let mut skipped = 0i64;
     let mut removed = 0i64;
-    let mut relationships = 0i64;
 
     for file_path in &cands.deleted {
         remove_file(db, &canon.project_id, file_path)?;
@@ -268,12 +273,26 @@ pub fn incremental_index(
             skipped += 1;
         } else {
             reindexed += 1;
-            relationships += r.relationships;
         }
     }
 
-    // Final, separate transaction: freshness markers advance only once every file landed.
+    // Final, separate transaction: the derived graph is rebuilt from the raw-edge layer, and
+    // freshness markers advance only once every file landed *and* the graph is whole again.
+    //
+    // The rebuild is skipped when no chunk or raw edge actually moved: a clean `index
+    // --incremental` runs on almost every agent turn, and recomputing ~1.8k edges from ~17k raw
+    // edges for nothing cost ~1s per call. Entering this function with the graph pending already
+    // routed to a full index above, so "nothing changed" really does mean the graph is intact.
+    let graph_changed = reindexed > 0 || removed > 0;
     let tx = db.transaction()?;
+    let relationships = if graph_changed {
+        rebuild_relationships(&tx, &canon.project_id)?
+    } else {
+        tx.query_row("SELECT COUNT(*) FROM relationships", [], |r| {
+            r.get::<_, i64>(0)
+        })?
+    };
+    set_meta(&tx, "graph_pending", "0")?;
     tx.execute(
         "UPDATE projects SET git_head = ?1, last_indexed_at = ?2, extractor_version = ?3 WHERE project_id = ?4",
         params![git_head_of(&canon.path), now_ms(), version, canon.project_id],

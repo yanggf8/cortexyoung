@@ -2,8 +2,10 @@
 
 use cort::ast_grep::resolve_ast_grep_bin;
 use cort::db::{ensure_schema, get_meta, open_db, project_id_for, set_meta};
+use cort::graph::get_transitive_dependents;
 use cort::incremental::{git_candidates, incremental_index, reindex_one_file, remove_file};
 use cort::indexer::full_index;
+use cort::staleness::compute_stale;
 use rusqlite::params;
 use std::fs;
 use std::path::PathBuf;
@@ -303,4 +305,150 @@ fn remove_file_and_reindex_one_file_each_run_in_their_own_transaction() {
         )
         .unwrap();
     assert_eq!(n, 0);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// F-01 regression (docs/2026-08-29-project-audit-root-causes-and-remediation.md)
+// The relationship graph is derived state that spans files. Re-indexing one file
+// must never silently drop an edge whose *other* end lives in an untouched file,
+// and a half-rebuilt graph must never report itself fresh.
+// ═══════════════════════════════════════════════════════════════════════════
+
+fn rel_count(db: &rusqlite::Connection) -> i64 {
+    db.query_row("SELECT COUNT(*) FROM relationships", [], |r| r.get(0))
+        .unwrap()
+}
+
+fn edge_exists(db: &rusqlite::Connection, source_sym: &str, target_sym: &str) -> i64 {
+    db.query_row(
+        "SELECT COUNT(*) FROM relationships r
+           JOIN chunks s ON s.chunk_id = r.source_chunk_id
+           JOIN chunks t ON t.chunk_id = r.target_chunk_id
+          WHERE s.symbol_name = ?1 AND t.symbol_name = ?2 AND r.rel_type = 'calls'",
+        params![source_sym, target_sym],
+        |r| r.get(0),
+    )
+    .unwrap()
+}
+
+#[test]
+fn an_incremental_reindex_of_a_callee_keeps_incoming_edges_from_unchanged_files() {
+    let (_dir, root, mut db, _id, bin) = git_project(SAMPLE);
+    assert!(edge_exists(&db, "alpha", "helper") == 1, "fixture premise");
+    let before = rel_count(&db);
+
+    // Body-only edit of the callee. alpha.ts is untouched.
+    fs::write(
+        root.join("src/helper.ts"),
+        "export function helper(n: number) { return n * 3; }\n",
+    )
+    .unwrap();
+    incremental_index(&mut db, &bin, &root).unwrap();
+
+    assert_eq!(
+        edge_exists(&db, "alpha", "helper"),
+        1,
+        "an unchanged caller's incoming edge must survive re-indexing the callee"
+    );
+    assert_eq!(
+        rel_count(&db),
+        before,
+        "the same edge set must come back, no duplicates"
+    );
+
+    let helper_chunk: String = db
+        .query_row(
+            "SELECT chunk_id FROM chunks WHERE symbol_name = 'helper'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let deps = get_transitive_dependents(&db, &helper_chunk, 3).unwrap();
+    assert!(
+        deps.iter()
+            .any(|d| d.symbol_name.as_deref() == Some("alpha")),
+        "impact must still see alpha, got {:?}",
+        deps.iter().map(|d| &d.symbol_name).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn an_incremental_reindex_reapplies_edges_from_files_that_only_grew_a_new_callee() {
+    let (_dir, root, mut db, _id, bin) = git_project(SAMPLE);
+    // Add a new caller of an existing symbol, then touch the callee so both the
+    // new file and a re-indexed file are in the candidate set.
+    fs::write(
+        root.join("src/gamma.ts"),
+        "import { helper } from './helper';\n\nexport function gamma(g: number) { return helper(g); }\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("src/helper.ts"),
+        "export function helper(n: number) { return n * 4; }\n",
+    )
+    .unwrap();
+    incremental_index(&mut db, &bin, &root).unwrap();
+
+    assert_eq!(
+        edge_exists(&db, "alpha", "helper"),
+        1,
+        "pre-existing caller kept"
+    );
+    assert_eq!(edge_exists(&db, "gamma", "helper"), 1, "new caller added");
+}
+
+#[test]
+fn a_full_index_persists_the_raw_edges_needed_to_rebuild_the_graph() {
+    let (_dir, _root, db, project_id, _bin) = git_project(SAMPLE);
+    let raw: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM raw_edges WHERE project_id = ?1",
+            params![project_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        raw > 0,
+        "raw call/import matches must be persisted, otherwise the graph cannot be rebuilt"
+    );
+    let unresolved: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM raw_edges WHERE project_id = ?1 AND source_symbol IS NULL",
+            params![project_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let _ = unresolved; // imports live outside any symbol body; NULL is legal.
+}
+
+#[test]
+fn a_pending_graph_is_reported_stale_even_when_every_file_hash_matches() {
+    let (_dir, root, db, project_id, bin) = git_project(SAMPLE);
+    set_meta(&db, "graph_pending", "1").unwrap();
+    let report = compute_stale(&db, &bin, &root, &project_id).unwrap();
+    assert!(
+        report.index_is_stale,
+        "a half-rebuilt graph must never report fresh"
+    );
+    assert!(
+        report.changed_files.is_empty() && report.deleted_files.is_empty(),
+        "staleness must be attributed to the pending graph, not to a fake file change: {:?}",
+        report
+    );
+}
+
+#[test]
+fn a_completed_incremental_index_clears_the_pending_graph_marker() {
+    let (_dir, root, mut db, _id, bin) = git_project(SAMPLE);
+    fs::write(
+        root.join("src/helper.ts"),
+        "export function helper(n: number) { return n * 5; }\n",
+    )
+    .unwrap();
+    incremental_index(&mut db, &bin, &root).unwrap();
+    assert_ne!(
+        get_meta(&db, "graph_pending").unwrap().as_deref(),
+        Some("1"),
+        "a fully rebuilt graph must not stay marked pending"
+    );
 }
