@@ -48,6 +48,16 @@ export const REQUIRED_FIELDS = [
   'permission_denials', 'estimator', 'venue_head', 'cort_calls',
 ];
 
+/// Count the arm's own tool invocations. The JS `bin/cort.js` entry point is gone since the
+/// Rust cutover, so matching on that filename silently reported 0 calls for a Rust arm that
+/// called cort on every turn — the metric that proves the whitelist was actually exercised.
+export function isCortCommand(command) {
+  const raw = String(command ?? '').trim();
+  if (raw === '') return false;
+  const first = raw.split(/\s+/)[0];
+  return first === CORT_BIN || path.basename(first) === 'cort' || raw.includes(CORT_BIN);
+}
+
 export function buildPrompt(task, arm) {
   const { guidance } = AGENT_ARMS[arm];
   return [task.prompt, guidance, ANSWER_CONTRACT].filter(Boolean).join('\n\n');
@@ -104,7 +114,7 @@ export function buildRow({ arm, task, parsed, venueHead }) {
     tool_return_tokens: parsed.tool_return_tokens,
     tool_return_bytes: parsed.tool_return_bytes,
     read_calls: parsed.read_calls,
-    cort_calls: parsed.tool_calls.filter((c) => String(c.input?.command ?? '').includes('cort.js')).length,
+    cort_calls: parsed.tool_calls.filter((c) => isCortCommand(c.input?.command)).length,
     rg_calls: parsed.tool_calls.filter((c) => /^\s*rg\b/.test(String(c.input?.command ?? ''))).length,
     turns: parsed.turns,
     hit_turn_cap: parsed.hit_turn_cap,

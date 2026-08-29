@@ -2,13 +2,17 @@
 
 ## Protocol
 
-- Same model, same task set (`evals/tasks.json`), one full trace per arm.
-- Arms: `rg+Read`, `ast-grep+Read`, `cort` (`cort struct` + `cort context`).
+- Same model, same task set, one full trace per arm.
+- Two arms ship today (`run-agents.mjs`): `rg+Read` and `cort`, driven over the graph-required task
+  set `evals/tasks-graph.json`. The third arm in `run-eval.mjs`'s constants (`ast-grep+Read`) is the
+  historical three-arm gate from rounds 1-3; the newer runner compares against `rg+Read`.
 - Transcripts saved under `evals/runs/<date>/<arm>/<task>.json` (one JSON file per task per arm per date).
+- `cort` is the Rust binary since the cutover. `CORT_BIN` resolves to
+  `rust/target/release/cort` (override with the `CORT_BIN` env var), and `bin/cort.js` no longer exists.
 
 ## Metrics
 
-Per-run fields returned by `runEval({arm, task})`:
+Per-run fields produced by `buildRow()` in `run-agents.mjs` (older recorded cells use the same names):
 
 ```
 { success, total_tokens, tool_return_tokens, turns, read_calls, stale_reads }
@@ -57,15 +61,23 @@ verify do not go in the file.
 Agent arms are dominated by behavioural variance (one cell ran 171 turns). To price the tool itself:
 
 ```bash
-CORT_CACHE_DIR=/tmp/cort node bin/cort.js index /path/to/repo
-node evals/relation-cost.mjs --repo /path/to/repo --depth 3 --pick 6   # per-hop payload accounting
+CORT_CACHE_DIR=/tmp/cort ./rust/target/release/cort index /path/to/repo
 node evals/verify-impact.mjs --repo /path/to/repo --symbols A,B --depth 3
 ```
 
-`relation-cost.mjs` compares, for the same answer set: `cort impact` JSON tokens, `cort impact -f lean`
-tokens, and what `rg` must ingest to reach that set — one batched alternation grep per hop (a best case
-for `rg`: oracle names, one call, no wasted turns) plus the enclosing-symbol text for every hit. It also
-reports `rg_precision`, the fraction of grep hits that are actually on a dependency path.
+`verify-impact.mjs` is current and runnable: it checks each reported dependent against the file text.
+
+`relation-cost.mjs` — the no-model cost probe behind the hop-ratio table in `../README.md` — was part
+of the JS tree and was deleted by the cutover (`1a4052cc`). It imported `better-sqlite3` and
+`src/db.js`, so it cannot run against this tree as-is. Two consequences, both stated rather than
+papered over:
+
+- The table it produced (968/1,022/1,136 cort tokens vs 16,584/86,949/127,531 for `rg`) is
+  **historical evidence**, reproducible only with the archived script:
+  `git show 1a4052cc^:evals/relation-cost.mjs`.
+- Re-pricing the graph needs a Rust-native probe (open follow-up), and it is only worth writing if
+  the graph is still in scope after `docs/2026-08-29-finance-cli-measurement.md` and
+  `docs/2026-08-28-real-session-cost.md`.
 
 ## Stop/go gate (spec section 8)
 
@@ -90,10 +102,16 @@ If `cort_beats_ast_grep` is `false`, deferred features (`cort rewrite`, `cort mo
 ## Running
 
 ```bash
-node evals/run-eval.mjs          # exports summarize() over recorded rows; see caveat above
-node --test tests/eval-harness.test.js
-node --test tests/render.test.js # the -f lean contract
+node --test evals/harness.test.mjs                     # the harness's own tests (no npm install needed)
+node evals/run-agents.mjs --only <task-id> --arms rg+Read,cort   # drives real agent cells
+node -e "import('./evals/run-eval.mjs').then(m=>console.log(m.summarize(JSON.parse(require('fs').readFileSync('evals/runs/2026-08-26/rows.json')))))"
 ```
 
-`run-eval.mjs` exports `summarize()` and the arm/metric constants; it does not itself drive an agent.
-Arms are run by dispatching fresh subagents and recording one JSON file per cell under `runs/<date>/`.
+`run-agents.mjs` needs an isolated `CLAUDE_CONFIG_DIR` (default `/tmp/cc-eval`) or ~16k tokens of
+hooks/plugin text enter every cell and swamp a ~1.1k lean payload; it refuses to run when that
+directory is missing. `-f lean` contract tests moved to `rust/tests/render.rs` with the product.
+
+`run-eval.mjs` exports `summarize()` and the arm/metric constants; it does not drive an agent.
+`summarize()` now counts unmeasured metrics instead of averaging nulls, and `summarize(rows, {strict: true})`
+throws on any missing metric — the failure mode that let 30 null cells pass for three rounds.
+The `-f lean` contract lives in `rust/tests/render.rs` since the cutover.
