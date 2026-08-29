@@ -731,15 +731,24 @@ $ cort-evals run-agents --help
 
 ### 剩下的 3 個任務怎麼補
 
-第二輪的 6 格需要等 5 小時窗口重置（本地 02:40）之後再跑，指令不變：
+第二輪的 6 格需要等 5 小時窗口重置（本地 02:40）之後再跑。F-17 之後這是一次呼叫，不是三次外層串接：
 
 ```bash
 CORT_BIN=$PWD/rust/target/release/cort ./evals/target/release/cort-evals run-agents \
-  --tasks evals/tasks-graph.json --only <task> --arms rg+Read,cort --max-turns 40 \
-  --config-dir /tmp/cc-eval --cache-dir /tmp/cort-exp --out /tmp/cort-eval-runs/round2/<task>
+  --tasks evals/tasks-graph.json \
+  --only blast-radius-3hop-getcurrenttimeet,hub-blast-radius-loginfo,storage-blast-radius-backtesting \
+  --arms rg+Read,cort --max-turns 40 --config-dir /tmp/cc-eval --cache-dir /tmp/cort-exp \
+  --out /tmp/cort-eval-runs/round2/refused3 --delay-secs <到 02:43 的秒數>
 ```
 
 現在若又被擋，會直接失敗而不會再污染資料。
+
+**那 6 格舊記錄已經隔離，不是刪掉。** F-15 修的是「往後不再寫入污染 cell」，但 blocked 那次**之前**
+寫進 `/tmp/cort-eval-runs/round2/` 的檔案還在原地：`blast-radius-3hop` 兩格 `cov 0.0`（27,933／27,826 tok，
+跑到一半被擋），`hub-blast-radius-loginfo` 與 `storage-blast-radius-backtesting` 各兩格 `total_tokens: 0`。
+只要有人對整個 `round2/` 目錄跑 `summarize`，F-15 剷除的那個「兩臂既免費又都不對」就會原地复活。
+已移到 `/tmp/cort-eval-runs/pre-f15-quarantine/`（附 README 說明这是證據不是資料），
+`round2/` 現在只剩兩個有效任務加這次的新 out 目錄。
 
 ## 13h. F-14：ast-grep 測試替身移植為 Rust
 
