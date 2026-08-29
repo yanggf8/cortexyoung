@@ -97,6 +97,7 @@ GitHub Actions 正確，這三者必須分別驗證。
 | F-10 | P1 | 既有測試在平行執行下約 40% 機率失敗（**HEAD 既存**，非本輪引入） | 新 CI 的 `cargo test` gate 會隨機紅，等於沒有 gate |
 | F-11 | P1 | `--allowedTools Bash(...)` 在 headless 下不約束 Bash，評測臂的「白名單即實驗組」只是標籤 | 兩臂 A/B 的基線臂實際用了 `grep`/`sed`，比較不成立 |
 | F-12 | P1 | 評測器是 6 個 `.mjs`，違反「本 repo 純 Rust」契約，同時也是唯一沒有型別、沒有 lint、沒有 gate 的部分 | 已移植為 `evals/` crate，JS 全部移除 |
+| F-18 | P2 | 一批 cell 是**全有或全無**：rows.json 只在所有執行緒成功 join 之後才寫 | 6 格批次只要最後一格被額度擋掉，前 5 格「真的跑過也真的量到」的資料就一起消失；補齊第二輪的批次越大，白燒的風險越大 |
 | F-16 | P1 | `install.sh` 把 managed marker 寫成 SKILL.md 的**第一行**，frontmatter 被擠到第二行 | Codex/Claude 載入器判定 `missing YAML frontmatter delimited by ---` 並整個跳過該 skill：§13g 部署的 3 份引導全在盤上、0 份進得了 agent context；smoke 只驗「marker 存在」，53/53 綠燈照常漏 |
 | F-17 | P2 | `cort-evals` 不驗證選項，未知選項（含 `--help`）被當成不存在 | `run-agents --help` 以**全套預設值**啟動 5 任務 × 2 臂的真實取樣，並準備寫進 `evals/runs/2026-08-30-graph`；`--out=x` 之類也會靜默退回預設目錄 |
 | F-15 | P1 | 被額度拒絕的 cell 仍被寫成 `total_tokens=0 / coverage=0` 的測量值 | 第二輪 5 個任務裡有 3 個（6 格）根本沒跑，卻進入了聚合；已改為丟例外且不落 row |
@@ -615,6 +616,26 @@ verdict: baseline_arm=rg+Read, cort_beats_ast_grep=true → continue to deferred
 資料以 metrics-only 形式保存在 `evals/runs/2026-08-30-graph/`（不含 transcript，避免把 venue 的原始碼
 片段帶進本 repo）。
 
+## 13l. F-18：一批 cell 不該是一整顆蛋
+
+「把被擋的 3 個任務補回來」現在是一次呼叫（`--only a,b,c`）。但 F-15 之後的 runner 有個相反的性質：
+它**刻意**fail closed——任何一格出錯，整個 run 就 `return Err`，而 `rows.json` 是在所有線程 join 成功
+之後才寫。6 格一批的含義因此是：**最後一格被擋，前面 5 格白跑**。批次越大，白燒的窗口越大；
+這與「不要讓沒跑的格子混進資料」是對的，但用的是同一個開關把量到的格子也一起丟掉。
+
+修法把兩件事拆開：
+
+- **落盤时机**：每格一旦 `build_row` 成功就重寫 `rows.json`（先排序再整個覆寫，因此線程誰先完成
+  不影響檔案內容，同一批重跑仍是可 diff 的同一份資料）。
+- **批次是否完整**：`run-status.json` 由一個 `Drop` guard 寫，涵蓋包含提前 `return Err` 在內的
+  所有出口，內容是 `planned_cells / written_cells / complete`。少了 2 格的批次會自己講：
+  「2 of 6 planned cells are missing … Do not read this batch as complete.」
+
+邊界同樣釘住：0 planned 且 0 written 是 `complete: true`（本來就沒東西要跑），
+6 planned 只有 0 written 則是 `complete: false`（不是「一組零格的資料」）。
+`rows.json` 與 `run-status.json` 在任何一顆 cell 開跑之前就落地（內容 `[]`），
+所以「還在等窗口」與「跑過但全被擋」在盤上長得不一樣。
+
 ## 13k. F-16：部署到 agent 家目錄的 SKILL.md，agent 從來沒看過
 
 §13g 的原則是「改動若不會到達 agent 眼前，等於沒改」。這一條被 `install.sh` 自己打破了，而且破了整個 §13g 的成果。
@@ -915,6 +936,7 @@ Bash 只准留在 `install.sh` 與 `tests/install-smoke.sh`（平台需求），
 | F-07 | **未修（維持既有契約）** | 僅在文件層面保留「candidates 需查證」的語意 | 需 CLI 契約變更（多 seed 時 fail closed 或 `--file` 消歧），影響現有輸出格式，另行提案 |
 | F-08 | **部分已修** | README 能力表把 `context/read/recall` 列為主要能力、`impact` 標明語言邊界 | 完整 Stable/Experimental/Deferred 分級仍待一次文件整理 |
 | F-09 | **僅文件化** | README 限制 #9 說明 `status.unparsed` 也包含「合法零符號檔案」 | 程式層面需區分 `no_symbols` 與 parse failure，屬 P3 |
+| F-18 | **已修** | 每格量到當下就重寫 `rows.json`（排序後整個覆寫，線程完成順序不影響檔內容）；`RunStatus` guard 在**包括提前 return 在內**的每一條出口寫 `run-status.json`，記 planned/written/complete | 2 項新測試（部分批次必須自報 incomplete、rows 排序與完成順序無關）；evals 測試 30 → 32；實際取樣中可在跑完前直接看到 rows.json/run-status.json 長大 |
 | F-16 | **已修** | marker 移到 frontmatter 內部第二行（`with_managed_marker`）；up-to-date 的條件從「內容相同」改成「內容相同**且**第一行是 `---`」，舊形状走 `repaired skill frontmatter` 分支重寫 | smoke 53 → 62：fence 在第一行、marker 正好在第二行、`grep -vxF marker` 後與來源 `cmp` 逐字節相同、legacy 形状必須被 repair、外加**真載入器 oracle**（`codex debug prompt-input`，缺 codex 時明確 SKIP 不冒充 PASS）；實測 3 份部署檔 repaired 後可見 |
 | F-17 | **已修** | 每個子命令白名單化選項，`guard_options()` 在任何動作前擋下未知選項；`--help`/`-h` 印 usage 並 exit 0；`--flag=value` 直接拒絕 | 新增 6 項測試（help 不再等於執行、未知選項附 usage、whitelist 覆蓋、`=` 形式被拒、`--jail`/`--jailed` 可區分、位置參數不误殺）；evals 測試 20 → 30 |
 | F-10 | **已修** | C2-22（會改行程 CWD 的測試）拆到獨立 target `rust/tests/staleness_cwd.rs` | 修正前 HEAD 基線 10/20 失敗；修正後 `--test staleness` 20/20 通過、整輪 218/218 連續 3 次 |

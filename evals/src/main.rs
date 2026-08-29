@@ -75,6 +75,59 @@ fn only_matches(only: &[String], id: &str) -> bool {
     only.is_empty() || only.iter().any(|want| want == id)
 }
 
+/// Sort is part of the artefact: rows.json is diffed and re-summarised across rounds, so an
+/// order that depends on which thread finished first would make an identical run look like a
+/// changed dataset.
+fn sort_rows(rows: &mut [Value]) {
+    rows.sort_by_key(|r| {
+        format!(
+            "{} {}",
+            r["arm"].as_str().unwrap_or(""),
+            r["task"].as_str().unwrap_or("")
+        )
+    });
+}
+
+/// A batch is not one thing. Until now rows.json was written only after every thread joined
+/// successfully, so one refused cell threw away the cells that *had* run: six cells in one batch
+/// meant one rejection could cost a whole sampling window. The counter is what lets a reader tell
+/// "this batch has 4 cells" apart from "this batch lost 2 cells".
+fn run_status_json(planned: usize, written: usize) -> Value {
+    json!({
+        "planned_cells": planned,
+        "written_cells": written,
+        "complete": planned == written,
+        "rows": "rows.json",
+        "reading": if planned == written {
+            "every planned cell ran and was measured".to_string()
+        } else {
+            format!(
+                "{} of {} planned cells are missing from rows.json: they did not run (refused,                  interrupted, or unmeasurable). Do not read this batch as complete.",
+                planned - written,
+                planned
+            )
+        }
+    })
+}
+
+/// Records the honest batch state on *every* exit path, including the early `return Err(...)`s.
+struct RunStatus {
+    out_dir: String,
+    planned: usize,
+    written: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl Drop for RunStatus {
+    fn drop(&mut self) {
+        let written = self.written.load(std::sync::atomic::Ordering::Relaxed);
+        let body = run_status_json(self.planned, written);
+        let path = format!("{}/run-status.json", self.out_dir);
+        if let Err(err) = std::fs::write(&path, format!("{body}\n")) {
+            eprintln!("could not record run status in {path}: {err}");
+        }
+    }
+}
+
 fn wants_help(argv: &[String]) -> bool {
     argv.iter().any(|a| a == "--help" || a == "-h")
 }
@@ -240,6 +293,11 @@ fn run_agents(argv: &[String]) -> Result<(), String> {
         eprintln!("delay: window reached, starting cells");
     }
 
+    // The status file and the first rows.json land before any cell runs, so an interrupted batch
+    // is distinguishable from a batch that never started.
+    std::fs::create_dir_all(&out_dir).map_err(|e| format!("{out_dir}: {e}"))?;
+    std::fs::write(format!("{out_dir}/rows.json"), "[]\n")
+        .map_err(|e| format!("{out_dir}/rows.json: {e}"))?;
     let head = venue_head(&tasks[0].venue)?;
     let work: Vec<(Task, String)> = tasks
         .iter()
@@ -247,10 +305,20 @@ fn run_agents(argv: &[String]) -> Result<(), String> {
         .flat_map(|t| arms.iter().map(move |a| (t.clone(), a.clone())))
         .collect();
 
+    let planned = work.len();
+    let written = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let _status = RunStatus {
+        out_dir: out_dir.clone(),
+        planned,
+        written: Arc::clone(&written),
+    };
     let queue = Arc::new(Mutex::new(work.into_iter()));
+    let sink = Arc::new(Mutex::new(Vec::<Value>::new()));
     let mut threads = Vec::new();
     for _ in 0..concurrency {
         let queue = Arc::clone(&queue);
+        let sink = Arc::clone(&sink);
+        let written = Arc::clone(&written);
         let out_dir = out_dir.clone();
         let head = head.clone();
         let (config_dir, cache_dir, jail_root) =
@@ -292,7 +360,23 @@ fn run_agents(argv: &[String]) -> Result<(), String> {
                     format!("{}\n", serde_json::to_string_pretty(&row).unwrap()),
                 )
                 .map_err(|e| format!("{dir}: {e}"))?;
-                rows.push(row);
+                rows.push(row.clone());
+                // Publish the cell the moment it is measured, not at join time.
+                {
+                    let mut guard = sink.lock().unwrap();
+                    guard.push(row);
+                    sort_rows(&mut guard);
+                    std::fs::write(
+                        format!("{out_dir}/rows.json"),
+                        format!(
+                            "{}\n",
+                            serde_json::to_string_pretty(&*guard)
+                                .unwrap_or_else(|_| "[]".to_string())
+                        ),
+                    )
+                    .map_err(|e| format!("{out_dir}/rows.json: {e}"))?;
+                    written.store(guard.len(), std::sync::atomic::Ordering::Relaxed);
+                }
             }
             Ok(rows)
         }));
@@ -311,13 +395,7 @@ fn run_agents(argv: &[String]) -> Result<(), String> {
     if rows.is_empty() {
         return Err("no rows produced".to_string());
     }
-    rows.sort_by_key(|r| {
-        format!(
-            "{} {}",
-            r["arm"].as_str().unwrap_or(""),
-            r["task"].as_str().unwrap_or("")
-        )
-    });
+    sort_rows(&mut rows);
     std::fs::create_dir_all(&out_dir).map_err(|e| format!("{out_dir}: {e}"))?;
     std::fs::write(
         format!("{out_dir}/rows.json"),
@@ -508,5 +586,70 @@ mod sampling_window {
                 "accepted {bad:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod batch_accounting {
+    use super::*;
+
+    fn row(arm: &str, task: &str) -> Value {
+        json!({ "arm": arm, "task": task })
+    }
+
+    #[test]
+    fn a_partial_batch_says_so_instead_of_looking_complete() {
+        let full = run_status_json(6, 6);
+        assert_eq!(full["complete"], json!(true));
+        assert_eq!(full["written_cells"], json!(6));
+
+        let lost = run_status_json(6, 4);
+        assert_eq!(lost["complete"], json!(false));
+        assert!(
+            lost["reading"]
+                .as_str()
+                .unwrap()
+                .contains("2 of 6 planned cells"),
+            "{}",
+            lost["reading"]
+        );
+        // Nothing ever ran: that must not read as "a batch of zero cells" either.
+        assert_eq!(run_status_json(6, 0)["complete"], json!(false));
+        assert_eq!(run_status_json(0, 0)["complete"], json!(true));
+    }
+
+    #[test]
+    fn rows_sort_the_same_way_whichever_order_threads_finished_in() {
+        let mut a = vec![
+            row("rg+Read", "zeta"),
+            row("cort", "alpha"),
+            row("cort", "beta"),
+        ];
+        let mut b = vec![
+            row("cort", "beta"),
+            row("rg+Read", "zeta"),
+            row("cort", "alpha"),
+        ];
+        sort_rows(&mut a);
+        sort_rows(&mut b);
+        assert_eq!(a, b);
+        let order: Vec<String> = a
+            .iter()
+            .map(|r| {
+                format!(
+                    "{}/{}",
+                    r["arm"].as_str().unwrap(),
+                    r["task"].as_str().unwrap()
+                )
+            })
+            .collect();
+        assert_eq!(
+            order,
+            vec![
+                "cort/alpha".to_string(),
+                "cort/beta".to_string(),
+                "rg+Read/zeta".to_string()
+            ]
+        );
     }
 }
