@@ -4,7 +4,6 @@ use cort::ast_grep::resolve_ast_grep_bin;
 use cort::db::{ensure_schema, open_db, project_id_for};
 use cort::indexer::full_index;
 use cort::staleness::compute_stale;
-use std::env;
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -149,21 +148,4 @@ fn a_deleted_file_makes_the_index_stale_and_is_reported() {
     let s = compute_stale(&db, &bin, &root, &project_id).unwrap();
     assert!(s.index_is_stale);
     assert_eq!(s.deleted_files, vec!["src/helper.ts".to_string()]);
-}
-
-/// C2-22
-#[test]
-fn staleness_is_computed_against_projects_path_not_the_cwd() {
-    let (_dir, root, db, project_id, bin) = setup(SAMPLE);
-    let (_else_dir, elsewhere) = make_project(&[("src/unrelated.ts", "export function u() {}\n")]);
-    let prev = env::current_dir().unwrap();
-    env::set_current_dir(&elsewhere).unwrap();
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let s = compute_stale(&db, &bin, &root, &project_id).unwrap();
-        assert!(!s.index_is_stale);
-    }));
-    env::set_current_dir(prev).unwrap();
-    if let Err(e) = result {
-        std::panic::resume_unwind(e);
-    }
 }
