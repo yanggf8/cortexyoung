@@ -534,7 +534,8 @@ Deferred:     rewrite, modules, watch, diff impact, embeddings
 修完 F-01 後整輪 `cargo test` 出現一次 `171 passed / 1 failed`（其餘 binary 因失敗而中止）。
 連跑 10 次 `--test staleness` 得到 3 次失敗；為確認不是本輪引入，用 `git archive HEAD` 在 `/tmp`
 重建一份**未含任何改動**的基線，跑 20 次得到 **10 次失敗**。也就是說這個 flake 在 HEAD 就存在，
-只是過去 CI 跑的是 `npm test`，這批 Rust 測試从来没被 gate 執行過。
+只是過去 CI 跑的是 `npm test`，這批 Rust 測試從未被 gate 執行過（遠端記錄：`ce7ea604`、`1eaad63f`
+兩個 master push 都在 12–14 秒失敗）。
 
 ### 根因
 
@@ -582,6 +583,22 @@ Deferred:     rewrite, modules, watch, diff impact, embeddings
 
 1. **全域重建不可無條件執行。** 第一版實作在每次 `index --incremental` 結束時都重建圖，結果乾淨工作區也要 1.05–1.11s（cct 規模 1,837 條邊／16,624 條 raw edges）。改為「只有真的有 chunk 或 raw edge 變動才重建」後，髒檔 0.73s、乾淨工作區 0.06–0.11s，比修法之前還快。
 2. **schema 升級必須帶安全閥。** 舊 v2 DB 有 chunks 但 `raw_edges` 是空的，若直接走「由 raw edges 重建」會把整張圖擦成 0 條邊。因此 v2→v3 升級會設定 `graph_pending=1`：`status` 立刻報 stale，下一次 `index --incremental` 自動退回 full 重建後才清標記。實測本專案 567-chunk 舊索引與 cct 舊索引都正確自愈。
+
+### CI 實際執行結果（F-03 的最終證明）
+
+本地全綠不等於 gate 有效，因此以遠端 Actions 為準。同一份 workflow 的三個 run：
+
+| run | commit | 結果 |
+|---|---|---|
+| 舊 workflow（`npm ci`） | `ce7ea604` | failure，12 秒失敗 |
+| 舊 workflow | `1eaad63f` | failure，14 秒失敗 |
+| 新 workflow 第一次 | `9d4b69e0` | ubuntu failure — 唯一失敗在 `shellcheck` 步驟；10 個 SC2002 (style) + 1 個 SC2015 (info)，全部是本輪之前就存在的發現 |
+| 新 workflow 修正後 | `7057f1e1` | **success**，ubuntu-latest 與 macos-latest 各 20 步全過 |
+
+第一次的失敗是我替換第三方 action 時漏了它原本的 `severity: warning` 門檻，等於把 gate 無意中收緊。
+已用 `--severity=warning` 還原原門檻（不是放寬），並從日誌確認該步驟沒有任何 warning/error 級發現，
+所以這個修法沒有掩蓋問題。前兩列同時佐證 F-03：CI 在主幹上已經連續紅了兩個 commit，而本地的
+218 個 Rust 測試從未被 gate 執行過。
 
 ### 尚未做（刻意留在後續）
 
