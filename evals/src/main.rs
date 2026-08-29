@@ -4,7 +4,7 @@
 //!                            [--config-dir /tmp/cc-eval] [--cache-dir /tmp/cort-exp]
 //!                            [--out <dir>] [--concurrency 2] [--jail-dir <dir>] [--jail]
 //!   cort-evals verify-impact --repo <path> --symbols A,B [--depth 3]
-//!   cort-evals summarize     <rows.json> [--strict]
+//!   cort-evals summarize     <rows.json>... [--strict]
 
 use cort_evals::arms::{self, build_args, build_env, build_row, make_jail, AGENT_ARMS};
 use cort_evals::grade::{load_tasks, Task};
@@ -263,13 +263,22 @@ fn verify_impact_main(argv: &[String]) -> Result<(), String> {
 }
 
 fn summarize_main(argv: &[String]) -> Result<(), String> {
-    let path = argv
-        .first()
+    // Accepts several row files so a multi-run experiment aggregates in one call, which is what
+    // the two-question review actually needs: 5 tasks x 2 arms landed in 5 directories.
+    let paths: Vec<String> = argv
+        .iter()
         .filter(|a| !a.starts_with("--"))
         .cloned()
-        .ok_or_else(|| "summarize needs a rows.json path".to_string())?;
-    let raw = std::fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))?;
-    let rows: Vec<Value> = serde_json::from_str(&raw).map_err(|e| format!("{path}: {e}"))?;
+        .collect();
+    if paths.is_empty() {
+        return Err("summarize needs at least one rows.json path".to_string());
+    }
+    let mut rows: Vec<Value> = Vec::new();
+    for path in &paths {
+        let raw = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
+        let parsed: Vec<Value> = serde_json::from_str(&raw).map_err(|e| format!("{path}: {e}"))?;
+        rows.extend(parsed);
+    }
     let out = cort_evals::summary::summarize(&rows, has(argv, "--strict"))?;
     println!("{}", serde_json::to_string_pretty(&out).unwrap());
     Ok(())

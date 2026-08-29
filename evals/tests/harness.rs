@@ -425,7 +425,11 @@ fn summarize_never_averages_nulls_into_a_verdict() {
     );
 
     assert_eq!(ARMS.len(), 3);
-    assert_eq!(METRICS.len(), 5);
+    assert_eq!(METRICS.len(), 4);
+    assert!(
+        !METRICS.contains(&"stale_reads"),
+        "a metric nothing measures cannot be part of the strict gate"
+    );
 }
 
 #[test]
@@ -470,4 +474,40 @@ fn word_matching_adjudicates_edges_without_a_regex_crate() {
     assert!(!contains_word("x = mylogInfo(msg)", "logInfo"));
     assert!(!contains_word("", "leaf"));
     assert!(!contains_word("leaf()", ""));
+}
+
+#[test]
+fn the_gate_judges_against_whichever_baseline_actually_ran() {
+    // Rounds 1-3 compared cort against `ast-grep+Read`; the current runner drives `rg+Read`.
+    // A gate that can only name the old baseline reports "no comparison possible" on good data,
+    // which is how a verdict goes missing without anybody noticing.
+    let three_arm = vec![
+        json!({"arm":"cort","success":true,"total_tokens":100,"tool_return_tokens":10,"turns":2,"read_calls":0,"stale_reads":0}),
+        json!({"arm":"ast-grep+Read","success":true,"total_tokens":90,"tool_return_tokens":9,"turns":2,"read_calls":1,"stale_reads":0}),
+        json!({"arm":"rg+Read","success":true,"total_tokens":80,"tool_return_tokens":8,"turns":2,"read_calls":1,"stale_reads":0}),
+    ];
+    let t = summarize(&three_arm, true).unwrap();
+    assert_eq!(t["verdict"]["baseline_arm"], "ast-grep+Read");
+    assert_eq!(
+        t["verdict"]["cort_beats_ast_grep"], false,
+        "100 is not cheaper than 90"
+    );
+
+    let two_arm = vec![
+        json!({"arm":"cort","success":true,"total_tokens":100,"tool_return_tokens":10,"turns":2,"read_calls":0,"stale_reads":0}),
+        json!({"arm":"rg+Read","success":true,"total_tokens":900,"tool_return_tokens":90,"turns":9,"read_calls":4,"stale_reads":0}),
+    ];
+    let t2 = summarize(&two_arm, true).unwrap();
+    assert_eq!(t2["verdict"]["baseline_arm"], "rg+Read");
+    assert_eq!(t2["verdict"]["cort_beats_ast_grep"], true);
+
+    let alone = vec![
+        json!({"arm":"cort","success":true,"total_tokens":100,"tool_return_tokens":10,"turns":2,"read_calls":0,"stale_reads":0}),
+    ];
+    let t3 = summarize(&alone, false).unwrap();
+    assert_eq!(t3["verdict"]["baseline_arm"], Value::Null);
+    assert_eq!(
+        t3["verdict"]["reason"],
+        "metric-missing: no comparison possible"
+    );
 }

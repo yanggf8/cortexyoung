@@ -8,13 +8,13 @@
 use serde_json::{json, Map, Value};
 
 pub const ARMS: [&str; 3] = ["rg+Read", "ast-grep+Read", "cort"];
-pub const METRICS: [&str; 5] = [
-    "total_tokens",
-    "tool_return_tokens",
-    "turns",
-    "read_calls",
-    "stale_reads",
-];
+/// The metrics the current runner actually measures. `stale_reads` is deliberately **not** here:
+/// it was defined as "the agent acted on content that no longer matched disk when it answered",
+/// which needs a disk-vs-answer comparison the runner never implemented, and the archived rows
+/// carry it as null. Listing it made `--strict` unconditionally fatal, i.e. a check that can never
+/// pass is not a check. The per-arm `stale_reads` field stays (null + counted as missing) so
+/// historical rows still aggregate honestly.
+pub const METRICS: [&str; 4] = ["total_tokens", "tool_return_tokens", "turns", "read_calls"];
 
 const AVERAGED: [(&str, &str); 4] = [
     ("mean_total_tokens", "total_tokens"),
@@ -29,6 +29,11 @@ fn as_number(row: &Value, key: &str) -> Option<f64> {
         _ => None,
     }
 }
+
+/// Which arm `cort` is judged against. Rounds 1-3 compared against `ast-grep+Read`; the current
+/// runner only drives `rg+Read`, so a gate that could only see the old baseline reported
+/// "metric-missing" on perfectly good data. Preference order, first arm actually present wins.
+pub const BASELINE_PREFERENCE: [&str; 2] = ["ast-grep+Read", "rg+Read"];
 
 pub fn summarize(rows: &[Value], strict: bool) -> Result<Value, String> {
     let mut by_arm = Map::new();
@@ -72,12 +77,18 @@ pub fn summarize(rows: &[Value], strict: bool) -> Result<Value, String> {
             .iter()
             .filter_map(|r| as_number(r, "stale_reads"))
             .collect();
-        if stale.len() == mine.len() {
-            obj.insert("stale_reads".into(), json!(stale.iter().sum::<f64>()));
-        } else {
-            obj.insert("stale_reads".into(), Value::Null);
-            missing.insert("stale_reads".into(), json!(mine.len() - stale.len()));
-        }
+        // Reported, never gated: no driver produces this field yet (see METRICS). Making an
+        // unmeasurable field a strict failure turns `--strict` into a check that can never pass,
+        // which quietly trains people to stop running it.
+        obj.insert(
+            "stale_reads".into(),
+            if stale.len() == mine.len() {
+                json!(stale.iter().sum::<f64>())
+            } else {
+                Value::Null
+            },
+        );
+        obj.insert("stale_reads_measured".into(), json!(stale.len()));
 
         obj.insert("metrics_missing".into(), Value::Object(missing.clone()));
         if strict && !missing.is_empty() {
@@ -88,7 +99,13 @@ pub fn summarize(rows: &[Value], strict: bool) -> Result<Value, String> {
         by_arm.insert(arm.into(), Value::Object(obj));
     }
 
-    let base = by_arm.get("ast-grep+Read").and_then(Value::as_object);
+    let baseline_arm = BASELINE_PREFERENCE
+        .iter()
+        .find(|arm| by_arm.contains_key(**arm))
+        .map(|s| s.to_string());
+    let base = baseline_arm
+        .as_ref()
+        .and_then(|arm| by_arm.get(arm).and_then(Value::as_object));
     let cort = by_arm.get("cort").and_then(Value::as_object);
     let comparable = base
         .zip(cort)
@@ -125,6 +142,7 @@ pub fn summarize(rows: &[Value], strict: bool) -> Result<Value, String> {
     Ok(json!({
         "by_arm": by_arm,
         "verdict": {
+            "baseline_arm": baseline_arm,
             "cort_beats_ast_grep": beats,
             "reason": if comparable {
                 "compared on mean_total_tokens + success_rate"
