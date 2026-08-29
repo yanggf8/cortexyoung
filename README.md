@@ -27,6 +27,30 @@ a remembered reading. Run `cort index` once before using either command.
 
 Routing for agents is in `skills/ast-grep/SKILL.md` — it states when to use `rg`, `ast-grep run`, `cort struct`/`context`/`impact`, and `xg`.
 
+## Local usage recording (opt-out by not existing: it is offline, plain SQLite)
+
+Every cort command appends one row to a **central, local-only** SQLite database at
+`$CORT_CACHE_DIR/usage.db` (default `~/.cache/cortex-ng/usage.db`). Nothing ever leaves the
+machine; there is no network code in cort at all.
+
+What is recorded per invocation: command name, status (ok/error) and error code only, the
+project id, allowlisted arguments (symbol, project-relative path, line range), for reads the
+requested vs effective content mode and `source`, whether the index was evaluated as stale, the
+exact rendered output size (`bytes_out`), and `saved_bytes` — on a receipt cache hit, the number
+of raw body bytes the receipt omitted from the response.
+
+What is never recorded: file contents, `recall` queries, `struct` patterns, unresolved free-text
+`context` queries, clap/error messages, absolute home paths. The recorder is best-effort: it
+never retries, never blocks beyond 25 ms, and a logging failure can never change a command's
+output or exit code — which also means the report can only ever under-count.
+
+Read the report with `cort usage [days]` (1–90, default 30; retention is 90 days, pruned at
+most once per day). Two fields deserve care: `receipt_hit_rate` counts only successful
+`auto`-mode reads, so toggling `--content full/receipt` does not distort it; and `saved_bytes`
+means raw body bytes omitted from receipts — it is **not** a claim about total output, network
+or cost savings. The report itself is written to the log after it is rendered, so an invocation
+never appears in its own report.
+
 ## Install
 
 ```bash
