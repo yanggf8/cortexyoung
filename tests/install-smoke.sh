@@ -27,6 +27,15 @@ assert_contains() {
 assert_not_contains() {
   if ! grep -qF "$2" "$1" 2>/dev/null; then pass "$3"; else fail "$3 (should not contain: $2 in $1)"; fi
 }
+# A SKILL.md the loader cannot parse is worse than a missing file: it is on disk, green in every
+# "is it there" assertion, and silently skipped by both agents. These two pin the shape.
+assert_frontmatter_first() {
+  if [ "$(head -n 1 "$1" 2>/dev/null)" = "---" ]; then pass "$2"; else fail "$2 (line 1 is not '---' in $1)"; fi
+}
+assert_marker_inside_frontmatter() {
+  if [ "$(head -n 2 "$1" 2>/dev/null | tail -n 1)" = "$MANAGED_MARKER" ]; then pass "$2"
+  else fail "$2 (marker is not line 2 of $1)"; fi
+}
 
 # ── isolated HOME ────────────────────────────────────────────────
 TMPHOME="$(mktemp -d)"
@@ -88,6 +97,13 @@ echo "--- Test 1: first install ---"
 bash "$INSTALL_SH" > /tmp/smoke1.log 2>&1; cat /tmp/smoke1.log | sed 's/^/    /'
 assert_file_exists "$HOME/.claude/skills/ast-grep/SKILL.md" "ast-grep skill installed"
 assert_contains "$HOME/.claude/skills/ast-grep/SKILL.md" "$MANAGED_MARKER" "ast-grep skill has managed marker"
+assert_frontmatter_first "$HOME/.claude/skills/ast-grep/SKILL.md" "deployed skill keeps its YAML fence on line 1"
+assert_marker_inside_frontmatter "$HOME/.claude/skills/ast-grep/SKILL.md" "managed marker lives inside the frontmatter, never above it"
+if cmp -s <(grep -vxF "$MANAGED_MARKER" "$HOME/.claude/skills/ast-grep/SKILL.md") "$REPO_ROOT/skills/ast-grep/SKILL.md"; then
+  pass "deployed skill is the repo source plus the marker line and nothing else"
+else
+  fail "deployed skill is the repo source plus the marker line and nothing else"
+fi
 assert_file_not_exists "$HOME/.claude/skills/xgrep/SKILL.md" "xgrep skill not installed by default"
 assert_file_exists "$HOME/.local/share/cortexyoung/manifest" "manifest created"
 assert_contains "$HOME/.local/share/cortexyoung/manifest" "manifest_version:2" "manifest version 2 recorded"
@@ -384,6 +400,7 @@ CODEX_DEST="$HOME/.codex/skills/ast-grep/SKILL.md"
 CLAUDE_DEST="$HOME/.claude/skills/ast-grep/SKILL.md"
 assert_file_exists "$CODEX_DEST" "codex skill deployed"
 assert_contains "$CODEX_DEST" "$MANAGED_MARKER" "codex skill has managed marker"
+assert_frontmatter_first "$CODEX_DEST" "codex skill keeps its YAML fence on line 1"
 if cmp -s "$CODEX_DEST" "$CLAUDE_DEST"; then
   pass "claude and codex skill copies are byte-identical (one source of truth)"
 else
@@ -413,6 +430,41 @@ assert_contains "$CODEX_DEST" "$MANAGED_MARKER" "codex skill adopted with --forc
 # uninstall removes the managed copy and never the other home's
 bash "$INSTALL_SH" --uninstall > /tmp/smoke16d.log 2>&1; cat /tmp/smoke16d.log | sed 's/^/    /' > /dev/null
 if [ -f "$CODEX_DEST" ]; then fail "codex skill removed on uninstall"; else pass "codex skill removed on uninstall"; fi
+
+# ── 17. the shape the previous installer wrote must be repaired, not reported "up to date" ──
+echo "--- Test 17: legacy marker-on-line-1 skill is repaired ---"
+LEGACY_SKILL="$HOME/.claude/skills/ast-grep/SKILL.md"
+{ echo "$MANAGED_MARKER"; cat "$REPO_ROOT/skills/ast-grep/SKILL.md"; } > "$LEGACY_SKILL"
+if [ "$(head -n 1 "$LEGACY_SKILL")" = "$MANAGED_MARKER" ]; then
+  pass "fixture reproduces the inert legacy shape (marker above the fence)"
+else
+  fail "fixture reproduces the inert legacy shape"
+fi
+bash "$INSTALL_SH" > /tmp/smoke17.log 2>&1; cat /tmp/smoke17.log | sed 's/^/    /' > /dev/null
+if grep -q "repaired skill frontmatter" /tmp/smoke17.log; then
+  pass "rerun repairs a content-identical but inert skill"
+else
+  fail "rerun repairs a content-identical but inert skill (a hash match must not excuse the shape)"
+fi
+assert_frontmatter_first "$LEGACY_SKILL" "repaired skill has its fence back on line 1"
+assert_contains "$LEGACY_SKILL" "$MANAGED_MARKER" "repaired skill is still managed"
+# The strongest form of the assertion, when the real loader is available: does the deployed text
+# actually reach a Codex prompt? Skipped (never faked) where codex is not installed, e.g. CI.
+SKILL_PROBE="Route code lookup, reusable reads"
+if command -v codex >/dev/null 2>&1; then
+  # Resolve the same way install.sh does, so the probe reads the home the skill was written to.
+  codex_probe_home="${CODEX_HOME:-$HOME/.codex}"
+  PROMPT_INPUT="$(CODEX_HOME="$codex_probe_home" codex debug prompt-input 'smoke probe' 2>/dev/null || true)"
+  if [ -z "$PROMPT_INPUT" ]; then
+    echo "  SKIP: codex prompt-input returned nothing; loader visibility not exercised"
+  elif printf '%s' "$PROMPT_INPUT" | grep -qF "$SKILL_PROBE"; then
+    pass "deployed skill is visible in a real Codex prompt (loader accepted it)"
+  else
+    fail "deployed skill is on disk but invisible to the Codex loader"
+  fi
+else
+  echo "  SKIP: codex not installed; loader visibility not exercised"
+fi
 
 # ── summary ──────────────────────────────────────────────────────
 echo ""

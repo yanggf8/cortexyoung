@@ -159,6 +159,26 @@ skill_is_managed() {
   [ -f "$1" ] && head -n 5 "$1" 2>/dev/null | grep -qF "$MANAGED_MARKER"
 }
 
+# skill_frontmatter_intact: a SKILL.md is only loaded when its YAML frontmatter fence starts on
+# line 1. Codex enforces exactly that and otherwise skips the whole skill with
+# "missing YAML frontmatter delimited by ---" — the file sits on disk and no agent ever sees it.
+# Claude Code parses frontmatter the same way. So the marker belongs inside the block, never above it.
+skill_frontmatter_intact() {
+  [ "$(head -n 1 "$1" 2>/dev/null)" = "---" ]
+}
+
+# with_managed_marker: emit "$1" with the managed marker on line 2, i.e. as a YAML comment inside
+# the frontmatter block. Deleting that single line reproduces the source byte-for-byte, so the hash
+# comparison in deploy_skill_at stays exact. A file with no frontmatter at all keeps the legacy
+# placement, because there is nothing there to displace.
+with_managed_marker() {
+  if skill_frontmatter_intact "$1"; then
+    { head -n 1 "$1"; echo "$MANAGED_MARKER"; tail -n +2 "$1"; }
+  else
+    { echo "$MANAGED_MARKER"; cat "$1"; }
+  fi
+}
+
 skill_hash() {
   sha256sum "$1" 2>/dev/null | awk '{print $1}' || shasum -a 256 "$1" 2>/dev/null | awk '{print $1}' || echo ""
 }
@@ -320,13 +340,15 @@ deploy_skill_at() {
       stripped_hash="$(skill_hash "$dest_stripped")"
       src_hash="$(skill_hash "$src")"
       rm -f "$dest_stripped"
-      if [ "$stripped_hash" = "$src_hash" ]; then
+      # Content equality alone is not enough: a file written by an older installer carries the
+      # marker on line 1, which is precisely what hides it from both agents. Repair the shape too.
+      if [ "$stripped_hash" = "$src_hash" ] && skill_frontmatter_intact "$dest"; then
         info "skill up to date: $dest"
+      elif [ "$stripped_hash" = "$src_hash" ]; then
+        with_managed_marker "$src" > "$dest"
+        info "repaired skill frontmatter: $dest"
       else
-        {
-          echo "$MANAGED_MARKER"
-          cat "$src"
-        } > "$dest"
+        with_managed_marker "$src" > "$dest"
         info "updated skill: $dest"
       fi
     else
@@ -335,10 +357,7 @@ deploy_skill_at() {
       dest_hash="$(skill_hash "$dest")"
       if [ "$src_hash" = "$dest_hash" ]; then
         local tmp; tmp="$(mktemp)"
-        {
-          echo "$MANAGED_MARKER"
-          cat "$dest"
-        } > "$tmp" && cat "$tmp" > "$dest"
+        with_managed_marker "$dest" > "$tmp" && cat "$tmp" > "$dest"
         rm -f "$tmp"
         info "adopted unmanaged skill (hash-equal): $dest"
       else
@@ -346,18 +365,12 @@ deploy_skill_at() {
         bak="${dest}.bak.$(date +%Y%m%d%H%M%S)"
         cp "$dest" "$bak"
         info "backed up unmanaged skill to $bak"
-        {
-          echo "$MANAGED_MARKER"
-          cat "$src"
-        } > "$dest"
+        with_managed_marker "$src" > "$dest"
         info "replaced skill: $dest"
       fi
     fi
   else
-    {
-      echo "$MANAGED_MARKER"
-      cat "$src"
-    } > "$dest"
+    with_managed_marker "$src" > "$dest"
     info "installed skill: $dest"
   fi
   record_manifest "$key" "$dest"

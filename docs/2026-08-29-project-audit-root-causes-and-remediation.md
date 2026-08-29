@@ -97,6 +97,7 @@ GitHub Actions 正確，這三者必須分別驗證。
 | F-10 | P1 | 既有測試在平行執行下約 40% 機率失敗（**HEAD 既存**，非本輪引入） | 新 CI 的 `cargo test` gate 會隨機紅，等於沒有 gate |
 | F-11 | P1 | `--allowedTools Bash(...)` 在 headless 下不約束 Bash，評測臂的「白名單即實驗組」只是標籤 | 兩臂 A/B 的基線臂實際用了 `grep`/`sed`，比較不成立 |
 | F-12 | P1 | 評測器是 6 個 `.mjs`，違反「本 repo 純 Rust」契約，同時也是唯一沒有型別、沒有 lint、沒有 gate 的部分 | 已移植為 `evals/` crate，JS 全部移除 |
+| F-16 | P1 | `install.sh` 把 managed marker 寫成 SKILL.md 的**第一行**，frontmatter 被擠到第二行 | Codex/Claude 載入器判定 `missing YAML frontmatter delimited by ---` 並整個跳過該 skill：§13g 部署的 3 份引導全在盤上、0 份進得了 agent context；smoke 只驗「marker 存在」，53/53 綠燈照常漏 |
 | F-15 | P1 | 被額度拒絕的 cell 仍被寫成 `total_tokens=0 / coverage=0` 的測量值 | 第二輪 5 個任務裡有 3 個（6 格）根本沒跑，卻進入了聚合；已改為丟例外且不落 row |
 | F-14 | **已修** | 假 parser fixture 是 46 行 Python，抵觸純 Rust 契約 | 已移植為 Rust bin `fake_ast_grep`（模式語法不變）+ 7 個自身測試 |
 | F-13 | **已修** | `cort` 只靠 PATH 找 `ast-grep`，而 agent 的 Bash PATH 會被正規化 | 見 §13e：候選探測 + 版本優先 + probed/hint 錯誤；5 個回歸測試，端到端已證 |
@@ -613,6 +614,52 @@ verdict: baseline_arm=rg+Read, cort_beats_ast_grep=true → continue to deferred
 資料以 metrics-only 形式保存在 `evals/runs/2026-08-30-graph/`（不含 transcript，避免把 venue 的原始碼
 片段帶進本 repo）。
 
+## 13k. F-16：部署到 agent 家目錄的 SKILL.md，agent 從來沒看過
+
+§13g 的原則是「改動若不會到達 agent 眼前，等於沒改」。這一條被 `install.sh` 自己打破了，而且破了整個 §13g 的成果。
+
+`deploy_skill_at()` 把 managed marker 直接前綴成檔案第一行：
+
+```
+# managed by cortexyoung install.sh   ← 第一行
+---
+name: ast-grep
+---
+```
+
+Codex 與 Claude Code 都要求 YAML frontmatter 的 `---` 從第一行開始。marker 佔掉第一行之後，整個 skill 被載入器
+判定為 `missing YAML frontmatter delimited by ---` 而**整個跳過**：檔案在硬碟上、字節正確、與來源 hash 對得上，
+但 agent 的 context 裡不留痕跡。Codex 只在啟動時列一行 `⚠ Skipped loading 1 skill(s)`，其餘一切照常，
+所以這個狀態可以安靜地撐过好幾天。實測證據（修復前）：`~/.claude/skills/ast-grep`、`~/.codex/skills/ast-grep`、
+`~/.claude/skills/xgrep` 三份的第一行全是 marker；`codex debug prompt-input` 渲染出來的 model-visible prompt
+裡 grep 不到該 skill 描述的任何片段（計數 0）。
+
+為什麼 53 項 smoke 全綠也抓不到：既有斷言清一色是 `assert_contains "$dest" "$MANAGED_MARKER"`，問的是
+「marker 在不在」，而失敗模式恰恰是「marker 在，所以 skill 不在」。與 F-15 同類——驗證了存在的條件，
+沒驗證生效的條件。
+
+修法：marker 進 frontmatter **內部**（第二行的 YAML 註解）。插入由 `with_managed_marker()` 負責、
+形状由 `skill_frontmatter_intact()` 判定。刪掉那唯一一行後與倉庫來源**逐字節相同**，
+`deploy_skill_at()` 的 hash 比對語意完全不動；`skill_is_managed()`（`head -n 5`）照樣認得，
+既有的 unmanaged-collision／--force／uninstall 路徑一項都不用改。
+
+真正關鍵的是「已部署但形状壞掉」的檔案必須被**修**，不能被 hash 比對放過：舊檔內容與來源相同，
+只比內容會一路回報 `skill up to date`，壞形状就永遠留在盤上。所以 up-to-date 條件改成
+「內容相同 **且** 第一行是 `---`」，否則進 `repaired skill frontmatter` 分支重寫。
+實跑驗證：三份部署檔各被標一次 repaired，`./install.sh` 再跑一次全部 `up to date`（冪等，沒有 churn）。
+
+驗收（smoke 53 → 62，新增 9 項）：
+
+- 第一行必須是 `---`，marker 必須正好落在第二行（claude 與 codex 兩份都驗）；
+- `grep -vxF marker` 之後與倉庫來源 `cmp` 逐字節相同——「只多一行 marker」必須是**可證明的**，不是願望；
+- 播一個舊安裝器寫出來的 marker-在第一行 檔案，重跑必須出現 `repaired skill frontmatter`，
+  且 fence 回到第一行、仍判為 managed；
+- 最強的一條直接問載入器：`codex debug prompt-input` 把該 skills 目錄渲染成 model-visible prompt，
+  再 grep skill 描述文字，驗的是「在不在模型看得到的地方」。`codex` 不在册時（CI 就是）印 `SKIP:` 而**不計 PASS**。
+
+這條 oracle 在写完的當下就抓到我自己把它接錯：probe 的 `CODEX_HOME` 指向 temp home 本身而不是 `$HOME/.codex`，
+於是對一份正確的檔案也宣稱看不到 skill——一次假失敗，但正是這類斷言該有的灵敏度。
+
 ## 13i. 第二輪取樣：額度攔截、F-15，與「正確度穩定 / 成本不穩定」
 
 ### 加了 1 輪重複取樣，結果是兩件事
@@ -826,6 +873,7 @@ Bash 只准留在 `install.sh` 與 `tests/install-smoke.sh`（平台需求），
 | F-07 | **未修（維持既有契約）** | 僅在文件層面保留「candidates 需查證」的語意 | 需 CLI 契約變更（多 seed 時 fail closed 或 `--file` 消歧），影響現有輸出格式，另行提案 |
 | F-08 | **部分已修** | README 能力表把 `context/read/recall` 列為主要能力、`impact` 標明語言邊界 | 完整 Stable/Experimental/Deferred 分級仍待一次文件整理 |
 | F-09 | **僅文件化** | README 限制 #9 說明 `status.unparsed` 也包含「合法零符號檔案」 | 程式層面需區分 `no_symbols` 與 parse failure，屬 P3 |
+| F-16 | **已修** | marker 移到 frontmatter 內部第二行（`with_managed_marker`）；up-to-date 的條件從「內容相同」改成「內容相同**且**第一行是 `---`」，舊形状走 `repaired skill frontmatter` 分支重寫 | smoke 53 → 62：fence 在第一行、marker 正好在第二行、`grep -vxF marker` 後與來源 `cmp` 逐字節相同、legacy 形状必須被 repair、外加**真載入器 oracle**（`codex debug prompt-input`，缺 codex 時明確 SKIP 不冒充 PASS）；實測 3 份部署檔 repaired 後可見 |
 | F-10 | **已修** | C2-22（會改行程 CWD 的測試）拆到獨立 target `rust/tests/staleness_cwd.rs` | 修正前 HEAD 基線 10/20 失敗；修正後 `--test staleness` 20/20 通過、整輪 218/218 連續 3 次 |
 
 ### 過程中發現並一併處理的兩件事
