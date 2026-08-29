@@ -1,4 +1,4 @@
-//! Relationships + containment join. JS `src/graph.js` (+ `containmentJoin` from `src/struct.js`).
+//! Relationships + containment join.
 //! Spec §5.6 assigns `applyBudget` to struct/context (Job D), not this module.
 
 use crate::chunker::{Chunk, Edge};

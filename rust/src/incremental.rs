@@ -1,4 +1,4 @@
-//! Incremental index + git candidates. JS `src/incremental.js`.
+//! Incremental index + git candidates.
 //!
 //! Git argv (spec §2):
 //!   git -C root diff --name-status -M HEAD

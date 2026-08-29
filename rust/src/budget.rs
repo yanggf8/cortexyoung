@@ -1,5 +1,5 @@
-//! Token budget. JS `src/budget.js` — `Math.ceil(String(text ?? '').length / 4)`.
-//! JS `.length` is UTF-16 code units, so we count `encode_utf16()`.
+//! Token budget: `ceil(chars / 4)`, where `chars` counts UTF-16 code units
+//! (`encode_utf16().count()`) because that is the unit the measurement was taken in.
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BudgetResult<T> {

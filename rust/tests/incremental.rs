@@ -1,4 +1,4 @@
-//! C2-8..C2-16 — tests/incremental.test.js (frozen JS reference)
+//! C2-8..C2-16 — the Rust port kept the case ids (audit F-12).
 
 use cort::ast_grep::resolve_ast_grep_bin;
 use cort::db::{ensure_schema, get_meta, open_db, project_id_for, set_meta};

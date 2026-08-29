@@ -1,4 +1,4 @@
-//! Pack enumeration + hash. JS `src/pack.js`.
+//! Pack enumeration + hash.
 //! cort does not parse YAML — ast-grep reads `sgconfig.yml`; we only walk and hash.
 
 use sha2::{Digest, Sha256};

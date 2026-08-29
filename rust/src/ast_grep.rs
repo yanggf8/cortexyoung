@@ -1,4 +1,4 @@
-//! ast-grep subprocess bridge. JS `src/ast-grep.js`.
+//! ast-grep subprocess bridge.
 //! Spawn only — never `sg`, never in-process. Pin is string-equal `"0.45.2"`.
 
 use crate::errors::CortError;

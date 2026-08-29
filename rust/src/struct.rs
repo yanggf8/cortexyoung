@@ -1,4 +1,4 @@
-//! Structural search + containment join. JS `src/struct.js`.
+//! Structural search + containment join.
 
 use crate::ast_grep::{exec_ast_grep, ExecOpts};
 use crate::budget::apply_budget;

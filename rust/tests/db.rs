@@ -1,4 +1,4 @@
-//! B-10..B-21 — db.test.js
+//! B-10..B-21 — the Rust port kept the case ids (audit F-12).
 
 use cort::db::{
     cache_dir, db_path_for, delete_project, ensure_schema, get_meta, list_projects, open_db,

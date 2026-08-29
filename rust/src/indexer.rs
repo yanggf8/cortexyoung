@@ -1,4 +1,4 @@
-//! Full index, file walk, git HEAD, status. JS `src/indexer.js`.
+//! Full index, file walk, git HEAD, status.
 //!
 //! C1 contract (spec §1.4 / §1.13 / §1.15), snake_case like Job B:
 //! - `pack::extractor_version() -> String`

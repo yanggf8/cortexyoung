@@ -1,4 +1,4 @@
-//! D-35..D-41 — tests/render.test.js (frozen JS reference)
+//! D-35..D-41 — the Rust port kept the case ids (audit F-12).
 //! Read/recall lean shapes follow proposal §1 and §3 (supersede JS D-41).
 
 use cort::ast_grep::resolve_ast_grep_bin;

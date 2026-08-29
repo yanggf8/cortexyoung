@@ -1,4 +1,4 @@
-//! B-6..B-9 — budget.test.js
+//! B-6..B-9 — the Rust port kept the case ids (audit F-12).
 
 use cort::budget::{apply_budget, estimate_tokens};
 

@@ -1,4 +1,4 @@
-//! C2-1..C2-7 — tests/indexer.test.js (frozen JS reference)
+//! C2-1..C2-7 — the Rust port kept the case ids (audit F-12).
 //! Plus plan §7 B-gap: canonicalize → project_id_for.
 
 use cort::ast_grep::resolve_ast_grep_bin;

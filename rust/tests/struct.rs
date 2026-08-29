@@ -1,4 +1,4 @@
-//! D-13..D-25 — tests/struct.test.js (frozen JS reference)
+//! D-13..D-25 — the Rust port kept the case ids (audit F-12).
 
 use cort::ast_grep::resolve_ast_grep_bin;
 use cort::db::{ensure_schema, open_db, project_id_for};

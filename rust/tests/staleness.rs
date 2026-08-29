@@ -1,4 +1,4 @@
-//! C2-17..C2-22 — tests/staleness.test.js (frozen JS reference)
+//! C2-17..C2-22 — the Rust port kept the case ids (audit F-12).
 
 use cort::ast_grep::resolve_ast_grep_bin;
 use cort::db::{ensure_schema, open_db, project_id_for};

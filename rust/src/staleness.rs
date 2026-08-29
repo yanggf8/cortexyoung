@@ -1,4 +1,4 @@
-//! Staleness: `index_is_stale` signalling. JS `src/staleness.js`.
+//! Staleness: `index_is_stale` signalling.
 //! Compared extraction hash, not git dirty and not raw file bytes (spec §7.5).
 
 use crate::db::{get_meta, Db};

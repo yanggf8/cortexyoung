@@ -1,4 +1,4 @@
-//! B-22..B-29 — fts.test.js
+//! B-22..B-29 — the Rust port kept the case ids (audit F-12).
 //!
 //! keywordSearch JS tests go through fullIndex (Job C2). Job B seeds chunks
 //! directly so we do not call indexer.

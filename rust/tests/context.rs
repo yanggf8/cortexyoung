@@ -1,4 +1,4 @@
-//! D-1..D-12 — tests/context.test.js (frozen JS reference)
+//! D-1..D-12 — the Rust port kept the case ids (audit F-12).
 //! Plus proposal §4 owner-disambiguation regressions.
 
 use cort::ast_grep::{exec_ast_grep, resolve_ast_grep_bin, ExecOpts};

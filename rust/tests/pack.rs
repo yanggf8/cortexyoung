@@ -1,4 +1,4 @@
-//! C1-1..C1-5 — tests/pack.test.js (frozen JS reference)
+//! C1-1..C1-5 — the Rust port kept the case ids (audit F-12).
 
 use cort::ast_grep::{exec_ast_grep, resolve_ast_grep_bin, ExecOpts};
 use cort::pack::{extractor_version, pack_dir, pack_files, sgconfig};

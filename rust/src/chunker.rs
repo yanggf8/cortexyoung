@@ -1,4 +1,4 @@
-//! Per-file extraction. JS `src/chunker.js`.
+//! Per-file extraction.
 //! argv: `scan --json=stream --config SGCONFIG absPath`. Timeout 30s/file (overridable).
 //! 256 MiB maxBuffer is specified on `execAstGrep` (Job B's bridge).
 

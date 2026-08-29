@@ -1,4 +1,4 @@
-//! B-1..B-5 — ast-grep.test.js
+//! B-1..B-5 — the Rust port kept the case ids (audit F-12).
 
 use cort::ast_grep::{
     assert_ast_grep_version, ast_grep_candidates, ast_grep_version, exec_ast_grep,

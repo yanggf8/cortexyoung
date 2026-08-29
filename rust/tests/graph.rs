@@ -1,4 +1,4 @@
-//! C1-20..C1-29 — tests/graph.test.js (frozen JS reference)
+//! C1-20..C1-29 — the Rust port kept the case ids (audit F-12).
 //!
 //! JS graph tests go through `fullIndex` (Job C2). C1 seeds via `extract_file` +
 //! `relationship_rows_for_file` so we do not call the C2 stub.

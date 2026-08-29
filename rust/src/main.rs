@@ -1,4 +1,4 @@
-//! CLI dispatch. JS `bin/cort.js` with clap; `--help`/`-h`/`help` are side-effect free.
+//! CLI dispatch with clap; `--help`/`-h`/`help` are side-effect free.
 
 use clap::Parser;
 use cort::ast_grep::{assert_ast_grep_version, resolve_ast_grep_bin};

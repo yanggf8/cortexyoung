@@ -1,4 +1,4 @@
-//! SQLite open / schema v2 / cache helpers. JS `src/db.js`.
+//! SQLite open / schema v3 / cache helpers.
 
 use crate::errors::CortError;
 use rusqlite::{params, Connection, ErrorCode, OpenFlags};

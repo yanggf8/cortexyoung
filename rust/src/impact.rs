@@ -1,4 +1,4 @@
-//! Reverse dependents. JS `src/impact.js`.
+//! Reverse dependents.
 
 use crate::chunker::{extract_file, ExtractFileArgs};
 use crate::db::Db;

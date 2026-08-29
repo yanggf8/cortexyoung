@@ -1,4 +1,4 @@
-//! D-42..D-47 — tests/cli.test.js (frozen JS reference)
+//! D-42..D-47 — the Rust port kept the case ids (audit F-12).
 //! Plus plan §7 B-gap canonicalize-before-hash, format errors, CORT_CACHE_DIR.
 
 use cort::db::project_id_for;

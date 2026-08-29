@@ -1,4 +1,4 @@
-//! Context packets. JS `src/context.js`, seed selection superseded by
+//! Context packets. Seed selection follows
 //! `docs/superpowers/plans/2026-08-28-codex-fix-proposal.md` §4.
 
 use crate::budget::{apply_budget, estimate_tokens};

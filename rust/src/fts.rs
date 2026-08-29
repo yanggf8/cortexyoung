@@ -1,4 +1,4 @@
-//! FTS sanitizer + keyword search. JS `src/fts.js`.
+//! FTS sanitizer + keyword search.
 
 use crate::db::Db;
 use crate::errors::CortError;

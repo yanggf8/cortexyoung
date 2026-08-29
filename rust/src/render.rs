@@ -1,4 +1,4 @@
-//! JSON / lean rendering. JS `src/render.js`, superseded for read/validation by
+//! JSON / lean rendering. The `read`/`recall` validation contracts follow
 //! `docs/superpowers/plans/2026-08-28-codex-fix-proposal.md` §1 and §3.
 
 use crate::errors::CortError;

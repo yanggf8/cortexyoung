@@ -1,4 +1,4 @@
-//! C1-6..C1-19 — tests/chunker.test.js (frozen JS reference)
+//! C1-6..C1-19 — the Rust port kept the case ids (audit F-12).
 
 use cort::ast_grep::resolve_ast_grep_bin;
 use cort::chunker::{
