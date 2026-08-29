@@ -628,8 +628,12 @@ name: ast-grep
 ---
 ```
 
-Codex 與 Claude Code 都要求 YAML frontmatter 的 `---` 從第一行開始。marker 佔掉第一行之後，整個 skill 被載入器
-判定為 `missing YAML frontmatter delimited by ---` 而**整個跳過**：檔案在硬碟上、字節正確、與來源 hash 對得上，
+兩個載入器的規則不是靠猜，分別從各自 binary 取出：Codex 0.150.1 對不在第一行的 fence 報
+`missing YAML frontmatter delimited by ---` 並跳過整個 skill（啟動時只留一行 `⚠ Skipped loading …`）；
+Claude Code 2.1.251 的解析正則是 `hR = /^---\s*\n([\s\S]*?)---\s*\n?/`，以 `^` 錨定在第一行，
+**沒命中時回 `frontmatter:{}`**——沒有警告、沒有錯誤，只是 name/description 全空，skill 從此不可能被路由到。
+換言之 Claude 那一側的失敗模式比 Codex 更安靜。marker 佔掉第一行之後，整個 skill 被載入器判定為
+`missing YAML frontmatter delimited by ---` 而**整個跳過**：檔案在硬碟上、字節正確、與來源 hash 對得上，
 但 agent 的 context 裡不留痕跡。Codex 只在啟動時列一行 `⚠ Skipped loading 1 skill(s)`，其餘一切照常，
 所以這個狀態可以安靜地撐过好幾天。實測證據（修復前）：`~/.claude/skills/ast-grep`、`~/.codex/skills/ast-grep`、
 `~/.claude/skills/xgrep` 三份的第一行全是 marker；`codex debug prompt-input` 渲染出來的 model-visible prompt
