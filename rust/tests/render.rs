@@ -3,7 +3,7 @@
 
 use cort::ast_grep::resolve_ast_grep_bin;
 use cort::budget::estimate_tokens;
-use cort::context::{context_command, DEFAULT_BUDGET, ContextOptions};
+use cort::context::{context_command, ContextOptions, DEFAULT_BUDGET};
 use cort::db::{ensure_schema, open_db, project_id_for};
 use cort::errors::CortError;
 use cort::impact::impact_command;
@@ -84,13 +84,7 @@ fn indexed(
     (dir, root, db, project_id, bin)
 }
 
-fn chain() -> (
-    tempfile::TempDir,
-    rusqlite::Connection,
-    Value,
-    Value,
-    Value,
-) {
+fn chain() -> (tempfile::TempDir, rusqlite::Connection, Value, Value, Value) {
     let (dir, root, db, project_id, bin) = indexed(CHAIN);
     let impact = impact_command(&db, &bin, &root, &project_id, "d", 3).unwrap();
     let context = context_command(
@@ -100,10 +94,10 @@ fn chain() -> (
         &project_id,
         "c",
         ContextOptions {
-                budget: DEFAULT_BUDGET,
-                include_ambiguous: false,
-                full_content: false,
-            }
+            budget: DEFAULT_BUDGET,
+            include_ambiguous: false,
+            full_content: false,
+        },
     )
     .unwrap();
     let glob = root.join("src/c.ts").to_string_lossy().into_owned();
@@ -144,23 +138,13 @@ fn lean_impact_output_lists_every_dependent_with_its_hop_and_drops_the_stored_ch
             .any(|l| l == "# impact d depth=3 seeds=1 dependents=3 stale=false"),
         "{out}"
     );
-    assert!(
-        out.lines().any(|l| l == "h1\tsrc/c.ts\tc\t2"),
-        "{out}"
-    );
-    assert!(
-        out.lines().any(|l| l == "h3\tsrc/a.ts\ta\t2"),
-        "{out}"
-    );
+    assert!(out.lines().any(|l| l == "h1\tsrc/c.ts\tc\t2"), "{out}");
+    assert!(out.lines().any(|l| l == "h3\tsrc/a.ts\ta\t2"), "{out}");
     let chunk_id = impact["dependents"][0]["chunk_id"].as_str().unwrap();
+    assert!(!out.contains(chunk_id), "lean must not repeat the chunk_id");
     assert!(
-        !out.contains(chunk_id),
-        "lean must not repeat the chunk_id"
-    );
-    assert!(
-        !out.lines().any(|l| {
-            l.chars().all(|c| c.is_ascii_hexdigit()) && l.len() == 64
-        }),
+        !out.lines()
+            .any(|l| { l.chars().all(|c| c.is_ascii_hexdigit()) && l.len() == 64 }),
         "no 64-char project hash in lean output:\n{out}"
     );
 }
@@ -196,10 +180,7 @@ fn lean_context_keeps_neighbours_and_unresolved_refs_one_per_line() {
         out.starts_with("# context c resolution=exact_symbol"),
         "{out}"
     );
-    assert!(
-        out.lines().any(|l| l == "src/c.ts:2\tc\tfunction"),
-        "{out}"
-    );
+    assert!(out.lines().any(|l| l == "src/c.ts:2\tc\tfunction"), "{out}");
     for n in context["seeds"][0]["neighbors"].as_array().unwrap() {
         let path = n["file_path"].as_str().unwrap();
         assert!(out.contains(path), "neighbour {} missing", n["symbol_name"]);
@@ -212,9 +193,8 @@ fn lean_struct_emits_one_row_per_match_with_the_enclosing_symbol() {
     let (_dir, _db, _, _, strukt) = chain();
     let out = render(Some("struct"), Format::Lean, &strukt);
     assert!(
-        out.lines().any(|l| {
-            l == "# struct d() lang=ts matches=1 shown=1 truncated=false stale=false"
-        }),
+        out.lines()
+            .any(|l| { l == "# struct d() lang=ts matches=1 shown=1 truncated=false stale=false" }),
         "{out}"
     );
     let rows: Vec<&str> = out.split('\n').skip(1).filter(|s| !s.is_empty()).collect();
@@ -297,9 +277,7 @@ fn lean_reading_output_identifies_cache_provenance_and_keeps_stored_content() {
     assert!(recall
         .lines()
         .any(|l| l == "# recall work readings=1 truncated_query=false"));
-    assert!(recall
-        .lines()
-        .any(|l| l == "src/main.rs:10-12\treads=2"));
+    assert!(recall.lines().any(|l| l == "src/main.rs:10-12\treads=2"));
 }
 
 /// Proposal §3 — validation_error lean is one line; null errno/os_code become "-".

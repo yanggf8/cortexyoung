@@ -24,7 +24,10 @@ pub fn parse_format(raw: Option<&str>) -> Option<Format> {
 }
 
 fn pretty(payload: &Value) -> String {
-    format!("{}\n", serde_json::to_string_pretty(payload).unwrap_or_else(|_| "null".into()))
+    format!(
+        "{}\n",
+        serde_json::to_string_pretty(payload).unwrap_or_else(|_| "null".into())
+    )
 }
 
 fn as_str<'a>(v: &'a Value, key: &str) -> &'a str {
@@ -34,12 +37,12 @@ fn as_str<'a>(v: &'a Value, key: &str) -> &'a str {
 fn as_i64(v: &Value, key: &str) -> i64 {
     v.get(key)
         .and_then(Value::as_i64)
-        .or_else(|| v.get(key).and_then(Value::as_u64).and_then(|u| i64::try_from(u).ok()))
         .or_else(|| {
             v.get(key)
-                .and_then(Value::as_f64)
-                .map(|f| f as i64)
+                .and_then(Value::as_u64)
+                .and_then(|u| i64::try_from(u).ok())
         })
+        .or_else(|| v.get(key).and_then(Value::as_f64).map(|f| f as i64))
         .unwrap_or(0)
 }
 
@@ -83,10 +86,7 @@ pub fn render_impact(payload: &Value) -> String {
         ));
     }
     for d in arr(payload, "dependents") {
-        let name = d
-            .get("symbol_name")
-            .and_then(Value::as_str)
-            .unwrap_or("?");
+        let name = d.get("symbol_name").and_then(Value::as_str).unwrap_or("?");
         lines.push(format!(
             "h{}\t{}\t{}\t{}",
             as_i64(d, "hop"),
@@ -130,10 +130,7 @@ pub fn render_struct(payload: &Value) -> String {
             })
             .collect::<Vec<_>>()
             .join(",");
-        let symbol = m
-            .get("symbol_name")
-            .and_then(Value::as_str)
-            .unwrap_or("?");
+        let symbol = m.get("symbol_name").and_then(Value::as_str).unwrap_or("?");
         let text = js_slice_120(&as_str(m, "text").replace('\n', " "));
         let cols: Vec<String> = [
             format!("{}:{}", as_str(m, "file_path"), as_i64(m, "start_line")),
@@ -159,10 +156,7 @@ pub fn render_context(payload: &Value) -> String {
         js_display(payload, "index_is_stale"),
     )];
     for s in arr(payload, "seeds") {
-        let name = s
-            .get("symbol_name")
-            .and_then(Value::as_str)
-            .unwrap_or("?");
+        let name = s.get("symbol_name").and_then(Value::as_str).unwrap_or("?");
         lines.push(format!(
             "{}:{}\t{}\t{}",
             as_str(s, "file_path"),
@@ -173,10 +167,7 @@ pub fn render_context(payload: &Value) -> String {
         for n in arr(s, "neighbors") {
             let dir0 = as_str(n, "direction").chars().next().unwrap_or('?');
             let conf0 = as_str(n, "confidence").chars().next().unwrap_or('?');
-            let nname = n
-                .get("symbol_name")
-                .and_then(Value::as_str)
-                .unwrap_or("?");
+            let nname = n.get("symbol_name").and_then(Value::as_str).unwrap_or("?");
             lines.push(format!(
                 "  {dir0}{}\t{}:{}\t{}\t{conf0}",
                 as_str(n, "rel_type"),

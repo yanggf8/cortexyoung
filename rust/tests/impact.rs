@@ -109,8 +109,7 @@ fn a_symbol_with_no_dependents_returns_an_empty_list_not_an_error() {
 #[test]
 fn an_unknown_symbol_reports_zero_seeds_without_throwing() {
     let (_dir, root, db, project_id, bin) = indexed(CHAIN);
-    let out =
-        impact_command(&db, &bin, &root, &project_id, "nosuchsymbol", DEFAULT_DEPTH).unwrap();
+    let out = impact_command(&db, &bin, &root, &project_id, "nosuchsymbol", DEFAULT_DEPTH).unwrap();
     assert_eq!(out["seed_count"], 0);
     assert_eq!(out["dependents"], serde_json::json!([]));
 }

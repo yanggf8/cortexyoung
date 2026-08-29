@@ -200,18 +200,17 @@ fn strip_segment_generics(seg: &str) -> String {
                 }
                 depth += 1;
             }
-            '>'
-                if depth > 0 => {
-                    depth -= 1;
-                    if depth == 0 {
-                        if let Some(st) = start {
-                            let rest = seg[i + c.len_utf8()..].trim();
-                            if rest.is_empty() {
-                                return seg[..st].trim().to_string();
-                            }
+            '>' if depth > 0 => {
+                depth -= 1;
+                if depth == 0 {
+                    if let Some(st) = start {
+                        let rest = seg[i + c.len_utf8()..].trim();
+                        if rest.is_empty() {
+                            return seg[..st].trim().to_string();
                         }
                     }
                 }
+            }
             _ => {}
         }
     }

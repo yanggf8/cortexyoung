@@ -70,7 +70,10 @@ fn run_cort(args: &[&str], cwd: &Path, cache: &Path) -> Run {
 
 fn payload(run: &Run) -> Value {
     serde_json::from_str(run.stdout.trim_end()).unwrap_or_else(|e| {
-        panic!("json parse failed: {e}; stdout={:?} stderr={:?}", run.stdout, run.stderr)
+        panic!(
+            "json parse failed: {e}; stdout={:?} stderr={:?}",
+            run.stdout, run.stderr
+        )
     })
 }
 
@@ -250,11 +253,7 @@ fn cli_canonicalizes_root_before_project_id_for() {
         .prefix("cort-cache-")
         .tempdir()
         .unwrap();
-    let r = run_cort(
-        &["index", link.to_str().unwrap()],
-        tmp.path(),
-        cache.path(),
-    );
+    let r = run_cort(&["index", link.to_str().unwrap()], tmp.path(), cache.path());
     assert_eq!(r.code, 0, "stderr={}", r.stderr);
     let canon = fs::canonicalize(&real).unwrap();
     let expected = format!("{}.db", project_id_for(canon.to_str().unwrap()));
@@ -262,7 +261,10 @@ fn cli_canonicalizes_root_before_project_id_for() {
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
-    assert!(names.contains(&expected), "names={names:?} expected={expected}");
+    assert!(
+        names.contains(&expected),
+        "names={names:?} expected={expected}"
+    );
     let hashed_link = format!("{}.db", project_id_for(link.to_str().unwrap()));
     assert_ne!(expected, hashed_link);
 }
@@ -312,8 +314,16 @@ fn type_method_end_to_end_cli_json_and_lean() {
         &cwd,
         cache.path(),
     );
-    assert!(lean.stdout.contains("Ledger::run\tmethod"), "{}", lean.stdout);
-    let none = run_cort(&["context", "Ledger::nope", "-f", "json"], &cwd, cache.path());
+    assert!(
+        lean.stdout.contains("Ledger::run\tmethod"),
+        "{}",
+        lean.stdout
+    );
+    let none = run_cort(
+        &["context", "Ledger::nope", "-f", "json"],
+        &cwd,
+        cache.path(),
+    );
     assert_eq!(payload(&none)["resolution"], "none");
     let _ = proj;
 }

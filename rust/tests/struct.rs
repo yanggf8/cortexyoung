@@ -5,8 +5,8 @@ use cort::db::{ensure_schema, open_db, project_id_for};
 use cort::errors::CortError;
 use cort::indexer::full_index;
 use cort::r#struct::{
-    StructOptions, containment_join, preflight_pattern, run_pattern, struct_command, MAX_MALFORMED_RATIO,
-    MAX_NEIGHBORS, UNBOUNDED_SCAN_FILE_LIMIT,
+    containment_join, preflight_pattern, run_pattern, struct_command, StructOptions,
+    MAX_MALFORMED_RATIO, MAX_NEIGHBORS, UNBOUNDED_SCAN_FILE_LIMIT,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -110,8 +110,13 @@ fn constants_match_the_spec() {
 #[test]
 fn a_malformed_pattern_is_caught_by_the_pre_flight_not_by_the_exit_code() {
     let (_dir, root, _db, _id, bin) = indexed(SAMPLE);
-    let err = preflight_pattern(&bin, "function (", "ts", &[root.to_string_lossy().into_owned()])
-        .unwrap_err();
+    let err = preflight_pattern(
+        &bin,
+        "function (",
+        "ts",
+        &[root.to_string_lossy().into_owned()],
+    )
+    .unwrap_err();
     assert_eq!(err.code, "parse_failed");
     assert_eq!(err.detail["pattern"], "function (");
     assert_eq!(err.detail["lang"], "ts");
@@ -244,9 +249,11 @@ fn containment_join_picks_the_smallest_chunk_that_contains_the_match() {
 #[test]
 fn containment_join_returns_null_when_no_chunk_contains_the_match() {
     let (_dir, _root, db, project_id, _bin) = indexed(SAMPLE);
-    assert!(containment_join(&db, &project_id, "src/alpha.ts", 9999, 9999)
-        .unwrap()
-        .is_none());
+    assert!(
+        containment_join(&db, &project_id, "src/alpha.ts", 9999, 9999)
+            .unwrap()
+            .is_none()
+    );
 }
 
 /// D-22
@@ -310,7 +317,10 @@ fn an_unglobbed_scan_of_a_large_project_is_refused_with_actionable_advice() {
             )
         })
         .collect();
-    let files_ref: Vec<(&str, &str)> = files.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let files_ref: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
     let (_dir, root, db, project_id, bin) = indexed(&files_ref);
     let err = struct_command(
         &db,
@@ -343,7 +353,10 @@ fn the_same_scan_succeeds_once_a_glob_narrows_it() {
             )
         })
         .collect();
-    let files_ref: Vec<(&str, &str)> = files.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let files_ref: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
     let (_dir, root, db, project_id, bin) = indexed(&files_ref);
     let glob = root.join("src/f0.ts").to_string_lossy().into_owned();
     struct_command(

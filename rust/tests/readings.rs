@@ -24,7 +24,8 @@ struct Harness {
     project_id: String,
 }
 
-fn setup() -> Harness { // db field is now mutable when full_index is used
+fn setup() -> Harness {
+    // db field is now mutable when full_index is used
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().to_path_buf();
     std::fs::write(root.join("notes.txt"), BODY).unwrap();

@@ -129,7 +129,11 @@ pub fn run_pattern(
         .iter()
         .filter_map(|rec| {
             let file = rec.get("file").and_then(Value::as_str)?.to_string();
-            let text = rec.get("text").and_then(Value::as_str).unwrap_or("").to_string();
+            let text = rec
+                .get("text")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
             let start_line = rec
                 .get("range")
                 .and_then(|r| r.get("start"))
@@ -230,7 +234,11 @@ pub fn struct_command(
     lang: &str,
     opts: StructOptions,
 ) -> Result<Value, CortError> {
-    let StructOptions { globs, budget, file_limit } = opts;
+    let StructOptions {
+        globs,
+        budget,
+        file_limit,
+    } = opts;
     let globs = &globs;
     let root = root.as_ref();
     let root_str = root.to_str().unwrap_or("");

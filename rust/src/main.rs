@@ -58,8 +58,12 @@ fn map_index(err: IndexError) -> CortError {
         IndexError::Io(io) if io.kind() == std::io::ErrorKind::NotFound => {
             CortError::new("file_not_found", json!({ "message": io.to_string() }))
         }
-        IndexError::Io(io) => CortError::new("file_not_found", json!({ "message": io.to_string() })),
-        IndexError::Sqlite(e) => CortError::new("storage_busy", json!({ "message": e.to_string() })),
+        IndexError::Io(io) => {
+            CortError::new("file_not_found", json!({ "message": io.to_string() }))
+        }
+        IndexError::Sqlite(e) => {
+            CortError::new("storage_busy", json!({ "message": e.to_string() }))
+        }
     }
 }
 
@@ -112,9 +116,8 @@ fn open_project_tracked(
     match canonicalize_root(root) {
         Ok(canon) => {
             usage.project_id = Some(canon.project_id.clone());
-            let db = open_db(db_path_for(&canon.path_str)).map_err(|e| {
-                CortError::new("storage_busy", json!({ "message": e.to_string() }))
-            })?;
+            let db = open_db(db_path_for(&canon.path_str))
+                .map_err(|e| CortError::new("storage_busy", json!({ "message": e.to_string() })))?;
             ensure_schema(&db)?;
             Ok((canon, db))
         }
@@ -210,9 +213,8 @@ fn render_emit(emit: &Emit) -> String {
 }
 
 fn resolve_fmt(raw: Option<&str>) -> Result<Format, CortError> {
-    parse_format(raw).ok_or_else(|| {
-        CortError::new("unknown_format", json!({ "hint": "--format json|lean" }))
-    })
+    parse_format(raw)
+        .ok_or_else(|| CortError::new("unknown_format", json!({ "hint": "--format json|lean" })))
 }
 
 fn parse_usize_flag(raw: Option<&str>, default: usize) -> usize {
@@ -262,7 +264,11 @@ fn cwd() -> PathBuf {
 }
 
 #[derive(Parser, Debug)]
-#[command(no_binary_name = true, disable_help_flag = true, disable_version_flag = true)]
+#[command(
+    no_binary_name = true,
+    disable_help_flag = true,
+    disable_version_flag = true
+)]
 struct IndexArgs {
     root: Option<PathBuf>,
     #[arg(long)]
@@ -272,7 +278,11 @@ struct IndexArgs {
 }
 
 #[derive(Parser, Debug)]
-#[command(no_binary_name = true, disable_help_flag = true, disable_version_flag = true)]
+#[command(
+    no_binary_name = true,
+    disable_help_flag = true,
+    disable_version_flag = true
+)]
 struct RootArgs {
     root: Option<PathBuf>,
     #[arg(short = 'f', long = "format")]
@@ -280,14 +290,22 @@ struct RootArgs {
 }
 
 #[derive(Parser, Debug)]
-#[command(no_binary_name = true, disable_help_flag = true, disable_version_flag = true)]
+#[command(
+    no_binary_name = true,
+    disable_help_flag = true,
+    disable_version_flag = true
+)]
 struct FormatOnlyArgs {
     #[arg(short = 'f', long = "format")]
     format: Option<String>,
 }
 
 #[derive(Parser, Debug)]
-#[command(no_binary_name = true, disable_help_flag = true, disable_version_flag = true)]
+#[command(
+    no_binary_name = true,
+    disable_help_flag = true,
+    disable_version_flag = true
+)]
 struct StructArgs {
     #[arg(short = 'p', long = "pattern")]
     pattern: Option<String>,
@@ -302,7 +320,11 @@ struct StructArgs {
 }
 
 #[derive(Parser, Debug)]
-#[command(no_binary_name = true, disable_help_flag = true, disable_version_flag = true)]
+#[command(
+    no_binary_name = true,
+    disable_help_flag = true,
+    disable_version_flag = true
+)]
 struct ContextArgs {
     query: Option<String>,
     #[arg(long)]
@@ -316,7 +338,11 @@ struct ContextArgs {
 }
 
 #[derive(Parser, Debug)]
-#[command(no_binary_name = true, disable_help_flag = true, disable_version_flag = true)]
+#[command(
+    no_binary_name = true,
+    disable_help_flag = true,
+    disable_version_flag = true
+)]
 struct ImpactArgs {
     #[arg(long)]
     symbol: Option<String>,
@@ -327,7 +353,11 @@ struct ImpactArgs {
 }
 
 #[derive(Parser, Debug)]
-#[command(no_binary_name = true, disable_help_flag = true, disable_version_flag = true)]
+#[command(
+    no_binary_name = true,
+    disable_help_flag = true,
+    disable_version_flag = true
+)]
 struct ReadArgs {
     file: Option<String>,
     #[arg(long)]
@@ -341,7 +371,11 @@ struct ReadArgs {
 }
 
 #[derive(Parser, Debug)]
-#[command(no_binary_name = true, disable_help_flag = true, disable_version_flag = true)]
+#[command(
+    no_binary_name = true,
+    disable_help_flag = true,
+    disable_version_flag = true
+)]
 struct RecallArgs {
     query: Option<String>,
     #[arg(long)]
@@ -353,7 +387,11 @@ struct RecallArgs {
 }
 
 #[derive(Parser, Debug)]
-#[command(no_binary_name = true, disable_help_flag = true, disable_version_flag = true)]
+#[command(
+    no_binary_name = true,
+    disable_help_flag = true,
+    disable_version_flag = true
+)]
 struct UsageArgs {
     #[arg(allow_hyphen_values = true)]
     days: Option<String>,
@@ -476,9 +514,8 @@ fn cmd_status(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError
             }),
         });
     }
-    let db = Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(
-        |e| CortError::new("storage_busy", json!({ "message": e.to_string() })),
-    )?;
+    let db = Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|e| CortError::new("storage_busy", json!({ "message": e.to_string() })))?;
     let st = status_of(&db, &canon.path).map_err(map_index)?;
     if !st.indexed {
         return Ok(Emit {
@@ -585,7 +622,11 @@ fn cmd_struct(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError
         &canon.project_id,
         &pattern,
         &lang,
-        StructOptions { globs, budget, file_limit: None },
+        StructOptions {
+            globs,
+            budget,
+            file_limit: None,
+        },
     )?;
     fill_stale(usage, &out);
     Ok(Emit {
@@ -614,7 +655,11 @@ fn cmd_context(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortErro
         &canon.path,
         &canon.project_id,
         &query,
-        ContextOptions { budget, include_ambiguous: a.include_ambiguous, full_content },
+        ContextOptions {
+            budget,
+            include_ambiguous: a.include_ambiguous,
+            full_content,
+        },
     )?;
     fill_stale(usage, &out);
     if out.get("resolution").and_then(Value::as_str) == Some("exact_symbol") {
@@ -662,16 +707,8 @@ fn cmd_read(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError> 
     };
     let payload = unwrap_busy(
         with_busy_retry(|| {
-            read_fragment(
-                &db,
-                &canon.path,
-                &canon.project_id,
-                &file,
-                start,
-                end,
-                mode,
-            )
-            .map_err(CortWrap)
+            read_fragment(&db, &canon.path, &canon.project_id, &file, start, end, mode)
+                .map_err(CortWrap)
         }),
         |w| w.0,
     )?;
@@ -708,18 +745,12 @@ fn cmd_read(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError> 
 
 fn cmd_recall(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError> {
     let a = RecallArgs::try_parse_from(args.iter()).map_err(clap_fail)?;
-    let query = a.query.ok_or_else(|| {
-        CortError::new(
-            "missing_query",
-            json!({ "hint": "cort recall <query>" }),
-        )
-    })?;
+    let query = a
+        .query
+        .ok_or_else(|| CortError::new("missing_query", json!({ "hint": "cort recall <query>" })))?;
     let format = resolve_fmt(a.format.as_deref())?;
     let (canon, db) = open_project_tracked(&cwd(), usage)?;
-    let limit = a
-        .limit
-        .as_deref()
-        .and_then(|s| s.parse::<i64>().ok());
+    let limit = a.limit.as_deref().and_then(|s| s.parse::<i64>().ok());
     let full_content = a.content.as_deref() == Some("full");
     let payload = unwrap_busy(
         with_busy_retry(|| {

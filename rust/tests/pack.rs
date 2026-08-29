@@ -247,7 +247,10 @@ fn an_override_pack_dir_without_sgconfig_fails_closed() {
     let result = std::panic::catch_unwind(cort::pack::sgconfig);
     set_pack_env(None);
     // sgconfig must fail closed: the override dir has no sgconfig.yml
-    assert!(result.is_err(), "sgconfig() must refuse an override pack without sgconfig.yml");
+    assert!(
+        result.is_err(),
+        "sgconfig() must refuse an override pack without sgconfig.yml"
+    );
 }
 
 #[test]

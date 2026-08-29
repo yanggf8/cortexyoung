@@ -57,18 +57,21 @@ pub fn impact_command(
         );
         let mut stmt = db.prepare(&sql).map_err(map_sql)?;
         let rows = stmt
-            .query_map(params_from_iter(
-                std::iter::once(&project_id as &dyn rusqlite::types::ToSql)
-                    .chain(names.iter().map(|n| n as &dyn rusqlite::types::ToSql)),
-            ), |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, Option<String>>(2)?,
-                    r.get::<_, i64>(3)?,
-                    r.get::<_, i64>(4)?,
-                ))
-            })
+            .query_map(
+                params_from_iter(
+                    std::iter::once(&project_id as &dyn rusqlite::types::ToSql)
+                        .chain(names.iter().map(|n| n as &dyn rusqlite::types::ToSql)),
+                ),
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, Option<String>>(2)?,
+                        r.get::<_, i64>(3)?,
+                        r.get::<_, i64>(4)?,
+                    ))
+                },
+            )
             .map_err(map_sql)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(map_sql)?
     };
@@ -119,8 +122,8 @@ pub fn impact_command(
             if !seen_symbols.insert(e.raw_target.clone()) {
                 continue;
             }
-            let targets =
-                resolve_targets(db, project_id, &seed.1, &import_map, &e.raw_target).map_err(map_sql)?;
+            let targets = resolve_targets(db, project_id, &seed.1, &import_map, &e.raw_target)
+                .map_err(map_sql)?;
             if targets.is_empty() {
                 let u = unresolved_inline(&e.raw_target);
                 unresolved.push(json!({

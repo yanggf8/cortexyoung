@@ -110,7 +110,11 @@ pub fn args_summary(
     Value::Object(map).to_string()
 }
 
-pub fn saved_bytes_for(source: Option<&str>, effective: Option<&str>, omitted_body_len: i64) -> i64 {
+pub fn saved_bytes_for(
+    source: Option<&str>,
+    effective: Option<&str>,
+    omitted_body_len: i64,
+) -> i64 {
     if source == Some("store") && effective == Some("receipt") {
         omitted_body_len.max(0)
     } else {
@@ -411,11 +415,9 @@ fn ensure_schema_readable(conn: &Connection) -> Result<(), CortError> {
         None => {
             // Fresh file that record_command created always writes the version.
             // A readable DB without our meta is treated as corrupt for the query.
-            conn.query_row(
-                "SELECT COUNT(*) FROM command_log",
-                [],
-                |r| r.get::<_, i64>(0),
-            )
+            conn.query_row("SELECT COUNT(*) FROM command_log", [], |r| {
+                r.get::<_, i64>(0)
+            })
             .map_err(map_query_err)?;
             Ok(())
         }
@@ -463,14 +465,12 @@ fn prune_best_effort(conn: &Connection, now: i64) {
 
 fn map_query_err(e: rusqlite::Error) -> CortError {
     match e.sqlite_error_code() {
-        Some(ErrorCode::DatabaseBusy) | Some(ErrorCode::DatabaseLocked) => CortError::new(
-            "usage_busy",
-            json!({ "sqlite_code": "SQLITE_BUSY" }),
-        ),
-        Some(ErrorCode::DatabaseCorrupt) | Some(ErrorCode::NotADatabase) => CortError::new(
-            "usage_corrupt",
-            json!({ "sqlite_code": "SQLITE_CORRUPT" }),
-        ),
+        Some(ErrorCode::DatabaseBusy) | Some(ErrorCode::DatabaseLocked) => {
+            CortError::new("usage_busy", json!({ "sqlite_code": "SQLITE_BUSY" }))
+        }
+        Some(ErrorCode::DatabaseCorrupt) | Some(ErrorCode::NotADatabase) => {
+            CortError::new("usage_corrupt", json!({ "sqlite_code": "SQLITE_CORRUPT" }))
+        }
         _ => {
             let msg = e.to_string().to_lowercase();
             if msg.contains("busy") || msg.contains("locked") {

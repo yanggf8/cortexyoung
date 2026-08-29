@@ -6,9 +6,7 @@ use crate::chunker::{canonical_owner, extract_file, ExtractFileArgs};
 use crate::db::Db;
 use crate::errors::CortError;
 use crate::fts::keyword_search;
-use crate::graph::{
-    build_import_map, get_neighbors, resolve_targets, unresolved_inline, Neighbor,
-};
+use crate::graph::{build_import_map, get_neighbors, resolve_targets, unresolved_inline, Neighbor};
 use crate::indexer::IndexError;
 use crate::staleness::compute_stale;
 use rusqlite::params;
@@ -47,10 +45,9 @@ fn last_colon_colon_outside_generics(s: &str) -> Option<usize> {
     while i + 1 < b.len() {
         match b[i] {
             b'<' => depth += 1,
-            b'>'
-                if depth > 0 => {
-                    depth -= 1;
-                }
+            b'>' if depth > 0 => {
+                depth -= 1;
+            }
             b':' if depth == 0 && b[i + 1] == b':' => {
                 last = Some(i);
                 i += 1;
@@ -89,7 +86,11 @@ struct SeedRow {
     language: Option<String>,
 }
 
-fn exact_symbol_seeds(db: &Db, project_id: &str, symbol_name: &str) -> Result<Vec<SeedRow>, CortError> {
+fn exact_symbol_seeds(
+    db: &Db,
+    project_id: &str,
+    symbol_name: &str,
+) -> Result<Vec<SeedRow>, CortError> {
     let mut stmt = db
         .prepare(
             "SELECT chunk_id, file_path, symbol_name, chunk_type, start_line, end_line, content, language
@@ -214,9 +215,8 @@ fn unresolved_for(
         if !seen.insert(e.raw_target.clone()) {
             continue;
         }
-        let targets =
-            resolve_targets(db, project_id, &seed.file_path, &import_map, &e.raw_target)
-                .map_err(map_sql)?;
+        let targets = resolve_targets(db, project_id, &seed.file_path, &import_map, &e.raw_target)
+            .map_err(map_sql)?;
         if targets.is_empty() {
             let u = unresolved_inline(&e.raw_target);
             out.push(UnresolvedOut {
@@ -268,7 +268,11 @@ pub fn context_command(
     query: &str,
     opts: ContextOptions,
 ) -> Result<Value, CortError> {
-    let ContextOptions { budget, include_ambiguous, full_content } = opts;
+    let ContextOptions {
+        budget,
+        include_ambiguous,
+        full_content,
+    } = opts;
     let root = root.as_ref();
     let parsed = parse_symbol_query(query);
 
@@ -353,7 +357,9 @@ pub fn context_command(
     }
 
     let seed_count = seed_count_before_limit.max(seeds.len());
-    let budgeted = apply_budget(seeds, budget, |s| serde_json::to_string(s).unwrap_or_default());
+    let budgeted = apply_budget(seeds, budget, |s| {
+        serde_json::to_string(s).unwrap_or_default()
+    });
     let mut kept = budgeted.kept;
     let mut truncated = budgeted.truncated || limit_truncated;
     if !kept.is_empty()

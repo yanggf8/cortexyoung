@@ -27,7 +27,10 @@ const SAMPLE: &[(&str, &str)] = &[
         "import { helper } from './helper';\n\
 export function alpha(a: number) { return helper(a) + 1; }\n",
     ),
-    ("src/utf8.ts", "export const greet = '你好'; // quote \" and \\\\ slash\n"),
+    (
+        "src/utf8.ts",
+        "export const greet = '你好'; // quote \" and \\\\ slash\n",
+    ),
 ];
 
 fn cort_bin() -> PathBuf {
@@ -339,7 +342,8 @@ fn recorder_isolation_busy_leaves_command_stdout_and_exit_unchanged() {
     let baseline = projects_stdout_baseline(&cwd, &cache);
     record_command_at(&usage_db(&cache), &rec("projects"));
     let lock = Connection::open(usage_db(&cache)).unwrap();
-    lock.busy_timeout(std::time::Duration::from_millis(0)).unwrap();
+    lock.busy_timeout(std::time::Duration::from_millis(0))
+        .unwrap();
     lock.execute_batch("BEGIN EXCLUSIVE").unwrap();
     let r = run_cort(&["projects"], &cwd, &cache);
     drop(lock);
@@ -505,8 +509,10 @@ fn usage_query_busy_or_corrupt_is_structured_error() {
     fs::remove_file(usage_db(&cache)).ok();
     record_command_at(&usage_db(&cache), &rec("usage"));
     let lock = Connection::open(usage_db(&cache)).unwrap();
-    lock.busy_timeout(std::time::Duration::from_millis(0)).unwrap();
-    lock.pragma_update(None, "locking_mode", "EXCLUSIVE").unwrap();
+    lock.busy_timeout(std::time::Duration::from_millis(0))
+        .unwrap();
+    lock.pragma_update(None, "locking_mode", "EXCLUSIVE")
+        .unwrap();
     lock.execute_batch("BEGIN EXCLUSIVE").unwrap();
     lock.execute(
         "UPDATE command_log SET bytes_out = bytes_out WHERE id = id",
@@ -644,7 +650,10 @@ fn daily_prune_throttle_runs_at_most_once_per_day() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(leftover_a, 0, "first prune of the day must delete expired_a");
+    assert_eq!(
+        leftover_a, 0,
+        "first prune of the day must delete expired_a"
+    );
     insert_log(
         &db,
         NOW_MS - (RETENTION_DAYS + 1) * DAY_MS,
@@ -727,7 +736,11 @@ fn bytes_out_is_exact_utf8_len_for_json_and_lean_including_multibyte_and_escapin
     let json_r = run_cort(&["read", "src/utf8.ts"], &cwd, &cache);
     assert_eq!(json_r.code, 0, "stderr={}", json_r.stderr);
     let json_bytes = json_r.stdout.len() as i64;
-    let lean_r = run_cort(&["read", "src/utf8.ts", "--content", "full", "-f", "lean"], &cwd, &cache);
+    let lean_r = run_cort(
+        &["read", "src/utf8.ts", "--content", "full", "-f", "lean"],
+        &cwd,
+        &cache,
+    );
     assert_eq!(lean_r.code, 0, "stderr={}", lean_r.stderr);
     assert!(
         lean_r.stdout.contains("你好"),
@@ -738,7 +751,11 @@ fn bytes_out_is_exact_utf8_len_for_json_and_lean_including_multibyte_and_escapin
     let rows = log_rows(&cache);
     let json_row = rows
         .iter()
-        .find(|r| r["command"] == "read" && r["effective_content_mode"] == "full" && r["bytes_out"] == json_bytes)
+        .find(|r| {
+            r["command"] == "read"
+                && r["effective_content_mode"] == "full"
+                && r["bytes_out"] == json_bytes
+        })
         .or_else(|| rows.iter().find(|r| r["command"] == "read"));
     assert!(json_row.is_some(), "missing read row: {rows:?}");
     let read_rows: Vec<&Value> = rows.iter().filter(|r| r["command"] == "read").collect();
@@ -863,7 +880,12 @@ fn receipt_rate_denominator_not_polluted_by_explicit_full_or_receipt() {
     assert_eq!(run_cort(&["read", "src/helper.ts"], &cwd, &cache).code, 0);
     assert_eq!(run_cort(&["read", "src/helper.ts"], &cwd, &cache).code, 0);
     assert_eq!(
-        run_cort(&["read", "src/helper.ts", "--content", "full"], &cwd, &cache).code,
+        run_cort(
+            &["read", "src/helper.ts", "--content", "full"],
+            &cwd,
+            &cache
+        )
+        .code,
         0
     );
     assert_eq!(
@@ -919,8 +941,8 @@ fn unindexed_status_does_not_count_as_stale() {
 /// §10 privacy: sentinel in context query, recall query, struct pattern, unknown flag, clap error
 /// appears NOWHERE in usage.db; only allowlisted fields in args_summary; no home paths.
 #[test]
-fn privacy_sentinels_from_context_recall_struct_unknown_flag_and_clap_error_are_absent_from_usage_db()
-{
+fn privacy_sentinels_from_context_recall_struct_unknown_flag_and_clap_error_are_absent_from_usage_db(
+) {
     let (_p, cwd, _c, cache) = sandbox();
     assert_eq!(run_cort(&["index"], &cwd, &cache).code, 0);
     let _ = run_cort(&["context", SENTINEL], &cwd, &cache);
@@ -928,7 +950,11 @@ fn privacy_sentinels_from_context_recall_struct_unknown_flag_and_clap_error_are_
     let _ = run_cort(&["struct", "-p", SENTINEL, "--lang", "ts"], &cwd, &cache);
     let flag = format!("--{SENTINEL}");
     let _ = run_cort(&["read", flag.as_str(), "src/helper.ts"], &cwd, &cache);
-    let _ = run_cort(&["read", "src/helper.ts", "--start", SENTINEL], &cwd, &cache);
+    let _ = run_cort(
+        &["read", "src/helper.ts", "--start", SENTINEL],
+        &cwd,
+        &cache,
+    );
     let abs = cwd.join("src/helper.ts");
     let _ = run_cort(&["read", abs.to_str().unwrap()], &cwd, &cache);
     assert!(
@@ -953,7 +979,10 @@ fn privacy_sentinels_from_context_recall_struct_unknown_flag_and_clap_error_are_
             );
         }
         if let Some(path) = obj.get("path").and_then(Value::as_str) {
-            assert!(!path.starts_with('/'), "path must be project-relative: {path}");
+            assert!(
+                !path.starts_with('/'),
+                "path must be project-relative: {path}"
+            );
             assert!(!path.contains(&home) || home.is_empty());
         }
     }
@@ -1013,8 +1042,17 @@ fn empty_db_yields_stable_zero_report() {
         .as_str()
         .unwrap()
         .contains("raw body bytes omitted"));
-    assert!(!a["note"].as_str().unwrap().to_lowercase().contains("total-output savings")
-        || a["note"].as_str().unwrap().contains("not total-output savings"));
+    assert!(
+        !a["note"]
+            .as_str()
+            .unwrap()
+            .to_lowercase()
+            .contains("total-output savings")
+            || a["note"]
+                .as_str()
+                .unwrap()
+                .contains("not total-output savings")
+    );
 }
 
 /// §10 cort usage aggregates FIRST then records itself — current call absent, next sees it.
@@ -1041,8 +1079,28 @@ fn golden_json_and_lean_snapshots() {
     let path = dir.path().join("usage.db");
     seed_schema(&path);
     let db = Connection::open(&path).unwrap();
-    insert_log(&db, NOW_MS, Some("aaa"), "read", "ok", 100, 50, Some(1), None);
-    insert_log(&db, NOW_MS, Some("aaa"), "read", "ok", 200, 0, Some(0), None);
+    insert_log(
+        &db,
+        NOW_MS,
+        Some("aaa"),
+        "read",
+        "ok",
+        100,
+        50,
+        Some(1),
+        None,
+    );
+    insert_log(
+        &db,
+        NOW_MS,
+        Some("aaa"),
+        "read",
+        "ok",
+        200,
+        0,
+        Some(0),
+        None,
+    );
     insert_log(&db, NOW_MS, None, "status", "ok", 10, 0, None, None);
     insert_log(
         &db,
@@ -1056,10 +1114,7 @@ fn golden_json_and_lean_snapshots() {
         None,
     );
     let report = query_usage_at(&path, 30, NOW_MS).unwrap();
-    let json = format!(
-        "{}\n",
-        serde_json::to_string_pretty(&report).unwrap()
-    );
+    let json = format!("{}\n", serde_json::to_string_pretty(&report).unwrap());
     const GOLDEN_JSON: &str = r#"{
   "best_effort": true,
   "commands": {

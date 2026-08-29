@@ -6,8 +6,10 @@ use cort::budget::estimate_tokens;
 use cort::chunker::{
     canonical_owner, compose_symbol_name, extract_file, ComposeError, ExtractFileArgs,
 };
-use cort::context::{ContextOptions, context_command, parse_symbol_query, SymbolQuery, CONTENT_HEAD_LINES, DEFAULT_BUDGET,
-    NEIGHBORS_PER_SEED};
+use cort::context::{
+    context_command, parse_symbol_query, ContextOptions, SymbolQuery, CONTENT_HEAD_LINES,
+    DEFAULT_BUDGET, NEIGHBORS_PER_SEED,
+};
 use cort::db::{ensure_schema, get_meta, open_db, project_id_for, set_meta};
 use cort::incremental::incremental_index;
 use cort::indexer::full_index;
@@ -130,7 +132,15 @@ fn git_init(root: &Path) {
         .success());
     assert!(
         Command::new("git")
-            .args(["-c", "user.email=cort@test", "-c", "user.name=cort", "commit", "-m", "init"])
+            .args([
+                "-c",
+                "user.email=cort@test",
+                "-c",
+                "user.name=cort",
+                "commit",
+                "-m",
+                "init"
+            ])
             .env("GIT_AUTHOR_NAME", "cort")
             .env("GIT_AUTHOR_EMAIL", "cort@test")
             .env("GIT_COMMITTER_NAME", "cort")
@@ -162,10 +172,10 @@ fn an_exact_symbol_name_resolves_without_touching_fts() {
         &project_id,
         "helper",
         ContextOptions {
-                budget: DEFAULT_BUDGET,
-                include_ambiguous: false,
-                full_content: false,
-            }
+            budget: DEFAULT_BUDGET,
+            include_ambiguous: false,
+            full_content: false,
+        },
     )
     .unwrap();
     assert_eq!(out["resolution"], "exact_symbol");
@@ -184,10 +194,10 @@ fn a_non_symbol_query_falls_back_to_fts() {
         &project_id,
         "return",
         ContextOptions {
-                budget: DEFAULT_BUDGET,
-                include_ambiguous: false,
-                full_content: false,
-            }
+            budget: DEFAULT_BUDGET,
+            include_ambiguous: false,
+            full_content: false,
+        },
     )
     .unwrap();
     assert_eq!(out["resolution"], "fts");
@@ -205,10 +215,10 @@ fn seeds_carry_depth_1_neighbours() {
         &project_id,
         "helper",
         ContextOptions {
-                budget: DEFAULT_BUDGET,
-                include_ambiguous: false,
-                full_content: false,
-            }
+            budget: DEFAULT_BUDGET,
+            include_ambiguous: false,
+            full_content: false,
+        },
     )
     .unwrap();
     let names: Vec<&str> = out["seeds"][0]["neighbors"]
@@ -235,10 +245,10 @@ fn ambiguous_neighbours_are_dropped_unless_explicitly_requested() {
         &project_id,
         "caller",
         ContextOptions {
-                budget: DEFAULT_BUDGET,
-                include_ambiguous: false,
-                full_content: false,
-            }
+            budget: DEFAULT_BUDGET,
+            include_ambiguous: false,
+            full_content: false,
+        },
     )
     .unwrap();
     let amb: Vec<_> = strict["seeds"][0]["neighbors"]
@@ -255,10 +265,10 @@ fn ambiguous_neighbours_are_dropped_unless_explicitly_requested() {
         &project_id,
         "caller",
         ContextOptions {
-                budget: DEFAULT_BUDGET,
-                include_ambiguous: true,
-                full_content: false,
-            }
+            budget: DEFAULT_BUDGET,
+            include_ambiguous: true,
+            full_content: false,
+        },
     )
     .unwrap();
     let amb_loose: Vec<_> = loose["seeds"][0]["neighbors"]
@@ -284,10 +294,10 @@ fn an_unresolvable_reference_is_inlined_on_the_fly_and_never_persisted() {
         &project_id,
         "solo",
         ContextOptions {
-                budget: DEFAULT_BUDGET,
-                include_ambiguous: false,
-                full_content: false,
-            }
+            budget: DEFAULT_BUDGET,
+            include_ambiguous: false,
+            full_content: false,
+        },
     )
     .unwrap();
     let u = out["seeds"][0]["unresolved"].as_array().unwrap();
@@ -304,17 +314,36 @@ fn an_unresolvable_reference_is_inlined_on_the_fly_and_never_persisted() {
 /// D-7
 #[test]
 fn the_emitted_json_actually_fits_the_budget_and_reports_truncation() {
-    let mut files: Vec<(String, String)> =
-        vec![("src/hub.ts".into(), "export function hub() { return 1; }\n".into())];
+    let mut files: Vec<(String, String)> = vec![(
+        "src/hub.ts".into(),
+        "export function hub() { return 1; }\n".into(),
+    )];
     for i in 0..40 {
         files.push((
             format!("src/c{i}.ts"),
-            format!("import {{ hub }} from './hub';\nexport function caller{i}() {{ return hub(); }}\n"),
+            format!(
+                "import {{ hub }} from './hub';\nexport function caller{i}() {{ return hub(); }}\n"
+            ),
         ));
     }
-    let files_ref: Vec<(&str, &str)> = files.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let files_ref: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
     let (_dir, root, db, project_id, bin) = indexed(&files_ref);
-    let out = context_command(&db, &bin, &root, &project_id, "hub", ContextOptions { budget: 400, include_ambiguous: false, full_content: false }).unwrap();
+    let out = context_command(
+        &db,
+        &bin,
+        &root,
+        &project_id,
+        "hub",
+        ContextOptions {
+            budget: 400,
+            include_ambiguous: false,
+            full_content: false,
+        },
+    )
+    .unwrap();
     let rendered = serde_json::to_string(&out).unwrap();
     assert!(
         estimate_tokens(&rendered) as f64 <= 400.0 * 1.15,
@@ -334,10 +363,10 @@ fn an_unknown_query_returns_an_empty_packet_rather_than_throwing() {
         &project_id,
         "nothingmatchesthis",
         ContextOptions {
-                budget: DEFAULT_BUDGET,
-                include_ambiguous: false,
-                full_content: false,
-            }
+            budget: DEFAULT_BUDGET,
+            include_ambiguous: false,
+            full_content: false,
+        },
     )
     .unwrap();
     assert_eq!(out["seeds"], json!([]));
@@ -372,10 +401,10 @@ fn seed_content_is_truncated_by_default_and_restorable_with_full_content() {
         &project_id,
         "bigThing",
         ContextOptions {
-                budget: DEFAULT_BUDGET,
-                include_ambiguous: false,
-                full_content: false,
-            }
+            budget: DEFAULT_BUDGET,
+            include_ambiguous: false,
+            full_content: false,
+        },
     )
     .unwrap();
     assert_eq!(trimmed["seeds"][0]["content_truncated"], true);
@@ -400,10 +429,10 @@ fn seed_content_is_truncated_by_default_and_restorable_with_full_content() {
         &project_id,
         "bigThing",
         ContextOptions {
-                budget: DEFAULT_BUDGET,
-                include_ambiguous: false,
-                full_content: true,
-            }
+            budget: DEFAULT_BUDGET,
+            include_ambiguous: false,
+            full_content: true,
+        },
     )
     .unwrap();
     assert_eq!(full["seeds"][0]["content_truncated"], false);
@@ -427,10 +456,10 @@ fn short_content_is_untouched_and_not_flagged() {
         &project_id,
         "helper",
         ContextOptions {
-                budget: DEFAULT_BUDGET,
-                include_ambiguous: false,
-                full_content: false,
-            }
+            budget: DEFAULT_BUDGET,
+            include_ambiguous: false,
+            full_content: false,
+        },
     )
     .unwrap();
     assert_eq!(out["seeds"][0]["content_truncated"], false);
@@ -459,10 +488,10 @@ fn a_rust_symbol_returns_only_its_function_body_not_the_rest_of_a_large_file() {
         &project_id,
         "wanted",
         ContextOptions {
-                budget: DEFAULT_BUDGET,
-                include_ambiguous: false,
-                full_content: true,
-            }
+            budget: DEFAULT_BUDGET,
+            include_ambiguous: false,
+            full_content: true,
+        },
     )
     .unwrap();
     assert_eq!(out["resolution"], "exact_symbol");
@@ -478,7 +507,10 @@ fn a_rust_symbol_returns_only_its_function_body_not_the_rest_of_a_large_file() {
 #[test]
 fn canonical_owner_strips_per_segment_generics_and_normalizes_whitespace() {
     assert_eq!(canonical_owner("Ledger"), "Ledger");
-    assert_eq!(canonical_owner("crate::ledger::Ledger"), "crate::ledger::Ledger");
+    assert_eq!(
+        canonical_owner("crate::ledger::Ledger"),
+        "crate::ledger::Ledger"
+    );
     assert_eq!(
         canonical_owner("crate::ledger::Ledger<T>"),
         "crate::ledger::Ledger"
@@ -561,12 +593,7 @@ fn rust_pack_rules_are_mutually_exclusive_and_capture_owner() {
     let recs = parse_scan(&abs);
     let chunks: Vec<_> = recs
         .iter()
-        .filter(|r| {
-            r["message"]
-                .as_str()
-                .unwrap_or("")
-                .starts_with("chunk:")
-        })
+        .filter(|r| r["message"].as_str().unwrap_or("").starts_with("chunk:"))
         .collect();
     let main = chunks
         .iter()
@@ -589,13 +616,17 @@ fn rust_pack_rules_are_mutually_exclusive_and_capture_owner() {
     assert_eq!(trait_go.len(), 2, "trait default + trait impl, no dupes");
     let owners: Vec<&str> = trait_go
         .iter()
-        .map(|r| r["metaVariables"]["single"]["OWNER"]["text"].as_str().unwrap())
+        .map(|r| {
+            r["metaVariables"]["single"]["OWNER"]["text"]
+                .as_str()
+                .unwrap()
+        })
         .collect();
     assert!(owners.contains(&"Runner"), "{owners:?}");
     assert!(owners.contains(&"Worker"), "{owners:?}");
-    assert!(!chunks.iter().any(|r| {
-        r["metaVariables"]["single"]["NAME"]["text"] == "declared"
-    }));
+    assert!(!chunks
+        .iter()
+        .any(|r| { r["metaVariables"]["single"]["NAME"]["text"] == "declared" }));
 }
 
 /// Proposal §4 TDD-3: six impls named run → A::run..F::run, no bare run method.
@@ -603,7 +634,9 @@ fn rust_pack_rules_are_mutually_exclusive_and_capture_owner() {
 fn six_impls_all_named_run_store_qualified_names() {
     let mut body = String::new();
     for name in ["A", "B", "C", "D", "E", "F"] {
-        body.push_str(&format!("struct {name};\nimpl {name} {{ fn run() {{}} }}\n"));
+        body.push_str(&format!(
+            "struct {name};\nimpl {name} {{ fn run() {{}} }}\n"
+        ));
     }
     let (_dir, _root, db, _id, _bin) = indexed(&[("src/lib.rs", body.as_str())]);
     let names: Vec<String> = db
@@ -632,7 +665,9 @@ fn six_impls_all_named_run_store_qualified_names() {
 fn qualified_query_for_the_sixth_run_is_still_exact() {
     let mut body = String::new();
     for name in ["A", "B", "C", "D", "E", "F"] {
-        body.push_str(&format!("struct {name};\nimpl {name} {{ fn run() {{}} }}\n"));
+        body.push_str(&format!(
+            "struct {name};\nimpl {name} {{ fn run() {{}} }}\n"
+        ));
     }
     let (_dir, root, db, project_id, bin) = indexed(&[("src/lib.rs", body.as_str())]);
     let out = context_command(
@@ -642,10 +677,10 @@ fn qualified_query_for_the_sixth_run_is_still_exact() {
         &project_id,
         "F::run",
         ContextOptions {
-                budget: DEFAULT_BUDGET,
-                include_ambiguous: false,
-                full_content: true,
-            }
+            budget: DEFAULT_BUDGET,
+            include_ambiguous: false,
+            full_content: true,
+        },
     )
     .unwrap();
     assert_eq!(out["resolution"], "exact_symbol");
@@ -674,10 +709,10 @@ fn trait_default_method_body_via_content_full() {
         &project_id,
         "Worker::run",
         ContextOptions {
-                budget: DEFAULT_BUDGET,
-                include_ambiguous: false,
-                full_content: true,
-            }
+            budget: DEFAULT_BUDGET,
+            include_ambiguous: false,
+            full_content: true,
+        },
     )
     .unwrap();
     assert_eq!(out["resolution"], "exact_symbol");
@@ -708,10 +743,10 @@ fn trait_impl_collision_keeps_both_type_run_in_stable_order() {
         &project_id,
         "Type::run",
         ContextOptions {
-                budget: DEFAULT_BUDGET,
-                include_ambiguous: false,
-                full_content: true,
-            }
+            budget: DEFAULT_BUDGET,
+            include_ambiguous: false,
+            full_content: true,
+        },
     )
     .unwrap();
     assert_eq!(out["resolution"], "exact_symbol");
@@ -751,10 +786,10 @@ fn type_method_json_and_lean_and_nonexistent_qualified_is_none_without_fts() {
         &project_id,
         "Ledger::run",
         ContextOptions {
-                budget: DEFAULT_BUDGET,
-                include_ambiguous: false,
-                full_content: true,
-            }
+            budget: DEFAULT_BUDGET,
+            include_ambiguous: false,
+            full_content: true,
+        },
     )
     .unwrap();
     assert_eq!(out["query"], "Ledger::run");
@@ -796,10 +831,10 @@ fn type_method_json_and_lean_and_nonexistent_qualified_is_none_without_fts() {
         &project_id,
         "Ledger::nope",
         ContextOptions {
-                budget: DEFAULT_BUDGET,
-                include_ambiguous: false,
-                full_content: false,
-            }
+            budget: DEFAULT_BUDGET,
+            include_ambiguous: false,
+            full_content: false,
+        },
     )
     .unwrap();
     assert_eq!(none["resolution"], "none");
@@ -889,7 +924,10 @@ fn method_record_without_owner_is_malformed_extraction() {
             timeout_ms: Some(5_000),
         })
         .unwrap();
-        assert!(!out.chunks.iter().any(|c| c.symbol_name.as_deref() == Some("run")));
+        assert!(!out
+            .chunks
+            .iter()
+            .any(|c| c.symbol_name.as_deref() == Some("run")));
         assert!(out.malformed >= 1);
     });
 }
@@ -929,8 +967,12 @@ fn rust_yml_change_moves_the_pack_hash_and_old_index_requires_full_rebuild() {
     ensure_schema(&db).unwrap();
     let bin = resolve_ast_grep_bin().unwrap();
     full_index(&mut db, &bin, &root).unwrap();
-    set_meta(&db, "extractor_version", "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
-        .unwrap();
+    set_meta(
+        &db,
+        "extractor_version",
+        "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+    )
+    .unwrap();
     let result = incremental_index(&mut db, &bin, &root).unwrap();
     assert_eq!(result.mode, "full");
     let stored = get_meta(&db, "extractor_version").unwrap().unwrap();
