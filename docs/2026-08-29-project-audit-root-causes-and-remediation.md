@@ -732,6 +732,29 @@ fixture 從 `.ts` 換成 `.rs`，這是倉庫裡最後一個 TypeScript 字串�
 與 node 路徑皆為 0。這台機器的 ast-grep 仍是由 npm 交付的（版本剛好等於 pin 值，所以 `install.sh`
 的既有檢查直接沿用），要換成 `install.sh` 自己下載的原生資產或 `cargo install`，需要先決定再動家目錄。
 
+### 但誰來讀 completeness？
+
+F-18 的第一版只做到「把狀態寫成檔案」：`run-status.json` 落在 `rows.json` 旁邊，而 `summarize`
+只吃 `rows.json`。於是 4/6 的批次被聚合時，輸出跟「本來就只規劃 4 格的實驗」**完全無法區分**。
+同一個教訓第五次出現：產生了證據，沒有產生讀證據的人。
+
+現在 `summarize` 對每個 `rows.json` 去找同目錄的 sidecar，把 `batches` 與 `batch_problems` 一併寫進
+聚合輸出；`--strict` 之下任何不完整批次 fail closed。實測（拿真資料前 4 格造的 4-of-6 樣本）：
+
+- 非 strict：`2 of 6 planned cells never made it into rows.json (4 measured)`，聚合照給；
+- strict：exit 1，同一句話出現在錯誤裡；
+- 兩份 F-18 之前的 committed 目錄跑 `--strict`：`problems: []`，20 格照常聚合。
+
+判定順序有意講究：**先**看 `rows.json` 的格數與 sidecar 的 `written_cells` 是否互相矛盾，**再**看
+planned/written。被 SIGKILL 的進程不會走到 Drop，sidecar 會停在「running / 0 written」而 `rows.json`
+裡已經有 4 格——這時報「掉了 6 格」是錯的，那 4 格就在檔案裡；正確的診斷是「sidecar 來不及更新，
+計數不可信」。為了讓這條規則可能觸發，sidecar 現在在**第一顆 cell 之前**就以 `state: "running"`
+落地，而不是只在退出時寫。
+
+兩條邊界同樣釘住：沒有 sidecar（F-18 之前的產物）不視為問題——把歷史复現一律標成可疑，只會訓練人
+把 `--strict` 拿掉；舊 sidecar 缺 `state` 欄時報 `"unrecorded"`，不印 `null` 讓讀者自己猜。
+消費端新增 7 項測試，evals 33 → 42。
+
 ## 13k. F-16：部署到 agent 家目錄的 SKILL.md，agent 從來沒看過
 **〔本節最後那段「marker 進 frontmatter 內部」的結論已被 F-19（§13m）取代。〕**「兩個載入器都把
 fence 錨定在第一行，所以 marker 不能放上面」是對的；「所以 marker 必須放裡面」是錯的推論，
@@ -805,7 +828,12 @@ $ cort-evals run-agents --help
 修法：每個子命令白名單化自己的選項（`RUN_AGENTS_FLAGS`／`VERIFY_IMPACT_FLAGS`／`SUMMARIZE_FLAGS`），
 `guard_options()` 在**任何動作之前**擋下未知選項並連同該子命令的 usage 一起報；`--help`/`-h` 印 usage 後 exit 0；
 `--flag=value` 直接拒絕並說明要分開傳值，而不是讓它無聲地退成預設值。新增 6 項測試釘住這些行為
-（其中一項要求 whitelist 涵蓋所有已recognised 選項，未来新增 `at(argv, "--x")` 卻忘記登記時會立刻顯形）。
+；涵蓋性現在由掃自身原始碼保證（`include_str!` 找每個 `at(argv, "--x")`），不再靠註解呼喚自律。
+
+白名單涵蓋性也從願望變成 gate。原先那條測試只走白名單**本身**（列出來的選項都被接受），
+所以「parser 新增一個選項卻忘記登記」這種漂移它照樣綠。現在改成掃 `include_str!("main.rs")` 裡每一個
+`at(argv, "--x")` / `has(argv, "--x")`，不在任何白名單者直接失敗；另加一條反向測試，確認這個掃描
+**真的匹配到選項**——否則它會因為自己寫錯而永遠綠（我自己犯的正是這類的錯，所以釘兩頭）。
 
 順帶把 §13i「剩下的 3 個任務」真正需要的事放進同一個子命令，不必用 bash 串：
 
@@ -1051,10 +1079,10 @@ Bash 只准留在 `install.sh` 與 `tests/install-smoke.sh`（平台需求），
 | F-07 | **未修（維持既有契約）** | 僅在文件層面保留「candidates 需查證」的語意 | 需 CLI 契約變更（多 seed 時 fail closed 或 `--file` 消歧），影響現有輸出格式，另行提案 |
 | F-08 | **部分已修** | README 能力表把 `context/read/recall` 列為主要能力、`impact` 標明語言邊界 | 完整 Stable/Experimental/Deferred 分級仍待一次文件整理 |
 | F-09 | **僅文件化** | README 限制 #9 說明 `status.unparsed` 也包含「合法零符號檔案」 | 程式層面需區分 `no_symbols` 與 parse failure，屬 P3 |
-| F-18 | **已修** | 每格量到當下就重寫 `rows.json`（排序後整個覆寫，線程完成順序不影響檔內容）；`RunStatus` guard 在**包括提前 return 在內**的每一條出口寫 `run-status.json`，記 planned/written/complete | 2 項新測試（部分批次必須自報 incomplete、rows 排序與完成順序無關）；evals 測試 30 → 32；實際取樣中可在跑完前直接看到 rows.json/run-status.json 長大 |
+| F-18 | **已修** | 每格量到當下就重寫 `rows.json`（排序後整個覆寫，線程完成順序不影響檔內容）；`RunStatus` guard 在**包括提前 return 在內**的每一條出口寫 `run-status.json`，記 planned/written/complete；**消費端一併補上**：`summarize` 讀同目錄 sidecar、輸出 `batches`/`batch_problems`、`--strict` 對不完整批次 fail closed，且 sidecar 在第一顆 cell 之前就落地 | 2 項新測試（部分批次必須自報 incomplete、rows 排序與完成順序無關）＋ 7 項消費端測試（4-of-6、SIGKILL 計數矛盾、無 sidecar 不疑、缺 `state` 報 unrecorded），此節合計 9 項；實際取樣中可在跑完前直接看到 rows.json/run-status.json 長大 |
 | F-19 | **已修** | 安裝器帳目整個移出 SKILL.md：改寫同目錄的 `.cortexyoung-managed`（簽名＋部署當時的 SHA-256），部署檔與來源逐字節相同；`preflight` 先驗來源 frontmatter 形狀；新增 `rust/tests/skill_format.rs` 以消費者角度解析 `skills/*/SKILL.md` | 負向驗證內建在 `negative_shapes_are_rejected_by_the_same_gates`（六種被禁止的形狀）；smoke 62 → 81（含兩種舊形狀升級、孤兒 stamp、手改被拒）；Test 14 移除寫死的 nvm 路徑與最後一個 `.ts` fixture |
 | F-16 | **已修** | marker 移到 frontmatter 內部第二行（`with_managed_marker`）；up-to-date 的條件從「內容相同」改成「內容相同**且**第一行是 `---`」，舊形状走 `repaired skill frontmatter` 分支重寫 | smoke 53 → 62：fence 在第一行、marker 正好在第二行、`grep -vxF marker` 後與來源 `cmp` 逐字節相同、legacy 形状必須被 repair、外加**真載入器 oracle**（`codex debug prompt-input`，缺 codex 時明確 SKIP 不冒充 PASS）；實測 3 份部署檔 repaired 後可見 |〔結論已被 **F-19** 取代：marker 不進文件，改寫旁邊的 stamp〕
-| F-17 | **已修** | 每個子命令白名單化選項，`guard_options()` 在任何動作前擋下未知選項；`--help`/`-h` 印 usage 並 exit 0（頂層漏了一層，見下）；`--flag=value` 直接拒絕 | 新增 6 項測試（help 不再等於執行、未知選項附 usage、whitelist 覆蓋、`=` 形式被拒、`--jail`/`--jailed` 可區分、位置參數不误殺）；evals 測試 20 → 30 |
+| F-17 | **已修** | 每個子命令白名單化選項，`guard_options()` 在任何動作前擋下未知選項；`--help`/`-h` 印 usage 並 exit 0（頂層漏了一層，見下）；`--flag=value` 直接拒絕 | 新增 6 項測試（help 不再等於執行、未知選項附 usage、`=` 形式被拒、`--jail`/`--jailed` 可區分、位置參數不误殺）；whitelist 涵蓋性後來改為掃自身原始碼保證（2 項，含「掃描必须真的匹配到」的反向測試） |
 | F-10 | **已修** | C2-22（會改行程 CWD 的測試）拆到獨立 target `rust/tests/staleness_cwd.rs` | 修正前 HEAD 基線 10/20 失敗；修正後 `--test staleness` 20/20 通過、整輪 218/218 連續 3 次 |
 
 ### 過程中發現並一併處理的兩件事

@@ -93,10 +93,11 @@ fn sort_rows(rows: &mut [Value]) {
 /// successfully, so one refused cell threw away the cells that *had* run: six cells in one batch
 /// meant one rejection could cost a whole sampling window. The counter is what lets a reader tell
 /// "this batch has 4 cells" apart from "this batch lost 2 cells".
-fn run_status_json(planned: usize, written: usize) -> Value {
+fn run_status_json(planned: usize, written: usize, state: &str) -> Value {
     json!({
         "planned_cells": planned,
         "written_cells": written,
+        "state": state,
         "complete": planned == written,
         "rows": "rows.json",
         "reading": if planned == written {
@@ -121,11 +122,113 @@ struct RunStatus {
 impl Drop for RunStatus {
     fn drop(&mut self) {
         let written = self.written.load(std::sync::atomic::Ordering::Relaxed);
-        let body = run_status_json(self.planned, written);
+        // "exited" rather than "complete": a Drop also runs on the `return Err(...)` paths, and
+        // only the row count in rows.json says how much of the batch was actually measured.
+        let body = run_status_json(self.planned, written, "exited");
         let path = format!("{}/run-status.json", self.out_dir);
         if let Err(err) = std::fs::write(&path, format!("{body}\n")) {
             eprintln!("could not record run status in {path}: {err}");
         }
+    }
+}
+
+/// One `rows.json` plus whatever its batch claimed it should contain. Without this, F-18's
+/// completeness record is an artefact nobody reads: a 4-of-6 batch would be aggregated as "4
+/// cells" and look exactly like an experiment that only ever planned 4.
+#[derive(Debug, Clone)]
+struct BatchRead {
+    rows_path: String,
+    rows_count: usize,
+    status: Option<Value>,
+}
+
+impl BatchRead {
+    fn load(rows_path: &str, rows_count: usize) -> Self {
+        let status_path = Path::new(rows_path)
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("run-status.json");
+        let status = std::fs::read_to_string(&status_path)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
+        Self {
+            rows_path: rows_path.to_string(),
+            rows_count,
+            status,
+        }
+    }
+
+    fn field(&self, key: &str) -> Option<usize> {
+        self.status
+            .as_ref()
+            .and_then(|st| st[key].as_u64())
+            .map(|v| v as usize)
+    }
+
+    /// What this batch says about itself, for the reader of the aggregate.
+    fn report(&self) -> Value {
+        match &self.status {
+            None => json!({
+                "rows": self.rows_path, "cells": self.rows_count,
+                "run_status": "absent (predates F-18, nothing to check against)"
+            }),
+            Some(st) => json!({
+                "rows": self.rows_path,
+                "cells": self.rows_count,
+                "planned_cells": st["planned_cells"],
+                "written_cells": st["written_cells"],
+                // A sidecar from the first cut of F-18 has no `state` key. Emitting null there
+                // would leave a reader to guess between "never ran" and "ran, unrecorded".
+                "state": st.get("state").cloned().unwrap_or(json!("unrecorded")),
+                "complete": st["complete"],
+            }),
+        }
+    }
+
+    /// A reason to distrust this batch, or None. Pre-F-18 artefacts are deliberately not a
+    /// problem: they were written before the counter existed, and calling them suspect would
+    /// make every historical repro look broken.
+    fn problem(&self) -> Option<String> {
+        // Pre-F-18 artefacts are deliberately not a problem: they predate the counter, and
+        // calling them suspect would make every historical repro look broken.
+        self.status.as_ref()?;
+        let planned = self.field("planned_cells");
+        let written = self.field("written_cells");
+        // Order matters. If rows.json and its sidecar disagree, the sidecar is the untrustworthy
+        // one (a SIGKILLed run leaves "running / 0 written" next to four real cells) and reporting
+        // "lost cells" would send a reader to look for cells that are sitting right there.
+        if let Some(w) = written {
+            if self.rows_count != w {
+                return Some(format!(
+                    "{}: rows.json holds {} cells but its run-status.json claims {} were written \
+                     (state {:?}, planned {:?}) -- the batch was interrupted before it could report, \
+                     so treat the counts as unreliable",
+                    self.rows_path,
+                    self.rows_count,
+                    w,
+                    self.status.as_ref().and_then(|st| st["state"].as_str()),
+                    planned
+                ));
+            }
+        }
+        if let (Some(p), Some(w)) = (planned, written) {
+            if w < p {
+                return Some(format!(
+                    "{}: {} of {} planned cells never made it into rows.json ({} measured)",
+                    self.rows_path,
+                    p - w,
+                    p,
+                    self.rows_count
+                ));
+            }
+        }
+        if self.status.as_ref().and_then(|st| st["complete"].as_bool()) == Some(false) {
+            return Some(format!(
+                "{}: run-status.json says this batch did not complete",
+                self.rows_path
+            ));
+        }
+        None
     }
 }
 
@@ -313,6 +416,16 @@ fn run_agents(argv: &[String]) -> Result<(), String> {
         planned,
         written: Arc::clone(&written),
     };
+    // Claim "running" before the first cell. A process that is SIGKILLed never reaches Drop, and
+    // a half-written batch with no status file at all is indistinguishable from a pre-F-18 run.
+    std::fs::write(
+        format!("{out_dir}/run-status.json"),
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&run_status_json(planned, 0, "running")).unwrap()
+        ),
+    )
+    .map_err(|e| format!("{out_dir}/run-status.json: {e}"))?;
     let queue = Arc::new(Mutex::new(work.into_iter()));
     let sink = Arc::new(Mutex::new(Vec::<Value>::new()));
     let mut threads = Vec::new();
@@ -458,12 +571,31 @@ fn summarize_main(argv: &[String]) -> Result<(), String> {
         return Err("summarize needs at least one rows.json path".to_string());
     }
     let mut rows: Vec<Value> = Vec::new();
+    let mut batches: Vec<BatchRead> = Vec::new();
     for path in &paths {
         let raw = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
         let parsed: Vec<Value> = serde_json::from_str(&raw).map_err(|e| format!("{path}: {e}"))?;
+        batches.push(BatchRead::load(path, parsed.len()));
         rows.extend(parsed);
     }
-    let out = cort_evals::summary::summarize(&rows, has(argv, "--strict"))?;
+    let problems: Vec<String> = batches.iter().filter_map(BatchRead::problem).collect();
+    let strict = has(argv, "--strict");
+    // Fail closed on an incomplete batch under --strict; otherwise still surface it, because the
+    // whole point of the counter is that nobody has to guess whether the numbers are whole.
+    if strict && !problems.is_empty() {
+        return Err(format!(
+            "refusing to aggregate an incomplete batch:\n  {}",
+            problems.join("\n  ")
+        ));
+    }
+    let mut out = cort_evals::summary::summarize(&rows, strict)?;
+    if let Value::Object(map) = &mut out {
+        map.insert(
+            "batches".to_string(),
+            json!(batches.iter().map(BatchRead::report).collect::<Vec<_>>()),
+        );
+        map.insert("batch_problems".to_string(), json!(problems));
+    }
     println!("{}", serde_json::to_string_pretty(&out).unwrap());
     Ok(())
 }
@@ -608,11 +740,11 @@ mod batch_accounting {
 
     #[test]
     fn a_partial_batch_says_so_instead_of_looking_complete() {
-        let full = run_status_json(6, 6);
+        let full = run_status_json(6, 6, "exited");
         assert_eq!(full["complete"], json!(true));
         assert_eq!(full["written_cells"], json!(6));
 
-        let lost = run_status_json(6, 4);
+        let lost = run_status_json(6, 4, "exited");
         assert_eq!(lost["complete"], json!(false));
         assert!(
             lost["reading"]
@@ -623,8 +755,8 @@ mod batch_accounting {
             lost["reading"]
         );
         // Nothing ever ran: that must not read as "a batch of zero cells" either.
-        assert_eq!(run_status_json(6, 0)["complete"], json!(false));
-        assert_eq!(run_status_json(0, 0)["complete"], json!(true));
+        assert_eq!(run_status_json(6, 0, "running")["complete"], json!(false));
+        assert_eq!(run_status_json(0, 0, "running")["complete"], json!(true));
     }
 
     #[test]
@@ -660,5 +792,157 @@ mod batch_accounting {
                 "rg+Read/zeta".to_string()
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod whitelist_coverage {
+    use super::*;
+
+    /// The earlier test only walked the whitelist, which proves nothing about coverage: a new
+    /// `at(argv, "--x")` that nobody registered would still leave it green. Read the flags out of
+    /// this file's own source instead, so the whitelist cannot fall behind the parser.
+    #[test]
+    fn every_option_the_parser_asks_for_is_whitelisted() {
+        let src = include_str!("main.rs");
+        let keys: Vec<String> = vec![format!("at(argv, {}", '"'), format!("has(argv, {}", '"')];
+        let mut orphans = Vec::new();
+        for (n, line) in src.lines().enumerate() {
+            let code = line.trim_start();
+            if code.starts_with("//") {
+                continue;
+            }
+            for key in &keys {
+                if let Some(at) = code.find(key.as_str()) {
+                    let rest = &code[at + key.len()..];
+                    let name: String = rest.chars().take_while(|c| *c != '"').collect();
+                    if !name.starts_with("--") {
+                        continue;
+                    }
+                    let known = RUN_AGENTS_FLAGS
+                        .iter()
+                        .chain(VERIFY_IMPACT_FLAGS.iter())
+                        .chain(SUMMARIZE_FLAGS.iter())
+                        .any(|f| *f == name.as_str());
+                    if !known {
+                        orphans.push(format!("{name} (src/main.rs:{})", n + 1));
+                    }
+                }
+            }
+        }
+        assert!(
+            orphans.is_empty(),
+            "options read by the parser but missing from every whitelist: {orphans:?}"
+        );
+    }
+
+    #[test]
+    fn the_scan_itself_finds_the_real_options() {
+        // Guards against the test passing because it matched nothing at all.
+        let src = include_str!("main.rs");
+        let needle = format!("at(argv, {}--tasks{}", '"', '"');
+        assert!(src.contains(&needle), "scanner found no options at all");
+    }
+}
+
+#[cfg(test)]
+mod batch_consumption {
+    use super::*;
+
+    /// `complete` is derived by run_status_json, so callers here only pick the counts.
+    fn status(planned: usize, written: usize, state: &str) -> Option<Value> {
+        Some(run_status_json(planned, written, state))
+    }
+
+    fn batch(rows_count: usize, st: Option<Value>) -> BatchRead {
+        BatchRead {
+            rows_path: "x/rows.json".to_string(),
+            rows_count,
+            status: st,
+        }
+    }
+
+    #[test]
+    fn a_whole_batch_raises_no_flag_and_reports_its_counts() {
+        let b = batch(6, status(6, 6, "exited"));
+        assert_eq!(b.problem(), None);
+        let rep = b.report();
+        assert_eq!(rep["cells"], json!(6));
+        assert_eq!(rep["planned_cells"], json!(6));
+        assert_eq!(rep["complete"], json!(true));
+
+        // F-18's first cut wrote no `state`: say so instead of printing null.
+        let legacy = batch(
+            6,
+            Some(json!({"planned_cells": 6, "written_cells": 6, "complete": true})),
+        );
+        assert_eq!(legacy.report()["state"], json!("unrecorded"));
+        assert_eq!(legacy.problem(), None);
+    }
+
+    #[test]
+    fn a_short_batch_is_named_with_exactly_how_many_cells_are_missing() {
+        // This is the F-15 failure mode seen from the other end: 4 of 6 ran, and the aggregate
+        // would otherwise read as "an experiment that planned 4".
+        let b = batch(4, status(6, 4, "exited"));
+        let p = b.problem().expect("a lost cell must be flagged");
+        assert!(p.contains("2 of 6 planned cells"), "{p}");
+        assert!(p.contains("(4 measured)"), "{p}");
+    }
+
+    #[test]
+    fn a_killed_batch_is_caught_by_the_count_disagreement() {
+        // SIGKILL never reaches Drop, so the sidecar still says "running / 0 written" while
+        // rows.json already holds 4 cells. planned == written would look fine; the counts do not.
+        let b = batch(4, status(6, 0, "running"));
+        let p = b.problem().expect("interrupted batch must be flagged");
+        assert!(p.contains("claims 0"), "{p}");
+        assert!(p.contains("interrupted"), "{p}");
+    }
+
+    #[test]
+    fn a_sidecar_with_no_rows_at_all_is_still_a_lost_batch() {
+        let b = batch(0, status(6, 0, "running"));
+        assert!(b.problem().unwrap().contains("6 of 6 planned cells"));
+    }
+
+    #[test]
+    fn pre_f18_artefacts_are_not_called_suspicious() {
+        // Every committed round-1/round-2 directory predates the counter. Distrusting them would
+        // make historical reproductions look broken and train people to drop --strict.
+        let b = batch(10, None);
+        assert_eq!(b.problem(), None);
+        assert!(b.report()["run_status"]
+            .as_str()
+            .unwrap()
+            .contains("predates F-18"));
+    }
+
+    #[test]
+    fn an_incomplete_flag_without_a_count_gap_is_still_a_problem() {
+        let st =
+            json!({"planned_cells": 6, "written_cells": 6, "complete": false, "state": "exited"});
+        let b = batch(6, Some(st));
+        let p = b.problem().expect("complete:false must be honoured");
+        assert!(p.contains("did not complete"), "{p}");
+    }
+
+    #[test]
+    fn load_reads_the_sidecar_beside_rows_json() {
+        let dir = std::env::temp_dir().join(format!("cort-evals-batch-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let rows = dir.join("rows.json");
+        std::fs::write(&rows, "[]\n").unwrap();
+        std::fs::write(
+            dir.join("run-status.json"),
+            format!("{}\n", run_status_json(2, 2, "exited")),
+        )
+        .unwrap();
+        let b = BatchRead::load(rows.to_str().unwrap(), 0);
+        assert_eq!(b.field("planned_cells"), Some(2));
+        assert_eq!(b.field("written_cells"), Some(2));
+        // A rows.json of its own accord with 0 cells against a claimed 2 is a discrepancy.
+        assert!(b.problem().unwrap().contains("interrupted"));
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
