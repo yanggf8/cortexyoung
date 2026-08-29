@@ -93,6 +93,7 @@ pub fn parse_stream(ndjson: &str) -> Result<Parsed, String> {
     let mut return_bytes = 0i64;
     let mut return_tokens = 0i64;
     let mut result: Option<Value> = None;
+    let mut rejected: Option<String> = None;
 
     for line in ndjson.lines() {
         let trimmed = line.trim();
@@ -144,12 +145,45 @@ pub fn parse_stream(ndjson: &str) -> Result<Parsed, String> {
                 }
             }
             Some("result") => result = Some(event),
+            // A refused call is not a measurement. Without this branch a rate-limited cell lands in
+            // the aggregate as `total_tokens: 0, coverage: 0` — "cost nothing, learned nothing" —
+            // which is the same silent-poisoning class this harness was rewritten to prevent.
+            Some("rate_limit_event") => {
+                let info = event.get("rate_limit_info");
+                if info.and_then(|i| i.get("status")).and_then(Value::as_str) == Some("rejected") {
+                    let window = info
+                        .and_then(|i| i.get("rateLimitType"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown");
+                    rejected = Some(format!("rate limited ({window})"));
+                }
+            }
             _ => {}
         }
     }
 
     let result = result
         .ok_or_else(|| "transcript has no result event: the cell did not finish".to_string())?;
+    let message = || {
+        result
+            .get("result")
+            .and_then(Value::as_str)
+            .unwrap_or("(no message)")
+            .trim()
+            .to_string()
+    };
+    if let Some(reason) = rejected {
+        return Err(format!("cell never ran: {reason} — {}", message()));
+    }
+    if result.get("is_error").and_then(Value::as_bool) == Some(true)
+        && result.get("terminal_reason").and_then(Value::as_str) != Some("completed")
+    {
+        return Err(format!(
+            "cell errored without measuring: terminal_reason={:?} — {}",
+            result.get("terminal_reason").and_then(Value::as_str),
+            message()
+        ));
+    }
     let usage = result
         .get("usage")
         .filter(|u| !u.is_null())

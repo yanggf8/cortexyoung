@@ -97,6 +97,7 @@ GitHub Actions 正確，這三者必須分別驗證。
 | F-10 | P1 | 既有測試在平行執行下約 40% 機率失敗（**HEAD 既存**，非本輪引入） | 新 CI 的 `cargo test` gate 會隨機紅，等於沒有 gate |
 | F-11 | P1 | `--allowedTools Bash(...)` 在 headless 下不約束 Bash，評測臂的「白名單即實驗組」只是標籤 | 兩臂 A/B 的基線臂實際用了 `grep`/`sed`，比較不成立 |
 | F-12 | P1 | 評測器是 6 個 `.mjs`，違反「本 repo 純 Rust」契約，同時也是唯一沒有型別、沒有 lint、沒有 gate 的部分 | 已移植為 `evals/` crate，JS 全部移除 |
+| F-15 | P1 | 被額度拒絕的 cell 仍被寫成 `total_tokens=0 / coverage=0` 的測量值 | 第二輪 5 個任務裡有 3 個（6 格）根本沒跑，卻進入了聚合；已改為丟例外且不落 row |
 | F-14 | **已修** | 假 parser fixture 是 46 行 Python，抵觸純 Rust 契約 | 已移植為 Rust bin `fake_ast_grep`（模式語法不變）+ 7 個自身測試 |
 | F-13 | **已修** | `cort` 只靠 PATH 找 `ast-grep`，而 agent 的 Bash PATH 會被正規化 | 見 §13e：候選探測 + 版本優先 + probed/hint 錯誤；5 個回歸測試，端到端已證 |
 
@@ -611,6 +612,58 @@ verdict: baseline_arm=rg+Read, cort_beats_ast_grep=true → continue to deferred
 
 資料以 metrics-only 形式保存在 `evals/runs/2026-08-30-graph/`（不含 transcript，避免把 venue 的原始碼
 片段帶進本 repo）。
+
+## 13i. 第二輪取樣：額度攔截、F-15，與「正確度穩定 / 成本不穩定」
+
+### 加了 1 輪重複取樣，結果是兩件事
+
+第二輪（同一份 tasks、同一 venue HEAD、同一 release binary）只完成 2 個任務共 4 格；另外 3 個任務
+被 5 小時窗口硬擋（`rate_limit_info.status = "rejected"`）。有效的兩格對照如下：
+
+| 任務 | 臂 | 第 1 輪 | 第 2 輪 |
+|---|---|---|---|
+| transitive-chain-lastntradingdays | cort | cov 1.0・85,510 tok・336 tool・3 turns | cov 1.0・85,540 tok・336 tool・3 turns |
+| transitive-chain-lastntradingdays | shell | cov 0.75・307,070・2,627・10 | cov 0.75・240,683・2,429・8 |
+| route-blast-radius-reportsstatus | cort | cov 1.0・86,018・431・3・held | cov 1.0・176,695・1,044・6・**未受控** |
+| route-blast-radius-reportsstatus | shell | cov 0.75・476,138・9,809・21 | cov 0.75・670,928・10,436・18 |
+
+讀得出来的結論：
+
+1. **正確度跨輪穩定。** 兩格、兩臂、四次重覆，coverage 完全一致（包括基線臂**兩次都漏同一個符號**
+   `reports`）。這不是運氣：漏的是同一個位於 `tests/validation/` 的呼叫端，grep 走法兩次都沒走到那里。
+2. **成本不穩定，而且變動來自 agent 是否順手查證。** cort 那一格第 2 輪多花一倍 token、turns 3→6，
+   `arm_held` 從 true 變 false——它自己去 grep 驗證圖的答案。所以「cort 比較便宜」的倍數，取決於
+   我們讓不让 agent 查證；把查證算進成本時倍數會縮小，不讓查證時資料不可信。這是設計取捨，不是誤差。
+3. 以 14 格（cort 7、基線 7）聚合：cort success 1.0、mean 123,109 tok、mean tool 889、mean turns 4.1；
+   基線 success 0.286、mean 467,925 tok、mean tool 7,314、mean turns 15.9。verdict 仍是 cort 勝。
+   n 仍只有 2（且 3 個任務 n=1），中位數在 n=2 沒有意義，所以這裡報兩次觀測值而非「中位數」。
+
+### F-15：被拒的 cell 曾經被當成測量值
+
+第二輪那 3 個任務的 row 長這樣：`total_tokens: 0, tool_return_tokens: 0, coverage: 0, success: false`。
+但 transcript 顯示 `terminal_reason: api_error`、`is_error: true`、結果文字是
+`You've hit your session limit · resets 2:40am`。也就是**根本沒有跑的格子被寫進聚合，把平均分數拉成
+「兩臂都很便宜又都不對」**——正是這輪一直在剷除的靜默污染類別，這次長在我自己的 runner 裡。
+
+修法（`evals/src/stream.rs`）：`parse_stream` 現在先掃描 `rate_limit_event`，`status == "rejected"` 即
+丟例外；此外 `is_error == true` 且 `terminal_reason != "completed"` 也丟例外。例外訊息保留原始拒絕文字，
+方便判斷是額度還是上游錯誤。runner 因此以 exit 1 失敗、**不寫任何 row**（實測在仍被擋的狀態下跑一次：
+只有錯誤訊息，無檔案落地）。
+
+要分辨的邊界：**turn-cap 仍是一個有效測量**。`subtype == "error_max_turns"` 的格子會照常寫入並標
+`hit_turn_cap: true`——那是「跑了但沒跑完」，跟「沒跑」不同。3 個新測試把這三種情況釘住。
+
+### 剩下的 3 個任務怎麼補
+
+第二輪的 6 格需要等 5 小時窗口重置（本地 02:40）之後再跑，指令不變：
+
+```bash
+CORT_BIN=$PWD/rust/target/release/cort ./evals/target/release/cort-evals run-agents \
+  --tasks evals/tasks-graph.json --only <task> --arms rg+Read,cort --max-turns 40 \
+  --config-dir /tmp/cc-eval --cache-dir /tmp/cort-exp --out /tmp/cort-eval-runs/round2/<task>
+```
+
+現在若又被擋，會直接失敗而不會再污染資料。
 
 ## 13h. F-14：ast-grep 測試替身移植為 Rust
 

@@ -1,0 +1,56 @@
+{
+  "answer_block": true,
+  "answered_symbols": [
+    "handleReportRoutes",
+    "handleApiV1Request",
+    "reports",
+    "handleDirectRequest"
+  ],
+  "arm": "cort",
+  "arm_held": false,
+  "cache_creation": 19271,
+  "cache_read": 155642,
+  "cort_calls": 2,
+  "cost_usd": 0.316021,
+  "coverage": 1.0,
+  "covered_symbols": [
+    "handleReportRoutes",
+    "handleApiV1Request",
+    "reports",
+    "handleDirectRequest"
+  ],
+  "estimator": "ascii/4 + non-ascii*1 (v1)",
+  "expected_symbols": [
+    "handleReportRoutes",
+    "handleApiV1Request",
+    "reports",
+    "handleDirectRequest"
+  ],
+  "guidance_given": true,
+  "hit_turn_cap": false,
+  "hop_accuracy": 1.0,
+  "input_tokens": 12,
+  "jailed": false,
+  "output_tokens": 1770,
+  "permission_denials": 0,
+  "precision": 1.0,
+  "read_calls": 0,
+  "rg_calls": 0,
+  "session_id": "f8aa5039-6bcb-42f1-8c59-0b56f7c1fe83",
+  "shells_used": [
+    "/home/yanggf/a/cortexyoung/rust/target/release/cort",
+    "/home/yanggf/a/cortexyoung/rust/target/release/cort",
+    "grep",
+    "grep",
+    "sed"
+  ],
+  "spurious_symbols": [],
+  "success": true,
+  "task": "route-blast-radius-reportsstatus",
+  "tool_return_bytes": 4166,
+  "tool_return_tokens": 1044,
+  "total_tokens": 176695,
+  "turns": 6,
+  "venue_head": "86a5ee6",
+  "wrong_hop": []
+}

@@ -511,3 +511,55 @@ fn the_gate_judges_against_whichever_baseline_actually_ran() {
         "metric-missing: no comparison possible"
     );
 }
+
+#[test]
+fn a_rate_limited_cell_is_an_error_never_a_zero() {
+    // Observed live: the five-hour window rejected the call, the CLI still emitted a `result`
+    // event with subtype success and all-zero usage, and the row went out as
+    // total_tokens=0 coverage=0 — three tasks' worth of cells that had not run at all.
+    let refused = [
+        json!({"type":"rate_limit_event","rate_limit_info":{
+            "status":"rejected","rateLimitType":"five_hour","overageStatus":"rejected",
+            "isUsingOverage":false}}),
+        json!({"type":"result","subtype":"success","is_error":true,"num_turns":1,
+               "terminal_reason":"api_error","result":"You've hit your session limit",
+               "permission_denials":[],"total_cost_usd":0,
+               "usage":{"input_tokens":0,"cache_creation_input_tokens":0,
+                        "cache_read_input_tokens":0,"output_tokens":0}}),
+    ]
+    .iter()
+    .map(|e| e.to_string())
+    .collect::<Vec<_>>()
+    .join("\n");
+
+    let err = parse_stream(&refused).unwrap_err();
+    assert!(err.contains("cell never ran"), "{err}");
+    assert!(err.contains("five_hour"), "{err}");
+    assert!(err.contains("session limit"), "{err}");
+}
+
+#[test]
+fn a_non_rate_limited_api_error_is_also_refused() {
+    let raw = json!({"type":"result","subtype":"success","is_error":true,"num_turns":2,
+        "terminal_reason":"api_error","result":"upstream blew up","permission_denials":[],
+        "usage":{"input_tokens":0,"cache_creation_input_tokens":0,
+                 "cache_read_input_tokens":0,"output_tokens":0}})
+    .to_string();
+    let err = parse_stream(&raw).unwrap_err();
+    assert!(err.contains("cell errored without measuring"), "{err}");
+}
+
+#[test]
+fn a_turn_capped_cell_is_still_a_real_measurement() {
+    // Distinct from the two above: the agent did work and ran out of turns. That is a result, and
+    // must be recorded as one (with hit_turn_cap) rather than dropped.
+    let parsed = parse_stream(&stream(
+        &[],
+        &["h1\tsrc/c.ts\tmid\t2\n"],
+        "error_max_turns",
+        "",
+    ))
+    .unwrap();
+    assert!(parsed.hit_turn_cap);
+    assert!(parsed.tool_return_bytes > 0);
+}
