@@ -1,11 +1,9 @@
 {
-  "venue": "/home/yanggf/a/cct",
-  "note": "Graph-required tasks. Unlike evals/tasks.json (single-hop or literal-answerable), these cannot be answered without a transitive relationship walk, so they are the cells the stop/go gate was supposed to run on. Labels regenerated 2026-08-28 against cct 86a5ee6; re-run this regeneration when the venue HEAD or the indexer changes, or the gate will punish a correct answer.",
+  "note": "Graph-required tasks. Unlike evals/tasks.json (single-hop or literal-answerable), these cannot be answered without a transitive relationship walk, so they are the cells the stop/go gate was supposed to run on. Labels regenerated 2026-08-28 against cct 86a5ee6; re-run this regeneration when the venue HEAD or the indexer changes, or the gate will punish a correct answer. The venue itself is machine-local state and is deliberately not pinned in this file: pass it per invocation as `run-agents --venue <path-to-cct-checkout>`.",
   "tasks": [
     {
       "id": "blast-radius-3hop-getcurrenttimeet",
       "prompt": "What breaks if getCurrentTimeET changes its return shape? Name every function that reaches it within 3 hops, and say how far each one is.",
-      "venue": "/home/yanggf/a/cct",
       "seed_symbol": "getCurrentTimeET",
       "min_hops_required": 3,
       "expected_symbols": [
@@ -79,7 +77,6 @@
     {
       "id": "transitive-chain-lastntradingdays",
       "prompt": "List the full transitive chain of functions that depend on getLastNTradingDays within 3 hops, ordered by hop distance.",
-      "venue": "/home/yanggf/a/cct",
       "seed_symbol": "getLastNTradingDays",
       "min_hops_required": 3,
       "expected_symbols": [
@@ -111,7 +108,6 @@
     {
       "id": "route-blast-radius-reportsstatus",
       "prompt": "If handleReportsStatus is deleted, which handlers and routes must change? Include indirect dependents out to 3 hops.",
-      "venue": "/home/yanggf/a/cct",
       "seed_symbol": "handleReportsStatus",
       "min_hops_required": 3,
       "expected_symbols": [
@@ -144,7 +140,6 @@
     {
       "id": "storage-blast-radius-backtesting",
       "prompt": "Which functions reach createBacktestingStorage within 3 hops? Group them by hop distance.",
-      "venue": "/home/yanggf/a/cct",
       "seed_symbol": "createBacktestingStorage",
       "min_hops_required": 3,
       "expected_symbols": [
@@ -208,7 +203,6 @@
     {
       "id": "hub-blast-radius-loginfo",
       "prompt": "What is the 3-hop blast radius of making logInfo take a required context object as its first argument? Group the answer by hop.",
-      "venue": "/home/yanggf/a/cct",
       "seed_symbol": "logInfo",
       "min_hops_required": 3,
       "expected_symbols": [

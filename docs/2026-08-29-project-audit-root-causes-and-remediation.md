@@ -1074,10 +1074,10 @@ Bash 只准留在 `install.sh` 與 `tests/install-smoke.sh`（平台需求），
 |---|---|---|---|
 | F-01 | **已修（正解，非降級）** | schema v3 新增 `raw_edges` 持久層；`relationships` 改為「所有檔案落地後，由 raw edges 一次性全域重建」；`graph_pending` 作為 derived-state 安全閥，並讓 `compute_stale` 在它為真時回報 stale | 5 個新測試（含 3 跳鏈、新呼叫者、pending→stale、pending→full 自愈）；`cargo test` 218/218；最小重現與 2,037-chunk 場域端到端皆保持 `dependents` 不變 |
 | F-02 | **已修** | `install_cort` 改為每次 `cargo build --release --locked`（把 build 提到 `rm -rf $CORT_HOME` 之前，失敗時保留舊安裝） | 新 smoke Test 15（用可記錄呼叫的假 cargo 驗證「prebuilt 存在時仍必須 build」）；`tests/install-smoke.sh` 42/42；實測 no-op build 0.04s、有變更 6.7s |
-| F-03 | **已修** | CI 改為 Rust gate：`rustfmt`、`clippy -D warnings`、`cargo test --locked --all-targets`、release build、`bash -n`、直接安裝 shellcheck 執行 lint、install smoke、評測 `node --check` + `node --test` | YAML 結構可解析；`package.json`/`npm` 相依全部移除 |
+| F-03 | **已修** | CI 改為 Rust gate：`rustfmt`、`clippy -D warnings`、`cargo test --locked --all-targets`、release build、`bash -n`、直接安裝 shellcheck 執行 lint、install smoke、評測 `node --check` + `node --test`〔其中 `node --check`/`node --test` 已隨 F-12 移植移除，現行 CI 無任何 node 步驟〕 | YAML 結構可解析；`package.json`/`npm` 相依全部移除 |
 | F-04 | **已文件化（未實作 Rust edges）** | README 新增「各語言實際能力表」；skill 明確指示 Rust 不要走 `impact`，改用 `rg`/`cargo check` | 能力表 + 限制 #8；實測本專案 Rust 545 chunks / 0 outgoing edges |
 | F-12 | **已修** | `evals/` crate 取代 6 個 `.mjs`；`CLAUDE.md` 寫下純 Rust 契約；CI 改跑兩 crate 且移除 Node | JS 813 行刪除；Rust 16 tests、fmt/clippy 全清；summarize 與 verify-impact 對同一份歷史資料等價；CI 無 node 引用 |
-| F-05 | **部分已修** | `cort_calls` 改用 `isCortCommand()`（比對 Rust `CORT_BIN`，也接受 `cort`/`…/bin/cort`）；`summarize()` 改為計數未量測指標、`strict` 模式直接丟例外、指標缺失時 verdict fail closed；新增 `evals/harness.test.mjs`（10 tests，純 Node，無需 npm）；`evals/README.md` 的 `bin/cort.js`／已刪測試路徑全部校正 | `node --test evals/harness.test.mjs` 10/10 |
+| F-05 | **部分已修** | `cort_calls` 改用 `isCortCommand()`（比對 Rust `CORT_BIN`，也接受 `cort`/`…/bin/cort`）；`summarize()` 改為計數未量測指標、`strict` 模式直接丟例外、指標缺失時 verdict fail closed；新增 `evals/harness.test.mjs`（10 tests，純 Node，無需 npm）；`evals/README.md` 的 `bin/cort.js`／已刪測試路徑全部校正〔上述 Node 測試已隨 F-12 移植為 Rust 並刪除，等價性見 F-12 列；餘項（重複取樣、能束縛工具的 driver）仍在下方「尚未做」清單〕 | `node --test evals/harness.test.mjs` 10/10〔已由 F-12 的 Rust 測試取代〕 |
 | F-06 | **已修** | 執行 `cargo fmt --all` 並把 `cargo fmt --all -- --check` 放進 CI | 98 處 diff → 0；Clippy 同時通過 |
 | F-07 | **未修（維持既有契約）** | 僅在文件層面保留「candidates 需查證」的語意 | 需 CLI 契約變更（多 seed 時 fail closed 或 `--file` 消歧），影響現有輸出格式，另行提案 |
 | F-08 | **部分已修** | README 能力表把 `context/read/recall` 列為主要能力、`impact` 標明語言邊界 | 完整 Stable/Experimental/Deferred 分級仍待一次文件整理 |
@@ -1087,6 +1087,10 @@ Bash 只准留在 `install.sh` 與 `tests/install-smoke.sh`（平台需求），
 | F-16 | **已修** | marker 移到 frontmatter 內部第二行（`with_managed_marker`）；up-to-date 的條件從「內容相同」改成「內容相同**且**第一行是 `---`」，舊形状走 `repaired skill frontmatter` 分支重寫 | smoke 53 → 62：fence 在第一行、marker 正好在第二行、`grep -vxF marker` 後與來源 `cmp` 逐字節相同、legacy 形状必須被 repair、外加**真載入器 oracle**（`codex debug prompt-input`，缺 codex 時明確 SKIP 不冒充 PASS）；實測 3 份部署檔 repaired 後可見 |〔結論已被 **F-19** 取代：marker 不進文件，改寫旁邊的 stamp〕
 | F-17 | **已修** | 每個子命令白名單化選項，`guard_options()` 在任何動作前擋下未知選項；`--help`/`-h` 印 usage 並 exit 0（頂層漏了一層，見下）；`--flag=value` 直接拒絕 | 新增 6 項測試（help 不再等於執行、未知選項附 usage、`=` 形式被拒、`--jail`/`--jailed` 可區分、位置參數不误殺）；whitelist 涵蓋性後來改為掃自身原始碼保證（2 項，含「掃描必须真的匹配到」的反向測試） |
 | F-10 | **已修** | C2-22（會改行程 CWD 的測試）拆到獨立 target `rust/tests/staleness_cwd.rs` | 修正前 HEAD 基線 10/20 失敗；修正後 `--test staleness` 20/20 通過、整輪 218/218 連續 3 次 |
+| F-11 | **部分已修（可觀測，未強制）** | 每臂 PATH jail（`make_jail`）＋ `arm_held`/`shells_used` 列入 REQUIRED_FIELDS、`jailed` 落 row，讓外洩由資料自己說出來；但 Claude Code 會正規化 Bash 的 PATH，jail 不是管制——`--jail` 為 opt-in，`arm_held` 才決定一格能否當比較讀 | `the_jail_exposes_only_the_permitted_binary`（jail 內容：基線臂僅 `rg`，cort 臂為 cort/git/ast-grep）；`summarize` 目前仍不過濾 `arm_held=false`；「能真正束縛工具的 driver」仍在下方「尚未做」清單。§13c 的 `.mjs` 敘述是 F-12 移植前的歷史，現行實作在 `evals/src/arms.rs` |
+| F-13 | **已修** | `cort` 不再只靠 PATH 找 `ast-grep`：候選探測＋版本優先＋`probed`/`hint` 錯誤（§13e） | 5 個回歸測試；`ast_grep_missing` 錯誤自帶探測目錄清單；端到端已證 |
+| F-14 | **已修** | 倉庫最後一個非 Rust 的可執行邏輯（46 行 Python 假 parser）移植為 Rust bin `rust/src/bin/fake_ast_grep.rs`，模式語法完全不變（§13h） | `rust/tests/fixture.rs` 7 項測替身自己；移植前後 4 個測試檔 60 個測試結果完全相同；`cargo test` 不再需要特殊 feature |
+| F-15 | **已修** | `parse_stream` 對 `rate_limit_event(rejected)`（及未 completed 的 error result）丟例外（`cell never ran`），不建 row、不落 0 值；全拒批次的空產物（`rows.json: []`＋run-status sidecar）是刻意設計，不是資料 | `a_rate_limited_cell_is_an_error_never_a_zero`；row 寫入在 parse 之後，被拒 cell 結構上不可能進聚合 |
 
 ### 過程中發現並一併處理的兩件事
 

@@ -129,10 +129,10 @@ If `cort_beats_ast_grep` is `false`, deferred features (`cort rewrite`, `cort mo
 ## Running
 
 ```bash
-cargo test --manifest-path evals/Cargo.toml --all-targets        # the harness's own tests (16)
+cargo test --manifest-path evals/Cargo.toml --all-targets        # the harness's own tests
 
 cargo run --manifest-path evals/Cargo.toml --release -- run-agents \
-  --only <task-id> --arms rg+Read,cort --max-turns 40 --concurrency 2 \
+  --venue /path/to/cct --only <task-id> --arms rg+Read,cort --max-turns 40 --concurrency 2 \
   --config-dir /tmp/cc-eval --cache-dir /tmp/cort-exp --out /tmp/cort-eval-runs/<date>
 
 cargo run --manifest-path evals/Cargo.toml --release -- summarize \
@@ -141,8 +141,12 @@ cargo run --manifest-path evals/Cargo.toml --release -- summarize \
 
 `run-agents` needs an isolated `CLAUDE_CONFIG_DIR` (default `/tmp/cc-eval`) or ~16k tokens of
 hooks/plugin text enter every cell and swamp a ~1.1k lean payload; it refuses to run when that
-directory is missing. It also builds one PATH jail per arm (default `/tmp/cc-jails`, disable with
-`--no-jail`), because `--allowedTools` does not bind Bash in headless mode — see Containment above.
+directory is missing. The `--venue` directory is required — the venue is machine-local state, so
+tasks files never pin one (an absolute path would be a dev-machine path in the repo). With `--jail`
+it builds one PATH jail per arm (`--jail-dir`, default `/tmp/cc-jails`); the jail is opt-in because
+Claude Code normalises the Bash tool's PATH, so it is containment theatre, not control —
+`--allowedTools` does not bind Bash in headless mode either, and `arm_held` is what decides whether
+a cell may be read as a comparison. See Containment above.
 
 `summarize` counts unmeasured metrics instead of averaging nulls, and `--strict` refuses the whole
 aggregate when anything was not measured — the failure mode that let 30 null cells decide a STOP for

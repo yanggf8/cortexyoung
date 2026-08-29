@@ -1,8 +1,9 @@
 //! `cort-evals` — the evaluation driver. Dev-only binary; `install.sh` never touches it.
 //!
-//!   cort-evals run-agents    [--only <task>] [--arms rg+Read,cort] [--max-turns 40]
-//!                            [--config-dir /tmp/cc-eval] [--cache-dir /tmp/cort-exp]
-//!                            [--out <dir>] [--concurrency 2] [--jail-dir <dir>] [--jail]
+//!   cort-evals run-agents    --venue <dir> [--only <task>] [--arms rg+Read,cort]
+//!                            [--max-turns 40] [--config-dir /tmp/cc-eval]
+//!                            [--cache-dir /tmp/cort-exp] [--out <dir>]
+//!                            [--concurrency 2] [--jail-dir <dir>] [--jail]
 //!   cort-evals verify-impact --repo <path> --symbols A,B [--depth 3]
 //!   cort-evals summarize     <rows.json>... [--strict]
 
@@ -35,6 +36,7 @@ fn has(argv: &[String], name: &str) -> bool {
 const RUN_AGENTS_FLAGS: &[&str] = &[
     "--tasks",
     "--only",
+    "--venue",
     "--arms",
     "--max-turns",
     "--config-dir",
@@ -49,7 +51,7 @@ const VERIFY_IMPACT_FLAGS: &[&str] = &["--repo", "--depth", "--symbols"];
 const SUMMARIZE_FLAGS: &[&str] = &["--strict"];
 
 const USAGE_TOP: &str = "usage: cort-evals <run-agents|verify-impact|summarize> [options]";
-const USAGE_RUN_AGENTS: &str = "usage: cort-evals run-agents [--tasks FILE] [--only ID[,ID...]] [--arms a,b] [--max-turns N] [--config-dir DIR] [--cache-dir DIR] [--jail-dir DIR] [--jail] [--out DIR] [--concurrency N] [--delay-secs N]";
+const USAGE_RUN_AGENTS: &str = "usage: cort-evals run-agents --venue DIR [--tasks FILE] [--only ID[,ID...]] [--arms a,b] [--max-turns N] [--config-dir DIR] [--cache-dir DIR] [--jail-dir DIR] [--jail] [--out DIR] [--concurrency N] [--delay-secs N]";
 const USAGE_VERIFY_IMPACT: &str =
     "usage: cort-evals verify-impact --repo DIR --symbols A,B [--depth N]";
 const USAGE_SUMMARIZE: &str = "usage: cort-evals summarize [--strict] rows.json [rows.json...]";
@@ -277,12 +279,30 @@ fn sanitize(arm: &str) -> String {
         .collect()
 }
 
+/// The venue is machine-local state (an external checkout), so it is a per-invocation option and
+/// never a field of a tracked tasks file — an absolute path here would be a dev-machine path in
+/// the repo, and a relative one would bake in a checkout topology clean clones do not control.
+fn venue_from(argv: &[String]) -> Result<String, String> {
+    let venue = at(argv, "--venue", "");
+    if venue.is_empty() {
+        return Err(format!(
+            "run-agents requires --venue DIR: the venue is machine-local state and must not be pinned in a tasks file\n{USAGE_RUN_AGENTS}"
+        ));
+    }
+    if !Path::new(&venue).is_dir() {
+        return Err(format!("--venue {venue}: not a directory"));
+    }
+    Ok(venue)
+}
+
 fn venue_head(repo: &str) -> Result<String, String> {
     let out = Command::new("git")
         .args(["rev-parse", "--short", "HEAD"])
         .current_dir(repo)
         .output()
-        .map_err(|e| format!("git: {e}"))?;
+        // A missing directory fails the spawn before git runs, so name the venue here: the bare
+        // io error ("No such file or directory") alone does not say which path was meant.
+        .map_err(|e| format!("git: {e} (in {repo})"))?;
     if !out.status.success() {
         return Err(format!(
             "git rev-parse failed in {repo}: {}",
@@ -327,6 +347,7 @@ fn run_cell(
 
 fn run_agents(argv: &[String]) -> Result<(), String> {
     guard_options(argv, RUN_AGENTS_FLAGS, USAGE_RUN_AGENTS)?;
+    let venue = venue_from(argv)?;
     let tasks_path = at(argv, "--tasks", "evals/tasks-graph.json");
     let doc = load_tasks(&tasks_path)?;
     let only = at(argv, "--only", "");
@@ -334,7 +355,17 @@ fn run_agents(argv: &[String]) -> Result<(), String> {
     let tasks: Vec<Task> = doc
         .into_iter()
         .filter(|t| only_matches(&only_ids, &t.id))
-        .collect();
+        .map(|mut t| {
+            if !t.venue.is_empty() && t.venue != venue {
+                return Err(format!(
+                    "task {} pins venue {} in the tasks file: the venue is per-invocation (--venue), a tasks file must not carry one",
+                    t.id, t.venue
+                ));
+            }
+            t.venue = venue.clone();
+            Ok(t)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     if tasks.is_empty() {
         return Err(format!("no task matched --only {only} in {tasks_path}"));
     }
@@ -397,12 +428,14 @@ fn run_agents(argv: &[String]) -> Result<(), String> {
         eprintln!("delay: window reached, starting cells");
     }
 
+    // The venue is resolved before anything is written: a wrong --venue must fail without
+    // leaving an out dir or an empty rows.json behind.
+    let head = venue_head(&tasks[0].venue)?;
     // The status file and the first rows.json land before any cell runs, so an interrupted batch
     // is distinguishable from a batch that never started.
     std::fs::create_dir_all(&out_dir).map_err(|e| format!("{out_dir}: {e}"))?;
     std::fs::write(format!("{out_dir}/rows.json"), "[]\n")
         .map_err(|e| format!("{out_dir}/rows.json: {e}"))?;
-    let head = venue_head(&tasks[0].venue)?;
     let work: Vec<(Task, String)> = tasks
         .iter()
         .cloned()
@@ -683,6 +716,45 @@ mod option_guard {
     #[test]
     fn positionals_stay_positionals() {
         assert!(check_flags(&v(&["a/b/rows.json"]), SUMMARIZE_FLAGS, USAGE_SUMMARIZE).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod venue {
+    use super::*;
+
+    fn v(args: &[&str]) -> Vec<String> {
+        args.iter().map(|a| a.to_string()).collect()
+    }
+
+    #[test]
+    fn a_missing_venue_is_refused_with_the_flag_in_the_message() {
+        // The venue is machine-local state; there is deliberately no default to fall back to.
+        let err = venue_from(&v(&["run-agents"])).unwrap_err();
+        assert!(err.contains("--venue"), "{err}");
+        assert!(err.contains("usage: cort-evals run-agents"), "{err}");
+    }
+
+    #[test]
+    fn a_venue_that_is_not_a_directory_names_the_path() {
+        let err = venue_from(&v(&[
+            "run-agents",
+            "--venue",
+            "/nonexistent-venue-for-tests",
+        ]))
+        .unwrap_err();
+        assert!(
+            err.contains("--venue /nonexistent-venue-for-tests"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn an_existing_directory_is_accepted() {
+        // is_dir, not is_git_dir: the git preflight (`venue_head`) is what rejects a non-repo,
+        // before anything is written.
+        let tmp = std::env::temp_dir().to_string_lossy().into_owned();
+        assert!(venue_from(&v(&["run-agents", "--venue", &tmp])).is_ok());
     }
 }
 

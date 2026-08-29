@@ -453,6 +453,24 @@ fn the_shipped_task_file_still_loads_and_its_labels_are_hop_consistent() {
     }
 }
 
+fn pins_venue_key(value: &Value) -> bool {
+    match value {
+        Value::Object(map) => map.keys().any(|k| k == "venue") || map.values().any(pins_venue_key),
+        Value::Array(items) => items.iter().any(pins_venue_key),
+        _ => false,
+    }
+}
+
+#[test]
+fn the_shipped_task_file_pins_no_venue() {
+    // The venue is per-invocation (`run-agents --venue`); a tracked tasks file must not carry
+    // one, so a dev-machine path can never re-enter the repo through this file.
+    let raw = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/tasks-graph.json"))
+        .expect("tasks-graph.json is shipped");
+    let doc: Value = serde_json::from_str(&raw).expect("tasks-graph.json parses");
+    assert!(!pins_venue_key(&doc), "a tasks file must not pin a venue");
+}
+
 #[test]
 fn word_matching_adjudicates_edges_without_a_regex_crate() {
     assert!(contains_word(
