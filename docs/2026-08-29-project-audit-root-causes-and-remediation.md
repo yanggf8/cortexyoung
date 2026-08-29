@@ -616,6 +616,36 @@ verdict: baseline_arm=rg+Read, cort_beats_ast_grep=true → continue to deferred
 資料以 metrics-only 形式保存在 `evals/runs/2026-08-30-graph/`（不含 transcript，避免把 venue 的原始碼
 片段帶進本 repo）。
 
+## 13n. 第二輪樣本完成：n=2、20 cells，以及對 §13i 判讀的三點修正
+
+額度窗口重置後補跑，一次呼叫 `--only a,b,c`（F-18 的落盤語意在這裡派上用場：6 格全寫入，
+`run-status.json` 回報 `complete: true, planned_cells: 6, written_cells: 6`）。資料在
+`evals/runs/2026-08-30-graph-sample2/`（10 cells，metrics-only；transcript 留 `/tmp`，裡面有 venue
+原始碼片段）。`cort-evals summarize` 吃兩份 rows.json（20 cells）：
+
+| 臂 | success | mean total_tokens | mean turns | mean tool-return tokens | runs |
+|---|---|---|---|---|---|
+| cort | 1.0 | 122,142 | 4.2 | 991.8 | 10 |
+| rg+Read | 0.4 | 482,859 | 16.8 | 7,642.3 | 10 |
+
+verdict 仍是 `cort_beats_ast_grep=true`。名目成本：第 1 輪 $5.209、第 2 輪 $5.497（cort 側各佔 27%
+／27%）。三點必須修正 §13i 當時只看到 4 格所下的判斷：
+
+1. **「基線兩次都漏同一個符號」從 2 個任務變成 5 個任務的現象。** 10 組（task×arm）的 `success`
+   兩輪**全部一致**：基線在同樣 3 個任務失敗（hub-loginfo、route-reportsstatus、transitive-chain），
+   coverage 逐輪 0.886/0.886、0.75/0.75、0.75/0.75，一格格重覆。n=2 證到的不是「答案會漂」，
+   而是「錯得可重覆」——這對「graph 值不值得上」比平均 token 有意義得多。
+2. **倍數沒變差，但逐格变异仍在。** 3.95× token、4.0× turns（第一輪是 3.8×／3.9×）。cort 單格变异
+   最大的是 route（86,018 → 176,695）與 3hop（250,224 → 183,937）；基線同方向（476,138 → 670,928）。
+   所以「便宜多少」這種說法只能用均值，且要連變異量一起講，不能講成一個倍數保證。
+3. **`arm_held` 不是正確度的自變數，至少這批資料不是。** 第 2 輪 cort 10 格裡有 2 格 `arm_held=false`
+   （route 與 3hop，而且兩輪都 false），它們照樣 `success=true`、coverage 1.0。受控與否目前看到的是
+   影響成本（agent 自己 grep 查證），還沒證據說它影響對錯。把 `arm_held` 讀成正確度前提會把之後的
+   引導修正帶到錯方向。
+
+邊界照樣講明白：n=2、單一 venue（cct，TypeScript Worker）、單一基線臂、jail 未啟用（F-11）。
+n=2 時中位數沒有意義，因此這裡只報均值與逐輪觀測值，不報「中位數」。
+
 ## 13l. F-18：一批 cell 不該是一整顆蛋
 
 「把被擋的 3 個任務補回來」現在是一次呼叫（`--only a,b,c`）。但 F-15 之後的 runner 有個相反的性質：
@@ -784,7 +814,22 @@ $ cort-evals run-agents --help
 - `--delay-secs N` 讓 runner 自己等額度窗口重置，不需要外層 `sleep`。等待發生在讀 venue HEAD 與任何 cell 之前，
   因此 HEAD 仍是開跑當時那個；只收 0 與正整數，`-5`／`10.5`／空字串一律拒——靜默退回 0 等於把 cell 直接打进還關著的窗口。
 
+### F-17 的邊界：頂層 `--help` 仍然 exit 2（已修）
+
+F-17 的 commit 訊息寫「`--help`/`-h` 印 usage 並 exit 0」，那對**三個子命令**都成立，但
+`cort-evals --help`（沒有子命令）走的是 `main()` 的預設分支：印 usage 到 stderr、exit 2。
+`wants_help()` 這個判斷式當時就對裸 `--help` 回 true，而且它有單元測試——測試綠，行為錯，因為
+`main()` 根本沒呼叫它。這是同一個教訓第四次出現（F-15、F-16、F-19、以及這裡）：**測了條件，沒測生效**。
+條件測在純函式上，生效只發生在真正的程序裡。
+
+修法：頂層也走同一條 help 路徑（`cort-evals help` 同義），unknown 選項照舊 exit 2。
+驗證方式改成**跑真 binary**：`evals/tests/harness.rs` 用 `CARGO_BIN_EXE_cort-evals` 實際 spawn，
+斷言 `--help` 與 `help` 退出 0 且 stdout 三個子命令都提到、`--frobnicate` 仍非零。
+evals 32 → 33 tests。
+
 ## 13i. 第二輪取樣：額度攔截、F-15，與「正確度穩定 / 成本不穩定」
+〔第 3 點的 14 格聚合已被 §13n 的 20 格取代；該節的观察 1、2 仍然成立。〕
+
 
 ### 加了 1 輪重複取樣，結果是兩件事
 
@@ -1009,7 +1054,7 @@ Bash 只准留在 `install.sh` 與 `tests/install-smoke.sh`（平台需求），
 | F-18 | **已修** | 每格量到當下就重寫 `rows.json`（排序後整個覆寫，線程完成順序不影響檔內容）；`RunStatus` guard 在**包括提前 return 在內**的每一條出口寫 `run-status.json`，記 planned/written/complete | 2 項新測試（部分批次必須自報 incomplete、rows 排序與完成順序無關）；evals 測試 30 → 32；實際取樣中可在跑完前直接看到 rows.json/run-status.json 長大 |
 | F-19 | **已修** | 安裝器帳目整個移出 SKILL.md：改寫同目錄的 `.cortexyoung-managed`（簽名＋部署當時的 SHA-256），部署檔與來源逐字節相同；`preflight` 先驗來源 frontmatter 形狀；新增 `rust/tests/skill_format.rs` 以消費者角度解析 `skills/*/SKILL.md` | 負向驗證內建在 `negative_shapes_are_rejected_by_the_same_gates`（六種被禁止的形狀）；smoke 62 → 81（含兩種舊形狀升級、孤兒 stamp、手改被拒）；Test 14 移除寫死的 nvm 路徑與最後一個 `.ts` fixture |
 | F-16 | **已修** | marker 移到 frontmatter 內部第二行（`with_managed_marker`）；up-to-date 的條件從「內容相同」改成「內容相同**且**第一行是 `---`」，舊形状走 `repaired skill frontmatter` 分支重寫 | smoke 53 → 62：fence 在第一行、marker 正好在第二行、`grep -vxF marker` 後與來源 `cmp` 逐字節相同、legacy 形状必須被 repair、外加**真載入器 oracle**（`codex debug prompt-input`，缺 codex 時明確 SKIP 不冒充 PASS）；實測 3 份部署檔 repaired 後可見 |〔結論已被 **F-19** 取代：marker 不進文件，改寫旁邊的 stamp〕
-| F-17 | **已修** | 每個子命令白名單化選項，`guard_options()` 在任何動作前擋下未知選項；`--help`/`-h` 印 usage 並 exit 0；`--flag=value` 直接拒絕 | 新增 6 項測試（help 不再等於執行、未知選項附 usage、whitelist 覆蓋、`=` 形式被拒、`--jail`/`--jailed` 可區分、位置參數不误殺）；evals 測試 20 → 30 |
+| F-17 | **已修** | 每個子命令白名單化選項，`guard_options()` 在任何動作前擋下未知選項；`--help`/`-h` 印 usage 並 exit 0（頂層漏了一層，見下）；`--flag=value` 直接拒絕 | 新增 6 項測試（help 不再等於執行、未知選項附 usage、whitelist 覆蓋、`=` 形式被拒、`--jail`/`--jailed` 可區分、位置參數不误殺）；evals 測試 20 → 30 |
 | F-10 | **已修** | C2-22（會改行程 CWD 的測試）拆到獨立 target `rust/tests/staleness_cwd.rs` | 修正前 HEAD 基線 10/20 失敗；修正後 `--test staleness` 20/20 通過、整輪 218/218 連續 3 次 |
 
 ### 過程中發現並一併處理的兩件事

@@ -48,6 +48,7 @@ const RUN_AGENTS_FLAGS: &[&str] = &[
 const VERIFY_IMPACT_FLAGS: &[&str] = &["--repo", "--depth", "--symbols"];
 const SUMMARIZE_FLAGS: &[&str] = &["--strict"];
 
+const USAGE_TOP: &str = "usage: cort-evals <run-agents|verify-impact|summarize> [options]";
 const USAGE_RUN_AGENTS: &str = "usage: cort-evals run-agents [--tasks FILE] [--only ID[,ID...]] [--arms a,b] [--max-turns N] [--config-dir DIR] [--cache-dir DIR] [--jail-dir DIR] [--jail] [--out DIR] [--concurrency N] [--delay-secs N]";
 const USAGE_VERIFY_IMPACT: &str =
     "usage: cort-evals verify-impact --repo DIR --symbols A,B [--depth N]";
@@ -474,10 +475,18 @@ fn main() {
         Some("verify-impact") => verify_impact_main(&argv[1..]),
         Some("summarize") => summarize_main(&argv[1..]),
         other => {
-            eprintln!(
-                "usage: cort-evals <run-agents|verify-impact|summarize> [options]\n(got {:?})",
-                other.unwrap_or("")
-            );
+            // Asking how to use the tool is never an error and never a run — including at the top
+            // level, which is where F-17 stopped. `wants_help` already answered true for a bare
+            // `--help`; main() simply never consulted it, so the predicate had a unit test while
+            // the binary exited 2. Asserted end to end in tests/harness.rs for exactly that reason.
+            if other == Some("help") || wants_help(&argv) {
+                println!("{USAGE_TOP}");
+                println!("  {USAGE_RUN_AGENTS}");
+                println!("  {USAGE_VERIFY_IMPACT}");
+                println!("  {USAGE_SUMMARIZE}");
+                return;
+            }
+            eprintln!("{USAGE_TOP}\n(got {:?})", other.unwrap_or(""));
             std::process::exit(2);
         }
     };

@@ -563,3 +563,38 @@ fn a_turn_capped_cell_is_still_a_real_measurement() {
     assert!(parsed.hit_turn_cap);
     assert!(parsed.tool_return_bytes > 0);
 }
+
+/// The option guard is only worth anything if the *binary* behaves it. A predicate with a unit test
+/// and a `main()` that never calls it is the same "verified the condition, not the effect" failure
+/// that hid the skill from both agents (audit F-16, F-19).
+#[test]
+fn asking_for_help_exits_zero_and_names_every_subcommand() {
+    let help = std::process::Command::new(env!("CARGO_BIN_EXE_cort-evals"))
+        .arg("--help")
+        .output()
+        .expect("run cort-evals --help");
+    assert!(
+        help.status.success(),
+        "--help must succeed, got status {:?} on stderr: {}",
+        help.status,
+        String::from_utf8_lossy(&help.stderr)
+    );
+    let out = String::from_utf8_lossy(&help.stdout);
+    for sub in ["run-agents", "verify-impact", "summarize"] {
+        assert!(out.contains(sub), "usage text never mentions {sub}: {out}");
+    }
+    // The `help` word form is the same request, and the guard still refuses a real run.
+    let word = std::process::Command::new(env!("CARGO_BIN_EXE_cort-evals"))
+        .arg("help")
+        .output()
+        .expect("run cort-evals help");
+    assert!(word.status.success(), "`help` must succeed too");
+    let unknown = std::process::Command::new(env!("CARGO_BIN_EXE_cort-evals"))
+        .args(["--frobnicate"])
+        .output()
+        .expect("run cort-evals --frobnicate");
+    assert!(
+        !unknown.status.success(),
+        "an unknown option is still not a silent success"
+    );
+}
