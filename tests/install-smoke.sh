@@ -58,6 +58,9 @@ chmod +x "$TMPHOME/fakebin/npm"
 cat > "$TMPHOME/fakebin/cargo" <<'FAKECARGO'
 #!/usr/bin/env bash
 echo "cargo 1.88.0"
+if [ -n "${FAKE_CARGO_LOG:-}" ] && [ "$1" = "build" ]; then
+  printf 'cargo %s\n' "$*" >> "$FAKE_CARGO_LOG"
+fi
 exit 0
 FAKECARGO
 chmod +x "$TMPHOME/fakebin/cargo"
@@ -346,6 +349,27 @@ elif [ -n "$AFTER" ] && [ "$AFTER" -ge "$BEFORE" ]; then
   pass "db intact after a killed index (before=$BEFORE after=$AFTER)"
 else
   fail "db intact after a killed index (before=$BEFORE after='$AFTER')"
+fi
+
+echo "--- Test 15: install rebuilds even though a release binary already exists (F-02) ---"
+PREBUILT="$REPO_ROOT/rust/target/release/cort"
+if [ ! -x "$PREBUILT" ]; then
+  pass "skipped: no prebuilt binary for the existence check to be fooled by"
+else
+  : > "$TMPHOME/cargo-build.log"
+  FAKE_CARGO_LOG="$TMPHOME/cargo-build.log" \
+    PATH="$TMPHOME/fakebin:$HOME/.cargo/bin:$ORIGINAL_PATH" \
+    bash "$REPO_ROOT/install.sh" > "$TMPHOME/test15.out" 2>&1 || true
+  if grep -q "build --release --locked" "$TMPHOME/cargo-build.log"; then
+    pass "cargo build --release --locked runs with a prebuilt binary present"
+  else
+    fail "cargo build --release --locked runs with a prebuilt binary present (log empty)"
+  fi
+  if grep -q "installed cort" "$TMPHOME/test15.out"; then
+    pass "install completed with a prebuilt binary present"
+  else
+    fail "install completed with a prebuilt binary present (see $TMPHOME/test15.out)"
+  fi
 fi
 
 # ── summary ──────────────────────────────────────────────────────

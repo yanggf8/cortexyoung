@@ -466,12 +466,14 @@ install_ast_grep() {
 
 install_cort() {
   local crate_bin="$SCRIPT_DIR/rust/target/release/cort"
-  [ -x "$crate_bin" ] || {
-    info "cort binary not found — building (cargo build --release)"
-    command -v cargo >/dev/null 2>&1 || die "cort needs cargo (rustup) to build — rerun with --with-rustup"
-    ( cd "$SCRIPT_DIR/rust" && cargo build --release ) || die "cargo build --release failed"
-    [ -x "$crate_bin" ] || die "cort binary missing after build: $crate_bin"
-  }
+
+  # Always ask cargo to build. Cargo owns freshness: an up-to-date tree costs a fraction of a
+  # second, while "does the artifact exist?" does not — `git pull` leaves rust/target/ (ignored)
+  # in place, so an existence check would happily ship the previous build's binary.
+  command -v cargo >/dev/null 2>&1 || die "cort needs cargo (rustup) to build — rerun with --with-rustup"
+  info "building cort (cargo build --release --locked)"
+  ( cd "$SCRIPT_DIR/rust" && cargo build --release --locked ) || die "cargo build --release failed"
+  [ -x "$crate_bin" ] || die "cort binary missing after build: $crate_bin"
 
   rm -rf "$CORT_HOME"
   mkdir -p "$CORT_HOME"
