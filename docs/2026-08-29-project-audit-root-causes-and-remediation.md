@@ -97,7 +97,7 @@ GitHub Actions 正確，這三者必須分別驗證。
 | F-10 | P1 | 既有測試在平行執行下約 40% 機率失敗（**HEAD 既存**，非本輪引入） | 新 CI 的 `cargo test` gate 會隨機紅，等於沒有 gate |
 | F-11 | P1 | `--allowedTools Bash(...)` 在 headless 下不約束 Bash，評測臂的「白名單即實驗組」只是標籤 | 兩臂 A/B 的基線臂實際用了 `grep`/`sed`，比較不成立 |
 | F-12 | P1 | 評測器是 6 個 `.mjs`，違反「本 repo 純 Rust」契約，同時也是唯一沒有型別、沒有 lint、沒有 gate 的部分 | 已移植為 `evals/` crate，JS 全部移除 |
-| F-13 | P1 | `cort` 只靠 PATH 找 `ast-grep`，而 agent 的 Bash PATH 會被正規化 | 在 Claude Code 會話內 cort 直接 `ast_grep_missing`，對其主要使用者不可用 |
+| F-13 | **已修** | `cort` 只靠 PATH 找 `ast-grep`，而 agent 的 Bash PATH 會被正規化 | 見 §13e：候選探測 + 版本優先 + probed/hint 錯誤；5 個回歸測試，端到端已證 |
 
 ## 5. F-01：incremental index 會產生 fresh-but-wrong graph
 
@@ -583,16 +583,25 @@ PATH 查）。而 Claude Code 給 Bash 工具的 PATH 會被正規化成
 所以這不是評測器的邊角問題，而是：**用 `install.sh` 正常安裝的 cort，在 agent 會話裡執行任何需要解析器的
 命令都會失敗**，而且錯誤訊息只說 `candidate: "ast-grep"`，不告訴使用者该設定什麼。
 
-### 建議解法（動到產品碼，尚未實作，等你核准）
+### 已實作的解法（本輪）
 
-1. `resolve_ast_grep_bin()` 依序嘗試候選清單，並保留 fail-closed 的版本檢查：
-   `CORT_AST_GREP_BIN` → PATH → cort executable 同目錄與其 `../bin` → `$CORT_HOME/bin` →
-   `$HOME/.local/bin` → `$HOME/.cargo/bin` → `$CARGO_HOME/bin` → `/usr/local/bin` → `/opt/homebrew/bin`。
-2. `ast_grep_missing` 的 detail 帶上「查過哪些位置」與 `CORT_AST_GREP_BIN` 提示，讓 agent 能自我修復。
-3. `install.sh` 在 `~/.local/bin` 可用時優先裝到那裡（它幾乎總在 agent 的 PATH 內）；`cort status`
-   顯示實際解析到的 parser 路徑。
-4. 回歸測試：PATH 清空但 `~/.local/bin` 有可用 ast-grep 時解析成功；全部缺席時仍 `ast_grep_missing`
-   （不得退化成 in-process parser，那是設計紅線）；版本不符仍 fail closed。
+1. `resolve_ast_grep_bin()` 改為依序探測候選清單（純函式 `ast_grep_candidates()` 可測）：
+   PATH 上的裸名 → cort executable 同目錄與其 `../bin` → `$HOME/.local/bin` → `$CARGO_HOME/bin` →
+   `$HOME/.cargo/bin` → `/usr/local/bin` → `/opt/homebrew/bin`，並**優先選版本正好等於 pin 的那個**
+   （PATH 上一個 0.44.x 不得遮掉裝在旁边的 0.45.2）。
+2. `ast_grep_missing` 的 detail 帶 `probed`（查過哪些位置）與 `hint`（含 `CORT_AST_GREP_BIN`），
+   agent 能自我修復；找到可用但版本不對時回 `ast_grep_version_mismatch` 並附 found/expected，
+   仍是 fail-closed，不會退化成 in-process parser。
+3. `CORT_AST_GREP_BIN` 設定时**絕不 fallback**（「明確指定 = 就要這一個」），否則 fail-closed 的
+   測試會因為探測到真實 ast-grep 而僥倖通過。
+4. 沒有改 `install.sh` 的安裝位置：探測清單已經消除對 caller PATH 的相依，動 BIN_DIR 會牽動
+   smoke suite 的 42 項斷言與 manifest 所有權，代價大於收益。
+5. 5 個回歸測試（`rust/tests/ast_grep.rs`）：候選清單順序與內容；PATH 清空但 `~/.cargo/bin` 有
+   pinned 假裝者時解析成功；可達但版本不對時回 `ast_grep_version_mismatch`；全數缺席時回
+   `ast_grep_missing` 且帶 probed/hint；明確覆寫失效時不 fallback（detail 帶 `source`）。
+6. 端到端實證：`env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=<sim>`（ast-grep 只出現在
+   `<sim>/.cargo/bin`，也就是 `install.sh` 的預設落點）下，release cort 成功 `index`（2,583 chunks）
+   並回報 `dependents=23`。同一命令在修復前就是那次 cell 裡的 20 turns `ast_grep_missing`。
 
 在此之前，評測器由 `build_env` 把父行程解析到的路徑注入 `CORT_AST_GREP_BIN`，讓被測的 cort 與使用者
 跑的確實是同一個工具——這是量測效度的要求，不是對產品缺陷的掩蓋。

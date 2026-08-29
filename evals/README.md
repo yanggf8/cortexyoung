@@ -25,9 +25,9 @@
     honest reading of the data so far is that no arm can be held on this driver, so the question
     "cort vs rg" cannot be answered here — only "cort vs an agent's whole shell", which is the
     adoption-realistic comparison anyway.
-  - `build_env` pins `CORT_AST_GREP_BIN` from the parent's PATH, because the normalised child PATH
-    drops where ast-grep lives on this host; without that the cort arm measures a broken tool. See
-    audit F-13 for the product-side fix this argues for.
+  - `build_env` still pins `CORT_AST_GREP_BIN` from the parent's PATH so the measured cort is
+    bit-for-bit the one under test. It is no longer *required* for cort to work: audit F-13 is fixed,
+    so cort probes its install locations instead of trusting the caller's PATH.
 - Transcripts saved under `evals/runs/<date>/<arm>/<task>.json` (one JSON file per task per arm per date).
 - `cort` is the Rust binary since the cutover. `CORT_BIN` resolves to
   `rust/target/release/cort` (override with the `CORT_BIN` env var), and `bin/cort.js` no longer exists.

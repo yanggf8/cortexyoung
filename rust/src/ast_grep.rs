@@ -26,11 +26,63 @@ pub struct ExecResult {
     pub stderr: String,
 }
 
-fn candidate_bin() -> String {
+/// Explicit override means *exactly this binary*, with no fallback: `CORT_AST_GREP_BIN` is the knob
+/// tests and the smoke suite use to pin a fixture, and silently falling back to a real ast-grep a
+/// few directories away would turn those fail-closed tests into accidental passes.
+fn explicit_override() -> Option<String> {
     match std::env::var("CORT_AST_GREP_BIN") {
-        Ok(s) if !s.is_empty() => s,
-        _ => "ast-grep".to_string(),
+        Ok(s) if !s.is_empty() => Some(s),
+        _ => None,
     }
+}
+
+/// Where `ast-grep` may live, in probe order.
+///
+/// cort used to ask for a bare `ast-grep` and rely on PATH. That broke for its main audience: an
+/// agent shell does not necessarily inherit the user's PATH (Claude Code normalises it to
+/// `/usr/local/bin:/usr/bin:/bin:~/.local/bin`), and `install.sh` puts the binary under
+/// `$CARGO_HOME/bin` by default, which is not in that list — so a correctly installed cort answered
+/// `ast_grep_missing` from inside an agent session (audit F-13). Probing the install locations
+/// directly removes the dependency on whoever launched us.
+pub fn ast_grep_candidates() -> Vec<String> {
+    let mut out: Vec<String> = vec!["ast-grep".to_string()];
+
+    let mut push_dir = |dir: Option<PathBuf>| {
+        if let Some(d) = dir {
+            let cand = d.join("ast-grep");
+            let s = cand.to_string_lossy().into_owned();
+            if !out.contains(&s) {
+                out.push(s);
+            }
+        }
+    };
+
+    // Next to the running cort: the installer's payload directory and the bin directory that
+    // shipped the shim.
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            push_dir(Some(dir.to_path_buf()));
+            push_dir(dir.parent().map(|p| p.join("bin")).clone());
+        }
+    }
+    push_dir(
+        std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .map(|h| h.join(".local").join("bin")),
+    );
+    push_dir(
+        std::env::var_os("CARGO_HOME")
+            .map(PathBuf::from)
+            .map(|c| c.join("bin")),
+    );
+    push_dir(
+        std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .map(|h| h.join(".cargo").join("bin")),
+    );
+    push_dir(Some(PathBuf::from("/usr/local/bin")));
+    push_dir(Some(PathBuf::from("/opt/homebrew/bin")));
+    out
 }
 
 /// `--version` probe has no 30s timeout (JS spawnSync default).
@@ -46,15 +98,58 @@ fn probe_failed(output: &std::io::Result<std::process::Output>) -> bool {
 }
 
 pub fn resolve_ast_grep_bin() -> Result<String, CortError> {
-    let candidate = candidate_bin();
-    let probe = run_version(&candidate);
-    if probe_failed(&probe) {
-        return Err(CortError::new(
-            "ast_grep_missing",
-            json!({ "candidate": candidate }),
-        ));
+    if let Some(explicit) = explicit_override() {
+        let probe = run_version(&explicit);
+        if probe_failed(&probe) {
+            return Err(CortError::new(
+                "ast_grep_missing",
+                json!({ "candidate": explicit, "source": "CORT_AST_GREP_BIN" }),
+            ));
+        }
+        return Ok(explicit);
     }
-    Ok(candidate)
+
+    let probed = ast_grep_candidates();
+    let mut reachable: Option<(String, Option<String>)> = None;
+    for candidate in &probed {
+        let probe = match run_version(candidate) {
+            Ok(ok) => ok,
+            Err(_) => continue,
+        };
+        if !probe.status.success() {
+            continue;
+        }
+        let found = first_xyz(&String::from_utf8_lossy(&probe.stdout)).map(str::to_string);
+        if reachable.is_none() {
+            reachable = Some((candidate.clone(), found.clone()));
+        }
+        // Prefer a binary that actually matches the pin over merely the first one found; a stale
+        // 0.44.x on PATH must not shadow the pinned copy sitting next to cort.
+        if found.as_deref() == Some(AST_GREP_PINNED) {
+            return Ok(candidate.clone());
+        }
+    }
+
+    match reachable {
+        // Something is installed, but it is not the pinned parser: still fail closed, and say which
+        // version was found so the fix is obvious instead of mysterious.
+        Some((candidate, found)) => Err(CortError::new(
+            "ast_grep_version_mismatch",
+            json!({
+                "found": found.unwrap_or_else(|| "unparsable".to_string()),
+                "expected": AST_GREP_PINNED,
+                "candidate": candidate,
+            }),
+        )),
+        None => Err(CortError::new(
+            "ast_grep_missing",
+            json!({
+                "candidate": "ast-grep",
+                "probed": probed,
+                "hint": "install ast-grep 0.45.2 (`./install.sh` or `cargo install ast-grep --version 0.45.2 --locked`), or point CORT_AST_GREP_BIN at it",
+            }),
+        )),
+    }
 }
 
 /// First `(\d+\.\d+\.\d+)` in stdout — no regex crate (not on the dep whitelist).
