@@ -892,7 +892,10 @@ evals 32 → 33 tests。
 修法（`evals/src/stream.rs`）：`parse_stream` 現在先掃描 `rate_limit_event`，`status == "rejected"` 即
 丟例外；此外 `is_error == true` 且 `terminal_reason != "completed"` 也丟例外。例外訊息保留原始拒絕文字，
 方便判斷是額度還是上游錯誤。runner 因此以 exit 1 失敗、**不寫任何 row**（實測在仍被擋的狀態下跑一次：
-只有錯誤訊息，無檔案落地）。
+只有錯誤訊息，無檔案落地）。〔F-18 之後這句要修正讀法：**「不寫任何 row」仍然成立**，但「無檔案落地」不再
+成立——現在 `rows.json` 以 `[]`、`run-status.json` 以 `state:"running"`/`written 0` 在**第一顆 cell 之前**
+就落地。這是刻意的：全被擋的批次從「什麼都沒有」變成「看得见的一格都沒有」，`summarize --strict` 會報
+`6 of 6 planned cells never made it into rows.json`。空的與不存在是兩件事，前者是證據，後者要靠猜。〕
 
 要分辨的邊界：**turn-cap 仍是一個有效測量**。`subtype == "error_max_turns"` 的格子會照常寫入並標
 `hit_turn_cap: true`——那是「跑了但沒跑完」，跟「沒跑」不同。3 個新測試把這三種情況釘住。
