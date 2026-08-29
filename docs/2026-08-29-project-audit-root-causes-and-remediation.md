@@ -97,6 +97,7 @@ GitHub Actions 正確，這三者必須分別驗證。
 | F-10 | P1 | 既有測試在平行執行下約 40% 機率失敗（**HEAD 既存**，非本輪引入） | 新 CI 的 `cargo test` gate 會隨機紅，等於沒有 gate |
 | F-11 | P1 | `--allowedTools Bash(...)` 在 headless 下不約束 Bash，評測臂的「白名單即實驗組」只是標籤 | 兩臂 A/B 的基線臂實際用了 `grep`/`sed`，比較不成立 |
 | F-12 | P1 | 評測器是 6 個 `.mjs`，違反「本 repo 純 Rust」契約，同時也是唯一沒有型別、沒有 lint、沒有 gate 的部分 | 已移植為 `evals/` crate，JS 全部移除 |
+| F-14 | P2 | `rust/tests/fixtures/fake-ast-grep` 是 46 行 Python，被 5 個測試當假 parser 用，抵觸純 Rust 契約 | 已在 `AGENTS.md` 標為「不得擴大的已知例外」；待移植成 Rust fixture bin |
 | F-13 | **已修** | `cort` 只靠 PATH 找 `ast-grep`，而 agent 的 Bash PATH 會被正規化 | 見 §13e：候選探測 + 版本優先 + probed/hint 錯誤；5 個回歸測試，端到端已證 |
 
 ## 5. F-01：incremental index 會產生 fresh-but-wrong graph
@@ -610,6 +611,27 @@ verdict: baseline_arm=rg+Read, cort_beats_ast_grep=true → continue to deferred
 
 資料以 metrics-only 形式保存在 `evals/runs/2026-08-30-graph/`（不含 transcript，避免把 venue 的原始碼
 片段帶進本 repo）。
+
+## 13g. Agent 引導的連動（skill / AGENTS.md / Codex）
+
+改動若不會到達 agent 眼前，等於沒改。本輪把三條路徑接起來：
+
+- `skills/ast-grep/SKILL.md` 改寫：開頭同時引用**需求面**（1,565 prompt 內 0 次問圖）與**成本面**
+  （§13f 的 5 任務 2 臂：圖臂 5/5、~120k tokens；shell 臂 17 turns、~473k、3/5 錯），第 4 條從
+  「只在明確問題時才用、不要因為有圖就用」改成「明確關係問題時**一次** call，不要 grep 逐跳走」，
+  並給出便宜的正确查證方式（`cort context <dependent>` 讀一個函式，而不是重讀整檔）。另加
+  `ast_grep_missing` 的自救說明（F-13 之後只需設 `CORT_AST_GREP_BIN` 或重跑 install）。
+  長度 955 → 1,079 est tokens（+13%）：新增的都是行為改變，其餘段落同步壓縮過。
+- `install.sh` 現在把同一份 skill 部署到 `~/.claude/skills/` 與 `~/.codex/skills/`（尊重
+  `CODEX_HOME`），兩份 byte-identical，各自有 managed marker、manifest key（`skill_ast_grep` /
+  `skill_ast_grep_codex`）、preflight 拒絕未管理檔、`--force` 採用、uninstall 只刪自己擁有的。
+  smoke 新增 Test 16（10 項斷言，總數 42 → 52）。
+- 新增 `AGENTS.md` 作為唯一來源，`CLAUDE.md` 改為它的符號連結（兩邊讀到同一份 bytes，不可能漂移），
+  內容含純 Rust 契約、兩 crate 的提交前檢查、目錄邊界，以及「引導文字是受度量的人工产物」這條規則。
+  同時把 Python fixture 登记為 F-14（不得擴大的已知例外）。
+
+注意：倉庫改變不會自己進入你的 agent 設定。要让 Codex 與 Claude 都用到新的引導，需要執行一次
+`./install.sh`（依 `AGENTS.md` 的規則，我不會自動安裝）。
 
 ## 13e. F-13：agent 的 PATH 被正規化後，cort 找不到它唯一的 parser
 
