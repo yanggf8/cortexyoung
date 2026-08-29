@@ -7,8 +7,8 @@ Six shipped commands (plus `status`/`projects`/`delete` utilities):
 - `cort index [--incremental] [path]` — build or incrementally refresh the index (`ast-grep` + SQLite)
 - `cort struct -p '<pattern>' --lang <lang>` — structural search joined to enclosing symbols + 3 neighbours
 - `cort context <symbol-or-query>` — "what else deals with X" (exact symbol or FTS recall, depth-1 neighbours, ~1500-token budget; seed bodies are head-truncated to 12 lines, pass `--content full` for the whole body)
-- `cort impact --symbol <name[,name2,...]>` — reverse dependents (depth 3); accepts a comma-separated batch
-- `cort impact --symbol <name>` — "what breaks if I change X" (reverse dependents, depth 3)
+- `cort impact --symbol <name[,name2,...]>` — "what breaks if I change X": reverse dependents to
+  depth 3, accepting a comma-separated batch
 - `cort read <file> [--start N] [--end N]` — read a file or line range and persist it as a reading note; unchanged repeats come from SQLite
 - `cort recall <query>` — FTS lookup over previously read files/fragments (default 12-line heads; pass `--content full` for stored bodies)
 - `cort usage [days]` — local per-machine usage stats (best-effort; 1–90 days, default 30)
@@ -26,6 +26,22 @@ use and reports `source:"store"` on an unchanged repeat. Each entry carries file
 a remembered reading. Run `cort index` once before using either command.
 
 Routing for agents is in `skills/ast-grep/SKILL.md` — it states when to use `rg`, `ast-grep run`, `cort struct`/`context`/`impact`, and `xg`.
+
+## What each language actually gets
+
+Capability is per language, because the extractor pack is per language. Do not assume a verb works
+just because the binary runs.
+
+| Language | `struct` | `context` (symbol slice) | `read`/`recall` | `impact` (relationship graph) |
+|---|---|---|---|---|
+| TypeScript, TSX, JavaScript | yes | yes | yes | **yes** — `edge:calls` + `edge:imports` rules ship |
+| Python | yes | yes | yes | **yes** — same |
+| Rust | yes | **yes** (free functions, `impl`/trait methods as `Type::method`) | **yes** | **no** — `src/pack/rules/rust.yml` has chunk rules only, no edge rules, so the graph is empty |
+
+For Rust, `cort context <symbol> --content full -f lean` is the supported use (that is the case the
+27k→89-token measurement below covers). For Rust callers, use `rg` for one hop and `cargo check` /
+`cargo build` errors for the precise list — a compiler beats a name-resolved graph here, and cort will
+not pretend otherwise. See `docs/2026-08-28-real-session-cost.md` §1.3.
 
 ## Local usage recording (opt-out by not existing: it is offline, plain SQLite)
 
@@ -65,7 +81,7 @@ never appears in its own report.
 **What it does (default, without `--with-xgrep`):**
 
 - Downloads pinned `ast-grep` v0.45.2 prebuilt `app-<target>.zip` for your platform (Linux x86_64/aarch64, macOS x86_64/arm64) from GitHub Releases and verifies SHA-256 (repo-maintained; upstream publishes no checksums) — fail-closed: an empty or mismatched checksum refuses to install. Falls back to `cargo install ast-grep --version 0.45.2 --locked` (requires Rust 1.88+).
-- Builds `cort` from `rust/` (`cargo build --release`, done once if `rust/target/release/cort` is absent) and installs the binary plus its ast-grep pack (`src/pack`, located at runtime via `CORT_PACK_DIR`) to `~/.local/share/cortexyoung/cort`, shimming `~/.cargo/bin/cort` or `~/.local/bin/cort`.
+- Builds `cort` from `rust/` with `cargo build --release --locked` on **every** run and installs the binary plus its ast-grep pack (`src/pack`, located at runtime via `CORT_PACK_DIR`) to `~/.local/share/cortexyoung/cort`, shimming `~/.cargo/bin/cort` or `~/.local/bin/cort`.
 - Deploys `skills/ast-grep/SKILL.md` to `~/.claude/skills/ast-grep/SKILL.md` with a managed marker. Preflights collisions before mutating: skips if hash-equal, replaces if managed, refuses unmanaged collisions (use `--force` to backup and replace).
 - Adds a single bounded idempotent `PATH` block to your shell profile (`.bashrc`/`.zshrc`/`.profile`) so `cort` and `ast-grep` are on `PATH`; removed on `--uninstall`.
 - Records ownership in `~/.local/share/cortexyoung/manifest` (v2 `key:value` lines) — uninstall only removes what it installed, never a pre-existing binary.
@@ -76,7 +92,7 @@ never appears in its own report.
 
 ```bash
 git pull --no-rebase
-./install.sh              # idempotent — skips hash-equal skill, no duplicate PATH block
+./install.sh              # idempotent — cargo decides build freshness (0.04s when nothing changed), skips hash-equal skill, no duplicate PATH block
 ```
 
 With xgrep (opt-in):
@@ -84,6 +100,18 @@ With xgrep (opt-in):
 ```bash
 ./install.sh --with-xgrep # idempotent xg install + xgrep skill deploy
 ```
+
+## Upgrade note — index schema v3
+
+Schema v3 adds a `raw_edges` table: the unresolved call/import matches that the relationship graph
+is derived from. It exists because resolution spans files — re-indexing one file used to delete its
+target chunks, `ON DELETE CASCADE` took the edges pointing at them with it, and the unchanged
+caller's edge was never rebuilt (audit F-01, `docs/2026-08-29-project-audit-root-causes-and-remediation.md`).
+
+Nothing to do by hand. An index written by an older cort is detected on first use, reported as
+stale, and rebuilt in full by the next `cort index --incremental` (which falls back to a full index
+while the graph is pending, then clears the marker). Until that rebuild runs, `impact` results come
+from the pre-upgrade graph and `index_is_stale` is `true`.
 
 ## Uninstall
 
@@ -145,8 +173,11 @@ are "the graph does not help". Full write-up (method, numbers, what remains unpr
    unreachable by `cort impact` at any depth — the cort arm scored 1.00 only because the agent went and
    read files, which is precisely the turn inflation that produced the STOP.
 
-Measured on tasks that require a relationship walk (`evals/relation-cost.mjs`, deterministic, no model in
-the loop; `cct`, 2,713 chunks; medians over 6 auto-picked multi-hop symbols):
+Measured on tasks that require a relationship walk (deterministic probe, no model in the loop; `cct`,
+2,713 chunks; medians over 6 auto-picked multi-hop symbols). **Provenance:** that probe was
+`evals/relation-cost.mjs`, which lived in the JS tree and was deleted by the Rust cutover
+(`1a4052cc`), so these numbers are historical evidence, not a reproducible command; recover it with
+`git show 1a4052cc^:evals/relation-cost.mjs` or re-price it with a Rust-native probe:
 
 | hops | `cort impact -f lean` | `rg` + reads to reach the same set | ratio | share of rg cost that is reads | rg hit precision |
 |---|---|---|---|---|---|
@@ -177,7 +208,7 @@ has been run yet.
 
 ## Documented limitations (contracts, not apologies)
 
-1. **Index staleness:** the index lags unsaved edits and brand-new untracked files. Every `cort` command returns JSON with `index_is_stale`; when `true`, run `cort index --incremental` before trusting the answer, or fall back to `rg`. A brand-new untracked file is invisible to `cort` until the next index. `cort index` must have been run once for the project.
+1. **Index staleness:** the index lags unsaved edits and brand-new untracked files. Every `cort` command returns JSON with `index_is_stale`; when `true`, run `cort index --incremental` before trusting the answer, or fall back to `rg`. A brand-new untracked file is invisible to `cort` until the next index. `cort index` must have been run once for the project. Staleness covers two things, not one: a file whose indexed content no longer matches disk, and a relationship graph that has not been recomputed since its chunks changed (the `graph_pending` marker — set by an interrupted index or an older-schema database — makes every graph answer stale instead of quietly wrong).
 2. **`chunk_id` stability:** `chunk_id` is stable only while a symbol's first line does not move — inserting lines above a symbol changes its id.
 3. **`context` is FTS-only:** `cort context` uses SQLite FTS keyword recall, not semantic search or embeddings. No vector, no RRF, no reranking.
 4. **Const-bound functions are chunks; plain aliases and collection transforms are not.** `const f = (x) => ...`,
@@ -188,7 +219,15 @@ has been run yet.
 5. **Name-based target resolution:** relationship targets are resolved by symbol name. A same-named symbol in an unimported file can still surface as `AMBIGUOUS`, even if it is not actually imported.
 6. **`--lang` is required on `struct`:** `cort struct -p '<pattern>' --lang <lang>` fails with `{"error":"missing_lang"}` if `--lang` is absent. It also drives the pattern pre-flight that turns a malformed pattern into `{"error":"parse_failed"}` instead of a silent empty result. The binary is `ast-grep`, never `sg`.
 7. **FTS tokenizer is bare `unicode61`:** the design calls for `unicode61 "remove_diacritics 1" "tokenchars ._$"`, but the bundled SQLite that ships with rusqlite 0.32 rejects every parameterised `unicode61` form (the JS reference via `better-sqlite3` had the same limit). Consequence: `cort context` keyword recall splits identifiers on `.`, `_` and `$` — searching `foo.bar` matches `foo` and `bar` separately, and diacritics are not folded. CJK still tokenizes. `src/schema.sql` carries a `NOTE` and reverting is one line once a SQLite build accepts the parameters.
-8. **Reading recall is lexical and source-validated:** `cort recall` searches only fragments previously
+8. **`impact` needs edge rules, and Rust has none:** the relationship graph is only as good as the
+   language's `edge:calls`/`edge:imports` rules in `src/pack/rules/`. Rust ships chunk rules only, so
+   `cort impact --symbol <rust-symbol>` returns `seeds=1 dependents=0` for a symbol with plenty of
+   callers. Use `rg`/`cargo check` for Rust (see the capability table above).
+9. **`status.unparsed` also counts files with no symbols:** `extract_file` degrades to a single
+   FTS-only `unparsed` chunk on timeout, on a non-zero `ast-grep` exit, **and** when the scan returns
+   zero records. A file that legitimately declares no functions (e.g. `rust/src/lib.rs`, which is only
+   `pub mod` lines) is therefore included in that count. It does not mean the parser failed.
+10. **Reading recall is lexical and source-validated:** `cort recall` searches only fragments previously
    captured by `cort read`; it is FTS5, not semantic memory. Changed or deleted source files invalidate
    their stored readings. Reading notes survive full and incremental re-indexing when the source is unchanged.
 
