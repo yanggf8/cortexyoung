@@ -40,12 +40,12 @@ just because the binary runs.
 |---|---|---|---|---|
 | TypeScript, TSX, JavaScript | yes | yes | yes | **yes** — `edge:calls` + `edge:imports` rules ship |
 | Python | yes | yes | yes | **yes** — same |
-| Rust | yes | **yes** (free functions, `impl`/trait methods as `Type::method`) | **yes** | **no** — `src/pack/rules/rust.yml` has chunk rules only, no edge rules, so the graph is empty |
+| Rust | yes | **yes** (free functions, `impl`/trait methods as `Type::method`) | **yes** | **partial** — bare calls and fully-qualified `Type::method()` calls index (`edge:calls`); receiver calls (`x.m()`) and module-path calls do not, and there is no `edge:imports` rule |
 
 For Rust, `cort context <symbol> --content full -f lean` is the supported use (that is the case the
-27k→89-token measurement below covers). For Rust callers, use `rg` for one hop and `cargo check` /
-`cargo build` errors for the precise list — a compiler beats a name-resolved graph here, and cort will
-not pretend otherwise. See `docs/2026-08-28-real-session-cost.md` §1.3.
+27k→89-token measurement below covers). Rust `impact` covers the two indexed call shapes and is
+name-resolved — treat its output as candidates. For the precise caller list use `cargo check` /
+`cargo build` errors — a compiler beats a name-resolved graph here. See `docs/2026-08-28-real-session-cost.md` §1.3.
 
 ## Local usage recording (opt-out by not existing: it is offline, plain SQLite)
 
@@ -225,10 +225,13 @@ has been run yet.
 5. **Name-based target resolution:** relationship targets are resolved by symbol name. A same-named symbol in an unimported file can still surface as `AMBIGUOUS`, even if it is not actually imported.
 6. **`--lang` is required on `struct`:** `cort struct -p '<pattern>' --lang <lang>` fails with `{"error":"missing_lang"}` if `--lang` is absent. It also drives the pattern pre-flight that turns a malformed pattern into `{"error":"parse_failed"}` instead of a silent empty result. The binary is `ast-grep`, never `sg`.
 7. **FTS tokenizer is bare `unicode61`:** the design calls for `unicode61 "remove_diacritics 1" "tokenchars ._$"`, but the bundled SQLite that ships with rusqlite 0.32 rejects every parameterised `unicode61` form (the JS reference via `better-sqlite3` had the same limit). Consequence: `cort context` keyword recall splits identifiers on `.`, `_` and `$` — searching `foo.bar` matches `foo` and `bar` separately, and diacritics are not folded. CJK still tokenizes. `src/schema.sql` carries a `NOTE` and reverting is one line once a SQLite build accepts the parameters.
-8. **`impact` needs edge rules, and Rust has none:** the relationship graph is only as good as the
-   language's `edge:calls`/`edge:imports` rules in `src/pack/rules/`. Rust ships chunk rules only, so
-   `cort impact --symbol <rust-symbol>` returns `seeds=1 dependents=0` for a symbol with plenty of
-   callers. Use `rg`/`cargo check` for Rust (see the capability table above).
+8. **`impact` is only as good as a language's edge rules:** the relationship graph indexes the call
+   shapes the language's `edge:calls`/`edge:imports` rules in `src/pack/rules/` capture. For Rust that
+   is bare calls (`foo()`) and fully-qualified associated calls (`Type::method()`), resolved by name;
+   receiver calls (`x.m()`), module-path calls (`crate::m::f()`) and `use`/`mod` edges are not
+   indexed, so `cort impact --symbol <rust-symbol>` can return `dependents=0` for a symbol with
+   plenty of callers. Use `cargo check`/`rg` for the precise Rust caller list (see the capability
+   table above).
 9. **`status.unparsed` also counts files with no symbols:** `extract_file` degrades to a single
    FTS-only `unparsed` chunk on timeout, on a non-zero `ast-grep` exit, **and** when the scan returns
    zero records. A file that legitimately declares no functions (e.g. `rust/src/lib.rs`, which is only

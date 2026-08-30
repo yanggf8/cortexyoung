@@ -75,6 +75,8 @@ turns multiplied by an accumulating transcript. Treat those verdicts as "the age
 `tasks.json` is single-hop or literal-answerable — it cannot exercise a transitive walk. Use
 `tasks-graph.json`: 3-hop blast-radius questions whose labels were produced by the shipped pack and then
 independently confirmed against file text (`cort-evals verify-impact`, precision 1.0 on all five chains).
+The same-day Rust `edge:calls` rules changed only `rust.yml`; all five chains are TypeScript-venue, so
+TS extraction — and these labels — are unaffected.
 `createSimplifiedEnhancedDAL` was measured and **dropped** for scoring 0.965, not 1.0 — labels that do not
 verify do not go in the file.
 

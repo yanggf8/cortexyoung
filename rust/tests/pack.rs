@@ -199,6 +199,66 @@ fn the_pack_extracts_chunks_and_edges_from_python() {
     );
 }
 
+/// Rust edge rules must never emit a bare last segment for a qualified call: a
+/// project-wide bare-name match would fabricate an INFERRED caller for any
+/// same-named free function. A scoped capture carries the full path (exact match
+/// against `Owner::method` chunks or nothing), and a receiver call emits no edge.
+#[test]
+fn the_pack_extracts_rust_call_edges_with_exact_targets_only() {
+    let _g = pack_guard();
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("k.rs");
+    fs::write(
+        &file,
+        [
+            "pub fn run(x: u8) -> u8 { x }",
+            "pub struct Worker;",
+            "impl Worker {",
+            "    pub fn run(&self) -> u8 { 1 }",
+            "}",
+            "pub fn caller(w: &Worker) -> u8 {",
+            "    run(1) + Worker::run(w) + w.run()",
+            "}",
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+    let bin = resolve_ast_grep_bin().expect("ast-grep on PATH");
+    let sg = sgconfig();
+    let r = exec_ast_grep(
+        &bin,
+        &[
+            "scan",
+            "--json=stream",
+            "--config",
+            sg.to_str().unwrap(),
+            file.to_str().unwrap(),
+        ],
+        ExecOpts::default(),
+    )
+    .unwrap();
+    assert_eq!(r.code, 0);
+    let mut callees: Vec<String> = r
+        .stdout
+        .trim()
+        .split('\n')
+        .filter(|l| !l.is_empty())
+        .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+        .filter(|x| x["message"] == "edge:calls")
+        .map(|x| {
+            x["metaVariables"]["single"]["CALLEE"]["text"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
+        .collect();
+    callees.sort();
+    // Exactly two edges: the bare call and the fully-qualified one. A second bare
+    // `run` from `Worker::run(w)`, or anything from `w.run()`, means the pack is
+    // fabricating name-collision targets again.
+    assert_eq!(callees, ["Worker::run", "run"]);
+}
+
 /// C1-5
 #[test]
 fn pack_dir_points_at_a_real_directory_containing_sgconfig_yml() {

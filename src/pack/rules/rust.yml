@@ -38,3 +38,22 @@ rule:
         kind: trait_item
         stopBy: end
         has: { field: name, pattern: $OWNER }
+---
+id: cort-rust-edge-calls
+language: Rust
+severity: hint
+message: edge:calls
+rule:
+  kind: call_expression
+  has: { field: function, kind: identifier, pattern: $CALLEE }
+---
+id: cort-rust-edge-calls-scoped
+language: Rust
+severity: hint
+message: edge:calls
+rule:
+  kind: call_expression
+  has:
+    field: function
+    kind: scoped_identifier
+    pattern: $CALLEE
