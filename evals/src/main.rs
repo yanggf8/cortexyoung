@@ -6,6 +6,8 @@
 //!                            [--concurrency 2] [--jail-dir <dir>] [--jail]
 //!   cort-evals verify-impact --repo <path> --symbols A,B [--depth 3]
 //!   cort-evals summarize     <rows.json>... [--strict]
+//!   cort-evals demand        [--claude-dir DIR] [--codex-dir DIR] [--exclude a,b]
+//!                            [--show] [--out FILE]
 
 use cort_evals::arms::{self, build_args, build_env, build_row, make_jail, AGENT_ARMS};
 use cort_evals::grade::{load_tasks, Task};
@@ -49,12 +51,20 @@ const RUN_AGENTS_FLAGS: &[&str] = &[
 ];
 const VERIFY_IMPACT_FLAGS: &[&str] = &["--repo", "--depth", "--symbols"];
 const SUMMARIZE_FLAGS: &[&str] = &["--strict"];
+const DEMAND_FLAGS: &[&str] = &[
+    "--claude-dir",
+    "--codex-dir",
+    "--exclude",
+    "--out",
+    "--show",
+];
 
-const USAGE_TOP: &str = "usage: cort-evals <run-agents|verify-impact|summarize> [options]";
+const USAGE_TOP: &str = "usage: cort-evals <run-agents|verify-impact|summarize|demand> [options]";
 const USAGE_RUN_AGENTS: &str = "usage: cort-evals run-agents --venue DIR [--tasks FILE] [--only ID[,ID...]] [--arms a,b] [--max-turns N] [--config-dir DIR] [--cache-dir DIR] [--jail-dir DIR] [--jail] [--out DIR] [--concurrency N] [--delay-secs N]";
 const USAGE_VERIFY_IMPACT: &str =
     "usage: cort-evals verify-impact --repo DIR --symbols A,B [--depth N]";
 const USAGE_SUMMARIZE: &str = "usage: cort-evals summarize [--strict] rows.json [rows.json...]";
+const USAGE_DEMAND: &str = "usage: cort-evals demand [--claude-dir DIR] [--codex-dir DIR] [--exclude a,b,c] [--out FILE] [--show]";
 
 /// The provider gates a sampling run on a rolling window, so "run these cells after the window
 /// resets" is part of the experiment, not shell glue. Seconds rather than a wall-clock time: the
@@ -633,12 +643,114 @@ fn summarize_main(argv: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// Demand-side measurement over the local agent transcripts. The defaults come from `$HOME` and
+/// nothing else: a baked-in `/home/<someone>/...` would be a developer's machine inside the repo,
+/// and AGENTS.md forbids it. A tree that does not exist on this machine is dropped with a note
+/// rather than failing the run, because one driver may simply not be installed here.
+fn demand_main(argv: &[String]) -> Result<(), String> {
+    guard_options(argv, DEMAND_FLAGS, USAGE_DEMAND)?;
+    let home = std::env::var("HOME").unwrap_or_default();
+    if home.is_empty() {
+        return Err("HOME is unset: pass --claude-dir and --codex-dir explicitly".to_string());
+    }
+    let wanted = vec![
+        (
+            "claude",
+            at(argv, "--claude-dir", &format!("{home}/.claude/projects")),
+        ),
+        (
+            "codex",
+            at(argv, "--codex-dir", &format!("{home}/.codex/sessions")),
+        ),
+    ];
+    let mut notes = Vec::new();
+    let mut trees = Vec::new();
+    let mut present: Vec<(&str, std::path::PathBuf)> = Vec::new();
+    for (label, path) in &wanted {
+        let dir = std::path::Path::new(path);
+        if dir.is_dir() {
+            present.push((*label, dir.to_path_buf()));
+            // Recorded with $HOME replaced by `<home>`: the artefact says which tree was read
+            // without publishing the account it was read from.
+            trees.push(json!({
+                "kind": label,
+                "path": path.replacen(&home, "<home>", 1),
+            }));
+        } else {
+            notes.push(format!("{label} tree {path} does not exist here, skipped"));
+        }
+    }
+    if present.is_empty() {
+        return Err(format!(
+            "no transcript tree to read (looked for {})",
+            wanted
+                .iter()
+                .map(|(_, p)| p.as_str())
+                .collect::<Vec<_>>()
+                .join(" and ")
+        ));
+    }
+    let exclude: Vec<String> = at(argv, "--exclude", "")
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+    let mut report = cort_evals::demand::scan(
+        present
+            .iter()
+            .find(|(k, _)| *k == "claude")
+            .map(|(_, p)| p.as_path()),
+        present
+            .iter()
+            .find(|(k, _)| *k == "codex")
+            .map(|(_, p)| p.as_path()),
+        &exclude,
+    )?;
+    if let Some(map) = report.as_object_mut() {
+        map.insert("trees_read".to_string(), json!(trees));
+        map.insert("notes".to_string(), json!(notes));
+    }
+    let out = at(argv, "--out", "");
+    if !out.is_empty() {
+        std::fs::write(
+            &out,
+            format!("{}\n", serde_json::to_string_pretty(&report).unwrap()),
+        )
+        .map_err(|e| format!("{out}: {e}"))?;
+    }
+    println!("{}", serde_json::to_string_pretty(&report).unwrap());
+    if has(argv, "--show") {
+        println!("--- every hit, with the needles that fired ---");
+        if let Some(list) = report["matches"].as_array() {
+            for m in list {
+                println!(
+                    "[{:5}] {} | {} | {}",
+                    m["class"].as_str().unwrap_or(""),
+                    m["project"].as_str().unwrap_or(""),
+                    m["needles"]
+                        .as_array()
+                        .map(|a| a
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .collect::<Vec<_>>()
+                            .join(","))
+                        .unwrap_or_default(),
+                    m["instruction"].as_str().unwrap_or("")
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 fn main() {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let result = match argv.first().map(String::as_str) {
         Some("run-agents") => run_agents(&argv[1..]),
         Some("verify-impact") => verify_impact_main(&argv[1..]),
         Some("summarize") => summarize_main(&argv[1..]),
+        Some("demand") => demand_main(&argv[1..]),
         other => {
             // Asking how to use the tool is never an error and never a run — including at the top
             // level, which is where F-17 stopped. `wants_help` already answered true for a bare
@@ -895,6 +1007,7 @@ mod whitelist_coverage {
                         .iter()
                         .chain(VERIFY_IMPACT_FLAGS.iter())
                         .chain(SUMMARIZE_FLAGS.iter())
+                        .chain(DEMAND_FLAGS.iter())
                         .any(|f| *f == name.as_str());
                     if !known {
                         orphans.push(format!("{name} (src/main.rs:{})", n + 1));

@@ -5,6 +5,7 @@
 //! holding `cort` reach the labelled answer for less than an agent holding a shell?
 
 pub mod arms;
+pub mod demand;
 pub mod grade;
 pub mod stream;
 pub mod summary;

@@ -1,0 +1,228 @@
+{
+  "adjudicates": "report.json matches[] in this directory",
+  "report_sha256": "a963cbab20940446a6059267c6d559cece97347578ad903ea3c4edb65c01bcef",
+  "method": "hand verdict per hit by whoever ran `cort-evals demand --show`; keyed by instruction prefix, not by array index, so a re-run cannot silently re-point a verdict",
+  "counts": {
+    "real_weak": 3,
+    "not_demand": 6,
+    "paste": 5,
+    "real": 4
+  },
+  "adjudicated_caller_set_demand": 7,
+  "usable_instructions": 1214,
+  "strict_rate": 0.0033,
+  "including_weak_rate": 0.0058,
+  "reading": "7 of 1214 usable instructions survived as real caller-set demand (4 strict, 7 including weak). The screen over-includes on purpose so a human can reject; every rejection is recorded here instead of being remembered as a narrative.",
+  "verdict_legend": {
+    "real": "cannot be done correctly without knowing who calls/uses the thing",
+    "real_weak": "plausible demand, but the instruction is too fragmentary to size",
+    "paste": "not the user's own words: an agent report or another model's review that survived own_words",
+    "not_demand": "the needle fired on something that is not a code symbol (docs, filenames, SQL, hosting)"
+  },
+  "items": [
+    {
+      "index": 0,
+      "project": "tsheet",
+      "class": "task",
+      "needles": [
+        "改名"
+      ],
+      "verdict": "real_weak",
+      "reason": "renaming data-source labels used across scripts; needs the usage set, but what is named is a string, not a symbol",
+      "instruction_prefix": "都對齊好,是BI就改好名叫BI,是Data改名叫NewData,要不太亂了"
+    },
+    {
+      "index": 1,
+      "project": "travel2026",
+      "class": "task",
+      "needles": [
+        "migrate"
+      ],
+      "verdict": "not_demand",
+      "reason": "a hosting decision (Turso vs D1); no call sites involved",
+      "instruction_prefix": "and also I like to know if I need to migrate my "
+    },
+    {
+      "index": 2,
+      "project": "travel2026",
+      "class": "task",
+      "needles": [
+        "delete",
+        "delete"
+      ],
+      "verdict": "paste",
+      "reason": "agent voice; the DELETEs are SQL statements",
+      "instruction_prefix": "Now addressing the 2 new corroboration findings:"
+    },
+    {
+      "index": 3,
+      "project": "typhoonway",
+      "class": "task",
+      "needles": [
+        "rename"
+      ],
+      "verdict": "not_demand",
+      "reason": "renaming a diagram inside a design document",
+      "instruction_prefix": "The dependency view has been presented in system"
+    },
+    {
+      "index": 4,
+      "project": "typhoonway",
+      "class": "task",
+      "needles": [
+        "move to"
+      ],
+      "verdict": "not_demand",
+      "reason": "moving a diagram section between design documents",
+      "instruction_prefix": "I will prefer HLD still in abstract, maybe we sh"
+    },
+    {
+      "index": 5,
+      "project": "typhoonway",
+      "class": "task",
+      "needles": [
+        "delete",
+        "delete"
+      ],
+      "verdict": "paste",
+      "reason": "another model's review comments pasted in for evaluation",
+      "instruction_prefix": "help me evaluate the polish comments from gemini"
+    },
+    {
+      "index": 6,
+      "project": "persona-core",
+      "class": "task",
+      "needles": [
+        "migrate"
+      ],
+      "verdict": "paste",
+      "reason": "agent status text describing pending commits",
+      "instruction_prefix": "Three things pending on disk/plan before moving "
+    },
+    {
+      "index": 7,
+      "project": "persona-core",
+      "class": "task",
+      "needles": [
+        "migrate"
+      ],
+      "verdict": "paste",
+      "reason": "agent status text",
+      "instruction_prefix": "Worktree clean. Phase 5 native code is fully shi"
+    },
+    {
+      "index": 8,
+      "project": "persona-core",
+      "class": "task",
+      "needles": [
+        "delete",
+        "delete"
+      ],
+      "verdict": "real",
+      "reason": "'confirm no skill-side caller still hits SERVICE_ALLOWED_PATHS' -- a caller-set existence check gating a deletion",
+      "instruction_prefix": "Phase 6 — skill retirement, now unblocked. Safe "
+    },
+    {
+      "index": 9,
+      "project": "ainews",
+      "class": "task",
+      "needles": [
+        "refactor"
+      ],
+      "verdict": "not_demand",
+      "reason": "review of a skill wrapper; nothing requires enumerating call sites",
+      "instruction_prefix": "Please code-review a newly created Claude Code s"
+    },
+    {
+      "index": 10,
+      "project": "cct",
+      "class": "task",
+      "needles": [
+        "replace"
+      ],
+      "verdict": "paste",
+      "reason": "agent voice ('Key changes made:')",
+      "instruction_prefix": "the revise of Document updated. Key changes made"
+    },
+    {
+      "index": 11,
+      "project": "tsheet",
+      "class": "ask",
+      "needles": [
+        "callers"
+      ],
+      "verdict": "real",
+      "reason": "the user distrusts the agent's claim that no callers use a key and asks for a fact check: the verification tax, visible in the logs",
+      "instruction_prefix": "fact check, please. your review is not very soli"
+    },
+    {
+      "index": 12,
+      "project": "cct",
+      "class": "task",
+      "needles": [
+        "refactor"
+      ],
+      "verdict": "real",
+      "reason": "reviewing what a refactor commit changed, where a missed call site is the finding to look for",
+      "instruction_prefix": "the code changes introduced by commit 87dfa1a7be"
+    },
+    {
+      "index": 13,
+      "project": "tc",
+      "class": "task",
+      "needles": [
+        "refactor"
+      ],
+      "verdict": "real",
+      "reason": "the user is mid-refactor and asks for the work to be reviewed",
+      "instruction_prefix": "working on the refactoring now, and review follo"
+    },
+    {
+      "index": 14,
+      "project": "tc",
+      "class": "task",
+      "needles": [
+        "delete",
+        "delete",
+        "replace"
+      ],
+      "verdict": "not_demand",
+      "reason": "generating quote markdown; delete/replacement name files and content",
+      "instruction_prefix": "longerr text are ok, tone fix required, long tex"
+    },
+    {
+      "index": 15,
+      "project": "tc",
+      "class": "task",
+      "needles": [
+        "delete",
+        "delete"
+      ],
+      "verdict": "not_demand",
+      "reason": "deletequote.md / appendquote.md are filenames, not symbols",
+      "instruction_prefix": "can you just prepare the deletequote.md and appe"
+    },
+    {
+      "index": 16,
+      "project": "cct",
+      "class": "task",
+      "needles": [
+        "refactor"
+      ],
+      "verdict": "real_weak",
+      "reason": "a review directive fragment about a refactor; too little to size",
+      "instruction_prefix": "the refactor works"
+    },
+    {
+      "index": 17,
+      "project": "cct",
+      "class": "task",
+      "needles": [
+        "replace"
+      ],
+      "verdict": "real_weak",
+      "reason": "a replacement whose referent is in earlier context",
+      "instruction_prefix": "go replace it"
+    }
+  ]
+}

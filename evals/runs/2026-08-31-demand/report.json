@@ -1,0 +1,349 @@
+{
+  "ask": {
+    "count": 1,
+    "share_of_instructions": 0.0008
+  },
+  "by_project": [
+    {
+      "ask": 0,
+      "project": ".claude-code-router",
+      "task": 0,
+      "usable": 95
+    },
+    {
+      "ask": 0,
+      "project": "20260211.20260215YokohamaTravel",
+      "task": 0,
+      "usable": 4
+    },
+    {
+      "ask": 0,
+      "project": "AttentionOS",
+      "task": 0,
+      "usable": 13
+    },
+    {
+      "ask": 0,
+      "project": "NemoClaw",
+      "task": 0,
+      "usable": 1
+    },
+    {
+      "ask": 0,
+      "project": "TCEX",
+      "task": 0,
+      "usable": 2
+    },
+    {
+      "ask": 0,
+      "project": "aienv",
+      "task": 0,
+      "usable": 6
+    },
+    {
+      "ask": 0,
+      "project": "ainews",
+      "task": 1,
+      "usable": 2
+    },
+    {
+      "ask": 0,
+      "project": "cct",
+      "task": 4,
+      "usable": 386
+    },
+    {
+      "ask": 0,
+      "project": "claude-skills",
+      "task": 0,
+      "usable": 7
+    },
+    {
+      "ask": 0,
+      "project": "claudecat",
+      "task": 0,
+      "usable": 5
+    },
+    {
+      "ask": 0,
+      "project": "claw",
+      "task": 0,
+      "usable": 8
+    },
+    {
+      "ask": 0,
+      "project": "cortexyoung",
+      "task": 0,
+      "usable": 41
+    },
+    {
+      "ask": 0,
+      "project": "dac",
+      "task": 0,
+      "usable": 123
+    },
+    {
+      "ask": 0,
+      "project": "frontend",
+      "task": 0,
+      "usable": 1
+    },
+    {
+      "ask": 0,
+      "project": "ft",
+      "task": 0,
+      "usable": 34
+    },
+    {
+      "ask": 0,
+      "project": "graphMER",
+      "task": 0,
+      "usable": 4
+    },
+    {
+      "ask": 0,
+      "project": "mos",
+      "task": 0,
+      "usable": 2
+    },
+    {
+      "ask": 0,
+      "project": "persona-core",
+      "task": 3,
+      "usable": 24
+    },
+    {
+      "ask": 0,
+      "project": "reloan",
+      "task": 0,
+      "usable": 12
+    },
+    {
+      "ask": 0,
+      "project": "tc",
+      "task": 3,
+      "usable": 173
+    },
+    {
+      "ask": 0,
+      "project": "toolkit",
+      "task": 0,
+      "usable": 2
+    },
+    {
+      "ask": 0,
+      "project": "travel2026",
+      "task": 2,
+      "usable": 86
+    },
+    {
+      "ask": 1,
+      "project": "tsheet",
+      "task": 1,
+      "usable": 96
+    },
+    {
+      "ask": 0,
+      "project": "typhoonway",
+      "task": 3,
+      "usable": 74
+    },
+    {
+      "ask": 0,
+      "project": "valueTube",
+      "task": 0,
+      "usable": 12
+    },
+    {
+      "ask": 0,
+      "project": "zencat",
+      "task": 0,
+      "usable": 1
+    }
+  ],
+  "dropped_as_pure_paste": 877,
+  "excluded_instructions": 51,
+  "excluded_projects": [
+    "<user>",
+    ".claude",
+    "b",
+    "transcripts",
+    "mosh-1.4.0"
+  ],
+  "files": {
+    "read": 301,
+    "unreadable": 0
+  },
+  "matches": [
+    {
+      "class": "task",
+      "instruction": "都對齊好,是BI就改好名叫BI,是Data改名叫NewData,要不太亂了",
+      "needles": [
+        "改名"
+      ],
+      "project": "tsheet"
+    },
+    {
+      "class": "task",
+      "instruction": "and also I like to know if I need to migrate my tursordb to cloudflare d1",
+      "needles": [
+        "migrate"
+      ],
+      "project": "travel2026"
+    },
+    {
+      "class": "task",
+      "instruction": "Now addressing the 2 new corroboration findings: Finding 1 (High — non-atomic sync): Fixed. syncNormalizedTables() now wraps the entire DELETE + INSERT sequence",
+      "needles": [
+        "delete",
+        "delete"
+      ],
+      "project": "travel2026"
+    },
+    {
+      "class": "task",
+      "instruction": "The dependency view has been presented in system overview diagram, rename the exisiting to depenecy view and propose me a correct one to show our true layers",
+      "needles": [
+        "rename"
+      ],
+      "project": "typhoonway"
+    },
+    {
+      "class": "task",
+      "instruction": "I will prefer HLD still in abstract, maybe we should mark that static dependency view to move to detail design in the future",
+      "needles": [
+        "move to"
+      ],
+      "project": "typhoonway"
+    },
+    {
+      "class": "task",
+      "instruction": "help me evaluate the polish comments from gemini 3.1 pro Minor Polish <path> Notes for the DLD The HLD is solid as-is, but keep these two things in mind as you ",
+      "needles": [
+        "delete",
+        "delete"
+      ],
+      "project": "typhoonway"
+    },
+    {
+      "class": "task",
+      "instruction": "Three things pending on disk/plan before moving forward: 1. Commit the uncommitted batch — T-2.9 migrate + users/columns/streams/installments/issues are all on ",
+      "needles": [
+        "migrate"
+      ],
+      "project": "persona-core"
+    },
+    {
+      "class": "task",
+      "instruction": "Worktree clean. Phase 5 native code is fully shipped. Remaining open work: Cleanup (small, do before switching tracks) 1. Plan docs are stale. PERSONA-CORE-PLAN",
+      "needles": [
+        "migrate"
+      ],
+      "project": "persona-core"
+    },
+    {
+      "class": "task",
+      "instruction": "Phase 6 — skill retirement, now unblocked. Safe ordering: 1. Traffic audit first — confirm no skill-side caller still hits SERVICE_ALLOWED_PATHS. Check recent a",
+      "needles": [
+        "delete",
+        "delete"
+      ],
+      "project": "persona-core"
+    },
+    {
+      "class": "task",
+      "instruction": "Please code-review a newly created Claude Code skill for dev.to bilingual publishing. Context: - Skill location: <path> - It wraps a Python CLI at <path> (alrea",
+      "needles": [
+        "refactor"
+      ],
+      "project": "ainews"
+    },
+    {
+      "class": "task",
+      "instruction": "the revise of Document updated. Key changes made: 1. Status Indicators - Changed missing to n/a with clear meaning for historical dates without data 2. Implemen",
+      "needles": [
+        "replace"
+      ],
+      "project": "cct"
+    },
+    {
+      "class": "ask",
+      "instruction": "fact check, please. your review is not very solid No callers use result[\"by_date\"] from Process A output. The by_date matches are all unrelated (sort_by_date pa",
+      "needles": [
+        "callers"
+      ],
+      "project": "tsheet"
+    },
+    {
+      "class": "task",
+      "instruction": "the code changes introduced by commit 87dfa1a7be1077d7ed68ff55f293d303e6861fce (\"refactor: wire all handlers to use shared pending page\"). Provide prioritized, ",
+      "needles": [
+        "refactor"
+      ],
+      "project": "cct"
+    },
+    {
+      "class": "task",
+      "instruction": "working on the refactoring now, and review following work",
+      "needles": [
+        "refactor"
+      ],
+      "project": "tc"
+    },
+    {
+      "class": "task",
+      "instruction": "longerr text are ok, tone fix required, long text ok, we are not not Tao, we are zen, please generate new quotes md file one for the delete one is for replaceme",
+      "needles": [
+        "delete",
+        "delete",
+        "replace"
+      ],
+      "project": "tc"
+    },
+    {
+      "class": "task",
+      "instruction": "can you just prepare the deletequote.md and appendquote.md",
+      "needles": [
+        "delete",
+        "delete"
+      ],
+      "project": "tc"
+    },
+    {
+      "class": "task",
+      "instruction": "the refactor works",
+      "needles": [
+        "refactor"
+      ],
+      "project": "cct"
+    },
+    {
+      "class": "task",
+      "instruction": "go replace it",
+      "needles": [
+        "replace"
+      ],
+      "project": "cct"
+    }
+  ],
+  "max_prompt_chars": 2000,
+  "method": "demand-v1",
+  "notes": [],
+  "reading": "1214 usable user instructions produced 1 ask and 17 task hits. Each hit carries its needles and the instruction verbatim: reject the false positives by hand before quoting either number.",
+  "task": {
+    "count": 17,
+    "share_of_instructions": 0.014
+  },
+  "task_per_ask": 17.0,
+  "trees_read": [
+    {
+      "kind": "claude",
+      "path": "<home>/.claude/projects"
+    },
+    {
+      "kind": "codex",
+      "path": "<home>/.codex/sessions"
+    }
+  ],
+  "usable_instructions": 1214
+}

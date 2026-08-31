@@ -78,7 +78,9 @@ independently confirmed against file text (`cort-evals verify-impact`, precision
 The same-day Rust `edge:calls` rules changed only `rust.yml`; all five chains are TypeScript-venue, so
 TS extraction — and these labels — are unaffected.
 `createSimplifiedEnhancedDAL` was measured and **dropped** for scoring 0.965, not 1.0 — labels that do not
-verify do not go in the file.
+verify do not go in the file. One of the six (`delete-getcurrenttimeet-task-framed`) is deliberately phrased
+as a task rather than a question, reusing another task's verified label set verbatim: the demand probe found
+the question-shaped task is the shape almost nobody uses, so the eval set should not be entirely made of it.
 
 ## Deterministic cost probe (no model in the loop)
 
@@ -107,6 +109,26 @@ papered over:
   walk plus per-hit enclosing-symbol pricing; `rusqlite` is already vendored in this repo), and it is only worth writing if
   the graph is still in scope after `docs/2026-08-29-finance-cli-measurement.md` and
   `docs/2026-08-28-real-session-cost.md`.
+
+## Demand probe (`demand`)
+
+Cost per use is `run-agents`. This answers the other half — how often the walk is wanted — from the
+local agent transcripts, reading `$HOME/.claude/projects` and `$HOME/.codex/sessions` (defaults;
+overridable with `--claude-dir` / `--codex-dir`, and a tree that is not on this machine is skipped
+into `notes` rather than reported as zero).
+
+It counts **instructions**, not questions, and splits them into `ask` (the answer *is* the
+relationship set) and `task` (rename / delete / migrate / extract / replace — not doable correctly
+without the call sites). The reason it is not a keyword grep: these logs are dominated by `review`
+followed by a **pasted agent report**, and that report is full of the words `refactor`, `impact` and
+`callers`. A naive keyword pass over raw user messages reports 7.9% relational demand on this
+corpus; after `own_words` strips the paste it reports 0.08%. That stripping is the most heavily
+tested function in the crate (`tests/demand.rs`), simplified-Chinese variants are normalised so a
+missed needle cannot under-count demand, and **every hit is emitted with its needles and the
+instruction verbatim** so a human can reject it. Rejections live in
+`evals/runs/2026-08-31-demand/adjudication.json`, keyed to the report by SHA-256 — an adjudication
+that is not version-bound to the data it judges is how the 2026-08-28 "0 of 1,565" conclusion ended
+up unverifiable.
 
 ## Stop/go gate (spec section 8)
 
@@ -139,6 +161,10 @@ cargo run --manifest-path evals/Cargo.toml --release -- run-agents \
 
 cargo run --manifest-path evals/Cargo.toml --release -- summarize \
   evals/runs/2026-08-26/rows.json          # add --strict to refuse unmeasured metrics
+
+cargo run --manifest-path evals/Cargo.toml --release -- demand \
+  --exclude yanggf,.claude,b,transcripts,mosh-1.4.0 --show \
+  --out evals/runs/2026-08-31-demand/report.json
 ```
 
 `run-agents` needs an isolated `CLAUDE_CONFIG_DIR` (default `/tmp/cc-eval`) or ~16k tokens of
