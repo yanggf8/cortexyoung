@@ -24,7 +24,7 @@
 這條本身就是發現的一半：**一條會決定功能去留的結論，站在了會被自動刪除的資料上，而且沒有留下任何
 可重算的中間產物。**這跟前三輪 `tool_return_tokens: null` 連續三轮沒人發現是同一類錯誤。
 
-## 2. 這次量到什麼（本機、兩套 driver、300 個 transcript 檔）
+## 2. 這次量到什麼（本機、兩套 driver、301 個 transcript 檔：Claude Code 95 + Codex 206）
 
 | 項目 | 數量 |
 |---|---|
@@ -36,7 +36,7 @@
 
 三個要一起讀的點：
 
-1. **877 / 2,090 = 42% 的「user 訊息」其實是 agent 報告被貼回來。** 這個比例本身就說明日常主軸
+1. **877 / 2,091 = 41.9% 的「user 訊息」其實是 agent 報告被貼回來。** 這個比例本身就說明日常主軸
    不是「問一個問題」，而是「做完 → 貼回來查」。
 2. 裁決出來的 4 筆嚴格需求裡，**3 筆長在寫入路線上**（persona-core 刪除前確認無人呼叫
    `SERVICE_ALLOWED_PATHS`；cct 審 `refactor: wire all handlers…` 那個 commit；tc 進行中的重構），
@@ -72,9 +72,13 @@
 
 ## 5. 邊界（別又把話說滿）
 
-- **本機不是主力機**：這 300 檔合計 2,764 次工具呼叫，而原文件引用的是 14,731 次。樣本偏
+- **本機不是主力機**：只數 Claude Code 那 103 個 transcript（本機 95 ＋ Windows 側 8）合計 2,764 次工具呼叫，而原文件引用的是 14,731 次；Codex 側未用同一標準計數，不放在一起講。樣本偏
   「這台機器上做的事」，且 cct 的 386 筆可用指令多數來自 Codex 而非 Claude Code。
 - 只讀了 Claude Code 與 Codex 兩套 log；經委派跑的其他 runtime 不在樣本內。
+- **讀的是 95 個 session 檔，不是該目錄下的全部 140 個 jsonl**：另外 45 個是
+  `<session>/subagents/agent-*.jsonl` 與 `vercel-plugin/skill-injections.jsonl`。前者是 subagent 的
+  transcript，那裡的 `role: user` 訊息是**我們自己寫給子行程的提示**，不是真人打字；把它計入分母會
+  直接灌大「需求」。`claude_user_line` 同時也擋掉 `isSidechain`。這是刻意取樣，不是漏讀。
 - 螢幕是刻意 over-include 的，裁決是一個人做的；`adjudication.json` 的存在目的就是讓下一個人
   能逐筆推翻它。推翻請改那個檔，不要改敘事。
 - `verify-impact` 只證「不是捏造」，`demand` 只證「多久發生一次」。**兩者都不證「值得」**——
@@ -92,6 +96,6 @@ cargo run --manifest-path evals/Cargo.toml --release -- demand \
 `notes`，不會假裝量到 0。`--exclude` 的名單是「不是 repo 根目錄的 cwd」（家目錄、`.claude` 設定
 目錄、上層目錄、third-party source、媒體資料），逐筆可見於 `report.json` 的 `by_project`。
 
-還活著的風險：**留存機制照樣會刪掉今天的原始 log**（默认 30 天）。這次的對策是把派生的
+還活著的風險：**留存機制照樣會刪掉今天的原始 log**（預設 30 天）。這次的對策是把派生的
 `report.json` + `adjudication.json` 進 repo，所以就算盤上原始檔消失，命中清單與裁決仍可查；
 不可重現的只剩「重新跑一次得到同樣的母數」這件事本身。

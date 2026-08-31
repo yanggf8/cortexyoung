@@ -229,7 +229,7 @@ that measurement falsified.
 The 2026-08-28 note concluded "0 of 1,565 real prompts asked about code relationships" — and its
 transcripts have since been deleted by Claude Code's 30-day retention, so it can no longer be recomputed.
 [`docs/2026-08-31-demand-recheck.md`](docs/2026-08-31-demand-recheck.md) re-measures it with a committed
-tool (`cort-evals demand`) over the 300 transcripts that do survive on this machine: 1,214 genuine user
+tool (`cort-evals demand`) over the 301 transcripts that still exist on this machine (95 Claude Code + 206 Codex): 1,214 genuine user
 instructions contain **one** relationship question (0.08%), and 4-7 (0.33-0.58%) are instructions that
 cannot be done correctly without a call-site set — all of them delete, refactor or review. 42% of what
 arrives as a "user message" is a pasted agent report being fact-checked. Every hit is listed with the
