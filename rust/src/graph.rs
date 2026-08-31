@@ -315,21 +315,17 @@ pub fn load_candidates(
     for row in rows {
         let (symbol, chunk_id, file_path) = row?;
         let module = module_segments(&file_path);
-        map.entry(symbol)
-            .or_default()
-            .push(Candidate {
-                chunk_id,
-                file_path,
-                module,
-            });
+        map.entry(symbol).or_default().push(Candidate {
+            chunk_id,
+            file_path,
+            module,
+        });
     }
     Ok(map)
 }
 
 fn ends_with_segments(hay: &[String], needle: &[String]) -> bool {
-    !needle.is_empty()
-        && hay.len() >= needle.len()
-        && hay[hay.len() - needle.len()..] == *needle
+    !needle.is_empty() && hay.len() >= needle.len() && hay[hay.len() - needle.len()..] == *needle
 }
 
 /// The resolution cascade, in memory, shared by the SQL wrapper (`resolve_targets`)
@@ -360,12 +356,10 @@ pub fn resolve_candidates(
 
     let (qualifier, _) = split_call_path(raw_target);
     if !exact_name && !qualifier.is_empty() {
-        return ids(
-            candidates
-                .iter()
-                .filter(|c| ends_with_segments(&c.module, &qualifier))
-                .collect(),
-        );
+        return ids(candidates
+            .iter()
+            .filter(|c| ends_with_segments(&c.module, &qualifier))
+            .collect());
     }
 
     // Same file wins first, exactly as before.
@@ -422,17 +416,9 @@ pub fn resolve_candidates(
     ids(candidates.iter().collect())
 }
 
-
-fn chunks_named(db: &Db, project_id: &str, name: &str) -> rusqlite::Result<Vec<(String, String)>> {
-    let mut stmt = db.prepare(
-        "SELECT chunk_id, file_path FROM chunks
-          WHERE project_id = ?1 AND symbol_name = ?2 ORDER BY chunk_id",
-    )?;
-    let rows = stmt
-        .query_map(params![project_id, name], |r| Ok((r.get(0)?, r.get(1)?)))?
-        .collect::<rusqlite::Result<_>>()?;
-    Ok(rows)
-}
+/// One entry per candidate: the chunk to attach, and the symbol name it was found under (the owner
+/// half of the binding rules needs the name, not just the id).
+pub type ReceiverCandidate = (String, String);
 
 /// Project-wide lookup from a call's *method* name to every chunk that declares a symbol ending in
 /// that name: `add` -> the chunks for `add`, `Tally::add`, `Store::add`.
@@ -441,10 +427,6 @@ fn chunks_named(db: &Db, project_id: &str, name: &str) -> rusqlite::Result<Vec<(
 /// `chunk_id` order, so the candidate set -- and therefore the gate's verdict -- is reproducible.
 /// A `LIKE '%:' || name` query per edge would have cost a full scan of `chunks` per call site, which
 /// on the measured venue is five thousand scans over the same table.
-/// One entry per candidate: the chunk to attach, and the symbol name it was found under (the owner
-/// half of the binding rules needs the name, not just the id).
-pub type ReceiverCandidate = (String, String);
-
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ReceiverIndex {
     by_name: HashMap<String, Vec<ReceiverCandidate>>,
@@ -604,7 +586,9 @@ pub fn resolve_targets(
         })
         .collect();
     if !exact.is_empty() {
-        return Ok(resolve_candidates(file_path, import_map, &exact, symbol, true));
+        return Ok(resolve_candidates(
+            file_path, import_map, &exact, symbol, true,
+        ));
     }
 
     if symbol.contains("::") {

@@ -12,7 +12,7 @@
 
 ---
 
-## 1. 這一段已經落地什麼（全部已推 master、CI 綠）
+## 1. 這一段已經落地什麼（全部已推 master；⚠ `209fa06f` 那筆**沒過 CI**，見 §3 項目 0）
 
 | commit | 內容 |
 |---|---|
@@ -26,6 +26,8 @@
 | `80d92d0` | K3 第二輪覆核紀錄 ＋ B／C 反事實實驗計數 |
 | `7ab31af` | `scan_skipped`：>2MB／讀檔失敗納為第三類盲檔並參與翻轉旗標 |
 | `(本提交)` | **schema v4**：`raw_edges.call_form` ＋ `relationships.call_site_line`／`call_form`；Rust pack 新增 receiver 規則；解析端「唯一才連 ＋ receiver 必須能綁到該 owner」；`impact` 印 `@<呼叫行> <form>`；`verify-impact` 新增逐行查證 |
+| `209fa06f` | 把「上游 receiver 閘」與「本地 module-path 後綴解析（`module_segments`／`expand_use_path`／`split_call_path`／`Candidate`／`resolve_candidates`）＋ Rust `edge:imports`」合併。**這筆沒過倉庫 gate**：rustfmt 4 個 hunk、clippy `dead_code`（`chunks_named` 被重寫後的 `resolve_targets` 遺留）、`ReceiverIndex` 的文件註解在合併時跑到 `ReceiverCandidate` 上面（結構體因此沒有說明了）。 |
+| `(本提交 2)` | 修掉上面三項（含把註解放回 `ReceiverIndex`）、補 `a_std_module_qualifier_that_matches_a_local_module_file_still_attaches` 把 std／本地模組同名的洞**釘住**、並更正 README 對這個洞的講法（它說會回 `AMBIGUOUS`，實測是回 `INFERRED` 的假邊）。合併後的實測：本倉庫同一棵樹 1,386→1,401 條邊（+18 條 module-path 全對、6 條原本 AMBIGUOUS 被 `use` 收窄）、cct 1,839 條與五條鏈逐條不變。 |
 
 量到的事實（決定優先序用的，不是敘事）：
 - 需求面：1,214 筆可用指令 → 問關係 **1 筆（0.08%）**；需呼叫點集合的寫入任務裁決後 **4 嚴格／7 含弱**；**877 筆（41.9%）是貼回來的 agent 報告**。
@@ -150,8 +152,15 @@
 4. 非來源檔（`.sh`／`.txt`／設定檔）與 `IGNORE_DIRS` 下的來源檔，三層全部看不見——**邊界，不是 bug**。
 5. `.wrangler/tmp/deploy-*/index.js` 7 份 bundle 在 cct 索引裡（`IGNORE_DIRS` 不含 `.wrangler`）：
    我們引用過的 cct chunk／edge 數都含它們。動 `IGNORE_DIRS` 會移動基線，**未決**。
-6. `mod::f()`（靠 `use` 帶進來的模組路徑）仍不解析，因為 Rust 側沒有 import 圖、`pub mod` 也不是
-   chunk。就是實驗裡判定「不做」的 B；翻案條件是換一個模塊間呼叫占比更高的 Rust 倉庫重跑計數。
+6. ~~`mod::f()` 仍不解析~~ **已被 `209fa06f` 翻案**：Rust 現在有 `edge:imports`（`use_declaration`）與
+   module-path 後綴解析，本倉庫因此 +18 條真邊、並把 6 條 AMBIGUOUS 收對。
+   當初「B 不做」的結論之所以相反，是因為當時想像的做法是「把 `fs::write` 退回末段 `write` 再全域比名字」；
+   實作的版本比的是**模組路徑**（`src/fs.rs` 的 module 結尾是 `fs`），所以 std／依賴呼叫照樣落空、
+   留在 `--coverage` 的列裡。教訓：判定「不做」时要寫清楚是**哪種機制**不做。
+   仍未做：`pub mod def;` 不是 chunk（mod 聲明還是沒有圖層身份）。
+7. **std／本地模組同名會造假邊**（`use std::fs;` + `fs::write()` 遇到專案裡的 `src/fs.rs::write`
+   → 直接連成 INFERRED，不會 AMBIGUOUS，因為外部 crate 根本沒入索引、沒有第二個候選可否決它）。
+   要修得靠「本 crate 名字」或 `mod` 聲明，也就是上面那條；目前用測試釘住行為，README 限制 #8 明寫。
 
 ## 4. 接續用的環境事實
 

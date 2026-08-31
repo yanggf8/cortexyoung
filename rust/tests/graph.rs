@@ -762,7 +762,10 @@ fn module_segments_strip_src_and_mod_components() {
         ("src/a/mod.rs", vec!["a"]),
         ("lib.rs", vec!["lib"]),
         ("main.rs", vec!["main"]),
-        ("crates/x/src/deep/nested.rs", vec!["crates", "x", "deep", "nested"]),
+        (
+            "crates/x/src/deep/nested.rs",
+            vec!["crates", "x", "deep", "nested"],
+        ),
     ];
     for (path, expected) in cases {
         let want: Vec<String> = expected.into_iter().map(str::to_string).collect();
@@ -806,7 +809,11 @@ fn a_qualified_rust_call_resolves_through_the_module_path_suffix() {
         "crate::a::value",
     )
     .unwrap();
-    assert_eq!(ids.len(), 1, "qualified call must pick the matching module, got {ids:?}");
+    assert_eq!(
+        ids.len(),
+        1,
+        "qualified call must pick the matching module, got {ids:?}"
+    );
     assert!(ids[0].contains("src/a.rs"));
 }
 
@@ -815,7 +822,10 @@ fn a_use_path_disambiguates_a_bare_rust_call_between_modules() {
     let ix = indexed(&[
         ("src/a.rs", "pub fn value(x: u8) -> u8 { x }\n"),
         ("src/b.rs", "pub fn value(x: u8) -> u8 { x + 1 }\n"),
-        ("src/main.rs", "use crate::a::value;\nfn go() { value(1); }\n"),
+        (
+            "src/main.rs",
+            "use crate::a::value;\nfn go() { value(1); }\n",
+        ),
     ]);
     let map: HashMap<String, String> = build_import_map(&[cort::chunker::Edge {
         rel_type: "imports".into(),
@@ -824,8 +834,7 @@ fn a_use_path_disambiguates_a_bare_rust_call_between_modules() {
         raw_target: "crate::a::value".into(),
         start_line: 1,
     }]);
-    let ids =
-        resolve_targets(&ix.db, &ix.project_id, "src/main.rs", &map, "value").unwrap();
+    let ids = resolve_targets(&ix.db, &ix.project_id, "src/main.rs", &map, "value").unwrap();
     assert_eq!(ids.len(), 1, "the use path must pick module a, got {ids:?}");
     assert!(ids[0].contains("src/a.rs"));
 }
@@ -845,6 +854,42 @@ fn a_qualified_call_matching_no_module_stays_unresolved() {
         "crate::nope::value",
     )
     .unwrap();
-    assert!(ids.is_empty(), "no module `nope` exists; the call must not resolve");
+    assert!(
+        ids.is_empty(),
+        "no module `nope` exists; the call must not resolve"
+    );
+}
 
+/// The hole the module-suffix rule cannot see, pinned rather than argued away.
+///
+/// `use std::fs;` + `fs::write(..)` is a dependency call, but the only evidence the suffix rule has
+/// is "some project module is named `fs`" -- and a project that ships `src/fs.rs` matches that
+/// exactly. Telling `std::fs` from a local `fs` needs the crate's own name or `mod` declarations,
+/// which is the undecided half of the "B" question (`docs/2026-08-31-coverage-external-review.md`).
+/// If a future change makes this resolve to nothing, the README limitation that describes it has to
+/// be deleted in the same commit -- a pinned wrong behaviour is a contract, a documented-away one is
+/// a lie waiting to happen.
+#[test]
+fn a_std_module_qualifier_that_matches_a_local_module_file_still_attaches() {
+    let ix = indexed(&[
+        ("src/fs.rs", "pub fn write(path: &str) -> u32 { 1 }\n"),
+        (
+            "src/main.rs",
+            "use std::fs;\nfn go() -> u32 { fs::write(\"x\") }\n",
+        ),
+    ]);
+    let map = build_import_map(&[cort::chunker::Edge {
+        rel_type: "imports".into(),
+        call_form: CallForm::Bare,
+        source_symbol: None,
+        raw_target: "std::fs".into(),
+        start_line: 1,
+    }]);
+    let ids = resolve_targets(&ix.db, &ix.project_id, "src/main.rs", &map, "fs::write").unwrap();
+    assert_eq!(
+        ids.len(),
+        1,
+        "current behaviour: the local `fs` module shadows the std one, {ids:?}"
+    );
+    assert!(ids[0].contains("src/fs.rs"), "{ids:?}");
 }

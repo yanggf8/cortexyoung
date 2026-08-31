@@ -290,9 +290,18 @@ than it attaches, and the gap boolean still needs the wording change it is coupl
    module-path calls (`crate::m::f()`) resolved by name and module-path suffix with `use` statements
    feeding the same map; only the internal prefixes `crate::`, `self::`, `super::`, `::` are rescued,
    so a dependency call like `Vec::new` stays unresolved and visible instead of inventing an edge
-   (`docs/2026-08-31-rust-qualified-call-resolution.md`). Module-suffix matching cannot tell apart
-   crates that share a module name — those come back `AMBIGUOUS`. Use `cargo check`/`rg` for the
-   precise Rust caller list (see the capability table above).
+   (`docs/2026-08-31-rust-qualified-call-resolution.md`). Measured on this repo: the rule added 18
+   module-path edges, all real (`usage::now_ms()`, `arms::resolve_binary()`, `coverage::attach()`), and
+   narrowed six previously-`AMBIGUOUS` bare calls onto the module their `use` names; `Vec::new` (75
+   sites), `fs::write` (44) and `String::new` (28) still attach nothing and stay visible as gaps.
+   **What it cannot see:** a qualifier that is a *dependency* module while a local module carries the
+   same name. `use std::fs;` + `fs::write(..)` in a project that ships `src/fs.rs::write` attaches to
+   the local one as `INFERRED` -- not `AMBIGUOUS`, because the external crate is not indexed and has no
+   candidate to disagree with. Separating them needs the crate's own name or `mod` declarations (the
+   undecided half of "B"); the behaviour is pinned by
+   `a_std_module_qualifier_that_matches_a_local_module_file_still_attaches`, so a relaxation cannot
+   arrive unnoticed. Use `cargo check`/`rg` for the precise Rust caller list (see the capability table
+   above).
 
    The Rust receiver shape is gated, and the gate is a name test, not a type test: `x.m()` becomes an
    edge only when `m` belongs to exactly one symbol in the project *and* `x` can be that symbol's owner

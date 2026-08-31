@@ -41,3 +41,13 @@ Caveats recorded honestly: the grading in (1) is a manual pass over 25 rows, by 
 wrote the gate. And neither check can see a *type* — a line that reads `e.kind()` "confirms" an edge
 to any symbol named `kind`, which is why the gate refuses those on the receiver's shape instead of
 trusting a unique name, and why `line_precision: 1.0` must never be quoted as correctness.
+
+## These files are pinned to `a0269cda`, and what has moved since
+
+`209fa06f` merged module-path suffix resolution and a Rust `edge:imports` rule on top of v4. Re-run
+on that commit, same working tree: the cct arm is **unchanged** (1,839 relationships; 66/23/4/20/4
+dependents with `line_precision` 1.0), and this repo's Rust chains gained 18 module-path edges
+(+15 net) with six `AMBIGUOUS` rows narrowed by their own `use` path -- so
+`verify-impact-self-v4.json`'s 64 dependents and the "1,369 relationships" quoted in
+`docs/2026-08-31-recall-wip.md` §1 are figures for `a0269cda`, not for current master. The receiver
+gate itself moved nothing: 9 attached edges before and after.
