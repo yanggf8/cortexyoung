@@ -159,9 +159,15 @@ fn coverage_lines(payload: &Value) -> Vec<String> {
             js_display(b, "unparsed"),
             js_display(b, "unindexed")
         ));
-        for f in arr(b, "unindexed_example") {
-            if let Some(name) = f.as_str() {
-                out.push(format!("blind\tunindexed\t{name}"));
+        // Paths, not just counts: "1 file is blind" tells an agent nothing it can act on.
+        for (kind, key) in [
+            ("unparsed", "unparsed_example"),
+            ("unindexed", "unindexed_example"),
+        ] {
+            for f in arr(b, key) {
+                if let Some(name) = f.as_str() {
+                    out.push(format!("blind\t{kind}\t{name}"));
+                }
             }
         }
     }

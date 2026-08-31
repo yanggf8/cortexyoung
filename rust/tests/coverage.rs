@@ -233,6 +233,48 @@ fn a_generated_bundle_is_not_allowed_to_look_like_a_missed_caller() {
 }
 
 #[test]
+fn a_blind_file_is_never_a_clean_bill_of_health() {
+    // The independent review (agy + gemini-3.1-pro, 2026-08-31) found the dangerous reading: a file
+    // the chunker could not read holds callers the mention scan never sees, so every per-seed gap
+    // list was empty and the flag answered `false` -- "nothing missed" while the graph was knowingly
+    // blind. Absence of signal in a blind tree must fail toward "may be incomplete".
+    let (_dir, root, db, project_id, bin) = indexed(&[
+        ("src/d.ts", "export function d() { return 1; }\n"),
+        (
+            "src/c.ts",
+            "import { d } from './d';\nexport function c() { return d(); }\n",
+        ),
+        ("src/notes.ts", "// a file with no symbols at all\n"),
+    ]);
+    let cov = coverage_of(&db, &project_id, &root, &bin, "d");
+    let blind = &cov["blind_files"];
+    let blind_seen =
+        blind["unparsed"].as_u64().unwrap_or(0) + blind["unindexed"].as_u64().unwrap_or(0);
+    assert!(
+        blind_seen >= 1,
+        "fixture should produce a blind file: {cov}"
+    );
+    assert!(
+        cov["seeds"].as_array().unwrap().iter().any(|s| {
+            s["enumeration_may_be_incomplete"] == Value::Bool(true)
+                && s["why"]
+                    .as_array()
+                    .map(|w| w.contains(&Value::String("blind_files".into())))
+                    == Some(true)
+        }),
+        "the blind file must reach the per-seed verdict, not just a side table: {cov}"
+    );
+    assert!(
+        blind["unparsed_example"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v.as_str().unwrap_or_default().contains("notes.ts")),
+        "a count without the path is not actionable: {blind}"
+    );
+}
+
+#[test]
 fn qualification_and_word_boundaries_are_parsed_the_way_the_caller_reads_them() {
     assert_eq!(bare_name("Tally::add"), "add");
     assert_eq!(bare_name("formatter.formatToParts"), "formatToParts");

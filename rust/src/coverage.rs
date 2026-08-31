@@ -41,6 +41,17 @@ pub const MAX_GAP_ROWS: usize = 20;
 /// not the line the callee's name sits on. Two lines of slack, and nothing more.
 pub const LINE_TOLERANCE: i64 = 2;
 
+/// How many files a blind-layer field reports, whether it carries a count or the path list. The
+/// flag has to be right whichever shape the field has: reading an array as "no count" and defaulting
+/// to zero is precisely how a blind file ended up producing a clean bill of health.
+fn blind_count(value: Option<&Value>) -> usize {
+    match value {
+        Some(Value::Array(list)) => list.len(),
+        Some(Value::Number(n)) => n.as_u64().unwrap_or(0) as usize,
+        _ => 0,
+    }
+}
+
 /// Paths that are machine-generated copies of the source tree. A bundle cannot be a caller of a
 /// source symbol, and `cct`'s index currently contains seven `.wrangler/tmp/deploy-*/index.js`
 /// copies because `IGNORE_DIRS` does not list `.wrangler` -- reported separately rather than
@@ -370,13 +381,18 @@ fn blind_files(
 ) -> Result<Value, CortError> {
     let err =
         |e: rusqlite::Error| CortError::new("storage_busy", json!({ "message": e.to_string() }));
-    let unparsed: i64 = db
-        .query_row(
-            "SELECT COUNT(DISTINCT file_path) FROM chunks WHERE project_id = ?1 AND chunk_source = 'unparsed'",
-            params![project_id],
-            |r| r.get(0),
+    // Paths, not just a count: "1 file is blind" is not actionable, "rust/src/legacy.rs is blind" is.
+    let mut unparsed_stmt = db
+        .prepare(
+            "SELECT DISTINCT file_path FROM chunks
+              WHERE project_id = ?1 AND chunk_source = 'unparsed' ORDER BY file_path",
         )
         .map_err(err)?;
+    let unparsed: Vec<String> = unparsed_stmt
+        .query_map(params![project_id], |r| r.get::<_, String>(0))
+        .map_err(err)?
+        .flatten()
+        .collect();
     let mut unindexed: Vec<String> = walk_files(root)
         .into_iter()
         .filter(|rel| {
@@ -392,7 +408,8 @@ fn blind_files(
     unindexed.sort();
     let hidden: Vec<String> = unindexed.iter().take(MAX_GAP_ROWS).cloned().collect();
     Ok(json!({
-        "unparsed": unparsed,
+        "unparsed": unparsed.len(),
+        "unparsed_example": unparsed.iter().take(MAX_GAP_ROWS).cloned().collect::<Vec<_>>(),
         "unindexed": unindexed.len(),
         "unindexed_example": hidden,
         "unindexed_truncated": unindexed.len() > MAX_GAP_ROWS,
@@ -423,6 +440,12 @@ pub fn coverage_for(
         }
     }
 
+    let blind = blind_files(db, project_id, root, &index_set)?;
+    // The reviewer's finding (agy, 2026-08-31): a file the chunker could not read holds callers the
+    // mention scan never sees, so "no gaps for this seed" was being read as a clean bill of health
+    // while `blind_files` said otherwise. Absence of signal inside a blind tree is not absence of
+    // gaps; the flag has to fail toward "may be incomplete".
+    let blind_gap = blind_count(blind.get("unparsed")) + blind_count(blind.get("unindexed")) > 0;
     let mut per_seed = Vec::new();
     for seed in seeds {
         let name = bare_name(&seed.symbol).to_string();
@@ -518,6 +541,16 @@ pub fn coverage_for(
         let mut causes: Vec<(&str, usize)> = by_cause.into_iter().collect();
         causes.sort_by(|a, b| a.0.cmp(b.0));
         let gap_rows = gap_rows_sorted.len() + unresolved.len();
+        let mut reasons: Vec<&str> = Vec::new();
+        if !gap_rows_sorted.is_empty() {
+            reasons.push("mentions_without_edge");
+        }
+        if !unresolved.is_empty() {
+            reasons.push("extracted_but_unresolved");
+        }
+        if blind_gap {
+            reasons.push("blind_files");
+        }
         per_seed.push(json!({
             "symbol": seed.symbol,
             "chunk_id": seed.chunk_id,
@@ -535,11 +568,11 @@ pub fn coverage_for(
             ),
             "mentions_without_edge": gaps,
             "extracted_but_unresolved": unresolved,
-            "enumeration_may_be_incomplete": gap_rows > 0,
+            "enumeration_may_be_incomplete": gap_rows > 0 || blind_gap,
+            "why": reasons,
         }));
     }
 
-    let blind = blind_files(db, project_id, root, &index_set)?;
     Ok(json!({
         "method": "coverage-v1 (three-layer recall screen: mentions, dropped resolutions, blind files)",
         "seeds": per_seed,
@@ -547,6 +580,8 @@ pub fn coverage_for(
         "reading": "mentions_without_edge and extracted_but_unresolved are candidates, not proof: a \
                     mention may be a comment, a string, or a same-named symbol elsewhere. They exist \
                     because dependents=0 is otherwise indistinguishable from an enumeration that never \
-                    saw the caller. Never read absence of a signal as verified completeness.",
+                    saw the caller. Never read absence of a signal as verified completeness. Outside all \
+                    three layers: a caller in a file the indexer does not read at all (.sh, .txt, config) \
+                    is invisible here, not merely blind.",
     }))
 }
