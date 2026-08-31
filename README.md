@@ -224,6 +224,26 @@ when a relationship walk is actually asked for; it is not asked for often. `docs
 is the historical prerequisite note behind that eval run, marked superseded, including the one claim in it
 that measurement falsified.
 
+### Demand, re-measured (2026-08-31)
+
+The 2026-08-28 note concluded "0 of 1,565 real prompts asked about code relationships" — and its
+transcripts have since been deleted by Claude Code's 30-day retention, so it can no longer be recomputed.
+[`docs/2026-08-31-demand-recheck.md`](docs/2026-08-31-demand-recheck.md) re-measures it with a committed
+tool (`cort-evals demand`) over the 300 transcripts that do survive on this machine: 1,214 genuine user
+instructions contain **one** relationship question (0.08%), and 4-7 (0.33-0.58%) are instructions that
+cannot be done correctly without a call-site set — all of them delete, refactor or review. 42% of what
+arrives as a "user message" is a pasted agent report being fact-checked. Every hit is listed with the
+needles that fired, and the hand verdicts are committed beside them.
+
+So the goal is stated where it can be argued with, and in [`AGENTS.md`](AGENTS.md) as the project's
+long-term direction: **make the caller-set enumeration an agent already performs — and often gets
+wrong — both cheap and checkable.** Cost per use is settled (7.7x smaller tool payload at ~4x fewer
+turns, 10/10 vs 6-of-10-wrong on the same tasks). Checkability is the open half: `impact` prints each
+dependent's definition line and not its call site, so confirming one edge still costs a re-read, which
+is the same gap the 2026-08-28 re-analysis recorded as section 6.2 and which the demand data now makes
+a priority rather than a polish item.
+
+
 ## Documented limitations (contracts, not apologies)
 
 1. **Index staleness:** the index lags unsaved edits and brand-new untracked files. Every `cort` command returns JSON with `index_is_stale`; when `true`, run `cort index --incremental` before trusting the answer, or fall back to `rg`. A brand-new untracked file is invisible to `cort` until the next index. `cort index` must have been run once for the project. Staleness covers two things, not one: a file whose indexed content no longer matches disk, and a relationship graph that has not been recomputed since its chunks changed (the `graph_pending` marker — set by an interrupted index or an older-schema database — makes every graph answer stale instead of quietly wrong).
