@@ -359,3 +359,152 @@ fn with_busy_retry_converts_a_full_or_corrupt_db_into_storage_full() {
         WithBusyRetryError::Other(_) => panic!("expected CortError storage_full"),
     }
 }
+
+// ---------------------------------------------------------------------------
+// schema v4: `raw_edges.call_form`, `relationships.call_site_line` + `call_form`.
+//
+// The reason this is a migration and not a rebuild: `CREATE TABLE IF NOT EXISTS` never adds a
+// column to a table that already exists, so an older database would come back with a schema
+// version of 4 and columns that do not exist -- and fail at the first insert, on someone's
+// repository, hours later.
+// ---------------------------------------------------------------------------
+
+/// The two tables exactly as schema v3 defined them, plus one row in each.
+const V3_SHAPED_DB: &str = "
+CREATE TABLE _cortex_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+INSERT INTO _cortex_meta (key, value) VALUES ('SCHEMA_VERSION', '3');
+CREATE TABLE projects (
+  project_id TEXT PRIMARY KEY, name TEXT NOT NULL, path TEXT NOT NULL, git_head TEXT,
+  last_indexed_at INTEGER, extractor_version TEXT NOT NULL, created_at TEXT DEFAULT (datetime('now')));
+INSERT INTO projects (project_id, name, path, extractor_version) VALUES ('p', 'p', '/p', 'v3');
+CREATE TABLE chunks (
+  chunk_id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(project_id) ON DELETE CASCADE,
+  file_path TEXT NOT NULL, symbol_name TEXT,
+  chunk_type TEXT CHECK(chunk_type IN ('function','class','method','config','documentation','unparsed')),
+  start_line INTEGER NOT NULL, end_line INTEGER NOT NULL, content TEXT NOT NULL,
+  content_hash TEXT NOT NULL, language TEXT,
+  chunk_source TEXT NOT NULL CHECK(chunk_source IN ('ast','unparsed')),
+  created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')));
+INSERT INTO chunks (chunk_id, project_id, file_path, symbol_name, chunk_type, start_line, end_line,
+  content, content_hash, language, chunk_source)
+  VALUES ('p:a.rs:1','p','a.rs','T::take','method',1,3,'fn take(){}','h','Rust','ast');
+INSERT INTO chunks (chunk_id, project_id, file_path, symbol_name, chunk_type, start_line, end_line,
+  content, content_hash, language, chunk_source)
+  VALUES ('p:b.rs:1','p','b.rs','go','function',1,3,'fn go(){}','h2','Rust','ast');
+CREATE TABLE relationships (
+  source_chunk_id TEXT NOT NULL REFERENCES chunks(chunk_id) ON DELETE CASCADE,
+  target_chunk_id TEXT NOT NULL REFERENCES chunks(chunk_id) ON DELETE CASCADE,
+  rel_type TEXT NOT NULL CHECK(rel_type IN ('imports','exports','calls')),
+  confidence TEXT NOT NULL CHECK(confidence IN ('EXTRACTED','INFERRED','AMBIGUOUS')),
+  confidence_score REAL NOT NULL CHECK(confidence_score BETWEEN 0 AND 1),
+  confidence_reasoning TEXT,
+  PRIMARY KEY (source_chunk_id, target_chunk_id, rel_type));
+INSERT INTO relationships (source_chunk_id, target_chunk_id, rel_type, confidence,
+  confidence_score, confidence_reasoning)
+  VALUES ('p:b.rs:1','p:a.rs:1','calls','INFERRED',0.7,'resolved: take');
+CREATE TABLE raw_edges (
+  project_id TEXT NOT NULL REFERENCES projects(project_id) ON DELETE CASCADE,
+  file_path TEXT NOT NULL, source_symbol TEXT NOT NULL DEFAULT '', raw_target TEXT NOT NULL,
+  rel_type TEXT NOT NULL CHECK(rel_type IN ('imports','exports','calls')),
+  start_line INTEGER NOT NULL,
+  PRIMARY KEY (project_id, file_path, rel_type, raw_target, source_symbol, start_line));
+INSERT INTO raw_edges (project_id, file_path, source_symbol, raw_target, rel_type, start_line)
+  VALUES ('p','b.rs','go','take','calls',2);
+";
+
+fn columns(db: &rusqlite::Connection, table: &str) -> Vec<String> {
+    db.prepare(&format!("PRAGMA table_info({table})"))
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(1))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect()
+}
+
+#[test]
+fn a_v3_database_is_upgraded_in_place_and_its_rows_survive_the_column_addition() {
+    let db = open_db(":memory:").unwrap();
+    db.execute_batch(V3_SHAPED_DB).unwrap();
+    ensure_schema(&db).unwrap();
+
+    assert_eq!(
+        get_meta(&db, "SCHEMA_VERSION").unwrap().as_deref(),
+        Some(SCHEMA_VERSION.to_string().as_str())
+    );
+    // The columns, on the tables that already existed: an ALTER that silently no-opped is the
+    // failure this test exists to catch.
+    for table in ["raw_edges", "relationships"] {
+        let cols = columns(&db, table);
+        assert!(cols.iter().any(|c| c == "call_form"), "{table}: {cols:?}");
+    }
+    assert!(columns(&db, "relationships")
+        .iter()
+        .any(|c| c == "call_site_line"));
+    assert_eq!(
+        get_meta(&db, "graph_pending").unwrap().as_deref(),
+        Some("1"),
+        "a graph whose rows predate the new columns is not trusted until a full re-index"
+    );
+
+    let (target, form, line): (String, String, Option<i64>) = db
+        .query_row(
+            "SELECT target_chunk_id, call_form, call_site_line FROM relationships",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!((target.as_str(), form.as_str()), ("p:a.rs:1", "bare"));
+    assert_eq!(line, None, "a v3 row cannot claim a line it never recorded");
+    let raw_form: String = db
+        .query_row("SELECT call_form FROM raw_edges", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(raw_form, "bare", "old edges mean what they always meant");
+}
+
+#[test]
+fn the_call_form_column_is_checked_on_upgraded_and_fresh_databases() {
+    // An `ALTER TABLE ADD COLUMN` that accepted the CHECK text but did not enforce it would let a
+    // bad form into the column the receiver gate reads its policy from.
+    let upgraded = open_db(":memory:").unwrap();
+    upgraded.execute_batch(V3_SHAPED_DB).unwrap();
+    ensure_schema(&upgraded).unwrap();
+    let fresh = fresh();
+
+    for (label, db) in [("upgraded", &upgraded), ("fresh", &fresh)] {
+        let err = db
+            .execute(
+                "INSERT INTO raw_edges (project_id, file_path, source_symbol, raw_target,
+                   rel_type, call_form, start_line)
+                 VALUES ('p','a.rs','go','take','calls','reciever',2)",
+                [],
+            )
+            .expect_err("a misspelled form must not be storable");
+        assert!(
+            err.to_string().contains("CHECK"),
+            "{label}: expected a CHECK violation, got {err}"
+        );
+        let rel_err = db
+            .execute(
+                "INSERT INTO relationships (source_chunk_id, target_chunk_id, rel_type,
+                   confidence, confidence_score, call_form)
+                 VALUES ('p:b.rs:1','p:a.rs:1','calls','INFERRED',0.7,'maybe')",
+                [],
+            )
+            .expect_err("a made-up form must not be storable");
+        assert!(rel_err.to_string().contains("CHECK"), "{label}: {rel_err}");
+    }
+}
+
+#[test]
+fn re_running_the_v4_upgrade_is_a_no_op() {
+    let db = open_db(":memory:").unwrap();
+    db.execute_batch(V3_SHAPED_DB).unwrap();
+    ensure_schema(&db).unwrap();
+    ensure_schema(&db).unwrap();
+    ensure_schema(&fresh()).unwrap();
+    let rows: i64 = db
+        .query_row("SELECT COUNT(*) FROM raw_edges", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(rows, 1, "no duplicated edges from a repeated migration");
+}

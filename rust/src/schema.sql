@@ -44,6 +44,17 @@ CREATE TABLE IF NOT EXISTS relationships (
   source_chunk_id TEXT NOT NULL REFERENCES chunks(chunk_id) ON DELETE CASCADE,
   target_chunk_id TEXT NOT NULL REFERENCES chunks(chunk_id) ON DELETE CASCADE,
   rel_type TEXT NOT NULL CHECK(rel_type IN ('imports','exports','calls')),
+  -- v4 (the recall line): the line that *names* the callee inside the source chunk, so confirming
+  -- one edge costs a one-line read instead of re-reading the dependent. It is the earliest such
+  -- line, because `relationships` is keyed by (source, target, rel_type): two calls from one
+  -- function to one callee are one edge, and one line is all this column claims to be.
+  call_site_line INTEGER,
+  -- How the extractor saw the call, because the resolution policy differs per form: a `receiver`
+  -- edge (`t.add()`) attaches only when the method name is unique project-wide, while `bare` and
+  -- `scoped` keep the pre-v4 rules. Carrying the form is what makes an edge falsifiable -- a
+  -- reader can check the claim without re-deriving it.
+  call_form TEXT NOT NULL DEFAULT 'bare'
+    CHECK(call_form IN ('bare','receiver','scoped')),
   confidence TEXT NOT NULL CHECK(confidence IN ('EXTRACTED','INFERRED','AMBIGUOUS')),
   confidence_score REAL NOT NULL CHECK(confidence_score BETWEEN 0 AND 1),
   confidence_reasoning TEXT,
@@ -63,6 +74,15 @@ CREATE TABLE IF NOT EXISTS raw_edges (
   source_symbol TEXT NOT NULL DEFAULT '',
   raw_target TEXT NOT NULL,
   rel_type TEXT NOT NULL CHECK(rel_type IN ('imports','exports','calls')),
+  -- v4: carried from the pack rule that matched (`edge:calls:receiver`), because the gate in
+  -- `graph::resolve_edge_targets` has to know which form an unresolved name arrived as. `bare` is
+  -- the pre-v4 shape, so rows an upgrade adds with DEFAULT 'bare' mean what they always meant.
+  -- The primary key is deliberately unchanged. A bare `add()` and a receiver `t.add()` on one line do
+  -- not collide, because a receiver edge stores its head (`t.add`) beside the method name; what is
+  -- left is a true duplicate, and `indexer::replace_file_raw_edges` writes in a canonical order so
+  -- the surviving row does not depend on the order ast-grep emitted records in.
+  call_form TEXT NOT NULL DEFAULT 'bare'
+    CHECK(call_form IN ('bare','receiver','scoped')),
   start_line INTEGER NOT NULL,
   PRIMARY KEY (project_id, file_path, rel_type, raw_target, source_symbol, start_line)
 );

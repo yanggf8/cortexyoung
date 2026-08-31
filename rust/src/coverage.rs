@@ -203,14 +203,9 @@ fn is_word_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_' || c == '$' || c == '\u{00b7}'
 }
 
-/// `Type::method`, `crate::m::f` and `x.method` all name the method `method`.
-pub fn bare_name(target: &str) -> &str {
-    target
-        .rsplit([':', '.'])
-        .next()
-        .filter(|s| !s.is_empty())
-        .unwrap_or(target)
-}
+/// `Type::method`, `crate::m::f` and `x.method` all name the method `method`. The one split both the
+/// receiver gate (`graph`) and this screen use; re-exported so the two cannot drift apart.
+pub use crate::chunker::bare_name;
 
 /// Every whole-word occurrence of `name`, as 1-based (line, column). The column is what makes a
 /// cause guess possible, and the cause is what makes the list usable: a screen that reports a git

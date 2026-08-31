@@ -40,8 +40,8 @@ const INSERT_CHUNK: &str =
   VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)";
 
 const INSERT_RAW_EDGE: &str = "INSERT INTO raw_edges
-  (project_id, file_path, source_symbol, raw_target, rel_type, start_line)
-  VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+  (project_id, file_path, source_symbol, raw_target, rel_type, call_form, start_line)
+  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
   ON CONFLICT(project_id, file_path, rel_type, raw_target, source_symbol, start_line)
   DO NOTHING";
 
@@ -284,6 +284,7 @@ pub(crate) fn insert_raw_edge(
             edge.source_symbol.clone().unwrap_or_default(),
             edge.raw_target,
             edge.rel_type,
+            edge.call_form.as_str(),
             edge.start_line,
         ],
     )?;
@@ -302,7 +303,20 @@ pub(crate) fn replace_file_raw_edges(
         "DELETE FROM raw_edges WHERE project_id = ?1 AND file_path = ?2",
         params![project_id, file_path],
     )?;
-    for edge in edges {
+    // `raw_edges` keys on (file, rel_type, target, source, line) without the call form, so two forms
+    // of the same call on one line are a single row and the insert order decides which one survives.
+    // Make that order a rule instead of a coincidence of subprocess output.
+    let mut ordered: Vec<&crate::chunker::Edge> = edges.iter().collect();
+    ordered.sort_by_key(|e| {
+        (
+            e.rel_type.clone(),
+            e.raw_target.clone(),
+            e.source_symbol.clone().unwrap_or_default(),
+            e.start_line,
+            e.call_form.insertion_rank(),
+        )
+    });
+    for edge in ordered {
         insert_raw_edge(conn, project_id, file_path, edge)?;
     }
     Ok(())

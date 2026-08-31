@@ -138,8 +138,37 @@ fn lean_impact_output_lists_every_dependent_with_its_hop_and_drops_the_stored_ch
             .any(|l| l == "# impact d depth=3 seeds=1 dependents=3 stale=false"),
         "{out}"
     );
-    assert!(out.lines().any(|l| l == "h1\tsrc/c.ts\tc\t2"), "{out}");
-    assert!(out.lines().any(|l| l == "h3\tsrc/a.ts\ta\t2"), "{out}");
+    // Six columns, the last two new in schema v4: the line *inside* the dependent that names the
+    // callee, and the call shape the extractor saw. In this fixture every function is one line, so
+    // the definition line and the call site are the same number -- which is itself the reason the
+    // two are printed separately.
+    assert!(
+        out.lines().any(|l| l == "h1\tsrc/c.ts\tc\t2\t@2\tbare"),
+        "{out}"
+    );
+    assert!(
+        out.lines().any(|l| l == "h3\tsrc/a.ts\ta\t2\t@2\tbare"),
+        "{out}"
+    );
+    for line in out.lines().skip(1).filter(|l| l.starts_with('h')) {
+        assert_eq!(line.split('\t').count(), 6, "fixed shape: {line}");
+    }
+    // A dependency that came in through an import has no call site. `-`, never line 0 and never a
+    // shorter row: a missing value that changes the row's shape gets misread as a different column.
+    let no_site = serde_json::json!({
+        "symbol": "x", "depth": 1, "seed_count": 1, "seeds": [], "dependent_count": 1,
+        "index_is_stale": false,
+        "dependents": [{
+            "chunk_id": "p:a.ts:9", "symbol_name": "uses", "file_path": "a.ts",
+            "start_line": 9, "end_line": 12, "hop": 1,
+        }],
+    });
+    assert!(
+        render(Some("impact"), Format::Lean, &no_site)
+            .lines()
+            .any(|l| l == "h1\ta.ts\tuses\t9\t-\t-"),
+        "{no_site}"
+    );
     let chunk_id = impact["dependents"][0]["chunk_id"].as_str().unwrap();
     assert!(!out.contains(chunk_id), "lean must not repeat the chunk_id");
     assert!(

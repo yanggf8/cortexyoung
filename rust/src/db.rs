@@ -1,4 +1,4 @@
-//! SQLite open / schema v3 / cache helpers.
+//! SQLite open / schema v4 / cache helpers.
 
 use crate::errors::CortError;
 use rusqlite::{params, Connection, ErrorCode, OpenFlags};
@@ -7,7 +7,24 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
+
+/// Every `TEXT NOT NULL DEFAULT` column an `ALTER TABLE ADD COLUMN` has to supply, per table.
+/// Kept as one list so the upgrade path and `schema.sql` cannot drift: a column that exists in the
+/// fresh schema but not here produces a database that only fails at first insert.
+const V4_ADDED_COLUMNS: &[(&str, &str, &str)] = &[
+    (
+        "raw_edges",
+        "call_form",
+        "TEXT NOT NULL DEFAULT 'bare' CHECK(call_form IN ('bare','receiver','scoped'))",
+    ),
+    ("relationships", "call_site_line", "INTEGER"),
+    (
+        "relationships",
+        "call_form",
+        "TEXT NOT NULL DEFAULT 'bare' CHECK(call_form IN ('bare','receiver','scoped'))",
+    ),
+];
 
 const SCHEMA_SQL: &str = include_str!("schema.sql");
 
@@ -86,6 +103,47 @@ pub fn set_meta(db: &Db, key: &str, value: &str) -> rusqlite::Result<()> {
     Ok(())
 }
 
+fn column_exists(db: &Db, table: &str, column: &str) -> rusqlite::Result<bool> {
+    let mut stmt = db.prepare(&format!("PRAGMA table_info({table})"))?;
+    let found = stmt
+        .query_map([], |r| r.get::<_, String>(1))?
+        .any(|r| r.map(|n: String| n == column).unwrap_or(false));
+    Ok(found)
+}
+
+/// Add the v4 columns to tables that predate them.
+///
+/// `CREATE TABLE IF NOT EXISTS` never adds a column to a table that already exists, so an upgrade
+/// has to say so explicitly or every later insert into `raw_edges` fails on an unknown column.
+/// Order matters: this runs *before* `SCHEMA_VERSION` is written, so a failed `ALTER` leaves the
+/// database at its old version and the next run retries instead of trusting a half-migrated file.
+/// The rows themselves need no back-fill -- `raw_edges` is rewritten by the full re-index that
+/// `graph_pending` forces, and `relationships` is derived state rebuilt from it.
+fn migrate_v4(db: &Db) -> Result<(), CortError> {
+    for (table, column, spec) in V4_ADDED_COLUMNS {
+        let exists = column_exists(db, table, column).map_err(|e| {
+            CortError::new(
+                "schema_migration_failed",
+                json!({ "table": table, "column": column, "message": e.to_string() }),
+            )
+        })?;
+        if exists {
+            continue;
+        }
+        db.execute(
+            &format!("ALTER TABLE {table} ADD COLUMN {column} {spec}"),
+            [],
+        )
+        .map_err(|e| {
+            CortError::new(
+                "schema_migration_failed",
+                json!({ "table": table, "column": column, "message": e.to_string() }),
+            )
+        })?;
+    }
+    Ok(())
+}
+
 pub fn ensure_schema(db: &Db) -> Result<(), CortError> {
     db.execute_batch(SCHEMA_SQL)
         .expect("schema.sql (JS rethrows raw sqlite errors)");
@@ -98,9 +156,11 @@ pub fn ensure_schema(db: &Db) -> Result<(), CortError> {
     if existing.is_none() {
         set_meta(db, "SCHEMA_VERSION", &expected).expect("setMeta");
     } else if upgrading {
-        // v3 adds `raw_edges`. An older database has chunks but no raw-edge layer, so a
-        // rebuild would resolve zero edges and silently wipe the graph. Mark it pending:
-        // `status` reports stale and the next incremental index falls back to a full one.
+        migrate_v4(db)?;
+        // v3 added `raw_edges`; v4 adds `call_form` and the call-site line. An older database has
+        // chunks whose edges cannot be re-derived with the new columns filled in, so a rebuild would
+        // silently wipe the graph. Mark it pending: `status` reports stale and the next incremental
+        // index falls back to a full one.
         set_meta(db, "graph_pending", "1").expect("setMeta");
         set_meta(db, "SCHEMA_VERSION", &expected).expect("setMeta");
     } else if existing.as_deref() != Some(expected.as_str()) {

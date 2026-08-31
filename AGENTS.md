@@ -13,10 +13,16 @@ cannot be done correctly without a call-site set - all of them on the delete / r
 The same corpus shows 42% of what arrives as a "user message" is a pasted agent report being fact-checked,
 which is the real surface: the agent does this work unprompted, gets multi-hop answers wrong in 6 of 10
 cells (`evals/runs/2026-08-30-graph{,-sample2}/`), and is then asked to prove it. Cost per use is already
-settled (7.7x smaller tool payload at ~4x fewer turns, same venue, same task set); **checkability is the
-open half** - `impact` reports each dependent's *definition* line and not its *call site*, so confirming
-one edge still costs a re-read, and `relationships` stores no call-site column. A change that makes an
-answer cheaper to verify is on the main line; a feature that only makes answers more numerous is not.
+settled (7.7x smaller tool payload at ~4x fewer turns, same venue, same task set). **Checkability is the
+open half.** Its first piece landed on 2026-08-31 (schema v4): `relationships` stores `call_site_line`
+and `call_form`, `impact` prints `@<line> <form>` beside each dependent's definition line, and
+`cort-evals verify-impact` grades an edge against that single line (117/117 dependents on the 5 cct
+chains, 64/64 on 4 chains in this repo). The rest of that half is still open and it is the *other*
+direction of the same claim: the receiver gate attaches 9 of 4,833 receiver call sites here (all 9
+correct, every refusal a `--coverage` row), `enumeration_may_be_incomplete` still flips on every
+`unparsed` file, and nobody has written down what reading `false` entitles an agent to conclude. A
+change that makes an answer cheaper to verify is on the main line; a feature that only makes answers
+more numerous is not.
 
 **The repo is pure Rust. No JavaScript, TypeScript, Python or other scripting language may exist as executable code** — not as a product entry point, not as tooling, not as tests. The eval harness that used to be six `.mjs` files was ported into the `evals/` crate for exactly this reason. Bash stays only where the platform requires it (`install.sh`, `tests/install-smoke.sh`); it is not a place to put logic. If a task seems to need a script, add a Rust subcommand to `evals/` or `rust/` instead.
 

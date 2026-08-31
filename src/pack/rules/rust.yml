@@ -38,11 +38,19 @@ rule:
         kind: trait_item
         stopBy: end
         has: { field: name, pattern: $OWNER }
+# Three call shapes, three forms, named in the message because the message string is the only
+# channel a rule has to the parser (`chunker::parse_edge_tag`). The form decides the resolution
+# policy -- see `graph::resolve_edge_targets` -- so these three rules may not be collapsed.
+#
+# `field_expression` rather than `method_call_expression`: the Rust grammar ast-grep 0.45.2 pins has
+# no such node. `t.add()` is a `call_expression` whose `function` is a `field_expression` with the
+# method name in `field`. A rule written against the older node name matches nothing and says so by
+# producing no edges at all, which is how the receiver shape stayed invisible for this long.
 ---
 id: cort-rust-edge-calls
 language: Rust
 severity: hint
-message: edge:calls
+message: edge:calls:bare
 rule:
   kind: call_expression
   has: { field: function, kind: identifier, pattern: $CALLEE }
@@ -50,10 +58,27 @@ rule:
 id: cort-rust-edge-calls-scoped
 language: Rust
 severity: hint
-message: edge:calls
+message: edge:calls:scoped
 rule:
   kind: call_expression
   has:
     field: function
     kind: scoped_identifier
     pattern: $CALLEE
+---
+# $CALLEE is the whole call head (`tally.add`), not the method name: the receiver is the only
+# evidence available for whether this call can bind to a given symbol, and a receiver-shaped edge
+# without it is an unverifiable name match. $METHOD is the name itself, so the edge can be pinned to
+# the line the callee is written on -- which for `tally\n    .add()` is not where the head starts.
+id: cort-rust-edge-calls-receiver
+language: Rust
+severity: hint
+message: edge:calls:receiver
+rule:
+  kind: call_expression
+  has:
+    field: function
+    kind: field_expression
+    all:
+      - pattern: $CALLEE
+      - has: { field: field, kind: field_identifier, pattern: $METHOD }

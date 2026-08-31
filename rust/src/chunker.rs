@@ -12,6 +12,87 @@ use std::collections::HashSet;
 const CHUNK_TAG: &str = "chunk:";
 const EDGE_TAG: &str = "edge:";
 
+/// The call shapes the graph resolves differently, and the only values
+/// `raw_edges.call_form` / `relationships.call_form` may hold (both columns are CHECK-constrained
+/// to this list). A pack rule names its form in its message -- `edge:calls:receiver` -- because the
+/// message string is the only channel from a rule to the parser.
+/// The last segment of a call target: `Tally::add` -> `add`, `formatter.formatToParts` ->
+/// `formatToParts`. Lives here because three modules need the same split -- the receiver gate in
+/// `graph`, the mention screen in `coverage`, and the line that names a callee -- and two different
+/// answers to "which name is this" is how a gate and a report start disagreeing.
+pub fn bare_name(target: &str) -> &str {
+    target
+        .rsplit([':', '.'])
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(target)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CallForm {
+    /// `add()` -- a name with no qualifier (#[default]); the pre-v4 behaviour of every rule.
+    #[default]
+    Bare,
+    /// `t.add()` -- the method name is only worth an edge if it is unique project-wide.
+    Receiver,
+    /// `Worker::add()` / `crate::m::f()` -- carries its own path, so it is matched exactly.
+    Scoped,
+}
+
+impl CallForm {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Bare => "bare",
+            Self::Receiver => "receiver",
+            Self::Scoped => "scoped",
+        }
+    }
+
+    /// Public because the database stores the string and `graph` has to read it back.
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "bare" => Some(Self::Bare),
+            "receiver" => Some(Self::Receiver),
+            "scoped" => Some(Self::Scoped),
+            _ => None,
+        }
+    }
+
+    /// Total order for writing edges into `raw_edges`, whose key does not include the form. A bare
+    /// `add()` and a receiver `t.add()` no longer collide -- the receiver stores its head -- so what
+    /// is left is a genuinely duplicated row, and the rank exists to make *which* row survives a rule
+    /// rather than an artefact of the order ast-grep emitted records in. `receiver` first, because it
+    /// is the form with the strictest gate behind it.
+    pub fn insertion_rank(self) -> u8 {
+        match self {
+            Self::Receiver => 0,
+            Self::Scoped => 1,
+            Self::Bare => 2,
+        }
+    }
+}
+
+/// The rel types the schema allows. Checked here so one typo in a pack rule message cannot take
+/// down `cort index` for a whole project: the CHECK constraint would reject the insert mid-
+/// transaction, and every chunk and edge already gathered would be lost with it.
+pub const EDGE_REL_TYPES: &[&str] = &["imports", "exports", "calls"];
+
+/// Split an `edge:` tag remainder into (rel_type, call_form).
+///
+/// `calls` -> (calls, bare), `calls:receiver` -> (calls, receiver). `None` -- an unknown rel type or
+/// an unknown form -- drops the edge rather than guessing: a dropped edge leaves the call site
+/// uncovered in the coverage screen, so a rule typo surfaces as a reported gap, whereas defaulting a
+/// mistyped `reciever` to `bare` would have attached it under the looser policy and *hidden* the hole.
+pub fn parse_edge_tag(rest: &str) -> Option<(String, CallForm)> {
+    let (rel_type, form) = match rest.split_once(':') {
+        Some((rel, form)) => (rel, CallForm::parse(form)?),
+        None => (rest, CallForm::Bare),
+    };
+    EDGE_REL_TYPES
+        .contains(&rel_type)
+        .then(|| (rel_type.to_string(), form))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Chunk {
     pub chunk_id: String,
@@ -30,8 +111,18 @@ pub struct Chunk {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Edge {
     pub rel_type: String,
+    /// Which call shape produced this edge. Only meaningful for `calls`; an import carries `bare`.
+    pub call_form: CallForm,
     pub source_symbol: Option<String>,
+    /// What the code calls, with whitespace removed: `helper` for a bare call, `crate::m::f` for a
+    /// qualified one, `tally.add` for a receiver call. A receiver target keeps its receiver because
+    /// that is the only evidence `graph::receiver_binds` has for whether the call can bind to the
+    /// symbol it is about to attach to; dropping it is what made the first cut of this gate invent
+    /// edges from `e.kind()` to a test fixture's `FailFs::kind`.
     pub raw_target: String,
+    /// The line that names the callee: for a call record this is the `CALLEE` capture's own line,
+    /// not the matched node's, because a chained `a.b()\n .c()` names `c` two lines below where the
+    /// outer call starts. This is what `relationships.call_site_line` ends up storing.
     pub start_line: i64,
 }
 
@@ -85,6 +176,11 @@ pub fn edge_string(edge: &Edge) -> String {
     )
 }
 
+/// The form a call arrived as is *not* part of this hash. A form can only change two ways: the text
+/// changed (which changes the target set or the recorded lines, and so the hash), or the rules that
+/// assign forms changed -- and that moves `pack::extractor_version()`, which forces a full re-index
+/// on its own. Hashing the form as well would churn every file of every project at the v3/v4
+/// boundary and buy nothing, because nothing can reach this hash without one of those two changes.
 pub fn file_content_hash(chunks: &[Chunk], edges: &[Edge]) -> String {
     let mut ordered: Vec<&Chunk> = chunks.iter().collect();
     ordered.sort_by_key(|c| c.start_line);
@@ -100,14 +196,28 @@ pub fn file_content_hash(chunks: &[Chunk], edges: &[Edge]) -> String {
     hex_sha256(h)
 }
 
-/// `metaVariables.single.<name>.text`. Job D can read `"OWNER"` through this
+/// `metaVariables.single.<name>`. Job D can read `"OWNER"` through this
 /// without changing the parser; C1 only uses `"NAME"` for `symbol_name`.
-pub fn meta_var_text<'a>(rec: &'a Value, name: &str) -> Option<&'a str> {
+fn meta_var<'a>(rec: &'a Value, name: &str) -> Option<&'a Value> {
     rec.get("metaVariables")
         .and_then(|m| m.get("single"))
         .and_then(|s| s.get(name))
+}
+
+pub fn meta_var_text<'a>(rec: &'a Value, name: &str) -> Option<&'a str> {
+    meta_var(rec, name)
         .and_then(|v| v.get("text"))
         .and_then(Value::as_str)
+}
+
+/// 1-based line a capture sits on, so a call edge can be pinned to the line that names its callee.
+fn meta_var_line(rec: &Value, name: &str) -> Option<i64> {
+    meta_var(rec, name)
+        .and_then(|v| v.get("range"))
+        .and_then(|r| r.get("start"))
+        .and_then(|p| p.get("line"))
+        .and_then(json_i64)
+        .map(|n| n + 1)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -270,6 +380,11 @@ fn unquote(text: &str) -> String {
     t.to_string()
 }
 
+/// Remove every whitespace character: a call head split across lines is still the same call.
+fn compact_ws(text: &str) -> String {
+    text.chars().filter(|c| !c.is_whitespace()).collect()
+}
+
 fn json_i64(v: &Value) -> Option<i64> {
     v.as_i64()
         .or_else(|| v.as_u64().and_then(|u| i64::try_from(u).ok()))
@@ -366,7 +481,7 @@ pub fn extract_file(args: ExtractFileArgs<'_>) -> Result<ExtractResult, CortErro
     let file_path = args.file_path;
 
     let mut chunks = Vec::new();
-    let mut raw_edges: Vec<(String, String, i64)> = Vec::new();
+    let mut raw_edges: Vec<(String, CallForm, String, i64)> = Vec::new();
     let mut extra_malformed = 0usize;
     for rec in &parsed.records {
         let tag = rec.get("message").and_then(Value::as_str).unwrap_or("");
@@ -406,9 +521,32 @@ pub fn extract_file(args: ExtractFileArgs<'_>) -> Result<ExtractResult, CortErro
                 }
             }
         } else if let Some(rest) = tag.strip_prefix(EDGE_TAG) {
-            let target = meta_var_text(rec, "SRC").or_else(|| meta_var_text(rec, "CALLEE"));
+            let Some((rel_type, call_form)) = parse_edge_tag(rest) else {
+                // A rule cort cannot interpret. Counted rather than silently obeyed: `malformed` is
+                // the field that says "this extraction is not complete".
+                extra_malformed += 1;
+                continue;
+            };
+            let callee = meta_var_text(rec, "CALLEE");
+            let target = meta_var_text(rec, "SRC").or(callee);
             if let Some(target) = target {
-                raw_edges.push((rest.to_string(), unquote(target), start_line));
+                // Pin the edge to the line that *names* the callee, not to the first line of the
+                // matched node: `builder\n    .foo()` names `foo` on the second line, and a call site
+                // an agent cannot read at the stated line is not evidence. A rule that captures the
+                // head and the name separately (`$CALLEE` + `$METHOD`) says which one is the name.
+                let line = ["METHOD", "CALLEE"]
+                    .iter()
+                    .find_map(|var| meta_var_line(rec, var))
+                    .unwrap_or(start_line);
+                // Whitespace inside a call head is formatting, not identity: `tally\n  .add` and
+                // `tally.add` are the same edge, and a stored target containing a newline would
+                // never survive a LIKE match against a symbol name.
+                let text = if callee.is_some() {
+                    compact_ws(unquote(target).as_str())
+                } else {
+                    unquote(target)
+                };
+                raw_edges.push((rel_type, call_form, text, line));
             }
         }
     }
@@ -428,13 +566,14 @@ pub fn extract_file(args: ExtractFileArgs<'_>) -> Result<ExtractResult, CortErro
 
     let edges: Vec<Edge> = raw_edges
         .into_iter()
-        .map(|(rel_type, raw_target, start_line)| {
+        .map(|(rel_type, call_form, raw_target, start_line)| {
             let containing = deduped
                 .iter()
                 .filter(|c| c.start_line <= start_line && start_line <= c.end_line)
                 .min_by_key(|c| c.end_line - c.start_line);
             Edge {
                 rel_type,
+                call_form,
                 source_symbol: containing.and_then(|c| c.symbol_name.clone()),
                 raw_target,
                 start_line,

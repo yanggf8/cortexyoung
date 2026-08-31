@@ -452,3 +452,208 @@ fn a_completed_incremental_index_clears_the_pending_graph_marker() {
         "a fully rebuilt graph must not stay marked pending"
     );
 }
+
+/// v4 end to end: an index built by the previous schema version is upgraded, force-rebuilt, and
+/// comes back carrying the two things v4 exists to record -- which call shape each edge arrived as,
+/// and the line inside the caller that names the callee.
+///
+/// This is the path a user's cache actually takes: `SCHEMA_VERSION` goes up under a database whose
+/// tables were created by an older build, so the upgrade has to add the columns (`ALTER`, because
+/// `CREATE TABLE IF NOT EXISTS` never does), `graph_pending` has to route the next index through a
+/// full rebuild, and the rebuild has to fill in what the old rows could never have had.
+#[test]
+fn a_v3_index_is_upgraded_and_its_rebuilt_graph_carries_forms_and_call_sites() {
+    let (_dir, root) = {
+        let d = tempfile::Builder::new()
+            .prefix("cort-v4-")
+            .tempdir()
+            .unwrap();
+        for (rel, body) in [
+            (
+                "src/lib.rs",
+                "pub struct T;\nimpl T { pub fn take(&self) -> u32 { 1 } }\n",
+            ),
+            (
+                "src/use.rs",
+                "use crate::lib::T;\nfn one(t: &T) -> u32 { t.take() }\nfn two(t: &T) -> u32 { t.take() }\n",
+            ),
+        ] {
+            let abs = d.path().join(rel);
+            fs::create_dir_all(abs.parent().unwrap()).unwrap();
+            fs::write(&abs, body).unwrap();
+        }
+        let root = fs::canonicalize(d.path()).unwrap();
+        (d, root)
+    };
+    let project_id = project_id_for(root.to_str().unwrap());
+
+    let mut db = open_db(":memory:").unwrap();
+    db.execute_batch(
+        "CREATE TABLE _cortex_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+         INSERT INTO _cortex_meta (key, value) VALUES ('SCHEMA_VERSION', '3');
+         CREATE TABLE projects (
+           project_id TEXT PRIMARY KEY, name TEXT NOT NULL, path TEXT NOT NULL, git_head TEXT,
+           last_indexed_at INTEGER, extractor_version TEXT NOT NULL,
+           created_at TEXT DEFAULT (datetime('now')));
+         CREATE TABLE chunks (
+           chunk_id TEXT PRIMARY KEY,
+           project_id TEXT NOT NULL REFERENCES projects(project_id) ON DELETE CASCADE,
+           file_path TEXT NOT NULL, symbol_name TEXT,
+           chunk_type TEXT CHECK(chunk_type IN ('function','class','method','config','documentation','unparsed')),
+           start_line INTEGER NOT NULL, end_line INTEGER NOT NULL, content TEXT NOT NULL,
+           content_hash TEXT NOT NULL, language TEXT,
+           chunk_source TEXT NOT NULL CHECK(chunk_source IN ('ast','unparsed')),
+           created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')));
+         CREATE TABLE relationships (
+           source_chunk_id TEXT NOT NULL REFERENCES chunks(chunk_id) ON DELETE CASCADE,
+           target_chunk_id TEXT NOT NULL REFERENCES chunks(chunk_id) ON DELETE CASCADE,
+           rel_type TEXT NOT NULL CHECK(rel_type IN ('imports','exports','calls')),
+           confidence TEXT NOT NULL CHECK(confidence IN ('EXTRACTED','INFERRED','AMBIGUOUS')),
+           confidence_score REAL NOT NULL CHECK(confidence_score BETWEEN 0 AND 1),
+           confidence_reasoning TEXT,
+           PRIMARY KEY (source_chunk_id, target_chunk_id, rel_type));
+         CREATE TABLE raw_edges (
+           project_id TEXT NOT NULL REFERENCES projects(project_id) ON DELETE CASCADE,
+           file_path TEXT NOT NULL, source_symbol TEXT NOT NULL DEFAULT '', raw_target TEXT NOT NULL,
+           rel_type TEXT NOT NULL CHECK(rel_type IN ('imports','exports','calls')),
+           start_line INTEGER NOT NULL,
+           PRIMARY KEY (project_id, file_path, rel_type, raw_target, source_symbol, start_line));",
+    )
+    .unwrap();
+
+    ensure_schema(&db).unwrap();
+    assert_eq!(
+        get_meta(&db, "SCHEMA_VERSION").unwrap().as_deref(),
+        Some("4"),
+        "the upgrade writes the version only after the columns land"
+    );
+    assert_eq!(
+        get_meta(&db, "graph_pending").unwrap().as_deref(),
+        Some("1"),
+        "a graph whose edges predate the new columns must not be trusted"
+    );
+
+    // Leftovers of a v3 index of this same repository, written *after* `ensure_schema` installed the
+    // FTS triggers: an external-content index can only delete rows it was told about, so a chunk
+    // inserted before its trigger exists makes the next `DELETE FROM chunks` fail as
+    // "database disk image is malformed". A real v3 database has its FTS rows already, which is what
+    // this ordering reproduces.
+    db.execute_batch(&format!(
+        "INSERT INTO projects (project_id, name, path, extractor_version)
+           VALUES ('{project_id}', 'v3', '{path}', 'stale-version-hash');
+         INSERT INTO chunks (chunk_id, project_id, file_path, symbol_name, chunk_type,
+           start_line, end_line, content, content_hash, language, chunk_source)
+           VALUES ('stale', '{project_id}', 'gone.rs', 'gone', 'function', 1, 2, 'x', 'h', 'Rust', 'ast');
+         INSERT INTO raw_edges (project_id, file_path, source_symbol, raw_target, rel_type, start_line)
+           VALUES ('{project_id}', 'gone.rs', 'gone', 'whatever', 'calls', 1);",
+        path = root.to_str().unwrap()
+    ))
+    .unwrap();
+
+    let bin = resolve_ast_grep_bin().expect("ast-grep on PATH");
+    let stats = full_index(&mut db, &bin, &root).unwrap();
+    assert!(stats.relationships >= 2, "{stats:?}");
+    assert_eq!(
+        get_meta(&db, "graph_pending").unwrap().as_deref(),
+        Some("0"),
+        "the rebuild clears the marker it was rebuilt for"
+    );
+    let stale_chunks: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM chunks WHERE chunk_id = 'stale'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(stale_chunks, 0, "a full rebuild replaces the v3 chunk set");
+
+    let forms: Vec<String> = db
+        .prepare(
+            "SELECT DISTINCT call_form FROM raw_edges WHERE project_id = ?1 ORDER BY call_form",
+        )
+        .unwrap()
+        .query_map(params![project_id], |r| r.get(0))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert!(
+        forms.contains(&"receiver".to_string()),
+        "the form a call arrived as has to survive the database round trip: {forms:?}"
+    );
+
+    let edges: Vec<(Option<i64>, String, String)> = db
+        .prepare(
+            "SELECT r.call_site_line, r.call_form, c.symbol_name FROM relationships r
+               JOIN chunks c ON c.chunk_id = r.source_chunk_id
+              WHERE c.project_id = ?1 AND r.call_form = 'receiver' ORDER BY r.call_site_line",
+        )
+        .unwrap()
+        .query_map(params![project_id], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert_eq!(
+        edges,
+        vec![
+            (Some(2), "receiver".to_string(), "one".to_string()),
+            (Some(3), "receiver".to_string(), "two".to_string())
+        ],
+        "each caller's own line, tagged with the shape that attached it"
+    );
+}
+
+#[test]
+fn a_bare_and_a_receiver_call_of_the_same_name_on_one_line_are_two_rows() {
+    // `raw_edges` does not key on the form, so a receiver edge that stored only the method name would
+    // collide with a bare call to the same name on the same line and one of the two would vanish.
+    // Storing the head (`take(t)` vs `t.take()`) is what keeps both: the dedupe that remains is
+    // genuinely duplicate work, not a lost edge.
+    let (_dir, root) = {
+        let d = tempfile::Builder::new()
+            .prefix("cort-v4clash-")
+            .tempdir()
+            .unwrap();
+        let abs = d.path().join("src/lib.rs");
+        fs::create_dir_all(abs.parent().unwrap()).unwrap();
+        fs::write(
+            &abs,
+            "pub struct T;\npub fn take(_: &T) -> u32 { 1 }\nimpl T { pub fn take(&self) -> u32 { 2 } }\n",
+        )
+        .unwrap();
+        let use_rs = d.path().join("src/use.rs");
+        fs::write(
+            &use_rs,
+            "use crate::lib::T;\nfn go(t: &T) -> u32 { take(t) + t.take() }\n",
+        )
+        .unwrap();
+        let root = fs::canonicalize(d.path()).unwrap();
+        (d, root)
+    };
+    let mut db = open_db(":memory:").unwrap();
+    ensure_schema(&db).unwrap();
+    let project_id = project_id_for(root.to_str().unwrap());
+    let bin = resolve_ast_grep_bin().expect("ast-grep on PATH");
+    full_index(&mut db, &bin, &root).unwrap();
+
+    let mut rows: Vec<(String, String)> = db
+        .prepare(
+            "SELECT call_form, raw_target FROM raw_edges
+              WHERE project_id = ?1 AND file_path = 'src/use.rs' AND rel_type = 'calls'",
+        )
+        .unwrap()
+        .query_map(params![project_id], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    rows.sort();
+    assert_eq!(
+        rows,
+        vec![
+            ("bare".to_string(), "take".to_string()),
+            ("receiver".to_string(), "t.take".to_string()),
+        ],
+        "both shapes of the same name on one line, neither swallowed by the other"
+    );
+}

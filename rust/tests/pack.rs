@@ -199,10 +199,15 @@ fn the_pack_extracts_chunks_and_edges_from_python() {
     );
 }
 
-/// Rust edge rules must never emit a bare last segment for a qualified call: a
-/// project-wide bare-name match would fabricate an INFERRED caller for any
-/// same-named free function. A scoped capture carries the full path (exact match
-/// against `Owner::method` chunks or nothing), and a receiver call emits no edge.
+/// Three shapes, three forms, and one rule that has not changed: a *qualified* call may never be
+/// emitted with its qualification stripped, because a project-wide bare-name match would fabricate
+/// an INFERRED caller for any same-named free function.
+///
+/// v4 added the receiver shape (`w.run()`) with the method name as its target -- which is exactly
+/// the stripped shape this test used to say must never appear. It is allowed only because the
+/// resolution side refuses it unless the name is unique project-wide
+/// (`graph::resolve_edge_targets`), and because the form is stored so the refusal is auditable. A
+/// `bare` or `scoped` row carrying `run` for `Worker::run(w)` is still fabrication.
 #[test]
 fn the_pack_extracts_rust_call_edges_with_exact_targets_only() {
     let _g = pack_guard();
@@ -238,25 +243,50 @@ fn the_pack_extracts_rust_call_edges_with_exact_targets_only() {
     )
     .unwrap();
     assert_eq!(r.code, 0);
-    let mut callees: Vec<String> = r
+    let mut tagged: Vec<String> = r
         .stdout
         .trim()
         .split('\n')
         .filter(|l| !l.is_empty())
         .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
-        .filter(|x| x["message"] == "edge:calls")
-        .map(|x| {
-            x["metaVariables"]["single"]["CALLEE"]["text"]
+        .filter(|x| {
+            x["message"]
                 .as_str()
-                .unwrap()
-                .to_string()
+                .is_some_and(|m| m.starts_with("edge:calls"))
+        })
+        .map(|x| {
+            format!(
+                "{} {}",
+                x["message"].as_str().unwrap(),
+                x["metaVariables"]["single"]["CALLEE"]["text"]
+                    .as_str()
+                    .unwrap()
+            )
         })
         .collect();
-    callees.sort();
-    // Exactly two edges: the bare call and the fully-qualified one. A second bare
-    // `run` from `Worker::run(w)`, or anything from `w.run()`, means the pack is
-    // fabricating name-collision targets again.
-    assert_eq!(callees, ["Worker::run", "run"]);
+    tagged.sort();
+    assert_eq!(
+        tagged,
+        [
+            "edge:calls:bare run",
+            // The receiver edge keeps its receiver: `w.run()`, not `run`. Resolution needs it
+            // (`graph::receiver_binds` asks whether `w` can be a `Worker`), and a reader who is
+            // checking the edge needs it more.
+            "edge:calls:receiver w.run",
+            "edge:calls:scoped Worker::run",
+        ],
+        "one edge per call shape, each carrying the form that decides how it resolves"
+    );
+    let stripped: Vec<&String> = tagged
+        .iter()
+        .filter(|row| {
+            row.starts_with("edge:calls:bare Worker") || row.starts_with("edge:calls:scoped run")
+        })
+        .collect();
+    assert!(
+        stripped.is_empty(),
+        "a qualified call must never surface as a loose name: {tagged:?}"
+    );
 }
 
 /// C1-5

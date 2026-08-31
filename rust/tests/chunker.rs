@@ -2,8 +2,8 @@
 
 use cort::ast_grep::resolve_ast_grep_bin;
 use cort::chunker::{
-    chunk_id_for, edge_string, extract_file, file_content_hash, parse_scan_stream, Chunk, Edge,
-    ExtractFileArgs,
+    chunk_id_for, edge_string, extract_file, file_content_hash, parse_scan_stream, CallForm, Chunk,
+    Edge, ExtractFileArgs,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -91,6 +91,7 @@ fn chunk(start_line: i64, content: &str) -> Chunk {
 fn edge(rel_type: &str, source_symbol: Option<&str>, raw_target: &str) -> Edge {
     Edge {
         rel_type: rel_type.to_string(),
+        call_form: CallForm::Bare,
         source_symbol: source_symbol.map(|s| s.to_string()),
         raw_target: raw_target.to_string(),
         start_line: 0,
@@ -475,4 +476,190 @@ fn base64_encode(bytes: &[u8]) -> String {
         i += 3;
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// schema v4: the call form travels in the rule message, and a call edge is
+// pinned to the line that names the callee.
+// ---------------------------------------------------------------------------
+
+fn extract_emitted(body: &str, stream: &str) -> cort::chunker::ExtractResult {
+    let _g = env_guard();
+    let (_dir, abs) = tmp_file("emit.rs", body);
+    let mut out: Option<cort::chunker::ExtractResult> = None;
+    with_var(
+        "FAKE_AG_MODE",
+        Some(&format!("emit:{}", base64_encode(stream.as_bytes()))),
+        || {
+            out = Some(
+                extract_file(ExtractFileArgs {
+                    bin: fake_ag().to_str().unwrap(),
+                    project_id: "p",
+                    file_path: "emit.rs",
+                    abs_path: abs.to_str().unwrap(),
+                    source: body,
+                    timeout_ms: None,
+                })
+                .expect("a scan stream must never throw"),
+            );
+        },
+    );
+    out.expect("the fake ran")
+}
+
+/// One `edge:` record whose matched node starts on line 10 and whose `$CALLEE` sits on line 11
+/// (ast-grep's lines are 0-based, so the stored numbers are 11 and 12).
+fn edge_record(message: &str, callee: &str, node_line: u64, name_line: u64) -> String {
+    serde_json::json!({
+        "text": "builder\n    .foo()",
+        "message": message,
+        "language": "Rust",
+        "range": {
+            "start": { "line": node_line, "column": 0 },
+            "end": { "line": name_line, "column": 12 }
+        },
+        "metaVariables": {
+            "single": {
+                "CALLEE": {
+                    "text": callee,
+                    "range": {
+                        "start": { "line": name_line, "column": 6 },
+                        "end": { "line": name_line, "column": 9 }
+                    }
+                }
+            }
+        },
+    })
+    .to_string()
+}
+
+#[test]
+fn an_edge_tag_names_its_rel_type_and_defaults_the_form_to_bare() {
+    use cort::chunker::parse_edge_tag;
+    for (raw, rel, form) in [
+        ("calls", "calls", CallForm::Bare),
+        ("imports", "imports", CallForm::Bare),
+        ("exports", "exports", CallForm::Bare),
+        ("calls:receiver", "calls", CallForm::Receiver),
+        ("calls:scoped", "calls", CallForm::Scoped),
+    ] {
+        assert_eq!(parse_edge_tag(raw), Some((rel.to_string(), form)), "{raw}");
+    }
+    // Forms are stable strings, because they are stored in a CHECK-constrained column and printed
+    // in `lean` output where an agent reads them without a schema in front of it.
+    assert_eq!(CallForm::Receiver.as_str(), "receiver");
+    assert_eq!(CallForm::default(), CallForm::Bare);
+}
+
+#[test]
+fn an_edge_tag_this_build_cannot_read_drops_the_edge_instead_of_guessing_a_form() {
+    use cort::chunker::parse_edge_tag;
+    for raw in [
+        "calls:reciever",
+        "calls:",
+        "calls:receiver:extra",
+        "bogus",
+        "exports:bogus",
+        "",
+    ] {
+        assert_eq!(parse_edge_tag(raw), None, "{raw} must not be guessed");
+    }
+}
+
+#[test]
+fn a_mislabelled_edge_record_is_counted_as_malformed_and_yields_no_edge() {
+    // A typo in a pack rule must cost one reported gap, not one whole project index: the schema
+    // CHECK would have rejected the insert mid-transaction and taken every chunk with it.
+    let out = extract_emitted(
+        "x\n    .foo()\n",
+        &edge_record("edge:calls:reciever", "foo", 10, 11),
+    );
+    assert!(
+        !out.unparsed,
+        "the surviving shape of the file is still fine"
+    );
+    assert!(out.edges.is_empty(), "{:?}", out.edges);
+    assert_eq!(out.malformed, 1);
+}
+
+#[test]
+fn a_call_edge_is_pinned_to_the_line_that_names_the_callee() {
+    let out = extract_emitted(
+        "x\n    .foo()\n",
+        &edge_record("edge:calls:receiver", "foo", 10, 11),
+    );
+    assert_eq!(out.malformed, 0);
+    assert_eq!(out.edges.len(), 1, "{:?}", out.edges);
+    let edge = &out.edges[0];
+    assert_eq!(edge.rel_type, "calls");
+    assert_eq!(edge.call_form, CallForm::Receiver);
+    assert_eq!(edge.raw_target, "foo");
+    assert_eq!(
+        edge.start_line, 12,
+        "the name's own line, not the first line of the matched node"
+    );
+}
+
+#[test]
+fn an_import_edge_keeps_the_matched_node_line_because_it_has_no_callee() {
+    let record = serde_json::json!({
+        "text": "use crate::lib::T;",
+        "message": "edge:imports",
+        "language": "Rust",
+        "range": {
+            "start": { "line": 0, "column": 0 },
+            "end": { "line": 0, "column": 18 }
+        },
+        "metaVariables": { "single": { "SRC": { "text": "crate::lib::T" } } },
+    })
+    .to_string();
+    let out = extract_emitted("use crate::lib::T;\n", &record);
+    assert_eq!(out.edges.len(), 1, "{:?}", out.edges);
+    assert_eq!(out.edges[0].start_line, 1);
+    assert_eq!(out.edges[0].call_form, CallForm::Bare);
+    assert_eq!(out.edges[0].raw_target, "crate::lib::T");
+}
+
+/// The pack side of v4: three Rust call shapes, three forms. This is the only test that reads the
+/// real grammar, because `method_call_expression` does not exist in the Rust grammar ast-grep
+/// 0.45.2 ships -- a rule written against it matches nothing and looks exactly like a file with no
+/// method calls in it.
+#[test]
+fn the_rust_pack_tags_each_call_shape_with_the_form_it_is() {
+    let body = concat!(
+        "pub struct T;\n",
+        "impl T { pub fn take(&self) -> u32 { 1 } }\n",
+        "pub fn free() -> u32 { 2 }\n",
+        "pub fn go(t: &T) -> u32 { let _ = crate::free(); t.take() + T::take(t) }\n",
+    );
+    let (_dir, abs) = tmp_file("forms.rs", body);
+    let out = extract_real(&abs, "forms.rs", body);
+    let mut got: Vec<(String, String)> = out
+        .edges
+        .iter()
+        .map(|e| (e.call_form.as_str().to_string(), e.raw_target.clone()))
+        .collect();
+    got.sort();
+    assert_eq!(
+        got,
+        [
+            // The head, receiver included: `graph::receiver_binds` needs it, and it is what makes
+            // the edge checkable at a glance instead of at a guess.
+            ("receiver".to_string(), "t.take".to_string()),
+            ("scoped".to_string(), "T::take".to_string()),
+            ("scoped".to_string(), "crate::free".to_string()),
+        ],
+        "{out:?}"
+    );
+    let receiver = out
+        .edges
+        .iter()
+        .find(|e| e.call_form == CallForm::Receiver)
+        .expect("t.take()");
+    assert_eq!(
+        receiver.source_symbol.as_deref(),
+        Some("go"),
+        "the receiver call must still be attributed to its enclosing function"
+    );
+    assert_eq!(receiver.start_line, 4);
 }

@@ -1,7 +1,7 @@
 //! Relationships + containment join.
 //! Spec §5.6 assigns `applyBudget` to struct/context (Job D), not this module.
 
-use crate::chunker::{Chunk, Edge};
+use crate::chunker::{bare_name, CallForm, Chunk, Edge};
 use crate::db::Db;
 use rusqlite::params;
 use std::collections::{HashMap, HashSet};
@@ -27,6 +27,13 @@ pub struct RelationshipRow {
     pub confidence: String,
     pub confidence_score: f64,
     pub confidence_reasoning: String,
+    /// The line inside the source chunk that names the callee: the one line to read in order to
+    /// check this edge without re-reading the function. `None` only for rows written before schema
+    /// v4, which a re-index replaces.
+    pub call_site_line: Option<i64>,
+    /// Which call shape attached this edge. A `receiver` row is a name match the gate proved unique
+    /// project-wide; it is not a type-checked call edge, and the form is how a reader learns that.
+    pub call_form: CallForm,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -206,6 +213,152 @@ fn chunks_named(db: &Db, project_id: &str, name: &str) -> rusqlite::Result<Vec<(
     Ok(rows)
 }
 
+/// Project-wide lookup from a call's *method* name to every chunk that declares a symbol ending in
+/// that name: `add` -> the chunks for `add`, `Tally::add`, `Store::add`.
+///
+/// Built once per project (or once per call, for the single-file helpers) by scanning `chunks` in
+/// `chunk_id` order, so the candidate set -- and therefore the gate's verdict -- is reproducible.
+/// A `LIKE '%:' || name` query per edge would have cost a full scan of `chunks` per call site, which
+/// on the measured venue is five thousand scans over the same table.
+/// One entry per candidate: the chunk to attach, and the symbol name it was found under (the owner
+/// half of the binding rules needs the name, not just the id).
+pub type ReceiverCandidate = (String, String);
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ReceiverIndex {
+    by_name: HashMap<String, Vec<ReceiverCandidate>>,
+}
+
+impl ReceiverIndex {
+    pub fn build(db: &Db, project_id: &str) -> rusqlite::Result<Self> {
+        let mut stmt = db.prepare(
+            "SELECT symbol_name, chunk_id FROM chunks
+              WHERE project_id = ?1 AND symbol_name IS NOT NULL ORDER BY chunk_id",
+        )?;
+        let rows = stmt.query_map(params![project_id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
+        let mut by_name: HashMap<String, Vec<ReceiverCandidate>> = HashMap::new();
+        for row in rows {
+            let (symbol, chunk_id) = row?;
+            by_name
+                .entry(bare_name(&symbol).to_string())
+                .or_default()
+                .push((chunk_id, symbol));
+        }
+        Ok(Self { by_name })
+    }
+
+    /// Chunks declaring a symbol whose last segment is `name`, in `chunk_id` order.
+    pub fn candidates(&self, name: &str) -> &[ReceiverCandidate] {
+        self.by_name.get(name).map(Vec::as_slice).unwrap_or(&[])
+    }
+}
+
+/// `Tally::add` -> `Tally`; `add` -> None. Rust chunks for `impl` and trait methods carry their type
+/// as an owner (`chunker::compose_symbol_name`), which is what makes this question answerable at all.
+pub fn symbol_owner(symbol: &str) -> Option<&str> {
+    symbol.rsplit_once("::").map(|(owner, _)| owner)
+}
+
+/// Letters and digits only, lowercased: `CallForm` and `call_form` are the same name when one is a
+/// type and the other is its variable, which is the entire Rust convention for receivers.
+fn norm_name(raw: &str) -> String {
+    raw.chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(|c| c.to_lowercase())
+        .collect()
+}
+
+/// Can `x.method()` be a call to this symbol?
+///
+/// Two structural facts, then one heuristic, in that order:
+///
+/// 1. `x.m()` binds to a **method**. A project-wide free function named `m` is not a candidate no
+///    matter how unique its name is, so a candidate with no owner is refused. (`status.code()`
+///    attaching to a test helper called `code` was the single most common false edge in the first
+///    measurement of this gate.)
+/// 2. `self.m()` inside `Owner::f` binds to `Owner::m`, subject to `Deref`, which name resolution
+///    cannot see. This is the one case with a real scoping rule behind it, so it is checked against
+///    the *enclosing symbol* rather than against a name guess.
+/// 3. Otherwise the receiver's last segment has to look like the owner's name: equal (so `t`/`T`
+///    works), or one a prefix or suffix of the other with at least three characters of overlap
+///    (`e.call_form.insertion_rank` -> `CallForm`, `index.candidates` -> `ReceiverIndex`,
+///    `err.to_json` -> `CortError`).
+///
+/// Rule 3 is a heuristic and only ever *refuses*: when it is wrong the cost is a missing edge, which
+/// the coverage screen reports as a gap, instead of a phantom caller an agent cannot argue away.
+/// Measured on this repo, 4,833 receiver call sites produced 4,833 raw edges; uniqueness alone
+/// attached **25 of them, 13 true and 12 false** (48% precision -- `e.kind()` onto a test fixture's
+/// `FailFs::kind`, `status.code()` onto a helper called `code`, `.chain()` onto a function called
+/// `chain`). These rules attach **9, all 9 true**, refusing four that were real (`b.problem()` onto
+/// `BatchRead::problem` x3, `err.to_json()` onto `CortError::to_json`) because a one-letter variable
+/// carries no trace of its type. `--depth 3` on this repo therefore got +9 edges and +0 phantoms.
+pub fn receiver_binds(head: &str, enclosing: Option<&str>, candidate: &str) -> bool {
+    let Some(dot) = head.rfind(['.', ':']) else {
+        return false; // no receiver at all: not a receiver-shaped call
+    };
+    let receiver = bare_name(&head[..dot]);
+    let Some(owner) = symbol_owner(candidate) else {
+        return false; // rule 1
+    };
+    if receiver.eq_ignore_ascii_case("self") || receiver == "Self" {
+        return symbol_owner(enclosing.unwrap_or(""))
+            .is_some_and(|en| norm_name(en) == norm_name(owner));
+    }
+    let (recv, own) = (norm_name(receiver), norm_name(owner));
+    if recv.is_empty() || own.is_empty() {
+        return false;
+    }
+    if recv == own {
+        return true;
+    }
+    recv.len() >= 3
+        && own.len() >= 3
+        && (recv.starts_with(&own)
+            || own.starts_with(&recv)
+            || recv.ends_with(&own)
+            || own.ends_with(&recv))
+}
+
+/// Resolve one edge to the chunks it names, applying the policy that belongs to its form.
+///
+/// The receiver gate is the reason the form is carried at all. A measured 5,522 receiver call sites
+/// in this repo: 96.5% name a symbol the project never declares (std, dependency, iterator
+/// adapters), and of the residue that is unique by name, more than a third were still wrong because
+/// the *receiver* belonged to some other type. So a receiver edge needs the unique name *and*
+/// [`receiver_binds`]. Where either refuses, nothing is attached and nothing is hidden -- coverage's
+/// `extracted_but_unresolved` layer reads `raw_edges` and reports the site as a gap.
+///
+/// The gate is deliberately *not* applied to `bare` or `scoped`: a multi-candidate bare call has
+/// always attached as `AMBIGUOUS`, and recorded eval labels (cct's `getCurrentTimeET`, seeds=2)
+/// depend on that recall. Turning it off for those forms would trade a measured behaviour for an
+/// unmeasured improvement.
+pub fn resolve_edge_targets(
+    db: &Db,
+    project_id: &str,
+    file_path: &str,
+    import_map: &HashMap<String, String>,
+    edge: &Edge,
+    index: &ReceiverIndex,
+) -> rusqlite::Result<Vec<String>> {
+    if edge.call_form == CallForm::Receiver {
+        let candidates = index.candidates(bare_name(&edge.raw_target));
+        if candidates.len() != 1 {
+            return Ok(Vec::new());
+        }
+        let (chunk_id, symbol) = &candidates[0];
+        return Ok(
+            if receiver_binds(&edge.raw_target, edge.source_symbol.as_deref(), symbol) {
+                vec![chunk_id.clone()]
+            } else {
+                Vec::new()
+            },
+        );
+    }
+    resolve_targets(db, project_id, file_path, import_map, &edge.raw_target)
+}
+
 pub fn resolve_targets(
     db: &Db,
     project_id: &str,
@@ -275,10 +428,44 @@ pub fn relationship_rows_for_symbol_map(
     chunk_by_symbol: &HashMap<String, String>,
     edges: &[Edge],
 ) -> rusqlite::Result<Vec<RelationshipRow>> {
+    let index = ReceiverIndex::build(db, project_id)?;
+    relationship_rows_for_symbol_map_with_index(
+        db,
+        project_id,
+        file_path,
+        chunk_by_symbol,
+        edges,
+        &index,
+    )
+}
+
+/// As [`relationship_rows_for_symbol_map`], with a receiver index the caller already built --
+/// `rebuild_relationships` walks every file in the project and would otherwise rebuild the same
+/// lookup once per file.
+pub fn relationship_rows_for_symbol_map_with_index(
+    db: &Db,
+    project_id: &str,
+    file_path: &str,
+    chunk_by_symbol: &HashMap<String, String>,
+    edges: &[Edge],
+    index: &ReceiverIndex,
+) -> rusqlite::Result<Vec<RelationshipRow>> {
     let import_map = build_import_map(edges);
     let mut rows = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
-    for e in edges {
+    // Walk the file in source order, not in subprocess order: `relationships` is keyed by
+    // (source, target, rel_type), so the first edge to arrive is the one whose line becomes the
+    // reported call site. Source order makes that the *earliest* call site instead of an accident.
+    let mut ordered: Vec<&Edge> = edges.iter().collect();
+    ordered.sort_by_key(|e| {
+        (
+            e.start_line,
+            e.raw_target.clone(),
+            e.rel_type.clone(),
+            e.call_form.insertion_rank(),
+        )
+    });
+    for e in ordered {
         let Some(source_symbol) = &e.source_symbol else {
             continue;
         };
@@ -286,7 +473,7 @@ pub fn relationship_rows_for_symbol_map(
             continue;
         };
         let targets: Vec<String> =
-            resolve_targets(db, project_id, file_path, &import_map, &e.raw_target)?
+            resolve_edge_targets(db, project_id, file_path, &import_map, e, index)?
                 .into_iter()
                 .filter(|id| id != source_chunk_id)
                 .collect();
@@ -300,10 +487,15 @@ pub fn relationship_rows_for_symbol_map(
         } else {
             CONFIDENCE_SCORE.ambiguous * (1.0 / n as f64)
         };
-        let reasoning = if n == 1 {
-            format!("resolved: {}", e.raw_target)
-        } else {
-            format!("ambiguous: {} ({n} candidates)", e.raw_target)
+        let reasoning = match (n, e.call_form) {
+            // The receiver gate only lets a unique name through, but "unique name" is not "same
+            // type": say which of the two was checked.
+            (1, CallForm::Receiver) => format!(
+                "resolved receiver: {} (unique method name; owner inferred from the receiver, not type-checked)",
+                e.raw_target
+            ),
+            (1, _) => format!("resolved: {}", e.raw_target),
+            _ => format!("ambiguous: {} ({n} candidates)", e.raw_target),
         };
         for target in targets {
             let key = format!("{source_chunk_id} {target} {}", e.rel_type);
@@ -317,6 +509,8 @@ pub fn relationship_rows_for_symbol_map(
                 confidence: confidence.to_string(),
                 confidence_score: score,
                 confidence_reasoning: reasoning.clone(),
+                call_site_line: Some(e.start_line),
+                call_form: e.call_form,
             });
         }
     }
@@ -424,8 +618,9 @@ pub fn containment_join(
 }
 
 const INSERT_REL: &str = "INSERT INTO relationships
-  (source_chunk_id, target_chunk_id, rel_type, confidence, confidence_score, confidence_reasoning)
-  VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+  (source_chunk_id, target_chunk_id, rel_type, confidence, confidence_score, confidence_reasoning,
+   call_site_line, call_form)
+  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
   ON CONFLICT(source_chunk_id, target_chunk_id, rel_type) DO NOTHING";
 
 pub fn insert_relationship(db: &Db, row: &RelationshipRow) -> rusqlite::Result<bool> {
@@ -438,6 +633,8 @@ pub fn insert_relationship(db: &Db, row: &RelationshipRow) -> rusqlite::Result<b
             row.confidence,
             row.confidence_score,
             row.confidence_reasoning,
+            row.call_site_line,
+            row.call_form.as_str(),
         ],
     )? > 0)
 }
@@ -466,6 +663,10 @@ pub fn rebuild_relationships(db: &Db, project_id: &str) -> rusqlite::Result<i64>
         params![project_id],
     )?;
 
+    // The receiver gate asks "how many symbols in this project answer to that name", which is a
+    // project-wide question -- so it is answered once, here, rather than per file.
+    let index = ReceiverIndex::build(db, project_id)?;
+
     let mut count = 0i64;
     for file_path in &files {
         let mut chunk_by_symbol: HashMap<String, String> = HashMap::new();
@@ -487,7 +688,7 @@ pub fn rebuild_relationships(db: &Db, project_id: &str) -> rusqlite::Result<i64>
         let mut edges: Vec<Edge> = Vec::new();
         {
             let mut stmt = db.prepare(
-                "SELECT source_symbol, raw_target, rel_type, start_line FROM raw_edges
+                "SELECT source_symbol, raw_target, rel_type, start_line, call_form FROM raw_edges
                   WHERE project_id = ?1 AND file_path = ?2
                   ORDER BY start_line, raw_target, rel_type",
             )?;
@@ -497,12 +698,20 @@ pub fn rebuild_relationships(db: &Db, project_id: &str) -> rusqlite::Result<i64>
                     r.get::<_, String>(1)?,
                     r.get::<_, String>(2)?,
                     r.get::<_, i64>(3)?,
+                    r.get::<_, String>(4)?,
                 ))
             })?;
             for row in rows {
-                let (source_symbol, raw_target, rel_type, start_line) = row?;
+                let (source_symbol, raw_target, rel_type, start_line, call_form) = row?;
+                // A form this build does not know is a row from a newer extractor. Drop it rather
+                // than resolve it under `bare`, which is the looser policy: a dropped edge keeps
+                // showing up in the coverage screen, a mislabelled one stops showing up anywhere.
+                let Some(call_form) = CallForm::parse(&call_form) else {
+                    continue;
+                };
                 edges.push(Edge {
                     rel_type,
+                    call_form,
                     source_symbol: if source_symbol.is_empty() {
                         None
                     } else {
@@ -514,8 +723,14 @@ pub fn rebuild_relationships(db: &Db, project_id: &str) -> rusqlite::Result<i64>
             }
         }
 
-        let rows =
-            relationship_rows_for_symbol_map(db, project_id, file_path, &chunk_by_symbol, &edges)?;
+        let rows = relationship_rows_for_symbol_map_with_index(
+            db,
+            project_id,
+            file_path,
+            &chunk_by_symbol,
+            &edges,
+            &index,
+        )?;
         for row in rows {
             if insert_relationship(db, &row)? {
                 count += 1;

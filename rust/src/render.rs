@@ -87,12 +87,28 @@ pub fn render_impact(payload: &Value) -> String {
     }
     for d in arr(payload, "dependents") {
         let name = d.get("symbol_name").and_then(Value::as_str).unwrap_or("?");
+        // Six fixed columns -- hop, file, symbol, definition line, call site, call form. The last two
+        // carry a dash rather than disappearing, because a row that changed shape would be read as a
+        // different claim; `@-` means "this dependency came in through an import, or through an edge
+        // indexed before call sites were recorded", not "line 0".
+        let site = d
+            .get("call_site_line")
+            .and_then(Value::as_i64)
+            .map(|l| format!("@{l}"))
+            .unwrap_or_else(|| "-".to_string());
+        let form = d
+            .get("call_form")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("-");
         lines.push(format!(
-            "h{}\t{}\t{}\t{}",
+            "h{}\t{}\t{}\t{}\t{}\t{}",
             as_i64(d, "hop"),
             as_str(d, "file_path"),
             name,
-            as_i64(d, "start_line")
+            as_i64(d, "start_line"),
+            site,
+            form
         ));
     }
     for u in arr(payload, "unresolved") {

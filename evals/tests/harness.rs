@@ -14,7 +14,7 @@ use cort_evals::grade::{
 };
 use cort_evals::stream::{estimate_tokens, parse_stream, ToolCall};
 use cort_evals::summary::{summarize, ARMS, METRICS};
-use cort_evals::verify::contains_word;
+use cort_evals::verify::{call_site_verdict, contains_word, last_segment};
 use serde_json::{json, Value};
 
 fn task() -> Task {
@@ -495,6 +495,41 @@ fn word_matching_adjudicates_edges_without_a_regex_crate() {
     assert!(!contains_word("x = mylogInfo(msg)", "logInfo"));
     assert!(!contains_word("", "leaf"));
     assert!(!contains_word("leaf()", ""));
+}
+
+#[test]
+fn a_recorded_call_site_is_graded_against_the_line_and_only_that_line() {
+    assert_eq!(last_segment("Tally::add"), "add");
+    assert_eq!(last_segment("t.run"), "run");
+    assert_eq!(last_segment("add"), "add");
+    assert_eq!(last_segment(""), "");
+    assert_eq!(
+        last_segment("::"),
+        "::",
+        "a path with no name keeps its text"
+    );
+
+    // The dependent's qualified seed name still has to match the call as written.
+    assert_eq!(
+        call_site_verdict(
+            "    tally.add(&project, &text);",
+            &["Tally::add".to_string()]
+        )
+        .as_deref(),
+        Some("Tally::add"),
+    );
+    // One line is now enough to falsify an edge: no mention of the parent on the stated line means
+    // the row cannot be confirmed by reading it, whatever the enclosing function contains.
+    assert_eq!(
+        call_site_verdict("    let n = items.len();", &["logInfo".to_string()]),
+        None,
+    );
+    // Same honest limitation as the body check, one level down: this is text, not a parse tree.
+    assert!(call_site_verdict(
+        "// tally.add() is documented here",
+        &["Tally::add".to_string()]
+    )
+    .is_some());
 }
 
 #[test]

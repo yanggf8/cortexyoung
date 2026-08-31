@@ -12,7 +12,9 @@ Six shipped commands (plus `status`/`projects`/`delete` utilities):
 - `cort struct -p '<pattern>' --lang <lang>` — structural search joined to enclosing symbols + 3 neighbours
 - `cort context <symbol-or-query>` — "what else deals with X" (exact symbol or FTS recall, depth-1 neighbours, ~1500-token budget; seed bodies are head-truncated to 12 lines, pass `--content full` for the whole body)
 - `cort impact --symbol <name[,name2,...]>` — "what breaks if I change X": reverse dependents to
-  depth 3, accepting a comma-separated batch
+  depth 3, accepting a comma-separated batch. In `lean`, each row carries the dependent's definition
+  line *and* the call site that ties it to the seed (`@626`), tagged with the call shape that attached
+  it (`bare` / `scoped` / `receiver`)
 - `cort read <file> [--start N] [--end N]` — read a file or line range and persist it as a reading note; unchanged repeats come from SQLite
 - `cort recall <query>` — FTS lookup over previously read files/fragments (default 12-line heads; pass `--content full` for stored bodies)
 - `cort usage [days]` — local per-machine usage stats (best-effort; 1–90 days, default 30)
@@ -105,17 +107,26 @@ With xgrep (opt-in):
 ./install.sh --with-xgrep # idempotent xg install + xgrep skill deploy
 ```
 
-## Upgrade note — index schema v3
+## Upgrade note — index schema v3 and v4
 
 Schema v3 adds a `raw_edges` table: the unresolved call/import matches that the relationship graph
 is derived from. It exists because resolution spans files — re-indexing one file used to delete its
 target chunks, `ON DELETE CASCADE` took the edges pointing at them with it, and the unchanged
 caller's edge was never rebuilt (audit F-01, `docs/2026-08-29-project-audit-root-causes-and-remediation.md`).
 
-Nothing to do by hand. An index written by an older cort is detected on first use, reported as
-stale, and rebuilt in full by the next `cort index --incremental` (which falls back to a full index
-while the graph is pending, then clears the marker). Until that rebuild runs, `impact` results come
-from the pre-upgrade graph and `index_is_stale` is `true`.
+Schema v4 adds two columns: `raw_edges.call_form` / `relationships.call_form` (`bare` | `receiver` |
+`scoped`), and `relationships.call_site_line` — the line inside the caller that names the callee. The
+form exists because a receiver call (`tally.add()`) is resolved by a different rule than a bare one,
+and the line exists so that one edge can be checked by reading one line. Both are carried into
+`impact` output (`@626 receiver`), and both are recorded for every edge, not only receiver ones.
+
+Nothing to do by hand in either case. An index written by an older cort is detected on first use,
+reported as stale, and rebuilt in full by the next `cort index --incremental` (which falls back to a
+full index while the graph is pending, then clears the marker). An older database is upgraded in
+place with `ALTER TABLE` — `CREATE TABLE IF NOT EXISTS` never adds a column to a table that already
+exists — and the added columns stay `CHECK`-constrained, so a form this build does not know cannot be
+stored. Until that rebuild runs, `impact` results come from the pre-upgrade graph (with `@-` where no
+call site was recorded) and `index_is_stale` is `true`.
 
 ## Uninstall
 
@@ -199,7 +210,19 @@ is nearly flat in depth because the walk is one recursive SQL query.
 
 Soundness of those same answers, checked independently against file text: 100/100 dependents confirmed
 across 5 chains (`cort-evals verify-impact`, re-run on the current binary — see
-[`evals/README.md`](evals/README.md)).
+[`evals/README.md`](evals/README.md)). Since schema v4 the same checker also grades the *single line*
+each row reports: 117/117 at `line_precision` 1.0 on those cct chains, and 64/64 on four chains in this
+repo — where the body-level check scores 0.667 on `Tally::add` because the body contains `tally.add` and
+the seed was asked for as `Tally::add`. That is the same 5 chains re-indexed with the previous build
+(23/4/4/20/66 dependents) against the v4 index (identical counts): the upgrade moved no TypeScript
+baseline, because no TypeScript rule changed.
+
+**What the two new columns cost.** The `lean` dependent row grew from four fields to six, so the same
+answer is bigger: `logInfo --depth 3` 4,411 → 5,069 bytes, `getCurrentTimeET` 1,641 → 1,874,
+`handleReportsStatus` 835 → 873, `createBacktestingStorage` 1,414 → 1,619 (cct, same two binaries, same
+index contents, ~15% average). The 7.7x payload advantage over the shell arm becomes ~6.7x. It buys the
+removal of the read that used to be required to check a row, which is the half of the goal sentence that
+was still open.
 
 **Corrected positioning: `cort` is an agent tool for relationships, and `rg`/`xg` stay the right tool for
 strings.** The claim "graph adds correctness nowhere" is withdrawn; it was only ever tested where the graph
@@ -238,10 +261,14 @@ needles that fired, and the hand verdicts are committed beside them.
 So the goal is stated where it can be argued with, and in [`AGENTS.md`](AGENTS.md) as the project's
 long-term direction: **make the caller-set enumeration an agent already performs — and often gets
 wrong — both cheap and checkable.** Cost per use is settled (7.7x smaller tool payload at ~4x fewer
-turns, 10/10 vs 6-of-10-wrong on the same tasks). Checkability is the open half: `impact` prints each
-dependent's definition line and not its call site, so confirming one edge still costs a re-read, which
-is the same gap the 2026-08-28 re-analysis recorded as section 6.2 and which the demand data now makes
-a priority rather than a polish item.
+turns, 10/10 vs 6-of-10-wrong on the same tasks). Checkability moved on 2026-08-31: schema v4 records
+the line that names the callee and the shape the call arrived as, `impact` prints both, and
+`cort-evals verify-impact` now grades an edge against that single line — 117 of 117 dependents
+confirmed across the 5 cct chains at `line_precision` 1.0, and 64 of 64 across 4 chains in this repo,
+where the older whole-body check scores 0.667 on `Tally::add` because the body says `tally.add` and the
+seed was asked as `Tally::add`. What is still open is stated in
+[`docs/2026-08-31-recall-wip.md`](docs/2026-08-31-recall-wip.md): the receiver gate refuses more calls
+than it attaches, and the gap boolean still needs the wording change it is coupled to.
 
 
 ## Documented limitations (contracts, not apologies)
@@ -259,13 +286,26 @@ a priority rather than a polish item.
 7. **FTS tokenizer is bare `unicode61`:** the design calls for `unicode61 "remove_diacritics 1" "tokenchars ._$"`, but the bundled SQLite that ships with rusqlite 0.32 rejects every parameterised `unicode61` form (the JS reference via `better-sqlite3` had the same limit). Consequence: `cort context` keyword recall splits identifiers on `.`, `_` and `$` — searching `foo.bar` matches `foo` and `bar` separately, and diacritics are not folded. CJK still tokenizes. `src/schema.sql` carries a `NOTE` and reverting is one line once a SQLite build accepts the parameters.
 8. **`impact` is only as good as a language's edge rules:** the relationship graph indexes the call
    shapes the language's `edge:calls`/`edge:imports` rules in `src/pack/rules/` capture. For Rust that
-   is bare calls (`foo()`) and fully-qualified associated calls (`Type::method()`), resolved by name;
-   receiver calls (`x.m()`) and `use`/`mod` edges are not indexed, so `cort impact --symbol
-   <rust-symbol>` can return `dependents=0` for a symbol with plenty of callers. Module-path calls
-   (`crate::m::f()`) are extracted and now resolve by their last segment — only for the internal
-   prefixes `crate::`, `self::`, `super::`, `::`, so a dependency call like `Vec::new` stays
-   unresolved and visible instead of inventing an edge (`docs/2026-08-31-rust-qualified-call-resolution.md`). Use `cargo check`/`rg` for the precise Rust caller list (see the capability
-   table above).
+   is three shapes — bare (`foo()`), qualified (`Type::method()`) and receiver (`x.method()`) — resolved
+   by name; `use`/`mod` edges are not indexed, so `cort impact --symbol <rust-symbol>` can still return
+   `dependents=0` for a symbol with plenty of callers. Module-path calls (`crate::m::f()`) are extracted
+   and resolve by their last segment — only for the internal prefixes `crate::`, `self::`, `super::`,
+   `::`, so a dependency call like `Vec::new` stays unresolved and visible instead of inventing an edge
+   (`docs/2026-08-31-rust-qualified-call-resolution.md`). Use `cargo check`/`rg` for the precise Rust
+   caller list (see the capability table above).
+
+   The Rust receiver shape is gated, and the gate is a name test, not a type test: `x.m()` becomes an
+   edge only when `m` belongs to exactly one symbol in the project *and* `x` can be that symbol's owner
+   (`self` inside the same `impl`, or a receiver whose last segment equals/prefixes/suffixes the type
+   name after normalising case and underscores). Measured on this repo: 4,833 receiver call sites, 9
+   attached edges, all 9 correct; uniqueness alone would have attached 25, of which 13 were correct and
+   12 invented -- `e.kind()` onto a test fixture's `FailFs::kind`, `status.code()` onto a helper named
+   `code`, `.chain()` onto a function named `chain`. The gate also refuses true calls whose variable
+   carries no trace of its type: `b.problem()` onto `BatchRead::problem` (3 sites), `err.to_json()` onto
+   `CortError::to_json`. Every refusal is reported by `--coverage` as an `extracted_but_unresolved` row,
+   so a refused edge is visible as a gap and never silent. TypeScript/TSX/JavaScript keep their single
+   `call_expression` rule (no form suffix, no gate): their recorded eval labels depend on the existing
+   recall, and putting the gate there would move a baseline nobody has measured yet.
 9. **`status.unparsed` also counts files with no symbols:** `extract_file` degrades to a single
    FTS-only `unparsed` chunk on timeout, on a non-zero `ast-grep` exit, **and** when the scan returns
    zero records. A file that legitimately declares no functions (e.g. `rust/src/lib.rs`, which is only
@@ -274,10 +314,10 @@ a priority rather than a polish item.
    captured by `cort read`; it is FTS5, not semantic memory. Changed or deleted source files invalidate
    their stored readings. Reading notes survive full and incremental re-indexing when the source is unchanged.
 
-The recall line's open work — receiver-call extraction under a uniqueness gate, and the
-`call_site_line` evidence column (schema v4) — is specified in
-[`docs/2026-08-31-recall-wip.md`](docs/2026-08-31-recall-wip.md), together with the measured
-numbers that killed the alternative (Rust `use`/`mod` import edges) and the residual known holes.
+What landed on the recall line, and what is still open (`unparsed` and the gap boolean, the wording
+that has to change with it, trait declarations labelled `call`, the ±2-line tolerance), is recorded in
+[`docs/2026-08-31-recall-wip.md`](docs/2026-08-31-recall-wip.md), together with the measured numbers
+that killed the alternative (Rust `use`/`mod` import edges).
 
 11. **`impact --coverage` is a recall *screen*, not a completeness proof.** It compares the graph with
    `raw_edges` and with the text of indexed files, and reports three layers: mentions that produced no

@@ -48,11 +48,11 @@ fn coverage_of(
     out["coverage"].clone()
 }
 
+/// The case that started the recall line: one `t.take()`, and `take` belongs to exactly one symbol
+/// in the project. v4 attaches it and records the line to read, so the screen has no hole left here
+/// to report -- a gap row that disappears because the edge exists is the only good outcome.
 #[test]
-fn a_receiver_call_is_reported_even_though_the_graph_has_no_edge_for_it() {
-    // The shipped Rust pack extracts `foo()` and `Type::method()`, not `x.method()`. So the graph
-    // legitimately answers `dependents=0` here -- and without this screen that is indistinguishable
-    // from "nothing calls it", which is the mistake the product's whole purpose is to prevent.
+fn a_unique_receiver_call_becomes_an_edge_with_a_line_to_check() {
     let (_dir, root, db, project_id, bin) = indexed(&[
         (
             "src/lib.rs",
@@ -64,21 +64,66 @@ fn a_receiver_call_is_reported_even_though_the_graph_has_no_edge_for_it() {
         ),
     ]);
     let impact = impact_command(&db, &bin, &root, &project_id, "T::take", 3).unwrap();
+    assert_eq!(impact["dependent_count"].as_i64(), Some(1), "{impact}");
+    let dep = &impact["dependents"][0];
+    assert_eq!(dep["symbol_name"], Value::String("go".into()));
+    assert_eq!(dep["start_line"].as_i64(), Some(2), "where `go` is defined");
+    assert_eq!(
+        dep["call_site_line"].as_i64(),
+        Some(2),
+        "where `go` calls `take` -- the same line here, because the fixture is one line long"
+    );
+    assert_eq!(dep["call_form"], Value::String("receiver".into()));
+
+    let cov = coverage_of(&db, &project_id, &root, &bin, "T::take");
+    let seed = &cov["seeds"][0];
+    assert_eq!(seed["mentions_without_edge"], json!([]), "{cov}");
+    assert_eq!(seed["extracted_but_unresolved"], json!([]), "{cov}");
+    assert_eq!(seed["enumeration_may_be_incomplete"], Value::Bool(false));
+}
+
+/// The other half of the gate, and the half that keeps the first one honest: `take` belongs to two
+/// symbols, so no edge is invented -- and the call site is still reported, one layer down, as
+/// "extracted but unresolved" instead of vanishing from both answers.
+#[test]
+fn an_ambiguous_receiver_call_attaches_nothing_and_still_shows_up_as_a_gap() {
+    let (_dir, root, db, project_id, bin) = indexed(&[
+        (
+            "src/lib.rs",
+            concat!(
+                "pub struct T;\nimpl T { pub fn take(&self) -> u32 { 1 } }\n",
+                "pub struct U;\nimpl U { pub fn take(&self) -> u32 { 2 } }\n",
+            ),
+        ),
+        (
+            "src/use.rs",
+            "use crate::lib::T;\nfn go(t: &T) -> u32 { t.take() }\n",
+        ),
+    ]);
+    let impact = impact_command(&db, &bin, &root, &project_id, "T::take", 3).unwrap();
     assert_eq!(
         impact["dependent_count"].as_i64(),
         Some(0),
-        "this test is pinning the documented extractor limitation; if the pack starts extracting \
-         receiver calls, update both this assertion and the screen"
+        "two candidates named `take` is a guess: {impact}"
     );
     let cov = coverage_of(&db, &project_id, &root, &bin, "T::take");
     let seed = &cov["seeds"][0];
     assert_eq!(seed["enumeration_may_be_incomplete"], Value::Bool(true));
-    let gaps = seed["mentions_without_edge"].as_array().unwrap();
     assert!(
-        gaps.iter()
-            .any(|g| g["file_path"] == Value::String("src/use.rs".into())
-                && g["cause"] == Value::String("receiver".into())),
+        seed["why"]
+            .as_array()
+            .unwrap()
+            .contains(&Value::String("extracted_but_unresolved".into())),
         "{cov}"
+    );
+    let dropped = seed["extracted_but_unresolved"].as_array().unwrap();
+    assert!(
+        dropped
+            .iter()
+            .any(|d| d["file_path"] == Value::String("src/use.rs".into())
+                && d["raw_target"] == Value::String("t.take".into())
+                && d["line"].as_i64() == Some(2)),
+        "the refused edge has to be discoverable from the row, not just from the count: {cov}"
     );
 }
 

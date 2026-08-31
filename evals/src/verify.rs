@@ -12,6 +12,31 @@ fn is_word_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_' || c == '$'
 }
 
+/// The callee name out of a possibly-qualified symbol: `Tally::add` -> `add`, `t.run` -> `run`.
+///
+/// This mirrors `cort::chunker::bare_name`. The duplication is deliberate and the other direction is
+/// not: an evaluator that links the product it grades cannot be used to contradict it.
+pub fn last_segment(symbol: &str) -> &str {
+    symbol
+        .rsplit([':', '.'])
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(symbol)
+}
+
+/// Does this line name one of the symbols the dependent is supposed to depend on?
+///
+/// The point of the column is that one line of source is now enough to check one edge, so the
+/// independent checker has to look at exactly that line and nothing else. The same honest
+/// limitation as the body check applies: this matches text, so a comment naming the symbol also
+/// "confirms" it. It is a screen against fabricated edges, not proof of a call.
+pub fn call_site_verdict(line_text: &str, nearer: &[String]) -> Option<String> {
+    nearer
+        .iter()
+        .find(|name| contains_word(line_text, last_segment(name)))
+        .cloned()
+}
+
 /// `\b<name>\b` without pulling in a regex crate.
 pub fn contains_word(haystack: &str, name: &str) -> bool {
     if name.is_empty() {
@@ -84,9 +109,28 @@ pub fn verify_impact(cort: &str, repo: &str, symbol: &str, depth: i64) -> Result
         parents.insert(h, names);
     }
 
+    // Which names a row at hop h is allowed to mention on its call-site line. `parents[h]` is the
+    // set the *body* check uses for that hop (parents[1] is the seed itself), so the line check has
+    // to be graded against parents[1..=h]: wider, because `impact` picks the earliest call site into
+    // "the seeds plus anything nearer", and it records which edge carried the hop only implicitly.
+    // Grading narrower would call true edges unfounded -- the first cut did exactly that and read
+    // `line_precision=0.0` on a venue where every dependent is real.
+    let mut nearer_by_hop: HashMap<i64, Vec<String>> = HashMap::new();
+    {
+        let mut acc: Vec<String> = Vec::new();
+        for hop in 1..=depth {
+            if let Some(names) = parents.get(&hop) {
+                acc.extend(names.iter().cloned());
+            }
+            nearer_by_hop.insert(hop, acc.clone());
+        }
+    }
+
     let mut body_cache: HashMap<String, Vec<String>> = HashMap::new();
     let mut rows = Vec::new();
     let mut by_hop: Map<String, Value> = Map::new();
+    let mut sites_total = 0i64;
+    let mut sites_confirmed = 0i64;
 
     for d in &dependents {
         let file = d
@@ -141,9 +185,38 @@ pub fn verify_impact(cort: &str, repo: &str, symbol: &str, depth: i64) -> Result
             }
         }
 
+        // The v4 column: `impact` now names the line it based this row on, so the claim is checkable
+        // against one line instead of one function. Absent for a dependency that came in through an
+        // import, and for any index built before call sites were recorded.
+        let site = d.get("call_site_line").and_then(Value::as_i64);
+        let call_site = site.map(|line| {
+            let text = lines
+                .get(line as usize - 1)
+                .map(String::as_str)
+                .unwrap_or("")
+                .to_string();
+            let nearer = nearer_by_hop
+                .get(&hop)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            let via = call_site_verdict(&text, nearer);
+            sites_total += 1;
+            if via.is_some() {
+                sites_confirmed += 1;
+            }
+            json!({
+                "line": line,
+                "form": d.get("call_form").and_then(Value::as_str),
+                "confirmed": via.is_some(),
+                "via": via,
+                "text": text.trim().chars().take(120).collect::<String>(),
+            })
+        });
+
         rows.push(json!({
             "hop": hop, "file": file, "symbol": name,
             "confirmed": matched.is_some(), "via": matched,
+            "call_site": call_site,
         }));
     }
 
@@ -177,5 +250,15 @@ pub fn verify_impact(cort: &str, repo: &str, symbol: &str, depth: i64) -> Result
             json!(((confirmed as f64 / rows.len() as f64) * 1000.0).round() / 1000.0)
         },
         "unconfirmed": unconfirmed,
+        // Kept beside `precision`, never folded into it: the body-level figure is what every
+        // recorded run from 2026-08-28 onwards measured, and a stricter check that also renames the
+        // old one destroys the comparison it is supposed to strengthen.
+        "call_sites": sites_total,
+        "call_sites_confirmed": sites_confirmed,
+        "line_precision": if sites_total == 0 {
+            Value::Null
+        } else {
+            json!(((sites_confirmed as f64 / sites_total as f64) * 1000.0).round() / 1000.0)
+        },
     }))
 }
