@@ -348,7 +348,10 @@ that killed the alternative (Rust `use`/`mod` import edges).
    (`export { x as y }`, then called as `y`) is flagged at the barrel line, not at the eventual caller; a
    mention within 2 lines of an extracted call is treated as covered, so nearby prose can be swallowed;
    name-in-string and name-in-comment matching is lexical, so a common word (`get`, `add`, `new`) yields
-   candidates that must be triaged, and Rust lifetimes before a name can be labelled `quoted`.
+   candidates that must be triaged, and Rust lifetimes before a name can be labelled `quoted`. A call
+   that exists only after **macro expansion** is silent too: no file on disk names the callee, so no
+   layer of the screen can fire and `false` means nothing there — that one is inherent to a text
+   comparison and is disclosed rather than fixed (`cargo expand`/`cargo check` is the tool for it).
    **`unparsed` is advisory (coverage-v2, 2026-08-31):** a file with no chunks -- barrel, types-only,
    `pub mod`-only `lib.rs` -- has no edges by construction but *is* text-scanned, so its callers arrive as
    rows. It used to flip every seed: two such files in this repo (four in cct) made the boolean true for

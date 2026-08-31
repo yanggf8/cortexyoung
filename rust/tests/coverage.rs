@@ -556,3 +556,37 @@ fn a_declaration_line_is_never_a_call_even_when_the_declaration_is_not_a_chunk()
     assert_eq!(cause_of("let add = compute(1);", 5, 3), "mention");
     assert_eq!(cause_of("tally.add(&p);", 7, 3), "receiver");
 }
+
+/// What the row order is for: the most severe finding must not lose to unrelated prose.
+///
+/// `file_covered` used to be the *primary* sort key, so a genuine hole in a file that also contained
+/// one extracted call was ranked below comment noise from an unrelated file -- and `MAX_GAP_ROWS`
+/// truncates the printed list, which is how "read the rows, not the boolean" quietly stops being
+/// true. The boolean still said `true`; the row an agent needed was off the page.
+#[test]
+fn a_real_gap_in_a_partially_covered_file_outranks_comment_noise_from_an_uncovered_one() {
+    let c_ts = format!(
+        "import {{ d }} from './d';\nexport function c() {{ return d(); }}\n{}export function c2(x: number) {{ return x + d; }}\n",
+        "// padding keeps the two mentions outside the line tolerance\n".repeat(18)
+    );
+    let (_dir, root, db, project_id, bin) = indexed(&[
+        ("src/d.ts", "export function d() { return 1; }\n"),
+        ("src/c.ts", &c_ts),
+        (
+            "src/u.ts",
+            "// d is probably unused around here\nexport function u() { return 2; }\n",
+        ),
+    ]);
+    let cov = coverage_of(&db, &project_id, &root, &bin, "d");
+    let gaps = cov["seeds"][0]["mentions_without_edge"].as_array().unwrap();
+    let causes: Vec<&str> = gaps.iter().map(|g| g["cause"].as_str().unwrap()).collect();
+    assert!(
+        causes.contains(&"comment"),
+        "the unrelated file's prose should still be listed: {cov}"
+    );
+    assert_eq!(
+        (gaps[0]["cause"].as_str().unwrap(), gaps[0]["file_path"].as_str().unwrap()),
+        ("mention", "src/c.ts"),
+        "the unmapped use of the name in a partially-covered file is the row that must be on top, got {cov}"
+    );
+}

@@ -613,9 +613,16 @@ pub fn coverage_for(
                         .or_insert((1, text_snippet));
                 }
                 for ((line, cause), (occurrences, text_snippet)) in per_line {
+                    // Cause first, file-level coverage second. The reverse order -- which this had --
+                    // demotes the most severe row in a partially-covered file below comment noise from
+                    // an unrelated file, and with `MAX_GAP_ROWS` truncating the list that pushed a real
+                    // `receiver` hole off the printed page while `gap_count` still said it existed. The
+                    // independent review (K3, 2026-09-01) found it; the boolean was never the thing at
+                    // risk here, the *rows* were, and "read the rows" is only true if the rows are ordered
+                    // by what they are.
                     gap_rows_sorted.push((
-                        u8::from(file_covered),
                         cause_rank(cause),
+                        u8::from(file_covered),
                         file.clone(),
                         line,
                         cause,
@@ -702,6 +709,8 @@ pub fn coverage_for(
                     the indexer does not read at all (.sh, .txt, config, or anything under dist/, \
                     build/, target/, node_modules/), a file over 2 MB that the mention scan skips (that \
                     one does flip the boolean, as scan_skipped), a re-export chain reported at its \
-                    barrel line, and a mention within 2 lines of an extracted call (counted covered).",
+                    barrel line, a mention within 2 lines of an extracted call (counted covered), and a \
+                    call that only exists after macro expansion -- nothing on disk names the callee, so \
+                    no layer of this screen can see it, and `false` there is not clearance either.",
     }))
 }

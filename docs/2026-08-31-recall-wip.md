@@ -196,8 +196,14 @@
   這種最常見的寫法整個看不見 → 有真實遮蔽却报 0）。最後一條是先寫出 `/tmp/k3chk` 那個反例才被抓出來的。
   腳本本身不再需要。
 - 外部覆核指令包在 `/tmp/k3-prompt.txt`（同樣未進 repo；要常用就收進來當固定 reviewer brief）。
-- 覆核引擎實測：**Kimi K3** `kimi -m kimi-code/k3 -p ...`（`-p` 模式可用 shell；`-p` 與 `-y`／`--auto`
-  互斥）；**agy** `agy -p ... --model gemini-3.1-pro-high --dangerously-skip-permissions`；
+- 覆核引擎實測（2026-09-01 更正，先前這行寫錯、害下一次白等 45 分鐘）：**Kimi K3**
+  `kimi -m kimi-code/k3 -p ...`。`-p` 與 `-y`／`--auto` **互斥，是 CLI 直接拒絕的**（`error: Cannot combine
+  --prompt with --yolo.`），所以 `-p` 底下任何需要核准的工具呼叫（shell、建 repo）會**永久掛起**，
+  而且看起來像在跑。可行做法：提示詞裡明確「唯讀、不準叫用工具」，並把要審的原始碼**內嵌**進去
+  （讓它自己 Read 會把時間燒在探索上）；`--output-format stream-json` 可看到它卡在哪個工具。
+  第一次送 8 項 + 要它自建 repo：45 分鐘零輸出；第二次禁 shell：它改自己讀檔，15 分鐘被 timeout 砍；
+  第三次內嵌 coverage.rs + 單一大哉問：交貨（見覆核紀錄第三輪）。
+  **agy** `agy -p ... --model gemini-3.1-pro-high --dangerously-skip-permissions`（這個有真正的跳核准旗標）；
   **zglmcode** 預設 `glm-5.3` 在 `-p` 路徑被 `unrecognized_model` 拒（`--model glm-5.1` 可用），
   且該帳號已撞 429 週限額（2026-09-05 重置）。
 - Gate 慣例（兩 crate 分別跑）：`cargo fmt --all -- --check`、`cargo clippy --all-targets
