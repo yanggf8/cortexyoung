@@ -110,6 +110,40 @@ papered over:
   the graph is still in scope after `docs/2026-08-29-finance-cli-measurement.md` and
   `docs/2026-08-28-real-session-cost.md`.
 
+## Recall experiment (`recall-exp`)
+
+`cort-evals recall-exp --venue DIR [--top N]` counts **the population a call-shape rule would have to
+work on**, from source text only. It exists because the two decisions that shaped schema v4 — build C
+(receiver calls), do not build B (Rust import edges) — were argued from numbers a throwaway Python
+script produced in `/tmp`, and nobody else can re-run them. The repo's rule is that analysis lives
+here, in Rust.
+
+```
+cargo run --manifest-path evals/Cargo.toml --release -- recall-exp --venue ~/a/cortexyoung --top 5
+```
+
+It reports, per venue: files scanned, declared symbols, receiver call sites bucketed by how many
+project symbols answer to the method name (`no_project_symbol` / `unique` / `ambiguous`), the same for
+`::`-path calls, `module_path_calls_into_a_local_module` (the population the module-suffix rule can
+reach) and `dependency_shadowed_by_local_module_sites` — the subset where a `use std::x;` makes the
+qualifier genuinely ambiguous with a local module of the same name, which is the hole README
+limitation #8 describes.
+
+What it deliberately does **not** do: open a `cort` database, or re-implement `receiver_binds`. A
+harness that measures the product by running the product's own code cannot contradict it, so `unique`
+here is a **text-side upper bound** and is not the same quantity as "160 attachable sites" in
+`docs/2026-08-31-coverage-external-review.md` (that counted `cort`'s chunks, this counts every declared
+name including test functions, `const`s and `let`s). What was actually attached comes from
+`cort status` and `verify-impact`, and both numbers belong in the same sentence only when labelled.
+
+Measured on 2026-08-31: this repo 55 files, 6,468 receiver sites (5,180 name nothing the project
+declares, 416 unique, 872 ambiguous), 45 `::`-path calls into a local module, **0 shadowed**; cct 183
+files, 13,297 receiver sites, 0 path calls into a local module, 0 shadowed. Three earlier versions of
+this metric were wrong in the informative direction and are now pinned by tests: it counted every
+internal path call as an exposure (44 here), it stopped reading a crate name at the venue root
+(multi-crate repos have none), and it compared `cort-evals` to `cort_evals` as if they were different
+crates.
+
 ## Demand probe (`demand`)
 
 Cost per use is `run-agents`. This answers the other half — how often the walk is wanted — from the

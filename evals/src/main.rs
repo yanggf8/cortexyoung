@@ -50,6 +50,7 @@ const RUN_AGENTS_FLAGS: &[&str] = &[
     "--delay-secs",
 ];
 const VERIFY_IMPACT_FLAGS: &[&str] = &["--repo", "--depth", "--symbols"];
+const RECALL_EXP_FLAGS: &[&str] = &["--venue", "--top"];
 const SUMMARIZE_FLAGS: &[&str] = &["--strict"];
 const DEMAND_FLAGS: &[&str] = &[
     "--claude-dir",
@@ -59,12 +60,15 @@ const DEMAND_FLAGS: &[&str] = &[
     "--show",
 ];
 
-const USAGE_TOP: &str = "usage: cort-evals <run-agents|verify-impact|summarize|demand> [options]";
+const USAGE_TOP: &str =
+    "usage: cort-evals <run-agents|verify-impact|summarize|demand|recall-exp> [options]";
 const USAGE_RUN_AGENTS: &str = "usage: cort-evals run-agents --venue DIR [--tasks FILE] [--only ID[,ID...]] [--arms a,b] [--max-turns N] [--config-dir DIR] [--cache-dir DIR] [--jail-dir DIR] [--jail] [--out DIR] [--concurrency N] [--delay-secs N]";
 const USAGE_VERIFY_IMPACT: &str =
     "usage: cort-evals verify-impact --repo DIR --symbols A,B [--depth N]";
 const USAGE_SUMMARIZE: &str = "usage: cort-evals summarize [--strict] rows.json [rows.json...]";
 const USAGE_DEMAND: &str = "usage: cort-evals demand [--claude-dir DIR] [--codex-dir DIR] [--exclude a,b,c] [--out FILE] [--show]";
+const USAGE_RECALL_EXP: &str =
+    "usage: cort-evals recall-exp --venue DIR [--top N]  (text-side counterfactual; no cort index needed)";
 
 /// The provider gates a sampling run on a rolling window, so "run these cells after the window
 /// resets" is part of the experiment, not shell glue. Seconds rather than a wall-clock time: the
@@ -601,6 +605,29 @@ fn verify_impact_main(argv: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+fn recall_exp_main(argv: &[String]) -> Result<(), String> {
+    guard_options(argv, RECALL_EXP_FLAGS, USAGE_RECALL_EXP)?;
+    let venue = at(argv, "--venue", "");
+    if venue.is_empty() {
+        return Err(format!(
+            "recall-exp needs --venue DIR: the population it counts is the venue's\n{USAGE_RECALL_EXP}"
+        ));
+    }
+    let top: usize = at(argv, "--top", "10")
+        .parse()
+        .map_err(|_| "--top must be a number".to_string())?;
+    let path = std::path::Path::new(&venue);
+    if !path.is_dir() {
+        return Err(format!("--venue {venue}: not a directory"));
+    }
+    let report = cort_evals::recall::report(path, top)?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&report).expect("the report is serialisable")
+    );
+    Ok(())
+}
+
 fn summarize_main(argv: &[String]) -> Result<(), String> {
     guard_options(argv, SUMMARIZE_FLAGS, USAGE_SUMMARIZE)?;
     // Accepts several row files so a multi-run experiment aggregates in one call, which is what
@@ -751,6 +778,7 @@ fn main() {
         Some("verify-impact") => verify_impact_main(&argv[1..]),
         Some("summarize") => summarize_main(&argv[1..]),
         Some("demand") => demand_main(&argv[1..]),
+        Some("recall-exp") => recall_exp_main(&argv[1..]),
         other => {
             // Asking how to use the tool is never an error and never a run — including at the top
             // level, which is where F-17 stopped. `wants_help` already answered true for a bare
@@ -1008,6 +1036,7 @@ mod whitelist_coverage {
                         .chain(VERIFY_IMPACT_FLAGS.iter())
                         .chain(SUMMARIZE_FLAGS.iter())
                         .chain(DEMAND_FLAGS.iter())
+                        .chain(RECALL_EXP_FLAGS.iter())
                         .any(|f| *f == name.as_str());
                     if !known {
                         orphans.push(format!("{name} (src/main.rs:{})", n + 1));

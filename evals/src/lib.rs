@@ -7,6 +7,7 @@
 pub mod arms;
 pub mod demand;
 pub mod grade;
+pub mod recall;
 pub mod stream;
 pub mod summary;
 pub mod verify;

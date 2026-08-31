@@ -636,7 +636,13 @@ fn asking_for_help_exits_zero_and_names_every_subcommand() {
         String::from_utf8_lossy(&help.stderr)
     );
     let out = String::from_utf8_lossy(&help.stdout);
-    for sub in ["run-agents", "verify-impact", "summarize"] {
+    for sub in [
+        "run-agents",
+        "verify-impact",
+        "summarize",
+        "demand",
+        "recall-exp",
+    ] {
         assert!(out.contains(sub), "usage text never mentions {sub}: {out}");
     }
     // The `help` word form is the same request, and the guard still refuses a real run.
@@ -652,5 +658,40 @@ fn asking_for_help_exits_zero_and_names_every_subcommand() {
     assert!(
         !unknown.status.success(),
         "an unknown option is still not a silent success"
+    );
+}
+
+#[test]
+fn the_declaration_scan_terminates_on_attributes_and_non_ascii_names() {
+    // A character that opens the word branch without being able to form a word used to spin the
+    // scan forever on the first `#[derive]` in any Rust file: the hang was invisible in review
+    // because the loop is three lines long and looks like it advances.
+    for line in [
+        "#[derive(Debug, Clone)]",
+        "#![allow(dead_code)]",
+        "pub fn 你好() {}",
+        "!!! ??? ###",
+        "  ",
+        "",
+    ] {
+        let _ = cort_evals::recall::declared_names(line);
+    }
+    assert_eq!(
+        cort_evals::recall::declared_names("pub(crate) fn add() {}"),
+        ["add"],
+    );
+    assert_eq!(
+        cort_evals::recall::declared_names("impl SqliteErrorCode {"),
+        ["SqliteErrorCode"],
+    );
+    assert_eq!(
+        cort_evals::recall::declared_names("let x = compute(1);"),
+        ["x"]
+    );
+    assert!(cort_evals::recall::declared_names("foo(bar);").is_empty());
+    // Two declarations, one line: the shape that made the single-name version under-count.
+    assert_eq!(
+        cort_evals::recall::declared_names("impl T { pub fn take(&self) -> u32 { 1 } }"),
+        ["T", "take"],
     );
 }

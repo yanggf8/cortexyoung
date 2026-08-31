@@ -25,9 +25,12 @@
 | `3fd9d9b` | **解析根因修復**：`crate::`／`self::`／`super::`／`::` 限定呼叫退回最後一段；外部呼叫（`Vec::new`）刻意不退回、維持可見 |
 | `80d92d0` | K3 第二輪覆核紀錄 ＋ B／C 反事實實驗計數 |
 | `7ab31af` | `scan_skipped`：>2MB／讀檔失敗納為第三類盲檔並參與翻轉旗標 |
-| `(本提交)` | **schema v4**：`raw_edges.call_form` ＋ `relationships.call_site_line`／`call_form`；Rust pack 新增 receiver 規則；解析端「唯一才連 ＋ receiver 必須能綁到該 owner」；`impact` 印 `@<呼叫行> <form>`；`verify-impact` 新增逐行查證 |
+| `a0269cda` | **schema v4**：`raw_edges.call_form` ＋ `relationships.call_site_line`／`call_form`；Rust pack 新增 receiver 規則；解析端「唯一才連 ＋ receiver 必須能綁到該 owner」；`impact` 印 `@<呼叫行> <form>`；`verify-impact` 新增逐行查證 |
 | `209fa06f` | 把「上游 receiver 閘」與「本地 module-path 後綴解析（`module_segments`／`expand_use_path`／`split_call_path`／`Candidate`／`resolve_candidates`）＋ Rust `edge:imports`」合併。**這筆沒過倉庫 gate**：rustfmt 4 個 hunk、clippy `dead_code`（`chunks_named` 被重寫後的 `resolve_targets` 遺留）、`ReceiverIndex` 的文件註解在合併時跑到 `ReceiverCandidate` 上面（結構體因此沒有說明了）。 |
-| `(本提交 2)` | 修掉上面三項（含把註解放回 `ReceiverIndex`）、補 `a_std_module_qualifier_that_matches_a_local_module_file_still_attaches` 把 std／本地模組同名的洞**釘住**、並更正 README 對這個洞的講法（它說會回 `AMBIGUOUS`，實測是回 `INFERRED` 的假邊）。合併後的實測：本倉庫同一棵樹 1,386→1,401 條邊（+18 條 module-path 全對、6 條原本 AMBIGUOUS 被 `use` 收窄）、cct 1,839 條與五條鏈逐條不變。 |
+| `8d43628c` | 修掉上面三項（含把註解放回 `ReceiverIndex`）、補 `a_std_module_qualifier_that_matches_a_local_module_file_still_attaches` 把 std／本地模組同名的洞**釘住**、並更正 README 對這個洞的講法（它說會回 `AMBIGUOUS`，實測是回 `INFERRED` 的假邊）。合併後的實測：本倉庫同一棵樹 1,386→1,401 條邊（+18 條 module-path 全對、6 條原本 AMBIGUOUS 被 `use` 收窄）、cct 1,839 條與五條鏈逐條不變。 |
+| `c689080f` | **coverage-v2**：`unparsed` 不再翻布林值（改 advisory、`why: [unparsed_files]`）、`COVERAGE_METHOD` 升 v2、`reading`／skill／README 三處同時寫明「讀列，不要讀布林值」舆 `false` 能結論到什麼（含 K3 講漏的 >2MB、`dist`/`target` 下來源檔、±2 行容差），lean 多一列 advisory 說明。60 個隨機符號實測：本倉庫 true 從 60/60 變成 5/60。 |
+| `ad1caf65` | 宣告行不再被標成 `call`（`DECLARATION_KEYWORDS`；本倉庫 295 行、cct 6,693 行這類宣告不在任何 chunk 起點上）；`blind` 列的 `unread=-` 區分「沒算過」舆 0。 |
+| `(本提交)` | `cort-evals recall-exp --venue DIR`：把決定 B／C 的反事實計數從 `/tmp` 的 Python 腳本收成 Rust 子命令（只讀文字、不開 DB、不重刻閘），並附上兩場域現況數字。 |
 
 量到的事實（決定優先序用的，不是敘事）：
 - 需求面：1,214 筆可用指令 → 問關係 **1 筆（0.08%）**；需呼叫點集合的寫入任務裁決後 **4 嚴格／7 含弱**；**877 筆（41.9%）是貼回來的 agent 報告**。
@@ -182,8 +185,13 @@
 - 索引快取：本倉庫 `CORT_CACHE_DIR=/tmp/cort-self-rs`；cct 場域 `CORT_CACHE_DIR=/tmp/cort-exp`
   （cct HEAD `b41e39d`，全量重索引約 2 分鐘）；`/tmp/cort-exp/usage.db` 是使用記錄，別當專案檔。
 - 最小重現：`/tmp/rq`（`crate::def::my_func()` 解析）、`/tmp/blindx`（盲檔／scan_skipped）。
-- 反事實實驗腳本在 `/tmp/exp/exp.py`（**未進 repo**）。若要常态化，依純 Rust 契約做成
-  `cort-evals recall-exp --venue DIR`，別放腳本。
+- ~~反事實實驗腳本在 `/tmp/exp/exp.py`（未進 repo）~~ **已收進來**：
+  `cort-evals recall-exp --venue DIR [--top N]`（`evals/src/recall.rs`）。它只讀來源文字、不開
+  cort 的 DB、也不重刻 `receiver_binds`——所以它的 `unique` 是**文字面上界**，
+  與本檔前面那個「160 個唯一可連」（用 cort chunks 算的）不是同一個量，引用時要分開標。
+  目前兩場域：本倉庫 receiver 6,468 點（5,180 無同名符號／416 唯一／872 多候選）、
+  `::` 路徑進本地模組 45 點、被依賴同名遮蔽 0 點；cct 13,297 點、遮蔽 0 點。
+  腳本本身不再需要。
 - 外部覆核指令包在 `/tmp/k3-prompt.txt`（同樣未進 repo；要常用就收進來當固定 reviewer brief）。
 - 覆核引擎實測：**Kimi K3** `kimi -m kimi-code/k3 -p ...`（`-p` 模式可用 shell；`-p` 與 `-y`／`--auto`
   互斥）；**agy** `agy -p ... --model gemini-3.1-pro-high --dangerously-skip-permissions`；
