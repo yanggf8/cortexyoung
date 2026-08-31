@@ -436,7 +436,10 @@ fn summarize_never_averages_nulls_into_a_verdict() {
 fn the_shipped_task_file_still_loads_and_its_labels_are_hop_consistent() {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tasks-graph.json");
     let tasks = load_tasks(path).unwrap_or_else(|e| panic!("{e}"));
-    assert_eq!(tasks.len(), 5);
+    // Six, not five: `delete-getcurrenttimeet-task-framed` is the same verified label set reached
+    // from a task verb instead of a question, because the demand measurement (docs/2026-08-31)
+    // found the question-shaped task is the one almost nobody uses.
+    assert_eq!(tasks.len(), 6);
     for t in &tasks {
         assert!(!t.seed_symbol.is_empty(), "{} has no seed", t.id);
         assert_eq!(

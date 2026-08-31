@@ -326,6 +326,79 @@
       ],
       "why_graph_required": "Hops 2 and 3 are not textual neighbours of logInfo: each hop hands back names that must be searched again, and every hit has to be opened to learn which symbol encloses it.",
       "label_provenance": "Regenerated 2026-08-28 from cort impact --depth 3 against cct 86a5ee6 (index /tmp/cort-exp, 2577 chunks); every one of 66 edges independently textually confirmed by evals/verify-impact.mjs at precision 1.0. Distance is the shortest path: 21 symbols reach the seed by more than one path."
+    },
+    {
+      "id": "delete-getcurrenttimeet-task-framed",
+      "prompt": "We are deleting getCurrentTimeET outright — the caller owns the clock now. List every function that has to change as a result and how far each one is from the seed.",
+      "seed_symbol": "getCurrentTimeET",
+      "min_hops_required": 3,
+      "expected_symbols": [
+        "handlePreMarketBriefing",
+        "handleEndOfDaySummary",
+        "getLastNTradingDays",
+        "isMarketHours",
+        "getCurrentDateET",
+        "handleDirectRequest",
+        "generatePreMarketAnalysis",
+        "getSymbolSentimentData",
+        "refreshPreMarketAnalysis",
+        "hasPreMarketAnalysis",
+        "getCurrentPreMarketAnalysis",
+        "handleJobsLatest",
+        "handlePreMarketJob",
+        "handleIntradayJob",
+        "handleScheduleCheck",
+        "marketToday",
+        "handleReportsStatus",
+        "handleJobsRoutes",
+        "handleReportRoutes",
+        "handleWeeklyReport",
+        "handlePreMarketReport",
+        "handleIntradayReport",
+        "handleEndOfDayReport"
+      ],
+      "by_hop": {
+        "1": [
+          "handlePreMarketBriefing",
+          "handleEndOfDaySummary",
+          "getLastNTradingDays",
+          "isMarketHours",
+          "getCurrentDateET"
+        ],
+        "2": [
+          "handleDirectRequest",
+          "generatePreMarketAnalysis",
+          "getSymbolSentimentData",
+          "refreshPreMarketAnalysis",
+          "hasPreMarketAnalysis",
+          "getCurrentPreMarketAnalysis",
+          "handleJobsLatest",
+          "handlePreMarketJob",
+          "handleIntradayJob",
+          "handleScheduleCheck",
+          "marketToday",
+          "handleReportsStatus"
+        ],
+        "3": [
+          "handleJobsRoutes",
+          "handleReportRoutes",
+          "handleWeeklyReport",
+          "handlePreMarketReport",
+          "handleIntradayReport",
+          "handleEndOfDayReport"
+        ]
+      },
+      "expected_files": [
+        "src/modules/enhanced-request-handler.ts",
+        "src/modules/handlers/briefing-handlers.ts",
+        "src/modules/handlers/end-of-day-handlers.ts",
+        "src/modules/pre-market-data-bridge.ts",
+        "src/modules/trading-calendar.ts",
+        "src/routes/jobs-routes.ts",
+        "src/routes/report-routes.ts"
+      ],
+      "why_graph_required": "Same walk as blast-radius-3hop-getcurrenttimeet, reached from the other side: nothing here asks a relationship question. Deleting a name requires the dependent set to be enumerated correctly, which is the shape the demand measurement found in real transcripts (docs/2026-08-31-demand-recheck.md), whereas the question-shaped task is the shape almost nobody uses.",
+      "label_provenance": "Reuses the 23-symbol set of blast-radius-3hop-getcurrenttimeet verbatim, so it adds no new labelling risk: same seed, same depth, same venue. A deletion's blast radius is that set by definition, so no separate re-verification was needed."
     }
   ]
 }

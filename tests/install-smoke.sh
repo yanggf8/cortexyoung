@@ -549,7 +549,16 @@ assert_pristine_skill "$LEGACY_SKILL" "$SRC_SKILL" "legacy shape B upgraded to t
 assert_skill_claimed "$LEGACY_SKILL" "legacy shape B ownership moved into the stamp"
 # The strongest form of the assertion, when the real loader is available: does the deployed text
 # actually reach a Codex prompt? Skipped (never faked) where codex is not installed, e.g. CI.
-SKILL_PROBE="Route code lookup, reusable reads"
+# Derived, not hardcoded: the probe used to be a literal phrase from the description, so editing
+# the prose failed this test even when the loader was reading the file perfectly. Take whatever the
+# source says instead — the assertion stays "does the deployed text reach a real prompt", which is
+# the F-16 failure mode, and nothing else.
+SKILL_PROBE="$(awk '/^description: /{sub(/^description: /,""); print substr($0,1,48); exit}' "$SRC_SKILL")"
+if [ -z "$SKILL_PROBE" ]; then
+  fail "could not derive a probe string from $SRC_SKILL"
+else
+  echo "    probe: ${SKILL_PROBE}..."
+fi
 if command -v codex >/dev/null 2>&1; then
   # Resolve the same way install.sh does, so the probe reads the home the skill was written to.
   codex_probe_home="${CODEX_HOME:-$HOME/.codex}"
