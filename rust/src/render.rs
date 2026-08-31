@@ -168,6 +168,9 @@ fn coverage_lines(payload: &Value) -> Vec<String> {
         for (kind, key) in [
             ("unparsed", "unparsed_example"),
             ("unindexed", "unindexed_example"),
+            // A file this scan could not read was never looked at. Silence here is what let a
+            // healthy 2 MB+ file answer "no gaps": K3's worst false negative.
+            ("scan_skipped", "scan_skipped_files"),
         ] {
             for f in arr(b, key) {
                 if let Some(name) = f.as_str() {

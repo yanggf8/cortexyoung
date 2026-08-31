@@ -360,6 +360,42 @@ fn a_symbol_that_is_not_indexed_reports_itself_instead_of_failing() {
 }
 
 #[test]
+fn a_file_too_big_to_read_is_reported_as_skipped_instead_of_clean() {
+    // K3's worst false negative: the mention scan has a size cap, and a file over it used to vanish
+    // from every field -- an indexed, parsed, healthy file whose callers were never looked at still
+    // answered `incomplete=false`. The cap is fine; the silence was not.
+    let big = format!(
+        "export const blob = \"{}\";\nexport function use_it() {{ return d(); }}\n",
+        "x".repeat(2_100_000)
+    );
+    let (_dir, root, db, project_id, bin) = indexed(&[
+        ("src/d.ts", "export function d() { return 1; }\n"),
+        ("src/huge.ts", big.as_str()),
+    ]);
+    let cov = coverage_of(&db, &project_id, &root, &bin, "d");
+    let blind = &cov["blind_files"];
+    assert!(blind["scan_skipped"].as_u64().unwrap_or(0) >= 1, "{blind}");
+    assert!(
+        blind["scan_skipped_files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v.as_str().unwrap_or_default() == "src/huge.ts"),
+        "{blind}"
+    );
+    assert!(
+        cov["seeds"].as_array().unwrap().iter().all(|s| {
+            s["enumeration_may_be_incomplete"] == Value::Bool(true)
+                && s["why"]
+                    .as_array()
+                    .map(|w| w.contains(&Value::String("scan_skipped".into())))
+                    == Some(true)
+        }),
+        "a skipped file must reach every seed's verdict: {cov}"
+    );
+}
+
+#[test]
 fn qualification_and_word_boundaries_are_parsed_the_way_the_caller_reads_them() {
     assert_eq!(bare_name("Tally::add"), "add");
     assert_eq!(bare_name("formatter.formatToParts"), "formatToParts");

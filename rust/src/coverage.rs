@@ -49,6 +49,9 @@ pub const COVERAGE_METHOD: &str =
 /// How many files a blind-layer field reports, whether it carries a count or the path list. The
 /// flag has to be right whichever shape the field has: reading an array as "no count" and defaulting
 /// to zero is precisely how a blind file ended up producing a clean bill of health.
+/// How many files a blind-layer field reports, whether it carries a count or the path list. The
+/// flag has to be right whichever shape the field has: reading an array as "no count" and defaulting
+/// to zero is exactly how a blind file once produced a clean bill of health.
 fn blind_count(value: Option<&Value>) -> usize {
     match value {
         Some(Value::Array(list)) => list.len(),
@@ -444,6 +447,7 @@ pub fn coverage_for(
     let extracted = extracted_calls(db, project_id)?;
     // Read each indexed source file once, not once per seed: a batched `--symbol a,b,c` should cost
     // one walk of the tree.
+    let mut skipped: Vec<String> = Vec::new();
     let mut sources: HashMap<String, String> = HashMap::new();
     for file in &indexed {
         let path = root.join(file);
@@ -452,17 +456,54 @@ pub fn coverage_for(
                 continue;
             }
         }
-        if let Ok(text) = std::fs::read_to_string(&path) {
-            sources.insert(file.clone(), text);
+        match std::fs::read_to_string(&path) {
+            Ok(text) => {
+                sources.insert(file.clone(), text);
+            }
+            // K3's worst false negative, and the twin of the bug 78fad50 fixed one layer up: an
+            // indexed, parsed, perfectly healthy file can be skipped here (over the size cap, or an
+            // unreadable path) and its callers were then never looked at -- while the answer still
+            // read `incomplete=false`. A file the mention scan could not read is a blind file by
+            // definition, so it has to reach the verdict instead of disappearing.
+            Err(_) => skipped.push(file.clone()),
         }
     }
+    let size_skipped: Vec<String> = indexed
+        .iter()
+        .filter(|f| {
+            let path = root.join(f);
+            std::fs::metadata(&path).is_ok_and(|m| m.len() > MAX_SCAN_BYTES)
+        })
+        .cloned()
+        .collect();
+    for f in size_skipped {
+        if !skipped.contains(&f) {
+            skipped.push(f);
+        }
+    }
+    skipped.sort();
+    skipped.dedup();
 
-    let blind = blind_files(db, project_id, root, &index_set)?;
+    let mut blind = blind_files(db, project_id, root, &index_set)?;
+    if let Some(map) = blind.as_object_mut() {
+        map.insert("scan_skipped".to_string(), json!(skipped.len()));
+        map.insert(
+            "scan_skipped_files".to_string(),
+            json!(skipped
+                .iter()
+                .take(MAX_GAP_ROWS)
+                .cloned()
+                .collect::<Vec<_>>()),
+        );
+    }
     // The reviewer's finding (agy, 2026-08-31): a file the chunker could not read holds callers the
     // mention scan never sees, so "no gaps for this seed" was being read as a clean bill of health
     // while `blind_files` said otherwise. Absence of signal inside a blind tree is not absence of
     // gaps; the flag has to fail toward "may be incomplete".
-    let blind_gap = blind_count(blind.get("unparsed")) + blind_count(blind.get("unindexed")) > 0;
+    let blind_gap = blind_count(blind.get("unparsed"))
+        + blind_count(blind.get("unindexed"))
+        + blind_count(blind.get("scan_skipped"))
+        > 0;
     let mut per_seed = Vec::new();
     for seed in seeds {
         let name = bare_name(&seed.symbol).to_string();
@@ -583,6 +624,9 @@ pub fn coverage_for(
         }
         if blind_gap {
             reasons.push("blind_files");
+        }
+        if !skipped.is_empty() {
+            reasons.push("scan_skipped");
         }
         per_seed.push(json!({
             "symbol": seed.symbol,
