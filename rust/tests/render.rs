@@ -178,6 +178,21 @@ fn lean_impact_output_lists_every_dependent_with_its_hop_and_drops_the_stored_ch
         blind_out.contains("blind\tunparsed\trust/src/lib.rs"),
         "paths, not just the count: {blind_out}"
     );
+    // The no-seed shape never reads the tree, so `scan_skipped` was never computed. A blank field
+    // reads as zero, and zero reads as "nothing was skipped" -- the false-safe claim itself.
+    let no_scan = serde_json::json!({
+        "symbol": "z", "depth": 1, "seed_count": 0, "seeds": [], "dependent_count": 0,
+        "unresolved": [], "index_is_stale": false,
+        "coverage": {
+            "method": "coverage-v2", "no_seed_resolved": true, "seeds": [],
+            "blind_files": {"unparsed": 1, "unindexed": 0},
+        },
+    });
+    let no_scan_out = render(Some("impact"), Format::Lean, &no_scan);
+    assert!(
+        no_scan_out.contains("blind\tunparsed=1\tunindexed=0\tunread=-"),
+        "unknown must print as a dash: {no_scan_out}"
+    );
     // A dependency that came in through an import has no call site. `-`, never line 0 and never a
     // shorter row: a missing value that changes the row's shape gets misread as a different column.
     let no_site = serde_json::json!({

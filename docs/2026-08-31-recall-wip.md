@@ -154,7 +154,14 @@
    cct 63 個 seed 裡仍有 62 個 true —— 因為那些是真的有 gap 列，不是稀釋。所以「讀列」仍是主指令。
    回歸測試拆成兩條：`a_blind_file_is_never_a_clean_bill_of_health`（**未讀**檔仍必須翻）舆
    `a_file_with_no_chunks_is_advisory_and_does_not_flip_every_seed`（無 chunk 檔不得翻）。
-2. trait 內的方法**宣告**（`fn add(&self, x: i32) -> i32;`）被標 `call`，因為定義判定要求精確 `start_line`。
+2. ~~trait 內的方法宣告被標 `call`~~ **已修**：`cause_of` 現在先看名字前面那個 token 是不是宣告關鍵字
+   （`fn/struct/enum/trait/union/type/const/static/mod/impl`）→ `definition`。
+   類別大小（實測）：本倉庫 **295** 行宣告行不在任何 chunk 的 `start_line` 上、cct **6,693** 行——
+   這些行只要點到某個 seed 的名字，在 v1 就会被標成 `call`（rank 1，排在真實漏洞前面）。
+   方向是**降級**該列的嚴重度而不是刪掉它，所以仍可在列裡看到，只是不再冒充呼叫點。
+   測試：`a_declaration_line_is_never_a_call_even_when_the_declaration_is_not_a_chunk`。
+   順手修一個自己造成的渲染缺陷：`blind` 列現在 `unread=-` 表示「沒算過」（no-seed 那條路徑不讀盤），
+   而不是空白或 0（空白會被讀成 0，0 會被讀成「沒有跳過任何檔」＝那個假安全宣稱本身）。
 3. `LINE_TOLERANCE = 2` 會把離已抽取呼叫 ≤2 行的提及算成已覆蓋（可能吞掉真漏洞）。
 4. 非來源檔（`.sh`／`.txt`／設定檔）與 `IGNORE_DIRS` 下的來源檔，三層全部看不見——**邊界，不是 bug**。
 5. `.wrangler/tmp/deploy-*/index.js` 7 份 bundle 在 cct 索引裡（`IGNORE_DIRS` 不含 `.wrangler`）：

@@ -532,3 +532,27 @@ fn qualification_and_word_boundaries_are_parsed_the_way_the_caller_reads_them() 
     assert_eq!(cause_of("/// t.add() appears twice", 7, 3), "comment");
     assert_eq!(cause_of(" * t.add() as documentation", 7, 3), "comment");
 }
+
+#[test]
+fn a_declaration_line_is_never_a_call_even_when_the_declaration_is_not_a_chunk() {
+    // The shape that motivated it: a trait method signature. `trait_item` bodies declare `fn add(...)`
+    // without a body, the pack has no rule for that node, so no chunk exists at that line and the old
+    // label was `call`.
+    assert_eq!(
+        cause_of("    fn add(&self, x: i32) -> i32;", 8, 3),
+        "definition"
+    );
+    assert_eq!(cause_of("pub fn add(&self) {}", 8, 3), "definition");
+    assert_eq!(cause_of("pub(crate) fn add() {}", 15, 3), "definition");
+    assert_eq!(cause_of("async fn add() {}", 10, 3), "definition");
+    assert_eq!(cause_of("trait Reader { fn read(); }", 19, 4), "definition");
+    assert_eq!(cause_of("mod fs;", 5, 2), "definition");
+    // A call *inside* a declaration line keeps its own label: only the name directly after the
+    // keyword is the thing being declared.
+    assert_eq!(
+        cause_of("pub fn add(x: i32) -> i32 { helper(x) }", 29, 6),
+        "call"
+    );
+    assert_eq!(cause_of("let add = compute(1);", 5, 3), "mention");
+    assert_eq!(cause_of("tally.add(&p);", 7, 3), "receiver");
+}

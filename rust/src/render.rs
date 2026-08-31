@@ -175,11 +175,19 @@ fn coverage_lines(payload: &Value) -> Vec<String> {
     }
     let blind = coverage.get("blind_files");
     if let Some(b) = blind {
+        // `-` for a count that was never computed, never a blank and never a 0: the no-seed shape of
+        // this report reads the tree not at all, so its `scan_skipped` is unknown rather than empty,
+        // and "unread=0" there would be the exact false-safe claim the field exists to prevent.
+        let count = |key: &str| match b.get(key) {
+            Some(Value::Number(n)) => n.to_string(),
+            Some(Value::Array(list)) => list.len().to_string(),
+            _ => "-".to_string(),
+        };
         out.push(format!(
             "blind\tunparsed={}\tunindexed={}\tunread={}",
-            js_display(b, "unparsed"),
-            js_display(b, "unindexed"),
-            js_display(b, "scan_skipped")
+            count("unparsed"),
+            count("unindexed"),
+            count("scan_skipped")
         ));
         // The one sentence the flag cannot carry: `unparsed` files have no edges but were still read
         // as text, so they contribute rows and no verdict. Without this line, `blind unparsed=2` next

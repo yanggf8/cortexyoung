@@ -246,6 +246,12 @@ pub fn mentions(text: &str, name: &str) -> Vec<(usize, usize)> {
     out
 }
 
+/// The keywords that put a *name being declared* immediately after them. `impl`/`type` included:
+/// naming a type in those positions is not a call on it either.
+pub const DECLARATION_KEYWORDS: &[&str] = &[
+    "fn", "struct", "enum", "trait", "union", "type", "const", "static", "mod", "impl",
+];
+
 /// Why a mention produced no edge. A hint for triage, never a verdict: `receiver` is the pack's known
 /// blind spot, `quoted` is usually a string or a shell argument, and everything else is unexplained.
 pub fn cause_of(line_text: &str, column: usize, name_len: usize) -> &'static str {
@@ -273,6 +279,18 @@ pub fn cause_of(line_text: &str, column: usize, name_len: usize) -> &'static str
     // safe direction for a screen whose only job is to keep real holes near the top.
     if before.matches('"').count() % 2 == 1 || before.matches('\'').count() % 2 == 1 {
         return "quoted";
+    }
+    // A declaration, not a call. The chunk-based definition test matches the declaration line to a
+    // chunk that starts on it, and a trait method *signature* (`fn add(&self, x: i32) -> i32;`) is a
+    // `function_signature_item` in this grammar -- never a chunk -- so the line fell through to
+    // `call`, which is the second-most-severe cause. Over-reporting, but a wrong label on a row whose
+    // whole purpose is telling a reader what kind of thing they are looking at.
+    if before
+        .split_whitespace()
+        .next_back()
+        .is_some_and(|token| DECLARATION_KEYWORDS.contains(&token))
+    {
+        return "definition";
     }
     if matches!(before.chars().next_back(), Some('.') | Some(':')) {
         return "receiver";
