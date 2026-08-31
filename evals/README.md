@@ -75,8 +75,8 @@ turns multiplied by an accumulating transcript. Treat those verdicts as "the age
 `tasks.json` is single-hop or literal-answerable — it cannot exercise a transitive walk. Use
 `tasks-graph.json`: 3-hop blast-radius questions whose labels were produced by the shipped pack and then
 independently confirmed against file text (`cort-evals verify-impact`, precision 1.0 on all five chains).
-The same-day Rust `edge:calls` rules changed only `rust.yml`; all five chains are TypeScript-venue, so
-TS extraction — and these labels — are unaffected.
+The same-day Rust additions (`rust.yml` edge rules, module-path resolution in `graph.rs`) do not alter
+the TypeScript cascade — the graph tests pin its order — so these labels stand.
 `createSimplifiedEnhancedDAL` was measured and **dropped** for scoring 0.965, not 1.0 — labels that do not
 verify do not go in the file. One of the six (`delete-getcurrenttimeet-task-framed`) is deliberately phrased
 as a task rather than a question, reusing another task's verified label set verbatim: the demand probe found

@@ -82,3 +82,9 @@ rule:
     all:
       - pattern: $CALLEE
       - has: { field: field, kind: field_identifier, pattern: $METHOD }
+---
+id: cort-rust-edge-imports
+language: Rust
+severity: hint
+message: edge:imports
+rule: { kind: use_declaration, has: { field: argument, pattern: $SRC } }

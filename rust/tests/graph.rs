@@ -754,3 +754,97 @@ fn a_receiver_that_does_not_look_like_the_owner_is_refused_even_when_the_name_is
     );
     assert!(!receiver_binds("", None, "T::take"), "nothing to bind");
 }
+
+#[test]
+fn module_segments_strip_src_and_mod_components() {
+    let cases = [
+        ("rust/src/graph.rs", vec!["rust", "graph"]),
+        ("src/a/mod.rs", vec!["a"]),
+        ("lib.rs", vec!["lib"]),
+        ("main.rs", vec!["main"]),
+        ("crates/x/src/deep/nested.rs", vec!["crates", "x", "deep", "nested"]),
+    ];
+    for (path, expected) in cases {
+        let want: Vec<String> = expected.into_iter().map(str::to_string).collect();
+        assert_eq!(cort::graph::module_segments(path), want, "path {path}");
+    }
+}
+
+#[test]
+fn expand_use_path_fans_out_brace_groups_and_drops_crate() {
+    let expand = cort::graph::expand_use_path;
+    assert_eq!(
+        expand("crate::graph::rebuild_relationships"),
+        [vec!["graph", "rebuild_relationships"]]
+    );
+    assert_eq!(
+        expand("crate::chunker::{Chunk, Edge}"),
+        [vec!["chunker", "Chunk"], vec!["chunker", "Edge"]]
+    );
+    assert_eq!(
+        expand("std::fmt::{self, Display}"),
+        [vec!["std", "fmt"], vec!["std", "fmt", "Display"]]
+    );
+    assert_eq!(expand("super::inner::thing"), [vec!["inner", "thing"]]);
+    // File-relative specifiers are JS import paths, not module paths.
+    assert!(expand("./helper").is_empty());
+}
+
+#[test]
+fn a_qualified_rust_call_resolves_through_the_module_path_suffix() {
+    let ix = indexed(&[
+        ("src/a.rs", "pub fn value(x: u8) -> u8 { x }\n"),
+        ("src/b.rs", "pub fn value(x: u8) -> u8 { x + 1 }\n"),
+        ("src/main.rs", "fn go() { crate::a::value(1); }\n"),
+    ]);
+    let map: HashMap<String, String> = HashMap::new();
+    let ids = resolve_targets(
+        &ix.db,
+        &ix.project_id,
+        "src/main.rs",
+        &map,
+        "crate::a::value",
+    )
+    .unwrap();
+    assert_eq!(ids.len(), 1, "qualified call must pick the matching module, got {ids:?}");
+    assert!(ids[0].contains("src/a.rs"));
+}
+
+#[test]
+fn a_use_path_disambiguates_a_bare_rust_call_between_modules() {
+    let ix = indexed(&[
+        ("src/a.rs", "pub fn value(x: u8) -> u8 { x }\n"),
+        ("src/b.rs", "pub fn value(x: u8) -> u8 { x + 1 }\n"),
+        ("src/main.rs", "use crate::a::value;\nfn go() { value(1); }\n"),
+    ]);
+    let map: HashMap<String, String> = build_import_map(&[cort::chunker::Edge {
+        rel_type: "imports".into(),
+        call_form: CallForm::Bare,
+        source_symbol: None,
+        raw_target: "crate::a::value".into(),
+        start_line: 1,
+    }]);
+    let ids =
+        resolve_targets(&ix.db, &ix.project_id, "src/main.rs", &map, "value").unwrap();
+    assert_eq!(ids.len(), 1, "the use path must pick module a, got {ids:?}");
+    assert!(ids[0].contains("src/a.rs"));
+}
+
+#[test]
+fn a_qualified_call_matching_no_module_stays_unresolved() {
+    let ix = indexed(&[
+        ("src/a.rs", "pub fn value(x: u8) -> u8 { x }\n"),
+        ("src/main.rs", "fn go() { crate::nope::value(1); }\n"),
+    ]);
+    let map: HashMap<String, String> = HashMap::new();
+    let ids = resolve_targets(
+        &ix.db,
+        &ix.project_id,
+        "src/main.rs",
+        &map,
+        "crate::nope::value",
+    )
+    .unwrap();
+    assert!(ids.is_empty(), "no module `nope` exists; the call must not resolve");
+
+}

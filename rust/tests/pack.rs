@@ -289,6 +289,56 @@ fn the_pack_extracts_rust_call_edges_with_exact_targets_only() {
     );
 }
 
+/// The Rust `use` edge feeds the import map that disambiguates bare calls;
+/// brace groups must arrive intact so the resolver can fan them out.
+#[test]
+fn the_pack_extracts_rust_use_paths_as_import_edges() {
+    let _g = pack_guard();
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("k.rs");
+    fs::write(
+        &file,
+        [
+            "use crate::helper::run;",
+            "use std::fmt::{self, Display};",
+            "pub fn go() -> u8 { run(1) }",
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+    let bin = resolve_ast_grep_bin().expect("ast-grep on PATH");
+    let sg = sgconfig();
+    let r = exec_ast_grep(
+        &bin,
+        &[
+            "scan",
+            "--json=stream",
+            "--config",
+            sg.to_str().unwrap(),
+            file.to_str().unwrap(),
+        ],
+        ExecOpts::default(),
+    )
+    .unwrap();
+    assert_eq!(r.code, 0);
+    let mut srcs: Vec<String> = r
+        .stdout
+        .trim()
+        .split('\n')
+        .filter(|l| !l.is_empty())
+        .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+        .filter(|x| x["message"] == "edge:imports")
+        .map(|x| {
+            x["metaVariables"]["single"]["SRC"]["text"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
+        .collect();
+    srcs.sort();
+    assert_eq!(srcs, ["crate::helper::run", "std::fmt::{self, Display}"]);
+}
+
 /// C1-5
 #[test]
 fn pack_dir_points_at_a_real_directory_containing_sgconfig_yml() {

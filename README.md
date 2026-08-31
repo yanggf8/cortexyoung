@@ -42,11 +42,11 @@ just because the binary runs.
 |---|---|---|---|---|
 | TypeScript, TSX, JavaScript | yes | yes | yes | **yes** — `edge:calls` + `edge:imports` rules ship |
 | Python | yes | yes | yes | **yes** — same |
-| Rust | yes | **yes** (free functions, `impl`/trait methods as `Type::method`) | **yes** | **partial** — bare calls and fully-qualified `Type::method()` calls index (`edge:calls`); receiver calls (`x.m()`) and module-path calls do not, and there is no `edge:imports` rule |
+| Rust | yes | **yes** (free functions, `impl`/trait methods as `Type::method`) | **yes** | **partial** — bare, qualified `Type::method()`, module-path `crate::m::f()` via suffix + `use` (`edge:calls` + `edge:imports`), and gated receiver `x.m()` |
 
 For Rust, `cort context <symbol> --content full -f lean` is the supported use (that is the case the
-27k→89-token measurement below covers). Rust `impact` covers the two indexed call shapes and is
-name-resolved — treat its output as candidates. For the precise caller list use `cargo check` /
+27k→89-token measurement below covers). Rust `impact` covers the indexed call shapes and resolves
+module paths by suffix — treat its output as candidates. For the precise caller list use `cargo check` /
 `cargo build` errors — a compiler beats a name-resolved graph here. See `docs/2026-08-28-real-session-cost.md` §1.3.
 
 ## Local usage recording (opt-out by not existing: it is offline, plain SQLite)
@@ -286,13 +286,13 @@ than it attaches, and the gap boolean still needs the wording change it is coupl
 7. **FTS tokenizer is bare `unicode61`:** the design calls for `unicode61 "remove_diacritics 1" "tokenchars ._$"`, but the bundled SQLite that ships with rusqlite 0.32 rejects every parameterised `unicode61` form (the JS reference via `better-sqlite3` had the same limit). Consequence: `cort context` keyword recall splits identifiers on `.`, `_` and `$` — searching `foo.bar` matches `foo` and `bar` separately, and diacritics are not folded. CJK still tokenizes. `src/schema.sql` carries a `NOTE` and reverting is one line once a SQLite build accepts the parameters.
 8. **`impact` is only as good as a language's edge rules:** the relationship graph indexes the call
    shapes the language's `edge:calls`/`edge:imports` rules in `src/pack/rules/` capture. For Rust that
-   is three shapes — bare (`foo()`), qualified (`Type::method()`) and receiver (`x.method()`) — resolved
-   by name; `use`/`mod` edges are not indexed, so `cort impact --symbol <rust-symbol>` can still return
-   `dependents=0` for a symbol with plenty of callers. Module-path calls (`crate::m::f()`) are extracted
-   and resolve by their last segment — only for the internal prefixes `crate::`, `self::`, `super::`,
-   `::`, so a dependency call like `Vec::new` stays unresolved and visible instead of inventing an edge
-   (`docs/2026-08-31-rust-qualified-call-resolution.md`). Use `cargo check`/`rg` for the precise Rust
-   caller list (see the capability table above).
+   is three shapes — bare (`foo()`), qualified (`Type::method()`) and receiver (`x.method()`) — plus
+   module-path calls (`crate::m::f()`) resolved by name and module-path suffix with `use` statements
+   feeding the same map; only the internal prefixes `crate::`, `self::`, `super::`, `::` are rescued,
+   so a dependency call like `Vec::new` stays unresolved and visible instead of inventing an edge
+   (`docs/2026-08-31-rust-qualified-call-resolution.md`). Module-suffix matching cannot tell apart
+   crates that share a module name — those come back `AMBIGUOUS`. Use `cargo check`/`rg` for the
+   precise Rust caller list (see the capability table above).
 
    The Rust receiver shape is gated, and the gate is a name test, not a type test: `x.m()` becomes an
    edge only when `m` belongs to exactly one symbol in the project *and* `x` can be that symbol's owner

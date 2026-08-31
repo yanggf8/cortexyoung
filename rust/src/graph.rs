@@ -202,6 +202,227 @@ pub fn internal_rust_path_target(symbol: &str) -> Option<&str> {
     (!bare.is_empty() && !bare.contains('(') && !bare.contains('<')).then_some(bare)
 }
 
+pub fn module_segments(file_path: &str) -> Vec<String> {
+    strip_last_ext(file_path)
+        .split('/')
+        .filter(|s| !s.is_empty() && *s != "src" && *s != "mod")
+        .map(str::to_string)
+        .collect()
+}
+
+/// Expand one captured `use`/import target into the module paths it names.
+/// Brace groups fan out (`a::{b, c}` → `[[a,b],[a,c]]`; `{self, D}` keeps the
+/// head itself) and one leading `crate`/`self`/`super` is dropped, mirroring
+/// `split_call_path` so both sides of a `use`+call pair degrade to the same
+/// suffix semantics. Dot-relative specifiers (`./helper`) are file paths, not
+/// module paths, and yield nothing. Nested brace groups degrade to
+/// non-matching junk rather than to wrong names.
+pub fn expand_use_path(raw: &str) -> Vec<Vec<String>> {
+    let t = raw.trim();
+    if t.starts_with('.') {
+        return Vec::new();
+    }
+    let (head, group) = match t.find('{') {
+        Some(i) => (&t[..i], Some(t[i + 1..].trim_end_matches('}').trim())),
+        None => (t, None),
+    };
+    let mut head_segs: Vec<String> = head
+        .split("::")
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+    if matches!(
+        head_segs.first().map(String::as_str),
+        Some("crate" | "self" | "super")
+    ) {
+        head_segs.remove(0);
+    }
+    match group {
+        None => vec![head_segs],
+        Some(group) => group
+            .split(',')
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .map(|item| {
+                let mut segs = head_segs.clone();
+                if item != "self" {
+                    segs.push(item.to_string());
+                }
+                segs
+            })
+            .collect(),
+    }
+}
+
+/// Split a raw call target into qualifier segments and leaf name, dropping one
+/// leading `crate`/`self`/`super`. `crate::graph::f` → `(["graph"], "f")`,
+/// `CortError::new` → `(["CortError"], "new")`, `f` → `([], "f")`. Generic
+/// junk in a turbofish (`Vec::<u8>::new`) survives as qualifier segments that
+/// simply never suffix-match a module path.
+pub fn split_call_path(target: &str) -> (Vec<String>, String) {
+    let segs: Vec<String> = target
+        .split("::")
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+    match segs.as_slice() {
+        [] => (Vec::new(), String::new()),
+        [leaf] => (Vec::new(), leaf.clone()),
+        _ => {
+            let leaf = segs.last().cloned().unwrap_or_default();
+            let mut q = segs[..segs.len() - 1].to_vec();
+            if matches!(
+                q.first().map(String::as_str),
+                Some("crate" | "self" | "super")
+            ) {
+                q.remove(0);
+            }
+            (q, leaf)
+        }
+    }
+}
+
+/// One candidate target chunk with its derived module path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Candidate {
+    pub chunk_id: String,
+    pub file_path: String,
+    pub module: Vec<String>,
+}
+
+/// Every named chunk of a project, keyed by symbol name — the rebuild loads
+/// this once instead of running one SELECT per edge (audit finding: the
+/// per-edge query dominated index time once Rust grew a graph).
+pub fn load_candidates(
+    db: &Db,
+    project_id: &str,
+) -> rusqlite::Result<HashMap<String, Vec<Candidate>>> {
+    let mut stmt = db.prepare(
+        "SELECT symbol_name, chunk_id, file_path FROM chunks
+          WHERE project_id = ?1 AND symbol_name IS NOT NULL
+          ORDER BY start_line, chunk_id",
+    )?;
+    let rows = stmt.query_map(params![project_id], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+        ))
+    })?;
+    let mut map: HashMap<String, Vec<Candidate>> = HashMap::new();
+    for row in rows {
+        let (symbol, chunk_id, file_path) = row?;
+        let module = module_segments(&file_path);
+        map.entry(symbol)
+            .or_default()
+            .push(Candidate {
+                chunk_id,
+                file_path,
+                module,
+            });
+    }
+    Ok(map)
+}
+
+fn ends_with_segments(hay: &[String], needle: &[String]) -> bool {
+    !needle.is_empty()
+        && hay.len() >= needle.len()
+        && hay[hay.len() - needle.len()..] == *needle
+}
+
+/// The resolution cascade, in memory, shared by the SQL wrapper (`resolve_targets`)
+/// and the global rebuild (`rows_from_edges`) so the two can never drift.
+///
+/// `exact_name` candidates came from a query on the raw target text itself
+/// (bare `f`, or `Type::method` chunks that are named exactly that). The
+/// fallback kind carries leaf-name candidates for a qualified target whose
+/// full text names no chunk: those resolve only through the module-path
+/// suffix, or not at all — a qualified call must never degrade to a bare-name
+/// match, or `Worker::run` would fabricate a caller for any free `run`.
+pub fn resolve_candidates(
+    source_file: &str,
+    import_map: &HashMap<String, String>,
+    candidates: &[Candidate],
+    raw_target: &str,
+    exact_name: bool,
+) -> Vec<String> {
+    let ids = |sel: Vec<&Candidate>| {
+        let mut v: Vec<String> = sel.into_iter().map(|c| c.chunk_id.clone()).collect();
+        v.sort();
+        v.dedup();
+        v
+    };
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+
+    let (qualifier, _) = split_call_path(raw_target);
+    if !exact_name && !qualifier.is_empty() {
+        return ids(
+            candidates
+                .iter()
+                .filter(|c| ends_with_segments(&c.module, &qualifier))
+                .collect(),
+        );
+    }
+
+    // Same file wins first, exactly as before.
+    let same_file: Vec<&Candidate> = candidates
+        .iter()
+        .filter(|c| c.file_path == source_file)
+        .collect();
+    if !same_file.is_empty() {
+        return ids(same_file);
+    }
+
+    // File-path reachability through import specifiers (JS `./helper`) — the
+    // original, unchanged mechanism.
+    let prefixes = imported_path_prefixes(source_file, import_map);
+    let via_import: Vec<&Candidate> = candidates
+        .iter()
+        .filter(|c| {
+            let no_ext = strip_last_ext(&c.file_path);
+            prefixes
+                .iter()
+                .any(|p| no_ext == p || no_ext.ends_with(&format!("/{p}")))
+        })
+        .collect();
+    if !via_import.is_empty() {
+        return ids(via_import);
+    }
+
+    // A `use` that names the target outright disambiguates between same-named
+    // candidates in different modules (`use crate::a::value;` + bare `value()`).
+    if candidates.len() > 1 {
+        let use_prefixes: Vec<Vec<String>> = import_map
+            .keys()
+            .filter(|spec| !spec.starts_with('.'))
+            .flat_map(|spec| expand_use_path(spec))
+            .filter(|segs| segs.last().is_some_and(|last| last == raw_target))
+            .map(|segs| segs[..segs.len() - 1].to_vec())
+            .filter(|p| !p.is_empty())
+            .collect();
+        if !use_prefixes.is_empty() {
+            let via_use: Vec<&Candidate> = candidates
+                .iter()
+                .filter(|c| {
+                    use_prefixes
+                        .iter()
+                        .any(|p| ends_with_segments(&c.module, p))
+                })
+                .collect();
+            if !via_use.is_empty() {
+                return ids(via_use);
+            }
+        }
+    }
+
+    ids(candidates.iter().collect())
+}
+
+
 fn chunks_named(db: &Db, project_id: &str, name: &str) -> rusqlite::Result<Vec<(String, String)>> {
     let mut stmt = db.prepare(
         "SELECT chunk_id, file_path FROM chunks
@@ -366,41 +587,54 @@ pub fn resolve_targets(
     import_map: &HashMap<String, String>,
     symbol: &str,
 ) -> rusqlite::Result<Vec<String>> {
-    let mut all = chunks_named(db, project_id, symbol)?;
-    if all.is_empty() {
-        if let Some(bare) = internal_rust_path_target(symbol) {
-            all = chunks_named(db, project_id, bare)?;
-        }
-    }
-    if all.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let same_file: Vec<String> = all
-        .iter()
-        .filter(|(_, fp)| fp == file_path)
-        .map(|(id, _)| id.clone())
-        .collect();
-    if !same_file.is_empty() {
-        return Ok(same_file);
-    }
-
-    let prefixes = imported_path_prefixes(file_path, import_map);
-    let via_import: Vec<String> = all
-        .iter()
-        .filter(|(_, fp)| {
-            let no_ext = strip_last_ext(fp);
-            prefixes
-                .iter()
-                .any(|p| no_ext == p || no_ext.ends_with(&format!("/{p}")))
+    let mut stmt = db.prepare(
+        "SELECT chunk_id, file_path FROM chunks
+          WHERE project_id = ?1 AND symbol_name = ?2 ORDER BY chunk_id",
+    )?;
+    let exact: Vec<Candidate> = stmt
+        .query_map(params![project_id, symbol], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .into_iter()
+        .map(|(chunk_id, file_path)| Candidate {
+            module: module_segments(&file_path),
+            chunk_id,
+            file_path,
         })
-        .map(|(id, _)| id.clone())
         .collect();
-    if !via_import.is_empty() {
-        return Ok(via_import);
+    if !exact.is_empty() {
+        return Ok(resolve_candidates(file_path, import_map, &exact, symbol, true));
     }
 
-    Ok(all.into_iter().map(|(id, _)| id).collect())
+    if symbol.contains("::") {
+        let (_, leaf) = split_call_path(symbol);
+        let mut stmt = db.prepare(
+            "SELECT chunk_id, file_path FROM chunks
+              WHERE project_id = ?1 AND symbol_name = ?2 ORDER BY chunk_id",
+        )?;
+        let leaf_cands: Vec<Candidate> = stmt
+            .query_map(params![project_id, leaf], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .into_iter()
+            .map(|(chunk_id, file_path)| Candidate {
+                module: module_segments(&file_path),
+                chunk_id,
+                file_path,
+            })
+            .collect();
+        return Ok(resolve_candidates(
+            file_path,
+            import_map,
+            &leaf_cands,
+            symbol,
+            false,
+        ));
+    }
+
+    Ok(Vec::new())
 }
 
 pub fn relationship_rows_for_file(
