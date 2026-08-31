@@ -1,5 +1,37 @@
 # WIP：端對端圖評測的前置（2026-08-28）
 
+> ## ⚠️ 2026-08-31 標記：本檔已被取代，不再更新（audit F-05 §9.1(6)）
+>
+> 本檔是 2026-08-28 的**歷史工作紀錄**。它的處境分兩段，兩段都有文件：
+>
+> 1. **它的目的先被判作廢。** `docs/2026-08-28-real-session-cost.md` 用真實 session transcript 量需求面，
+>    結論是圖對主力 repo 的日常幫助有限。該檔明確寫「本文取代本 WIP 的方向」。
+> 2. **但端對端評測後來仍然跑了**，而且不是用本檔 §4 規格裡那支 JS runner。現在它是 `cort-evals
+>    run-agents`（Rust，`evals/src/arms.rs`），兩輪 × 5 任務 × 2 臂 = **20 cells，`tool_return_tokens`
+>    與 `read_calls` 全部有值**，gate 回 `cort_beats_ast_grep=true`。證據與判讀在
+>    `docs/2026-08-29-project-audit-root-causes-and-remediation.md` §13f／§13n，資料在
+>    `evals/runs/2026-08-30-graph{,-sample2}/`。
+>
+> **以下三條已被實測推翻，照做會燒錢或得出錯結論：**
+>
+> 1. **§3(3)「工具白名單即實驗組」不成立。** 這是本檔最錯的一條。F-11：headless 模式下
+>    `--allowedTools Bash(rg:*)` **根本不約束 Bash**（第一格真實 cell 就跑了十次 `grep -rn`/`sed -n`
+>    而 `permission_denials: []`）；PATH jail 也擋不住，因為 Claude Code 會正規化 Bash 工具的 `PATH`。
+>    因此每格改記 `shells_used` / `arm_held` / `jailed`，`arm_held: false` 的格子不得當成「cort vs rg」
+>    來平均——這批資料量到的是「cort vs agent 的整個 shell」。想量前者需要能真正束縛工具的 driver。
+> 2. **所有 JS 路徑失效。** 本檔寫的 `bin/cort.js`、`evals/run-agents.mjs`、`relation-cost.mjs` 都已隨
+>    cutover 刪除；`AGENTS.md` 現行契約是純 Rust，`CORT_BIN` 是 `rust/target/release/cort`。
+> 3. **§2.3 那個索引檔不可複用。** `/tmp/cort-exp/<sha>.db` 是 JS 時代的產物，schema 已升到 v3
+>    （新增 `raw_edges` 持久層，修 F-01 的 incremental 漏邊），必須由目前的 release binary 重建。
+>
+> **仍然有效、而且後來被用上的三條**：§2.1（`--output-format stream-json` 逐格取得 `tool_result`
+> 長度與 `permission_denials`——20 格就是靠它才有非 null 指標）、§2.2（不隔離 `CLAUDE_CONFIG_DIR`
+> 約 16k tokens 的 hook/plugin 雜訊會進每一格，runner 現在直接拒跑）、§2.3 的 `projectId` 由 `cwd`
+> 推得（runner 因此把 `--venue` 列為必要參數）。
+>
+> ---
+
+
 > 狀態：**前置全部探通。一個 eval cell 都還沒跑；已花的只有 5 次單字級探測（合計 < $0.40）。**
 > 本檔是接續用的工作紀錄，不是結論。結論要等 `evals/run-agents.mjs` 真的跑出兩臂數字之後，
 > 寫進 `docs/2026-08-28-graph-cost-reanalysis.md` 的後續版本。

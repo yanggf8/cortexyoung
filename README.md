@@ -205,12 +205,24 @@ across 5 chains (`cort-evals verify-impact`, re-run on the current binary — se
 strings.** The claim "graph adds correctness nowhere" is withdrawn; it was only ever tested where the graph
 could not apply.
 
-What is still unproven, and the prerequisites for the end-to-end run that would settle it, are recorded in
-`docs/2026-08-28-end-to-end-eval-wip.md`: the metric-capture path exists (`claude -p --output-format
-stream-json` exposes every `tool_result` payload and `permission_denials`), the agent config must be isolated
-or 16,067 tokens of hooks/plugin text enter every cell and swamp a ~1.1k lean payload, and `projectId` is
-derived from `cwd` — running `impact` for the `cct` venue from this repo silently returns `seeds=0`. No cell
-has been run yet.
+What that section left unproven has since been measured. Two rounds of the end-to-end two-arm eval
+(`cort-evals run-agents`, 5 graph-required tasks x 2 arms x 2 rounds = 20 cells, metrics-only under
+`evals/runs/2026-08-30-graph{,-sample2}/`) give the `cort` arm 10/10 success at a mean 992
+tool-return tokens against the baseline arm's 4/10 at 7,642, and the spec section 8 gate returns
+`cort_beats_ast_grep=true` for the first time with the metrics actually recorded. Two readings are
+load-bearing and are spelled out in
+[`docs/2026-08-29-project-audit-root-causes-and-remediation.md`](docs/2026-08-29-project-audit-root-causes-and-remediation.md)
+sections 13f and 13n: the comparator is **an agent's whole shell**, not `rg` — headless
+`--allowedTools` does not bind Bash (audit F-11), so most cells carry `arm_held: false` and must not be
+averaged as a tool-vs-tool A/B — and the labels are the graph's own output confirmed against file text,
+which rules out fabrication but is not compiler-grade truth.
+
+The demand side points the other way and is measured separately:
+[`docs/2026-08-28-real-session-cost.md`](docs/2026-08-28-real-session-cost.md) goes through 1,565 real
+prompts from the two heaviest repos and finds relational questions rare in daily use. `cort` is cheap
+when a relationship walk is actually asked for; it is not asked for often. `docs/2026-08-28-end-to-end-eval-wip.md`
+is the historical prerequisite note behind that eval run, marked superseded, including the one claim in it
+that measurement falsified.
 
 ## Documented limitations (contracts, not apologies)
 

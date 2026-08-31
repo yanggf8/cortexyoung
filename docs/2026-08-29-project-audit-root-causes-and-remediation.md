@@ -393,9 +393,9 @@ Rust 已有 compiler/rust-analyzer 可提供比 name graph 更精確的資訊，
    `rg+Read / ast-grep+Read / cort` gate，欄位還包含新 rows 沒有的 `stale_reads`；兩者未真正接線。
    實測餵入 runner 形狀的 row 之後，`summarize()` 的 `stale_reads` 變成 `NaN`、經 JSON 序列化成 `null`，
    而且不丟例外。也就是說文件承諾已修掉的「null 指標」失效模式，在 summary 路徑上仍然存在。
-5. graph-required end-to-end agent cells 尚未執行；README 已承認這一點。
+5. graph-required end-to-end agent cells 尚未執行；README 已承認這一點。 **(2026-08-31 已結：2026-08-30 兩輪共 20 cells 由 `cort-evals run-agents` 執行，`--strict` 下 `metrics_missing` 為空；見 §13f／§13n)**
 6. `docs/2026-08-28-end-to-end-eval-wip.md` 是歷史 WIP，仍寫 runner 不存在與 JS binary 路徑，未清楚標示
-   已被後續結論取代。
+   已被後續結論取代。 **(2026-08-31 已結：該檔頂部加入取代標記，並明列被實測推翻的三條——其中「工具白名單即實驗組」正是本輪 F-11 的成因；README 對該檔的「尚未跑任何 cell」陳述一併校正)**
 
 ### 9.2 根因
 
