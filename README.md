@@ -309,10 +309,15 @@ set the flag for every one of 60 sampled seeds. What remains is the receiver gat
    The Rust receiver shape is gated, and the gate is a name test, not a type test: `x.m()` becomes an
    edge only when `m` belongs to exactly one symbol in the project *and* `x` can be that symbol's owner
    (`self` inside the same `impl`, or a receiver whose last segment equals/prefixes/suffixes the type
-   name after normalising case and underscores). Measured on this repo: 4,833 receiver call sites, 9
+   name after normalising case and underscores). Measured at `a0269cda`: 4,833 receiver sites, 9
    attached edges, all 9 correct; uniqueness alone would have attached 25, of which 13 were correct and
    12 invented -- `e.kind()` onto a test fixture's `FailFs::kind`, `status.code()` onto a helper named
-   `code`, `.chain()` onto a function named `chain`. The gate also refuses true calls whose variable
+   `code`, `.chain()` onto a function named `chain` (row by row, with the source line each one claims:
+   `evals/runs/2026-08-31-schema-v4/receiver-gate-counterfactual.json`). The same query on the current
+   tree gives 5,212 sites and 12 attached, 12 correct; re-derive either side with
+   `cort-evals recall-exp --venue .` (text-side population) and `cort status` plus
+   `SELECT ... WHERE call_form='receiver'` (what got attached) rather than trusting a number that was
+   written down on a different day. The gate also refuses true calls whose variable
    carries no trace of its type: `b.problem()` onto `BatchRead::problem` (3 sites), `err.to_json()` onto
    `CortError::to_json`. Every refusal is reported by `--coverage` as an `extracted_but_unresolved` row,
    so a refused edge is visible as a gap and never silent. TypeScript/TSX/JavaScript keep their single

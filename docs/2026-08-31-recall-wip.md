@@ -47,7 +47,7 @@
 | 項目 | v3 (`bc5f887`) | v4 |
 |---|---|---|
 | 本倉庫 relationships | 1,360 | **1,369**（+9，全部是 receiver 邊） |
-| 本倉庫 receiver 呼叫點（raw_edges） | 0（pack 不抽） | 4,833 列，連上 9 條 |
+| 本倉庫 receiver 呼叫點（raw_edges） | 0（pack 不抽） | 4,833 列，連上 9 條（**這格是 `a0269cda` 那棵樹**；目前樹上是 5,212 列、連上 12 條、12 條全對） |
 | `Tally::add --depth 3` | dependents=0 ＋ 兩列 receiver 漏洞 | **dependents=3**，h1 = `evals/src/demand.rs scan 598 @626 receiver` |
 | cct（TS 場域）relationships | 1,839 | **1,839**（TS 沒加規則、基線未動） |
 | cct `logInfo/getCurrentTimeET/handleReportsStatus/createBacktestingStorage` 依賴者數 | 66 / 23 / 4 / 20 | 66 / 23 / 4 / 20（逐條相同） |

@@ -22,8 +22,10 @@ direction of the same claim: `enumeration_may_be_incomplete` now has two causes 
 gap row, or a file the screen never read -- `unparsed` became advisory on 2026-08-31, coverage-v2, after
 two chunk-less files in this repo were flipping all 60 sampled seeds), and skill + README + the report's
 own `reading` field say what `false` does and does not entitle anyone to conclude. Still open: the
-receiver gate attaches 9 of 4,833 receiver call sites here (all 9 correct; the refusals are where recall
-still leaks, each one a `--coverage` row), and on a hub-dense venue like cct the boolean is still true
+receiver gate attaches 9 of 4,833 receiver call sites at `a0269cda` and 12 of 5,212 on the current tree
+(all of them correct in both runs; the refusals are where recall still leaks, each one a `--coverage`
+row -- `cort-evals recall-exp` re-derives the population, so quote it with its commit), and on a
+hub-dense venue like cct the boolean is still true
 for 62 of 63 sampled seeds -- which is why the instruction is *read the rows*, not *watch the flag*. A
 change that makes an answer cheaper to verify is on the main line; a feature that only makes answers
 more numerous is not.
