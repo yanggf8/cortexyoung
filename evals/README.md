@@ -136,13 +136,20 @@ here is a **text-side upper bound** and is not the same quantity as "160 attacha
 name including test functions, `const`s and `let`s). What was actually attached comes from
 `cort status` and `verify-impact`, and both numbers belong in the same sentence only when labelled.
 
-Measured on 2026-08-31: this repo 55 files, 6,468 receiver sites (5,180 name nothing the project
-declares, 416 unique, 872 ambiguous), 45 `::`-path calls into a local module, **0 shadowed**; cct 183
-files, 13,297 receiver sites, 0 path calls into a local module, 0 shadowed. Three earlier versions of
-this metric were wrong in the informative direction and are now pinned by tests: it counted every
-internal path call as an exposure (44 here), it stopped reading a crate name at the venue root
-(multi-crate repos have none), and it compared `cort-evals` to `cort_evals` as if they were different
-crates.
+Measured on 2026-08-31 (working tree, so the counts move as the repo moves — quote them with their
+commit): this repo 55 files, ~6,500 receiver sites (about 80% name nothing the project declares), 48
+`::`-path calls into a local module, **0 shadowed**; cct 183 files, 13,297 receiver sites, 0 path calls
+into a local module, 0 shadowed.
+
+Four earlier versions of the shadow metric were wrong **in the reassuring direction**, each now a test:
+it counted every internal path call as an exposure (44 here, truth 0); it read the crate name only from
+the venue root's `Cargo.toml` (a multi-crate repo has none, so `use cort::usage` looked like a
+dependency); it compared `cort-evals` to `cort_evals` as two different crates; and it parsed only the
+path before a `{`, so `use std::{fs, io};` — the most common Rust import shape — introduced *nothing*,
+making a live exposure read 0. The last one was found by writing the fixture first: `/tmp/k3chk` ships
+`use std::{fs, io};` plus a local `src/fs.rs`, and the metric now answers 1 with the file and line. A
+risk count that can only be too big is safe; one that can be too small is how this repo has been fooled
+twice, which is why the doc comment that used to call the brace gap "conservative" is gone.
 
 ## Demand probe (`demand`)
 

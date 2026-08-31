@@ -274,39 +274,81 @@ pub fn qualified_calls(text: &str) -> Vec<Call> {
     out
 }
 
-/// What a `use` line introduces into a file's scope, as `(root, name)`: `use std::fs;` is
-/// `("std", "fs")`, `use crate::db::{open_db, set_meta};` is `("crate", "db")`. Brace items other
-/// than the head are ignored, which is the conservative direction -- an unparsed alias can only
-/// *reduce* the risk population below, and a measure that over-counts risk gets ignored too.
+/// What a `use` line introduces into the file's scope, as `(root, name)`: `use std::fs;` is
+/// `("std", "fs")`, `use std::{fs, io};` is `[("std","fs"),("std","io")]`,
+/// `use std::fs::{self, write};` is `[("std","fs"),("std","write")]`, and an alias binds the alias
+/// (`use std::io as sio;` -> `("std","sio")`) because that is what a call site can write.
+///
+/// Brace groups *must* be fanned out. An earlier cut read only the path before the `{`, so the single
+/// most common Rust import shape -- `use std::{fs, io};` -- introduced nothing, and the shadow metric
+/// reported 0 exposures on a tree that demonstrably had one. For a *risk* count the dangerous direction
+/// is the small number: 0 is read as "this class is not live here", which is how this repo has been
+/// fooled twice already. Nested groups (`a::{b::{c, d}}`) still degrade to fewer names, not wrong ones.
 pub fn use_introductions(text: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for line in text.lines() {
-        let head = line.trim();
-        let rest = match head
+        let trimmed = line.trim();
+        let head = trimmed.strip_prefix("pub ").unwrap_or(trimmed);
+        let Some(rest) = head
             .strip_prefix("use ")
             .or_else(|| head.strip_prefix("use\t"))
-        {
-            Some(rest) => rest,
-            None => continue,
-        };
-        let path = rest
-            .split('{')
-            .next()
-            .unwrap_or("")
-            .trim_end_matches(';')
-            .trim();
-        let segments: Vec<&str> = path
-            .split("::")
             .map(str::trim)
+        else {
+            continue;
+        };
+        let (path_part, group) = match rest.find('{') {
+            Some(i) => (
+                &rest[..i],
+                rest[i + 1..]
+                    .trim_end_matches(['}', ';', ' ', ','])
+                    .trim()
+                    .to_string(),
+            ),
+            None => (rest, String::new()),
+        };
+        // The terminating `;` clings to the last segment -- and the last segment *is* the name a
+        // call can use, so a missed strip silently empties the whole risk population: the first two
+        // tests after this rewrite both failed on `fs;` != `fs`.
+        let segments: Vec<&str> = path_part
+            .trim_end_matches(';')
+            .split("::")
+            .map(|s| s.trim().trim_end_matches(';'))
             .filter(|s| !s.is_empty())
             .collect();
-        let (Some(root), Some(last)) = (segments.first(), segments.last()) else {
+        let (Some(root), Some(leaf)) = (segments.first().copied(), segments.last().copied()) else {
             continue;
         };
-        if root.is_empty() || last.is_empty() || root == last && segments.len() == 1 {
+        if group.is_empty() {
+            // `use std::io as sio;` puts `sio` -- not `io` -- in scope, and a call is written as
+            // `sio::read()`, so the alias is the name that can collide with a local module.
+            let introduced = match rest.split_once(" as ") {
+                Some((_, alias)) => alias.trim().trim_end_matches(';').trim().to_string(),
+                None => leaf.to_string(),
+            };
+            if introduced.is_empty() || segments.len() == 1 {
+                // `use fs;` names a crate at the root; a module and a crate cannot both be called
+                // `fs` in one tree, so there is no ambiguity to report.
+                continue;
+            }
+            out.push((root.to_string(), introduced));
             continue;
         }
-        out.push((root.to_string(), last.to_string()));
+        for item in group.split(',') {
+            let item = item.trim();
+            if item.is_empty() {
+                continue;
+            }
+            let introduced = if let Some((_, alias)) = item.split_once(" as ") {
+                alias.trim().to_string()
+            } else if item == "self" {
+                leaf.to_string()
+            } else {
+                item.rsplit("::").next().unwrap_or(item).to_string()
+            };
+            if !introduced.is_empty() {
+                out.push((root.to_string(), introduced));
+            }
+        }
     }
     out
 }

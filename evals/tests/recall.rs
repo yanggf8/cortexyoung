@@ -221,3 +221,53 @@ fn an_internal_crate_name_with_a_hyphen_is_not_a_dependency_shadow() {
         "the crate's own path is not a dependency: {report}"
     );
 }
+
+#[test]
+fn a_brace_import_introduces_every_name_it_binds() {
+    // The single most common Rust import shape. Reading only the path before the `{` -- which the
+    // first cut did -- made `fs` invisible, and the shadow metric answered 0 on a tree with a live
+    // exposure. For a risk count, 0 is the wrong way to be wrong.
+    let names: Vec<String> = cort_evals::recall::use_introductions(
+        "use std::{fs, io};\nuse std::path::{self, PathBuf};\nuse std::io as sio;\n\
+         pub use crate::db::{open_db, set_meta};\nuse fs;\nuse\tstd::sync::Mutex;\n",
+    )
+    .into_iter()
+    .map(|(root, name)| format!("{root}:{name}"))
+    .collect();
+    assert_eq!(
+        names,
+        [
+            "std:fs",
+            "std:io",
+            "std:path",
+            "std:PathBuf",
+            "std:sio",
+            "crate:open_db",
+            "crate:set_meta",
+            "std:Mutex",
+        ],
+        "{names:?}"
+    );
+}
+
+#[test]
+fn the_shadow_metric_reports_the_brace_import_case_it_once_missed() {
+    let dir = venue(&[
+        ("src/fs.rs", "pub fn write(p: &str) -> u32 { 1 }\n"),
+        (
+            "src/main.rs",
+            "use std::{fs, io};\nfn go() -> u32 { fs::write(\"x\") }\n",
+        ),
+    ]);
+    let report = report(dir.path(), 10).expect("report");
+    assert_eq!(
+        report["dependency_shadowed_by_local_module_sites"],
+        serde_json::json!(1),
+        "{report}"
+    );
+    assert_eq!(
+        report["shadowed_examples"][0]["line"],
+        serde_json::json!(2),
+        "an exposure nobody can go and look at is not a measurement: {report}"
+    );
+}
