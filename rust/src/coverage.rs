@@ -41,6 +41,11 @@ pub const MAX_GAP_ROWS: usize = 20;
 /// not the line the callee's name sits on. Two lines of slack, and nothing more.
 pub const LINE_TOLERANCE: i64 = 2;
 
+/// Named so a reader can tell which screen produced a claim, and so both shapes of the report
+/// (with seeds and without) agree on what generated them.
+pub const COVERAGE_METHOD: &str =
+    "coverage-v1 (three-layer recall screen: mentions, dropped resolutions, blind files)";
+
 /// How many files a blind-layer field reports, whether it carries a count or the path list. The
 /// flag has to be right whichever shape the field has: reading an array as "no count" and defaulting
 /// to zero is precisely how a blind file ended up producing a clean bill of health.
@@ -161,13 +166,28 @@ pub fn attach(
         }
     }
     if seeds.is_empty() {
-        return Err(CortError::new(
-            "nothing_indexed",
-            json!({
-                "hint": "--coverage needs at least one resolved seed chunk; the names you asked for \
-                         are not in the index, which is itself a recall gap worth looking at"
-            }),
-        ));
+        // K3's review: this used to exit 1 with `nothing_indexed`, turning "the index cannot answer
+        // this" into a tool failure -- and anything that treats a clean exit as a passing check
+        // would read an unindexed symbol as a green light. Report it as the worst recall state
+        // instead: no seed resolved, so nothing was looked at in the first place.
+        let blind = blind_files(db, project_id, root, &index_set_of(db, project_id)?)?;
+        if let Some(map) = payload.as_object_mut() {
+            map.insert(
+                "coverage".to_string(),
+                json!({
+                    "method": COVERAGE_METHOD,
+                    "no_seed_resolved": true,
+                    "seeds": [],
+                    "blind_files": blind,
+                    "enumeration_may_be_incomplete": true,
+                    "why": ["no_seed_resolved"],
+                    "reading": "none of the names asked for exist in the index, so this enumeration \
+                                covered nothing at all. Not a clean answer: the symbol may be new, \
+                                renamed, misspelled, or in a file the indexer does not read.",
+                }),
+            );
+        }
+        return Ok(());
     }
     let report = coverage_for(db, project_id, root, &seeds)?;
     if let Some(map) = payload.as_object_mut() {
@@ -223,16 +243,12 @@ pub fn mentions(text: &str, name: &str) -> Vec<(usize, usize)> {
 pub fn cause_of(line_text: &str, column: usize, name_len: usize) -> &'static str {
     let chars: Vec<char> = line_text.chars().collect();
     let at = column.saturating_sub(1);
-    let before = if at == 0 {
-        None
-    } else {
-        chars.get(at - 1).copied()
-    };
-    let quoted = before
-        .map(|_| line_text.chars().take(at).filter(|c| *c == '"').count() % 2 == 1)
-        .unwrap_or(false);
-    if quoted {
-        return "quoted";
+    let before: String = chars[..at.min(chars.len())].iter().collect();
+    // Order matters, and it is ordered by "how much this line can possibly be a call": prose can
+    // contain quotes and identifiers, so it is settled before the quote arithmetic is consulted.
+    let opener = line_text.trim_start().chars().next().unwrap_or(' ');
+    if before.contains("//") || before.contains("/*") || opener == '*' || opener == '#' {
+        return "comment";
     }
     let head = line_text.trim_start();
     if head.starts_with("import ")
@@ -240,25 +256,19 @@ pub fn cause_of(line_text: &str, column: usize, name_len: usize) -> &'static str
         || head.starts_with("use ")
         || head.starts_with("from ")
         || head.starts_with("require(")
-        || head.starts_with("@")
     {
         return "import";
     }
-    // A `//` or `*` before the mention is prose: it can name a caller all day and never be one. Without
-    // this, a module that documents its own examples reports every doc comment as a receiver hole.
-    let before_text: String = chars[..at].iter().collect();
-    let opener = line_text.trim_start().chars().next().unwrap_or(' ');
-    let opens_with_star = opener == '*' || opener == '#';
-    if before_text.contains("//")
-        || before_text.contains("/*")
-        || (opens_with_star && !line_text.starts_with("#!"))
-    {
-        return "comment";
+    // Both quote styles: the TS/JS/Python that this pack indexes overwhelmingly well uses `'`, and
+    // K3's review found `'./alpha'` being reported as a bare mention. A Rust lifetime before the
+    // name can then be mislabelled `quoted`, which demotes a row rather than promoting one -- the
+    // safe direction for a screen whose only job is to keep real holes near the top.
+    if before.matches('"').count() % 2 == 1 || before.matches('\'').count() % 2 == 1 {
+        return "quoted";
     }
-    if matches!(before, Some('.') | Some(':')) {
+    if matches!(before.chars().next_back(), Some('.') | Some(':')) {
         return "receiver";
     }
-    // The character right after the name, ignoring whitespace: `add (` is still a call.
     let after = chars
         .iter()
         .skip(at + name_len)
@@ -297,6 +307,13 @@ fn extracted_calls(
             .push(row.2);
     }
     Ok(map)
+}
+
+/// The indexed file set as a lookup, so `blind_files` can tell "on disk, never indexed" from
+/// "indexed but produced no chunks". An empty set here would call every source file in the project
+/// unindexed -- which is exactly what the first cut of the no-seed path did.
+fn index_set_of(db: &Db, project_id: &str) -> Result<HashSet<String>, CortError> {
+    Ok(indexed_files(db, project_id)?.into_iter().collect())
 }
 
 fn indexed_files(db: &Db, project_id: &str) -> Result<Vec<String>, CortError> {
@@ -449,7 +466,8 @@ pub fn coverage_for(
     let mut per_seed = Vec::new();
     for seed in seeds {
         let name = bare_name(&seed.symbol).to_string();
-        let mut gap_rows_sorted: Vec<(u8, u8, String, usize, &'static str, String)> = Vec::new();
+        let mut gap_rows_sorted: Vec<(u8, u8, String, usize, &'static str, u32, String)> =
+            Vec::new();
         let mut orphan_files: Vec<String> = Vec::new();
         let mut artifact_files = 0usize;
         let defs = definition_lines(db, project_id, &name)?;
@@ -512,13 +530,25 @@ pub fn coverage_for(
                 if !file_covered && !generated && meaningful {
                     orphan_files.push(file.clone());
                 }
+                // Two mentions on one line are one row with a count: K3's review saw the same
+                // `export { alpha as beta } from './alpha';` printed twice, and a duplicated row
+                // makes a one-line file look like a two-line hole.
+                let mut per_line: std::collections::BTreeMap<(usize, &'static str), (u32, String)> =
+                    std::collections::BTreeMap::new();
                 for (line, cause, text_snippet) in file_rows {
+                    per_line
+                        .entry((line, cause))
+                        .and_modify(|(n, _)| *n += 1)
+                        .or_insert((1, text_snippet));
+                }
+                for ((line, cause), (occurrences, text_snippet)) in per_line {
                     gap_rows_sorted.push((
                         u8::from(file_covered),
                         cause_rank(cause),
                         file.clone(),
                         line,
                         cause,
+                        occurrences,
                         text_snippet,
                     ));
                 }
@@ -528,11 +558,12 @@ pub fn coverage_for(
         let gaps: Vec<Value> = gap_rows_sorted
             .iter()
             .take(MAX_GAP_ROWS)
-            .map(|(_, _, file, line, cause, text)| {
+            .map(|(_, _, file, line, cause, occurrences, text)| {
                 json!({
                     "file_path": file,
                     "line": line,
                     "cause": cause,
+                    "occurrences": occurrences,
                     "text": text,
                 })
             })
@@ -540,6 +571,8 @@ pub fn coverage_for(
         let unresolved = extracted_but_unresolved(db, project_id, seed, &name)?;
         let mut causes: Vec<(&str, usize)> = by_cause.into_iter().collect();
         causes.sort_by(|a, b| a.0.cmp(b.0));
+        // Rows, not mentions: with duplicates folded, `gap_count` counts distinct
+        // (file, line, cause) findings.
         let gap_rows = gap_rows_sorted.len() + unresolved.len();
         let mut reasons: Vec<&str> = Vec::new();
         if !gap_rows_sorted.is_empty() {
@@ -574,7 +607,7 @@ pub fn coverage_for(
     }
 
     Ok(json!({
-        "method": "coverage-v1 (three-layer recall screen: mentions, dropped resolutions, blind files)",
+        "method": COVERAGE_METHOD,
         "seeds": per_seed,
         "blind_files": blind,
         "reading": "mentions_without_edge and extracted_but_unresolved are candidates, not proof: a \

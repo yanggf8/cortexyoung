@@ -116,10 +116,9 @@ fn coverage_lines(payload: &Value) -> Vec<String> {
     };
     let mut out = vec![format!("# coverage {}", as_str(coverage, "method"))];
     let seeds = arr(coverage, "seeds");
-    if seeds.is_empty() {
+    if coverage["no_seed_resolved"] == Value::Bool(true) || seeds.is_empty() {
         out.push(
-            "coverage\tseeds=0\tnothing_resolved\tthis is itself a gap, not a clean answer"
-                .to_string(),
+            "coverage\tno_seed_resolved\tnot a clean answer: nothing was looked at".to_string(),
         );
     }
     for seed in seeds {
@@ -134,11 +133,17 @@ fn coverage_lines(payload: &Value) -> Vec<String> {
             js_display(seed, "enumeration_may_be_incomplete")
         ));
         for g in no_edge {
+            let occurrences = g["occurrences"].as_u64().unwrap_or(1);
             out.push(format!(
-                "miss\t{}\t{}:{}\t{}",
+                "miss\t{}\t{}:{}\t{}{}",
                 as_str(g, "cause"),
                 as_str(g, "file_path"),
                 js_display(g, "line"),
+                if occurrences > 1 {
+                    format!("x{occurrences}\t")
+                } else {
+                    String::new()
+                },
                 as_str(g, "text")
             ));
         }

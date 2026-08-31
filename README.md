@@ -272,6 +272,18 @@ a priority rather than a polish item.
    captured by `cort read`; it is FTS5, not semantic memory. Changed or deleted source files invalidate
    their stored readings. Reading notes survive full and incremental re-indexing when the source is unchanged.
 
+11. **`impact --coverage` is a recall *screen*, not a completeness proof.** It compares the graph with
+   `raw_edges` and with the text of indexed files, and reports three layers: mentions that produced no
+   edge, edges dropped during resolution, and blind files (unparsed or never indexed). Known holes, each
+   one measured rather than assumed: a caller in a file the indexer does not read at all (`.sh`, `.txt`,
+   config) is invisible to every layer; a re-export chain (`export { x as y }`, then called as `y`) is
+   flagged at the barrel line, not at the eventual caller; a mention within 2 lines of an extracted call
+   is treated as covered, so nearby prose can be swallowed; name-in-string and name-in-comment matching
+   is lexical, so a common word (`get`, `add`, `new`) yields candidates that must be triaged, and Rust
+   lifetimes before a name can be labelled `quoted`. `enumeration_may_be_incomplete: false` means "no gap
+   signal", never "verified none" -- and since 2026-08-31 a blind file forces `true` rather than letting
+   a clean per-seed list read as clearance.
+
 ## What is deliberately not built
 
 These stay deferred and must not appear (spec section 8). Nothing below was built in the 2026-08-28 pass:

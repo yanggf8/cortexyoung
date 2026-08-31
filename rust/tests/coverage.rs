@@ -5,7 +5,7 @@ use cort::coverage::{attach, bare_name, cause_of, mentions};
 use cort::db::{ensure_schema, open_db, project_id_for};
 use cort::impact::impact_command;
 use cort::indexer::full_index;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::fs;
 
 fn indexed(
@@ -271,6 +271,91 @@ fn a_blind_file_is_never_a_clean_bill_of_health() {
             .iter()
             .any(|v| v.as_str().unwrap_or_default().contains("notes.ts")),
         "a count without the path is not actionable: {blind}"
+    );
+}
+
+#[test]
+fn a_single_quoted_string_is_not_reported_as_a_bare_mention() {
+    // K3's review: the quote arithmetic only counted `\u{201c}`, so `\'./d\'` came back as a plain
+    // `mention` and competed with real holes for the top of the list.
+    let (_dir, root, db, project_id, bin) = indexed(&[
+        ("src/d.ts", "export function d() { return 1; }\n"),
+        (
+            "src/c.ts",
+            "import { d } from './d';\nexport function c() { return d(); }\n",
+        ),
+        (
+            "src/p.ts",
+            "export const p = 1;\nconst where = './d';\nexport const q = p;\n",
+        ),
+    ]);
+    let cov = coverage_of(&db, &project_id, &root, &bin, "d");
+    let quoted_p = cov["seeds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|s| s["mentions_without_edge"].as_array().unwrap().iter())
+        .filter(|g| g["file_path"] == Value::String("src/p.ts".into()))
+        .collect::<Vec<_>>();
+    assert!(
+        !quoted_p.is_empty(),
+        "the string mention should surface: {cov}"
+    );
+    assert_eq!(
+        quoted_p[0]["cause"],
+        Value::String("quoted".into()),
+        "{quoted_p:?}"
+    );
+}
+
+#[test]
+fn two_mentions_on_one_line_collapse_into_one_row_that_says_so() {
+    // Before this, `d + d` on one line printed the same row twice and made a one-line file look
+    // like a two-line hole.
+    let (_dir, root, db, project_id, bin) = indexed(&[
+        ("src/d.ts", "export function d() { return 1; }\n"),
+        // The duplicate sits 9 lines below the real call so the line tolerance cannot absorb it:
+        // that absorption is a separate deliberate behaviour, not something this test may hide.
+        (
+            "src/u.ts",
+            "import { d } from './d';\nexport function u() { return d(); }\n\n\n\n\n\n\n\nexport const sum = d + d;\n",
+        ),
+    ]);
+    let cov = coverage_of(&db, &project_id, &root, &bin, "d");
+    let rows = cov["seeds"][0]["mentions_without_edge"].as_array().unwrap();
+    let dup = rows
+        .iter()
+        .filter(|g| g["file_path"] == Value::String("src/u.ts".into()) && g["line"] == json!(10))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        dup.len(),
+        1,
+        "one row for line 10, not one per mention: {rows:?}"
+    );
+    assert_eq!(dup[0]["occurrences"], json!(2), "{rows:?}");
+    assert_eq!(dup[0]["cause"], Value::String("mention".into()), "{rows:?}");
+}
+
+#[test]
+fn a_symbol_that_is_not_indexed_reports_itself_instead_of_failing() {
+    // An unanswerable question is a finding, not a crash: exit 1 with `nothing_indexed` let a
+    // caller reading "command failed" treat the whole check as not-applicable.
+    let (_dir, root, db, project_id, bin) =
+        indexed(&[("src/d.ts", "export function d() { return 1; }\n")]);
+    let mut out = impact_command(&db, &bin, &root, &project_id, "never_heard_of_it", 3).unwrap();
+    assert_eq!(out["seed_count"], json!(0));
+    attach(&db, &project_id, &root, &mut out).expect("attach must succeed with no seed");
+    let cov = &out["coverage"];
+    assert_eq!(cov["no_seed_resolved"], Value::Bool(true), "{cov}");
+    assert_eq!(
+        cov["enumeration_may_be_incomplete"],
+        Value::Bool(true),
+        "{cov}"
+    );
+    assert_eq!(
+        cov["why"][0],
+        Value::String("no_seed_resolved".into()),
+        "{cov}"
     );
 }
 
