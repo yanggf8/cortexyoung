@@ -173,6 +173,39 @@ fn imported_path_prefixes(file_path: &str, import_map: &HashMap<String, String>)
         .collect()
 }
 
+/// The bare name behind an *internal* Rust path call, if this is one.
+///
+/// Root cause of the `extracted_but_unresolved` rows a reviewer reproduced: `resolve_targets` matches
+/// `symbol_name` exactly, while `crate::def::my_func()` is stored as a raw target with its
+/// qualification and as a chunk named just `my_func`. The exact match therefore finds nothing and the
+/// edge is silently dropped -- a Rust call written the way Rust modules are normally called was
+/// invisible to the graph.
+///
+/// Only the three prefixes that *prove* the target is inside the project are rescued. A std or
+/// dependency call (`Vec::new`, `formatter.formatToParts`) must stay unresolved and visible: stripping
+/// those to `new` would invent an edge to whatever happens to share the name, and would also make the
+/// `unresolved` rows that currently disclose the hole disappear.
+pub fn internal_rust_path_target(symbol: &str) -> Option<&str> {
+    let rest = symbol
+        .strip_prefix("crate::")
+        .or_else(|| symbol.strip_prefix("self::"))
+        .or_else(|| symbol.strip_prefix("super::"))
+        .or_else(|| symbol.strip_prefix("::"))?;
+    let bare = rest.rsplit("::").next().unwrap_or("");
+    (!bare.is_empty() && !bare.contains('(') && !bare.contains('<')).then_some(bare)
+}
+
+fn chunks_named(db: &Db, project_id: &str, name: &str) -> rusqlite::Result<Vec<(String, String)>> {
+    let mut stmt = db.prepare(
+        "SELECT chunk_id, file_path FROM chunks
+          WHERE project_id = ?1 AND symbol_name = ?2 ORDER BY chunk_id",
+    )?;
+    let rows = stmt
+        .query_map(params![project_id, name], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(rows)
+}
+
 pub fn resolve_targets(
     db: &Db,
     project_id: &str,
@@ -180,13 +213,12 @@ pub fn resolve_targets(
     import_map: &HashMap<String, String>,
     symbol: &str,
 ) -> rusqlite::Result<Vec<String>> {
-    let mut stmt = db.prepare(
-        "SELECT chunk_id, file_path FROM chunks
-          WHERE project_id = ?1 AND symbol_name = ?2 ORDER BY chunk_id",
-    )?;
-    let all: Vec<(String, String)> = stmt
-        .query_map(params![project_id, symbol], |r| Ok((r.get(0)?, r.get(1)?)))?
-        .collect::<rusqlite::Result<_>>()?;
+    let mut all = chunks_named(db, project_id, symbol)?;
+    if all.is_empty() {
+        if let Some(bare) = internal_rust_path_target(symbol) {
+            all = chunks_named(db, project_id, bare)?;
+        }
+    }
     if all.is_empty() {
         return Ok(Vec::new());
     }

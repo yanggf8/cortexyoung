@@ -2,6 +2,7 @@
 
 use cort::ast_grep::resolve_ast_grep_bin;
 use cort::db::{ensure_schema, open_db, project_id_for};
+use cort::graph::internal_rust_path_target;
 use cort::impact::{impact_command, DEFAULT_DEPTH};
 use cort::indexer::full_index;
 use std::fs;
@@ -177,4 +178,86 @@ fn symbol_accepts_a_comma_separated_batch_and_merges_dependents_at_min_hop() {
         serde_json::json!({ "b": 1, "a": 2 }),
         "b is hop-1 from seed c, a is hop-2; seeds themselves are excluded"
     );
+}
+
+/// Root cause: `resolve_targets` matched `symbol_name` exactly, so `crate::def::my_func()` — the way
+/// Rust code is normally written — could never attach. See
+/// docs/2026-08-31-rust-qualified-call-resolution.md.
+#[test]
+fn an_internal_rust_path_call_resolves_to_the_bare_symbol() {
+    let (_dir, root, db, project_id, bin) = indexed(&[
+        ("src/def.rs", "pub fn my_func() -> u32 { 7 }\n"),
+        (
+            "src/lib.rs",
+            "pub mod def;\npub fn caller() -> u32 { crate::def::my_func() }\n",
+        ),
+    ]);
+    let out = impact_command(&db, &bin, &root, &project_id, "my_func", 1).unwrap();
+    let names: Vec<&str> = out["dependents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|d| d["symbol_name"].as_str())
+        .collect();
+    assert_eq!(names, vec!["caller"], "{out}");
+}
+
+#[test]
+fn a_dependency_call_stays_unresolved_and_says_so_instead_of_becoming_an_edge() {
+    // The other half of the fix. Stripping `Vec::new` to `new` would invent an edge to any chunk
+    // named `new` and erase the row that admits the hole.
+    let (_dir, root, db, project_id, bin) = indexed(&[
+        (
+            "src/new.rs",
+            "pub fn new() -> u32 { let v = Vec::new(); 1 }\n",
+        ),
+        // The std call sits inside the seed itself: `impact`'s `unresolved` section reports what the
+        // seed could not resolve on its way out, while calls *to* the seed that got dropped are the
+        // coverage screen's `extracted_but_unresolved` layer. Two different questions.
+        ("src/lib.rs", "pub fn other() -> u32 { new() }\n"),
+    ]);
+    let out = impact_command(&db, &bin, &root, &project_id, "new", 1).unwrap();
+    let names: Vec<&str> = out["dependents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|d| d["symbol_name"].as_str())
+        .collect();
+    assert_eq!(names, vec!["other"], "only the real project call: {out}");
+    let unresolved: Vec<&str> = out["unresolved"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|u| u["symbol"].as_str())
+        .collect();
+    assert!(
+        unresolved.contains(&"Vec::new"),
+        "the std call must stay visible as unresolved rather than become an invented edge: {out}"
+    );
+}
+
+#[test]
+fn only_the_three_internal_rust_prefixes_are_rescued() {
+    assert_eq!(
+        internal_rust_path_target("crate::def::my_func"),
+        Some("my_func")
+    );
+    assert_eq!(internal_rust_path_target("self::helper"), Some("helper"));
+    assert_eq!(internal_rust_path_target("super::shared::f"), Some("f"));
+    assert_eq!(internal_rust_path_target("::kids::f"), Some("f"));
+    for keep_unresolved in [
+        "Vec::new",
+        "formatter.formatToParts",
+        "Tally::add",
+        "my_func",
+        "crate::",
+        "crate::generic::<T>",
+        "crate::weird(",
+    ] {
+        assert_eq!(
+            internal_rust_path_target(keep_unresolved),
+            None,
+            "{keep_unresolved} must not be stripped"
+        );
+    }
 }

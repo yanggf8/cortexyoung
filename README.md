@@ -260,9 +260,11 @@ a priority rather than a polish item.
 8. **`impact` is only as good as a language's edge rules:** the relationship graph indexes the call
    shapes the language's `edge:calls`/`edge:imports` rules in `src/pack/rules/` capture. For Rust that
    is bare calls (`foo()`) and fully-qualified associated calls (`Type::method()`), resolved by name;
-   receiver calls (`x.m()`), module-path calls (`crate::m::f()`) and `use`/`mod` edges are not
-   indexed, so `cort impact --symbol <rust-symbol>` can return `dependents=0` for a symbol with
-   plenty of callers. Use `cargo check`/`rg` for the precise Rust caller list (see the capability
+   receiver calls (`x.m()`) and `use`/`mod` edges are not indexed, so `cort impact --symbol
+   <rust-symbol>` can return `dependents=0` for a symbol with plenty of callers. Module-path calls
+   (`crate::m::f()`) are extracted and now resolve by their last segment — only for the internal
+   prefixes `crate::`, `self::`, `super::`, `::`, so a dependency call like `Vec::new` stays
+   unresolved and visible instead of inventing an edge (`docs/2026-08-31-rust-qualified-call-resolution.md`). Use `cargo check`/`rg` for the precise Rust caller list (see the capability
    table above).
 9. **`status.unparsed` also counts files with no symbols:** `extract_file` degrades to a single
    FTS-only `unparsed` chunk on timeout, on a non-zero `ast-grep` exit, **and** when the scan returns
