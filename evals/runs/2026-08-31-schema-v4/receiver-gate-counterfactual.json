@@ -1,0 +1,285 @@
+{
+ "generated": "2026-08-31, this repo at the schema-v4 commit, cache /tmp/cort-self-v4",
+ "question": "What would 'attach a receiver call when the method name is unique project-wide' have produced, without graph::receiver_binds?",
+ "receiver_raw_edges": 4833,
+ "unique_name_sites": 30,
+ "uniqueness_only_edges": 25,
+ "uniqueness_only_true_edges": 13,
+ "uniqueness_only_false_edges": 12,
+ "shipped_receiver_edges": 9,
+ "grading": "Manual, one row per (caller symbol, target symbol): the receiver's real type read from the line. The invented rows are the std/dependency methods whose names happened to be unique in this project.",
+ "edges": [
+  {
+   "from_symbol": "CountingFs::open_reads",
+   "target": "BatchRead::load",
+   "sites": [
+    "rust/tests/readings.rs:123"
+   ],
+   "grade": "false"
+  },
+  {
+   "from_symbol": "FailFs::clone_err",
+   "target": "FailFs::kind",
+   "sites": [
+    "rust/tests/readings.rs:171"
+   ],
+   "grade": "false"
+  },
+  {
+   "from_symbol": "RaceFs::open_read",
+   "target": "BatchRead::load",
+   "sites": [
+    "rust/tests/readings.rs:220"
+   ],
+   "grade": "false"
+  },
+  {
+   "from_symbol": "RunStatus::drop",
+   "target": "BatchRead::load",
+   "sites": [
+    "evals/src/main.rs:136"
+   ],
+   "grade": "false"
+  },
+  {
+   "from_symbol": "cause_of",
+   "target": "FailFs::matches",
+   "sites": [
+    "rust/src/coverage.rs:264"
+   ],
+   "grade": "false"
+  },
+  {
+   "from_symbol": "code",
+   "target": "code",
+   "sites": [
+    "rust/tests/fixture.rs:24"
+   ],
+   "grade": "false"
+  },
+  {
+   "from_symbol": "delete_project",
+   "target": "FailFs::kind",
+   "sites": [
+    "rust/src/db.rs:248"
+   ],
+   "grade": "false"
+  },
+  {
+   "from_symbol": "every_option_the_parser_asks_for_is_whitelisted",
+   "target": "chain",
+   "sites": [
+    "evals/src/main.rs:1008",
+    "evals/src/main.rs:1009",
+    "evals/src/main.rs:1010"
+   ],
+   "grade": "false"
+  },
+  {
+   "from_symbol": "exec_ast_grep",
+   "target": "code",
+   "sites": [
+    "rust/src/ast_grep.rs:299"
+   ],
+   "grade": "false"
+  },
+  {
+   "from_symbol": "impact_command",
+   "target": "chain",
+   "sites": [
+    "rust/src/impact.rs:118"
+   ],
+   "grade": "false"
+  },
+  {
+   "from_symbol": "map_index",
+   "target": "FailFs::kind",
+   "sites": [
+    "rust/src/main.rs:59"
+   ],
+   "grade": "false"
+  },
+  {
+   "from_symbol": "run_cort",
+   "target": "code",
+   "sites": [
+    "rust/tests/cli.rs:65",
+    "rust/tests/usage.rs:70"
+   ],
+   "grade": "false"
+  },
+  {
+   "from_symbol": "BatchRead::problem",
+   "target": "BatchRead::field",
+   "sites": [
+    "evals/src/main.rs:207",
+    "evals/src/main.rs:208"
+   ],
+   "grade": "true"
+  },
+  {
+   "from_symbol": "FailFs::metadata",
+   "target": "FailFs::clone_err",
+   "sites": [
+    "rust/tests/readings.rs:182"
+   ],
+   "grade": "true"
+  },
+  {
+   "from_symbol": "FailFs::metadata",
+   "target": "FailFs::matches",
+   "sites": [
+    "rust/tests/readings.rs:181"
+   ],
+   "grade": "true"
+  },
+  {
+   "from_symbol": "FailFs::open_read",
+   "target": "FailFs::clone_err",
+   "sites": [
+    "rust/tests/readings.rs:190"
+   ],
+   "grade": "true"
+  },
+  {
+   "from_symbol": "FailFs::open_read",
+   "target": "FailFs::matches",
+   "sites": [
+    "rust/tests/readings.rs:187"
+   ],
+   "grade": "true"
+  },
+  {
+   "from_symbol": "a_killed_batch_is_caught_by_the_count_disagreement",
+   "target": "BatchRead::problem",
+   "sites": [
+    "evals/src/main.rs:1083"
+   ],
+   "grade": "true"
+  },
+  {
+   "from_symbol": "a_short_batch_is_named_with_exactly_how_many_cells_are_missing",
+   "target": "BatchRead::problem",
+   "sites": [
+    "evals/src/main.rs:1073"
+   ],
+   "grade": "true"
+  },
+  {
+   "from_symbol": "an_incomplete_flag_without_a_count_gap_is_still_a_problem",
+   "target": "BatchRead::problem",
+   "sites": [
+    "evals/src/main.rs:1111"
+   ],
+   "grade": "true"
+  },
+  {
+   "from_symbol": "relationship_rows_for_symbol_map_with_index",
+   "target": "CallForm::insertion_rank",
+   "sites": [
+    "rust/src/graph.rs:465"
+   ],
+   "grade": "true"
+  },
+  {
+   "from_symbol": "render_error",
+   "target": "CortError::to_json",
+   "sites": [
+    "rust/src/render.rs:362"
+   ],
+   "grade": "true"
+  },
+  {
+   "from_symbol": "replace_file_raw_edges",
+   "target": "CallForm::insertion_rank",
+   "sites": [
+    "rust/src/indexer.rs:316"
+   ],
+   "grade": "true"
+  },
+  {
+   "from_symbol": "resolve_edge_targets",
+   "target": "ReceiverIndex::candidates",
+   "sites": [
+    "rust/src/graph.rs:346"
+   ],
+   "grade": "true"
+  },
+  {
+   "from_symbol": "scan",
+   "target": "Tally::add",
+   "sites": [
+    "evals/src/demand.rs:626",
+    "evals/src/demand.rs:648"
+   ],
+   "grade": "true"
+  }
+ ],
+ "shipped_edges_graded_false": 0,
+ "shipped_edges": [
+  {
+   "f": "evals/src/demand.rs",
+   "line": 626,
+   "src": "scan",
+   "tgt": "Tally::add",
+   "text": "tally.add(&project, &text);"
+  },
+  {
+   "f": "evals/src/main.rs",
+   "line": 207,
+   "src": "BatchRead::problem",
+   "tgt": "BatchRead::field",
+   "text": "let planned = self.field(\"planned_cells\");"
+  },
+  {
+   "f": "rust/src/graph.rs",
+   "line": 346,
+   "src": "resolve_edge_targets",
+   "tgt": "ReceiverIndex::candidates",
+   "text": "let candidates = index.candidates(bare_name(&edge.raw_target));"
+  },
+  {
+   "f": "rust/src/graph.rs",
+   "line": 465,
+   "src": "relationship_rows_for_symbol_map_with_index",
+   "tgt": "CallForm::insertion_rank",
+   "text": "e.call_form.insertion_rank(),"
+  },
+  {
+   "f": "rust/src/indexer.rs",
+   "line": 316,
+   "src": "replace_file_raw_edges",
+   "tgt": "CallForm::insertion_rank",
+   "text": "e.call_form.insertion_rank(),"
+  },
+  {
+   "f": "rust/tests/readings.rs",
+   "line": 181,
+   "src": "FailFs::metadata",
+   "tgt": "FailFs::matches",
+   "text": "if self.on == \"metadata\" && self.matches(path) {"
+  },
+  {
+   "f": "rust/tests/readings.rs",
+   "line": 182,
+   "src": "FailFs::metadata",
+   "tgt": "FailFs::clone_err",
+   "text": "return Err(self.clone_err());"
+  },
+  {
+   "f": "rust/tests/readings.rs",
+   "line": 187,
+   "src": "FailFs::open_read",
+   "tgt": "FailFs::matches",
+   "text": "if self.matches(path) && (self.on == \"open\" || self.on == \"read\") {"
+  },
+  {
+   "f": "rust/tests/readings.rs",
+   "line": 190,
+   "src": "FailFs::open_read",
+   "tgt": "FailFs::clone_err",
+   "text": "error: self.clone_err(),"
+  }
+ ],
+ "reading": "The 12 invented edges are not exotic: they are `kind`, `code`, `chain`, `matches`, `load` -- the std methods a Rust project calls most, which are exactly the names most likely to be unique among a project's own symbols. Any future relaxation of the gate has to be argued against this list, not against a hypothetical."
+}

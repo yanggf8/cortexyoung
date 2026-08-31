@@ -36,6 +36,9 @@
 
 ### 實測結果（同一棵樹、同一份 cct HEAD，v3 binary vs v4 binary）
 
+> 下面每一格都能稽核：`evals/runs/2026-08-31-schema-v4/`（兩臂的 `verify-impact` 報告、
+> 「只做唯一性閘」的反事實清單 25 條逐條附來源行、以及重現步驟）。
+
 | 項目 | v3 (`bc5f887`) | v4 |
 |---|---|---|
 | 本倉庫 relationships | 1,360 | **1,369**（+9，全部是 receiver 邊） |

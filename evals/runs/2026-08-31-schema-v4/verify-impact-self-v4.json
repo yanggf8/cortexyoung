@@ -1,0 +1,100 @@
+{
+  "depth": 3,
+  "repo": "/home/yanggf/a/cortexyoung",
+  "report": [
+    {
+      "by_hop": {
+        "1": {
+          "confirmed": 0,
+          "total": 1
+        },
+        "2": {
+          "confirmed": 2,
+          "total": 2
+        }
+      },
+      "call_sites": 3,
+      "call_sites_confirmed": 3,
+      "confirmed": 2,
+      "dependents": 3,
+      "depth": 3,
+      "line_precision": 1.0,
+      "precision": 0.667,
+      "seed_count": 1,
+      "symbol": "Tally::add",
+      "unconfirmed": [
+        "h1:scan"
+      ]
+    },
+    {
+      "by_hop": {
+        "1": {
+          "confirmed": 2,
+          "total": 2
+        }
+      },
+      "call_sites": 2,
+      "call_sites_confirmed": 2,
+      "confirmed": 2,
+      "dependents": 2,
+      "depth": 3,
+      "line_precision": 1.0,
+      "precision": 1.0,
+      "seed_count": 1,
+      "symbol": "scan",
+      "unconfirmed": []
+    },
+    {
+      "by_hop": {
+        "1": {
+          "confirmed": 1,
+          "total": 1
+        },
+        "2": {
+          "confirmed": 2,
+          "total": 2
+        },
+        "3": {
+          "confirmed": 18,
+          "total": 18
+        }
+      },
+      "call_sites": 21,
+      "call_sites_confirmed": 21,
+      "confirmed": 21,
+      "dependents": 21,
+      "depth": 3,
+      "line_precision": 1.0,
+      "precision": 1.0,
+      "seed_count": 1,
+      "symbol": "receiver_binds",
+      "unconfirmed": []
+    },
+    {
+      "by_hop": {
+        "1": {
+          "confirmed": 2,
+          "total": 2
+        },
+        "2": {
+          "confirmed": 18,
+          "total": 18
+        },
+        "3": {
+          "confirmed": 18,
+          "total": 18
+        }
+      },
+      "call_sites": 38,
+      "call_sites_confirmed": 38,
+      "confirmed": 38,
+      "dependents": 38,
+      "depth": 3,
+      "line_precision": 1.0,
+      "precision": 1.0,
+      "seed_count": 1,
+      "symbol": "resolve_edge_targets",
+      "unconfirmed": []
+    }
+  ]
+}
