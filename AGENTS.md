@@ -18,9 +18,13 @@ open half.** Its first piece landed on 2026-08-31 (schema v4): `relationships` s
 and `call_form`, `impact` prints `@<line> <form>` beside each dependent's definition line, and
 `cort-evals verify-impact` grades an edge against that single line (117/117 dependents on the 5 cct
 chains, 64/64 on 4 chains in this repo). The rest of that half is still open and it is the *other*
-direction of the same claim: the receiver gate attaches 9 of 4,833 receiver call sites here (all 9
-correct, every refusal a `--coverage` row), `enumeration_may_be_incomplete` still flips on every
-`unparsed` file, and nobody has written down what reading `false` entitles an agent to conclude. A
+direction of the same claim: `enumeration_may_be_incomplete` now has two causes and no more (a named
+gap row, or a file the screen never read -- `unparsed` became advisory on 2026-08-31, coverage-v2, after
+two chunk-less files in this repo were flipping all 60 sampled seeds), and skill + README + the report's
+own `reading` field say what `false` does and does not entitle anyone to conclude. Still open: the
+receiver gate attaches 9 of 4,833 receiver call sites here (all 9 correct; the refusals are where recall
+still leaks, each one a `--coverage` row), and on a hub-dense venue like cct the boolean is still true
+for 62 of 63 sampled seeds -- which is why the instruction is *read the rows*, not *watch the flag*. A
 change that makes an answer cheaper to verify is on the main line; a feature that only makes answers
 more numerous is not.
 

@@ -219,10 +219,18 @@ fn absence_of_a_signal_is_never_named_like_proof() {
         "the field naming has to keep the asymmetry: {text:?}"
     );
     assert_eq!(text["enumeration_may_be_incomplete"], Value::Bool(false));
-    assert!(cov["reading"]
-        .as_str()
-        .unwrap()
-        .contains("Never read absence of a signal"));
+    let reading = cov["reading"].as_str().unwrap();
+    assert!(
+        reading.contains("Read the rows, not the boolean")
+            && reading.contains("neither is a proof of anything"),
+        "the report has to say how to read the flag, in both directions: {reading}"
+    );
+    assert!(
+        reading.contains(".sh, .txt, config")
+            && reading.contains("2 MB")
+            && reading.contains("barrel"),
+        "and the boundaries K3 listed as missing must be in the same sentence: {reading}"
+    );
 }
 
 #[test]
@@ -280,9 +288,56 @@ fn a_generated_bundle_is_not_allowed_to_look_like_a_missed_caller() {
 #[test]
 fn a_blind_file_is_never_a_clean_bill_of_health() {
     // The independent review (agy + gemini-3.1-pro, 2026-08-31) found the dangerous reading: a file
-    // the chunker could not read holds callers the mention scan never sees, so every per-seed gap
-    // list was empty and the flag answered `false` -- "nothing missed" while the graph was knowingly
-    // blind. Absence of signal in a blind tree must fail toward "may be incomplete".
+    // this screen never read holds callers nothing else can say anything about, so the per-seed gap
+    // list was empty and the flag answered `false` -- "nothing missed" while the tree was knowingly
+    // blind. Absence of signal in an unread tree is not absence of gaps: the flag fails toward "may
+    // be incomplete". This is the *unread* case (a file on disk that never entered the index); the
+    // read-but-chunk-less case is the next test and must not behave this way.
+    let (dir, root, db, project_id, bin) = indexed(&[
+        ("src/d.ts", "export function d() { return 1; }\n"),
+        (
+            "src/c.ts",
+            "import { d } from './d';\nexport function c() { return d(); }\n",
+        ),
+    ]);
+    fs::write(
+        dir.path().join("src/extra.ts"),
+        "// added after the index: nobody read it at all\n",
+    )
+    .unwrap();
+    let cov = coverage_of(&db, &project_id, &root, &bin, "d");
+    let blind = &cov["blind_files"];
+    assert!(
+        blind["unindexed"].as_u64().unwrap_or(0) >= 1,
+        "fixture should produce an unread file: {cov}"
+    );
+    assert!(
+        cov["seeds"].as_array().unwrap().iter().any(|s| {
+            s["enumeration_may_be_incomplete"] == Value::Bool(true)
+                && s["why"]
+                    .as_array()
+                    .map(|w| w.contains(&Value::String("blind_files".into())))
+                    == Some(true)
+        }),
+        "the unread file must reach the per-seed verdict, not just a side table: {cov}"
+    );
+    assert!(
+        blind["unindexed_example"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v.as_str().unwrap_or_default().contains("extra.ts")),
+        "a count without the path is not actionable: {blind}"
+    );
+}
+
+/// A file with no chunks is blind to the *graph*, not to this screen: its text is scanned, so a
+/// caller in it shows up as a row. Counting it as a gap anyway made 2 files in this repo (4 in cct)
+/// answer `true` for **every** seed -- a boolean that is always true gets read as noise, and the
+/// noise drags the real warning down with it. So: still listed with its paths, still named in `why`,
+/// never a verdict.
+#[test]
+fn a_file_with_no_chunks_is_advisory_and_does_not_flip_every_seed() {
     let (_dir, root, db, project_id, bin) = indexed(&[
         ("src/d.ts", "export function d() { return 1; }\n"),
         (
@@ -293,21 +348,9 @@ fn a_blind_file_is_never_a_clean_bill_of_health() {
     ]);
     let cov = coverage_of(&db, &project_id, &root, &bin, "d");
     let blind = &cov["blind_files"];
-    let blind_seen =
-        blind["unparsed"].as_u64().unwrap_or(0) + blind["unindexed"].as_u64().unwrap_or(0);
     assert!(
-        blind_seen >= 1,
-        "fixture should produce a blind file: {cov}"
-    );
-    assert!(
-        cov["seeds"].as_array().unwrap().iter().any(|s| {
-            s["enumeration_may_be_incomplete"] == Value::Bool(true)
-                && s["why"]
-                    .as_array()
-                    .map(|w| w.contains(&Value::String("blind_files".into())))
-                    == Some(true)
-        }),
-        "the blind file must reach the per-seed verdict, not just a side table: {cov}"
+        blind["unparsed"].as_u64().unwrap_or(0) >= 1,
+        "the fixture must really produce a chunk-less file: {blind}"
     );
     assert!(
         blind["unparsed_example"]
@@ -315,7 +358,32 @@ fn a_blind_file_is_never_a_clean_bill_of_health() {
             .unwrap()
             .iter()
             .any(|v| v.as_str().unwrap_or_default().contains("notes.ts")),
-        "a count without the path is not actionable: {blind}"
+        "advisory does not mean hidden: the path still has to be there: {blind}"
+    );
+    assert_eq!(
+        blind["unindexed"].as_u64().unwrap_or(0),
+        0,
+        "nothing here is unread: {blind}"
+    );
+    let seed = &cov["seeds"][0];
+    assert_eq!(
+        seed["enumeration_may_be_incomplete"],
+        Value::Bool(false),
+        "an unread-free tree with no gap rows is not a gap, chunk-less file or not: {cov}"
+    );
+    assert!(
+        seed["why"]
+            .as_array()
+            .unwrap()
+            .contains(&Value::String("unparsed_files".into())),
+        "and the advisory still has to be named where the reasons live: {seed}"
+    );
+    assert!(
+        !seed["why"]
+            .as_array()
+            .unwrap()
+            .contains(&Value::String("blind_files".into())),
+        "`blind_files` is reserved for trees this screen never read: {seed}"
     );
 }
 

@@ -176,10 +176,21 @@ fn coverage_lines(payload: &Value) -> Vec<String> {
     let blind = coverage.get("blind_files");
     if let Some(b) = blind {
         out.push(format!(
-            "blind\tunparsed={}\tunindexed={}",
+            "blind\tunparsed={}\tunindexed={}\tunread={}",
             js_display(b, "unparsed"),
-            js_display(b, "unindexed")
+            js_display(b, "unindexed"),
+            js_display(b, "scan_skipped")
         ));
+        // The one sentence the flag cannot carry: `unparsed` files have no edges but were still read
+        // as text, so they contribute rows and no verdict. Without this line, `blind unparsed=2` next
+        // to `incomplete=false` reads as a contradiction -- which is how an agent ends up ignoring
+        // both.
+        if b["unparsed"].as_u64().unwrap_or(0) > 0 {
+            out.push(
+                "blind\tunparsed\tadvisory: text-scanned, no edges; does not flip incomplete"
+                    .to_string(),
+            );
+        }
         // Paths, not just counts: "1 file is blind" tells an agent nothing it can act on.
         for (kind, key) in [
             ("unparsed", "unparsed_example"),

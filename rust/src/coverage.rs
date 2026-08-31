@@ -24,6 +24,15 @@
 //! another module, so the counts are candidates to look at, deliberately over-inclusive. The field is
 //! named `enumeration_may_be_incomplete` rather than anything containing "complete", because `false`
 //! means "no gap signal", never "verified none".
+//!
+//! **Read the rows, not the boolean.** The boolean has exactly two ways to be true -- a named gap row,
+//! or a file this screen never read (`unindexed`, `scan_skipped`) -- and one way to be false: nothing
+//! of either kind. Files that exist in the index but produced no chunks (`unparsed`: barrels,
+//! type-only modules, a `pub mod`-only `lib.rs`) used to flip it too, which made two files in this
+//! repo silently declare every seed in it incomplete. A boolean that is always true is not a warning
+//! light, it is noise -- and the agents that stop believing it are the same agents that then ignore
+//! the one it was protecting. Those files are still listed with their paths and still reach `why` as
+//! the advisory `unparsed_files`, because their *text* was scanned: a caller in them appears as a row.
 
 use crate::db::Db;
 use crate::errors::CortError;
@@ -43,12 +52,13 @@ pub const LINE_TOLERANCE: i64 = 2;
 
 /// Named so a reader can tell which screen produced a claim, and so both shapes of the report
 /// (with seeds and without) agree on what generated them.
-pub const COVERAGE_METHOD: &str =
-    "coverage-v1 (three-layer recall screen: mentions, dropped resolutions, blind files)";
+/// v2 changed what the boolean *means*, so the version has to change with it: a report is read long
+/// after the build that wrote it, and `enumeration_may_be_incomplete: true` from a v1 screen is a
+/// different claim from `true` from a v2 one.
+pub const COVERAGE_METHOD: &str = "coverage-v2 (three-layer recall screen: mentions, dropped \
+                                   resolutions, blind files -- the boolean means 'a named gap, or a \
+                                   file this screen never read'; unparsed files are advisory)";
 
-/// How many files a blind-layer field reports, whether it carries a count or the path list. The
-/// flag has to be right whichever shape the field has: reading an array as "no count" and defaulting
-/// to zero is precisely how a blind file ended up producing a clean bill of health.
 /// How many files a blind-layer field reports, whether it carries a count or the path list. The
 /// flag has to be right whichever shape the field has: reading an array as "no count" and defaulting
 /// to zero is exactly how a blind file once produced a clean bill of health.
@@ -491,14 +501,21 @@ pub fn coverage_for(
                 .collect::<Vec<_>>()),
         );
     }
-    // The reviewer's finding (agy, 2026-08-31): a file the chunker could not read holds callers the
-    // mention scan never sees, so "no gaps for this seed" was being read as a clean bill of health
-    // while `blind_files` said otherwise. Absence of signal inside a blind tree is not absence of
-    // gaps; the flag has to fail toward "may be incomplete".
-    let blind_gap = blind_count(blind.get("unparsed"))
-        + blind_count(blind.get("unindexed"))
-        + blind_count(blind.get("scan_skipped"))
-        > 0;
+    // Two different kinds of blind, and the first cut of this screen conflated them.
+    //
+    // * `unindexed` / `scan_skipped`: **this screen never read the file**. A caller can be sitting in
+    //   it with nothing else to say so, which is the false-safe reading agy found on 2026-08-31.
+    //   These have to flip the boolean, in every seed, because the hole is a property of the tree.
+    // * `unparsed`: the file has no chunks -- usually a barrel, a types-only module or a
+    //   `pub mod`-only `lib.rs`. The *text* of the file **was** read by the mention layer above, so a
+    //   caller in it already appears as a row, and its edgelessness is not a missing signal but a
+    //   missing graph. Counting it as a gap anyway made 2 files in this repo (4 in cct) flip *every*
+    //   seed to `true`, which is a boolean with no discriminating power: agents stop reading the rows
+    //   and start reading the always-true flag as noise. So it is advisory now, and still listed --
+    //   in `blind_files` with its paths, and in `why` as `unparsed_files`.
+    let unread_gap =
+        blind_count(blind.get("unindexed")) + blind_count(blind.get("scan_skipped")) > 0;
+    let unparsed_advisory = blind_count(blind.get("unparsed")) > 0;
     let mut per_seed = Vec::new();
     for seed in seeds {
         let name = bare_name(&seed.symbol).to_string();
@@ -617,11 +634,16 @@ pub fn coverage_for(
         if !unresolved.is_empty() {
             reasons.push("extracted_but_unresolved");
         }
-        if blind_gap {
+        if unread_gap {
             reasons.push("blind_files");
         }
         if !skipped.is_empty() {
             reasons.push("scan_skipped");
+        }
+        // Advisory, and deliberately last: it says "these files contribute no edges to the graph",
+        // not "a caller may be hiding here unread". It does not affect the boolean below.
+        if unparsed_advisory {
+            reasons.push("unparsed_files");
         }
         per_seed.push(json!({
             "symbol": seed.symbol,
@@ -640,7 +662,7 @@ pub fn coverage_for(
             ),
             "mentions_without_edge": gaps,
             "extracted_but_unresolved": unresolved,
-            "enumeration_may_be_incomplete": gap_rows > 0 || blind_gap,
+            "enumeration_may_be_incomplete": gap_rows > 0 || unread_gap,
             "why": reasons,
         }));
     }
@@ -649,11 +671,19 @@ pub fn coverage_for(
         "method": COVERAGE_METHOD,
         "seeds": per_seed,
         "blind_files": blind,
-        "reading": "mentions_without_edge and extracted_but_unresolved are candidates, not proof: a \
+        "reading": "Read the rows, not the boolean. `enumeration_may_be_incomplete: true` means only \
+                    that something specific was found -- a named gap row, or a file this screen never \
+                    read -- and `false` means only that every file it did read produced no gap signal \
+                    for that seed; neither is a proof of anything. `why` names which case fired, and \
+                    `unparsed_files` in `why` is advisory (a chunk-less file is still text-scanned, so \
+                    its callers appear as rows) and does not flip the boolean. \
+                    mentions_without_edge and extracted_but_unresolved are candidates, not proof: a \
                     mention may be a comment, a string, or a same-named symbol elsewhere. They exist \
                     because dependents=0 is otherwise indistinguishable from an enumeration that never \
-                    saw the caller. Never read absence of a signal as verified completeness. Outside all \
-                    three layers: a caller in a file the indexer does not read at all (.sh, .txt, config) \
-                    is invisible here, not merely blind.",
+                    saw the caller. Silent either way, and outside all three layers: a caller in a file \
+                    the indexer does not read at all (.sh, .txt, config, or anything under dist/, \
+                    build/, target/, node_modules/), a file over 2 MB that the mention scan skips (that \
+                    one does flip the boolean, as scan_skipped), a re-export chain reported at its \
+                    barrel line, and a mention within 2 lines of an extracted call (counted covered).",
     }))
 }

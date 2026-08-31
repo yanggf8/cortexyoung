@@ -267,8 +267,11 @@ the line that names the callee and the shape the call arrived as, `impact` print
 confirmed across the 5 cct chains at `line_precision` 1.0, and 64 of 64 across 4 chains in this repo,
 where the older whole-body check scores 0.667 on `Tally::add` because the body says `tally.add` and the
 seed was asked as `Tally::add`. What is still open is stated in
-[`docs/2026-08-31-recall-wip.md`](docs/2026-08-31-recall-wip.md): the receiver gate refuses more calls
-than it attaches, and the gap boolean still needs the wording change it is coupled to.
+[`docs/2026-08-31-recall-wip.md`](docs/2026-08-31-recall-wip.md). The boolean half of it landed the same
+day (coverage-v2): `enumeration_may_be_incomplete` now has two causes — a named gap row, or a file the
+screen never read — and `unparsed` is advisory, after two chunk-less files in this repo were enough to
+set the flag for every one of 60 sampled seeds. What remains is the receiver gate's recall: it attaches
+9 of 4,833 receiver call sites here.
 
 
 ## Documented limitations (contracts, not apologies)
@@ -328,17 +331,26 @@ that has to change with it, trait declarations labelled `call`, the ±2-line tol
 [`docs/2026-08-31-recall-wip.md`](docs/2026-08-31-recall-wip.md), together with the measured numbers
 that killed the alternative (Rust `use`/`mod` import edges).
 
-11. **`impact --coverage` is a recall *screen*, not a completeness proof.** It compares the graph with
-   `raw_edges` and with the text of indexed files, and reports three layers: mentions that produced no
-   edge, edges dropped during resolution, and blind files (unparsed or never indexed). Known holes, each
-   one measured rather than assumed: a caller in a file the indexer does not read at all (`.sh`, `.txt`,
-   config) is invisible to every layer; a re-export chain (`export { x as y }`, then called as `y`) is
-   flagged at the barrel line, not at the eventual caller; a mention within 2 lines of an extracted call
-   is treated as covered, so nearby prose can be swallowed; name-in-string and name-in-comment matching
-   is lexical, so a common word (`get`, `add`, `new`) yields candidates that must be triaged, and Rust
-   lifetimes before a name can be labelled `quoted`. `enumeration_may_be_incomplete: false` means "no gap
-   signal", never "verified none" -- and since 2026-08-31 a blind file forces `true` rather than letting
-   a clean per-seed list read as clearance.
+11. **`impact --coverage` is a recall *screen*, not a completeness proof, and `incomplete` is a warning
+   light, not the answer.** It compares the graph with `raw_edges` and with the text of indexed files,
+   and reports three layers: mentions that produced no edge, edges dropped during resolution, and blind
+   files. **Read the rows**: `true` has exactly two causes and `why` names them -- a row in either of the
+   first two layers, or a file this screen never read (`unindexed`, or `scan_skipped` for a file over
+   2 MB or unreadable). `false` means only "every file it read produced no gap signal for that seed",
+   never "verified none". Known holes, each one measured rather than assumed: a caller in a file the
+   indexer does not read at all (`.sh`, `.txt`, config, or anything under `dist/`, `build/`, `target/`,
+   `node_modules/`) is invisible to every layer and does not flip the flag either; a re-export chain
+   (`export { x as y }`, then called as `y`) is flagged at the barrel line, not at the eventual caller; a
+   mention within 2 lines of an extracted call is treated as covered, so nearby prose can be swallowed;
+   name-in-string and name-in-comment matching is lexical, so a common word (`get`, `add`, `new`) yields
+   candidates that must be triaged, and Rust lifetimes before a name can be labelled `quoted`.
+   **`unparsed` is advisory (coverage-v2, 2026-08-31):** a file with no chunks -- barrel, types-only,
+   `pub mod`-only `lib.rs` -- has no edges by construction but *is* text-scanned, so its callers arrive as
+   rows. It used to flip every seed: two such files in this repo (four in cct) made the boolean true for
+   every symbol in the project, which is not a warning light but noise, and noise is what agents ignore
+   when the real warning comes. The paths are still listed under `blind_files.unparsed_example`, `why`
+   still says `unparsed_files`, and the `lean` output carries the sentence
+   `blind unparsed advisory: text-scanned, no edges; does not flip incomplete`.
 
 ## What is deliberately not built
 

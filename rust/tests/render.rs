@@ -153,6 +153,31 @@ fn lean_impact_output_lists_every_dependent_with_its_hop_and_drops_the_stored_ch
     for line in out.lines().skip(1).filter(|l| l.starts_with('h')) {
         assert_eq!(line.split('\t').count(), 6, "fixed shape: {line}");
     }
+    // The blind row names all three counts, so `unparsed` can never be read as "unread".
+    let with_blind = serde_json::json!({
+        "symbol": "d", "depth": 1, "seed_count": 0, "seeds": [], "dependent_count": 0,
+        "unresolved": [], "index_is_stale": false,
+        "coverage": {
+            "method": "coverage-v2",
+            "seeds": [{"symbol": "d", "mentions_on_disk": 0, "mentions_without_edge": [],
+                        "extracted_but_unresolved": [], "enumeration_may_be_incomplete": false}],
+            "blind_files": {"unparsed": 2, "unindexed": 0, "scan_skipped": 0,
+                             "unparsed_example": ["rust/src/lib.rs", "src/notes.ts"]},
+        },
+    });
+    let blind_out = render(Some("impact"), Format::Lean, &with_blind);
+    assert!(
+        blind_out.contains("blind\tunparsed=2\tunindexed=0\tunread=0"),
+        "{blind_out}"
+    );
+    assert!(
+        blind_out.lines().any(|l| l.contains("advisory") && l.contains("does not flip")),
+        "the lean reader has to be told how to read a false next to a non-zero unparsed: {blind_out}"
+    );
+    assert!(
+        blind_out.contains("blind\tunparsed\trust/src/lib.rs"),
+        "paths, not just the count: {blind_out}"
+    );
     // A dependency that came in through an import has no call site. `-`, never line 0 and never a
     // shorter row: a missing value that changes the row's shape gets misread as a different column.
     let no_site = serde_json::json!({

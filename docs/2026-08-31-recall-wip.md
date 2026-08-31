@@ -144,9 +144,16 @@
    (b) `lean` 依賴者列 +15% 位元組（README「Token cost」有數）。
    (c) 逐行查證能抓到憑空的邊，**抓不到型別錯的邊**：一行寫了 `e.kind()` 就「證實」了 `e.kind`；
    所以 `line_precision=1.0` 不是正確性證明，別引用成那樣。
-1. `unparsed` 仍會把**每個** seed 的旗標翻成 true（本倉庫 2 個、cct 4 個這種檔）→ 布林值鑑別力被稀釋。
-   修法必須與「**讀列，不要讀布林值**」的 skill／README 措辭**同時**落地，否則只是換一種誤導。
-   v4 之後這條更要緊：現在每個依賴者都自帶可讀的列，旗標反而更不是讀的對象。
+1. ~~`unparsed` 仍會把每個 seed 的旗標翻成 true~~ **已做（coverage-v2，與措辭同時落地）**：
+   `unread_gap = unindexed + scan_skipped` 才會翻布林值；`unparsed` 只進 `blind_files`（含路徑）
+   與 `why: [unparsed_files]`（advisory）。同時改的還有：`COVERAGE_METHOD` 升 v2（語意变了就要换名字，
+   否則讀到一份 v1 的 `true` 會以為是同一件事）、`reading` 字串寫明「讀列，不要讀布林值」舆
+   `false` 能結論到什麼、skill 第一條補上 K3 講漏的三條邊界（>2MB、`dist`/`target`/`node_modules`
+   下的來源檔、±2 行容差），lean 多一列 `blind unparsed advisory: …`。
+   量測（60 個隨機符號、`--depth 1 --coverage`）：本倉庫 true 從「必定 60/60」變成 **5/60**；
+   cct 63 個 seed 裡仍有 62 個 true —— 因為那些是真的有 gap 列，不是稀釋。所以「讀列」仍是主指令。
+   回歸測試拆成兩條：`a_blind_file_is_never_a_clean_bill_of_health`（**未讀**檔仍必須翻）舆
+   `a_file_with_no_chunks_is_advisory_and_does_not_flip_every_seed`（無 chunk 檔不得翻）。
 2. trait 內的方法**宣告**（`fn add(&self, x: i32) -> i32;`）被標 `call`，因為定義判定要求精確 `start_line`。
 3. `LINE_TOLERANCE = 2` 會把離已抽取呼叫 ≤2 行的提及算成已覆蓋（可能吞掉真漏洞）。
 4. 非來源檔（`.sh`／`.txt`／設定檔）與 `IGNORE_DIRS` 下的來源檔，三層全部看不見——**邊界，不是 bug**。
