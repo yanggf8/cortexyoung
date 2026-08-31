@@ -103,7 +103,69 @@ pub fn render_impact(payload: &Value) -> String {
             as_str(u, "confidence")
         ));
     }
+    lines.extend(coverage_lines(payload));
     format!("{}\n", lines.join("\n"))
+}
+
+/// The recall section. It exists because `dependents=0` and "no caller was ever extracted" are the
+/// same bytes otherwise, so the summary header alone can bless a wrong "safe to remove". Rendered as
+/// its own block rather than folded into the header because the gap rows are the payload.
+fn coverage_lines(payload: &Value) -> Vec<String> {
+    let Some(coverage) = payload.get("coverage") else {
+        return Vec::new();
+    };
+    let mut out = vec![format!("# coverage {}", as_str(coverage, "method"))];
+    let seeds = arr(coverage, "seeds");
+    if seeds.is_empty() {
+        out.push(
+            "coverage\tseeds=0\tnothing_resolved\tthis is itself a gap, not a clean answer"
+                .to_string(),
+        );
+    }
+    for seed in seeds {
+        let no_edge = arr(seed, "mentions_without_edge");
+        let dropped = arr(seed, "extracted_but_unresolved");
+        out.push(format!(
+            "seed\t{}\tmentions={}\tno_edge={}\tdropped={}\tincomplete={}",
+            as_str(seed, "symbol"),
+            js_display(seed, "mentions_on_disk"),
+            no_edge.len(),
+            dropped.len(),
+            js_display(seed, "enumeration_may_be_incomplete")
+        ));
+        for g in no_edge {
+            out.push(format!(
+                "miss\t{}\t{}:{}\t{}",
+                as_str(g, "cause"),
+                as_str(g, "file_path"),
+                js_display(g, "line"),
+                as_str(g, "text")
+            ));
+        }
+        for g in dropped {
+            out.push(format!(
+                "drop\t{}:{}\t{} -> {}",
+                as_str(g, "file_path"),
+                js_display(g, "line"),
+                as_str(g, "from_symbol"),
+                as_str(g, "raw_target")
+            ));
+        }
+    }
+    let blind = coverage.get("blind_files");
+    if let Some(b) = blind {
+        out.push(format!(
+            "blind\tunparsed={}\tunindexed={}",
+            js_display(b, "unparsed"),
+            js_display(b, "unindexed")
+        ));
+        for f in arr(b, "unindexed_example") {
+            if let Some(name) = f.as_str() {
+                out.push(format!("blind\tunindexed\t{name}"));
+            }
+        }
+    }
+    out
 }
 
 pub fn render_struct(payload: &Value) -> String {

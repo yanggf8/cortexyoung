@@ -2,6 +2,7 @@ pub mod ast_grep;
 pub mod budget;
 pub mod chunker;
 pub mod context;
+pub mod coverage;
 pub mod db;
 pub mod errors;
 pub mod fts;

@@ -3,6 +3,7 @@
 use clap::Parser;
 use cort::ast_grep::{assert_ast_grep_version, resolve_ast_grep_bin};
 use cort::context::{context_command, ContextOptions, DEFAULT_BUDGET};
+use cort::coverage;
 use cort::db::{
     db_path_for, delete_project, ensure_schema, list_projects, open_db, with_busy_retry, Db,
     SqliteErrorCode, WithBusyRetryError,
@@ -35,7 +36,7 @@ fn usage_value() -> Value {
             "delete": "cort delete [root]",
             "struct": "cort struct -p '<pattern>' --lang <lang> [-g <glob>] [--budget <n>] [-f json|lean]",
             "context": "cort context <symbol|query> [--budget <n>] [--include-ambiguous] [--content full] [-f json|lean]",
-            "impact": "cort impact --symbol <name> [--depth <n>] [-f json|lean]",
+            "impact": "cort impact --symbol <name> [--depth <n>] [--coverage] [-f json|lean]",
             "read": "cort read <file> [--start <line>] [--end <line>] [-f json|lean]",
             "recall": "cort recall <query> [--limit <n>] [--content full] [-f json|lean]",
             "usage": "cort usage [days] [-f json|lean]",
@@ -350,6 +351,10 @@ struct ImpactArgs {
     depth: Option<String>,
     #[arg(short = 'f', long = "format")]
     format: Option<String>,
+    /// Report what the enumeration may have missed, not just what it found: `dependents=0` and "no
+    /// caller was ever extracted" look identical without this.
+    #[arg(long)]
+    coverage: bool,
 }
 
 #[derive(Parser, Debug)]
@@ -684,7 +689,12 @@ fn cmd_impact(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError
     let bin = pin_bin()?;
     let (canon, db) = open_project_tracked(&cwd(), usage)?;
     let depth = parse_i64_flag(a.depth.as_deref(), DEFAULT_DEPTH);
-    let out = impact_command(&db, &bin, &canon.path, &canon.project_id, &symbol, depth)?;
+    let mut out = impact_command(&db, &bin, &canon.path, &canon.project_id, &symbol, depth)?;
+    // Recall is a separate question from cost, so it is opt-in: the default payload stays the small
+    // answer the eval priced, and `--coverage` pays for a walk of the indexed files.
+    if a.coverage {
+        coverage::attach(&db, &canon.project_id, Path::new(&canon.path), &mut out)?;
+    }
     fill_stale(usage, &out);
     usage.args_summary = usage::args_summary(Some(&symbol), None, None, None);
     Ok(Emit {

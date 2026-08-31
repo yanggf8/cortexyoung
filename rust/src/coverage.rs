@@ -1,0 +1,552 @@
+//! Recall side: **what did this enumeration miss?**
+//!
+//! `impact` answers "who calls this" and `verify-impact` checks that each reported dependent really
+//! mentions the seed. Both are precision instruments: neither can see a caller that never became an
+//! edge, which is the failure that matters for the verbs the product exists for ("safe to remove",
+//! "rename it", "nothing else uses this"). Measured example, on this repo: `tally.add(&project, &text)`
+//! appears twice in `evals/src/demand.rs`, while `cort impact --symbol Tally::add` reports
+//! `dependents=0` with `stale=false` — a confident empty answer, because the Rust pack extracts only
+//! bare and `Type::method` call shapes and not receiver calls.
+//!
+//! So this module answers the other question by comparing the graph against two things it cannot lie
+//! about: what the extractor recorded (`raw_edges`) and what is on disk. Three layers, weakest first:
+//!
+//! * `mentions_without_edge` — a line on disk names the seed and produced no edge at all. Covers
+//!   extractor blind spots (receiver and module-path call forms, unindexed call styles, and the
+//!   const-binding shape that cost round 2 its labels).
+//! * `extracted_but_unresolved` — the extractor saw the call, but resolution dropped it, which is how
+//!   `relationship_rows_for_symbol_map`'s `targets.is_empty() { continue }` looks from the outside:
+//!   silently.
+//! * `blind_files` — files with no chunks (parse degraded) or not indexed at all, where an edge is
+//!   impossible by construction.
+//!
+//! What this is **not**: proof. A mention can be a comment, a string, or a same-named symbol in
+//! another module, so the counts are candidates to look at, deliberately over-inclusive. The field is
+//! named `enumeration_may_be_incomplete` rather than anything containing "complete", because `false`
+//! means "no gap signal", never "verified none".
+
+use crate::db::Db;
+use crate::errors::CortError;
+use crate::indexer::{walk_files, SOURCE_EXT};
+use rusqlite::params;
+use serde_json::{json, Value};
+use std::collections::{HashMap, HashSet};
+use std::path::Path;
+
+/// Cap on printed gap rows. A screen that dumps 900 hits is not a screen; the total is always
+/// reported, so truncation cannot hide the size of a hole.
+pub const MAX_GAP_ROWS: usize = 20;
+
+/// A raw edge's `start_line` is the line the matched node started on, which for a multi-line call is
+/// not the line the callee's name sits on. Two lines of slack, and nothing more.
+pub const LINE_TOLERANCE: i64 = 2;
+
+/// Paths that are machine-generated copies of the source tree. A bundle cannot be a caller of a
+/// source symbol, and `cct`'s index currently contains seven `.wrangler/tmp/deploy-*/index.js`
+/// copies because `IGNORE_DIRS` does not list `.wrangler` -- reported separately rather than
+/// silently excluded, since the underlying scope defect is a decision for the maintainer, not for
+/// a screen to hide.
+const GENERATED_MARKERS: &[&str] = &[
+    ".wrangler/",
+    "dist/",
+    "build/",
+    ".next/",
+    ".svelte-kit/",
+    "node_modules/",
+    "vendor/",
+    "/target/",
+];
+
+fn looks_generated(path: &str, first_line_chars: usize) -> bool {
+    GENERATED_MARKERS.iter().any(|m| path.contains(m)) || first_line_chars > 400
+}
+
+/// Lines that *declare* the name somewhere else. With name-based resolution a second `d` in another
+/// file is a real hazard, so this is kept and labelled rather than filtered out -- but it is not a
+/// missed caller, and it used to be reported as one.
+fn definition_lines(
+    db: &Db,
+    project_id: &str,
+    name: &str,
+) -> Result<HashSet<(String, i64)>, CortError> {
+    let err =
+        |e: rusqlite::Error| CortError::new("storage_busy", json!({ "message": e.to_string() }));
+    let mut stmt = db
+        .prepare(
+            "SELECT file_path, start_line FROM chunks
+          WHERE project_id = ?1 AND symbol_name IS NOT NULL
+            AND (symbol_name = ?2 OR symbol_name LIKE '%:' || ?3 OR symbol_name LIKE '%.' || ?4)",
+        )
+        .map_err(err)?;
+    let rows = stmt
+        .query_map(params![project_id, name, name, name], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        })
+        .map_err(err)?
+        .flatten()
+        .collect();
+    Ok(rows)
+}
+
+fn cause_rank(cause: &str) -> u8 {
+    match cause {
+        "receiver" => 0,
+        "call" => 1,
+        "mention" => 2,
+        "import" => 3, // names the symbol, proves the file is already reachable
+        "definition" => 4,
+        "quoted" => 5,
+        "comment" => 6, // named the thing, proved nothing
+        _ => 7,         // artifact: a generated copy of the tree
+    }
+}
+
+/// Files bigger than this are skipped for mention scanning rather than read into memory.
+const MAX_SCAN_BYTES: u64 = 2_000_000;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SeedRef {
+    pub symbol: String,
+    pub chunk_id: String,
+    pub file_path: String,
+    pub start_line: i64,
+}
+
+/// Build the coverage section from an `impact` payload's own seeds, so the CLI can attach it without
+/// `impact_command` growing a parameter (and without the two functions disagreeing about which
+/// symbols were actually seeded). `symbol_name` is read back from the database rather than parsed out
+/// of the request string, because a batched `--symbol a,b,c` seed list and the resolved chunk list are
+/// not the same thing when a name is qualified or absent.
+pub fn attach(
+    db: &Db,
+    project_id: &str,
+    root: &Path,
+    payload: &mut Value,
+) -> Result<(), CortError> {
+    let mut seeds = Vec::new();
+    if let Some(list) = payload.get("seeds").and_then(Value::as_array) {
+        for seed in list {
+            let chunk_id = match seed.get("chunk_id").and_then(Value::as_str) {
+                Some(id) => id.to_string(),
+                None => continue,
+            };
+            let symbol: String = db
+                .query_row(
+                    "SELECT COALESCE(symbol_name, file_path) FROM chunks WHERE chunk_id = ?1",
+                    params![chunk_id],
+                    |r| r.get(0),
+                )
+                .unwrap_or_else(|_| chunk_id.clone());
+            seeds.push(SeedRef {
+                symbol,
+                file_path: seed
+                    .get("file_path")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                start_line: seed.get("start_line").and_then(Value::as_i64).unwrap_or(0),
+                chunk_id,
+            });
+        }
+    }
+    if seeds.is_empty() {
+        return Err(CortError::new(
+            "nothing_indexed",
+            json!({
+                "hint": "--coverage needs at least one resolved seed chunk; the names you asked for \
+                         are not in the index, which is itself a recall gap worth looking at"
+            }),
+        ));
+    }
+    let report = coverage_for(db, project_id, root, &seeds)?;
+    if let Some(map) = payload.as_object_mut() {
+        map.insert("coverage".to_string(), report);
+    }
+    Ok(())
+}
+
+fn is_word_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_' || c == '$' || c == '\u{00b7}'
+}
+
+/// `Type::method`, `crate::m::f` and `x.method` all name the method `method`.
+pub fn bare_name(target: &str) -> &str {
+    target
+        .rsplit([':', '.'])
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(target)
+}
+
+/// Every whole-word occurrence of `name`, as 1-based (line, column). The column is what makes a
+/// cause guess possible, and the cause is what makes the list usable: a screen that reports a git
+/// argument (`["add", "-A"]`) the same way it reports a real receiver call gets ignored.
+pub fn mentions(text: &str, name: &str) -> Vec<(usize, usize)> {
+    let needle: Vec<char> = name.chars().collect();
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for (index, line) in text.lines().enumerate() {
+        let chars: Vec<char> = line.chars().collect();
+        if chars.len() < needle.len() {
+            continue;
+        }
+        for start in 0..=(chars.len() - needle.len()) {
+            if chars[start..start + needle.len()] != needle[..] {
+                continue;
+            }
+            let before_ok = start == 0 || !is_word_char(chars[start - 1]);
+            let after = start + needle.len();
+            let after_ok = after == chars.len() || !is_word_char(chars[after]);
+            if before_ok && after_ok {
+                out.push((index + 1, start + 1));
+            }
+        }
+    }
+    out
+}
+
+/// Why a mention produced no edge. A hint for triage, never a verdict: `receiver` is the pack's known
+/// blind spot, `quoted` is usually a string or a shell argument, and everything else is unexplained.
+pub fn cause_of(line_text: &str, column: usize, name_len: usize) -> &'static str {
+    let chars: Vec<char> = line_text.chars().collect();
+    let at = column.saturating_sub(1);
+    let before = if at == 0 {
+        None
+    } else {
+        chars.get(at - 1).copied()
+    };
+    let quoted = before
+        .map(|_| line_text.chars().take(at).filter(|c| *c == '"').count() % 2 == 1)
+        .unwrap_or(false);
+    if quoted {
+        return "quoted";
+    }
+    let head = line_text.trim_start();
+    if head.starts_with("import ")
+        || head.starts_with("import{")
+        || head.starts_with("use ")
+        || head.starts_with("from ")
+        || head.starts_with("require(")
+        || head.starts_with("@")
+    {
+        return "import";
+    }
+    // A `//` or `*` before the mention is prose: it can name a caller all day and never be one. Without
+    // this, a module that documents its own examples reports every doc comment as a receiver hole.
+    let before_text: String = chars[..at].iter().collect();
+    let opener = line_text.trim_start().chars().next().unwrap_or(' ');
+    let opens_with_star = opener == '*' || opener == '#';
+    if before_text.contains("//")
+        || before_text.contains("/*")
+        || (opens_with_star && !line_text.starts_with("#!"))
+    {
+        return "comment";
+    }
+    if matches!(before, Some('.') | Some(':')) {
+        return "receiver";
+    }
+    // The character right after the name, ignoring whitespace: `add (` is still a call.
+    let after = chars
+        .iter()
+        .skip(at + name_len)
+        .find(|c| !c.is_whitespace())
+        .copied();
+    if after == Some('(') {
+        return "call";
+    }
+    "mention"
+}
+
+/// (file, bare target) -> lines the extractor recorded a call on.
+fn extracted_calls(
+    db: &Db,
+    project_id: &str,
+) -> Result<HashMap<(String, String), Vec<i64>>, CortError> {
+    let mut stmt = db
+        .prepare(
+            "SELECT file_path, raw_target, start_line FROM raw_edges
+          WHERE project_id = ?1 AND rel_type = 'calls'",
+        )
+        .map_err(|e| CortError::new("storage_busy", json!({ "message": e.to_string() })))?;
+    let rows = stmt
+        .query_map(params![project_id], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        })
+        .map_err(|e| CortError::new("storage_busy", json!({ "message": e.to_string() })))?;
+    let mut map: HashMap<(String, String), Vec<i64>> = HashMap::new();
+    for row in rows.flatten() {
+        map.entry((row.0, bare_name(&row.1).to_string()))
+            .or_default()
+            .push(row.2);
+    }
+    Ok(map)
+}
+
+fn indexed_files(db: &Db, project_id: &str) -> Result<Vec<String>, CortError> {
+    let mut stmt = db
+        .prepare("SELECT file_path FROM file_state WHERE project_id = ?1 ORDER BY file_path")
+        .map_err(|e| CortError::new("storage_busy", json!({ "message": e.to_string() })))?;
+    let rows = stmt
+        .query_map(params![project_id], |r| r.get::<_, String>(0))
+        .map_err(|e| CortError::new("storage_busy", json!({ "message": e.to_string() })))?;
+    Ok(rows.flatten().collect())
+}
+
+/// L2: the extractor saw a call to `name` from a chunk in this file, but no `relationships` row
+/// points at this seed from a chunk containing that line.
+fn extracted_but_unresolved(
+    db: &Db,
+    project_id: &str,
+    seed: &SeedRef,
+    name: &str,
+) -> Result<Vec<Value>, CortError> {
+    let err =
+        |e: rusqlite::Error| CortError::new("storage_busy", json!({ "message": e.to_string() }));
+    let mut stmt = db
+        .prepare(
+            "SELECT file_path, source_symbol, raw_target, start_line FROM raw_edges
+          WHERE project_id = ?1 AND rel_type = 'calls'
+            AND (raw_target = ?2 OR raw_target LIKE '%:' || ?3 OR raw_target LIKE '%.' || ?4)
+          ORDER BY file_path, start_line",
+        )
+        .map_err(err)?;
+    let candidates = stmt
+        .query_map(params![project_id, name, name, name], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, i64>(3)?,
+            ))
+        })
+        .map_err(err)?
+        .flatten()
+        .collect::<Vec<_>>();
+    let mut out = Vec::new();
+    for (file, source_symbol, raw_target, line) in candidates {
+        let mut check = db
+            .prepare(
+                "SELECT 1 FROM relationships r
+               JOIN chunks sc ON sc.chunk_id = r.source_chunk_id
+              WHERE r.target_chunk_id = ?1 AND sc.file_path = ?2
+                AND sc.start_line <= ?3 AND sc.end_line >= ?3
+              LIMIT 1",
+            )
+            .map_err(err)?;
+        let resolved: bool = check
+            .query_map(params![seed.chunk_id, file, line], |r| r.get::<_, i64>(0))
+            .map_err(err)?
+            .next()
+            .is_some();
+        if !resolved {
+            out.push(json!({
+                "file_path": file,
+                "line": line,
+                "from_symbol": source_symbol,
+                "raw_target": raw_target,
+            }));
+        }
+    }
+    Ok(out)
+}
+
+fn snippet(line: &str) -> String {
+    let trimmed = line.trim();
+    trimmed.chars().take(120).collect()
+}
+
+/// L3: files the graph cannot possibly see through.
+fn blind_files(
+    db: &Db,
+    project_id: &str,
+    root: &Path,
+    indexed: &HashSet<String>,
+) -> Result<Value, CortError> {
+    let err =
+        |e: rusqlite::Error| CortError::new("storage_busy", json!({ "message": e.to_string() }));
+    let unparsed: i64 = db
+        .query_row(
+            "SELECT COUNT(DISTINCT file_path) FROM chunks WHERE project_id = ?1 AND chunk_source = 'unparsed'",
+            params![project_id],
+            |r| r.get(0),
+        )
+        .map_err(err)?;
+    let mut unindexed: Vec<String> = walk_files(root)
+        .into_iter()
+        .filter(|rel| {
+            let path = root.join(rel);
+            let is_source = path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+                SOURCE_EXT
+                    .iter()
+                    .any(|ext| ext.trim_start_matches('.') == e)
+            });
+            is_source && !indexed.contains(rel)
+        })
+        .collect();
+    unindexed.sort();
+    let hidden: Vec<String> = unindexed.iter().take(MAX_GAP_ROWS).cloned().collect();
+    Ok(json!({
+        "unparsed": unparsed,
+        "unindexed": unindexed.len(),
+        "unindexed_example": hidden,
+        "unindexed_truncated": unindexed.len() > MAX_GAP_ROWS,
+    }))
+}
+
+pub fn coverage_for(
+    db: &Db,
+    project_id: &str,
+    root: &Path,
+    seeds: &[SeedRef],
+) -> Result<Value, CortError> {
+    let indexed = indexed_files(db, project_id)?;
+    let index_set: HashSet<String> = indexed.iter().cloned().collect();
+    let extracted = extracted_calls(db, project_id)?;
+    // Read each indexed source file once, not once per seed: a batched `--symbol a,b,c` should cost
+    // one walk of the tree.
+    let mut sources: HashMap<String, String> = HashMap::new();
+    for file in &indexed {
+        let path = root.join(file);
+        if let Ok(meta) = std::fs::metadata(&path) {
+            if meta.len() > MAX_SCAN_BYTES {
+                continue;
+            }
+        }
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            sources.insert(file.clone(), text);
+        }
+    }
+
+    let mut per_seed = Vec::new();
+    for seed in seeds {
+        let name = bare_name(&seed.symbol).to_string();
+        let mut gap_rows_sorted: Vec<(u8, u8, String, usize, &'static str, String)> = Vec::new();
+        let mut orphan_files: Vec<String> = Vec::new();
+        let mut artifact_files = 0usize;
+        let defs = definition_lines(db, project_id, &name)?;
+        let mut mention_count = 0usize;
+        let mut covered_count = 0usize;
+        let mut by_cause: HashMap<&'static str, usize> = HashMap::new();
+        for file in &indexed {
+            let Some(text) = sources.get(file) else {
+                continue;
+            };
+            let edge_lines = extracted
+                .get(&(file.clone(), name.clone()))
+                .cloned()
+                .unwrap_or_default();
+            let mut file_rows = Vec::new();
+            let mut file_covered = false;
+            let first_line_chars = text.lines().next().map_or(0, |l| l.chars().count());
+            let generated = looks_generated(file, first_line_chars);
+            for (line, column) in mentions(text, &name) {
+                if file == &seed.file_path && (line as i64) == seed.start_line {
+                    continue; // the definition itself is not a caller
+                }
+                mention_count += 1;
+                let source_line = text.lines().nth(line - 1).unwrap_or("");
+                let cause = if generated {
+                    "artifact"
+                } else if defs.contains(&(file.clone(), line as i64)) {
+                    "definition"
+                } else {
+                    cause_of(source_line, column, name.chars().count())
+                };
+                // A quoted mention can never become an edge -- the extractor does not read strings --
+                // so it is exempt from the line tolerance. Counting it as covered because a real call
+                // happens to sit two lines away is exactly the swallowing this screen exists to avoid.
+                let covered = cause != "quoted"
+                    && edge_lines
+                        .iter()
+                        .any(|edge| (edge - line as i64).abs() <= LINE_TOLERANCE);
+                if covered {
+                    covered_count += 1;
+                    file_covered = true;
+                    continue;
+                }
+                *by_cause.entry(cause).or_insert(0) += 1;
+                file_rows.push((line, cause, snippet(source_line)));
+            }
+            // The strongest signal here is file-level: a file that mentions the seed and has *no*
+            // covered mention anywhere is a caller the enumeration never saw. A file whose calls are
+            // already indexed contributes only import/prose noise, however many lines it has.
+            if !file_rows.is_empty() {
+                if generated {
+                    // Counted only when it actually produced a gap row: "a bundle that also has a
+                    // covered call" is not a hole in anything.
+                    artifact_files += 1;
+                }
+                // A file whose only mention is its own declaration of a same-named symbol is not a
+                // caller it missed -- name resolution just has two candidates. Counting those made the
+                // orphan list cry wolf on every duplicated name.
+                let meaningful = file_rows.iter().any(|(_, cause, _)| *cause != "definition");
+                if !file_covered && !generated && meaningful {
+                    orphan_files.push(file.clone());
+                }
+                for (line, cause, text_snippet) in file_rows {
+                    gap_rows_sorted.push((
+                        u8::from(file_covered),
+                        cause_rank(cause),
+                        file.clone(),
+                        line,
+                        cause,
+                        text_snippet,
+                    ));
+                }
+            }
+        }
+        gap_rows_sorted.sort();
+        let gaps: Vec<Value> = gap_rows_sorted
+            .iter()
+            .take(MAX_GAP_ROWS)
+            .map(|(_, _, file, line, cause, text)| {
+                json!({
+                    "file_path": file,
+                    "line": line,
+                    "cause": cause,
+                    "text": text,
+                })
+            })
+            .collect();
+        let unresolved = extracted_but_unresolved(db, project_id, seed, &name)?;
+        let mut causes: Vec<(&str, usize)> = by_cause.into_iter().collect();
+        causes.sort_by(|a, b| a.0.cmp(b.0));
+        let gap_rows = gap_rows_sorted.len() + unresolved.len();
+        per_seed.push(json!({
+            "symbol": seed.symbol,
+            "chunk_id": seed.chunk_id,
+            "mentions_on_disk": mention_count,
+            "mentions_covered_by_edge": covered_count,
+            "mentions_truncated": gap_rows_sorted.len() > MAX_GAP_ROWS,
+            "gap_count": gap_rows_sorted.len(),
+            "files_with_no_edge_at_all": orphan_files,
+            "generated_files_with_gaps": artifact_files,
+            "gap_cause_totals": Value::Object(
+                causes
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), json!(v)))
+                    .collect(),
+            ),
+            "mentions_without_edge": gaps,
+            "extracted_but_unresolved": unresolved,
+            "enumeration_may_be_incomplete": gap_rows > 0,
+        }));
+    }
+
+    let blind = blind_files(db, project_id, root, &index_set)?;
+    Ok(json!({
+        "method": "coverage-v1 (three-layer recall screen: mentions, dropped resolutions, blind files)",
+        "seeds": per_seed,
+        "blind_files": blind,
+        "reading": "mentions_without_edge and extracted_but_unresolved are candidates, not proof: a \
+                    mention may be a comment, a string, or a same-named symbol elsewhere. They exist \
+                    because dependents=0 is otherwise indistinguishable from an enumeration that never \
+                    saw the caller. Never read absence of a signal as verified completeness.",
+    }))
+}
