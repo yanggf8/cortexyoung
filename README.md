@@ -274,6 +274,11 @@ a priority rather than a polish item.
    captured by `cort read`; it is FTS5, not semantic memory. Changed or deleted source files invalidate
    their stored readings. Reading notes survive full and incremental re-indexing when the source is unchanged.
 
+The recall line's open work — receiver-call extraction under a uniqueness gate, and the
+`call_site_line` evidence column (schema v4) — is specified in
+[`docs/2026-08-31-recall-wip.md`](docs/2026-08-31-recall-wip.md), together with the measured
+numbers that killed the alternative (Rust `use`/`mod` import edges) and the residual known holes.
+
 11. **`impact --coverage` is a recall *screen*, not a completeness proof.** It compares the graph with
    `raw_edges` and with the text of indexed files, and reports three layers: mentions that produced no
    edge, edges dropped during resolution, and blind files (unparsed or never indexed). Known holes, each
