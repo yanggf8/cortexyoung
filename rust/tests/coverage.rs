@@ -231,6 +231,23 @@ fn absence_of_a_signal_is_never_named_like_proof() {
             && reading.contains("barrel"),
         "and the boundaries K3 listed as missing must be in the same sentence: {reading}"
     );
+    // The one hole no text screen can close (34a2ca10): a caller that exists only after macro
+    // expansion. Nothing pins it anywhere in the suite -- it lives only in prose -- so the sentence
+    // the report must keep carrying gets its own assertion here. If the wording drifts without the
+    // disclosure moving, this fails.
+    assert!(
+        reading.contains("macro expansion") && reading.contains("cargo check"),
+        "the disclosure of the macro-expanded caller must name the tool that can answer it: {reading}"
+    );
+    // The version-discipline rule behind `COVERAGE_METHOD`: the method string names the version
+    // majorly enough that a semantic change without a version bump is visible in the report
+    // itself. The constant's *value* is pinned by the render contract tests; what is pinned here is
+    // that a reader can tell v2 from v1 by reading the method field.
+    let method = cov["method"].as_str().unwrap();
+    assert!(
+        method.contains("coverage-v2"),
+        "a reader must be able to tell which screen generation produced this report: {method}"
+    );
 }
 
 #[test]

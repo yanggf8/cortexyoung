@@ -327,3 +327,51 @@ fn type_method_end_to_end_cli_json_and_lean() {
     assert_eq!(payload(&none)["resolution"], "none");
     let _ = proj;
 }
+
+/// The coverage screen reached only through its `attach()` unit tests until now -- the audit noted
+/// no test drove the flag through the CLI itself. This is that test: `--coverage` on the binary must
+/// attach the screen, and lean must print the method line and the seed row the skill tells agents
+/// to read.
+#[test]
+fn coverage_flows_through_the_cli_in_lean() {
+    let body = [
+        "fn helper(x: u8) -> u8 { x }",
+        "fn caller() -> u8 { helper(1) }",
+        "",
+    ]
+    .join("\n");
+    let (proj, cwd) = make_project(&[("src/util.rs", &body)]);
+    let cache_dir = tempfile::Builder::new()
+        .prefix("cort-cov-cli-")
+        .tempdir()
+        .unwrap();
+    let cache = cache_dir.path().to_path_buf();
+    let idx = run_cort(&["index", "."], &cwd, &cache);
+    assert_eq!(idx.code, 0, "{}", idx.stdout);
+    let r = run_cort(
+        &[
+            "impact",
+            "--symbol",
+            "helper",
+            "--depth",
+            "1",
+            "--coverage",
+            "-f",
+            "lean",
+        ],
+        &cwd,
+        &cache,
+    );
+    assert_eq!(r.code, 0, "{} {}", r.stdout, r.stderr);
+    let out = r.stdout;
+    assert!(
+        out.contains("# coverage coverage-v2"),
+        "the screen must attach through the CLI: {out}"
+    );
+    assert!(out.contains("seed\thelper\tmentions="), "{out}");
+    assert!(
+        !out.contains("truncated"),
+        "an uncut gap list must not announce a cut: {out}"
+    );
+    let _ = proj;
+}

@@ -324,7 +324,9 @@ set the flag for every one of 60 sampled seeds. What remains is the receiver gat
    12 invented -- `e.kind()` onto a test fixture's `FailFs::kind`, `status.code()` onto a helper named
    `code`, `.chain()` onto a function named `chain` (row by row, with the source line each one claims:
    `evals/runs/2026-08-31-schema-v4/receiver-gate-counterfactual.json`). The same query on the current
-   tree gives 5,212 sites and 12 attached, 12 correct; re-derive either side with
+   tree gives 5,843 sites and 12 attached at `dbc971f7` (12 of 5,212 at `d4637150` -- this number
+   moves with the tree; quote it with its commit), all 12 correct across today's `verify-impact`
+   runs; re-derive either side with
    `cort-evals recall-exp --venue .` (text-side population) and `cort status` plus
    `SELECT ... WHERE call_form='receiver'` (what got attached) rather than trusting a number that was
    written down on a different day. The gate also refuses true calls whose variable

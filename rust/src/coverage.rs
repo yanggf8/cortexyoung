@@ -798,6 +798,7 @@ pub fn coverage_for(
                     one does flip the boolean, as scan_skipped), a re-export chain reported at its \
                     barrel line, a mention within 2 lines of an extracted call (counted covered), and a \
                     call that only exists after macro expansion -- nothing on disk names the callee, so \
-                    no layer of this screen can see it, and `false` there is not clearance either.",
+                    no layer of this screen can see it (`cargo check` is the tool that can), and `false` \
+                    there is not clearance either.",
     }))
 }
