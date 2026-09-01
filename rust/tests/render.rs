@@ -500,3 +500,36 @@ fn a_truncated_gap_list_says_how_many_rows_it_dropped() {
         "missing gap_count falls back to the rows in hand"
     );
 }
+
+/// An import drop has no source symbol to name, and a brace import carries its newlines into the
+/// stored raw target. A blank field reads as an empty column and an embedded newline breaks
+/// one-row-per-line, so the lean contract collapses both.
+#[test]
+fn an_import_drop_row_prints_a_dash_for_its_missing_symbol_and_one_line_per_row() {
+    let payload = json!({
+        "symbol": "beta_fn", "depth": 1, "seed_count": 1, "seeds": [], "dependent_count": 0,
+        "unresolved": [], "index_is_stale": false,
+        "coverage": {
+            "method": "coverage-v2",
+            "seeds": [{
+                "symbol": "beta_fn", "mentions_on_disk": 2, "gap_count": 0,
+                "mentions_without_edge": [],
+                "extracted_but_unresolved": [{
+                    "file_path": "src/main.rs", "line": 3, "from_symbol": "",
+                    "raw_target": "cort_evals::demand::{\n    classify, beta_fn,\n}",
+                    "via": "import",
+                }],
+                "enumeration_may_be_incomplete": true,
+            }],
+        },
+    });
+    let out = render(Some("impact"), Format::Lean, &payload);
+    let drop = out
+        .lines()
+        .find(|l| l.starts_with("drop\t"))
+        .expect("the drop row prints");
+    assert_eq!(
+        drop, "drop\tsrc/main.rs:3\t- -> cort_evals::demand::{ classify, beta_fn, }",
+        "dash for the missing symbol, newlines collapsed: {out}"
+    );
+}

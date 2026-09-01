@@ -186,8 +186,14 @@ pub fn verify_impact(cort: &str, repo: &str, symbol: &str, depth: i64) -> Result
         }
 
         // The v4 column: `impact` now names the line it based this row on, so the claim is checkable
-        // against one line instead of one function. Absent for a dependency that came in through an
-        // import, and for any index built before call sites were recorded.
+        // against one line instead of one function. Absent for any index built before call sites
+        // were recorded. It is also absent for import-derived rows -- but as of 2026-09-01 no row is
+        // import-derived: a top-level `use` belongs to no function chunk, so an import edge drops
+        // before resolution and never becomes a relationship (measured on this repo: 336 import raw
+        // edges, 0 import relationships). The dropped ones are visible in `impact --coverage` as
+        // `extracted_but_unresolved` rows carrying their use line. If imports ever do resolve into
+        // relationships, their line is the `use` line and is gradeable here like any other -- do not
+        // extend this comment's exclusion to cover them.
         let site = d.get("call_site_line").and_then(Value::as_i64);
         let call_site = site.map(|line| {
             let text = lines

@@ -297,6 +297,14 @@ set the flag for every one of 60 sampled seeds. What remains is the receiver gat
    module-path edges, all real (`usage::now_ms()`, `arms::resolve_binary()`, `coverage::attach()`), and
    narrowed six previously-`AMBIGUOUS` bare calls onto the module their `use` names; `Vec::new` (75
    sites), `fs::write` (44) and `String::new` (28) still attach nothing and stay visible as gaps.
+
+   **Import edges themselves never become relationships** (2026-09-01, measured): a top-level `use`
+   belongs to no function chunk, so its raw edge carries an empty `source_symbol` and drops before
+   resolution -- 336 import raw edges on this repo, 0 import relationships. A TS/JS module specifier
+   (`./utils`) is a path, not a symbol name, and cannot match a chunk either. Imports feed call
+   narrowing only. That is a scope fact, not a defect to quietly fix later: attaching a file-level
+   `use` to some chunk would be inventing an answer. What a dropped import means for a caller set is
+   handled by `--coverage` -- see limitation #11.
    **What it cannot see:** a qualifier that is a *dependency* module while a local module carries the
    same name. `use std::fs;` + `fs::write(..)` in a project that ships `src/fs.rs::write` attaches to
    the local one as `INFERRED` -- not `AMBIGUOUS`, because the external crate is not indexed and has no
@@ -367,6 +375,20 @@ that killed the alternative (Rust `use`/`mod` import edges).
    precedes the rows themselves. Rows are ordered by cause severity, so a cut always drops the least
    severe first; `-f json` returns the remainder. Pinned by
    `a_truncated_gap_list_says_how_many_rows_it_dropped` (`rust/tests/render.rs`).
+
+   **L2 sees imports too (2026-09-01).** `extracted_but_unresolved` used to query `rel_type = 'calls'`
+   only, so an import the pack extracted and resolution dropped was indistinguishable from one the
+   pack never saw. Since import edges never become relationships (limitation #8), every import the
+   pack extracted is dropped; the screen now reports the ones that matter as `drop` rows carrying the
+   use line -- those whose *file* reaches the seed no other way, which is a dependency wholly absent
+   from the graph. An import whose file already reaches the seed through a resolved call is
+   suppressed as a duplicate. Leaf matching opens brace imports (`use crate::foo::{a, b};`) with the
+   same expander the call-narrowing map uses, so the blind spot 2461d2c8 fixed in `recall-exp` cannot
+   recur here. Measured on this repo across all seeds: 49 file-level import drops newly visible, 241
+   suppressed as already-reached. Pinned by
+   `an_import_the_extractor_saw_but_could_not_resolve_is_a_pack_attested_drop`,
+   `an_import_whose_file_already_reaches_the_seed_is_suppressed` and
+   `a_brace_import_reports_each_name_the_extractor_could_not_resolve` (`rust/tests/coverage.rs`).
 
 ## What is deliberately not built
 

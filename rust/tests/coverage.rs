@@ -590,3 +590,100 @@ fn a_real_gap_in_a_partially_covered_file_outranks_comment_noise_from_an_uncover
         "the unmapped use of the name in a partially-covered file is the row that must be on top, got {cov}"
     );
 }
+
+// ── L2 must see what the extractor extracted and resolution dropped -- imports included ──
+//
+// Rust `edge:imports` raw edges never become relationships: a top-level `use` belongs to no
+// function chunk, so `chunk_by_symbol.get(source_symbol)` misses and the edge is dropped before
+// resolution even runs. Until 2026-09-01 L2 queried `rel_type = 'calls'` only, so that drop was
+// invisible to the one screen whose job is to name dropped resolutions -- the mention layer saw the
+// text, but nothing distinguished "the pack never saw this line" from "the pack saw it and
+// resolution discarded it".
+
+/// A file that imports a symbol and never calls it in an extracted shape has its dependency on that
+/// symbol wholly absent from the graph: no edge, and no other file carries it. The use line is the
+/// only trace, and L2 is the layer that must name it -- pack-attested, not a text coincidence.
+#[test]
+fn an_import_the_extractor_saw_but_could_not_resolve_is_a_pack_attested_drop() {
+    let (_d, root, db, project_id, bin) = indexed(&[
+        ("src/foo.rs", "pub fn target_fn(x: u8) -> u8 { x }\n"),
+        (
+            "src/main.rs",
+            "mod foo;\nuse crate::foo::target_fn;\n\npub fn unrelated() -> u8 { 1 }\n",
+        ),
+    ]);
+    let c = coverage_of(&db, &project_id, &root, &bin, "target_fn");
+    let seed = &c["seeds"][0];
+    let dropped = seed["extracted_but_unresolved"].as_array().unwrap();
+    assert!(
+        dropped
+            .iter()
+            .any(|g| g["file_path"] == "src/main.rs" && g["raw_target"] == "crate::foo::target_fn"),
+        "the use line must appear as a dropped resolution: {dropped:?}"
+    );
+    assert!(
+        seed["why"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("extracted_but_unresolved")),
+        "the drop must name its reason; mentions_without_edge is also expected -- the use line is text too: {}",
+        seed["why"]
+    );
+    assert_eq!(seed["enumeration_may_be_incomplete"], json!(true));
+}
+
+/// The suppression is file-level, not line-level, and that is the semantics: a use whose symbol the
+/// same file already reaches through a resolved call contributes a dependency the graph already
+/// carries. Reporting it would bury the drops that matter under duplicates.
+#[test]
+fn an_import_whose_file_already_reaches_the_seed_is_suppressed() {
+    let (_d, root, db, project_id, bin) = indexed(&[
+        ("src/foo.rs", "pub fn target_fn(x: u8) -> u8 { x }\n"),
+        (
+            "src/main.rs",
+            "mod foo;\nuse crate::foo::target_fn;\n\npub fn caller() -> u8 { target_fn(1) }\n",
+        ),
+    ]);
+    let c = coverage_of(&db, &project_id, &root, &bin, "target_fn");
+    let seed = &c["seeds"][0];
+    let dropped = seed["extracted_but_unresolved"].as_array().unwrap();
+    assert!(
+        dropped.is_empty(),
+        "the file reaches the seed through a resolved call; the use line is not a loss: {dropped:?}"
+    );
+}
+
+/// `use crate::foo::{alpha_fn, beta_fn};` is one raw edge carrying two names. The leaf match has to
+/// open the braces: this exact shape is how `recall-exp`'s shadow metric once reported a safe 0
+/// (2461d2c8), and coverage must not repeat that blind spot.
+#[test]
+fn a_brace_import_reports_each_name_the_extractor_could_not_resolve() {
+    let (_d, root, db, project_id, bin) = indexed(&[
+        (
+            "src/foo.rs",
+            "pub fn alpha_fn(x: u8) -> u8 { x }\npub fn beta_fn(x: u8) -> u8 { x }\n",
+        ),
+        (
+            "src/main.rs",
+            "mod foo;\nuse crate::foo::{alpha_fn, beta_fn};\n\npub fn caller() -> u8 { alpha_fn(1) }\n",
+        ),
+    ]);
+    let c = coverage_of(&db, &project_id, &root, &bin, "beta_fn");
+    let dropped = c["seeds"][0]["extracted_but_unresolved"]
+        .as_array()
+        .unwrap();
+    assert!(
+        dropped.iter().any(|g| g["file_path"] == "src/main.rs"
+            && g["raw_target"].as_str().unwrap().contains("beta_fn")),
+        "the brace import must be opened and beta_fn named: {dropped:?}"
+    );
+    // alpha_fn resolves through the call, so the same use line must not be reported for it.
+    let c_alpha = coverage_of(&db, &project_id, &root, &bin, "alpha_fn");
+    let dropped_alpha = c_alpha["seeds"][0]["extracted_but_unresolved"]
+        .as_array()
+        .unwrap();
+    assert!(
+        dropped_alpha.is_empty(),
+        "alpha_fn is reached through a resolved call in the same file: {dropped_alpha:?}"
+    );
+}

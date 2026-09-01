@@ -180,12 +180,27 @@ fn coverage_lines(payload: &Value) -> Vec<String> {
             ));
         }
         for g in dropped {
+            // An import drop has no source symbol (a top-level `use` belongs to no chunk), and a
+            // brace import's raw target carries the newlines it was written with. A blank field
+            // reads as an empty column and a newline breaks the one-row-per-line contract, so both
+            // are collapsed before printing.
+            let from = as_str(g, "from_symbol");
+            let from = if from.is_empty() { "-" } else { from };
+            let target: String = as_str(g, "raw_target")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            let target = if target.chars().count() > 72 {
+                format!("{}…", target.chars().take(72).collect::<String>())
+            } else {
+                target
+            };
             out.push(format!(
                 "drop\t{}:{}\t{} -> {}",
                 as_str(g, "file_path"),
                 js_display(g, "line"),
-                as_str(g, "from_symbol"),
-                as_str(g, "raw_target")
+                from,
+                target
             ));
         }
     }

@@ -352,8 +352,21 @@ fn indexed_files(db: &Db, project_id: &str) -> Result<Vec<String>, CortError> {
     Ok(rows.flatten().collect())
 }
 
-/// L2: the extractor saw a call to `name` from a chunk in this file, but no `relationships` row
-/// points at this seed from a chunk containing that line.
+/// L2: the extractor saw a reference to `name` from this file -- a call, or an import the pack
+/// extracted -- and no `relationships` row covers it. The two rel_types suppress differently, and
+/// the difference is the finding:
+///
+/// * A **call** is suppressed when the chunk containing that line already has an edge to the seed:
+///   that exact call site is in the graph.
+/// * An **import** is suppressed at *file* level. A top-level `use` belongs to no function chunk --
+///   `source_symbol` is the empty string -- so an import edge can never resolve in today's graph
+///   and is dropped before resolution even runs (measured on this repo: 336 import raw edges, 0
+///   import relationships). What the graph can still carry is the same dependency arriving through
+///   a resolved call from any chunk in the file; when that exists the import drop is a duplicate,
+///   and when it does not, the file's dependency on the seed is wholly absent from the graph and
+///   this row is its only pack-attested trace. That distinction is what the mention layer cannot
+///   make: L1 sees the text of any `use` line, and cannot tell "the pack never extracted this"
+///   from "the pack extracted it and resolution discarded it".
 fn extracted_but_unresolved(
     db: &Db,
     project_id: &str,
@@ -407,6 +420,72 @@ fn extracted_but_unresolved(
             }));
         }
     }
+
+    // Imports. SQL `LIKE` cannot open `use crate::foo::{a, b}`, so the leaf match runs in Rust via
+    // the same expander the call-narrowing map uses -- one matcher, not two that can drift. A
+    // relative module specifier (`./utils`, the JS/TS shape) expands to nothing and honestly
+    // matches no symbol name.
+    let mut stmt = db
+        .prepare(
+            "SELECT file_path, source_symbol, raw_target, start_line FROM raw_edges
+          WHERE project_id = ?1 AND rel_type = 'imports'
+          ORDER BY file_path, start_line",
+        )
+        .map_err(err)?;
+    let imports = stmt
+        .query_map(params![project_id], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, i64>(3)?,
+            ))
+        })
+        .map_err(err)?
+        .flatten()
+        .collect::<Vec<_>>();
+    let mut seen: std::collections::HashSet<(String, i64)> = std::collections::HashSet::new();
+    for (file, source_symbol, raw_target, line) in imports {
+        let names_it = crate::graph::expand_use_path(&raw_target)
+            .iter()
+            .any(|segs| segs.last().map(String::as_str) == Some(name));
+        if !names_it || !seen.insert((file.clone(), line)) {
+            continue;
+        }
+        // File-level suppression: does any chunk of this file already reach the seed?
+        let mut check = db
+            .prepare(
+                "SELECT 1 FROM relationships r
+               JOIN chunks sc ON sc.chunk_id = r.source_chunk_id
+              WHERE r.target_chunk_id = ?1 AND sc.file_path = ?2
+              LIMIT 1",
+            )
+            .map_err(err)?;
+        let reached: bool = check
+            .query_map(params![seed.chunk_id, file], |r| r.get::<_, i64>(0))
+            .map_err(err)?
+            .next()
+            .is_some();
+        if !reached {
+            out.push(json!({
+                "file_path": file,
+                "line": line,
+                "from_symbol": source_symbol,
+                "raw_target": raw_target,
+                "via": "import",
+            }));
+        }
+    }
+    out.sort_by(|a, b| {
+        (
+            a["file_path"].as_str().unwrap_or(""),
+            a["line"].as_i64().unwrap_or(0),
+        )
+            .cmp(&(
+                b["file_path"].as_str().unwrap_or(""),
+                b["line"].as_i64().unwrap_or(0),
+            ))
+    });
     Ok(out)
 }
 
