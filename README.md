@@ -360,6 +360,14 @@ that killed the alternative (Rust `use`/`mod` import edges).
    still says `unparsed_files`, and the `lean` output carries the sentence
    `blind unparsed advisory: text-scanned, no edges; does not flip incomplete`.
 
+   **The printed list is capped at 20 rows, and lean says when it cut them (2026-09-01).** `gap_count`
+   in JSON has always been every row found, but `lean` printed the length of the capped array as
+   `no_edge=`, so a reader of the format the routing skill mandates saw `no_edge=20` over 51 rows and
+   had no way to know. `no_edge=` is now the full count and a `miss	truncated	shown=N	of=M` row
+   precedes the rows themselves. Rows are ordered by cause severity, so a cut always drops the least
+   severe first; `-f json` returns the remainder. Pinned by
+   `a_truncated_gap_list_says_how_many_rows_it_dropped` (`rust/tests/render.rs`).
+
 ## What is deliberately not built
 
 These stay deferred and must not appear (spec section 8). Nothing below was built in the 2026-08-28 pass:

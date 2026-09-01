@@ -415,3 +415,88 @@ fn json_pretty_print_uses_two_space_indent_and_trailing_newline() {
     let out = render(None, Format::Json, &payload);
     assert_eq!(out, "{\n  \"n\": 1,\n  \"ok\": true\n}\n");
 }
+
+/// The gap list is capped at `MAX_GAP_ROWS`, and lean is the format the routing skill tells agents
+/// to always pass. Printing the *printed* row count as `no_edge` told that reader it had seen every
+/// gap: `Tally::add` on this repo produces 51 rows, prints 20, and said `no_edge=20`. "Read the
+/// rows, not the boolean" is only true if the reader is told when the rows were cut.
+#[test]
+fn a_truncated_gap_list_says_how_many_rows_it_dropped() {
+    let rows: Vec<Value> = (0..20)
+        .map(|i| {
+            json!({
+                "file_path": "src/a.rs", "line": i + 1, "cause": "mention",
+                "occurrences": 1, "text": "add(x);",
+            })
+        })
+        .collect();
+    let truncated = json!({
+        "symbol": "add", "depth": 1, "seed_count": 1, "seeds": [], "dependent_count": 0,
+        "unresolved": [], "index_is_stale": false,
+        "coverage": {
+            "method": "coverage-v2",
+            "seeds": [{
+                "symbol": "add", "mentions_on_disk": 69, "gap_count": 51,
+                "mentions_truncated": true, "mentions_without_edge": rows,
+                "extracted_but_unresolved": [], "enumeration_may_be_incomplete": true,
+            }],
+        },
+    });
+    let out = render(Some("impact"), Format::Lean, &truncated);
+    assert!(
+        out.contains("no_edge=51"),
+        "the seed line must carry every gap found, not the number that fitted: {out}"
+    );
+    assert!(
+        !out.contains("no_edge=20"),
+        "20 is the printed count and reads as the total: {out}"
+    );
+    assert!(
+        out.lines().any(|l| l.starts_with("miss\ttruncated\t")
+            && l.contains("shown=20")
+            && l.contains("of=51")),
+        "a row has to name the cut, beside the rows it cut: {out}"
+    );
+
+    // Not truncated: no row claiming a cut that did not happen.
+    let whole = json!({
+        "symbol": "add", "depth": 1, "seed_count": 1, "seeds": [], "dependent_count": 0,
+        "unresolved": [], "index_is_stale": false,
+        "coverage": {
+            "method": "coverage-v2",
+            "seeds": [{
+                "symbol": "add", "mentions_on_disk": 4, "gap_count": 1,
+                "mentions_truncated": false,
+                "mentions_without_edge": [{"file_path": "src/a.rs", "line": 3,
+                                            "cause": "mention", "occurrences": 1, "text": "add(x);"}],
+                "extracted_but_unresolved": [], "enumeration_may_be_incomplete": true,
+            }],
+        },
+    });
+    let whole_out = render(Some("impact"), Format::Lean, &whole);
+    assert!(whole_out.contains("no_edge=1"), "{whole_out}");
+    assert!(
+        !whole_out.contains("truncated"),
+        "an uncut list must not announce a cut: {whole_out}"
+    );
+
+    // A report written without `gap_count` still prints a number, never a dash: a blank there reads
+    // as "no gaps", which is the false-safe claim this screen exists to prevent.
+    let legacy = json!({
+        "symbol": "add", "depth": 1, "seed_count": 1, "seeds": [], "dependent_count": 0,
+        "unresolved": [], "index_is_stale": false,
+        "coverage": {
+            "method": "coverage-v2",
+            "seeds": [{
+                "symbol": "add", "mentions_on_disk": 4,
+                "mentions_without_edge": [{"file_path": "src/a.rs", "line": 3,
+                                            "cause": "mention", "occurrences": 1, "text": "add(x);"}],
+                "extracted_but_unresolved": [], "enumeration_may_be_incomplete": true,
+            }],
+        },
+    });
+    assert!(
+        render(Some("impact"), Format::Lean, &legacy).contains("no_edge=1"),
+        "missing gap_count falls back to the rows in hand"
+    );
+}

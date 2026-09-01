@@ -5,15 +5,27 @@ Instructions for any coding agent working in this repository (Codex reads `AGENT
 This repo builds `cort`, an offline code-intelligence CLI over `ast-grep` + SQLite.
 
 **The product's long-term goal is one sentence, and it is a measurement rather than a sentiment: make
-the caller-set enumeration an agent already performs — and often gets wrong — both cheap and
-checkable.** Do not justify graph work by saying users ask relationship questions. They do not: on the
+the caller-set enumeration an agent already performs — and often gets wrong — cheap, checkable edge by
+edge, and able to say whether the set is complete.** The third clause was promoted from a property of
+the second to a goal in its own right on 2026-09-01, because the two are answered by different
+machinery and one of them is done: `verify-impact` grades a printed edge against its call site
+(soundness, "is this row real"), while `impact --coverage` is the only thing that speaks to
+completeness ("is any caller missing"), and completeness is where the tool is currently weakest — see
+the receiver-gate and 62-of-63 numbers below. A caller set nobody can bound is not evidence, however
+cheap it was to produce. Two scope facts to state rather than imply: the screen answers for
+**callers** only (`impact` emits `dependents`; there is no callee/`dependencies` direction anywhere in
+the product as of 2026-09-01), and it is a text-and-index screen, so it can be honest about what it
+did not read but can never be a compiler.
+
+Do not justify graph work by saying users ask relationship questions. They do not: on the
 surviving local corpus (`cort-evals demand`, `docs/2026-08-31-demand-recheck.md`) 1,214 genuine user
 instructions held **one** relational question (0.08%), and 4-7 (0.33-0.58%) were instructions that
 cannot be done correctly without a call-site set - all of them on the delete / refactor / review path.
 The same corpus shows 42% of what arrives as a "user message" is a pasted agent report being fact-checked,
 which is the real surface: the agent does this work unprompted, gets multi-hop answers wrong in 6 of 10
 cells (`evals/runs/2026-08-30-graph{,-sample2}/`), and is then asked to prove it. Cost per use is already
-settled (7.7x smaller tool payload at ~4x fewer turns, same venue, same task set). **Checkability is the
+settled (7.7x smaller tool payload — ~6.7x since schema v4 added two columns to the lean row — at ~4x
+fewer turns, same venue, same task set; README's cost section carries both figures). **Checkability is the
 open half.** Its first piece landed on 2026-08-31 (schema v4): `relationships` stores `call_site_line`
 and `call_form`, `impact` prints `@<line> <form>` beside each dependent's definition line, and
 `cort-evals verify-impact` grades an edge against that single line (117/117 dependents on the 5 cct

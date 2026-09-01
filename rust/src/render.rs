@@ -140,14 +140,30 @@ fn coverage_lines(payload: &Value) -> Vec<String> {
     for seed in seeds {
         let no_edge = arr(seed, "mentions_without_edge");
         let dropped = arr(seed, "extracted_but_unresolved");
+        // `mentions_without_edge` is capped at `MAX_GAP_ROWS`; `gap_count` is every row that was
+        // found. Printing the capped length told a lean reader -- the only reader the routing skill
+        // creates -- that it had seen the whole list, which is the one thing "read the rows, not the
+        // boolean" needs to be true. Older payloads without the field fall back to the rows in hand:
+        // a dash there would read as "no gaps".
+        let gap_total = seed["gap_count"].as_u64().unwrap_or(no_edge.len() as u64);
         out.push(format!(
             "seed\t{}\tmentions={}\tno_edge={}\tdropped={}\tincomplete={}",
             as_str(seed, "symbol"),
             js_display(seed, "mentions_on_disk"),
-            no_edge.len(),
+            gap_total,
             dropped.len(),
             js_display(seed, "enumeration_may_be_incomplete")
         ));
+        // Derived from the two numbers printed above rather than from `mentions_truncated`, so the
+        // cut cannot disagree with the counts beside it. Placed before the rows, not after, because
+        // a reader who stops at the twentieth row is exactly the one being misled.
+        if gap_total > no_edge.len() as u64 {
+            out.push(format!(
+                "miss\ttruncated\tshown={}\tof={}\tlowest-ranked rows dropped; -f json for the rest",
+                no_edge.len(),
+                gap_total
+            ));
+        }
         for g in no_edge {
             let occurrences = g["occurrences"].as_u64().unwrap_or(1);
             out.push(format!(
