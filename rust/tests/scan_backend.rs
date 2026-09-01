@@ -41,6 +41,13 @@ const TREE: &[(&str, &str)] = &[
         "pkg/mod.py",
         "def helper(n):\n    return n * 2\n\ndef caller(n):\n    return helper(n) + 1\n",
     ),
+    (
+        // Tsx is the one language whose grammar differs from its .ts sibling; indexing and pattern
+        // search over JSX must be backend-identical too (the probe's tsx leg was SKIPped until
+        // tests/fixtures/tsx/widget.tsx existed).
+        "src/widget.tsx",
+        "import { helper } from './helper';\n\nexport function Widget({ label }: { label: string }) {\n  return <button onClick={() => helper(label)}>{label}</button>;\n}\n",
+    ),
 ];
 
 fn set_backend(v: Option<&str>) {

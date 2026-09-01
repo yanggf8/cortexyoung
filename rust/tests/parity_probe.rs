@@ -232,7 +232,11 @@ fn the_crate_matches_the_cli_on_the_real_pack_and_real_files() {
     // TS/TSX/JS/Python: the cct venue if it is on this machine (the measured TS venue), else skip.
     let cct = Path::new(CCT);
     let ts = find_files(cct, &[".ts"], 4);
-    let tsx = find_files(cct, &[".tsx"], 2);
+    // The tsx leg always runs over the repo fixture (tests/fixtures/tsx/widget.tsx) plus any cct
+    // .tsx files -- the fixture is JSX-heavy and matches all six tsx rules, so grammar parity is
+    // exercised even where the venue has no .tsx.
+    let mut tsx = vec![Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tsx/widget.tsx")];
+    tsx.extend(find_files(cct, &[".tsx"], 2));
     let js = find_files(cct, &[".js"], 2);
     let py = find_files(cct, &[".py"], 2);
     let n2 = leg::<TypeScript>(

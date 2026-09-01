@@ -70,7 +70,7 @@ pub struct RulePack {
 const LANG_BY_EXT: &[(&str, &str, &str)] = &[
     ("rs", "rust", "Rust"),
     ("ts", "typescript", "TypeScript"),
-    ("tsx", "tsx", "TypeScript"),
+    ("tsx", "tsx", "Tsx"),
     ("js", "javascript", "JavaScript"),
     ("jsx", "javascript", "JavaScript"),
     ("mjs", "javascript", "JavaScript"),
