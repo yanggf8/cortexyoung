@@ -23,21 +23,27 @@ fn fake_ag() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_fake_ast_grep"))
 }
 
-fn with_var(key: &str, val: Option<&str>, f: impl FnOnce()) {
+fn with_vars(pairs: &[(&str, Option<&str>)], f: impl FnOnce()) {
     let _g = env_guard();
-    let prev = std::env::var(key).ok();
-    // SAFETY: tests in this file take ENV_LOCK so no other thread mutates env.
+    let prev: Vec<(String, Option<String>)> = pairs
+        .iter()
+        .map(|(k, _)| ((*k).to_string(), std::env::var(k).ok()))
+        .collect();
     unsafe {
-        match val {
-            Some(v) => std::env::set_var(key, v),
-            None => std::env::remove_var(key),
+        for (k, val) in pairs {
+            match val {
+                Some(v) => std::env::set_var(k, v),
+                None => std::env::remove_var(k),
+            }
         }
     }
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
     unsafe {
-        match prev {
-            Some(v) => std::env::set_var(key, v),
-            None => std::env::remove_var(key),
+        for (k, prev_v) in &prev {
+            match prev_v {
+                Some(v) => std::env::set_var(k, v),
+                None => std::env::remove_var(k),
+            }
         }
     }
     if let Err(e) = result {
@@ -144,7 +150,8 @@ fn zero_matches_is_a_clean_empty_result_never_parse_failed() {
         &bin,
         "zzzNoSuchFunction($A)",
         "ts",
-        &[root.to_string_lossy().into_owned()],
+        &root.to_string_lossy(),
+        &[],
         None,
         false,
     )
@@ -161,7 +168,8 @@ fn matches_are_returned_with_1_indexed_lines() {
         &bin,
         "helper($A)",
         "ts",
-        &[root.to_string_lossy().into_owned()],
+        &root.to_string_lossy(),
+        &[],
         None,
         false,
     )
@@ -186,19 +194,18 @@ fn a_few_malformed_json_lines_are_skipped_and_counted() {
     }
     stream.push_str("junk\n");
     let b64 = base64_encode(stream.as_bytes());
-    with_var("FAKE_AG_MODE", Some(&format!("emit:{b64}")), || {
-        let r = run_pattern(
-            fake_ag().to_str().unwrap(),
-            "x",
-            "ts",
-            &[".".to_string()],
-            None,
-            true,
-        )
-        .unwrap();
-        assert_eq!(r.malformed, 1);
-        assert_eq!(r.matches.len(), 19);
-    });
+    with_vars(
+        &[
+            ("CORT_SCAN_BACKEND", Some("cli")),
+            ("FAKE_AG_MODE", Some(&format!("emit:{b64}"))),
+        ],
+        || {
+            let r =
+                run_pattern(fake_ag().to_str().unwrap(), "x", "ts", ".", &[], None, true).unwrap();
+            assert_eq!(r.malformed, 1);
+            assert_eq!(r.matches.len(), 19);
+        },
+    );
 }
 
 /// D-19
@@ -216,20 +223,19 @@ fn more_than_10_percent_malformed_aborts_this_query_only() {
     }
     stream.push_str("junk\njunk\n");
     let b64 = base64_encode(stream.as_bytes());
-    with_var("FAKE_AG_MODE", Some(&format!("emit:{b64}")), || {
-        let err = run_pattern(
-            fake_ag().to_str().unwrap(),
-            "x",
-            "ts",
-            &[".".to_string()],
-            None,
-            true,
-        )
-        .unwrap_err();
-        assert_eq!(err.code, "run_aborted_malformed");
-        assert_eq!(err.detail["malformed"], 2);
-        assert_eq!(err.detail["total"], 10);
-    });
+    with_vars(
+        &[
+            ("CORT_SCAN_BACKEND", Some("cli")),
+            ("FAKE_AG_MODE", Some(&format!("emit:{b64}"))),
+        ],
+        || {
+            let err = run_pattern(fake_ag().to_str().unwrap(), "x", "ts", ".", &[], None, true)
+                .unwrap_err();
+            assert_eq!(err.code, "run_aborted_malformed");
+            assert_eq!(err.detail["malformed"], 2);
+            assert_eq!(err.detail["total"], 10);
+        },
+    );
 }
 
 /// D-20

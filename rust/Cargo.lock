@@ -291,6 +291,8 @@ dependencies = [
  "ast-grep-core",
  "ast-grep-language",
  "clap",
+ "globset",
+ "ignore",
  "rusqlite",
  "serde",
  "serde_json",

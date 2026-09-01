@@ -11,7 +11,7 @@ appears only in `install.sh` and `tests/install-smoke.sh`, where the platform re
 Six shipped commands (plus `status`/`projects`/`delete` utilities):
 
 - `cort index [--incremental] [path]` — build or incrementally refresh the index (`ast-grep` + SQLite)
-- `cort struct -p '<pattern>' --lang <lang>` — structural search joined to enclosing symbols + 3 neighbours
+- `cort struct -p '<pattern>' --lang <lang>` — structural search joined to enclosing symbols + 3 neighbours. `-g '<glob>'` narrows the search (fixed 2026-09-01: globs used to reach the CLI as literal paths and answer `No such file or directory`; they now go to `--globs`, matched relative to the search root, in both backends)
 - `cort context <symbol-or-query>` — "what else deals with X" (exact symbol or FTS recall, depth-1 neighbours, ~1500-token budget; seed bodies are head-truncated to 12 lines, pass `--content full` for the whole body)
 - `cort impact --symbol <name[,name2,...]>` — "what breaks if I change X": reverse dependents to
   depth 3, accepting a comma-separated batch. In `lean`, each row carries the dependent's definition

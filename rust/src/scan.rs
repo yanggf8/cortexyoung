@@ -18,7 +18,10 @@ use crate::pack::pack_dir;
 use ast_grep_config::{from_yaml_string, GlobalRules, RuleConfig, RuleCore};
 use ast_grep_core::meta_var::MetaVariable;
 use ast_grep_core::tree_sitter::StrDoc;
-use ast_grep_core::{matcher::MatcherExt, tree_sitter::LanguageExt, AstGrep, NodeMatch, Position};
+use ast_grep_core::{
+    matcher::MatcherExt, tree_sitter::LanguageExt, AstGrep, MatchStrictness, NodeMatch, Position,
+};
+use ignore::{overrides::OverrideBuilder, WalkBuilder};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -298,4 +301,224 @@ fn scan_lang<L: LanguageExt + Copy>(
         }
     }
     Ok(records)
+}
+
+// ── pattern lookup: `struct --pattern` in-process ────────────────────────────────────────────
+//
+// The CLI leg of this path is `ast-grep run --strictness ast --json=stream -p <pattern> -l <lang>
+// <paths>`, plus a preflight through `--debug-query=ast` that rejects malformed patterns and
+// patterns whose own AST carries an ERROR node. The in-process equivalents mirror those two
+// behaviors exactly: `Pattern::try_new` is the parse-failure path, and an ERROR node in the
+// pattern's own parse tree is the same warning the CLI prints.
+
+/// `--lang` aliases to the internal language key. The CLI accepts these same spellings; anything
+/// else is refused rather than silently searched with no rules.
+pub fn pattern_lang(name: &str) -> Option<&'static str> {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "rs" | "rust" => Some("rust"),
+        "ts" | "typescript" => Some("typescript"),
+        "tsx" => Some("tsx"),
+        "js" | "javascript" | "jsx" | "mjs" | "cjs" => Some("javascript"),
+        "py" | "python" => Some("python"),
+        _ => None,
+    }
+}
+
+/// The extensions each pattern language searches. A file whose extension does not belong to the
+/// language produces no matches, same as the CLI's `--lang` inference.
+const EXT_BY_LANG: &[(&str, &[&str])] = &[
+    ("rust", &["rs"]),
+    ("typescript", &["ts"]),
+    ("tsx", &["tsx"]),
+    ("javascript", &["js", "jsx", "mjs", "cjs"]),
+    ("python", &["py"]),
+];
+
+/// Files the crate backend searches, in the CLI's walk semantics: the `ignore` crate (the walker
+/// ast-grep itself uses -- hidden files and gitignore honored) filtered to the language's
+/// extensions. Globs are matched against each file's path relative to the search root -- the
+/// relative space the CLI's own `--globs` matching observed -- and `--globs` "always overrides any
+/// other ignore logic", implemented with the same `ignore` overrides mechanism, so a glob reaches a
+/// file gitignore would have skipped.
+///
+/// Returns (absolute path, label) where the label mirrors the CLI's `file` field: the search-root
+/// argument joined with the walked relative path.
+pub fn search_files(
+    root: &Path,
+    globs: &[String],
+    lang: &str,
+) -> Result<Vec<(PathBuf, String)>, CortError> {
+    let exts = EXT_BY_LANG
+        .iter()
+        .find(|(k, _)| *k == lang)
+        .map(|(_, e)| *e)
+        .ok_or_else(|| {
+            CortError::new(
+                "unknown_lang",
+                json!({ "lang": lang, "supported": ["rust", "ts", "tsx", "js", "jsx", "py"] }),
+            )
+        })?;
+    let mut walker = WalkBuilder::new(root);
+    if !globs.is_empty() {
+        // `--globs` semantics: matching files bypass ignore rules entirely. A single `-g` is the
+        // product surface; a leading `!` negates. The CLI's "later glob takes precedence" nuance
+        // over multi-glob lists is not reproduced -- one glob cannot exercise it.
+        let mut o = OverrideBuilder::new(root);
+        for g in globs {
+            // A glob formed from an absolute path (`root.join("src/c.ts")`, the shape any
+            // absolute-passing caller produces) is normalized back to root-relative first, or it
+            // can never match a walked relative path. The old CLI behavior happened to allow it
+            // because a literal absolute path exists on disk.
+            let raw = g.as_str();
+            let negated = raw.starts_with('!');
+            let body = raw.strip_prefix('!').unwrap_or(raw);
+            let body_path = std::path::Path::new(body);
+            let rel = body_path
+                .strip_prefix(root)
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| body.to_string());
+            let pat = if negated { format!("!{rel}") } else { rel };
+            o.add(&pat).map_err(|e| {
+                CortError::new(
+                    "invalid_glob",
+                    json!({ "glob": g, "message": e.to_string() }),
+                )
+            })?;
+        }
+        let overrides = o
+            .build()
+            .map_err(|e| CortError::new("storage_busy", json!({ "message": e.to_string() })))?;
+        walker.overrides(overrides);
+    }
+    let mut out = Vec::new();
+    for entry in walker.build() {
+        let Ok(e) = entry else { continue };
+        let p = e.path().to_path_buf();
+        let Some(ft) = e.file_type() else { continue };
+        if !ft.is_file() {
+            continue;
+        }
+        let ext_ok = p
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| exts.contains(&e))
+            .unwrap_or(false);
+        if !ext_ok {
+            continue;
+        }
+        let label = match p.strip_prefix(root) {
+            Ok(rel) => root.join(rel),
+            Err(_) => p.clone(),
+        };
+        out.push((p, label.to_string_lossy().into_owned()));
+    }
+    out.sort();
+    Ok(out)
+}
+
+/// Run a user pattern in-process over resolved files, `--strictness ast` semantics. Records carry
+/// the same `file`/`text`/`range` keys the CLI emits, so `run_pattern`'s folding code is untouched.
+/// `rewrite` is a CLI-backend surface: the product never passes it, and the in-process path refuses
+/// it rather than quietly ignoring it.
+pub fn run_pattern_in_process(
+    pattern: &str,
+    lang_name: &str,
+    lang_key: &'static str,
+    files: &[(PathBuf, String)],
+) -> Result<Vec<Value>, CortError> {
+    match lang_key {
+        "rust" => match_pattern(pattern, ast_grep_language::Rust, lang_name, files),
+        "typescript" => match_pattern(pattern, ast_grep_language::TypeScript, lang_name, files),
+        "tsx" => match_pattern(pattern, ast_grep_language::Tsx, lang_name, files),
+        "javascript" => match_pattern(pattern, ast_grep_language::JavaScript, lang_name, files),
+        _ => match_pattern(pattern, ast_grep_language::Python, lang_name, files),
+    }
+}
+
+fn match_pattern<L: LanguageExt + Copy>(
+    pattern: &str,
+    lang: L,
+    lang_name: &str,
+    files: &[(PathBuf, String)],
+) -> Result<Vec<Value>, CortError> {
+    let pat = ast_grep_core::Pattern::try_new(pattern, lang).map_err(|e| {
+        CortError::new(
+            "parse_failed",
+            json!({ "pattern": pattern, "lang": lang_name, "detail": e.to_string() }),
+        )
+    })?;
+    let pat = pat.with_strictness(MatchStrictness::Ast);
+    let mut records = Vec::new();
+    for (path, label) in files {
+        let text = std::fs::read_to_string(path).map_err(|e| {
+            CortError::new(
+                "ast_grep_run_failed",
+                json!({ "file": label, "message": e.to_string() }),
+            )
+        })?;
+        let root_doc: AstGrep<StrDoc<L>> = AstGrep::doc(StrDoc::new(&text, lang));
+        for node in root_doc.root().dfs() {
+            if let Some(m) = pat.match_node(node) {
+                let r = m.get_node().range();
+                records.push(json!({
+                    "text": m.text(),
+                    "range": {
+                        "byteOffset": { "start": r.start, "end": r.end },
+                        "start": pos(m.get_node().start_pos(), m.get_node()),
+                        "end": pos(m.get_node().end_pos(), m.get_node()),
+                    },
+                    "file": label,
+                    "language": lang_name,
+                    "metaVariables": meta_variables(&m),
+                }));
+            }
+        }
+    }
+    Ok(records)
+}
+
+/// The pre-flight, in-process. A malformed pattern fails `Pattern::try_new`; a pattern whose own
+/// parse tree contains an ERROR node is what the CLI's `--debug-query=ast` run surfaces as the
+/// stderr warning `preflight_pattern` greps for. Both map to `parse_failed`.
+pub fn preflight_pattern_in_process(pattern: &str, lang_name: &str) -> Result<(), CortError> {
+    let Some(key) = pattern_lang(lang_name) else {
+        return Err(CortError::new(
+            "unknown_lang",
+            json!({ "lang": lang_name, "supported": ["rust", "ts", "tsx", "js", "jsx", "py"] }),
+        ));
+    };
+    match key {
+        "rust" => preflight_check(pattern, lang_name, ast_grep_language::Rust),
+        "typescript" => preflight_check(pattern, lang_name, ast_grep_language::TypeScript),
+        "tsx" => preflight_check(pattern, lang_name, ast_grep_language::Tsx),
+        "javascript" => preflight_check(pattern, lang_name, ast_grep_language::JavaScript),
+        _ => preflight_check(pattern, lang_name, ast_grep_language::Python),
+    }
+}
+
+fn preflight_check<L: LanguageExt + Copy>(
+    pattern: &str,
+    lang_name: &str,
+    lang: L,
+) -> Result<(), CortError> {
+    let fail = |detail: String| {
+        Err(CortError::new(
+            "parse_failed",
+            json!({ "pattern": pattern, "lang": lang_name, "detail": detail }),
+        ))
+    };
+    // Two checks, both against the pattern ast-grep itself built -- not against a re-parse of the
+    // raw text. `Pattern::try_new` is the accept/reject verdict the CLI's own parser reaches; and
+    // `Pattern::has_error` is exactly what the CLI's `--debug-query=ast` run surfaces as the
+    // stderr warning this preflight greps for on the CLI leg. Re-parsing the raw text would
+    // over-reject: `def $A($$$B):` (python, no body) is raw-code ERROR but a perfectly good
+    // ast-grep pattern (MISSING, not ERROR), and the CLI accepts it.
+    let pat = match ast_grep_core::Pattern::try_new(pattern, lang) {
+        Ok(p) => p,
+        Err(e) => return fail(e.to_string()),
+    };
+    if pat.has_error() {
+        return fail("Pattern contains an ERROR node and may cause unexpected results.".into());
+    }
+    Ok(())
 }

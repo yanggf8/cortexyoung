@@ -12,6 +12,7 @@
 use cort::db::{ensure_schema, open_db, project_id_for};
 use cort::graph::rebuild_relationships;
 use cort::indexer::full_index;
+use serde_json::Value;
 use std::fs;
 use std::sync::Mutex;
 
@@ -151,5 +152,107 @@ fn the_crate_backend_indexes_the_same_tree_as_the_cli_backend() {
     assert!(
         cli_rels.len() >= 3,
         "the fixture must produce relationships across forms: {cli_rels:?}"
+    );
+}
+
+// ── struct: the pattern engine must also be backend-identical ────────────────────────────────
+
+use cort::r#struct::{struct_command, StructOptions};
+
+/// `struct_command` under both backends over the same tree: same matches, same containment join.
+/// Also covers the `-g` fix: globs go to the CLI's `--globs` flag and to the crate's override walk,
+/// so a glob query returns matches on both paths where the positional form returned an error.
+#[test]
+fn struct_pattern_search_is_backend_identical_and_globs_reach_the_cli() {
+    let _g = ENV_LOCK.lock().unwrap();
+    if cort::ast_grep::resolve_ast_grep_bin().is_err() {
+        eprintln!("SKIP: ast-grep CLI not present; backend equality not exercised");
+        return;
+    }
+    let dir = tempfile::Builder::new()
+        .prefix("cort-struct-")
+        .tempdir()
+        .unwrap();
+    for (rel, body) in TREE {
+        let abs = dir.path().join(rel);
+        fs::create_dir_all(abs.parent().unwrap()).unwrap();
+        fs::write(&abs, body).unwrap();
+    }
+    let root = fs::canonicalize(dir.path()).unwrap();
+    let mut db = open_db(":memory:").unwrap();
+    ensure_schema(&db).unwrap();
+    let project_id = project_id_for(root.to_str().unwrap());
+    let bin = cort::ast_grep::resolve_ast_grep_bin().unwrap();
+    full_index(&mut db, &bin, &root).unwrap();
+    let opts = || StructOptions {
+        globs: Vec::new(),
+        budget: 1500,
+        file_limit: None,
+    };
+
+    let rows = |out: &Value| -> Vec<String> {
+        let mut v: Vec<String> = out["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| {
+                format!(
+                    "{}|{}|{}|{}",
+                    m["file"].as_str().unwrap_or("?"),
+                    m["start_line"],
+                    m["end_line"],
+                    m["text"].as_str().unwrap_or("?")
+                )
+            })
+            .collect();
+        v.sort();
+        v
+    };
+
+    set_backend(Some("cli"));
+    let cli = struct_command(&db, &bin, &root, &project_id, "helper($A)", "ts", opts()).unwrap();
+    set_backend(Some("crate"));
+    let crate_out =
+        struct_command(&db, &bin, &root, &project_id, "helper($A)", "ts", opts()).unwrap();
+    set_backend(None);
+    let cli_rows = rows(&cli);
+    assert_eq!(
+        cli_rows,
+        rows(&crate_out),
+        "pattern matches must be backend-identical"
+    );
+    assert!(
+        cli_rows.iter().any(|r| r.contains("helper")),
+        "the fixture must produce matches: {cli_rows:?}"
+    );
+
+    // The -g fix, measured from the pre-wiring bug: globs reach both engines.
+    let globbed = |backend: &str| {
+        set_backend(Some(backend));
+        let out = struct_command(
+            &db,
+            &bin,
+            &root,
+            &project_id,
+            "helper($A)",
+            "ts",
+            StructOptions {
+                globs: vec!["src/alpha.ts".into()],
+                budget: 1500,
+                file_limit: None,
+            },
+        )
+        .unwrap();
+        set_backend(None);
+        rows(&out)
+    };
+    assert!(
+        !globbed("cli").is_empty(),
+        "-g must reach the CLI via --globs, not as a literal path"
+    );
+    assert_eq!(
+        globbed("cli"),
+        globbed("crate"),
+        "-g must agree across backends"
     );
 }

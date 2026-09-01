@@ -2,11 +2,12 @@
 
 use crate::ast_grep::{exec_ast_grep, ExecOpts};
 use crate::budget::apply_budget;
-use crate::chunker::parse_scan_stream;
+use crate::chunker::{parse_scan_stream, ScanStream};
 use crate::db::Db;
 use crate::errors::CortError;
 use crate::graph::{containment_join as graph_containment_join, get_neighbors, ContainingChunk};
 use crate::indexer::IndexError;
+use crate::scan;
 use crate::staleness::compute_stale;
 use rusqlite::params;
 use serde::Serialize;
@@ -40,6 +41,12 @@ pub fn preflight_pattern(
     lang: &str,
     paths: &[String],
 ) -> Result<(), CortError> {
+    // The crate backend validates the pattern itself -- parse failure and ERROR-node detection
+    // happen against the pattern text, so `paths` never mattered here; the CLI leg keeps them for
+    // its run. See scan.rs for why each in-process check mirrors the CLI's own behavior.
+    if scan::scan_backend()? == scan::Backend::Crate {
+        return scan::preflight_pattern_in_process(pattern, lang);
+    }
     let mut args = vec![
         "run".into(),
         "--debug-query=ast".into(),
@@ -84,36 +91,89 @@ pub fn run_pattern(
     bin: &str,
     pattern: &str,
     lang: &str,
-    paths: &[String],
+    root: &str,
+    globs: &[String],
     rewrite: Option<&str>,
     skip_preflight: bool,
 ) -> Result<RunPatternResult, CortError> {
     if !skip_preflight {
-        preflight_pattern(bin, pattern, lang, paths)?;
+        preflight_pattern(bin, pattern, lang, &[root.to_string()])?;
     }
-    let mut args = vec![
-        "run".into(),
-        "--json=stream".into(),
-        "--strictness".into(),
-        "ast".into(),
-        "--lang".into(),
-        lang.to_string(),
-        "-p".into(),
-        pattern.to_string(),
-    ];
-    if let Some(rw) = rewrite {
-        args.push("--rewrite".into());
-        args.push(rw.to_string());
-    }
-    args.extend(paths.iter().cloned());
-    let r = exec_ast_grep(bin, &exec_args(&args), ExecOpts::default())?;
-    if r.code != 0 && r.stdout.is_empty() && !r.stderr.trim().is_empty() {
-        return Err(CortError::new(
-            "ast_grep_run_failed",
-            json!({ "code": r.code, "detail": r.stderr.trim() }),
-        ));
-    }
-    let parsed = parse_scan_stream(&r.stdout);
+    let parsed = match scan::scan_backend()? {
+        scan::Backend::Crate => {
+            if rewrite.is_some() {
+                return Err(CortError::new(
+                    "rewrite_requires_cli_backend",
+                    json!({ "hint": "CORT_SCAN_BACKEND=cli runs `ast-grep run --rewrite`" }),
+                ));
+            }
+            let key = scan::pattern_lang(lang).ok_or_else(|| {
+                CortError::new(
+                    "unknown_lang",
+                    json!({ "lang": lang, "supported": ["rust", "ts", "tsx", "js", "jsx", "py"] }),
+                )
+            })?;
+            let root_path = Path::new(root);
+            let files = scan::search_files(root_path, globs, key)?;
+            ScanStream {
+                total: 0,
+                malformed: 0,
+                records: scan::run_pattern_in_process(pattern, lang, key, &files)?,
+            }
+        }
+        scan::Backend::Cli => {
+            let mut args = vec![
+                "run".into(),
+                "--json=stream".into(),
+                "--strictness".into(),
+                "ast".into(),
+                "--lang".into(),
+                lang.to_string(),
+                "-p".into(),
+                pattern.to_string(),
+            ];
+            if let Some(rw) = rewrite {
+                args.push("--rewrite".into());
+                args.push(rw.to_string());
+            }
+            // Globs go to the CLI's own `--globs` flag, matched relative to the search root --
+            // passing them positionally sent the glob string to the OS as a literal path and
+            // answered `ast_grep_run_failed: No such file or directory` for every `-g` query
+            // (measured 2026-09-01: the README's own `-g` hint never worked).
+            for g in globs {
+                // Same root-relative normalization the crate path does: a glob formed from an
+                // absolute path must match the CLI's walk-relative glob space.
+                let raw = g.as_str();
+                let negated = raw.starts_with('!');
+                let body = raw.strip_prefix('!').unwrap_or(raw);
+                let rel = std::path::Path::new(body)
+                    .strip_prefix(root)
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_else(|_| body.to_string());
+                args.push("--globs".into());
+                args.push(if negated { format!("!{rel}") } else { rel });
+            }
+            args.push(root.to_string());
+            // The glob base is the subprocess's cwd: pin it to the search root so `-g 'src/**'`
+            // means the same thing regardless of where the user invoked cort from, and so the CLI
+            // and crate backends match against the same relative space.
+            let r = exec_ast_grep(
+                bin,
+                &exec_args(&args),
+                ExecOpts {
+                    timeout_ms: None,
+                    cwd: Some(root.to_string().into()),
+                },
+            )?;
+            if r.code != 0 && r.stdout.is_empty() && !r.stderr.trim().is_empty() {
+                return Err(CortError::new(
+                    "ast_grep_run_failed",
+                    json!({ "code": r.code, "detail": r.stderr.trim() }),
+                ));
+            }
+            parse_scan_stream(&r.stdout)
+        }
+    };
     if parsed.total > 0 && (parsed.malformed as f64) / (parsed.total as f64) > MAX_MALFORMED_RATIO {
         return Err(CortError::new(
             "run_aborted_malformed",
@@ -262,12 +322,7 @@ pub fn struct_command(
             ));
         }
     }
-    let paths: Vec<String> = if globs.is_empty() {
-        vec![root_str.to_string()]
-    } else {
-        globs.to_vec()
-    };
-    let run = run_pattern(bin, pattern, lang, &paths, None, false)?;
+    let run = run_pattern(bin, pattern, lang, root_str, globs, None, false)?;
     let mut enriched = Vec::new();
     for m in run.matches {
         let file_path = rel_path(&m.file, root_str);
