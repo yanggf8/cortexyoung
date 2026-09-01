@@ -31,6 +31,7 @@
 | `c689080f` | **coverage-v2**：`unparsed` 不再翻布林值（改 advisory、`why: [unparsed_files]`）、`COVERAGE_METHOD` 升 v2、`reading`／skill／README 三處同時寫明「讀列，不要讀布林值」舆 `false` 能結論到什麼（含 K3 講漏的 >2MB、`dist`/`target` 下來源檔、±2 行容差），lean 多一列 advisory 說明。60 個隨機符號實測：本倉庫 true 從 60/60 變成 5/60。 |
 | `ad1caf65` | 宣告行不再被標成 `call`（`DECLARATION_KEYWORDS`；本倉庫 295 行、cct 6,693 行這類宣告不在任何 chunk 起點上）；`blind` 列的 `unread=-` 區分「沒算過」舆 0。 |
 | `9d95f8a9` | **lean 印的是它留下的列,不是它找到的列**(2026-09-01)。`no_edge=` 原本是截斷後陣列的長度,本倉庫 `Tally::add` 因此在 61 列上回報 `no_edge=20` 且毫無跡象。改成印 `gap_count`,並在 rows **之前**插一列 `miss	truncated	shown=N	of=M`。這是 `34a2ca10` 的同一個缺陷往上一層:那筆修了排序,沒修「有沒有被切」的揭露,而缺的正是 skill 唯一叫 agent 用的格式。同時把「完整性」從「可查證」的附屬性質升格成 `AGENTS.md` 的獨立目標,並更正目標句裡 7.7x／6.7x 的自相矛盾。測試 `a_truncated_gap_list_says_how_many_rows_it_dropped` |
+| `(本提交)` | **tsx 探針腳補齊**(`f3ef70fe`)。`tests/fixtures/tsx/widget.tsx` 打滿 tsx.yml 六條規則且全程 JSX(Tsx 與 Ts 唯一會分家的地方是文法,不含 JSX 的 tsx 檔等於沒測到差別)。第一次五腳齊跑:1,631 比對零分歧、無 SKIP;且 fixture 立刻抓到真分歧——`chunks.language` crate 猜 "TypeScript"、CLI 實吐 "Tsx",探針看不見(它不比 language 欄)、backend 逐列 diff 抓到。tsx 也進 backend 驗收樹,索引與 pattern 搜尋的 JSX 路徑兩 backend 等價在產品層蓋住 |
 | `(本提交)` | **pattern 查找直連**:`struct --pattern` 的 `run --strictness ast` 與 preflight 換成 in-process(`Pattern::try_new` + `MatchStrictness::Ast` + `Pattern::has_error`)。preflight 走了兩步彎路,都值得記:raw 文字 parse 查 ERROR 會**誤拒** `def $A($$$B):`(python 缺 body → raw-code ERROR,但 ast-grep pattern 機制判定為 MISSING、CLI 照收)——正確鏡像是 `Pattern::has_error()`,即 `--debug-query=ast` 那句 stderr 警告的來源。**順帶修了一個現行產品 bug**:`-g` 的 glob 被當字面路徑傳給 CLI,每個 `-g` 查詢都回 `ast_grep_run_failed: No such file or directory`(README 的 hint 從來沒生效)——glob 現在走 CLI `--globs` 旗標 / crate 的 override walk,且絕對路徑 glob 會正規化回 root 相對(兩臂同)。CLI 子程序 cwd 釘在搜尋根,glob 基準兩臂確定一致。走檔用 `ignore` crate(ast-grep 自己用的 walker,gitignore/hidden 語義同源)。`rewrite` 是 CLI-backend 面:產品從不傳,crate 臂 fail-closed 拒絕而非靜默忽略。驗收:5 個模式 × 兩 backend lean 輸出逐位元組相同(含 containment join 與 neighbors);`-g` 修復由 `struct_pattern_search_is_backend_identical_and_globs_reach_the_cli` 釘住 |
 | `(本提交)` | **掃描直連**:indexing 的 `scan --json=stream` 子程序換成 in-process crate(`src/scan.rs`,`ast-grep-core/config/language` 升為正式依賴)。parity 探針 1,604/1,604 位元組一致在前;驗收是兩場域全量索引逐列 diff:本倉庫 938 chunks/1,515 relationships、cct 2,580/1,839(= 文件記錄的 cct 基線)**兩個 backend 完全相同**。`CORT_SCAN_BACKEND=cli` 為逃生口(fake_ast_grep 失敗注入測試全走它,包括 spawn-failure 必須大聲的那條——crate backend 根本不 spawn,這正是功能)。掃描引擎身份進 `extractor_version`,翻 backend 或升 crate 都強制全量重索引。CLI 保留給 `struct --pattern`。npm ast-grep 在 indexing 熱路徑上正式退場 |
 | `(本提交)` | **`gap_count` 改為布林值讀的那個數**(2026-09-01)。布林值的列數是「提及列 + 解析丟掉列」,`gap_count` 卻只發布提及半邊,所以每個帶 drop 的 seed 都少報——只有 drop 的 seed 會發 `gap_count: 0` 配 `incomplete: true`。改為兩層合計,並新增 `mention_gap_count`(提及層自己的未截斷數):截斷判斷改讀它,含 drop 的總數不得驅動 truncated 宣稱,否則 3 列提及 + 2 drop 的 seed 會宣稱「truncated shown=3 of=5」——一份什麼都沒切的清單宣稱被切。lean 輸出契約不變(`no_edge=` 從頭到尾都是提及層數)。測試釘不變式 `gap_count == gap_cause_totals 總和 + dropped 長度`,與「drop 不會讓未被切的清單宣稱被切」 |
@@ -258,3 +259,31 @@ source 改了到部署生效差**約 8.75 小時**(要等 `install.sh` 跑)。�
 **資訊在**,而且把假清白換成了可行動的正確答案。**未證**的是 agent 會不會照做——它可能看到 10 列
 `receiver` 仍然說「可以刪」。那需要兩臂 agent eval,判分標準是**有沒有做出假清白宣稱**,不是答對幾個。
 `CortError::to_json` 可直接當 fixture,不必發明案例。
+
+## 6. 採用數據挖掘協定(2026-09-01 定稿,09-04 執行)
+
+已排程提醒(09-04 09:04,session-only)觸發,或任何 session 開口「挖 transcript」時照此執行。
+本文檔是權威來源;auto-memory 的 skill-adoption-mining-plan 與此同步。
+
+**歸屬**:`~/.local/share/cortexyoung/deploy.log`(時間 × sha)。**不要**用 description 快照反推——
+9d95f8a9 之後的 body-only 編輯對那個方法不可見。挖掘基準 sha:`208722c8`(2026-09-01 13:12 起,
+含三觸發面 + description 帶指令)。
+
+**配對(確定性,已在本 session 驗證)**:hook 每次觸發在 transcript 裡是 `type=attachment`——
+`attachment.type == "hook_additional_context"` 且 **`hookName` 以 `PreToolUse` 開頭**(必須過濾:
+superpowers 的 SessionStart hook 用同一個 attachment.type,naive grep 會把它的注入誤當攔截)。
+注入文字含 `--symbol '<name>'`;經 `parentUuid` 鄰接觸發的 Bash tool_use。採納判定看
+**tool_use 結構**(`"name":"Bash"` + `input.command` 含 `cort impact`),字串 contains 不是執行。
+
+**覆蓋面**:musecode 就是 claude(settings 只 override model 為 muse-spark),hook/skill/usage.db/
+session 位置與 Claude Code 同源——挖掘照掃 `~/.claude/projects`。Codex 只有 skill、沒有 hook。
+hook 是全域(`~/.claude/settings.json`),2026-09-01 下午已在 5 個非稽核 session 觸發過
+(hesocial 281 次 grep/rg、ft 164、travel 11、cc-router 15、home 5,**注入 0**——半天 551 次
+grep/rg 無呼叫點形狀機會,符合 1/200 機會率模型,不是 hook 壞了)。
+
+**基線(2026-09-01 收隊時)**:預設 cache `hook-suggest ok=485 / impact ok=14`(impact 多半是
+稽核 session 自己的)。挖掘看的是:機會來時有沒有被攔(注入數)、注入後有沒有 impact tool_use
+(採納)、`--coverage` 的 gap 列有沒有改變結論(效果);原始呼叫次數不是成功指標。
+
+**探針/規則變更後**:tsx fixture 已把 parity 探針補成五腳無 SKIP(1,631 比對零分歧);
+`Cargo.lock` 的 ast-grep-* 版本移動時重跑探針,backend 驗收測試兩場域重跑。
