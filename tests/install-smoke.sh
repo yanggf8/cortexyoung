@@ -574,6 +574,46 @@ else
   echo "  SKIP: codex not installed; loader visibility not exercised"
 fi
 
+echo "--- Test 18: the deploy log dates every change of the deployed bytes ---"
+DEPLOY_LOG_FILE="$XDG_DATA_HOME/cortexyoung/deploy.log"
+AG_DEST="$HOME/.claude/skills/ast-grep/SKILL.md"
+if [ -f "$DEPLOY_LOG_FILE" ]; then
+  pass "install writes a deploy log"
+else
+  fail "install writes a deploy log ($DEPLOY_LOG_FILE)"
+fi
+LINES_BEFORE="$(wc -l < "$DEPLOY_LOG_FILE" 2>/dev/null || echo 0)"
+bash "$INSTALL_SH" > /tmp/smoke18a.log 2>&1
+LINES_AFTER="$(wc -l < "$DEPLOY_LOG_FILE" 2>/dev/null || echo 0)"
+if [ "$LINES_BEFORE" = "$LINES_AFTER" ]; then
+  pass "a redeploy of identical bytes appends nothing (the log records changes, not runs)"
+else
+  fail "a redeploy appended a line: $LINES_BEFORE -> $LINES_AFTER"
+fi
+# A body-only edit is the case the transcript-grep method cannot see: the frontmatter description is
+# untouched, so only the sha moves. The log has to catch exactly this.
+DESC_BEFORE="$(sed -n 3p "$AG_DEST")"
+printf "\nA line appended by the smoke test.\n" >> "$REPO_ROOT/skills/ast-grep/SKILL.md"
+bash "$INSTALL_SH" > /tmp/smoke18b.log 2>&1
+git -C "$REPO_ROOT" checkout -- skills/ast-grep/SKILL.md 2>/dev/null || true
+LINES_EDITED="$(wc -l < "$DEPLOY_LOG_FILE" 2>/dev/null || echo 0)"
+if [ "$LINES_EDITED" -gt "$LINES_AFTER" ]; then
+  pass "a body-only edit appends a line even though the description never changed"
+else
+  fail "a body-only edit was not logged: $LINES_AFTER -> $LINES_EDITED"
+fi
+if [ "$(sed -n 3p "$AG_DEST")" = "$DESC_BEFORE" ]; then
+  pass "the description really was byte-identical across that edit (the blind spot is reproduced)"
+else
+  fail "fixture did not reproduce a body-only edit"
+fi
+LAST_LINE="$(tail -n 1 "$DEPLOY_LOG_FILE")"
+if printf "%s" "$LAST_LINE" | grep -qE "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:+-]+	[0-9a-f]{64}	/"; then
+  pass "each line is <iso8601> <sha256> <dest>, tab separated"
+else
+  fail "deploy log line shape: $LAST_LINE"
+fi
+
 # ── summary ──────────────────────────────────────────────────────
 echo ""
 echo "=== smoke results: $PASS passed, $FAIL failed ==="

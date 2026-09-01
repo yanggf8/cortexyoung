@@ -20,6 +20,7 @@ CORT_VERSION="0.1.0"
 MANAGED_SIGNATURE="managed by cortexyoung install.sh"
 MANIFEST_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/cortexyoung"
 MANIFEST_FILE="$MANIFEST_DIR/manifest"
+DEPLOY_LOG="$MANIFEST_DIR/deploy.log"
 SKILL_SRC_REL="skills/xgrep/SKILL.md"
 SKILL_DEST="$HOME/.claude/skills/xgrep/SKILL.md"
 CORT_HOME="$MANIFEST_DIR/cort"
@@ -271,6 +272,25 @@ remove_path_block() {
 }
 
 # ── manifest helpers ───────────────────────────────────────────────
+# Which bytes were in an agent home, and from when. Nothing else can answer that: the stamp records
+# the sha but no time, the manifest records neither, and a redeploy overwrites the mtime. Until this
+# log the only way to date an exposure was to grep the frontmatter description out of session
+# transcripts -- which works only when the description itself changed. On 2026-09-01 a body-only edit
+# moved the sha and left the description byte-identical, so that method went blind on the same day it
+# was first used. Append-only, one line per actual change, `<iso8601>\t<sha>\t<dest>`; `absent` is a
+# real sha value here, meaning the file was removed, because "no line" and "removed" are different
+# claims. Cross it with a session's start time to attribute that session to a version.
+record_deploy() {
+  local dest="$1" sha="$2" last=""
+  mkdir -p "$MANIFEST_DIR"
+  if [ -f "$DEPLOY_LOG" ]; then
+    last="$(awk -F'\t' -v d="$dest" '$3 == d { s = $2 } END { print s }' "$DEPLOY_LOG")"
+  fi
+  if [ "$last" != "$sha" ]; then
+    printf '%s\t%s\t%s\n' "$(date -Iseconds)" "$sha" "$dest" >> "$DEPLOY_LOG"
+  fi
+}
+
 record_manifest() {
   local key="$1" val="$2"
   mkdir -p "$MANIFEST_DIR"
@@ -408,6 +428,7 @@ deploy_skill_at() {
     info "installed skill: $dest"
   fi
   record_manifest "$key" "$dest"
+  record_deploy "$dest" "$src_hash"
 }
 
 # ═══════════════════════════════════════════════════════════════════
@@ -722,6 +743,7 @@ do_uninstall() {
       if skill_is_managed "$skill_ag"; then
         rm -f "$skill_ag" "$(skill_stamp_for "$skill_ag")"
         info "removed $skill_ag"
+        record_deploy "$skill_ag" "absent"
         rmdir "$(dirname "$skill_ag")" 2>/dev/null || true
       else
         info "skill_ast_grep no longer managed — skipping: $skill_ag"
@@ -729,6 +751,7 @@ do_uninstall() {
     elif [ -f "$AST_GREP_SKILL_DEST" ] && skill_is_managed "$AST_GREP_SKILL_DEST"; then
       rm -f "$AST_GREP_SKILL_DEST" "$(skill_stamp_for "$AST_GREP_SKILL_DEST")"
       info "removed $AST_GREP_SKILL_DEST"
+      record_deploy "$AST_GREP_SKILL_DEST" "absent"
       rmdir "$(dirname "$AST_GREP_SKILL_DEST")" 2>/dev/null || true
     else
       info "skill_ast_grep not managed — skipping"
@@ -738,6 +761,7 @@ do_uninstall() {
       if skill_is_managed "$skill_xg"; then
         rm -f "$skill_xg" "$(skill_stamp_for "$skill_xg")"
         info "removed $skill_xg"
+        record_deploy "$skill_xg" "absent"
         rmdir "$(dirname "$skill_xg")" 2>/dev/null || true
       else
         info "skill_xgrep no longer managed — skipping: $skill_xg"
@@ -745,6 +769,7 @@ do_uninstall() {
     elif [ -f "$SKILL_DEST" ] && skill_is_managed "$SKILL_DEST"; then
       rm -f "$SKILL_DEST" "$(skill_stamp_for "$SKILL_DEST")"
       info "removed $SKILL_DEST"
+      record_deploy "$SKILL_DEST" "absent"
       rmdir "$(dirname "$SKILL_DEST")" 2>/dev/null || true
     else
       info "skill_xgrep not managed — skipping"
@@ -758,6 +783,7 @@ do_uninstall() {
     if [ -f "$SKILL_DEST" ] && skill_is_managed "$SKILL_DEST"; then
       rm -f "$SKILL_DEST" "$(skill_stamp_for "$SKILL_DEST")"
       info "removed $SKILL_DEST (managed)"
+      record_deploy "$SKILL_DEST" "absent"
       rmdir "$(dirname "$SKILL_DEST")" 2>/dev/null || true
     else
       info "no manifest and skill not managed — nothing to remove for skill"
@@ -765,6 +791,7 @@ do_uninstall() {
     if [ -f "$AST_GREP_SKILL_DEST" ] && skill_is_managed "$AST_GREP_SKILL_DEST"; then
       rm -f "$AST_GREP_SKILL_DEST" "$(skill_stamp_for "$AST_GREP_SKILL_DEST")"
       info "removed $AST_GREP_SKILL_DEST (managed)"
+      record_deploy "$AST_GREP_SKILL_DEST" "absent"
       rmdir "$(dirname "$AST_GREP_SKILL_DEST")" 2>/dev/null || true
     fi
     remove_path_block

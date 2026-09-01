@@ -30,6 +30,8 @@
 | `8d43628c` | 修掉上面三項（含把註解放回 `ReceiverIndex`）、補 `a_std_module_qualifier_that_matches_a_local_module_file_still_attaches` 把 std／本地模組同名的洞**釘住**、並更正 README 對這個洞的講法（它說會回 `AMBIGUOUS`，實測是回 `INFERRED` 的假邊）。合併後的實測：本倉庫同一棵樹 1,386→1,401 條邊（+18 條 module-path 全對、6 條原本 AMBIGUOUS 被 `use` 收窄）、cct 1,839 條與五條鏈逐條不變。 |
 | `c689080f` | **coverage-v2**：`unparsed` 不再翻布林值（改 advisory、`why: [unparsed_files]`）、`COVERAGE_METHOD` 升 v2、`reading`／skill／README 三處同時寫明「讀列，不要讀布林值」舆 `false` 能結論到什麼（含 K3 講漏的 >2MB、`dist`/`target` 下來源檔、±2 行容差），lean 多一列 advisory 說明。60 個隨機符號實測：本倉庫 true 從 60/60 變成 5/60。 |
 | `ad1caf65` | 宣告行不再被標成 `call`（`DECLARATION_KEYWORDS`；本倉庫 295 行、cct 6,693 行這類宣告不在任何 chunk 起點上）；`blind` 列的 `unread=-` 區分「沒算過」舆 0。 |
+| `9d95f8a9` | **lean 印的是它留下的列,不是它找到的列**(2026-09-01)。`no_edge=` 原本是截斷後陣列的長度,本倉庫 `Tally::add` 因此在 61 列上回報 `no_edge=20` 且毫無跡象。改成印 `gap_count`,並在 rows **之前**插一列 `miss	truncated	shown=N	of=M`。這是 `34a2ca10` 的同一個缺陷往上一層:那筆修了排序,沒修「有沒有被切」的揭露,而缺的正是 skill 唯一叫 agent 用的格式。同時把「完整性」從「可查證」的附屬性質升格成 `AGENTS.md` 的獨立目標,並更正目標句裡 7.7x／6.7x 的自相矛盾。測試 `a_truncated_gap_list_says_how_many_rows_it_dropped` |
+| `(本提交)` | `install.sh` 加 `record_deploy` → `~/.local/share/cortexyoung/deploy.log`(`<iso8601>\t<sha>\t<dest>`,一行一次實際變更,移除記 `absent`)。動機是量測本身出現盲點:**skill 的曝光只能靠 session 開場 prompt 裡的 `description` 反推**,而 2026-09-01 那筆只改 body、`description` 逐位元組不變 —— 這個方法在第一次被用到的同一天就瞎了。smoke test 加 5 項(含把該盲點重現) |
 | `(本提交)` | `cort-evals recall-exp --venue DIR`：把決定 B／C 的反事實計數從 `/tmp` 的 Python 腳本收成 Rust 子命令（只讀文字、不開 DB、不重刻閘），並附上兩場域現況數字。 |
 
 量到的事實（決定優先序用的，不是敘事）：
@@ -209,3 +211,46 @@
 - Gate 慣例（兩 crate 分別跑）：`cargo fmt --all -- --check`、`cargo clippy --all-targets
   --all-features -- -D warnings`、`cargo test --locked --all-targets`、`bash tests/install-smoke.sh`；
   改過 `skills/*/SKILL.md` 要 `bash install.sh` 後比對三處 sha256 一致。
+
+## 5. 採用率與「這功能到底有沒有用」(2026-09-01 加)
+
+這一節記的是**量測方法本身的失敗**,不是功能。
+
+**曝光只能靠 `description` 反推,而這個方法已經瞎了。** skill 的 catalog description 在 session
+啟動時被快照進開場 prompt;body 是延遲載入。所以「某個 session 有沒有看到新 trigger」只能 grep 它
+的前幾行。實測(`996ec66e` 於 08-31 11:25 推):
+
+| session 啟動 | catalog 裡的 description |
+|---|---|
+| 08-31 12:10 → 18:07(7 個) | 舊 |
+| 08-31 20:10 → 09-01 09:23(7 個) | 新 |
+
+source 改了到部署生效差**約 8.75 小時**(要等 `install.sh` 跑)。而這個推論法只在 description 本身
+變了時才有效——`9d95f8a9` 改的是 body,`description` 逐位元組相同。所以才有了 `deploy.log`。
+
+**曝光後的實測:14 個 session,執行過的 `cort impact` = 0**(用 `"command"` 欄位數,不是文字提及;
+唯一有執行的是做這次稽核的那個 session)。**但分母未知**——沒人數過那 14 個 session 裡有幾次是
+真正該叫用的機會。所以現在是「0 / 未知」,還不能斷定路由失敗。
+
+**因此撤回一個原本要做的儀表。** 原計畫在 `command_log` 加 `skill_sha`,把每次叫用綁到 skill 版本。
+不做了:用量是**落後指標**,分子被需求(0.33-0.58%)結構性壓在接近零,再精緻的刻度也長不出分子。
+改成量**效果**——被用到時答案有沒有變對——那不依賴採用率。
+
+**效果的前半已經量到了,零成本。** `CortError::to_json` 的真實呼叫者全部被 receiver 閘拒絕:
+
+```
+臂 1  cort impact --symbol 'CortError::to_json' --depth 1 -f lean
+      # impact CortError::to_json depth=1 seeds=1 dependents=0 stale=false
+      → 一個乾淨、自信、錯誤的清白
+
+臂 2  同上 + --coverage
+      seed  CortError::to_json  mentions=12  no_edge=10  dropped=1  incomplete=true
+      miss  receiver  rust/src/render.rs:397    pretty(&err.to_json())
+      miss  receiver  rust/tests/errors.rs:13   err.to_json(),
+      miss  receiver  rust/tests/render.rs:403  assert_eq!(parsed, err.to_json());
+      → rank-0 的列逐條點名每個真實呼叫者,帶檔案與行號
+```
+
+**資訊在**,而且把假清白換成了可行動的正確答案。**未證**的是 agent 會不會照做——它可能看到 10 列
+`receiver` 仍然說「可以刪」。那需要兩臂 agent eval,判分標準是**有沒有做出假清白宣稱**,不是答對幾個。
+`CortError::to_json` 可直接當 fixture,不必發明案例。
