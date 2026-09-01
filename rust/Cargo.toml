@@ -28,4 +28,7 @@ sha2 = "0.10"
 clap = { version = "4", features = ["derive"] }
 
 [dev-dependencies]
+ast-grep-config = "0.45.2"
+ast-grep-core = "0.45.2"
+ast-grep-language = "0.45.2"
 tempfile = "3"
