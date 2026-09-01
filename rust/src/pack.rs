@@ -66,12 +66,21 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// SHA-256 of each pack file's raw bytes, in `pack_files()` order. 64 lowercase hex.
+/// SHA-256 of each pack file's raw bytes, in `pack_files()` order, mixed with the scan engine's
+/// identity. 64 lowercase hex.
+///
+/// The pack bytes alone stopped describing extraction when the scan moved in-process
+/// (2026-09-01): the same pack through the crate and through the CLI is parity-proven identical,
+/// but they are still different engines, and an engine that could flip via `CORT_SCAN_BACKEND`
+/// without moving this version would make staleness lie. The engine string changes whenever the
+/// `ast-grep-*` crate entries move; the parity probe is the discipline that re-answers
+/// byte-identity when it does.
 pub fn extractor_version() -> String {
     let mut h = Sha256::new();
     for f in pack_files() {
         let bytes = fs::read(&f).unwrap_or_else(|e| panic!("read pack file {}: {e}", f.display()));
         h.update(&bytes);
     }
+    h.update(crate::scan::SCAN_ENGINE.as_bytes());
     format!("{:x}", h.finalize())
 }

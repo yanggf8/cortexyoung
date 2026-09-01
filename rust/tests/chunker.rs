@@ -20,6 +20,36 @@ fn fake_ag() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_fake_ast_grep"))
 }
 
+fn with_vars(pairs: &[(&str, Option<&str>)], f: impl FnOnce()) {
+    // No env_guard here, exactly like `with_var` above: the tests that call this already hold
+    // ENV_LOCK for their whole body, and std Mutex is not reentrant -- taking it here is a
+    // guaranteed self-deadlock.
+    let prev: Vec<(String, Option<String>)> = pairs
+        .iter()
+        .map(|(k, _)| ((*k).to_string(), std::env::var(k).ok()))
+        .collect();
+    unsafe {
+        for (k, val) in pairs {
+            match val {
+                Some(v) => std::env::set_var(k, v),
+                None => std::env::remove_var(k),
+            }
+        }
+    }
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+    unsafe {
+        for (k, prev_v) in &prev {
+            match prev_v {
+                Some(v) => std::env::set_var(k, v),
+                None => std::env::remove_var(k),
+            }
+        }
+    }
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
+    }
+}
+
 fn with_var(key: &str, val: Option<&str>, f: impl FnOnce()) {
     let prev = std::env::var(key).ok();
     // SAFETY: tests in this file take ENV_LOCK so no other thread mutates env.
@@ -259,12 +289,17 @@ fn an_all_malformed_scan_stream_degrades_that_file_to_unparsed_and_never_throws(
     let _g = env_guard();
     let body = "export function ok() {}\n";
     let (_dir, abs) = tmp_file("m.ts", body);
-    with_var(
-        "FAKE_AG_MODE",
-        Some(&format!(
-            "emit:{}",
-            base64_encode(b"garbage\nalso garbage\n")
-        )),
+    with_vars(
+        &[
+            ("CORT_SCAN_BACKEND", Some("cli")),
+            (
+                "FAKE_AG_MODE",
+                Some(&format!(
+                    "emit:{}",
+                    base64_encode(b"garbage\nalso garbage\n")
+                )),
+            ),
+        ],
         || {
             let out = extract_file(ExtractFileArgs {
                 bin: fake_ag().to_str().unwrap(),
@@ -296,9 +331,14 @@ fn a_90_percent_malformed_scan_stream_still_indexes_the_surviving_record_scan_ne
         "metaVariables": { "single": { "NAME": { "text": "ok" } } },
     });
     let stream = format!("{}{}\n", "junk\n".repeat(19), good);
-    with_var(
-        "FAKE_AG_MODE",
-        Some(&format!("emit:{}", base64_encode(stream.as_bytes()))),
+    with_vars(
+        &[
+            ("CORT_SCAN_BACKEND", Some("cli")),
+            (
+                "FAKE_AG_MODE",
+                Some(&format!("emit:{}", base64_encode(stream.as_bytes()))),
+            ),
+        ],
         || {
             let out = extract_file(ExtractFileArgs {
                 bin: fake_ag().to_str().unwrap(),
@@ -326,51 +366,62 @@ fn a_scan_that_times_out_degrades_that_file_to_unparsed_instead_of_aborting() {
     let _g = env_guard();
     let body = "export function big() {}\n".repeat(500);
     let (_dir, abs) = tmp_file("huge.ts", &body);
-    with_var("FAKE_AG_MODE", Some("hang"), || {
-        let out = extract_file(ExtractFileArgs {
-            bin: fake_ag().to_str().unwrap(),
-            project_id: "p",
-            file_path: "huge.ts",
-            abs_path: abs.to_str().unwrap(),
-            source: &body,
-            timeout_ms: Some(200),
-        })
-        .expect("timeout must degrade, not throw");
-        assert!(
-            out.unparsed,
-            "a timed-out scan must degrade, never abort the index"
-        );
-        assert_eq!(out.chunks.len(), 1);
-        assert_eq!(out.chunks[0].chunk_source, "unparsed");
-        assert_eq!(out.chunks[0].content, body);
-        assert!(out.edges.is_empty());
-        assert!(
-            out.file_content_hash.len() == 64
-                && out
-                    .file_content_hash
-                    .chars()
-                    .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
-        );
-    });
+    with_vars(
+        &[
+            ("CORT_SCAN_BACKEND", Some("cli")),
+            ("FAKE_AG_MODE", Some("hang")),
+        ],
+        || {
+            let out = extract_file(ExtractFileArgs {
+                bin: fake_ag().to_str().unwrap(),
+                project_id: "p",
+                file_path: "huge.ts",
+                abs_path: abs.to_str().unwrap(),
+                source: &body,
+                timeout_ms: Some(200),
+            })
+            .expect("timeout must degrade, not throw");
+            assert!(
+                out.unparsed,
+                "a timed-out scan must degrade, never abort the index"
+            );
+            assert_eq!(out.chunks.len(), 1);
+            assert_eq!(out.chunks[0].chunk_source, "unparsed");
+            assert_eq!(out.chunks[0].content, body);
+            assert!(out.edges.is_empty());
+            assert!(
+                out.file_content_hash.len() == 64
+                    && out
+                        .file_content_hash
+                        .chars()
+                        .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+            );
+        },
+    );
 }
 
 /// C1-16
 #[test]
 fn a_spawn_failure_still_propagates_only_timeout_degrades_to_unparsed() {
-    let body = "export function x() {}\n";
-    let (_dir, abs) = tmp_file("x.ts", body);
-    let err = extract_file(ExtractFileArgs {
-        bin: "/nonexistent/ast-grep-binary",
-        project_id: "p",
-        file_path: "x.ts",
-        abs_path: abs.to_str().unwrap(),
-        source: body,
-        timeout_ms: None,
-    })
-    .expect_err(
-        "environment-wide failures must stay loud; per-file timeouts are the only silent degrade",
-    );
-    assert_eq!(err.code, "ast_grep_spawn_failed");
+    // CLI-backend property: the crate backend never spawns, so a bad binary cannot fail it --
+    // which is the point of the direct wiring. Pinned here so the loud failure survives on the
+    // path that still has a subprocess.
+    with_var("CORT_SCAN_BACKEND", Some("cli"), || {
+        let body = "export function x() {}\n";
+        let (_dir, abs) = tmp_file("x.ts", body);
+        let err = extract_file(ExtractFileArgs {
+            bin: "/nonexistent/ast-grep-binary",
+            project_id: "p",
+            file_path: "x.ts",
+            abs_path: abs.to_str().unwrap(),
+            source: body,
+            timeout_ms: None,
+        })
+        .expect_err(
+            "environment-wide failures must stay loud; per-file timeouts are the only silent degrade",
+        );
+        assert_eq!(err.code, "ast_grep_spawn_failed");
+    });
 }
 
 const CONST_FN: &str = concat!(
@@ -487,9 +538,14 @@ fn extract_emitted(body: &str, stream: &str) -> cort::chunker::ExtractResult {
     let _g = env_guard();
     let (_dir, abs) = tmp_file("emit.rs", body);
     let mut out: Option<cort::chunker::ExtractResult> = None;
-    with_var(
-        "FAKE_AG_MODE",
-        Some(&format!("emit:{}", base64_encode(stream.as_bytes()))),
+    with_vars(
+        &[
+            ("CORT_SCAN_BACKEND", Some("cli")),
+            (
+                "FAKE_AG_MODE",
+                Some(&format!("emit:{}", base64_encode(stream.as_bytes()))),
+            ),
+        ],
         || {
             out = Some(
                 extract_file(ExtractFileArgs {

@@ -14,6 +14,7 @@ pub mod indexer;
 pub mod pack;
 pub mod readings;
 pub mod render;
+pub mod scan;
 pub mod staleness;
 pub mod r#struct;
 pub mod usage;

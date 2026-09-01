@@ -26,9 +26,12 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 clap = { version = "4", features = ["derive"] }
-
-[dev-dependencies]
+# The scan hot path runs the rule pack in-process (src/scan.rs); the CLI stays only for
+# `struct --pattern` and as CORT_SCAN_BACKEND=cli. Pinned to the same minor the installed CLI
+# carries; `cargo update` moves these together with the pin check and the parity probe.
 ast-grep-config = "0.45.2"
 ast-grep-core = "0.45.2"
 ast-grep-language = "0.45.2"
+
+[dev-dependencies]
 tempfile = "3"

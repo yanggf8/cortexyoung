@@ -5,6 +5,7 @@
 use crate::ast_grep::{exec_ast_grep, ExecOpts};
 use crate::errors::CortError;
 use crate::pack::sgconfig;
+use crate::scan;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
@@ -437,37 +438,66 @@ pub struct ExtractFileArgs<'a> {
 }
 
 pub fn extract_file(args: ExtractFileArgs<'_>) -> Result<ExtractResult, CortError> {
-    let sg = sgconfig();
-    let sg_s = sg.to_str().expect("SGCONFIG path is UTF-8");
-    let r = match exec_ast_grep(
-        args.bin,
-        &["scan", "--json=stream", "--config", sg_s, args.abs_path],
-        ExecOpts {
-            timeout_ms: args.timeout_ms,
-            cwd: None,
-        },
-    ) {
-        Ok(r) => r,
-        Err(err) if err.code == "ast_grep_timeout" => {
-            return Ok(unparsed_result(
-                args.project_id,
-                args.file_path,
-                args.source,
-                0,
-            ));
+    // The scan backend is the one place the ast-grep subprocess can be replaced (parity-proven
+    // byte-identical; see src/scan.rs). The crate needs no binary, no PATH and no timeout; the CLI
+    // path is kept behind CORT_SCAN_BACKEND=cli and stays the failure-injection route for tests.
+    let ext = std::path::Path::new(args.file_path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("");
+    let parsed = match scan::scan_backend()? {
+        scan::Backend::Crate => {
+            let records = match scan::scan_in_process(args.source, ext) {
+                Ok(r) => r,
+                Err(err) if err.code == "scan_parse_failed" => {
+                    return Ok(unparsed_result(
+                        args.project_id,
+                        args.file_path,
+                        args.source,
+                        0,
+                    ));
+                }
+                Err(err) => return Err(err),
+            };
+            ScanStream {
+                total: records.len(),
+                malformed: 0,
+                records,
+            }
         }
-        Err(err) => return Err(err),
+        scan::Backend::Cli => {
+            let sg = sgconfig();
+            let sg_s = sg.to_str().expect("SGCONFIG path is UTF-8");
+            let r = match exec_ast_grep(
+                args.bin,
+                &["scan", "--json=stream", "--config", sg_s, args.abs_path],
+                ExecOpts {
+                    timeout_ms: args.timeout_ms,
+                    cwd: None,
+                },
+            ) {
+                Ok(r) => r,
+                Err(err) if err.code == "ast_grep_timeout" => {
+                    return Ok(unparsed_result(
+                        args.project_id,
+                        args.file_path,
+                        args.source,
+                        0,
+                    ));
+                }
+                Err(err) => return Err(err),
+            };
+            if r.code != 0 {
+                return Ok(unparsed_result(
+                    args.project_id,
+                    args.file_path,
+                    args.source,
+                    0,
+                ));
+            }
+            parse_scan_stream(&r.stdout)
+        }
     };
-    if r.code != 0 {
-        return Ok(unparsed_result(
-            args.project_id,
-            args.file_path,
-            args.source,
-            0,
-        ));
-    }
-
-    let parsed = parse_scan_stream(&r.stdout);
     if parsed.records.is_empty() {
         return Ok(unparsed_result(
             args.project_id,

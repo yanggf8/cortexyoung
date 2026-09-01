@@ -2,6 +2,8 @@
 
 `cort` is an offline code-intelligence CLI built on `ast-grep` (the only parser, never `sg`) and SQLite. One repo checkout, one SQLite index per project, no embeddings, no cloud DB, no servers.
 
+Since 2026-09-01 the indexing scan runs the rule pack **in-process** through the `ast-grep-core`/`-config`/`-language` crates (proven byte-identical to the CLI on 1,604 match comparisons plus row-identical full indexes of two venues); the `ast-grep` CLI is still provisioned by `install.sh` and stays the engine of `struct --pattern` lookup. `CORT_SCAN_BACKEND=cli` puts the subprocess back on the indexing path; the scan engine's identity is part of `extractor_version`, so flipping it or bumping the crates forces a full re-index.
+
 The repository is pure Rust: the product crate lives in [`rust/`](rust/), the dev-only agent-eval
 harness in [`evals/`](evals/), and no JavaScript, TypeScript or Python exists as executable code. Bash
 appears only in `install.sh` and `tests/install-smoke.sh`, where the platform requires a shell.

@@ -912,25 +912,31 @@ fn method_record_without_owner_is_malformed_extraction() {
     };
     let fake = fake_ag();
     let mode = format!("emit:{b64}");
-    with_vars(&[("FAKE_AG_MODE", Some(mode.as_str()))], || {
-        let dir = tempfile::tempdir().unwrap();
-        let abs = dir.path().join("lib.rs");
-        fs::write(&abs, "fn run() {}\n").unwrap();
-        let out = extract_file(ExtractFileArgs {
-            bin: fake.to_str().unwrap(),
-            project_id: "p",
-            file_path: "lib.rs",
-            abs_path: abs.to_str().unwrap(),
-            source: "fn run() {}\n",
-            timeout_ms: Some(5_000),
-        })
-        .unwrap();
-        assert!(!out
-            .chunks
-            .iter()
-            .any(|c| c.symbol_name.as_deref() == Some("run")));
-        assert!(out.malformed >= 1);
-    });
+    with_vars(
+        &[
+            ("CORT_SCAN_BACKEND", Some("cli")),
+            ("FAKE_AG_MODE", Some(mode.as_str())),
+        ],
+        || {
+            let dir = tempfile::tempdir().unwrap();
+            let abs = dir.path().join("lib.rs");
+            fs::write(&abs, "fn run() {}\n").unwrap();
+            let out = extract_file(ExtractFileArgs {
+                bin: fake.to_str().unwrap(),
+                project_id: "p",
+                file_path: "lib.rs",
+                abs_path: abs.to_str().unwrap(),
+                source: "fn run() {}\n",
+                timeout_ms: Some(5_000),
+            })
+            .unwrap();
+            assert!(!out
+                .chunks
+                .iter()
+                .any(|c| c.symbol_name.as_deref() == Some("run")));
+            assert!(out.malformed >= 1);
+        },
+    );
 }
 
 fn hash_pack_with_rust_yml(rust_yml: &[u8]) -> String {
@@ -942,6 +948,10 @@ fn hash_pack_with_rust_yml(rust_yml: &[u8]) -> String {
             h.update(fs::read(&f).unwrap());
         }
     }
+    // The engine identity is part of the real `extractor_version` (pack.rs) since the scan moved
+    // in-process; this reimplementation must hash the same bytes or the equality assertion below
+    // would compare a pack-only digest against a pack+engine digest.
+    h.update(cort::scan::SCAN_ENGINE.as_bytes());
     format!("{:x}", h.finalize())
 }
 
