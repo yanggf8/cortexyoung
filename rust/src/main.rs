@@ -21,9 +21,21 @@ use rusqlite::{params, Connection, OpenFlags};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
-const KNOWN_COMMANDS: [&str; 10] = [
-    "index", "status", "projects", "delete", "struct", "context", "impact", "read", "recall",
+// `hook-suggest` is here so its rows are recorded under their own name rather than `_unknown`:
+// whether the harness hook fires, and whether a fire is followed by an `impact` call, is the one
+// measurement that has a numerator. It is not a verb anyone types.
+const KNOWN_COMMANDS: [&str; 11] = [
+    "index",
+    "status",
+    "projects",
+    "delete",
+    "struct",
+    "context",
+    "impact",
+    "read",
+    "recall",
     "usage",
+    "hook-suggest",
 ];
 
 fn usage_value() -> Value {
@@ -40,6 +52,7 @@ fn usage_value() -> Value {
             "read": "cort read <file> [--start <line>] [--end <line>] [-f json|lean]",
             "recall": "cort recall <query> [--limit <n>] [--content full] [-f json|lean]",
             "usage": "cort usage [days] [-f json|lean]",
+            "hook-suggest": "cort hook-suggest  (PreToolUse hook: reads the harness payload on stdin, prints a suggestion or nothing; not a verb to type)",
         },
         "env": {
             "CORT_CACHE_DIR": "where indexes live (default ~/.cache/cortex-ng)",
@@ -423,6 +436,7 @@ fn dispatch(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError> 
         Some("read") => cmd_read(&args[1..], usage),
         Some("recall") => cmd_recall(&args[1..], usage),
         Some("usage") => cmd_usage(&args[1..], usage),
+        Some("hook-suggest") => cmd_hook_suggest(usage),
         other => Err(CortError::new(
             "unknown_command",
             json!({
@@ -431,6 +445,69 @@ fn dispatch(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError> 
             }),
         )),
     }
+}
+
+/// A PreToolUse hook, not a verb anyone types. It reads the harness's hook payload on stdin and,
+/// when the shell command about to run is a caller-set search, hands back one line of context
+/// naming the query that answers it.
+///
+/// Three rules, each measured rather than assumed:
+///
+/// * It never blocks and never denies. The agent is right about `rg` most of the time -- 409
+///   searches in the sampled sessions, ~6 of them caller-set work -- so anything stronger than a
+///   suggestion would be wrong far more often than right.
+/// * Silence is the default. No fire, no output, exit 0. A hook that prints on every search is
+///   noise, and noise is what gets ignored.
+/// * It stays silent when this project has no index. Suggesting a query that can only answer
+///   `no_seed_resolved` would spend the agent's turn to tell it nothing, and would make the
+///   suggestion itself untrustworthy the first time it happened.
+fn cmd_hook_suggest(usage: &mut UsageEvent) -> Result<Emit, CortError> {
+    usage.args_summary = "hook".into();
+    let mut payload = String::new();
+    let _ = std::io::Read::read_to_string(&mut std::io::stdin(), &mut payload);
+    let quiet = || {
+        Ok(Emit {
+            payload: json!({}),
+            format: Format::Lean,
+            render_command: Some("hook-suggest"),
+        })
+    };
+    let Ok(v) = serde_json::from_str::<Value>(&payload) else {
+        return quiet();
+    };
+    let Some(command) = v
+        .get("tool_input")
+        .and_then(|i| i.get("command"))
+        .and_then(Value::as_str)
+    else {
+        return quiet();
+    };
+    let Some(hit) = cort::hook::suggests_impact(command) else {
+        return quiet();
+    };
+    let root = cwd();
+    let real = std::fs::canonicalize(&root).unwrap_or(root);
+    if !db_path_for(&real.to_string_lossy()).exists() {
+        return quiet();
+    }
+    let context = format!(
+        "cort has an index for this project. `cort impact --symbol '{}' --depth 1 --coverage -f lean` \
+answers who calls it in one call, and `--coverage` lists what the enumeration could not see -- which \
+a grep cannot tell you. Use it before concluding nothing else uses this; keep the grep for anything \
+literal.",
+        hit.symbol
+    );
+    Ok(Emit {
+        payload: json!({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "additionalContext": context,
+            },
+            "suppressOutput": true,
+        }),
+        format: Format::Json,
+        render_command: Some("hook-suggest"),
+    })
 }
 
 fn cmd_index(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError> {

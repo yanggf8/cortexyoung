@@ -7,6 +7,7 @@ pub mod db;
 pub mod errors;
 pub mod fts;
 pub mod graph;
+pub mod hook;
 pub mod impact;
 pub mod incremental;
 pub mod indexer;

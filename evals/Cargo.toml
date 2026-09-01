@@ -9,6 +9,9 @@ description = "Agent evaluation harness for cort. Dev-only tooling: nothing here
 # tree. serde_json is already a product dependency, so this crate adds no new vendored crate.
 [dependencies]
 serde_json = "1"
+# The matcher lives in the product crate so the measured rule and the installed rule are one rule.
+# This direction only: AGENTS.md forbids the product depending on the harness.
+cort = { path = "../rust" }
 
 [dev-dependencies]
 tempfile = "3"
