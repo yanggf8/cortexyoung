@@ -51,6 +51,7 @@ const RUN_AGENTS_FLAGS: &[&str] = &[
 ];
 const VERIFY_IMPACT_FLAGS: &[&str] = &["--repo", "--depth", "--symbols"];
 const RECALL_EXP_FLAGS: &[&str] = &["--venue", "--top"];
+const HOOK_PROBE_FLAGS: &[&str] = &["--claude-dir", "--codex-dir", "--examples"];
 const SUMMARIZE_FLAGS: &[&str] = &["--strict"];
 const DEMAND_FLAGS: &[&str] = &[
     "--claude-dir",
@@ -61,12 +62,14 @@ const DEMAND_FLAGS: &[&str] = &[
 ];
 
 const USAGE_TOP: &str =
-    "usage: cort-evals <run-agents|verify-impact|summarize|demand|recall-exp> [options]";
+    "usage: cort-evals <run-agents|verify-impact|summarize|demand|recall-exp|hook-probe> [options]";
 const USAGE_RUN_AGENTS: &str = "usage: cort-evals run-agents --venue DIR [--tasks FILE] [--only ID[,ID...]] [--arms a,b] [--max-turns N] [--config-dir DIR] [--cache-dir DIR] [--jail-dir DIR] [--jail] [--out DIR] [--concurrency N] [--delay-secs N]";
 const USAGE_VERIFY_IMPACT: &str =
     "usage: cort-evals verify-impact --repo DIR --symbols A,B [--depth N]";
 const USAGE_SUMMARIZE: &str = "usage: cort-evals summarize [--strict] rows.json [rows.json...]";
 const USAGE_DEMAND: &str = "usage: cort-evals demand [--claude-dir DIR] [--codex-dir DIR] [--exclude a,b,c] [--out FILE] [--show]";
+const USAGE_HOOK_PROBE: &str =
+    "usage: cort-evals hook-probe [--claude-dir DIR] [--codex-dir DIR] [--examples N]  (replays the routing rule over transcripts already on disk; no model calls)";
 const USAGE_RECALL_EXP: &str =
     "usage: cort-evals recall-exp --venue DIR [--top N]  (text-side counterfactual; no cort index needed)";
 
@@ -628,6 +631,36 @@ fn recall_exp_main(argv: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+fn hook_probe_main(argv: &[String]) -> Result<(), String> {
+    guard_options(argv, HOOK_PROBE_FLAGS, USAGE_HOOK_PROBE)?;
+    let Ok(home) = std::env::var("HOME") else {
+        return Err("HOME is unset: pass --claude-dir and --codex-dir explicitly".to_string());
+    };
+    let examples: usize = at(argv, "--examples", "40")
+        .parse()
+        .map_err(|_| "--examples must be a number".to_string())?;
+    let dirs = vec![
+        (
+            "claude",
+            std::path::PathBuf::from(at(
+                argv,
+                "--claude-dir",
+                &format!("{home}/.claude/projects"),
+            )),
+        ),
+        (
+            "codex",
+            std::path::PathBuf::from(at(argv, "--codex-dir", &format!("{home}/.codex/sessions"))),
+        ),
+    ];
+    let report = cort_evals::hook::probe(&dirs, examples);
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&report).expect("the report is serialisable")
+    );
+    Ok(())
+}
+
 fn summarize_main(argv: &[String]) -> Result<(), String> {
     guard_options(argv, SUMMARIZE_FLAGS, USAGE_SUMMARIZE)?;
     // Accepts several row files so a multi-run experiment aggregates in one call, which is what
@@ -779,6 +812,7 @@ fn main() {
         Some("summarize") => summarize_main(&argv[1..]),
         Some("demand") => demand_main(&argv[1..]),
         Some("recall-exp") => recall_exp_main(&argv[1..]),
+        Some("hook-probe") => hook_probe_main(&argv[1..]),
         other => {
             // Asking how to use the tool is never an error and never a run — including at the top
             // level, which is where F-17 stopped. `wants_help` already answered true for a bare
@@ -1037,6 +1071,7 @@ mod whitelist_coverage {
                         .chain(SUMMARIZE_FLAGS.iter())
                         .chain(DEMAND_FLAGS.iter())
                         .chain(RECALL_EXP_FLAGS.iter())
+                        .chain(HOOK_PROBE_FLAGS.iter())
                         .any(|f| *f == name.as_str());
                     if !known {
                         orphans.push(format!("{name} (src/main.rs:{})", n + 1));
