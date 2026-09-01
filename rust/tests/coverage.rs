@@ -687,3 +687,51 @@ fn a_brace_import_reports_each_name_the_extractor_could_not_resolve() {
         "alpha_fn is reached through a resolved call in the same file: {dropped_alpha:?}"
     );
 }
+
+/// `gap_count` must be the number `enumeration_may_be_incomplete` reads. The boolean's row count is
+/// `mention rows + unresolved rows`; until 2026-09-01 `gap_count` published only the mention half, so
+/// every seed carrying a dropped resolution under-reported by exactly that drop's size -- and a seed
+/// whose drops carried the whole signal would publish `gap_count: 0` under `incomplete: true`, a
+/// count saying "nothing" under a flag saying "something". This fixture carries one of each: the
+/// `t.take` receiver call is refused by the gate (the drop), and `take`'s own declarations are
+/// definition-cause mention rows.
+#[test]
+fn gap_count_is_the_number_the_boolean_reads_not_the_mention_layers_alone() {
+    let (_d, root, db, project_id, bin) = indexed(&[
+        (
+            "src/lib.rs",
+            concat!(
+                "pub struct T;\nimpl T { pub fn take(&self) -> u32 { 1 } }\n",
+                "pub struct U;\nimpl U { pub fn take(&self) -> u32 { 2 } }\n",
+            ),
+        ),
+        (
+            "src/use.rs",
+            "use crate::lib::T;\nfn go(t: &T) -> u32 { t.take() }\n",
+        ),
+    ]);
+    let cov = coverage_of(&db, &project_id, &root, &bin, "T::take");
+    let seed = &cov["seeds"][0];
+    let dropped = seed["extracted_but_unresolved"].as_array().unwrap().len();
+    assert_eq!(
+        dropped, 1,
+        "the refused receiver call, and nothing else: {cov}"
+    );
+    let cause_total: u64 = seed["gap_cause_totals"]
+        .as_object()
+        .unwrap()
+        .values()
+        .map(|v| v.as_u64().unwrap())
+        .sum();
+    assert_eq!(
+        seed["mention_gap_count"],
+        json!(cause_total),
+        "the mention layer's own count is the sum of its cause totals: {cov}"
+    );
+    assert_eq!(
+        seed["gap_count"],
+        json!(cause_total + dropped as u64),
+        "gap_count is the number the boolean reads -- both layers, never the mention half alone: {cov}"
+    );
+    assert_eq!(seed["enumeration_may_be_incomplete"], json!(true));
+}

@@ -368,13 +368,21 @@ that killed the alternative (Rust `use`/`mod` import edges).
    still says `unparsed_files`, and the `lean` output carries the sentence
    `blind unparsed advisory: text-scanned, no edges; does not flip incomplete`.
 
-   **The printed list is capped at 20 rows, and lean says when it cut them (2026-09-01).** `gap_count`
-   in JSON has always been every row found, but `lean` printed the length of the capped array as
-   `no_edge=`, so a reader of the format the routing skill mandates saw `no_edge=20` over 51 rows and
-   had no way to know. `no_edge=` is now the full count and a `miss	truncated	shown=N	of=M` row
-   precedes the rows themselves. Rows are ordered by cause severity, so a cut always drops the least
-   severe first; `-f json` returns the remainder. Pinned by
-   `a_truncated_gap_list_says_how_many_rows_it_dropped` (`rust/tests/render.rs`).
+   **The printed list is capped at 20 rows, and lean says when it cut them (2026-09-01).** `lean`
+   printed the length of the capped array as `no_edge=`, so a reader of the format the routing skill
+   mandates saw `no_edge=20` over 51 rows and had no way to know. `no_edge=` is now the uncapped
+   mention-layer count and a `miss	truncated	shown=N	of=M` row precedes the rows themselves. Rows are
+   ordered by cause severity, so a cut always drops the least severe first; `-f json` returns the
+   remainder. Pinned by `a_truncated_gap_list_says_how_many_rows_it_dropped` (`rust/tests/render.rs`).
+
+   **`gap_count` is the number the boolean reads (2026-09-01).** The row count behind
+   `enumeration_may_be_incomplete` is `mention rows + dropped resolutions`; `gap_count` published
+   only the mention half, so every seed carrying a dropped resolution under-reported by that drop's
+   size. It now counts both layers, and `mention_gap_count` publishes the mention layer's own
+   uncapped figure (the truncation math reads it -- a total that includes drops must not drive the
+   truncated claim, or a list nothing was cut from would announce a cut). Pinned by
+   `gap_count_is_the_number_the_boolean_reads_not_the_mention_layers_alone` (`rust/tests/coverage.rs`)
+   and `dropped_resolutions_do_not_make_the_mention_list_look_truncated` (`rust/tests/render.rs`).
 
    **L2 sees imports too (2026-09-01).** `extracted_but_unresolved` used to query `rel_type = 'calls'`
    only, so an import the pack extracted and resolution dropped was indistinguishable from one the

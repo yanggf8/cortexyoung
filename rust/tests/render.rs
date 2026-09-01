@@ -533,3 +533,44 @@ fn an_import_drop_row_prints_a_dash_for_its_missing_symbol_and_one_line_per_row(
         "dash for the missing symbol, newlines collapsed: {out}"
     );
 }
+
+/// `gap_count` is the number the boolean reads -- mention rows plus dropped resolutions -- so it
+/// must not drive the truncation claim: a seed with three printed mention rows and two dropped
+/// resolutions would announce "truncated shown=3 of=5" over a mention list nothing was cut from.
+/// `mention_gap_count` is the uncapped mention-layer figure that claim is derived from.
+#[test]
+fn dropped_resolutions_do_not_make_the_mention_list_look_truncated() {
+    let rows: Vec<Value> = (0..3)
+        .map(|i| {
+            json!({
+                "file_path": "src/a.rs", "line": i + 1, "cause": "mention",
+                "occurrences": 1, "text": "beta_fn(x);",
+            })
+        })
+        .collect();
+    let payload = json!({
+        "symbol": "x", "depth": 1, "seed_count": 1, "seeds": [], "dependent_count": 0,
+        "unresolved": [], "index_is_stale": false,
+        "coverage": {
+            "method": "coverage-v2",
+            "seeds": [{
+                "symbol": "x", "mentions_on_disk": 9, "gap_count": 5, "mention_gap_count": 3,
+                "mentions_truncated": false, "mentions_without_edge": rows,
+                "extracted_but_unresolved": [
+                    {"file_path": "src/b.rs", "line": 8, "from_symbol": "caller",
+                     "raw_target": "x", "via": "import"},
+                    {"file_path": "src/c.rs", "line": 12, "from_symbol": "caller2",
+                     "raw_target": "x"},
+                ],
+                "enumeration_may_be_incomplete": true,
+            }],
+        },
+    });
+    let out = render(Some("impact"), Format::Lean, &payload);
+    assert!(out.contains("no_edge=3"), "{out}");
+    assert!(out.contains("dropped=2"), "{out}");
+    assert!(
+        !out.contains("truncated"),
+        "nothing was cut from the mention list; counting the drops in would fake a cut: {out}"
+    );
+}

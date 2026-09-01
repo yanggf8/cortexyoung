@@ -140,12 +140,20 @@ fn coverage_lines(payload: &Value) -> Vec<String> {
     for seed in seeds {
         let no_edge = arr(seed, "mentions_without_edge");
         let dropped = arr(seed, "extracted_but_unresolved");
-        // `mentions_without_edge` is capped at `MAX_GAP_ROWS`; `gap_count` is every row that was
-        // found. Printing the capped length told a lean reader -- the only reader the routing skill
-        // creates -- that it had seen the whole list, which is the one thing "read the rows, not the
-        // boolean" needs to be true. Older payloads without the field fall back to the rows in hand:
-        // a dash there would read as "no gaps".
-        let gap_total = seed["gap_count"].as_u64().unwrap_or(no_edge.len() as u64);
+        // `mentions_without_edge` is capped at `MAX_GAP_ROWS`; `mention_gap_count` is every
+        // mention-layer row that was found. Printing the capped length told a lean reader -- the
+        // only reader the routing skill creates -- that it had seen the whole list, which is the one
+        // thing "read the rows, not the boolean" needs to be true. `gap_count` is deliberately NOT
+        // the fallback of first resort any more: it now counts dropped resolutions too (it is the
+        // number the boolean reads), and a total that includes them must not drive the truncation
+        // claim, or a seed with three printed mention rows and two drops would announce "truncated
+        // shown=3 of=5" over a list nothing was cut from. Older payloads without the new field fall
+        // back through `gap_count` (which was L1-only before 2026-09-01) and then the rows in hand;
+        // a dash would read as "no gaps".
+        let gap_total = seed["mention_gap_count"]
+            .as_u64()
+            .or_else(|| seed["gap_count"].as_u64())
+            .unwrap_or(no_edge.len() as u64);
         out.push(format!(
             "seed\t{}\tmentions={}\tno_edge={}\tdropped={}\tincomplete={}",
             as_str(seed, "symbol"),

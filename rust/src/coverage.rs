@@ -728,8 +728,8 @@ pub fn coverage_for(
         let unresolved = extracted_but_unresolved(db, project_id, seed, &name)?;
         let mut causes: Vec<(&str, usize)> = by_cause.into_iter().collect();
         causes.sort_by(|a, b| a.0.cmp(b.0));
-        // Rows, not mentions: with duplicates folded, `gap_count` counts distinct
-        // (file, line, cause) findings.
+        // Rows, not mentions: with duplicates folded, the mention layer's contribution to `gap_count`
+        // counts distinct (file, line, cause) findings.
         let gap_rows = gap_rows_sorted.len() + unresolved.len();
         let mut reasons: Vec<&str> = Vec::new();
         if !gap_rows_sorted.is_empty() {
@@ -755,7 +755,15 @@ pub fn coverage_for(
             "mentions_on_disk": mention_count,
             "mentions_covered_by_edge": covered_count,
             "mentions_truncated": gap_rows_sorted.len() > MAX_GAP_ROWS,
-            "gap_count": gap_rows_sorted.len(),
+            // The number the boolean reads: both layers. Until 2026-09-01 this was the mention
+            // layer's count alone, so a seed whose entire signal was a dropped resolution published
+            // `gap_count: 0` beside `enumeration_may_be_incomplete: true` -- a count that says
+            // "nothing" under a flag that says "something" is the false-safe shape this screen
+            // exists to prevent. The mention layer's own count stays published beside it, because
+            // the truncation math (`mentions_without_edge` is capped) needs the uncapped L1 figure
+            // and must not be asked to subtract its way to it.
+            "mention_gap_count": gap_rows_sorted.len(),
+            "gap_count": gap_rows,
             "files_with_no_edge_at_all": orphan_files,
             "generated_files_with_gaps": artifact_files,
             "gap_cause_totals": Value::Object(
