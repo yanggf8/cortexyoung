@@ -493,8 +493,51 @@ fn dispatch(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError> 
 /// `args_summary` carries, so one parser reads the whole column.
 /// `v: 2` adds `harness`. A v1 row predates the field and is not attributable to any harness --
 /// `unspecified`, never defaulted to the one that happened to be wired first.
-fn hook_args(outcome: &str, harness: &str) -> String {
-    json!({ "v": 2, "hook": outcome, "harness": harness }).to_string()
+///
+/// `declared` is recorded only when it disagrees with `harness`, because a disagreement is the
+/// finding: one settings file can be read by more than one harness, and the flag then names the
+/// installer's intent rather than the process that actually ran.
+fn hook_args(outcome: &str, harness: &str, declared: Option<&str>) -> String {
+    let mut v = json!({ "v": 2, "hook": outcome, "harness": harness });
+    if let Some(d) = declared {
+        v["harness_declared"] = json!(d);
+    }
+    v.to_string()
+}
+
+/// Which harness is running this hook, taken from what the harness said about itself.
+///
+/// The installer's `--harness` flag is an intent, and on 2026-09-02 that intent was measured wrong:
+/// Grok reads `~/.claude/settings.json` for Claude Code compatibility, so the entry `install.sh`
+/// wired there fires inside Grok too and carries `--harness claude-code` with it. Every one of those
+/// rows would have been counted as a Claude Code injection with no Claude transcript to match.
+///
+/// `transcript_path` settles it without guessing: it is the harness naming its own session file,
+/// not an environment variable that happens to be set. When it names a harness we know, that wins
+/// over the flag and the flag is recorded alongside so the disagreement stays visible. When it
+/// names nothing we recognise, the flag stands -- a declared value is still better than none.
+fn harness_of(payload: &Value, declared: &str) -> (String, Option<String>) {
+    let path = payload
+        .get("transcript_path")
+        .or_else(|| payload.get("transcriptPath"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let observed = if path.contains("/.grok/") {
+        Some("grok")
+    } else if path.contains("/.codex/") {
+        Some("codex")
+    } else if path.contains("/.claude/") {
+        Some("claude-code")
+    } else if path.contains("/.kimi-code/") {
+        Some("kimi-code")
+    } else {
+        None
+    };
+    match observed {
+        Some(o) if o != declared => (o.to_string(), Some(declared.to_string())),
+        Some(o) => (o.to_string(), None),
+        None => (declared.to_string(), None),
+    }
 }
 
 /// A PreToolUse hook, not a verb anyone types. It reads the harness's hook payload on stdin and,
@@ -512,7 +555,7 @@ fn hook_args(outcome: &str, harness: &str) -> String {
 ///   `no_seed_resolved` would spend the agent's turn to tell it nothing, and would make the
 ///   suggestion itself untrustworthy the first time it happened.
 fn cmd_hook_suggest(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError> {
-    let harness = HookSuggestArgs::try_parse_from(args.iter())
+    let declared = HookSuggestArgs::try_parse_from(args.iter())
         .ok()
         .and_then(|a| a.harness)
         .unwrap_or_else(|| "unspecified".to_string());
@@ -523,7 +566,7 @@ fn cmd_hook_suggest(args: &[String], usage: &mut UsageEvent) -> Result<Emit, Cor
     // number. The outcome splits the row by what the hook did, which makes `hit` a second source
     // for the numerator and names the one silence that is a missed opportunity rather than a
     // correct pass: `no_index`, the rule fired on a project cort has never indexed.
-    usage.args_summary = hook_args("no_payload", &harness);
+    usage.args_summary = hook_args("no_payload", &declared, None);
     let mut payload = String::new();
     let _ = std::io::Read::read_to_string(&mut std::io::stdin(), &mut payload);
     let quiet = || {
@@ -543,7 +586,9 @@ fn cmd_hook_suggest(args: &[String], usage: &mut UsageEvent) -> Result<Emit, Cor
     else {
         return quiet();
     };
-    usage.args_summary = hook_args("no_shape", &harness);
+    let (harness, declared_differs) = harness_of(&v, &declared);
+    let harness_args = |outcome: &str| hook_args(outcome, &harness, declared_differs.as_deref());
+    usage.args_summary = harness_args("no_shape");
     let Some(hit) = cort::hook::suggests_impact(command) else {
         return quiet();
     };
@@ -553,7 +598,7 @@ fn cmd_hook_suggest(args: &[String], usage: &mut UsageEvent) -> Result<Emit, Cor
     // file test and the hook then told the agent `cort has an index for this project` on a tree
     // where `impact` can only answer `no_seed_resolved / stale=true`. That is the exact failure
     // the doc comment above forbids, and it was live on this machine on 2026-09-02.
-    usage.args_summary = hook_args("no_index", &harness);
+    usage.args_summary = harness_args("no_index");
     let state = index_state();
     if state == IndexState::Missing {
         return quiet();
@@ -564,7 +609,7 @@ fn cmd_hook_suggest(args: &[String], usage: &mut UsageEvent) -> Result<Emit, Cor
     // injected line said only "cort has an index", which is the half of the sentence that flatters
     // the tool. The outcome is recorded separately so the mining can tell the two apart.
     let stale = state == IndexState::BehindHead;
-    usage.args_summary = hook_args(if stale { "hit_stale" } else { "hit" }, &harness);
+    usage.args_summary = harness_args(if stale { "hit_stale" } else { "hit" });
     let context = format!(
         "cort has an index for this project{}. `cort impact --symbol '{}' --depth 1 --coverage -f lean` \
 answers who calls it in one call, and `--coverage` lists what the enumeration could not see -- which \

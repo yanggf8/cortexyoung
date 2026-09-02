@@ -338,3 +338,60 @@ harness,而在這裡猜錯等於靜默污染量測。`hook_outcomes_at` 多收�
 測試:`rust/tests/cli.rs` 一條(claude-code 記到、grok 被隔開、無標記的不被冒領、無 filter 時
 `cort usage` 不受影響)、`evals/tests/adopt.rs` 兩條(別的 harness 阻擋比較而非灌水、無標記的不被
 記到被挖的 harness 頭上)。全樹 337 + evals 92 + smoke 95,零失敗。
+
+## 11. Grok 不用裝——它早就在跑了,而且被記成 Claude Code(2026-09-02 16:50)
+
+任務是「把 cort 裝進 Grok」。探針的結論是**不要裝**,理由不是不相容,而是相反:它已經接上了。
+
+### 探到什麼
+
+`~/.grok/config.toml` 接一個 dump 用的 PreToolUse hook,跑一次真實 grok 指令:
+
+- **payload 相容**:Grok 同時提供 camelCase 與 snake_case,`tool_input.command` 就在那裡,
+  `cort hook-suggest` 的 parser 一行都不用改。
+- **注入通道相同**:`hookSpecificOutput.additionalContext` 落在 `chat_history.jsonl`,型別 `user`、
+  `synthetic_reason: "system_reminder"`,包成
+  `<system-reminder>Context from PreToolUse hook '<來源>':…</system-reminder>`。另外三種形狀實測:
+  `systemMessage` 只進 UI 事件流 `updates.jsonl`,頂層 `additionalContext` 與 `message` 哪裡都沒去。
+- **來源有兩個。** 在 `~/.grok/hooks/cort.json` 放一份之後,同一輪出現**兩段一模一樣**的
+  system-reminder,標籤分別是 `global/cort` 和 **`global/settings`**。
+
+`global/settings` 是關鍵:Grok 為了相容 Claude Code,**會讀 `~/.claude/settings.json`**
+(README 的相容表列了 skills / agents / plugins / MCP / CLAUDE.md / settings)。也就是說
+`install.sh` 在 10:57 寫進 Claude settings.json 的那一筆,**從那一刻起就在 Grok 裡觸發了**。
+
+刪掉 `~/.grok/hooks/cort.json` 後重測,注入數回到 1。**Grok 的正確安裝步驟是:不做任何事。**
+裝了反而是跨 harness 版本的「一份複製觸發一次」。
+
+### 這打穿了 §10 的歸屬設計
+
+§10 說 harness 由 installer 明示,理由是「只有 installer 知道自己在接哪個 harness」。這句話在
+一個設定檔只被一個 harness 讀時成立,而它今天被證明不成立:同一筆 entry 帶著
+`--harness claude-code` 在 Grok 裡跑,於是**每一次 Grok 觸發都會被記成 Claude Code 的注入,而
+Claude 的 transcript 裡沒有對應**。§10 修掉的污染,由另一條路徑照樣進來了。
+
+### 改法:問 harness 自己,不是問 installer 的意圖
+
+`transcript_path` 是 harness 指名自己的 session 檔——不是環境變數那種猜測:
+
+| harness | transcript_path |
+|---|---|
+| Claude Code | `~/.claude/projects/**/*.jsonl` |
+| Grok | `~/.grok/sessions/**/updates.jsonl` |
+| Codex | `~/.codex/sessions/**/rollout-*.jsonl` |
+
+`harness_of` 以它判定;認得就**壓過**旗標,並把旗標記進 `harness_declared` 讓分歧留下痕跡;
+認不得就沿用旗標(有宣告總比沒有好)。`no_payload` 仍只有旗標可用——那一列連 payload 都沒有。
+
+實地驗證:修好後同一個窗,`claude-code` 視角回報 `other_harness: 16`、
+`comparable_to_injections: false`。修之前那 16 列會被算成 Claude Code 的注入。
+
+### 基線第四次往後移
+
+新起點 **`2026-09-02T17:00:00+08:00`**。之前的窗裡混有被標成 `claude-code` 的 Grok 觸發,而且
+無法事後拆開——`harness_declared` 只在新列上有。
+
+這是本文件第四次移動基線,四次都是同一個原因:**一個守衛在被問對問題之前都是綠的**。
+
+測試:`rust/tests/cli.rs` 一條(旗標說 claude-code 但 transcript 說 grok → 歸給 grok 且不算進
+claude-code;認不得的路徑保留旗標)。全樹 338 + evals 94 + smoke 95,零失敗。

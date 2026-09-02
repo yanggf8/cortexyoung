@@ -387,6 +387,16 @@ fn run_hook_suggest(command: &str, cwd: &Path, cache: &Path) -> Run {
 }
 
 fn run_hook_suggest_with(command: &str, extra: &[&str], cwd: &Path, cache: &Path) -> Run {
+    run_hook_suggest_full(command, None, extra, cwd, cache)
+}
+
+fn run_hook_suggest_full(
+    command: &str,
+    transcript_path: Option<&str>,
+    extra: &[&str],
+    cwd: &Path,
+    cache: &Path,
+) -> Run {
     use std::io::Write;
     use std::process::Stdio;
     let mut child = Command::new(cort_bin())
@@ -399,11 +409,14 @@ fn run_hook_suggest_with(command: &str, extra: &[&str], cwd: &Path, cache: &Path
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn cort hook-suggest");
-    let body = serde_json::to_vec(&serde_json::json!({
+    let mut payload = serde_json::json!({
         "tool_name": "Bash",
         "tool_input": { "command": command },
-    }))
-    .unwrap();
+    });
+    if let Some(t) = transcript_path {
+        payload["transcript_path"] = serde_json::json!(t);
+    }
+    let body = serde_json::to_vec(&payload).unwrap();
     child.stdin.take().unwrap().write_all(&body).unwrap();
     let out = child.wait_with_output().expect("wait cort hook-suggest");
     Run {
@@ -700,4 +713,59 @@ fn a_usage_row_records_which_harness_fired_the_hook() {
     // With no filter the outcomes are reported as they are, so `cort usage` is unaffected.
     let all = cort::usage::hook_outcomes_at(&usage_db, 0, None).unwrap();
     assert!(all.get("other_harness").is_none(), "unfiltered read split by harness: {all:?}");
+}
+
+/// One settings file can be read by more than one harness: Grok loads `~/.claude/settings.json` for
+/// Claude Code compatibility, so the entry the installer wired there fires inside Grok carrying
+/// `--harness claude-code`. Measured on 2026-09-02: every such fire would have been counted as a
+/// Claude Code injection with no Claude transcript to match it. `transcript_path` is the harness
+/// naming its own session file, and it settles the question without guessing at the environment.
+#[test]
+fn the_harness_is_taken_from_the_payload_not_from_the_flag_alone() {
+    let (_p, cwd, _c, cache) = sandbox();
+    let idx = run_cort(&["index"], &cwd, &cache);
+    if idx.code != 0 {
+        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
+        return;
+    }
+    let usage_db = cache.join("usage.db");
+
+    // Wired as claude-code, but the transcript says the process running it is Grok.
+    run_hook_suggest_full(
+        FIRING_SEARCH,
+        Some("/home/u/.grok/sessions/x/updates.jsonl"),
+        &["--harness", "claude-code"],
+        &cwd,
+        &cache,
+    );
+    let as_claude = cort::usage::hook_outcomes_at(&usage_db, 0, Some("claude-code")).unwrap();
+    assert_eq!(
+        as_claude.get("other_harness").and_then(|v| v.as_i64()),
+        Some(1),
+        "a Grok fire was credited to claude-code: {as_claude:?}"
+    );
+    let as_grok = cort::usage::hook_outcomes_at(&usage_db, 0, Some("grok")).unwrap();
+    assert_eq!(
+        as_grok.get("hit").and_then(|v| v.as_i64()).unwrap_or(0)
+            + as_grok.get("hit_stale").and_then(|v| v.as_i64()).unwrap_or(0),
+        1,
+        "the fire was not attributed to grok: {as_grok:?}"
+    );
+
+    // A transcript path naming nothing we recognise leaves the declared value standing: a declared
+    // harness is still better than none.
+    run_hook_suggest_full(
+        FIRING_SEARCH,
+        Some("/var/tmp/somewhere/else.jsonl"),
+        &["--harness", "claude-code"],
+        &cwd,
+        &cache,
+    );
+    let as_claude = cort::usage::hook_outcomes_at(&usage_db, 0, Some("claude-code")).unwrap();
+    assert_eq!(
+        as_claude.get("hit").and_then(|v| v.as_i64()).unwrap_or(0)
+            + as_claude.get("hit_stale").and_then(|v| v.as_i64()).unwrap_or(0),
+        1,
+        "an unrecognised transcript path discarded the declared harness: {as_claude:?}"
+    );
 }
