@@ -445,3 +445,64 @@ claude-code;認不得的路徑保留旗標)。全樹 338 + evals 94 + smoke 95,�
 
 測試:`rust/tests/cli.rs` 一條(codex 拿到 context 但沒有 `suppressOutput`;其他 harness 兩者都
 有)。全樹 339 + evals 94 + smoke 95,零失敗。
+
+## 13. `cort hook-install` 的 TOML 模式,以及它接上了什麼(2026-09-02 夜)
+
+§12 說的「沒有做的事」在這裡做了:新模組 `rust/src/settings_toml.rs`,`cort hook-install` 依目標
+路徑的副檔名分流(`.toml` 走這裡,其餘走既有的 `rust/src/settings.rs`),`install.sh` 的
+`deploy_hook`/`remove_hook`/`--check` 三處都各自拆成一個共用函式再各呼叫兩次
+(`HOOK_SETTINGS` 給 Claude/Grok,新的 `CODEX_HOOK_SETTINGS="${CODEX_HOME:-$HOME/.codex}/config.toml"`
+給 Codex),manifest 新增 `hook_settings_codex`。部署邏輯與 JSON 側同一套哲學:兩個都是**無條件**
+部署,跟 `CODEX_SKILL_DEST` 的 skill 一樣——Codex 不在這台機器上也無妨,代價是留白就是重演本文件
+反覆講的同一句話。
+
+**TOML 的群組形狀是推來的,不是查來的。** Codex 沒有公開任何 hooks TOML schema 文件。證據鏈:
+`codex --strict-config doctor` 能接受候選格式,但複查發現 `doctor` 根本不深入驗證 hooks 子結構
+(塞一個亂編的欄位它一樣通過)——這條證據因此降級為佐證,不是證明。更硬的證據來自
+`strings` 對已安裝的原生 codex 二進位檔(`@openai/codex-linux-x64`)掃出的 serde 型別名:
+`struct ConfiguredHookMatcherGroup with 2 elements`(對應 `matcher` + `hooks` 兩個欄位),以及
+一組相鄰字串片段點名 hook 項目的欄位包含 `command`、`type`、`timeout`。據此寫死的形狀:
+
+```toml
+[[hooks.PreToolUse]]
+matcher = "Bash"
+
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "<cort_bin> hook-suggest --harness codex"
+timeout = 5
+```
+
+**這個形狀沒有被一次真正的 `codex exec` 觸發驗證過。** 原本要用 §12 同一招(灌好 hook、餵一個
+會觸發 grep 的 prompt、看模型有沒有收到)做端到端確認,但 `codex exec --dangerously-bypass-
+approvals-and-sandbox --dangerously-bypass-hook-trust` 這個組合被執行環境的權限分類器擋下(自動
+模式判定風險過高,不放行)。使用者选择跳過這一步,先用 `strings` 證據落地實作。已經做過、確實
+證明了什麼的,只有這些:
+
+- `cort hook-install --settings ~/.codex/config.toml --command '<bin> hook-suggest --harness codex'`
+  在這台機器的真實 `~/.codex/config.toml` 上跑過一輪 install → status → 二次 install(冪等)→
+  remove,每一步都跟 JSON 側的既有承諾一致(`already_present` 不重寫檔案、`remove` 之後檔案與
+  安裝前逐位元組相同、沒有安裝過的 Read/其他 matcher 群組原封不動)。
+- 每一步之後 `codex --strict-config doctor --json` 的 `config.load` 都回 `"status": "ok"`,證明
+  寫出來的 TOML 語法有效、能被 codex 自己的解析器讀回去——但不證明 hooks 子結構的欄位被正確
+  理解或真的會觸發。
+- `rust/tests/settings_toml.rs`(21 條,鏡射 `rust/tests/settings.rs` 覆蓋的每一個既有陷阱:
+  使用者原有的 hook 存活、二次安裝不重寫、binary 搬家更新原地、`remove` 只拿走自己的、
+  手接重複收斂成一筆且不留雜欄位、malformed 群組不擋住後面的條目、只是提到字眼的別人的 hook
+  不會被誤判、`hooks`/`PreToolUse` 型別不對就拒絕不覆寫、使用者自己的空群組在 collapse/remove
+  兩種操作下都存活)。TOML 特有的一條額外案例:空的 `hooks = []` 在 TOML 語法下只能寫成一個內聯
+  空陣列,不可能是「零元素的 array-of-tables」(後者序列化出來就是完全不寫入任何東西,跟沒有這
+  個 key 沒兩樣)——`is_ours` 的兩層掃描都用 `continue` 跳過非 array-of-tables 的 `hooks` 值,
+  所以這種群組完全不會被觸碰,測試 `the_users_own_empty_group_survives_*` 兩條都覆蓋到。
+
+`is_ours`(判斷一個指令是不是我們自己的 hook,§7、§9 兩輪硬化過的那條規則)從 `settings.rs`
+改成 `pub(crate)` 直接 import 進 `settings_toml.rs`,沒有第二份拷貝——重寫一份等於在兩個地方
+放同一個未來會走樣的 bug。
+
+**還開著的一件事,寫在這裡而不是靠人記得:** 在一台裝有真正 Codex 的機器上,找一個許可分類器
+會放行的方式(或直接由使用者手動)跑一次 `codex exec` 全端到端驗證(灌好 hook → 觸發一個 grep →
+確認模型真的收到 `additionalContext`),把結果記回本節。在那之前,`hook_codex: ... (wired)` 這行
+只保證「格式被 codex 的 TOML 解析器接受」,不保證「hook 真的會被執行」。
+
+測試:`rust/tests/settings_toml.rs` 新增 21 條。全樹 360 + evals 94 + smoke 95,零失敗
+(`is_ours` 移出的可見性變更沒有新增測試,因為行為完全沒變,只是換了呼叫路徑)。

@@ -18,6 +18,7 @@ use cort::r#struct::{struct_command, StructOptions};
 use cort::readings::{parse_content_mode, read_fragment, recall_readings, ContentMode};
 use cort::render::{parse_format, render, render_error, Format};
 use cort::settings;
+use cort::settings_toml;
 use cort::staleness::compute_stale;
 use cort::usage::{self, CommandRecord};
 use rusqlite::{params, Connection, OpenFlags};
@@ -722,6 +723,37 @@ fn index_state() -> IndexState {
 /// Wiring the PreToolUse hook into a Claude Code `settings.json`. `install.sh` calls this so the
 /// hook ships with the skill instead of being a separate thing to remember per agent home; it is
 /// not a verb anyone types either. `--remove` is what `install.sh --uninstall` calls.
+fn map_json_settings_err(e: settings::SettingsError) -> CortError {
+    match e {
+        settings::SettingsError::Unparsable(m) => {
+            CortError::new("bad_settings", json!({ "message": m }))
+        }
+        settings::SettingsError::Io(io) => {
+            CortError::new("file_not_found", json!({ "message": io.to_string() }))
+        }
+    }
+}
+
+fn map_toml_settings_err(e: settings_toml::SettingsError) -> CortError {
+    match e {
+        settings_toml::SettingsError::Unparsable(m) => {
+            CortError::new("bad_settings", json!({ "message": m }))
+        }
+        settings_toml::SettingsError::Io(io) => {
+            CortError::new("file_not_found", json!({ "message": io.to_string() }))
+        }
+    }
+}
+
+/// TOML for Codex's `config.toml`, JSON for everything else (Claude Code's and Grok's shared
+/// `settings.json` -- Grok reads that file for Claude Code compatibility and needs no wiring of its
+/// own, `docs/2026-09-02-hook-wiring-correction.md` §6). Decided by the target path's extension
+/// rather than a second flag: `install.sh` already has to name two different files for the two
+/// homes, and a `.toml` path is unambiguous.
+fn is_toml_settings(path: &Path) -> bool {
+    path.extension().and_then(|e| e.to_str()) == Some("toml")
+}
+
 fn cmd_hook_install(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, CortError> {
     let a = HookInstallArgs::try_parse_from(args.iter()).map_err(clap_fail)?;
     let path = match a.settings {
@@ -733,16 +765,13 @@ fn cmd_hook_install(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, Co
             )
         })?,
     };
-    let map_err = |e: settings::SettingsError| match e {
-        settings::SettingsError::Unparsable(m) => {
-            CortError::new("bad_settings", json!({ "message": m }))
-        }
-        settings::SettingsError::Io(io) => {
-            CortError::new("file_not_found", json!({ "message": io.to_string() }))
-        }
-    };
+    let toml = is_toml_settings(&path);
     if a.status {
-        let wired = settings::installed_command(&path);
+        let wired = if toml {
+            settings_toml::installed_command(&path)
+        } else {
+            settings::installed_command(&path)
+        };
         return Ok(Emit {
             render_command: None,
             format: Format::Json,
@@ -754,7 +783,11 @@ fn cmd_hook_install(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, Co
         });
     }
     if a.remove {
-        let out = settings::remove_hook(&path).map_err(map_err)?;
+        let out = if toml {
+            settings_toml::remove_hook(&path).map_err(map_toml_settings_err)?
+        } else {
+            settings::remove_hook(&path).map_err(map_json_settings_err)?
+        };
         return Ok(Emit {
             render_command: None,
             format: Format::Json,
@@ -776,7 +809,11 @@ fn cmd_hook_install(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, Co
             format!("{} hook-suggest", exe.to_string_lossy())
         }
     };
-    let out = settings::install_hook(&path, &command).map_err(map_err)?;
+    let out = if toml {
+        settings_toml::install_hook(&path, &command).map_err(map_toml_settings_err)?
+    } else {
+        settings::install_hook(&path, &command).map_err(map_json_settings_err)?
+    };
     Ok(Emit {
         render_command: None,
         format: Format::Json,

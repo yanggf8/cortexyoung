@@ -35,8 +35,16 @@ CODEX_SKILL_DEST="${CODEX_HOME:-$HOME/.codex}/skills/ast-grep/SKILL.md"
 # carried it, it never fired: 409 searches, zero cort calls. The hook is the retrospective half of
 # the same routing, and a routing half that has to be installed by hand is a routing half that is
 # not installed. `cort hook-install` owns the JSON merge -- see rust/src/settings.rs for why that is
-# not a jq pipeline in here.
+# not a jq pipeline in here. Grok reads this same file for Claude Code compatibility and needs no
+# entry of its own (docs/2026-09-02-hook-wiring-correction.md §6).
 HOOK_SETTINGS="${CLAUDE_SKILL_HOME:-$HOME/.claude}/settings.json"
+# Codex loads a PreToolUse hook only from `[[hooks.PreToolUse]]` in this TOML file -- neither of the
+# JSON locations it might plausibly read (~/.codex/hooks/hooks.json, ~/.codex/hooks.json) is ever
+# consulted (docs/2026-09-02-hook-wiring-correction.md §12). `rust/src/settings_toml.rs` owns this
+# merge for the same reason `rust/src/settings.rs` owns the JSON one. Deployed unconditionally, same
+# as CODEX_SKILL_DEST above: harmless if Codex is not installed on this machine, and the alternative
+# is the exact failure this file is about -- a route wired only when someone remembers Codex exists.
+CODEX_HOOK_SETTINGS="${CODEX_HOME:-$HOME/.codex}/config.toml"
 WITH_HOOK=1
 WITH_XGREP=0
 
@@ -446,6 +454,42 @@ deploy_skill_at() {
 # across reinstalls, recognising its own entry after the binary moves and refusing a settings.json
 # it cannot parse are all logic, and logic does not go in bash here. Failure is reported, never
 # fatal -- a settings file we could not merge must not cost the user a working binary.
+# Read-only: never writes. Shared by `--check` for both the Claude/Grok and the Codex hook, so the
+# "wired to a different binary" and "not wired" logic exists exactly once regardless of which
+# settings file is being asked about.
+check_hook_at() {
+  local settings_path="$1" managed_cort="$2" label="$3"
+  local hook_out
+  if hook_out="$("$managed_cort" hook-install --settings "$settings_path" --status 2>&1)"; then
+    if printf '%s' "$hook_out" | grep -q '"wired"[[:space:]]*:[[:space:]]*true'; then
+      # Wired is not enough: it has to be wired to the binary we just checked. A command naming a
+      # different cort is a live hook nobody here has verified.
+      if printf '%s' "$hook_out" | grep -q "\"command\"[[:space:]]*:[[:space:]]*\"$managed_cort "; then
+        echo "$label: $settings_path (wired)"
+      else
+        echo "$label: $settings_path (WIRED TO A DIFFERENT BINARY — re-run ./install.sh)"
+        echo "  wired: $(printf '%s' "$hook_out" | tr -d '\n' | sed 's/.*"command"[[:space:]]*:[[:space:]]*"//; s/".*//')"
+        echo "  managed: $managed_cort"
+        if [ "$WITH_HOOK" -eq 1 ]; then ok=0; fi
+      fi
+    else
+      echo "$label: $settings_path (NOT WIRED — re-run ./install.sh)"
+      if [ "$WITH_HOOK" -eq 1 ]; then ok=0; fi
+    fi
+  else
+    # Not the file's fault, ever: --status resolves an unreadable or unparsable settings file to
+    # `wired: false` rather than failing, so reaching here means the invocation itself did not run.
+    # The usual reason is a deployed cort older than the subcommand. Blaming the settings path sent
+    # the reader to the wrong file -- the silent line-down this check exists to catch.
+    if printf '%s' "$hook_out" | grep -q '"unknown_command"'; then
+      echo "$label: installed cort predates hook-install — re-run ./install.sh to redeploy the binary"
+    else
+      echo "$label: could not query hook state — $hook_out"
+    fi
+    ok=0
+  fi
+}
+
 deploy_hook() {
   local cort_bin="$1"
   if [ "$WITH_HOOK" -ne 1 ]; then
@@ -456,27 +500,42 @@ deploy_hook() {
     info "hook: cort not executable at $cort_bin — skipping"
     return 0
   fi
+  deploy_one_hook "$cort_bin" "$HOOK_SETTINGS" "claude-code" "hook_settings"
+  # `cort hook-install` picks the TOML merge over the JSON one by the target path's extension
+  # (rust/src/main.rs's `is_toml_settings`), so this one call wires Codex instead.
+  deploy_one_hook "$cort_bin" "$CODEX_HOOK_SETTINGS" "codex" "hook_settings_codex"
+}
+
+deploy_one_hook() {
+  local cort_bin="$1" settings_path="$2" harness="$3" manifest_key="$4"
   local out change
-  if ! out="$("$cort_bin" hook-install --settings "$HOOK_SETTINGS" --command "$cort_bin hook-suggest --harness claude-code" 2>&1)"; then
-    info "hook: NOT wired — $out"
+  if ! out="$("$cort_bin" hook-install --settings "$settings_path" --command "$cort_bin hook-suggest --harness $harness" 2>&1)"; then
+    info "hook ($harness): NOT wired — $out"
     return 0
   fi
   change="$(printf '%s' "$out" | sed -n 's/.*"change"[[:space:]]*:[[:space:]]*"\([a-z_]*\)".*/\1/p')"
   case "$change" in
-    installed) info "hook: wired PreToolUse -> cort hook-suggest in $HOOK_SETTINGS" ;;
-    updated)   info "hook: updated PreToolUse command in $HOOK_SETTINGS" ;;
-    already_present) info "hook: already wired in $HOOK_SETTINGS" ;;
-    *)         info "hook: $out" ;;
+    installed) info "hook ($harness): wired PreToolUse -> cort hook-suggest in $settings_path" ;;
+    updated)   info "hook ($harness): updated PreToolUse command in $settings_path" ;;
+    already_present) info "hook ($harness): already wired in $settings_path" ;;
+    *)         info "hook ($harness): $out" ;;
   esac
-  record_manifest "hook_settings" "$HOOK_SETTINGS"
+  record_manifest "$manifest_key" "$settings_path"
 }
 
 remove_hook() {
-  local settings cort_bin
-  settings="$(manifest_get hook_settings || true)"
-  [ -n "$settings" ] || settings="$HOOK_SETTINGS"
+  local cort_bin
   cort_bin="$(manifest_get cort_bin || true)"
   [ -n "$cort_bin" ] && [ -x "$cort_bin" ] || cort_bin="$(command -v cort 2>/dev/null || true)"
+  remove_one_hook "$cort_bin" hook_settings "$HOOK_SETTINGS"
+  remove_one_hook "$cort_bin" hook_settings_codex "$CODEX_HOOK_SETTINGS"
+}
+
+remove_one_hook() {
+  local cort_bin="$1" manifest_key="$2" default_settings="$3"
+  local settings
+  settings="$(manifest_get "$manifest_key" || true)"
+  [ -n "$settings" ] || settings="$default_settings"
   if [ -z "$cort_bin" ] || [ ! -x "$cort_bin" ]; then
     info "hook: no cort to unwire with — leaving $settings alone"
     return 0
@@ -716,35 +775,10 @@ do_check() {
     managed_cort="$BIN_DIR/cort"
   fi
   if [ -x "$managed_cort" ]; then
-    local hook_out
-    if hook_out="$("$managed_cort" hook-install --settings "$HOOK_SETTINGS" --status 2>&1)"; then
-      if printf '%s' "$hook_out" | grep -q '"wired"[[:space:]]*:[[:space:]]*true'; then
-        # Wired is not enough: it has to be wired to the binary we just checked. A command naming a
-        # different cort is a live hook nobody here has verified.
-        if printf '%s' "$hook_out" | grep -q "\"command\"[[:space:]]*:[[:space:]]*\"$managed_cort "; then
-          echo "hook: $HOOK_SETTINGS (wired)"
-        else
-          echo "hook: $HOOK_SETTINGS (WIRED TO A DIFFERENT BINARY — re-run ./install.sh)"
-          echo "  wired: $(printf '%s' "$hook_out" | tr -d '\n' | sed 's/.*"command"[[:space:]]*:[[:space:]]*"//; s/".*//')"
-          echo "  managed: $managed_cort"
-          if [ "$WITH_HOOK" -eq 1 ]; then ok=0; fi
-        fi
-      else
-        echo "hook: $HOOK_SETTINGS (NOT WIRED — re-run ./install.sh)"
-        if [ "$WITH_HOOK" -eq 1 ]; then ok=0; fi
-      fi
-    else
-      # Not the file's fault, ever: --status resolves an unreadable or unparsable settings.json to
-      # `wired: false` rather than failing, so reaching here means the invocation itself did not
-      # run. The usual reason is a deployed cort older than the subcommand. Blaming the settings
-      # path sent the reader to the wrong file -- the silent line-down this check exists to catch.
-      if printf '%s' "$hook_out" | grep -q '"unknown_command"'; then
-        echo "hook: installed cort predates hook-install — re-run ./install.sh to redeploy the binary"
-      else
-        echo "hook: could not query hook state — $hook_out"
-      fi
-      ok=0
-    fi
+    check_hook_at "$HOOK_SETTINGS" "$managed_cort" "hook"
+    # Codex is checked the same unconditional way CODEX_SKILL_DEST is below: deployed whether or not
+    # Codex is on this machine, so --check expects it wired the same way it expects the skill file.
+    check_hook_at "$CODEX_HOOK_SETTINGS" "$managed_cort" "hook_codex"
   fi
   if [ -f "$SKILL_DEST" ]; then
     if skill_is_managed "$SKILL_DEST"; then

@@ -105,7 +105,7 @@ pub fn default_settings_path() -> Option<PathBuf> {
 /// so a vendor's `/opt/vendor/bin/hook-suggest --daemon` is silently destroyed by an unrelated
 /// `./install.sh`. This module's first promise is that every hook the user already has survives,
 /// and that promise is only ever as good as this predicate.
-fn is_ours(command: &str) -> bool {
+pub(crate) fn is_ours(command: &str) -> bool {
     let tokens: Vec<&str> = command
         .split_whitespace()
         .map(|t| t.trim_matches(|c| c == '"' || c == '\''))

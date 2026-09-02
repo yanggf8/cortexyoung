@@ -34,6 +34,11 @@ ast-grep-core = "0.45.2"
 ast-grep-language = "0.45.2"
 globset = "0.4"
 ignore = "0.4"
+# Codex's hook wiring lives in ~/.codex/config.toml (settings_toml.rs), not settings.json. toml_edit
+# over the plain `toml` crate because it round-trips a partial edit without reformatting or dropping
+# comments elsewhere in the file -- the same "everything else survives byte-identical" guarantee
+# settings.rs already holds for the JSON side. It is what `cargo` itself uses to edit Cargo.toml.
+toml_edit = "0.22"
 
 [dev-dependencies]
 tempfile = "3"
