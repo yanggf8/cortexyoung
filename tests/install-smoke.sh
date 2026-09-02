@@ -628,6 +628,38 @@ else
   fail "deploy log line shape: $LAST_LINE"
 fi
 
+# ── 19. --check names the stale binary, never the settings file ───
+# `hook-install --status` resolves an unreadable or unparsable settings.json to `wired: false`
+# instead of failing, so the failure branch is only ever reached by a cort that cannot run the
+# subcommand. It used to print "could not read <settings.json>", which is the one file that is
+# provably not at fault -- a wrong pointer in the check whose whole job is to stop the hook going
+# down silently. Reproduced with a double that answers the way a pre-hook-install binary does.
+echo "--- Test 19: --check blames the binary, not settings.json ---"
+STALEBIN="$TMPHOME/stalebin"
+mkdir -p "$STALEBIN"
+cat > "$STALEBIN/cort" <<'FAKESTALECORT'
+#!/usr/bin/env bash
+# A cort from before `hook-install` existed: unknown subcommand on stderr, non-zero exit.
+if [ "$1" = "hook-install" ]; then
+  echo '{"detail":{"command":"hook-install"},"error":"unknown_command"}' >&2
+  exit 2
+fi
+echo "cort 0.1.0 (rust)"
+FAKESTALECORT
+chmod +x "$STALEBIN/cort"
+PATH="$STALEBIN:$PATH" bash "$INSTALL_SH" --check > /tmp/smoke19.log 2>&1 || true
+if grep -q "predates hook-install" /tmp/smoke19.log; then
+  pass "--check names the stale binary as the cause"
+else
+  fail "--check does not name the stale binary"; sed 's/^/    /' /tmp/smoke19.log
+fi
+if grep -q "hook: could not read" /tmp/smoke19.log; then
+  fail "--check still blames settings.json for a stale-binary failure"
+else
+  pass "--check no longer blames settings.json for a stale-binary failure"
+fi
+rm -rf "$STALEBIN"
+
 # ── summary ──────────────────────────────────────────────────────
 echo ""
 echo "=== smoke results: $PASS passed, $FAIL failed ==="

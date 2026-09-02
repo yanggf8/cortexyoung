@@ -714,7 +714,15 @@ do_check() {
         if [ "$WITH_HOOK" -eq 1 ]; then ok=0; fi
       fi
     else
-      echo "hook: could not read $HOOK_SETTINGS — $hook_out"
+      # Not the file's fault, ever: --status resolves an unreadable or unparsable settings.json to
+      # `wired: false` rather than failing, so reaching here means the invocation itself did not
+      # run. The usual reason is a deployed cort older than the subcommand. Blaming the settings
+      # path sent the reader to the wrong file -- the silent line-down this check exists to catch.
+      if printf '%s' "$hook_out" | grep -q '"unknown_command"'; then
+        echo "hook: installed cort predates hook-install — re-run ./install.sh to redeploy the binary"
+      else
+        echo "hook: could not query hook state — $hook_out"
+      fi
       ok=0
     fi
   fi

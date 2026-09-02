@@ -62,6 +62,9 @@ uninstall 解線)。全樹 317 + smoke 91,零失敗。
 
 ## 5. 09-04 重挖時的實際基線
 
+> **本節在 2026-09-02 11:00 被 §7 取代。**下面 09:24 那組數字是同一天稍早寫的,而當天稍晚的
+> 檢查證明 hook 從來沒有真的由 installer 接上過。實際要用的起點在 §7。
+
 - **累積窗起點**:2026-09-02 09:24(`hook_settings` 寫入 manifest 的時刻),不是 09-01 13:12。
 - **cache**:`~/.cache/cortex-ng/usage.db`,birth 08-31 11:12,`hook-suggest` 第一列
   `09-02 09:08`(手動驗證),第一列真實觸發 `09-02 09:24:26`。
@@ -86,3 +89,64 @@ uninstall 解線)。全樹 317 + smoke 91,零失敗。
 
 hook 不需要重開 session 才生效:09-02 09:27 在改設定之後的同一個 session 裡,一次
 `grep -rn "canonicalize_root("` 就觸發了注入,usage.db 同步寫入。設定是即時重讀的。
+
+## 7. 第二次線斷,以及它為什麼是同一個 bug(2026-09-02 11:00)
+
+§5 寫完之後,`./install.sh --check` 在同一台機器上回 `check: ISSUES FOUND`。四條各自獨立:
+
+| 檢查 | 結果 |
+|---|---|
+| `~/.cargo/bin/cort` | 不認得 `hook-install`(`unknown_command`)→ **早於 `ccf90c07`** |
+| manifest | **沒有 `hook_settings`** —— §5 說它在 09:24 寫入,這台機器上沒有 |
+| `~/.claude/settings.json` | 有 cort hook,但是**手接的兩筆重複 entry**,各帶自己的 `if` |
+| `cort usage` | `hook-suggest ok=988`,全部 `legacy_unsplit`(舊 binary 不寫 outcome) |
+
+也就是說 §5 的三個前提一個都沒成立:`--check` 印不出 `(wired)`、窗起點沒有 manifest 憑證、
+cross-check 沒有 outcome 可比。**§5 那句「09-02 09:24 由 installer 部署後才第一次成立」是錯的**
+—— installer 從來沒跑過那一版,那兩筆 entry 是手接的。
+
+### 根因:`is_ours` 把辨識錨在字串結尾
+
+```
+$HOME/.cargo/bin/cort hook-suggest 2>/dev/null || true
+```
+
+`is_ours` 當時要求指令 `ends_with(" hook-suggest")`。上面這行結尾是 `|| true`,所以**不是我們的**。
+一個 hook command 是 shell,而人寫 shell 就會加重導向和 `|| true`。後果是三個,全部同源:
+
+1. `--status` 在 hook 每天觸發數百次的機器上回 `wired: false`;
+2. 每次重新部署**再加一筆**,而不是更新既有那筆(實測 2 → 3);
+3. `--remove` 解不掉手接的那些,uninstall 會留下會觸發的殘骸。
+
+第二個獨立 bug:`installed_command` 用 `?` 讀 group 的 `hooks` 陣列,所以 `PreToolUse` 裡任何一個
+沒有 `hooks` 的 group 會**終止整個掃描**,讓排在它後面的我方 entry 報成沒接上。
+
+修法:`is_ours` 改成把 `hook-suggest` 當 **token** 認(且前一個 token 必須是 `cort` 或以 `/cort`
+結尾,所以 `echo hook-suggest` 不會誤判);`install_hook` 收斂重複(保留第一筆、丟掉其餘)並把
+存活那筆**整個 entry 正規化**——留著手打的 `if: Bash(grep:*)` 會讓實際覆蓋面小於 installer 宣稱的
+「wired for Bash」,那正是本文件要消滅的那類落差;`installed_command` 的 `?` 改成 `continue`。
+另外 `install.sh --check` 的失敗訊息本來一律印 `could not read <settings.json>`,但 `--status`
+會把讀不到/解不開的檔案吞成 `wired: false` 而不是失敗,所以那個分支**在每一條可達路徑上都不是
+檔案的錯**;現在會指名是 binary 太舊。
+
+測試:`rust/tests/settings.rs` 新增 7 條(帶重導向後綴仍認得、重複收斂成一筆、存活 entry 不留
+`if`、收斂後 idempotent、`--remove` 清得掉手接的、壞 group 不遮蔽後面的 entry、只是提到字眼的別
+人的 hook 不會被誤刪),`tests/install-smoke.sh` 新增 Test 19(用舊 binary 替身確認 `--check`
+指名 binary 而非 settings.json)。全樹 326 + smoke 93,零失敗。
+
+### 實際部署後的狀態(2026-09-02 10:57:05 +0800)
+
+`./install.sh` → `hook: updated PreToolUse command`;`--check` → `check: OK` / `hook: ... (wired)`;
+settings.json 的 PreToolUse 收斂成**一筆** canonical entry,其餘 15 個 top-level key 未動;
+manifest 有 `hook_settings`。手動觸發一次 `grep` 立刻注入,且注入文字是 `ce1b56c7` 的誠實版本
+(索引 stale 就說 stale)。
+
+### 09-04 真正要用的基線
+
+- **累積窗起點:`2026-09-02T10:58:00+08:00`**(三個部署寫入都在 10:57:05 之前完成;取 10:58 保證
+  窗內沒有 `legacy_unsplit` 列)。**不是** 09-01 13:12,也不是 09-02 09:24。
+- 指令:`cort-evals adopt-mine --since 2026-09-02T10:58:00+08:00`。
+- 已驗證此起點下 `usage_db_cross_check.comparable_to_injections` 為 `true`;往前取到 10:50 就會因
+  23 列 `legacy_unsplit` 而正確地拒絕比較。
+- 機會母體仍是已建索引的那些專案,挖掘時要一起報;`hit_stale` 是一個獨立的 outcome,代表 hook
+  出聲了但索引落後,讀漏斗時不能和 `hit` 混為一談。

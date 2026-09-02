@@ -91,19 +91,43 @@ pub fn default_settings_path() -> Option<PathBuf> {
 /// Is this configured hook ours? Matched on the verb rather than the whole string, so an install
 /// that moved the binary (`~/.cargo/bin` to `~/.local/bin`, say) updates one entry instead of
 /// leaving two that both fire.
+/// Recognising our own entry cannot be anchored to the end of the command line. A hook command is
+/// shell and people write shell: `.../cort hook-suggest 2>/dev/null || true` is ours, and ending in
+/// `|| true` made it read as somebody else's. That is not cosmetic -- it is how a machine ends up
+/// with `--status` answering `wired: false` while the hook fires hundreds of times, and with every
+/// redeploy appending one more copy instead of updating the one that is there. Match the subcommand
+/// as a token, and keep it ours only when the token in front of it is the binary.
 fn is_ours(command: &str) -> bool {
-    let c = command.trim();
-    c == "hook-suggest" || c.ends_with(" hook-suggest") || c.ends_with("/hook-suggest")
+    let tokens: Vec<&str> = command
+        .split_whitespace()
+        .map(|t| t.trim_matches(|c| c == '"' || c == '\''))
+        .collect();
+    tokens.iter().enumerate().any(|(i, t)| {
+        if *t != "hook-suggest" && !t.ends_with("/hook-suggest") {
+            return false;
+        }
+        match i.checked_sub(1).map(|prev| tokens[prev]) {
+            // A bare `hook-suggest`, or a binary named that: ours by the same rule as before.
+            None => true,
+            Some(prev) => prev == "cort" || prev.ends_with("/cort"),
+        }
+    })
+}
+
+/// The one shape an entry of ours is allowed to have. Factored out because `install_hook` has to
+/// be able to normalise an existing entry to it, not only to create one.
+fn hook_command_entry(command: &str) -> Value {
+    json!({
+        "type": "command",
+        "command": command,
+        "timeout": TIMEOUT_SECS,
+    })
 }
 
 fn hook_entry(command: &str) -> Value {
     json!({
         "matcher": MATCHER,
-        "hooks": [{
-            "type": "command",
-            "command": command,
-            "timeout": TIMEOUT_SECS,
-        }],
+        "hooks": [hook_command_entry(command)],
     })
 }
 
@@ -187,26 +211,55 @@ pub fn install_hook(path: &Path, command: &str) -> Result<Outcome, SettingsError
     let mut root = read_root(path)?;
     let list = pre_tool_use(&mut root);
 
+    let canonical = hook_command_entry(command);
+    let mut seen_ours = false;
     let mut found_same = false;
     let mut changed = false;
+    let mut emptied_a_group = false;
     for group in list.iter_mut() {
         let Some(hooks) = group.get_mut("hooks").and_then(Value::as_array_mut) else {
             continue;
         };
-        for h in hooks.iter_mut() {
+        let before = hooks.len();
+        hooks.retain_mut(|h| {
             let Some(cur) = h.get("command").and_then(Value::as_str) else {
-                continue;
+                return true;
             };
             if !is_ours(cur) {
-                continue;
+                return true;
             }
-            if cur == command {
+            // A file can already hold more than one of ours -- a hand-wired one did, which is what
+            // firing the hook once per copy looks like. Keep the first, drop the rest, so that a
+            // redeploy converges on one entry instead of adding to the pile.
+            if seen_ours {
+                changed = true;
+                return false;
+            }
+            seen_ours = true;
+            if *h == canonical {
                 found_same = true;
             } else {
-                h["command"] = json!(command);
+                // Normalise the whole entry, not just its command string. An entry of ours that
+                // carries a hand-typed `if` condition covers less ground than the installer then
+                // reports as wired, and a deployed state nobody can predict from the installer is
+                // exactly what this module exists to rule out. Only entries `is_ours` are touched.
+                *h = canonical.clone();
                 changed = true;
             }
+            true
+        });
+        if hooks.is_empty() && before > 0 {
+            emptied_a_group = true;
         }
+    }
+    // Only when collapsing duplicates actually emptied one, so a group the user keeps empty for
+    // their own reasons is not swept up by an unrelated install.
+    if emptied_a_group {
+        list.retain(|g| {
+            g.get("hooks")
+                .and_then(Value::as_array)
+                .is_none_or(|h| !h.is_empty())
+        });
     }
 
     if found_same && !changed {
@@ -299,7 +352,12 @@ pub fn installed_command(path: &Path) -> Option<String> {
     let root = read_root(path).ok()?;
     let list = root.get("hooks")?.get("PreToolUse")?.as_array()?;
     for group in list {
-        let hooks = group.get("hooks").and_then(Value::as_array)?;
+        // `continue`, not `?`: a group without a hooks array is somebody else's malformed entry,
+        // and letting it end the scan would report `wired: false` for an entry sitting right
+        // after it.
+        let Some(hooks) = group.get("hooks").and_then(Value::as_array) else {
+            continue;
+        };
         for h in hooks {
             if let Some(c) = h.get("command").and_then(Value::as_str) {
                 if is_ours(c) {
