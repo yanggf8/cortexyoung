@@ -267,12 +267,30 @@ smoke Test 19 原本測的是相反方向(舊 binary 在 PATH 上),已改成把�
 才回收。這值得記下來,因為它會讓「磁碟滿了」這個結論在事後完全重現不出來——和本文件 §2 記的
 09-01 基線是同一種病:**一個當下為真、事後無法重現的觀察,不能當基線,但也不代表它沒發生過。**
 
-實際清理只動了明確可重建、且屬於本 repo 的東西:`cargo clean` 兩個 crate,回收 12.5G
-(`rust/target` 10.8G + `evals/target` 1.7G)。清完 123G used / 116G free(52%)。部署不受影響
-——`install.sh` 把 binary 裝在 `~/.local/share/cortexyoung/cort` 並在 `~/.cargo/bin/cort` 放 shim,
-不在 `target/` 裡;清完 `cort --version` 與 `./install.sh --check` 仍是 `check: OK`。
+清理分兩輪。第一輪只動本 repo 的建置產物:`cargo clean` 兩個 crate,回收 12.5G。第二輪經使用者
+指示擴大到全機:
 
-**沒有動的**(列出來是因為它們才是大宗,而且都不是本 repo 的):`~/.grok/sessions` 22G、其他專案
-的 cargo target 合計約 17.7G(hesocial 9.3G、travel-2026 5.9G、ainews 1.3G、ft 1.3G)、
-`~/.cache` 下的模型權重約 3.1G(whisper / modelscope / huggingface)。session 紀錄與模型權重不是
-建置產物,重建代價是網路與時間,不該由一個做 hook 修正的 session 代為決定。
+| 項目 | 回收 | 判準 |
+|---|---:|---|
+| cargo target × 12 個專案 | ~40 GB | 建置產物,一律可重建 |
+| `~/.grok/sessions` 的 Grok 4.5 session(121 個) | 10.75 GB | 依版本保留 4.6 |
+| 本 repo 的兩個 target | 12.5 GB | 同上 |
+| `~/.cache/modelscope`(SenseVoiceSmall) | 0.9 GB | 不是 whisper |
+
+`134G used` → **`76G used` / 163G free(32%)**。
+
+值得記的是**分辨的方法**,不是總量。Grok session 沒有版本欄位,但每個 session 的
+`system_prompt.txt` 開頭寫著 `You are Grok 4.6 released by xAI`,所以版本可以逐一判定而不是靠
+mtime 猜:4.6 有 144 個共 11.75G(保留),4.5 有 121 個共 10.75G(刪除)。另有 53 個沒有
+`system_prompt.txt`、合計僅 0.12G——**無法判定版本的就不刪**,省下的空間不值得用一次猜測換。
+
+同樣的原則讓 `~/.cache/huggingface` 留了下來:它整個只有 `Systran/faster-whisper-small` 與
+`faster-whisper-tiny`,而 faster-whisper **就是** whisper,指示是留 whisper。按目錄名字清會刪掉
+它;按內容清不會。`~/.cache/modelscope` 裝的 SenseVoiceSmall 不是 whisper,所以刪。
+
+深度也有陷阱:第一次用 `find -maxdepth 3` 盤點 cargo target 得到 29G,`-maxdepth 5` 才看到
+`finance-cli/target` 的 15G——**盤點的深度限制會直接變成清理的漏網**,而報告不會顯示它漏了什麼。
+
+部署不受影響:`install.sh` 把 binary 裝在 `~/.local/share/cortexyoung/cort`、`~/.cargo/bin/cort`
+只是 shim,不在 `target/` 裡;清完 `cort --version` 與 `./install.sh --check` 仍是 `check: OK`。
+測試結果停在 `a91ef5d2` 的 336 / 92 / 95(此後未改任何程式碼);重跑會重建約 10G,那正是剛清掉的。
