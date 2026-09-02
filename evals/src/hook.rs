@@ -16,8 +16,9 @@
 //! hook that fires on ordinary orientation greps would train the agent to ignore it, which is the
 //! failure the demand screen already documented for over-broad skill prose.
 
-use cort::hook::{first_segment, is_redirection, tokenize};
+use cort::hook::is_redirection;
 pub use cort::hook::{suggests_impact, HookHit};
+use cort::hook::{judge, search_from_grep_fields, search_from_shell, Search};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
@@ -138,15 +139,12 @@ fn walk_source(dir: &Path, depth: usize, files: &mut usize, f: &mut impl FnMut(&
 
 /// The directory a search covered, resolved against the session's working directory. Globs and
 /// filenames are trimmed back to the enclosing directory; the first one that exists wins.
-pub fn search_root(command: &str, cwd: Option<&str>) -> Option<PathBuf> {
-    let tokens = tokenize(first_segment(command.trim()));
-    let mut seen_pattern = false;
-    for t in tokens.iter().skip(1) {
+///
+/// Takes the parsed targets rather than a command line, so a structured search and a shell one are
+/// resolved by the same code without either being re-rendered into the other's spelling.
+pub fn root_of_targets(targets: &[String], cwd: Option<&str>) -> Option<PathBuf> {
+    for t in targets {
         if t.starts_with('-') || is_redirection(t) {
-            continue;
-        }
-        if !seen_pattern {
-            seen_pattern = true;
             continue;
         }
         let trimmed = t.split('*').next().unwrap_or(t);
@@ -234,6 +232,62 @@ fn collect_commands(v: &Value, out: &mut Vec<String>) {
     }
 }
 
+/// Every structured search tool call on one transcript line.
+///
+/// Not every harness searches through a shell. Kimi writes `{"name":"Grep","args":{…}}` inside a
+/// `tool.call` event and Claude Code writes `{"name":"Grep","input":{…}}` in a tool_use block; both
+/// are the same question asked with fields instead of a command line. The fields are handed to
+/// `cort::hook::search_from_grep_fields` -- the product crate's own parser for that surface -- so
+/// this file extracts and never decides. Parsing is per-harness; the verdict is not.
+pub fn structured_searches_of_line(line: &str) -> Vec<Search> {
+    let mut out = Vec::new();
+    let Ok(v) = serde_json::from_str::<Value>(line) else {
+        return out;
+    };
+    collect_structured(&v, &mut out);
+    out
+}
+
+fn collect_structured(v: &Value, out: &mut Vec<Search>) {
+    match v {
+        Value::Object(map) => {
+            // `args` is Kimi's spelling, `input` Claude Code's. A `Grep` entry with neither is the
+            // tool *declaration* in a tools snapshot, not a call, and must not be counted.
+            if map.get("name").and_then(Value::as_str) == Some("Grep") {
+                if let Some(args) = map
+                    .get("args")
+                    .or_else(|| map.get("input"))
+                    .and_then(Value::as_object)
+                {
+                    let field =
+                        |k: &str| args.get(k).and_then(Value::as_str).filter(|s| !s.is_empty());
+                    if let Some(pattern) = field("pattern") {
+                        let wants_context =
+                            ["-A", "-B", "-C"].iter().any(|k| args.contains_key(*k));
+                        if let Some(s) = search_from_grep_fields(
+                            pattern,
+                            field("path"),
+                            field("glob"),
+                            wants_context,
+                        ) {
+                            out.push(s);
+                        }
+                    }
+                }
+            }
+            for child in map.values() {
+                collect_structured(child, out);
+            }
+        }
+        Value::Array(items) => {
+            for child in items {
+                collect_structured(child, out);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn jsonl_files(dir: &Path, depth: usize) -> Vec<PathBuf> {
     let mut out = Vec::new();
     if depth == 0 {
@@ -256,7 +310,8 @@ fn jsonl_files(dir: &Path, depth: usize) -> Vec<PathBuf> {
 /// Replay the rule over transcripts. Reports what fired, with the command each fire came from, so
 /// the precision number is adjudicated rather than asserted.
 pub fn probe(dirs: &[(&str, PathBuf)], max_examples: usize) -> Value {
-    let mut searches = 0usize;
+    let (mut shell_searches, mut structured_searches) = (0usize, 0usize);
+    let (mut fired_shell, mut fired_structured) = (0usize, 0usize);
     let mut commands_seen = 0usize;
     let mut fires: Vec<Value> = Vec::new();
     let mut passed_over: Vec<Value> = Vec::new();
@@ -268,34 +323,44 @@ pub fn probe(dirs: &[(&str, PathBuf)], max_examples: usize) -> Value {
             let Ok(text) = std::fs::read_to_string(&file) else {
                 continue;
             };
+            // The path relative to the scanned root, not the file name. Every Kimi session's
+            // transcript is called `wire.jsonl`, so a bare file name made all 178 of them
+            // indistinguishable -- and a fire nobody can trace back to its session cannot be
+            // adjudicated, which is the only thing this report is for.
             let session = file
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("?")
+                .strip_prefix(dir)
+                .unwrap_or(&file)
+                .to_string_lossy()
                 .to_string();
             let mut cwd: Option<String> = None;
             for line in text.lines() {
                 if let Some(found) = cwd_of_line(line) {
                     cwd = Some(found);
                 }
+                // Two surfaces, one verdict. A shell search arrives as a command line and a
+                // structured one as fields; each has its own parser in the product crate, and both
+                // hand the same `Search` to the same `judge`. They are counted separately because
+                // they are not the same population -- Kimi is 834 structured to 32 shell, Claude
+                // Code 244 to 2,546 -- and a merged rate would describe a corpus that does not
+                // exist on any single machine.
+                let mut candidates: Vec<(&'static str, Search, String)> = Vec::new();
                 for cmd in commands_of_line(line) {
                     commands_seen += 1;
-                    let head = first_segment(cmd.trim());
-                    let tokens = tokenize(head);
-                    let is_search = tokens
-                        .first()
-                        .map(|t| {
-                            let base = t.rsplit('/').next().unwrap_or(t);
-                            base == "rg" || base == "grep" || base == "egrep"
-                        })
-                        .unwrap_or(false);
-                    if !is_search {
-                        continue;
+                    if let Some(search) = search_from_shell(&cmd) {
+                        shell_searches += 1;
+                        candidates.push(("shell", search, cmd));
                     }
-                    searches += 1;
-                    match suggests_impact(&cmd) {
+                }
+                for search in structured_searches_of_line(line) {
+                    structured_searches += 1;
+                    let shown = format!("Grep pattern={} targets={:?}", search.pattern, search.targets);
+                    candidates.push(("structured", search, shown));
+                }
+
+                for (source, search, shown) in candidates {
+                    match judge(&search) {
                         Some(hit) => {
-                            let verdict = match search_root(&cmd, cwd.as_deref())
+                            let verdict = match root_of_targets(&search.targets, cwd.as_deref())
                                 .and_then(|root| declares_function(&root, &hit.symbol))
                             {
                                 Some(true) => "confirmed_function",
@@ -307,14 +372,19 @@ pub fn probe(dirs: &[(&str, PathBuf)], max_examples: usize) -> Value {
                                 "rejected_not_a_function" => rejected += 1,
                                 _ => unchecked += 1,
                             }
+                            match source {
+                                "structured" => fired_structured += 1,
+                                _ => fired_shell += 1,
+                            }
                             *symbols.entry(hit.symbol.clone()).or_insert(0) += 1;
                             if fires.len() < max_examples {
                                 fires.push(json!({
                                     "session": session,
+                                    "source": source,
                                     "symbol": hit.symbol,
                                     "reason": hit.reason,
                                     "index_check": verdict,
-                                    "command": truncate(&cmd),
+                                    "command": truncate(&shown),
                                 }));
                             }
                         }
@@ -322,7 +392,8 @@ pub fn probe(dirs: &[(&str, PathBuf)], max_examples: usize) -> Value {
                             if passed_over.len() < max_examples {
                                 passed_over.push(json!({
                                     "session": session,
-                                    "command": truncate(&cmd),
+                                    "source": source,
+                                    "command": truncate(&shown),
                                 }));
                             }
                         }
@@ -334,11 +405,17 @@ pub fn probe(dirs: &[(&str, PathBuf)], max_examples: usize) -> Value {
 
     let fired: usize = symbols.values().sum();
     json!({
-        "method": "hook-probe-v1",
+        "method": "hook-probe-v2",
         "commands_seen": commands_seen,
-        "searches": searches,
+        "searches": shell_searches + structured_searches,
+        "searches_shell": shell_searches,
+        "searches_structured": structured_searches,
         "fired": fired,
-        "fire_rate_of_searches": rate(fired, searches),
+        "fired_shell": fired_shell,
+        "fired_structured": fired_structured,
+        "fire_rate_of_searches": rate(fired, shell_searches + structured_searches),
+        "fire_rate_shell": rate(fired_shell, shell_searches),
+        "fire_rate_structured": rate(fired_structured, structured_searches),
         "index_check": {
             "confirmed_function": confirmed,
             "rejected_not_a_function": rejected,

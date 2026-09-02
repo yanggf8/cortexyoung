@@ -16,6 +16,7 @@ pub mod readings;
 pub mod render;
 pub mod scan;
 pub mod settings;
+pub mod settings_kimi;
 pub mod settings_toml;
 pub mod staleness;
 pub mod r#struct;

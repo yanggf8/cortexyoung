@@ -53,7 +53,7 @@ const RUN_AGENTS_FLAGS: &[&str] = &[
 ];
 const VERIFY_IMPACT_FLAGS: &[&str] = &["--repo", "--depth", "--symbols"];
 const RECALL_EXP_FLAGS: &[&str] = &["--venue", "--top"];
-const HOOK_PROBE_FLAGS: &[&str] = &["--claude-dir", "--codex-dir", "--examples"];
+const HOOK_PROBE_FLAGS: &[&str] = &["--claude-dir", "--codex-dir", "--kimi-dir", "--examples"];
 const ADOPT_MINE_FLAGS: &[&str] = &[
     "--since",
     "--claude-dir",
@@ -646,7 +646,7 @@ fn recall_exp_main(argv: &[String]) -> Result<(), String> {
 fn hook_probe_main(argv: &[String]) -> Result<(), String> {
     guard_options(argv, HOOK_PROBE_FLAGS, USAGE_HOOK_PROBE)?;
     let Ok(home) = std::env::var("HOME") else {
-        return Err("HOME is unset: pass --claude-dir and --codex-dir explicitly".to_string());
+        return Err("HOME is unset: pass --claude-dir, --codex-dir and --kimi-dir explicitly".to_string());
     };
     let examples: usize = at(argv, "--examples", "40")
         .parse()
@@ -663,6 +663,13 @@ fn hook_probe_main(argv: &[String]) -> Result<(), String> {
         (
             "codex",
             std::path::PathBuf::from(at(argv, "--codex-dir", &format!("{home}/.codex/sessions"))),
+        ),
+        // Kimi's transcripts are `wire.jsonl` under a two-level session tree, and its searches are
+        // structured `Grep` calls rather than shell lines -- which is exactly why the probe had to
+        // learn a second surface rather than a third harness flag alone.
+        (
+            "kimi",
+            std::path::PathBuf::from(at(argv, "--kimi-dir", &format!("{home}/.kimi-code/sessions"))),
         ),
     ];
     let report = cort_evals::hook::probe(&dirs, examples);

@@ -92,7 +92,7 @@ never appears in its own report.
 - Downloads pinned `ast-grep` v0.45.2 prebuilt `app-<target>.zip` for your platform (Linux x86_64/aarch64, macOS x86_64/arm64) from GitHub Releases and verifies SHA-256 (repo-maintained; upstream publishes no checksums) — fail-closed: an empty or mismatched checksum refuses to install. Falls back to `cargo install ast-grep --version 0.45.2 --locked` (requires Rust 1.88+).
 - Builds `cort` from `rust/` with `cargo build --release --locked` on **every** run and installs the binary plus its ast-grep pack (`src/pack`, located at runtime via `CORT_PACK_DIR`) to `~/.local/share/cortexyoung/cort`, shimming `~/.cargo/bin/cort` or `~/.local/bin/cort`.
 - Deploys `skills/ast-grep/SKILL.md` to **both** agent homes — `~/.claude/skills/ast-grep/SKILL.md` and `~/.codex/skills/ast-grep/SKILL.md` (honouring `CODEX_HOME`) — **byte-for-byte the repo file**. The installer writes nothing inside the document: the frontmatter block holds keys only (`name`, `description`, and nothing of ours), both loaders anchor that fence to line 1, and `rust/tests/skill_format.rs` fails the build if a source stops parsing. Ownership lives in `.cortexyoung-managed` beside the skill, which records the SHA-256 of the bytes we deployed — so a hand-edit of a deployed `SKILL.md` reads as someone else's file and is refused, not silently overwritten. Edit `skills/<name>/SKILL.md` in this repo instead; one source feeds both homes. Preflights collisions before mutating: skips if hash-equal, replaces what it owns, refuses what it does not (use `--force` to backup and replace). Uninstall removes the document and its stamp, and nothing else.
-- Wires the `PreToolUse` hook into `~/.claude/settings.json` **and** `~/.codex/config.toml` in the **same run** as the skill (skip both with `--no-hook`). `cort hook-install` picks the merge by the target file's extension — JSON via `rust/src/settings.rs`, TOML via `rust/src/settings_toml.rs` — never `jq`: either way it preserves every hook you already have, rewrites our own entry when the binary moves instead of adding a second, collapses duplicates down to one, and refuses outright to overwrite a settings file it could not parse. Grok reads the same `settings.json` for Claude Code compatibility and needs no entry of its own. See [the hook section](#the-pretooluse-hook--the-retrospective-half-of-the-routing) for what it does at runtime. A hook that has to be wired by hand is a hook that stays unwired — that is not a hypothesis, it is what this repo measured on its own machine three times, once per harness.
+- Wires the `PreToolUse` hook into `~/.claude/settings.json`, `~/.codex/config.toml` **and** `~/.kimi-code/config.toml` in the **same run** as the skill (skip all three with `--no-hook`). `cort hook-install` takes an explicit `--format` — JSON via `rust/src/settings.rs`, Codex's nested TOML via `rust/src/settings_toml.rs`, Kimi's flat `[[hooks]]` TOML via `rust/src/settings_kimi.rs` — never `jq`: every one of them preserves the hooks you already have, rewrites our own entry when the binary moves instead of adding a second, collapses duplicates down to one, and refuses outright to overwrite a settings file it could not parse. (The format used to be read off the file extension. Two of these three files are called `config.toml`, so each caller now names its own.) Grok reads the same `settings.json` as Claude Code and needs no entry of its own. See [the hook section](#the-pretooluse-hook--the-retrospective-half-of-the-routing) for what it does at runtime. A hook that has to be wired by hand is a hook that stays unwired — that is not a hypothesis, it is what this repo measured on its own machine three times, once per harness.
 - Adds a single bounded idempotent `PATH` block to your shell profile (`.bashrc`/`.zshrc`/`.profile`) so `cort` and `ast-grep` are on `PATH`; removed on `--uninstall`.
 - Records ownership in `~/.local/share/cortexyoung/manifest` (v2 `key:value` lines) — uninstall only removes what it installed, never a pre-existing binary.
 
@@ -473,15 +473,36 @@ what a caller-set question is worth in this harness, not a controlled `cort` vs 
 the demand-side numbers a few paragraphs below it say plainly that this shape of question is rare in
 daily use. The hook only pays out when it fires, and it is built to stay silent otherwise.
 
-**Three harnesses, one rule.** Claude Code and Codex each get their own wired entry — JSON in
-`~/.claude/settings.json`, TOML in `~/.codex/config.toml`, both installed in the same run (see
-[Install](#install)). Grok reads Claude Code's `settings.json` for compatibility and fires the same
-entry with no wiring of its own; `harness_of` (`rust/src/main.rs`) tells the three apart from the
-harness's own `transcript_path` rather than trusting a flag, because a flag stays right only as long
-as one settings file serves one harness. Codex additionally never receives `suppressOutput` in the
-hook's JSON reply — the field is legal by Codex's own schema but makes it discard the whole response
-if present (`docs/2026-09-02-hook-wiring-correction.md` §12) — while Claude Code and Grok both get
-it, to keep the raw JSON out of the transcript view.
+**Four harnesses, one rule, two surfaces.** Claude Code, Codex and Kimi each get their own wired
+entry — JSON in `~/.claude/settings.json`, nested TOML in `~/.codex/config.toml`, flat `[[hooks]]`
+TOML in `~/.kimi-code/config.toml`, all installed in the same run (see [Install](#install)). Grok
+reads Claude Code's `settings.json` for compatibility and fires the same entry with no wiring of its
+own; `harness_of` (`rust/src/main.rs`) tells them apart from the harness's own `transcript_path`
+rather than trusting a flag, because a flag stays right only as long as one settings file serves one
+harness. Codex additionally never receives `suppressOutput` in the hook's JSON reply — the field is
+legal by Codex's own schema but makes it discard the whole response if present
+(`docs/2026-09-02-hook-wiring-correction.md` §12) — while Claude Code and Grok both get it, to keep
+the raw JSON out of the transcript view.
+
+**Not every harness searches through a shell.** Kimi's search surface is its structured `Grep` tool:
+1,078 structured searches against 3,417 shell ones across the whole local corpus, and on that
+harness specifically the split runs the other way from Claude Code's. So the rule is reached by two
+parsers and only one verdict — `search_from_shell` and `search_from_grep_fields` both build a
+`Search`, and `judge` decides. That the split is drawn in the right place is measured rather than
+asserted: replayed over 4,495 real searches, the same `judge` fires on 4.71% of shell searches and
+4.36% of structured ones. Parsing is per-harness by necessity; a second copy of the *decision* would
+leave `cort-evals hook-probe`'s calibration describing something other than what ships.
+
+**Kimi is the one harness where a suggestion cannot arrive as a suggestion.** Its `PreToolUse` keeps
+only results whose `action` is `block` and discards every allow-shaped one before the model sees it
+(every other hook event drops its result outright), so `additionalContext` there reaches nobody. The
+contract is therefore deliberately different on that harness and only on it: deny once per symbol
+per session, carrying the same sentence as the reason, and yield on every later attempt — which
+turns a false positive's cost from "the search was blocked" into "one extra turn", what a suggestion
+already costs everywhere else. Measured live: the deny landed, the agent re-issued the identical
+search and it ran, and the gate recorded exactly one fire (§16). What is *not* yet established is
+whether the deny changes what the agent does — two runs, one of which took up `cort impact` and one
+of which re-ran the grep and reasoned from it. That number is now accumulating on its own.
 
 **Codex wiring is two steps, and only one of them is ours.** Codex will not run a hook it has not
 been shown. A wired entry sits in `config.toml` and fires nothing until it is reviewed once in an
@@ -521,14 +542,14 @@ attributable to neither side. `cort usage` rolls up counts only; the outcome spl
 `cort-evals adopt-mine`, whose cross-check refuses to compare two sides drawn from different
 populations rather than quietly reporting a ratio across them.
 
-**Turning it off.** `./install.sh --no-hook` skips both entries; `./install.sh --uninstall` unwires
-both; `./install.sh --check` prints `hook: <path> (wired)` and `hook_codex: <path> (wired)` — the
-latter reading `(wired, NOT TRUSTED — start codex once and review the hook)` while Codex has not
-been shown the entry — or names what is wrong with each independently. Those lines exist because the
-wiring silently went down on this repo's own machine more than once, nothing said so, and Codex's
-TOML entry was left deliberately hand-wired (not deployed by `install.sh`) for a full day before
-this document's §13 closed that gap — after which §14 found the deployed entry still inert, because
-`wired` had been answering a question one step short of the one that matters. See
+**Turning it off.** `./install.sh --no-hook` skips all three entries; `./install.sh --uninstall`
+unwires them; `./install.sh --check` prints `hook:`, `hook_codex:` and `hook_kimi:` with `(wired)`
+each — `hook_codex` reading `(wired, NOT TRUSTED — start codex once and review the hook)` while
+Codex has not been shown the entry — or names what is wrong with each independently. Those lines
+exist because the wiring silently went down on this repo's own machine more than once, nothing said
+so, and Codex's TOML entry was left deliberately hand-wired (not deployed by `install.sh`) for a
+full day before this document's §13 closed that gap — after which §14 found the deployed entry still
+inert, because `wired` had been answering a question one step short of the one that matters. See
 `docs/2026-09-02-hook-wiring-correction.md`.
 
 ## Upstream credits

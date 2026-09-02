@@ -3,7 +3,7 @@
 //! plausible-looking greps would measure the rule against my imagination of agent behaviour, which
 //! is exactly the error the demand re-measurement was written to correct.
 
-use cort::hook::suggests_impact;
+use cort::hook::{judge, search_from_grep_fields, suggests_impact};
 
 #[test]
 fn the_one_call_site_search_in_the_corpus_fires() {
@@ -239,4 +239,89 @@ mod hook_command {
             assert!(!out.contains("additionalContext"), "{payload} -> {out}");
         }
     }
+}
+
+// --- Structured searches ------------------------------------------------------------------------
+//
+// Same discipline as above: every fixture is a verbatim `Grep` tool call taken from
+// ~/.kimi-code/sessions/**/wire.jsonl, so Kimi's parser is judged against traffic that happened
+// rather than against a guess at what a structured search looks like. What these pin is that a
+// second *parser* still reaches the one shared `judge` -- and reaches the same verdict its shell
+// twin does.
+
+fn grep_tool(pattern: &str, path: Option<&str>) -> Option<cort::hook::HookHit> {
+    judge(&search_from_grep_fields(pattern, path, None, false).expect("a non-empty pattern parses"))
+}
+
+#[test]
+fn a_bare_symbol_grep_tool_call_fires_the_same_as_its_shell_twin() {
+    // {"pattern":"enumeration_may_be_incomplete","path":"rust/src","output_mode":"content","-n":true}
+    let hit = grep_tool("enumeration_may_be_incomplete", Some("rust/src"))
+        .expect("a bare symbol scoped to source must fire");
+    assert_eq!(hit.symbol, "enumeration_may_be_incomplete");
+    assert_eq!(
+        hit.symbol,
+        suggests_impact("rg -e 'enumeration_may_be_incomplete' rust/src")
+            .unwrap()
+            .symbol,
+        "two parsers, one verdict -- that is the whole point of the split"
+    );
+}
+
+/// The value on `-C` is exactly what a rendering back into a shell line had to throw away. Kimi's
+/// parser keeps it as a flag rather than re-deriving it from text.
+#[test]
+fn a_context_flag_in_the_fields_silences_it_the_way_a_shell_flag_does() {
+    // {"-C":4,"output_mode":"content","path":"frontend/src","pattern":"updatePaymentStatus"}
+    let s = search_from_grep_fields("updatePaymentStatus", Some("frontend/src"), None, true)
+        .expect("parses");
+    assert!(
+        judge(&s).is_none(),
+        "a `-C` field is `cort context`'s question, not `impact`'s"
+    );
+    assert!(
+        suggests_impact("rg -C 4 -e 'updatePaymentStatus' frontend/src").is_none(),
+        "and the shell twin must agree"
+    );
+}
+
+#[test]
+fn a_grep_tool_call_pinned_to_one_file_does_not_fire() {
+    // {"-n":true,"output_mode":"content","path":"rust/src/main.rs","pattern":"cmd_hook_install"}
+    // A source-language file, so this is stopped by the single-file gate rather than by the
+    // extension gate -- which is the case a naive `recursive: true` would have got wrong.
+    assert!(
+        grep_tool("cmd_hook_install", Some("rust/src/main.rs")).is_none(),
+        "one concrete file is reading, not enumerating a caller set"
+    );
+}
+
+#[test]
+fn an_alternation_pattern_is_not_a_symbol_in_either_form() {
+    // {"pattern":"MAP_ORIGIN|MAP_STEP|MAP_COLS","path":"game/scripts", ...}
+    assert!(grep_tool("MAP_ORIGIN|MAP_STEP|MAP_COLS", Some("game/scripts")).is_none());
+}
+
+/// `type` narrows which languages are read, not where, so it is not a target -- folding it in would
+/// make a tree-wide search read as if it named a concrete path and stop firing.
+#[test]
+fn a_type_filtered_tree_wide_call_still_fires() {
+    // {"pattern":"custom_topic_raw_listing","type":"rust"}
+    let hit = grep_tool("custom_topic_raw_listing", None).expect("scoped to the working tree");
+    assert_eq!(hit.symbol, "custom_topic_raw_listing");
+}
+
+/// A `glob` is a target: it is what makes a search cross-file, which is the shape `impact` answers.
+#[test]
+fn a_glob_field_counts_as_a_cross_file_target() {
+    let s = search_from_grep_fields("visitorTracking", None, Some("*.ts"), false).expect("parses");
+    assert_eq!(judge(&s).unwrap().symbol, "visitorTracking");
+}
+
+/// No shell, so no quoting, so no class of pattern the parser has to refuse. The only `None` left
+/// is the one that was never a search.
+#[test]
+fn the_only_unparseable_structured_call_is_an_empty_pattern() {
+    assert!(search_from_grep_fields("", Some("rust/src"), None, false).is_none());
+    assert!(search_from_grep_fields("it's a \"quote\"", None, None, false).is_some());
 }

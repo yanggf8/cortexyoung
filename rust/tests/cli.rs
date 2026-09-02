@@ -817,3 +817,122 @@ fn suppress_output_is_omitted_for_codex_and_kept_for_the_others() {
         for_claude.stdout
     );
 }
+
+// --- Kimi: a structured search surface, and a contract that has to differ ----------------------
+
+/// Send a raw payload rather than a shell command, so a structured tool call can be tested the way
+/// the harness actually sends one.
+fn run_hook_suggest_payload(payload: serde_json::Value, extra: &[&str], cwd: &Path, cache: &Path) -> Run {
+    use std::io::Write;
+    use std::process::Stdio;
+    let mut child = Command::new(cort_bin())
+        .arg("hook-suggest")
+        .args(extra)
+        .current_dir(cwd)
+        .env("CORT_CACHE_DIR", cache)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn cort hook-suggest");
+    let body = serde_json::to_vec(&payload).unwrap();
+    child.stdin.take().unwrap().write_all(&body).unwrap();
+    let out = child.wait_with_output().expect("wait cort hook-suggest");
+    Run {
+        code: out.status.code().unwrap_or(1),
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+    }
+}
+
+fn kimi_grep(pattern: &str, path: &str, session: &str) -> serde_json::Value {
+    serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "session_id": session,
+        "tool_name": "Grep",
+        "tool_input": { "pattern": pattern, "path": path, "output_mode": "content", "-n": true },
+    })
+}
+
+/// Kimi's search surface is its structured `Grep` tool, not the shell. A hook that only reads
+/// `tool_input.command` is silent on the majority of that harness's traffic.
+#[test]
+fn a_structured_grep_payload_is_read_the_same_as_a_shell_search() {
+    let (_p, cwd, _c, cache) = sandbox();
+    let idx = run_cort(&["index"], &cwd, &cache);
+    if idx.code != 0 {
+        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
+        return;
+    }
+    let r = run_hook_suggest_payload(
+        kimi_grep("helper", "rust/src", "s1"),
+        &["--harness", "claude-code"],
+        &cwd,
+        &cache,
+    );
+    assert_eq!(r.code, 0);
+    let ctx = payload(&r)["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(ctx.contains("cort impact --symbol 'helper'"), "got: {ctx}");
+}
+
+/// On Kimi and only on Kimi the suggestion has to arrive as a deny, because its `PreToolUse` keeps
+/// only blocking results and discards the rest before the model sees them. It fires once per symbol
+/// per session and yields afterwards, so a false positive costs one turn rather than the search.
+#[test]
+fn kimi_denies_once_per_symbol_then_gets_out_of_the_way() {
+    let (_p, cwd, _c, cache) = sandbox();
+    let idx = run_cort(&["index"], &cwd, &cache);
+    if idx.code != 0 {
+        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
+        return;
+    }
+    let kimi = &["--harness", "kimi-code"];
+
+    let first = run_hook_suggest_payload(kimi_grep("helper", "rust/src", "sess-a"), kimi, &cwd, &cache);
+    let out = payload(&first)["hookSpecificOutput"].clone();
+    assert_eq!(out["permissionDecision"].as_str(), Some("deny"));
+    let reason = out["permissionDecisionReason"].as_str().unwrap_or_default();
+    assert!(reason.contains("cort impact --symbol 'helper'"), "got: {reason}");
+    assert!(
+        reason.contains("Issue exactly the same search again"),
+        "a stop the agent cannot get past is worse than any false positive: {reason}"
+    );
+    assert!(
+        out["additionalContext"].is_null(),
+        "the allow-shaped field is discarded by Kimi and must not be sent there"
+    );
+
+    // Same symbol, same session: yields.
+    let second = run_hook_suggest_payload(kimi_grep("helper", "rust/src", "sess-a"), kimi, &cwd, &cache);
+    assert_eq!(payload(&second), serde_json::json!({}));
+
+    // A different session has not been told anything yet.
+    let other = run_hook_suggest_payload(kimi_grep("helper", "rust/src", "sess-b"), kimi, &cwd, &cache);
+    assert_eq!(
+        payload(&other)["hookSpecificOutput"]["permissionDecision"].as_str(),
+        Some("deny")
+    );
+}
+
+/// The other three harnesses keep the contract the rule was calibrated under: never block.
+#[test]
+fn no_other_harness_ever_receives_a_deny() {
+    let (_p, cwd, _c, cache) = sandbox();
+    let idx = run_cort(&["index"], &cwd, &cache);
+    if idx.code != 0 {
+        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
+        return;
+    }
+    for harness in ["claude-code", "codex", "grok"] {
+        let r = run_hook_suggest_with(FIRING_SEARCH, &["--harness", harness], &cwd, &cache);
+        let out = payload(&r)["hookSpecificOutput"].clone();
+        assert!(
+            out["permissionDecision"].is_null(),
+            "{harness} must never be denied"
+        );
+        assert!(out["additionalContext"].is_string(), "{harness} got: {out}");
+    }
+}

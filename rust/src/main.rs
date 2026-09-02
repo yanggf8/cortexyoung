@@ -18,6 +18,7 @@ use cort::r#struct::{struct_command, StructOptions};
 use cort::readings::{parse_content_mode, read_fragment, recall_readings, ContentMode};
 use cort::render::{parse_format, render, render_error, Format};
 use cort::settings;
+use cort::settings_kimi;
 use cort::settings_toml;
 use cort::staleness::compute_stale;
 use cort::usage::{self, CommandRecord};
@@ -340,6 +341,15 @@ struct HookInstallArgs {
     /// Take the entry back out instead of putting one in.
     #[arg(long = "remove")]
     remove: bool,
+    /// Which settings dialect the target file speaks: `json` (Claude Code, and Grok through it),
+    /// `codex` (nested `[[hooks.PreToolUse]]` groups), `kimi` (a flat `[[hooks]]` array). Defaults
+    /// to the target's extension -- `.toml` means Codex, anything else JSON -- which held while
+    /// `.toml` named exactly one harness. It no longer does: Kimi's file is also called
+    /// `config.toml`, so that harness must say so, and sniffing the path for `.kimi-code` would put
+    /// the answer back in the hands of a string nobody controls (`KIMI_CODE_HOME` can point
+    /// anywhere).
+    #[arg(long = "format")]
+    format: Option<String>,
     /// Report what is wired without writing anything -- what `install.sh --check` needs.
     #[arg(long = "status")]
     status: bool,
@@ -518,15 +528,23 @@ fn hook_args(outcome: &str, harness: &str, declared: Option<&str>) -> String {
 /// over the flag and the flag is recorded alongside so the disagreement stays visible. When it
 /// names nothing we recognise, the flag stands -- a declared value is still better than none.
 ///
-/// Kimi (`kimi-code`) is deliberately absent from the list below. Its `PreToolUse` payload carries
-/// `tool_name` / `tool_input` / `tool_call_id` and nothing else: neither spelling of a transcript
-/// path occurs anywhere in the shipped `@moonshot-ai/kimi-code` bundle (grep over `dist/main.mjs`,
-/// 2026-09-02). A `/.kimi-code/` arm sat here until that was checked -- it could never match, and
-/// an arm that cannot fire made this list look like it covered a harness that is not wired at all.
-/// Kimi is also the one harness this hook has nothing to say to: its `PreToolUse` keeps only
-/// results whose `action` is `block` and drops every allow-shaped one before the model sees it
-/// (`blockDecision`, same bundle), and `cort hook-suggest` never blocks. Re-add the arm when a Kimi
-/// payload actually carries the path -- not on the assumption that it does.
+/// Kimi (`kimi-code`) is deliberately absent from the list below, for a narrower reason than the
+/// first version of this comment gave. Its `PreToolUse` payload does carry identity -- the runner
+/// prepends `hook_event_name`, `session_id`, `cwd` and `client_type` to the tool fields
+/// (`tool_name`, `tool_input`, `tool_call_id`), observed byte-for-byte on a live run, 2026-09-02 --
+/// but no transcript path under either spelling, and neither spelling occurs anywhere in the
+/// shipped `@moonshot-ai/kimi-code` bundle. A `/.kimi-code/` arm sat here until that was checked:
+/// it could never match, and an arm that cannot fire made this list look like it covered a harness
+/// that is not wired at all. The earlier claim that the payload carried the tool fields "and
+/// nothing else" was read off `runPreToolUse` alone and missed what the runner adds; the conclusion
+/// survived the correction, the reasoning did not. Re-add the arm when a Kimi payload actually
+/// carries a path -- not on the assumption that it does.
+///
+/// Whether to wire Kimi at all is a separate decision, not a leftover. Its `PreToolUse` keeps only
+/// results whose `action` is `block` and discards every allow-shaped one before the model sees it
+/// (`blockDecision`; every other hook event drops its result outright), and `cort hook-suggest`
+/// never blocks -- so an entry there would have to trade that rule for a deny. That is a contract
+/// change, not a third call to the same installer. `docs/2026-09-02-hook-wiring-correction.md` §14.
 fn harness_of(payload: &Value, declared: &str) -> (String, Option<String>) {
     let path = payload
         .get("transcript_path")
@@ -563,6 +581,73 @@ fn harness_of(payload: &Value, declared: &str) -> (String, Option<String>) {
 /// * It stays silent when this project has no index. Suggesting a query that can only answer
 ///   `no_seed_resolved` would spend the agent's turn to tell it nothing, and would make the
 ///   suggestion itself untrustworthy the first time it happened.
+
+/// The search a hook payload describes, on either surface.
+///
+/// `tool_input.command` is a shell line and is parsed as one. A payload without it may still be a
+/// search: Kimi's `Grep` tool carries `pattern`/`path`/`glob` and the context flags as fields, and
+/// on that harness it is the *majority* surface -- 834 structured calls against 32 shell greps in
+/// the local corpus (`docs/2026-09-02-hook-wiring-correction.md` §15). Both parsers live in
+/// `cort::hook` beside the one `judge` they feed, so adding a surface never adds a second verdict.
+fn search_of_payload(v: &Value) -> Option<cort::hook::Search> {
+    let input = v.get("tool_input")?;
+    if let Some(command) = input.get("command").and_then(Value::as_str) {
+        return cort::hook::search_from_shell(command);
+    }
+    if v.get("tool_name").and_then(Value::as_str) != Some("Grep") {
+        return None;
+    }
+    let field = |k: &str| input.get(k).and_then(Value::as_str).filter(|s| !s.is_empty());
+    cort::hook::search_from_grep_fields(
+        field("pattern")?,
+        field("path"),
+        field("glob"),
+        ["-A", "-B", "-C"].iter().any(|k| input.get(*k).is_some()),
+    )
+}
+
+/// Has this session already been told about this symbol?
+///
+/// Only Kimi needs the question, and it needs it because of what its `PreToolUse` will carry: it
+/// keeps only results whose `action` is `block` and discards every allow-shaped one before the
+/// model sees it, so on that harness a suggestion has to arrive as a deny or not at all. A deny
+/// that repeats is a loop -- the agent re-issues the search, gets stopped again, and never gets its
+/// answer. Firing once per session per symbol turns the cost of a false positive into one extra
+/// turn, which is what a suggestion already costs everywhere else.
+///
+/// A live probe on 2026-09-02 recorded the intended sequence: `Grep cmd_hook_install` denied, then
+/// `cort impact --symbol cmd_hook_install …` run by the model of its own accord, then the same grep
+/// re-issued and allowed. State lives beside the index rather than in `usage.db` because it is a
+/// gate, not a measurement: losing it costs one extra deny, and nothing reads it afterwards.
+fn gate_already_fired(session_id: &str, symbol: &str) -> bool {
+    let Some(dir) = cort::usage::usage_db_path().and_then(|p| p.parent().map(|d| d.join("hook-gate")))
+    else {
+        // No cache directory means no memory of a previous fire, and a deny we cannot remember is
+        // the loop this gate exists to prevent. Treat it as already fired: stay silent.
+        return true;
+    };
+    let safe: String = session_id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .take(128)
+        .collect();
+    if safe.is_empty() {
+        return true;
+    }
+    let file = dir.join(safe);
+    let seen = std::fs::read_to_string(&file).unwrap_or_default();
+    if seen.lines().any(|l| l == symbol) {
+        return true;
+    }
+    if std::fs::create_dir_all(&dir).is_err() {
+        return true;
+    }
+    let mut line = seen;
+    line.push_str(symbol);
+    line.push('\n');
+    // A failed write is the same unrememberable deny as a missing directory.
+    std::fs::write(&file, line).is_err()
+}
 fn cmd_hook_suggest(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError> {
     let declared = HookSuggestArgs::try_parse_from(args.iter())
         .ok()
@@ -588,17 +673,20 @@ fn cmd_hook_suggest(args: &[String], usage: &mut UsageEvent) -> Result<Emit, Cor
     let Ok(v) = serde_json::from_str::<Value>(&payload) else {
         return quiet();
     };
-    let Some(command) = v
-        .get("tool_input")
-        .and_then(|i| i.get("command"))
-        .and_then(Value::as_str)
-    else {
+    // A payload with no `tool_input` at all is one this hook could not read, and stays
+    // `no_payload`. One it can read but has nothing to say about is `no_shape`. Conflating the two
+    // would leave the funnel unable to tell "the hook never saw the command" from "the hook saw it
+    // and correctly stayed quiet" -- and the second is the number that says the rule is selective.
+    if v.get("tool_input").is_none() {
         return quiet();
-    };
+    }
     let (harness, declared_differs) = harness_of(&v, &declared);
     let harness_args = |outcome: &str| hook_args(outcome, &harness, declared_differs.as_deref());
     usage.args_summary = harness_args("no_shape");
-    let Some(hit) = cort::hook::suggests_impact(command) else {
+    let Some(search) = search_of_payload(&v) else {
+        return quiet();
+    };
+    let Some(hit) = cort::hook::judge(&search) else {
         return quiet();
     };
     // The gate is "this project has an index", which is what `cort status` means by
@@ -632,6 +720,37 @@ edges added since -- re-run `cort index` first if the answer has to be complete"
         },
         hit.symbol
     );
+    // Kimi is the one harness where a suggestion cannot arrive as a suggestion. Its `PreToolUse`
+    // keeps only results whose `action` is `block` and drops every allow-shaped one before the
+    // model sees it, so `additionalContext` there reaches nobody. The contract is therefore
+    // deliberately different on this harness and only on it: deny once per session per symbol,
+    // carrying the same sentence as the reason, and yield on every later attempt. The reason text
+    // says so explicitly, because a stop the agent cannot get past is a worse failure than any
+    // false positive this rule can produce.
+    if harness == "kimi-code" {
+        let session = v
+            .get("session_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if gate_already_fired(session, &hit.symbol) {
+            usage.args_summary = harness_args("hit_yielded");
+            return quiet();
+        }
+        return Ok(Emit {
+            payload: json!({
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": format!(
+                        "{context} This search was not run. Issue exactly the same search again and \
+it will run -- this fires once per symbol per session."
+                    ),
+                },
+            }),
+            format: Format::Json,
+            render_command: Some("hook-suggest"),
+        });
+    }
     // `suppressOutput` keeps the raw JSON out of the user's transcript view. Codex 0.152.1 rejects
     // the whole output when it is present -- the hook is reported `Failed` and the context never
     // reaches the model -- even though its own embedded `pre-tool-use.command.output` schema lists
@@ -753,13 +872,38 @@ fn map_toml_settings_err(e: settings_toml::SettingsError) -> CortError {
     }
 }
 
-/// TOML for Codex's `config.toml`, JSON for everything else (Claude Code's and Grok's shared
-/// `settings.json` -- Grok reads that file for Claude Code compatibility and needs no wiring of its
-/// own, `docs/2026-09-02-hook-wiring-correction.md` §6). Decided by the target path's extension
-/// rather than a second flag: `install.sh` already has to name two different files for the two
-/// homes, and a `.toml` path is unambiguous.
-fn is_toml_settings(path: &Path) -> bool {
-    path.extension().and_then(|e| e.to_str()) == Some("toml")
+/// Which merge owns a settings file.
+///
+/// Extension alone answered this while `.toml` named exactly one harness (Codex; Claude Code and
+/// Grok share one `settings.json`, `docs/2026-09-02-hook-wiring-correction.md` §6). Kimi's file is
+/// also `config.toml`, with a shape that is not Codex's, so the extension rule survives only as the
+/// default and Kimi has to name itself with `--format kimi`. The alternative -- sniffing the path
+/// for `.kimi-code` -- would hang the answer on a string nobody controls, since `KIMI_CODE_HOME`
+/// can point anywhere; `install.sh` already names all three files, so it can name the three formats.
+#[derive(Clone, Copy, PartialEq)]
+enum SettingsFormat {
+    Json,
+    CodexToml,
+    KimiToml,
+}
+
+fn settings_format(path: &Path, declared: Option<&str>) -> Result<SettingsFormat, CortError> {
+    match declared {
+        None => Ok(
+            if path.extension().and_then(|e| e.to_str()) == Some("toml") {
+                SettingsFormat::CodexToml
+            } else {
+                SettingsFormat::Json
+            },
+        ),
+        Some("json") => Ok(SettingsFormat::Json),
+        Some("codex") => Ok(SettingsFormat::CodexToml),
+        Some("kimi") => Ok(SettingsFormat::KimiToml),
+        Some(other) => Err(CortError::new(
+            "bad_flag",
+            json!({ "message": format!("--format must be json, codex or kimi, not `{other}`") }),
+        )),
+    }
 }
 
 fn cmd_hook_install(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, CortError> {
@@ -773,18 +917,18 @@ fn cmd_hook_install(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, Co
             )
         })?,
     };
-    let toml = is_toml_settings(&path);
+    let fmt = settings_format(&path, a.format.as_deref())?;
     if a.status {
         // `trusted` is `null`, never `false`, wherever the question does not apply: Claude Code and
         // Grok have no trust gate, and a file with no entry of ours has nothing to be trusted. Only
         // a wired Codex entry can answer it, and `false` there is a hook that will not run.
-        let (wired, trusted) = if toml {
-            match settings_toml::installed_entry(&path) {
+        let (wired, trusted) = match fmt {
+            SettingsFormat::CodexToml => match settings_toml::installed_entry(&path) {
                 Some((command, trusted)) => (Some(command), Some(trusted)),
                 None => (None, None),
-            }
-        } else {
-            (settings::installed_command(&path), None)
+            },
+            SettingsFormat::KimiToml => (settings_kimi::installed_command(&path), None),
+            SettingsFormat::Json => (settings::installed_command(&path), None),
         };
         return Ok(Emit {
             render_command: None,
@@ -798,10 +942,10 @@ fn cmd_hook_install(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, Co
         });
     }
     if a.remove {
-        let out = if toml {
-            settings_toml::remove_hook(&path).map_err(map_toml_settings_err)?
-        } else {
-            settings::remove_hook(&path).map_err(map_json_settings_err)?
+        let out = match fmt {
+            SettingsFormat::CodexToml => settings_toml::remove_hook(&path).map_err(map_toml_settings_err)?,
+            SettingsFormat::KimiToml => settings_kimi::remove_hook(&path).map_err(map_toml_settings_err)?,
+            SettingsFormat::Json => settings::remove_hook(&path).map_err(map_json_settings_err)?,
         };
         return Ok(Emit {
             render_command: None,
@@ -824,10 +968,10 @@ fn cmd_hook_install(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, Co
             format!("{} hook-suggest", exe.to_string_lossy())
         }
     };
-    let out = if toml {
-        settings_toml::install_hook(&path, &command).map_err(map_toml_settings_err)?
-    } else {
-        settings::install_hook(&path, &command).map_err(map_json_settings_err)?
+    let out = match fmt {
+        SettingsFormat::CodexToml => settings_toml::install_hook(&path, &command).map_err(map_toml_settings_err)?,
+        SettingsFormat::KimiToml => settings_kimi::install_hook(&path, &command).map_err(map_toml_settings_err)?,
+        SettingsFormat::Json => settings::install_hook(&path, &command).map_err(map_json_settings_err)?,
     };
     Ok(Emit {
         render_command: None,

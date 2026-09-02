@@ -47,14 +47,29 @@ more numerous is not.
 hook by `install.sh` in the same run as the skill, so while working in this repo your own
 `grep`/`rg` will sometimes come back with a `cort impact` suggestion attached -- that is the
 product talking, and it is the retrospective half of the routing the skill's prose could not
-carry (409 searches in skill-bearing sessions, zero `cort` calls). `cort-evals hook-probe` replays
-that same function to measure it; do not add a second copy of the rule to the eval harness, or the
-measured rule and the installed rule will drift. `cort hook-install` (`rust/src/settings.rs`) owns
-the settings.json merge for the same reason a `jq` pipeline would not: preserving other people's
-hooks, collapsing duplicates, and refusing a file it cannot parse are logic, and logic needs
-tests. Recognition of our own entry is a token test, never a suffix test -- anchoring it to the end
-of the command line is what let `--status` report `wired: false` on a machine where the hook was
-firing, twice (`docs/2026-09-02-hook-wiring-correction.md`).
+carry (409 searches in skill-bearing sessions, zero `cort` calls). Be precise about which half is
+singular: **parsing is per-harness and plural, the verdict is singular.** A shell line, Codex's
+`["bash","-lc",…]` and Kimi's structured `Grep` fields are three different extractions and each gets
+its own function; all three build a `Search` and all three hand it to the one `judge`. A second copy
+of a *parser* is just code; a second copy of the *decision* makes `cort-evals hook-probe`'s
+calibration describe something other than what ships, which is the only thing that number is for. So
+`hook-probe` replays `judge` itself, and never reimplements it -- a hand-rolled approximation of the
+rule was tried on 2026-09-02 and over-counted its own corpus by 48% and 4x on the two surfaces
+(`docs/2026-09-02-hook-wiring-correction.md` §15, §16). `cort hook-install` owns the settings merge
+for the same reason a `jq` pipeline would not: preserving other people's hooks, collapsing
+duplicates, and refusing a file it cannot parse are logic, and logic needs tests -- one module per
+dialect (`settings.rs` JSON, `settings_toml.rs` Codex, `settings_kimi.rs` Kimi), chosen by an
+explicit `--format` since two of the three files are called `config.toml`. Recognition of our own
+entry is a token test, never a suffix test -- anchoring it to the end of the command line is what
+let `--status` report `wired: false` on a machine where the hook was firing, twice
+(`docs/2026-09-02-hook-wiring-correction.md`).
+
+**The hook never blocks -- except on Kimi, where it can only block.** Kimi's `PreToolUse` keeps only
+results whose `action` is `block` and discards every allow-shaped one before the model sees it, so a
+suggestion there arrives as a deny or not at all. That exception is bounded and must stay bounded:
+once per symbol per session, then yield, and `no_other_harness_ever_receives_a_deny` is a test.
+Whether the deny actually changes what the agent does is still two runs and one uptake -- do not
+quote it as established (§16).
 
 **The repo is pure Rust. No JavaScript, TypeScript, Python or other scripting language may exist as executable code** — not as a product entry point, not as tooling, not as tests. The eval harness that used to be six `.mjs` files was ported into the `evals/` crate for exactly this reason. Bash stays only where the platform requires it (`install.sh`, `tests/install-smoke.sh`); it is not a place to put logic. If a task seems to need a script, add a Rust subcommand to `evals/` or `rust/` instead.
 

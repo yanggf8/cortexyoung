@@ -203,6 +203,37 @@ pub fn first_segment(command: &str) -> &str {
 /// `rg`, which is what the routing skill already says and what the traffic shows the agent doing
 /// correctly hundreds of times.
 pub fn suggests_impact(command: &str) -> Option<HookHit> {
+    judge(&search_from_shell(command)?)
+}
+
+/// One search in the terms the decision needs, with every harness-specific spelling already
+/// resolved.
+///
+/// The split exists because parsing and deciding are not the same job and do not have the same
+/// number of right answers. Parsing is per-harness by necessity -- a shell line, Codex's
+/// `["bash","-lc",…]`, Kimi's `Grep` fields -- and each of those gets its own function below.
+/// Deciding is one function, not out of tidiness but because its only justification is a measured
+/// number: `cort-evals hook-probe` grades exactly this predicate, so a second copy would leave the
+/// calibration describing something other than what ships. The data says the split is drawn in the
+/// right place -- replayed over 4,436 real searches the same `judge` fires on 4.73% of shell
+/// searches and 4.47% of structured ones (`docs/2026-09-02-hook-wiring-correction.md` §15).
+#[derive(Debug, Clone)]
+pub struct Search {
+    /// The pattern exactly as the agent issued it.
+    pub pattern: String,
+    /// What the search was pointed at: paths and globs, plus (from a shell line) the flag tokens
+    /// that trailed the pattern, which the source/extension tests read as text.
+    pub targets: Vec<String>,
+    /// The agent asked for the lines around each match (`-A`/`-B`/`-C`). That is `cort context`'s
+    /// question, not `impact`'s.
+    pub wants_context: bool,
+    /// The search descends through directories rather than reading named files.
+    pub recursive: bool,
+}
+
+/// A search written as a shell command line -- Claude Code's and Codex's surface, and Kimi's
+/// minority one.
+pub fn search_from_shell(command: &str) -> Option<Search> {
     let segment = first_segment(command.trim());
     let tokens = tokenize(segment);
     let mut idx = 0;
@@ -218,7 +249,7 @@ pub fn suggests_impact(command: &str) -> Option<HookHit> {
 
     // The pattern is the first non-flag token. `-e PATTERN` names it explicitly.
     let mut pattern: Option<String> = None;
-    let mut rest: Vec<String> = Vec::new();
+    let mut targets: Vec<String> = Vec::new();
     while idx < tokens.len() {
         let t = &tokens[idx];
         if t == "-e" || t == "--regexp" {
@@ -232,25 +263,78 @@ pub fn suggests_impact(command: &str) -> Option<HookHit> {
         } else if pattern.is_none() {
             pattern = Some(t.clone());
         } else if !is_redirection(t) {
-            rest.push(t.clone());
+            targets.push(t.clone());
         }
         idx += 1;
     }
-    let symbol = symbol_of_pattern(&pattern?)?;
+    Some(Search {
+        pattern: pattern?,
+        targets,
+        wants_context: tokens.iter().any(|t| is_context_flag(t)),
+        recursive: tokens.iter().any(|t| {
+            t == "-r" || t == "-R" || t == "--recursive" || is_short_cluster_with(t, 'r')
+        }),
+    })
+}
+
+/// A search issued as a structured tool call: Kimi's `Grep`, whose 834 calls against 32 shell greps
+/// make it that harness's real search surface (Claude Code's split is the other way round, 244 to
+/// 2,546). Its own parser rather than a rendering back into shell, because the fields already say
+/// what a shell line would have to be re-parsed to recover -- and a round trip through a tokenizer
+/// only loses things: the value on `-C`, and any pattern carrying both quote characters.
+///
+/// `file_type` (rg's `--type`) is deliberately not a target. It narrows which languages are
+/// searched, not where, so folding it in would make a tree-wide type-filtered search read as if it
+/// named a concrete path. The known gap that leaves is a type naming a language the rule pack
+/// cannot answer; the shell side has the same gap for the same reason.
+pub fn search_from_grep_fields(
+    pattern: &str,
+    path: Option<&str>,
+    glob: Option<&str>,
+    wants_context: bool,
+) -> Option<Search> {
+    if pattern.is_empty() {
+        return None;
+    }
+    let mut targets: Vec<String> = Vec::new();
+    if let Some(p) = path.filter(|p| !p.is_empty()) {
+        targets.push(p.to_string());
+    }
+    if let Some(g) = glob.filter(|g| !g.is_empty()) {
+        targets.push(g.to_string());
+    }
+    Some(Search {
+        pattern: pattern.to_string(),
+        targets,
+        wants_context,
+        // A structured grep descends when it is pointed at a directory and does not when it is
+        // pointed at one file -- which is the distinction the single-file gate below is made of.
+        recursive: path.is_none_or(|p| p.is_empty() || !names_an_extension(p)),
+    })
+}
+
+/// Does `cort impact` answer this search better than the search does?
+///
+/// Fires only on the narrow shape it can actually beat: one bare symbol, searched in project
+/// source. Everything else -- alternations, phrases, logs, transcripts, build output -- stays with
+/// `rg`, which is what the routing skill already says and what the traffic shows the agent doing
+/// correctly hundreds of times.
+pub fn judge(search: &Search) -> Option<HookHit> {
+    let symbol = symbol_of_pattern(&search.pattern)?;
 
     // A context flag means the agent wants to read the body around the match, not enumerate who
     // reaches it. `cort context` is that verb, and suggesting `impact` there is a wrong answer
     // dressed as a helpful one. Adjudicated on the first probe run: every `-A`/`-B`/`-C` fire was a
     // false positive.
-    if tokens.iter().any(|t| is_context_flag(t)) {
+    if search.wants_context {
         return None;
     }
 
-    let targets = rest.join(" ");
+    let targets = search.targets.join(" ");
     if NON_SOURCE_MARKERS.iter().any(|m| targets.contains(m)) {
         return None;
     }
-    // If the command names any file extension at all, at least one has to be a language the rule
+    // If the search names any file extension at all, at least one has to be a language the rule
     // pack actually indexes. Without this a Zig or Go file under `src/` fires, and `impact` has
     // nothing to say about a language it never parsed -- the worst kind of suggestion, because it
     // looks answerable.
@@ -261,14 +345,12 @@ pub fn suggests_impact(command: &str) -> Option<HookHit> {
     // recursive or glob-shaped is asking "where does this appear in the file I already have open",
     // which is reading. Eleven of the fourteen false positives left after the first two fixes were
     // exactly this shape.
-    let recursive = tokens
-        .iter()
-        .any(|t| t == "-r" || t == "-R" || t == "--recursive" || is_short_cluster_with(t, 'r'));
     let has_glob = targets.contains('*') || targets.contains('?');
-    let concrete_dirs = rest
+    let concrete_dirs = search
+        .targets
         .iter()
         .any(|t| !t.starts_with('-') && !names_an_extension(t) && !t.contains('*'));
-    if !targets.trim().is_empty() && !recursive && !has_glob && !concrete_dirs {
+    if !targets.trim().is_empty() && !search.recursive && !has_glob && !concrete_dirs {
         return None;
     }
 

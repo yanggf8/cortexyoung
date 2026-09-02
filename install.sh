@@ -45,6 +45,10 @@ HOOK_SETTINGS="${CLAUDE_SKILL_HOME:-$HOME/.claude}/settings.json"
 # as CODEX_SKILL_DEST above: harmless if Codex is not installed on this machine, and the alternative
 # is the exact failure this file is about -- a route wired only when someone remembers Codex exists.
 CODEX_HOOK_SETTINGS="${CODEX_HOME:-$HOME/.codex}/config.toml"
+# Kimi's own config file, and the third dialect: a flat top-level `[[hooks]]` array, not Codex's
+# nested groups. Both files are called config.toml, which is why `hook-install` now takes an
+# explicit --format instead of reading the extension.
+KIMI_HOOK_SETTINGS="${KIMI_CODE_HOME:-$HOME/.kimi-code}/config.toml"
 WITH_HOOK=1
 WITH_XGREP=0
 
@@ -458,9 +462,10 @@ deploy_skill_at() {
 # "wired to a different binary" and "not wired" logic exists exactly once regardless of which
 # settings file is being asked about.
 check_hook_at() {
-  local settings_path="$1" managed_cort="$2" label="$3"
-  local hook_out
-  if hook_out="$("$managed_cort" hook-install --settings "$settings_path" --status 2>&1)"; then
+  local settings_path="$1" managed_cort="$2" label="$3" fmt="${4:-}"
+  local hook_out fmt_arg=""
+  [ -n "$fmt" ] && fmt_arg="--format $fmt"
+  if hook_out="$("$managed_cort" hook-install --settings "$settings_path" $fmt_arg --status 2>&1)"; then
     if printf '%s' "$hook_out" | grep -q '"wired"[[:space:]]*:[[:space:]]*true'; then
       # Wired is not enough: it has to be wired to the binary we just checked. A command naming a
       # different cort is a live hook nobody here has verified.
@@ -512,15 +517,21 @@ deploy_hook() {
     return 0
   fi
   deploy_one_hook "$cort_bin" "$HOOK_SETTINGS" "claude-code" "hook_settings"
-  # `cort hook-install` picks the TOML merge over the JSON one by the target path's extension
-  # (rust/src/main.rs's `is_toml_settings`), so this one call wires Codex instead.
-  deploy_one_hook "$cort_bin" "$CODEX_HOOK_SETTINGS" "codex" "hook_settings_codex"
+  # Three files, three dialects, one installer. `hook-install` used to pick the merge from the
+  # target's extension; two of these are now called config.toml, so each names its own --format.
+  deploy_one_hook "$cort_bin" "$CODEX_HOOK_SETTINGS" "codex" "hook_settings_codex" "codex"
+  # Kimi: a flat `[[hooks]]` entry whose matcher is a regex over the tool name, covering both its
+  # shell and its structured Grep surface. Same unconditional deployment as the other two -- a
+  # machine without Kimi gets a config.toml it never reads, which is the price of not leaving a
+  # route to be wired by hand.
+  deploy_one_hook "$cort_bin" "$KIMI_HOOK_SETTINGS" "kimi-code" "hook_settings_kimi" "kimi"
 }
 
 deploy_one_hook() {
-  local cort_bin="$1" settings_path="$2" harness="$3" manifest_key="$4"
-  local out change
-  if ! out="$("$cort_bin" hook-install --settings "$settings_path" --command "$cort_bin hook-suggest --harness $harness" 2>&1)"; then
+  local cort_bin="$1" settings_path="$2" harness="$3" manifest_key="$4" fmt="${5:-}"
+  local out change fmt_arg=""
+  [ -n "$fmt" ] && fmt_arg="--format $fmt"
+  if ! out="$("$cort_bin" hook-install --settings "$settings_path" $fmt_arg --command "$cort_bin hook-suggest --harness $harness" 2>&1)"; then
     info "hook ($harness): NOT wired — $out"
     return 0
   fi
@@ -546,12 +557,14 @@ remove_hook() {
   cort_bin="$(manifest_get cort_bin || true)"
   [ -n "$cort_bin" ] && [ -x "$cort_bin" ] || cort_bin="$(command -v cort 2>/dev/null || true)"
   remove_one_hook "$cort_bin" hook_settings "$HOOK_SETTINGS"
-  remove_one_hook "$cort_bin" hook_settings_codex "$CODEX_HOOK_SETTINGS"
+  remove_one_hook "$cort_bin" hook_settings_codex "$CODEX_HOOK_SETTINGS" "codex"
+  remove_one_hook "$cort_bin" hook_settings_kimi "$KIMI_HOOK_SETTINGS" "kimi"
 }
 
 remove_one_hook() {
-  local cort_bin="$1" manifest_key="$2" default_settings="$3"
-  local settings
+  local cort_bin="$1" manifest_key="$2" default_settings="$3" fmt="${4:-}"
+  local settings fmt_arg=""
+  [ -n "$fmt" ] && fmt_arg="--format $fmt"
   settings="$(manifest_get "$manifest_key" || true)"
   [ -n "$settings" ] || settings="$default_settings"
   if [ -z "$cort_bin" ] || [ ! -x "$cort_bin" ]; then
@@ -559,7 +572,7 @@ remove_one_hook() {
     return 0
   fi
   local out
-  if out="$("$cort_bin" hook-install --settings "$settings" --remove 2>&1)"; then
+  if out="$("$cort_bin" hook-install --settings "$settings" $fmt_arg --remove 2>&1)"; then
     if printf '%s' "$out" | grep -q '"change"[[:space:]]*:[[:space:]]*"removed"'; then
       info "hook: unwired from $settings"
     else
@@ -796,7 +809,8 @@ do_check() {
     check_hook_at "$HOOK_SETTINGS" "$managed_cort" "hook"
     # Codex is checked the same unconditional way CODEX_SKILL_DEST is below: deployed whether or not
     # Codex is on this machine, so --check expects it wired the same way it expects the skill file.
-    check_hook_at "$CODEX_HOOK_SETTINGS" "$managed_cort" "hook_codex"
+    check_hook_at "$CODEX_HOOK_SETTINGS" "$managed_cort" "hook_codex" "codex"
+    check_hook_at "$KIMI_HOOK_SETTINGS" "$managed_cort" "hook_kimi" "kimi"
   fi
   if [ -f "$SKILL_DEST" ]; then
     if skill_is_managed "$SKILL_DEST"; then

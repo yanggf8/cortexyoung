@@ -603,12 +603,180 @@ trusted_hash = "sha256:e7c909599d16022fe2a529bccd32cfd347d4b0a1723ae7d1f02f8a3a9
 
 ### 順帶修掉的死碼
 
-`harness_of` 裡有一條 `/.kimi-code/` 的 arm,靠 `transcript_path` 比對。但 kimi-code 的
-`PreToolUse` payload 只有 `tool_name` / `tool_input` / `tool_call_id`,兩種拼法的 transcript path
-在它出貨的整份 bundle 裡都是零命中——那條 arm 永遠不會命中,而它讓那份 harness 清單看起來涵蓋了一
-個根本沒接的 harness。刪掉,理由寫進 `harness_of` 的 doc comment。
+`harness_of` 裡有一條 `/.kimi-code/` 的 arm,靠 `transcript_path` 比對。兩種拼法的 transcript path
+在 kimi-code 出貨的整份 bundle 裡都是零命中,實機收到的 payload 裡也沒有——那條 arm 永遠不會命中,
+而它讓那份 harness 清單看起來涵蓋了一個根本沒接的 harness。刪掉,理由寫進 `harness_of` 的 doc
+comment。
 
-Kimi 不接,原因不是「還沒做」:kimi-code 的 `PreToolUse` 只保留 `action === "block"` 的結果
-(`blockDecision`,其 bundle 內兩份獨立的 hook engine 一致),allow 形狀的一律在送達模型之前丟棄,
-而 `cort hook-suggest` 從設計上永不阻擋。要在 Kimi 上有效果,只能改成 `permissionDecision: "deny"`
-去擋掉使用者的 grep——那不是「照 Codex 再接一次」,是改契約。
+> **更正(同日稍晚,實測後):** 本節與 `cb3d04aa` 的 commit message 原本寫「payload 只有
+> `tool_name` / `tool_input` / `tool_call_id`」。那是只讀 `runPreToolUse` 得出的,漏了 runner 在
+> `main.mjs:276370` 送進 stdin 前補上的欄位。實際收到的是 `hook_event_name` / `session_id` /
+> `cwd` / `client_type` 加上那三個 tool 欄位。結論(arm 不會命中)不受影響,推理過程錯了。這不是
+> 無關緊要的措辭:`session_id` 的存在正是下一節那個設計可不可行的前提。
+
+## 15. Kimi:母體比想的大,通道比想的窄(2026-09-02 22:00-22:40)
+
+前面幾節推定 Kimi 的接法是「照 Codex 再寫一個 module」。撈了 kimi-code 自己的 session log 之後,
+兩個前提都不成立。
+
+**Log 在 `~/.kimi-code/sessions/<workspace>/<session>/agents/main/wire.jsonl`**,178 個 session、
+58MB、3,002 次 tool call。工具分布:
+
+```
+Read 1086 | Grep 834 | Edit 443 | Bash 358 | Glob 134 | TodoList 65 | Write 47 | …
+```
+
+**Kimi 的搜尋主要不走 shell。** `Grep` 是結構化 tool:
+
+```json
+{"name":"Grep","args":{"pattern":"enumeration_may_be_incomplete","path":"rust/src","output_mode":"content","-n":true}}
+```
+
+所以 `settings_toml.rs` 為 Codex 寫死的 `matcher = "Bash"` 搬到 Kimi 會直接漏掉主要母體。把
+`hook.rs` 的判準逐列套上去(**手工 grep 近似,不是那條規則本身**——見下方限制):
+
+| | Grep tool | Bash tool |
+|---|---|---|
+| 總數 | 834 | 358 |
+| 單一符號 pattern | 92 | — |
+| 且無 `-A`/`-B`/`-C` | 67 | — |
+| 且非單一具體檔案 | 53 | — |
+| 且非 non-source 路徑 | **43** | — |
+| 開頭是 `rg`/`grep`/`egrep` | — | **32** |
+
+> **這張表已被 §16 的 `hook-probe v2` 取代,兩個數字都高估。** 真規則重放同一批語料的答案是
+> **結構化 29、shell 8**,不是 43 和 32。方向的結論(結構化母體比 shell 大,`matcher = "Bash"`
+> 會漏掉大半)成立且被 v2 加強;倍率不要引用這一張。留著它是因為它示範了本文件反覆講的那條規矩
+> 在同一天內第二次咬人:一份手工近似的規則,產出的就是一組描述別的東西的數字。
+
+
+43 比 32 大。`matcher = "Bash"` 會漏掉約 57%。對照組:同一套數法在自己的 Claude Code transcript
+上是 `Grep` 244 對 Bash 裡的 rg/grep 2,546——**比例反過來**,所以 Claude Code 那邊的 `Bash` 是對
+的,這是真的 per-harness 行為差異,不是產品層的普遍漏洞。
+
+**通道確認到底了。** 八個 hook 事件全查過:`PreToolUse` 走 `triggerBlock`(只留 `action === "block"`);
+`PostToolUse` / `PermissionRequest` / `Interrupt` 是 `fireAndForget`;`SessionStart` / `SessionEnd` /
+`SubagentStart` / `PreCompact` 走 `trigger` 但**回傳值直接被丟棄**(`await trigger(...)` 沒有賦值)。
+沒有第二條通道。
+
+### 唯一可能成立的設計,以及它的實測
+
+**「每個 session 每個符號只擋一次,然後讓路。」** 第一次遇到合格搜尋時 deny,建議放進
+`permissionDecisionReason`;記下 `(session_id, symbol)`;重試放行。誤判代價從「搜尋被擋掉」降成
+「多花一個 turn」,也就是其他 harness 上一則建議本來的成本。
+
+唯一的未知數是:**模型被 deny 之後會不會重試?** 用一支 scratchpad 的 stub hook 實測
+(`KIMI_CODE_HOME` 指向 config 副本,真實設定與 plugin 的 managed block 都不參與)。hook 端記錄:
+
+| # | tool | 內容 | 決策 |
+|---|---|---|---|
+| 1 | `Grep` | `pattern=cmd_hook_install` | **DENIED** |
+| 2 | `Bash` | `cort impact --symbol cmd_hook_install --depth 1 --coverage -f lean` | ALLOWED |
+| 3-5 | `Grep` | `pattern=cmd_hook_install` ×3 | ALLOWED |
+
+**模型不但重試,還先去跑了被建議的指令。** 沒有放棄,沒有反覆撞同一個 pattern;它自己的回答裡寫
+「my first grep was blocked by the hook with a suggestion; my retry ran」。
+
+同一次跑還意外驗到 coverage 的價值:`cort impact` 的答案是**錯的**(索引 stale,說 caller 在 453、
+call site @467;實際 `dispatch` 在 468、call 在 482),而 `--coverage` 回 `incomplete=true` 並把真正
+的 call site 列在 `miss` 裡,模型讀到之後用 grep 覆核才給出正確答案。這正是「不保證答案對,但能說出
+答案可能不完整」。
+
+### 限制,以及為什麼先擴 `hook-probe` 再建 module
+
+上表的漏斗是**手工 grep 近似**,不是 `hook.rs` 那條規則。本文件反覆講的規矩就是不准有第二份規則
+拷貝——要拿這個母體去證成一個改契約的決定,得讓 `cort-evals hook-probe` 讀 Kimi 的 `wire.jsonl`,
+用同一個函式重放。實測本身也是 **n = 1**:一個 session、一個符號、一個模型(k3),回答了是非題,
+沒有建立任何比率。
+
+所以順序是:先擴 `hook-probe`,再談 module。而若真要建,「擋一次」必須當成明文的 harness 例外寫進
+`hook.rs`,連同本節的實測序列當證據——不能讓兩個 harness 的行為在同一份文件裡看起來一樣。
+
+## 16. Kimi 接上去了:一條規則、兩個 parser、一個只在這裡成立的契約(2026-09-02 23:00 - 09-03 01:30)
+
+§15 收在「先擴 `hook-probe`,再談 module」。兩件都做完了,而且第一件立刻改寫了第二件的前提。
+
+### `hook-probe v2`:兩個表面,一個判斷
+
+`suggests_impact` 拆成 parse 與 decide。**解析本來就該各家一份**——這個 codebase 早就有兩種方言
+(`"command":"…"` 與 `["bash","-lc","…"]`),Kimi 的結構化 `Grep` 是第三種——**判斷只能有一份**,
+因為它的全部價值就是那組校準數字,有第二份就等於量的東西不是裝出去的東西:
+
+```rust
+pub fn search_from_shell(&str)      -> Option<Search>
+pub fn search_from_grep_fields(...)  -> Option<Search>   // Kimi 自己一份,不經過 shell
+pub fn judge(&Search)                -> Option<HookHit>  // 校準量的就是它
+```
+
+中間曾經有一版是把結構化欄位**渲染回 shell 字串**再丟給既有的解析器。那個接縫選錯了,三個具體
+後果:`-C: 4` 的值被丟掉只為騙過一個為 shell 寫的 tokenizer;憑空生出一個 `structured_unrenderable`
+失敗類別(pattern 同時含兩種引號就拒絕——結構化資料本來沒有引號問題);以及證據鏈正中間多一層可能
+出錯的翻譯。拆成兩個 parser 之後三個一起消失。
+
+真規則重放的結果(55,458 個指令,三個 harness):
+
+| | shell | 結構化 | 合計 |
+|---|---|---|---|
+| 搜尋 | 3,417 | 1,078 | 4,495 |
+| 開火 | 161 | 47 | 208 |
+| 開火率 | 4.71% | 4.36% | 4.63% |
+
+**兩個表面的開火率幾乎相同**,這是「判斷共用一份」不只是教條的實證:同一套判準在兩種輸入形狀上
+的選擇性一樣。`--kimi-dir` 預設 `~/.kimi-code/sessions`;順帶修掉一個讓報告不可用的缺陷——Kimi
+每個 session 的檔案都叫 `wire.jsonl`,原本的 `session` 欄位對 178 個 session 印同一個字串,改成
+相對於掃描根的路徑。
+
+### 接線:第三種方言,以及副檔名規則的死亡
+
+`rust/src/settings_kimi.rs`,扁平 `[[hooks]]`,`matcher = "Bash|Grep"`(regex,涵蓋兩個表面)。
+兩件這個檔獨有的事:
+
+**`--format` 取代了副檔名分流。** `is_toml_settings` 的理由是「`.toml` 是明確的」。Kimi 的檔案也叫
+`config.toml`,那句話不再成立,所以 `install.sh` 明講三種格式。不嗅探路徑裡有沒有 `.kimi-code`——
+`KIMI_CODE_HOME` 可以指到任何地方,那等於把答案交給一個沒人控制的字串。
+
+**這個檔已經有別的主人,而第一次寫進去時位置是錯的。** Kimi plugin 用
+`# === BEGIN kimi-plugin-cc-managed:<host> ===` … `# === END … ===` 圍住自己的 entry,而那行 END 是
+document trailer。`toml_edit` 把 push 的元素放在 trailer **之前**,所以我們的 entry 落進了他們的
+區塊裡——他們的 uninstall 會靜默把我們一起帶走。`push_after_trailing` 把 trailer 搬到我們新 entry
+的前面,等於讓那行註解回到它本來要關閉的位置;他們的 bytes 一個字沒動。
+
+### 只在 Kimi 成立的契約:擋一次,然後讓路
+
+Kimi 的 `PreToolUse` 只保留 `action === "block"` 的結果,`additionalContext` 在那裡到不了任何人
+(§15 已把八個事件全查過,沒有第二條通道)。所以這一個 harness——**而且只有這一個**——的建議必須以
+deny 送出,配 `permissionDecisionReason`,並且**每 session 每符號只擋一次**,之後放行。誤判的代價
+因此從「搜尋被擋掉」降成「多花一個 turn」,也就是建議在其他 harness 上本來的成本。狀態是
+`$CORT_CACHE_DIR/hook-gate/<session_id>` 一個檔一行符號:它是閘,不是量測,弄丟只多擋一次。
+`no_other_harness_ever_receives_a_deny` 這條測試釘住另外三家永遠拿不到 deny。
+
+### 實測:機制 2/2,說服力 1/2
+
+裝好之後在真實 Kimi 跑一次(`kimi -p`,要求它找 `cmd_hook_install` 的呼叫點),四個獨立證據一致:
+
+- 模型自述:「The PreToolUse hook fired… It says to issue the same search again and it will run.」
+- `wire.jsonl`:兩次**完全相同**的 `Grep pattern=cmd_hook_install`,第一次被擋、第二次通過
+- `hook-gate/session_ee356d64-…` 內容只有一行 `cmd_hook_install`,證明只擋一次
+- `usage.db` 的 `hook-suggest` 計數 2684 → 2700
+
+**機制成立兩次,說服力兩次裡一次。** 這次模型沒有去跑 `cort impact`——它重發 grep、自己推理完,
+只在結尾提了一句索引 stale、`--coverage` 會是可檢查的做法(答案是對的:一個 call site,並正確把
+doc、測試、文件裡的提及排除)。稍早那次 stub 實測它是真的跑了。這個 case 本身也容易,grep 完全
+夠用,規則開火在這裡接近一次假陽性。
+
+要判斷 deny 值不值得,需要的正是更多這種紀錄,而現在它會自己累積:每次開火一列 `usage.db`
+帶 `--harness kimi-code`,每個 session 的 `wire.jsonl` 也留著給 `hook-probe` 重放。這一節記的是
+一個開始收資料的裝置,不是一個結論。
+
+### 這一輪自己弄壞又修好的兩件事
+
+- `--format` 那輪讓非搜尋的 Bash 指令從 `no_shape` 退化成 `no_payload`,被既有測試
+  `the_usage_row_records_which_outcome_the_hook_reached` 抓到。那條區分不能丟:一個是「讀不到指令」,
+  一個是「讀到了、規則正確地不出手」,而後者正是證明規則有選擇性的數字。
+- 為了趕快測 entry 位置,手動 `cp` raw binary 蓋掉了 `install.sh` 裝在 `~/.cargo/bin/cort` 的 shim,
+  `--version` 因此壞掉、`--check` 報 MISMATCH。部署路徑上的東西不要繞過 installer。
+
+### 還開著的
+
+`tests/chunker.rs` 或 `tests/coverage.rs` 之中有一條偶發失敗,出現過一次,之後連跑七次未重現。範圍
+縮到兩個 suite,原因未知。
