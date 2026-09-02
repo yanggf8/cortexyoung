@@ -257,8 +257,22 @@ smoke Test 19 原本測的是相反方向(舊 binary 在 PATH 上),已改成把�
 被拒、`PreToolUse` 型別錯被拒、使用者空 group 在 collapse 與 remove 兩邊都存活)。
 全樹 336 + evals 92 + smoke 95,零失敗。
 
-### 附帶:磁碟
+### 附帶:磁碟,以及那個 99% 是怎麼回事
 
-修這批時 build 撞到 `No space left on device`。根目錄 251G 用掉 236G(99%),清掉
-`evals/target` 才有空間繼續。目前 98%、5.6G 可用。這不是本 repo 造成的,但兩個 cargo target
-合計數 GB,值得知道。
+修這批時 build 撞到 `No space left on device`,連 harness 用來接指令輸出的 tmpfs 都滿了(`df`
+本身跑不出來)。當下根目錄 251G 用掉 236G(**99%**),清掉 `evals/target` 才有空間繼續。
+
+**但那個 99% 不是真的被檔案佔著。**幾分鐘後同一個 `df` 回報 134G used / 105G free(57%)——中間
+沒有人刪掉 99G。可信的解釋只有一個:有行程抓著**已刪除但未關閉**的檔案描述子,空間要等行程結束
+才回收。這值得記下來,因為它會讓「磁碟滿了」這個結論在事後完全重現不出來——和本文件 §2 記的
+09-01 基線是同一種病:**一個當下為真、事後無法重現的觀察,不能當基線,但也不代表它沒發生過。**
+
+實際清理只動了明確可重建、且屬於本 repo 的東西:`cargo clean` 兩個 crate,回收 12.5G
+(`rust/target` 10.8G + `evals/target` 1.7G)。清完 123G used / 116G free(52%)。部署不受影響
+——`install.sh` 把 binary 裝在 `~/.local/share/cortexyoung/cort` 並在 `~/.cargo/bin/cort` 放 shim,
+不在 `target/` 裡;清完 `cort --version` 與 `./install.sh --check` 仍是 `check: OK`。
+
+**沒有動的**(列出來是因為它們才是大宗,而且都不是本 repo 的):`~/.grok/sessions` 22G、其他專案
+的 cargo target 合計約 17.7G(hesocial 9.3G、travel-2026 5.9G、ainews 1.3G、ft 1.3G)、
+`~/.cache` 下的模型權重約 3.1G(whisper / modelscope / huggingface)。session 紀錄與模型權重不是
+建置產物,重建代價是網路與時間,不該由一個做 hook 修正的 session 代為決定。
