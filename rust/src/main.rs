@@ -11,7 +11,9 @@ use cort::db::{
 use cort::errors::CortError;
 use cort::impact::{impact_command, DEFAULT_DEPTH};
 use cort::incremental::incremental_index;
-use cort::indexer::{canonicalize_root, full_index, status_of, CanonicalRoot, IndexError};
+use cort::indexer::{
+    canonicalize_root, full_index, git_head_of, status_of, CanonicalRoot, IndexError,
+};
 use cort::r#struct::{struct_command, StructOptions};
 use cort::readings::{parse_content_mode, read_fragment, recall_readings, ContentMode};
 use cort::render::{parse_format, render, render_error, Format};
@@ -473,6 +475,12 @@ fn dispatch(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError> 
     }
 }
 
+/// `{"hook":"<outcome>","v":1}` -- the same JSON-object shape every other command's
+/// `args_summary` carries, so one parser reads the whole column.
+fn hook_args(outcome: &str) -> String {
+    json!({ "v": 1, "hook": outcome }).to_string()
+}
+
 /// A PreToolUse hook, not a verb anyone types. It reads the harness's hook payload on stdin and,
 /// when the shell command about to run is a caller-set search, hands back one line of context
 /// naming the query that answers it.
@@ -488,7 +496,14 @@ fn dispatch(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError> 
 ///   `no_seed_resolved` would spend the agent's turn to tell it nothing, and would make the
 ///   suggestion itself untrustworthy the first time it happened.
 fn cmd_hook_suggest(usage: &mut UsageEvent) -> Result<Emit, CortError> {
-    usage.args_summary = "hook".into();
+    // Every invocation used to record the same `hook` summary whether it injected or stayed
+    // silent, so `usage` could only ever report how often the hook *ran* -- which is how often the
+    // agent ran any Bash command. The injection count then had exactly one source, the transcript,
+    // and the 09-01 "two independent sources agree" cross-check was two readings of the same
+    // number. The outcome splits the row by what the hook did, which makes `hit` a second source
+    // for the numerator and names the one silence that is a missed opportunity rather than a
+    // correct pass: `no_index`, the rule fired on a project cort has never indexed.
+    usage.args_summary = hook_args("no_payload");
     let mut payload = String::new();
     let _ = std::io::Read::read_to_string(&mut std::io::stdin(), &mut payload);
     let quiet = || {
@@ -508,6 +523,7 @@ fn cmd_hook_suggest(usage: &mut UsageEvent) -> Result<Emit, CortError> {
     else {
         return quiet();
     };
+    usage.args_summary = hook_args("no_shape");
     let Some(hit) = cort::hook::suggests_impact(command) else {
         return quiet();
     };
@@ -517,14 +533,29 @@ fn cmd_hook_suggest(usage: &mut UsageEvent) -> Result<Emit, CortError> {
     // file test and the hook then told the agent `cort has an index for this project` on a tree
     // where `impact` can only answer `no_seed_resolved / stale=true`. That is the exact failure
     // the doc comment above forbids, and it was live on this machine on 2026-09-02.
-    if !project_is_indexed() {
+    usage.args_summary = hook_args("no_index");
+    let state = index_state();
+    if state == IndexState::Missing {
         return quiet();
     }
+    // A stale index is still worth suggesting -- most seeds resolve, and `impact` discloses
+    // `stale=true` itself -- but the suggestion must not arrive claiming more than it has. Every
+    // `impact` row recorded on this machine up to 2026-09-02 ran against a stale index, and the
+    // injected line said only "cort has an index", which is the half of the sentence that flatters
+    // the tool. The outcome is recorded separately so the mining can tell the two apart.
+    let stale = state == IndexState::BehindHead;
+    usage.args_summary = hook_args(if stale { "hit_stale" } else { "hit" });
     let context = format!(
-        "cort has an index for this project. `cort impact --symbol '{}' --depth 1 --coverage -f lean` \
+        "cort has an index for this project{}. `cort impact --symbol '{}' --depth 1 --coverage -f lean` \
 answers who calls it in one call, and `--coverage` lists what the enumeration could not see -- which \
 a grep cannot tell you. Use it before concluding nothing else uses this; keep the grep for anything \
 literal.",
+        if stale {
+            ", but it was built on an older commit, so it will answer `stale=true` and may miss \
+edges added since -- re-run `cort index` first if the answer has to be complete"
+        } else {
+            ""
+        },
         hit.symbol
     );
     Ok(Emit {
@@ -543,20 +574,43 @@ literal.",
 /// Does the cwd's project have an index with a `projects` row -- the same question `cort status`
 /// answers as `indexed`. Every failure is a `false`: a hook that cannot read the index has nothing
 /// to suggest, and must never turn a broken cache into a broken tool call.
-fn project_is_indexed() -> bool {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IndexState {
+    /// No index the hook may speak for. Every failure lands here.
+    Missing,
+    /// Indexed, and the commit it was built on is the commit checked out now.
+    Fresh,
+    /// Indexed on a different commit. Provably behind; the full `compute_stale` walk is too
+    /// expensive for a hook with a 5s budget, and one `git rev-parse HEAD` catches the case that
+    /// actually bites -- an index left behind by commits made since it was built. A clean tree at
+    /// the same head can still be stale through uncommitted edits; that is the residue this cheap
+    /// check knowingly does not cover, and `impact` still reports it as `stale=true`.
+    BehindHead,
+}
+
+fn index_state() -> IndexState {
     let Ok(canon) = canonicalize_root(cwd()) else {
-        return false;
+        return IndexState::Missing;
     };
     let path = db_path_for(&canon.path_str);
     if !path.exists() {
-        return false;
+        return IndexState::Missing;
     }
     let Ok(db) = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY) else {
-        return false;
+        return IndexState::Missing;
     };
-    status_of(&db, &canon.path)
-        .map(|s| s.indexed)
-        .unwrap_or(false)
+    let Ok(status) = status_of(&db, &canon.path) else {
+        return IndexState::Missing;
+    };
+    if !status.indexed {
+        return IndexState::Missing;
+    }
+    match (status.git_head.as_deref(), git_head_of(&canon.path)) {
+        // Only a definite disagreement is called stale. A tree with no git, or a head that cannot
+        // be read, is not evidence of staleness and must not be reported as if it were.
+        (Some(stored), Some(now)) if stored != now => IndexState::BehindHead,
+        _ => IndexState::Fresh,
+    }
 }
 
 /// Wiring the PreToolUse hook into a Claude Code `settings.json`. `install.sh` calls this so the

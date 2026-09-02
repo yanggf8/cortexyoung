@@ -292,6 +292,49 @@ pub fn query_usage_at(path: &Path, days: i64, now_ms: i64) -> Result<Value, Cort
     }))
 }
 
+/// Count `hook-suggest` rows in `[since_ms, ..)` by the outcome its `args_summary` records.
+///
+/// Aggregating by `command` cannot answer the question the adoption mining asks -- every Bash tool
+/// call the agent makes produces one `hook-suggest` row, so the command total is a measure of agent
+/// activity and not of interception. The outcome is the only column that separates `hit` (context
+/// was injected) from the three silences, which is what makes this db a second source for the
+/// injection count rather than a second reading of the transcript.
+///
+/// Rows written before the outcome existed carry the bare summary `hook`; they are counted under
+/// `legacy_unsplit` rather than folded into a silence, because "we do not know" is not "no".
+pub fn hook_outcomes_at(path: &Path, since_ms: i64) -> Result<Map<String, Value>, CortError> {
+    let mut out: Map<String, Value> = Map::new();
+    if !path.exists() {
+        return Ok(out);
+    }
+    let conn = open_query(path)?;
+    ensure_schema_readable(&conn)?;
+    let mut counts: std::collections::BTreeMap<String, i64> = std::collections::BTreeMap::new();
+    {
+        let mut stmt = conn
+            .prepare(
+                "SELECT args_summary FROM command_log
+                  WHERE command = 'hook-suggest' AND ts >= ?1",
+            )
+            .map_err(map_query_err)?;
+        let rows = stmt
+            .query_map(params![since_ms], |r| r.get::<_, String>(0))
+            .map_err(map_query_err)?;
+        for row in rows {
+            let raw = row.map_err(map_query_err)?;
+            let outcome = serde_json::from_str::<Value>(&raw)
+                .ok()
+                .and_then(|v| v.get("hook").and_then(Value::as_str).map(str::to_string))
+                .unwrap_or_else(|| "legacy_unsplit".to_string());
+            *counts.entry(outcome).or_insert(0) += 1;
+        }
+    }
+    for (k, v) in counts {
+        out.insert(k, json!(v));
+    }
+    Ok(out)
+}
+
 pub fn render_usage_lean(payload: &Value) -> String {
     let days = payload.get("days").and_then(Value::as_i64).unwrap_or(0);
     let best = payload

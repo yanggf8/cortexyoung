@@ -447,3 +447,116 @@ fn the_hook_speaks_once_the_project_is_actually_indexed() {
         .to_string();
     assert!(ctx.contains("cort impact --symbol 'helper'"), "got: {ctx}");
 }
+
+/// The usage row has to say what the hook *did*, not merely that it ran.
+///
+/// Every PreToolUse:Bash fires `hook-suggest`, so a row per invocation counts Bash calls and
+/// nothing else. That made the injection count a single-source number -- the transcript -- while
+/// the 09-01 report described it as two sources agreeing. The outcome is what makes `usage.db` an
+/// independent second reading, and `no_index` is the one silence worth its own name: the rule
+/// matched a real call-site search and the gate declined it, which is a missed opportunity rather
+/// than a correct pass.
+#[test]
+fn the_usage_row_records_which_outcome_the_hook_reached() {
+    let (_p, cwd, _c, cache) = sandbox();
+    let usage_db = cache.join("usage.db");
+
+    // No index yet: the rule matches, the gate declines.
+    run_hook_suggest(FIRING_SEARCH, &cwd, &cache);
+    let counts = cort::usage::hook_outcomes_at(&usage_db, 0).expect("read usage db");
+    assert_eq!(counts.get("no_index").and_then(Value::as_i64), Some(1));
+
+    // A command the rule has nothing to say about is a different silence.
+    run_hook_suggest("cargo test --workspace", &cwd, &cache);
+    let counts = cort::usage::hook_outcomes_at(&usage_db, 0).expect("read usage db");
+    assert_eq!(counts.get("no_shape").and_then(Value::as_i64), Some(1));
+    assert_eq!(counts.get("no_index").and_then(Value::as_i64), Some(1));
+
+    let idx = run_cort(&["index"], &cwd, &cache);
+    if idx.code != 0 {
+        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
+        return;
+    }
+    run_hook_suggest(FIRING_SEARCH, &cwd, &cache);
+    let counts = cort::usage::hook_outcomes_at(&usage_db, 0).expect("read usage db");
+    assert_eq!(
+        counts.get("hit").and_then(Value::as_i64),
+        Some(1),
+        "an injection must be countable from the db alone: {counts:?}"
+    );
+    // The silences did not move: an injection is not also a pass.
+    assert_eq!(counts.get("no_index").and_then(Value::as_i64), Some(1));
+
+    // The window is honoured, so a mining run cannot pick up rows from before the hook was wired.
+    let future = cort::usage::now_ms() + 60_000;
+    let later = cort::usage::hook_outcomes_at(&usage_db, future).expect("read usage db");
+    assert!(later.is_empty(), "nothing was recorded after now: {later:?}");
+}
+
+fn git_in(root: &Path, args: &[&str]) {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .output()
+        .expect("run git");
+    assert!(
+        out.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// A stale index does not silence the hook, but it does change what the hook is allowed to say.
+///
+/// The gate was `indexed: true` and nothing else, so on a tree whose index was built two commits
+/// ago the injected line still read "cort has an index for this project" -- the half of the
+/// sentence that flatters the tool. Every `impact` row recorded on this machine up to 2026-09-02
+/// carried `index_stale=1`, so this was the normal case rather than the edge one.
+#[test]
+fn a_stale_index_is_disclosed_in_the_line_the_agent_reads() {
+    let (_p, cwd, _c, cache) = sandbox();
+    git_in(&cwd, &["init", "-q"]);
+    git_in(&cwd, &["config", "user.email", "t@e.com"]);
+    git_in(&cwd, &["config", "user.name", "t"]);
+    git_in(&cwd, &["add", "-A"]);
+    git_in(&cwd, &["commit", "-qm", "one"]);
+
+    let idx = run_cort(&["index"], &cwd, &cache);
+    if idx.code != 0 {
+        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
+        return;
+    }
+    let fresh = run_hook_suggest(FIRING_SEARCH, &cwd, &cache);
+    let ctx = payload(&fresh)["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(ctx.contains("cort impact --symbol 'helper'"), "got: {ctx}");
+    assert!(
+        !ctx.contains("older commit"),
+        "a fresh index must not warn about staleness: {ctx}"
+    );
+
+    // Move the tree on without re-indexing: the index is now provably behind.
+    fs::write(cwd.join("src/gamma.ts"), "export function gamma() { return 3; }\n").unwrap();
+    git_in(&cwd, &["add", "-A"]);
+    git_in(&cwd, &["commit", "-qm", "two"]);
+
+    let stale = run_hook_suggest(FIRING_SEARCH, &cwd, &cache);
+    let ctx = payload(&stale)["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        ctx.contains("older commit") && ctx.contains("stale=true"),
+        "a behind-head index must say so: {ctx}"
+    );
+    // Still a suggestion, not a refusal: a stale index resolves most seeds.
+    assert!(ctx.contains("cort impact --symbol 'helper'"), "got: {ctx}");
+
+    // And the two are countable apart from the db alone.
+    let counts = cort::usage::hook_outcomes_at(&cache.join("usage.db"), 0).expect("read usage db");
+    assert_eq!(counts.get("hit").and_then(Value::as_i64), Some(1), "{counts:?}");
+    assert_eq!(counts.get("hit_stale").and_then(Value::as_i64), Some(1), "{counts:?}");
+}
