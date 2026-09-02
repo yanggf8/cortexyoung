@@ -43,6 +43,19 @@ for 62 of 63 sampled seeds -- which is why the instruction is *read the rows*, n
 change that makes an answer cheaper to verify is on the main line; a feature that only makes answers
 more numerous is not.
 
+**The routing rule has exactly one home: `rust/src/hook.rs`.** It is deployed as a `PreToolUse`
+hook by `install.sh` in the same run as the skill, so while working in this repo your own
+`grep`/`rg` will sometimes come back with a `cort impact` suggestion attached -- that is the
+product talking, and it is the retrospective half of the routing the skill's prose could not
+carry (409 searches in skill-bearing sessions, zero `cort` calls). `cort-evals hook-probe` replays
+that same function to measure it; do not add a second copy of the rule to the eval harness, or the
+measured rule and the installed rule will drift. `cort hook-install` (`rust/src/settings.rs`) owns
+the settings.json merge for the same reason a `jq` pipeline would not: preserving other people's
+hooks, collapsing duplicates, and refusing a file it cannot parse are logic, and logic needs
+tests. Recognition of our own entry is a token test, never a suffix test -- anchoring it to the end
+of the command line is what let `--status` report `wired: false` on a machine where the hook was
+firing, twice (`docs/2026-09-02-hook-wiring-correction.md`).
+
 **The repo is pure Rust. No JavaScript, TypeScript, Python or other scripting language may exist as executable code** — not as a product entry point, not as tooling, not as tests. The eval harness that used to be six `.mjs` files was ported into the `evals/` crate for exactly this reason. Bash stays only where the platform requires it (`install.sh`, `tests/install-smoke.sh`); it is not a place to put logic. If a task seems to need a script, add a Rust subcommand to `evals/` or `rust/` instead.
 
 **No absolute paths from any developer's machine, and no Node-installed toolchain paths, anywhere in

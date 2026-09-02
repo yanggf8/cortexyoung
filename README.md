@@ -84,6 +84,7 @@ never appears in its own report.
 ./install.sh --force      # on unmanaged skill collision: backup and replace
 ./install.sh --with-rustup # bootstrap rustup if cargo is missing
 ./install.sh --with-xgrep  # opt-in: also install xg v0.7.0 (xgrep-search crate) + xgrep skill
+./install.sh --no-hook    # skip wiring the PreToolUse hook into settings.json
 ```
 
 **What it does (default, without `--with-xgrep`):**
@@ -91,6 +92,7 @@ never appears in its own report.
 - Downloads pinned `ast-grep` v0.45.2 prebuilt `app-<target>.zip` for your platform (Linux x86_64/aarch64, macOS x86_64/arm64) from GitHub Releases and verifies SHA-256 (repo-maintained; upstream publishes no checksums) — fail-closed: an empty or mismatched checksum refuses to install. Falls back to `cargo install ast-grep --version 0.45.2 --locked` (requires Rust 1.88+).
 - Builds `cort` from `rust/` with `cargo build --release --locked` on **every** run and installs the binary plus its ast-grep pack (`src/pack`, located at runtime via `CORT_PACK_DIR`) to `~/.local/share/cortexyoung/cort`, shimming `~/.cargo/bin/cort` or `~/.local/bin/cort`.
 - Deploys `skills/ast-grep/SKILL.md` to **both** agent homes — `~/.claude/skills/ast-grep/SKILL.md` and `~/.codex/skills/ast-grep/SKILL.md` (honouring `CODEX_HOME`) — **byte-for-byte the repo file**. The installer writes nothing inside the document: the frontmatter block holds keys only (`name`, `description`, and nothing of ours), both loaders anchor that fence to line 1, and `rust/tests/skill_format.rs` fails the build if a source stops parsing. Ownership lives in `.cortexyoung-managed` beside the skill, which records the SHA-256 of the bytes we deployed — so a hand-edit of a deployed `SKILL.md` reads as someone else's file and is refused, not silently overwritten. Edit `skills/<name>/SKILL.md` in this repo instead; one source feeds both homes. Preflights collisions before mutating: skips if hash-equal, replaces what it owns, refuses what it does not (use `--force` to backup and replace). Uninstall removes the document and its stamp, and nothing else.
+- Wires the `PreToolUse` hook into `~/.claude/settings.json` in the **same run** as the skill (skip with `--no-hook`). The JSON merge is `cort hook-install`, not `jq`: it preserves every hook you already have, rewrites our own entry when the binary moves instead of adding a second, collapses duplicates down to one, and refuses outright to overwrite a `settings.json` it could not parse. See [the hook section](#the-pretooluse-hook--the-retrospective-half-of-the-routing) for what it does at runtime. A hook that has to be wired by hand is a hook that stays unwired — that is not a hypothesis, it is what this repo measured on its own machine twice.
 - Adds a single bounded idempotent `PATH` block to your shell profile (`.bashrc`/`.zshrc`/`.profile`) so `cort` and `ast-grep` are on `PATH`; removed on `--uninstall`.
 - Records ownership in `~/.local/share/cortexyoung/manifest` (v2 `key:value` lines) — uninstall only removes what it installed, never a pre-existing binary.
 
@@ -133,8 +135,10 @@ call site was recorded) and `index_is_stale` is `true`.
 ## Uninstall
 
 ```bash
-./install.sh --uninstall  # removes managed cort + ast-grep binaries, CORT_HOME, skills (claude + codex), PATH block, manifest
+./install.sh --uninstall  # removes managed cort + ast-grep binaries, CORT_HOME, skills (claude + codex), PATH block, hook, manifest
 ```
+
+The hook is unwired *before* the binary is removed, because `cort hook-install --remove` is what owns the JSON edit. Hooks that are not ours are left alone.
 
 Pre-existing binaries and unmanaged skills are never removed. With `--with-xgrep`, the managed `xg` binary and `xgrep` skill are also removed if owned.
 
@@ -449,6 +453,49 @@ The `ast-grep` skill teaches agents when to use `rg` vs `ast-grep` vs `cort` —
 neighbours, `cort context` for neighbourhood, `cort impact` for multi-hop blast radius, `xg` only when
 `command -v xg` succeeds and the task is repeated literal-string search. The skill states the measured
 break-even so an agent does not route a string question into a graph tool.
+
+## The PreToolUse hook — the retrospective half of the routing
+
+The skill above is **prospective**: it asks the model to recognise "I am about to rename this
+symbol" *before* running the search that would tell it what it is about to do. Measured over the
+sessions that carried it, that never fired — 409 searches, zero `cort` calls. The hook is the
+same rule in the **retrospective** shape: given the `grep`/`rg` the agent actually just ran, say
+whether `cort impact` answers it better. Nothing depends on the model remembering anything.
+
+It runs as a `PreToolUse` hook matched to `Bash`, reads the harness payload on stdin, and either
+prints one suggestion or stays silent. `cort hook-suggest` is not a verb to type.
+
+**When it fires.** The first pipeline segment must be `rg`, `grep` or `egrep`; the pattern must
+resolve to a single symbol; and the search must look like a caller-set question. It stays silent
+on: any `-A`/`-B`/`-C` context flag (that is `cort context`'s question, not `impact`'s), searches
+into logs, transcripts, `node_modules`, `.claude`/`.codex` and other non-source paths, searches
+naming only file extensions the rule pack does not index, and searches confined to concrete
+files. The rejections carry as much weight as the fires: a hook that also fires on ordinary
+orientation greps trains the agent to ignore it, which is exactly how the over-broad prose in the
+skill failed. Calibrated by hand-adjudicating every fire over 192 real searches from 13 sessions
+— four rounds took it from 31 fires to 10, six of them genuine (`rust/src/hook.rs` at `ea0acd25`, unchanged since).
+
+**One rule, two callers.** The rule lives in the product crate; `cort-evals hook-probe` replays
+that same function over transcripts to measure it. A second copy in the eval harness would let
+the measured rule and the installed rule drift apart.
+
+**It cannot claim freshness it did not check.** The gate is `indexed: true`, not "a db file
+exists" — opening a project creates the schema, so a zero-chunk database once passed a
+file-exists test and let the hook announce an index on a tree where `impact` could only answer
+`no_seed_resolved`. When the index is real but built on an older commit, the injected text says
+so and tells you to re-run `cort index`.
+
+**What it records.** Each fire appends one `hook-suggest` row to the same local `usage.db`
+described above, tagged with the outcome it reached: `hit`, `hit_stale`, `no_index`, `no_shape`
+or `no_payload`. Rows written before outcome recording existed read as `legacy_unsplit` and are
+attributable to neither side. `cort usage` rolls up counts only; the outcome split is read by
+`cort-evals adopt-mine`, whose cross-check refuses to compare two sides drawn from different
+populations rather than quietly reporting a ratio across them.
+
+**Turning it off.** `./install.sh --no-hook` skips it; `./install.sh --uninstall` unwires it;
+`./install.sh --check` prints `hook: <path> (wired)` or names what is wrong. That last line
+exists because both times the wiring silently went down on this repo's own machine, nothing said
+so — see `docs/2026-09-02-hook-wiring-correction.md`.
 
 ## Upstream credits
 
