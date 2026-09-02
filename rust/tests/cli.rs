@@ -769,3 +769,51 @@ fn the_harness_is_taken_from_the_payload_not_from_the_flag_alone() {
         "an unrecognised transcript path discarded the declared harness: {as_claude:?}"
     );
 }
+
+/// Codex 0.152.1 rejects the entire hook output when `suppressOutput` is present -- it reports the
+/// hook `Failed` and the context never reaches the model -- despite listing the field in its own
+/// embedded `pre-tool-use.command.output` schema. Bisected by emitting the shapes one at a time;
+/// `hookSpecificOutput` with `additionalContext` alone both completes and delivers. The field is
+/// dropped only for the harness that breaks on it, because it is what keeps the raw JSON out of the
+/// transcript view everywhere else.
+#[test]
+fn suppress_output_is_omitted_for_codex_and_kept_for_the_others() {
+    let (_p, cwd, _c, cache) = sandbox();
+    let idx = run_cort(&["index"], &cwd, &cache);
+    if idx.code != 0 {
+        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
+        return;
+    }
+    let for_codex = run_hook_suggest_full(
+        FIRING_SEARCH,
+        Some("/home/u/.codex/sessions/2026/09/02/rollout-x.jsonl"),
+        &[],
+        &cwd,
+        &cache,
+    );
+    let v = payload(&for_codex);
+    assert!(
+        v["hookSpecificOutput"]["additionalContext"].is_string(),
+        "codex still needs the context: {}",
+        for_codex.stdout
+    );
+    assert!(
+        v.get("suppressOutput").is_none(),
+        "suppressOutput would make codex discard the whole output: {}",
+        for_codex.stdout
+    );
+
+    let for_claude = run_hook_suggest_full(
+        FIRING_SEARCH,
+        Some("/home/u/.claude/projects/x/y.jsonl"),
+        &[],
+        &cwd,
+        &cache,
+    );
+    assert_eq!(
+        payload(&for_claude)["suppressOutput"],
+        serde_json::json!(true),
+        "the others still suppress the raw JSON: {}",
+        for_claude.stdout
+    );
+}

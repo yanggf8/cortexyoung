@@ -623,14 +623,24 @@ edges added since -- re-run `cort index` first if the answer has to be complete"
         },
         hit.symbol
     );
+    // `suppressOutput` keeps the raw JSON out of the user's transcript view. Codex 0.152.1 rejects
+    // the whole output when it is present -- the hook is reported `Failed` and the context never
+    // reaches the model -- even though its own embedded `pre-tool-use.command.output` schema lists
+    // the field. Bisected on 2026-09-02 by emitting the shapes one at a time: `{}`, `continue`,
+    // `hookSpecificOutput` alone, and `hookSpecificOutput` with `additionalContext` all report
+    // `Completed` and deliver; adding `suppressOutput` is the single change that fails. Claude Code
+    // and Grok both accept it and both suppress the noise, so it is dropped only where it breaks.
+    let mut payload = json!({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "additionalContext": context,
+        },
+    });
+    if harness != "codex" {
+        payload["suppressOutput"] = json!(true);
+    }
     Ok(Emit {
-        payload: json!({
-            "hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "additionalContext": context,
-            },
-            "suppressOutput": true,
-        }),
+        payload,
         format: Format::Json,
         render_command: Some("hook-suggest"),
     })

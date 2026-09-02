@@ -395,3 +395,53 @@ Claude 的 transcript 裡沒有對應**。§10 修掉的污染,由另一條路�
 
 測試:`rust/tests/cli.rs` 一條(旗標說 claude-code 但 transcript 說 grok → 歸給 grok 且不算進
 claude-code;認不得的路徑保留旗標)。全樹 338 + evals 94 + smoke 95,零失敗。
+
+## 12. Codex 的 `Failed`:一個它自己 schema 允許的欄位(2026-09-02 17:15)
+
+§11 留下的問題:Codex 0.152.1 下 hook 會執行(cort 有寫 usage 列)、exit 0、輸出對得上它內嵌的
+`pre-tool-use.command.output` schema,但 codex 印 `hook: PreToolUse Failed`,模型什麼都沒收到。
+
+反編譯 strings 查不出 `command_outcome` 的判定,所以改成**二分行為**。先問一個能一刀切開的問題:
+讓 hook **完全不輸出** —— 結果是 `Completed`。所以 `Failed` 與解析有關,不是信任或啟用問題。
+
+接著用**一次執行**做二分:讓 hook 每次呼叫換一種輸出形狀,請模型連跑五個指令,codex 會依序印出
+五個結果:
+
+| # | 輸出 | 結果 |
+|---|---|---|
+| 0 | `{}` | Completed |
+| 1 | `{"continue":true}` | Completed |
+| 2 | `{"hookSpecificOutput":{"hookEventName":"PreToolUse"}}` | Completed |
+| 3 | 上者加 `"additionalContext"` | **Completed** |
+| 4 | 再加 `"suppressOutput":true` | **Failed** |
+
+**`suppressOutput` 是唯一的變數。** 而 codex 自己內嵌的 schema 明明把它列在頂層允許欄位裡
+(`continue` / `decision` / `hookSpecificOutput` / `reason` / `stopReason` / `suppressOutput` /
+`systemMessage`,且 `additionalProperties: false`)。宣告與實作不一致,而失敗訊息不說原因。
+
+再一次執行確認變體 3 真的送達:模型回報 `Additional context received: "CORTDELIVERYMARKER42"`。
+換上真正的 `cort` 之後端到端也通:`hook: PreToolUse Completed`,模型收到 `cort impact` 建議。
+
+### 改法
+
+`suppressOutput` 的用途是不要把原始 JSON 顯示在使用者的 transcript 裡。Claude Code 與 Grok 都接受
+它也都確實抑制了,所以**只在 harness 是 codex 時不輸出**——§11 的 `harness_of` 已經能從 payload
+判定,不必猜。
+
+### 順帶記下的兩件設定事實
+
+- Codex 的 hook 設定**只有 `~/.codex/config.toml` 的 `[[hooks.PreToolUse]]` 生效**;
+  `~/.codex/hooks/hooks.json` 與 `~/.codex/hooks.json` 兩個位置都試過,**靜默不載入**。
+- Codex 的 payload 與 Claude Code 逐字相同:`tool_name`、`tool_input.command`、
+  `hook_event_name`、`transcript_path`、`session_id`、`turn_id`、`model`、`permission_mode`、
+  `tool_use_id`、`cwd`。
+
+### 沒有做的事
+
+**沒有把 codex hook 留在設定裡。** 它現在可以動,但那是我手接的:不在 `install.sh` 的部署路徑上、
+沒有記進 manifest、`--check` 看不到它。留著就是重演本文件 §3 的失效模式——**一個要靠人記得去接的
+路由,就是一個沒接上的路由**。要正式支援 codex,`cort hook-install` 需要一個 TOML 模式,而那是
+另一件事。
+
+測試:`rust/tests/cli.rs` 一條(codex 拿到 context 但沒有 `suppressOutput`;其他 harness 兩者都
+有)。全樹 339 + evals 94 + smoke 95,零失敗。
