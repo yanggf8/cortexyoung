@@ -80,9 +80,7 @@ fn map_index(err: IndexError) -> CortError {
         IndexError::Io(io) => {
             CortError::new("file_not_found", json!({ "message": io.to_string() }))
         }
-        IndexError::Sqlite(e) => {
-            CortError::new("storage_busy", json!({ "message": e.to_string() }))
-        }
+        IndexError::Sqlite(e) => cort::db::classify_sqlite(&e),
     }
 }
 
@@ -136,7 +134,7 @@ fn open_project_tracked(
         Ok(canon) => {
             usage.project_id = Some(canon.project_id.clone());
             let db = open_db(db_path_for(&canon.path_str))
-                .map_err(|e| CortError::new("storage_busy", json!({ "message": e.to_string() })))?;
+                .map_err(|e| cort::db::classify_sqlite(&e))?;
             ensure_schema(&db)?;
             Ok((canon, db))
         }
@@ -801,7 +799,7 @@ fn cmd_status(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError
         });
     }
     let db = Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .map_err(|e| CortError::new("storage_busy", json!({ "message": e.to_string() })))?;
+        .map_err(|e| cort::db::classify_sqlite(&e))?;
     let st = status_of(&db, &canon.path).map_err(map_index)?;
     if !st.indexed {
         return Ok(Emit {
@@ -866,6 +864,28 @@ fn cmd_delete(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError
     let canon = match canonicalize_root(&root) {
         Ok(c) => c,
         Err(e) => {
+            // A row whose directory is gone is the one most worth deleting, and it is precisely
+            // the one whose path cannot be canonicalised. The registry is a scan of the cache
+            // directory, so it can still name the row and its database by the path recorded
+            // inside it -- fall back to that before refusing.
+            let want = root.to_string_lossy().trim_end_matches('/').to_string();
+            if let Some(row) = cort::db::list_projects()
+                .into_iter()
+                .find(|r| r.path.trim_end_matches('/') == want)
+            {
+                usage.project_id = Some(row.project_id.clone());
+                let r = cort::db::delete_project_db(std::path::Path::new(&row.db_path));
+                return Ok(Emit {
+                    render_command: None,
+                    format: Format::Json,
+                    payload: json!({
+                        "deleted": r.deleted,
+                        "db_path": r.db_path,
+                        "path": row.path,
+                        "note": "resolved from the project registry: the directory no longer exists",
+                    }),
+                });
+            }
             usage.project_id = Some("_unknown".into());
             return Err(map_index(e));
         }

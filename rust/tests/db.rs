@@ -508,3 +508,33 @@ fn re_running_the_v4_upgrade_is_a_no_op() {
         .unwrap();
     assert_eq!(rows, 1, "no duplicated edges from a repeated migration");
 }
+
+/// Every sqlite failure used to be reported as `storage_busy`. Contention clears on retry; a table
+/// that is not there does not, and the caller needs to be told to rebuild instead of to wait.
+#[test]
+fn a_missing_table_is_classified_as_an_outdated_schema_not_contention() {
+    let db = rusqlite::Connection::open_in_memory().unwrap();
+    let err = db
+        .query_row("SELECT COUNT(*) FROM reading_notes", [], |r| {
+            r.get::<_, i64>(0)
+        })
+        .unwrap_err();
+    let mapped = cort::db::classify_sqlite(&err);
+    assert_eq!(mapped.code, "schema_outdated");
+    assert!(
+        mapped.detail["hint"]
+            .as_str()
+            .unwrap_or("")
+            .contains("cort index"),
+        "{:?}",
+        mapped.detail
+    );
+}
+
+#[test]
+fn an_ordinary_sqlite_failure_is_still_storage_busy() {
+    let db = rusqlite::Connection::open_in_memory().unwrap();
+    db.execute_batch("CREATE TABLE t (a INTEGER);").unwrap();
+    let err = db.execute_batch("this is not sql").unwrap_err();
+    assert_eq!(cort::db::classify_sqlite(&err).code, "storage_busy");
+}

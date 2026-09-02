@@ -50,7 +50,7 @@ binary 搬家時改寫既有 entry 而非新增第二筆、看不懂的 settings
 entry 配 `matcher: "Bash"`,因為 `hook-suggest` 只讀 `tool_input.command`。
 `--uninstall` 會在刪 binary 前先解線,`--no-hook` 可跳過,`--check` 用唯讀的 `--status` 回報。
 
-**gate 從「db 檔存在」改成「`indexed: true`」**(`rust/src/main.rs` `project_is_indexed`)。
+**gate 從「db 檔存在」改成「`indexed: true`」**(`rust/src/main.rs` `index_state`;本文件原先寫的 `project_is_indexed` 這個名字不存在)。
 開一個專案就會建 schema,所以一個 0 chunk 的 db 也能通過檔案存在測試,hook 於是在
 `impact` 只能回 `no_seed_resolved / stale=true` 的樹上宣稱「cort has an index for this
 project」。這是 `cmd_hook_suggest` 自己的 doc comment 早就禁止的失敗,而它在 09-02 是活的。
@@ -148,5 +148,55 @@ manifest 有 `hook_settings`。手動觸發一次 `grep` 立刻注入,且注入�
 - 指令:`cort-evals adopt-mine --since 2026-09-02T10:58:00+08:00`。
 - 已驗證此起點下 `usage_db_cross_check.comparable_to_injections` 為 `true`;往前取到 10:50 就會因
   23 列 `legacy_unsplit` 而正確地拒絕比較。
-- 機會母體仍是已建索引的那些專案,挖掘時要一起報;`hit_stale` 是一個獨立的 outcome,代表 hook
-  出聲了但索引落後,讀漏斗時不能和 `hit` 混為一談。
+- **機會母體是 9 個專案**(cct、claw-skills、cortexyoung、dac、finance-cli、finance-engineering、
+  ft、gwebcdb、persona-core),不是 §5 寫的 13 個,也不是清理前 `cort projects` 顯示的 11 個
+  ——多出來的兩列是 install smoke test 留在 cache 裡、指向已刪除 `/tmp` 目錄的殘骸。挖掘時要連
+  母體一起報。
+- `hit_stale` 是一個獨立的 outcome,代表 hook 出聲了但索引落後,讀漏斗時不能和 `hit` 混為一談。
+
+## 8. 全機索引重建(2026-09-02 13:44)
+
+`cort index --incremental` 在本 repo 印 `extractor_version mismatch ... full reindex required`。
+那不是單一專案的事:全機共存**三種** extractor_version,只有本 repo 是當前版。重建前後:
+
+| 專案 | files | rels 之前 | rels 之後 |
+|---|---:|---:|---:|
+| finance-cli | 69 | **0** | 1,644 |
+| ft | 76 | **1** | 617 |
+| finance-engineering | 76 | **4** | 1,720 |
+| persona-core | 64 | 25 | 2,111 |
+| claw-skills | 165 | **0** | 2,308 |
+| gwebcdb | 228 | 1,481 | 4,777 |
+| dac | 231 | 731 | 816 |
+| cct | 183 | 1,792 | 1,839 |
+| cortexyoung | 67 | 1,725 | 1,725 |
+
+`relationships = 0` 不是「語言不支援」——claw-skills 是 184 個 Rust 檔、finance-cli 是 88 個。舊
+extractor 對 Rust 沒抽出邊,而 hook 的 gate 只看「`projects` 有沒有那一列」,所以它照樣在那些樹上
+出聲說 `cort has an index for this project`,`impact` 卻只能回 `seeds=0 dependents=0`。唯一守住
+誠實的是 `--coverage`,它印 `no_seed_resolved / not a clean answer: nothing was looked at`。
+全機重建約 15 秒。**任何跨越 2026-09-02 13:44 的漏斗數字都不可比**:同一個 hook、同一個 `impact`,
+底下的邊數差了兩到三個數量級。
+
+### 這一輪順帶修掉的兩個誤診
+
+1. **`cort status` 在舊 schema 上回 `storage_busy`。** 真因是 `no such table: reading_notes`
+   ——資料庫早於加入該表的 schema。`status` 以唯讀開啟,所以無法順路遷移,於是**唯一以稽核索引為
+   職責的指令,正好是那個在舊索引上會壞掉的**,而且它把原因說成競爭(重試就會好),實際上永遠不會
+   好。`impact` 開讀寫、順手遷移,所以跑一次 `impact` 之後同一個 `status` 就正常了——這正是
+   `dac` 與 `persona-core` 在本次稽核中先失敗、後成功的原因。現在回 `schema_outdated`,並在
+   `hint` 指名 `cort index`。分類器 `cort::db::classify_sqlite` 是單一來源,原本 17 處各自把任何
+   sqlite 錯誤都寫成 `storage_busy`;真正的 busy(重試迴圈用盡)那一處保留不動。
+2. **`cort delete` 刪不掉目錄已消失的那一列。** 它先 canonicalize 路徑再去雜湊出 db 檔名,而
+   **最該被刪的那一列,正是路徑無法 canonicalize 的那一列**。registry 本身就是掃 cache 目錄得來
+   的,每列都帶自己的 `db_path`,所以現在 canonicalize 失敗時改用 registry 反查;查不到才報錯,
+   免得把打錯的路徑變成靜默成功。
+
+### 仍然開著的兩件事
+
+- cache 裡有兩個 db(`8275c303…` 09-01 17:08、`8a5edab2…` 08-29 02:40)有 schema 但 `projects`
+  表是空的。它們不是任何專案,`cort projects` 不會列出,也就無法用 `cort delete` 依路徑清掉。
+  這正是 `indexed: true` gate 當初要防的那種「開過但沒索引」的 db。
+- 測試會寫進**真實**的 `~/.cache/cortex-ng`:本次新增測試的第一版就用 `db_path_for` 在真 cache
+  建了兩個 0 byte 的檔(已刪)。`db_path_for` 讀的是呼叫端行程的 `CORT_CACHE_DIR`,測試行程沒設,
+  只有它 spawn 出來的 `cort` 有。測試已改成掃 sandbox cache;但這個陷阱對其他測試同樣成立。

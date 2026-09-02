@@ -99,7 +99,7 @@ fn definition_lines(
     name: &str,
 ) -> Result<HashSet<(String, i64)>, CortError> {
     let err =
-        |e: rusqlite::Error| CortError::new("storage_busy", json!({ "message": e.to_string() }));
+        |e: rusqlite::Error| crate::db::classify_sqlite(&e);
     let mut stmt = db
         .prepare(
             "SELECT file_path, start_line FROM chunks
@@ -316,7 +316,7 @@ fn extracted_calls(
             "SELECT file_path, raw_target, start_line FROM raw_edges
           WHERE project_id = ?1 AND rel_type = 'calls'",
         )
-        .map_err(|e| CortError::new("storage_busy", json!({ "message": e.to_string() })))?;
+        .map_err(|e| crate::db::classify_sqlite(&e))?;
     let rows = stmt
         .query_map(params![project_id], |r| {
             Ok((
@@ -325,7 +325,7 @@ fn extracted_calls(
                 r.get::<_, i64>(2)?,
             ))
         })
-        .map_err(|e| CortError::new("storage_busy", json!({ "message": e.to_string() })))?;
+        .map_err(|e| crate::db::classify_sqlite(&e))?;
     let mut map: HashMap<(String, String), Vec<i64>> = HashMap::new();
     for row in rows.flatten() {
         map.entry((row.0, bare_name(&row.1).to_string()))
@@ -345,10 +345,10 @@ fn index_set_of(db: &Db, project_id: &str) -> Result<HashSet<String>, CortError>
 fn indexed_files(db: &Db, project_id: &str) -> Result<Vec<String>, CortError> {
     let mut stmt = db
         .prepare("SELECT file_path FROM file_state WHERE project_id = ?1 ORDER BY file_path")
-        .map_err(|e| CortError::new("storage_busy", json!({ "message": e.to_string() })))?;
+        .map_err(|e| crate::db::classify_sqlite(&e))?;
     let rows = stmt
         .query_map(params![project_id], |r| r.get::<_, String>(0))
-        .map_err(|e| CortError::new("storage_busy", json!({ "message": e.to_string() })))?;
+        .map_err(|e| crate::db::classify_sqlite(&e))?;
     Ok(rows.flatten().collect())
 }
 
@@ -374,7 +374,7 @@ fn extracted_but_unresolved(
     name: &str,
 ) -> Result<Vec<Value>, CortError> {
     let err =
-        |e: rusqlite::Error| CortError::new("storage_busy", json!({ "message": e.to_string() }));
+        |e: rusqlite::Error| crate::db::classify_sqlite(&e);
     let mut stmt = db
         .prepare(
             "SELECT file_path, source_symbol, raw_target, start_line FROM raw_edges
@@ -502,7 +502,7 @@ fn blind_files(
     indexed: &HashSet<String>,
 ) -> Result<Value, CortError> {
     let err =
-        |e: rusqlite::Error| CortError::new("storage_busy", json!({ "message": e.to_string() }));
+        |e: rusqlite::Error| crate::db::classify_sqlite(&e);
     // Paths, not just a count: "1 file is blind" is not actionable, "rust/src/legacy.rs is blind" is.
     let mut unparsed_stmt = db
         .prepare(

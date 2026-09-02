@@ -23,12 +23,13 @@ const ERROR_NODE_MARKER: &str = "Pattern contains an ERROR node";
 fn map_index(err: IndexError) -> CortError {
     match err {
         IndexError::Cort(c) => c,
+        IndexError::Sqlite(e) => crate::db::classify_sqlite(&e),
         other => CortError::new("storage_busy", json!({ "message": other.to_string() })),
     }
 }
 
 fn map_sql(err: rusqlite::Error) -> CortError {
-    CortError::new("storage_busy", json!({ "message": err.to_string() }))
+    crate::db::classify_sqlite(&err)
 }
 
 fn exec_args(args: &[String]) -> Vec<&str> {

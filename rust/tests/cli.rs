@@ -560,3 +560,93 @@ fn a_stale_index_is_disclosed_in_the_line_the_agent_reads() {
     assert_eq!(counts.get("hit").and_then(Value::as_i64), Some(1), "{counts:?}");
     assert_eq!(counts.get("hit_stale").and_then(Value::as_i64), Some(1), "{counts:?}");
 }
+
+/// An index built before the current schema is not a busy database. `cort status` opens read-only
+/// and so cannot migrate on the way past, which made the one command whose job is to audit indexes
+/// the only one that failed on an old one -- reporting `storage_busy`, which says "retry and it
+/// will clear", about a condition that never clears.
+#[test]
+fn an_index_predating_the_schema_is_reported_as_outdated_not_busy() {
+    let (_p, cwd, _c, cache) = sandbox();
+    let idx = run_cort(&["index"], &cwd, &cache);
+    if idx.code != 0 {
+        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
+        return;
+    }
+    // Reproduce the observed shape: a database from before `reading_notes` existed. The file is
+    // located by scanning the sandbox cache -- `db_path_for` reads CORT_CACHE_DIR from *this*
+    // process, which does not have it, and would silently create a stray database in the real one.
+    let db_file = fs::read_dir(&cache)
+        .unwrap()
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .find(|p| p.extension().is_some_and(|x| x == "db") && p.file_name().unwrap() != "usage.db")
+        .expect("index wrote a database into the sandbox cache");
+    let db = rusqlite::Connection::open(&db_file).unwrap();
+    db.execute_batch("DROP TABLE reading_notes;").unwrap();
+    drop(db);
+
+    let r = run_cort(&["status"], &cwd, &cache);
+    let code = payload(&r)["error"].as_str().unwrap_or("").to_string();
+    assert_eq!(code, "schema_outdated", "stdout={}", r.stdout);
+    assert!(
+        payload(&r)["detail"]["hint"]
+            .as_str()
+            .unwrap_or("")
+            .contains("cort index"),
+        "the error has to name the fix: {}",
+        r.stdout
+    );
+}
+
+/// The row most worth deleting is the one whose directory is gone, and that is exactly the row
+/// whose path cannot be canonicalised into the database name. Two of these were left in the cache
+/// by the install smoke test and `cort delete` refused both.
+#[test]
+fn a_project_whose_directory_is_gone_can_still_be_deleted() {
+    let (proj, cwd, _c, cache) = sandbox();
+    let idx = run_cort(&["index"], &cwd, &cache);
+    if idx.code != 0 {
+        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
+        return;
+    }
+    let gone = fs::canonicalize(&cwd).unwrap();
+    let elsewhere = tempfile::Builder::new()
+        .prefix("cort-cwd-")
+        .tempdir()
+        .unwrap();
+    drop(proj); // the project directory no longer exists
+
+    let r = run_cort(
+        &["delete", gone.to_str().unwrap()],
+        elsewhere.path(),
+        &cache,
+    );
+    assert_eq!(r.code, 0, "stdout={} stderr={}", r.stdout, r.stderr);
+    assert_eq!(payload(&r)["deleted"], true, "stdout={}", r.stdout);
+
+    let after = run_cort(&["projects"], elsewhere.path(), &cache);
+    assert_eq!(
+        payload(&after).as_array().map(Vec::len),
+        Some(0),
+        "the row survived the delete: {}",
+        after.stdout
+    );
+}
+
+/// A path that names no row and no directory is still an error -- the fallback must not turn a
+/// typo into a silent success.
+#[test]
+fn deleting_a_path_that_is_neither_a_directory_nor_a_row_still_fails() {
+    let (_p, _cwd, _c, cache) = sandbox();
+    let elsewhere = tempfile::Builder::new()
+        .prefix("cort-cwd-")
+        .tempdir()
+        .unwrap();
+    let r = run_cort(
+        &["delete", "/nonexistent/never/indexed"],
+        elsewhere.path(),
+        &cache,
+    );
+    assert_ne!(r.code, 0, "stdout={}", r.stdout);
+    assert_eq!(payload(&r)["error"], "file_not_found", "stdout={}", r.stdout);
+}

@@ -233,7 +233,18 @@ pub struct DeleteResult {
 }
 
 pub fn delete_project(real_path: &str) -> DeleteResult {
-    let db_path = db_path_for(real_path);
+    delete_project_db(&db_path_for(real_path))
+}
+
+/// Delete by database path rather than by project path.
+///
+/// `delete_project` derives the database name by hashing the *canonicalised* project path, which
+/// is unavailable for exactly the row most worth deleting: one whose directory no longer exists.
+/// `list_projects` already records each row's own `db_path`, so a caller that found the row there
+/// can hand it straight back. Observed on 2026-09-02, when two rows left behind by the install
+/// smoke test pointed at deleted `/tmp` directories and `cort delete` refused both with
+/// `file_not_found` -- the registry could name the garbage but not remove it.
+pub fn delete_project_db(db_path: &Path) -> DeleteResult {
     let db_path_str = db_path.to_string_lossy().into_owned();
     if !db_path.exists() {
         return DeleteResult {
@@ -253,6 +264,33 @@ pub fn delete_project(real_path: &str) -> DeleteResult {
         deleted: true,
         db_path: db_path_str,
     }
+}
+
+/// Classify a rusqlite error into a code the caller can act on.
+///
+/// Every sqlite failure used to come back as `storage_busy`, which names contention: wait, retry,
+/// and it clears. A missing table is the opposite claim -- it will never clear, because the
+/// database predates the schema that added the table, and the only fix is `cort index`. That
+/// mattered most in `cort status`, which opens the index read-only and therefore cannot migrate on
+/// the way past: the one command whose job is to audit indexes was the one that failed on an old
+/// one, and it blamed contention while doing it. Observed on two projects on 2026-09-02, where
+/// `status` reported `storage_busy: no such table: reading_notes` and a single `impact` -- which
+/// opens read-write and migrates -- made the same `status` succeed.
+///
+/// SQLite reports a missing table as a generic `SQLITE_ERROR` with no distinct code, so the
+/// message is the only thing left to read.
+pub fn classify_sqlite(err: &rusqlite::Error) -> CortError {
+    let message = err.to_string();
+    if message.contains("no such table") || message.contains("no such column") {
+        return CortError::new(
+            "schema_outdated",
+            json!({
+                "message": message,
+                "hint": "this index predates the current schema -- run `cort index` to rebuild it",
+            }),
+        );
+    }
+    CortError::new("storage_busy", json!({ "message": message }))
 }
 
 pub trait SqliteErrorCode {
