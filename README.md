@@ -246,11 +246,17 @@ which rules out fabrication but is not compiler-grade truth.
 `cost_usd`, and it had never been quoted here. Per cell, averaged over the same 20 cells: the `cort`
 arm cost **$0.28** against the baseline arm's **$0.79** — **2.8x**, not 7.7x, because the tool payload
 is one term in a bill dominated by cached context (`cache_read` 102k vs 438k). Anyone comparing
-"7.7x smaller payload" with a monthly invoice will not find it, so the honest headline is the pair:
-**2.8x cheaper at 10/10 success against 4/10**, with the payload and turn ratios (7.7x, 4.0x)
+"7.7x smaller payload" with a monthly invoice will not find it, so the honest headline is the pair —
+**2.8x cheaper at 10/10 success against 4/10** — with the payload and turn ratios (7.7x, 4.0x)
 as the mechanism rather than the result. Both are re-derivable from the committed rows —
 `cort-evals summarize evals/runs/2026-08-30-graph{,-sample2}/*/rows.json`, or the `cost_usd` field
-of those files. The `arm_held` caveat above applies to every one of these numbers equally.
+of those files.
+
+**That pair does not survive being quoted on its own, and the success half breaks first.**
+`arm_held` is **0/10** on the baseline arm against 7/10 on the `cort` arm, so what was measured is
+*this agent setup holding `cort`, against an uncontrolled shell, on graph-labelled tasks* — not
+`cort` against `rg`. Read every number in this paragraph as a floor on what the tool is worth in
+the harness it actually runs in, never as a controlled comparison of two tools.
 
 The demand side points the other way and is measured separately:
 [`docs/2026-08-28-real-session-cost.md`](docs/2026-08-28-real-session-cost.md) goes through 1,565 real
