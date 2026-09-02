@@ -200,3 +200,65 @@ extractor 對 Rust 沒抽出邊,而 hook 的 gate 只看「`projects` 有沒有�
 - 測試會寫進**真實**的 `~/.cache/cortex-ng`:本次新增測試的第一版就用 `db_path_for` 在真 cache
   建了兩個 0 byte 的檔(已刪)。`db_path_for` 讀的是呼叫端行程的 `CORT_CACHE_DIR`,測試行程沒設,
   只有它 spawn 出來的 `cort` 有。測試已改成掃 sandbox cache;但這個陷阱對其他測試同樣成立。
+
+## 9. 複核發現的四條(2026-09-02 傍晚)
+
+§7 的修正被複核,四條全部成立,前三條逐條實測重現過。它們有一個共同點:**§7 為了讓辨識更寬而
+改動的 predicate,同時把「不該認領的」也一起認領了**——修一個方向的漏,開了另一個方向的洞。
+
+### 1. 別人的 hook 會被吃掉(最重)
+
+`is_ours` 接受任何 `ends_with("/hook-suggest")` 的 token,而 `i == 0` 時前面沒有 token 可檢查,
+於是走 `None => true`。實測:
+
+```
+before          {"command": "/opt/vendor/bin/hook-suggest --daemon", "timeout": 30}
+install →       {"command": "/x/cort hook-suggest", "timeout": 5}     ← 整筆被覆寫
+remove  →       hooks 整個 key 消失                                    ← 整份被刪光
+```
+
+而且 §7 的正規化讓它更糟:舊行為只改 `command` 字串,新行為換掉整個 entry,所以 vendor 的
+`--daemon` 和 `timeout: 30` 一起沒了。這正好穿過 `a_command_merely_mentioning_the_word_is_not_ours`
+守的縫——那條守的是 `echo hook-suggest`,不是「路徑結尾剛好是它」。
+
+`ends_with("/hook-suggest")` 沒有正當用途:`cort hook-install` 產生的 command **永遠**是
+`<exe> hook-suggest` 兩個 token。已移除該分支,`None` 只接受**恰好等於** `hook-suggest` 的裸 token。
+
+### 2. 看不懂的結構被無聲覆蓋
+
+`pre_tool_use` 在 `hooks` 或 `PreToolUse` 型別不對時直接 `*hooks = Value::Object(Map::new())`。
+實測 `{"hooks": "oops-user-data", ...}` → 字串消失、回傳 `Ok(Installed)`。這與
+`SettingsError::Unparsable` 自己的 doc 直接矛盾(*overwriting a settings file we failed to
+understand is the one unrecoverable thing this module could do*)。Claude Code 的 schema 下不會
+產生那個形狀,而那正是沒人會去找的原因。現在改成回 `Unparsable`,檔案一個 byte 都不動。
+
+### 3. 註解宣稱的保護不存在
+
+`emptied_a_group` 是**全域**旗標,一旦為真,`list.retain` 掃掉**所有**空 group。實測使用者原有的
+`{"matcher":"Read","hooks":[]}` 在收斂重複時一併被刪——而該處註解寫的正是「不會被無關的 install
+掃到」。`remove_hook` 更早就有同一問題且**連旗標都沒有**,無條件掃:實測它刪掉使用者的 Read group
+之後,`PreToolUse` 變空,連整個 `hooks` key 都被移除。
+
+改成記錄「**這一次呼叫**清空了哪幾個 group」的 index,只刪那幾個。功能影響本來很小(空 group 不做
+事),但一個宣稱保護、實際沒有保護的註解,比沒有註解更糟。
+
+### 4. `--check` 查的 binary 和實際觸發的 hook 可以是兩個(未實測,讀出來的)
+
+`install.sh` 的 `--check` 用 `command -v cort`(PATH),而 `deploy_hook` 寫進 settings.json 的是
+絕對路徑。機器上有兩份 cort 時(PATH 上新、被接上的舊),`--check` 會回 OK,實際觸發的卻是舊
+binary、不寫 outcome——正好是 `--check` 被造出來要抓的東西。
+
+改成問 manifest 記錄的 `cort_bin`(這份安裝真正擁有的那個),並額外比對 `--status` 回報的
+`command` 是否指向同一個 binary,不同就印 `WIRED TO A DIFFERENT BINARY` 並讓 `--check` 失敗。
+smoke Test 19 原本測的是相反方向(舊 binary 在 PATH 上),已改成把替身放在 **managed** 路徑,
+另加兩條:PATH 上的另一個 cort 不會被採信、以及接到別的 binary 時會被抓出來。
+
+測試:`rust/tests/settings.rs` 再加 5 條(vendor binary 存活於 install 與 remove、`hooks` 型別錯
+被拒、`PreToolUse` 型別錯被拒、使用者空 group 在 collapse 與 remove 兩邊都存活)。
+全樹 336 + evals 92 + smoke 95,零失敗。
+
+### 附帶:磁碟
+
+修這批時 build 撞到 `No space left on device`。根目錄 251G 用掉 236G(99%),清掉
+`evals/target` 才有空間繼續。目前 98%、5.6G 可用。這不是本 repo 造成的,但兩個 cargo target
+合計數 GB,值得知道。

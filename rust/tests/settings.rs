@@ -279,3 +279,124 @@ fn a_command_merely_mentioning_the_word_is_not_ours() {
         "somebody else's hook was removed"
     );
 }
+
+/// The predicate is the whole of the "every hook you already have survives" promise. A vendor's
+/// binary that happens to be named `hook-suggest` is not our subcommand, and claiming it is not a
+/// label -- install rewrites the entry it claims and remove deletes it. The `echo hook-suggest`
+/// case above guards a different seam: this one is a real path in the command position.
+#[test]
+fn a_third_party_binary_named_hook_suggest_is_not_ours() {
+    let (_d, p) = tmp();
+    let theirs = json!({"command": "/opt/vendor/bin/hook-suggest --daemon", "timeout": 30});
+    fs::write(
+        p.as_path(),
+        serde_json::to_string_pretty(&json!({
+            "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [theirs]}]}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(installed_command(&p).is_none(), "claimed a vendor binary");
+
+    install_hook(&p, "/x/cort hook-suggest").unwrap();
+    let v = read(&p);
+    let hooks = v["hooks"]["PreToolUse"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|g| g["hooks"].as_array().unwrap().iter())
+        .collect::<Vec<_>>();
+    assert!(
+        hooks.iter().any(|h| h["command"] == "/opt/vendor/bin/hook-suggest --daemon"
+            && h["timeout"] == 30),
+        "the vendor's hook was rewritten: {v}"
+    );
+    assert!(
+        hooks.iter().any(|h| h["command"] == "/x/cort hook-suggest"),
+        "ours was not added: {v}"
+    );
+
+    remove_hook(&p).unwrap();
+    let v = read(&p);
+    assert_eq!(
+        v["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
+        "/opt/vendor/bin/hook-suggest --daemon",
+        "the vendor's hook was deleted by our uninstall: {v}"
+    );
+}
+
+/// `SettingsError::Unparsable` exists because overwriting a file we failed to understand is the one
+/// unrecoverable thing this module can do. A `hooks` of the wrong type is that same file, one level
+/// in -- it used to be replaced wholesale, and the user had no reason to go looking.
+#[test]
+fn a_hooks_key_of_the_wrong_type_is_refused_not_replaced() {
+    let (_d, p) = tmp();
+    let before = serde_json::to_string_pretty(&json!({
+        "hooks": "oops-user-data",
+        "permissions": {"allow": ["Bash(git status)"]}
+    }))
+    .unwrap();
+    fs::write(p.as_path(), &before).unwrap();
+    let err = install_hook(&p, "/x/cort hook-suggest").unwrap_err();
+    assert!(format!("{err}").contains("not an object"), "{err}");
+    assert_eq!(fs::read_to_string(&p).unwrap(), before, "the file was written");
+}
+
+#[test]
+fn a_pretooluse_of_the_wrong_type_is_refused_not_replaced() {
+    let (_d, p) = tmp();
+    let before = serde_json::to_string_pretty(&json!({
+        "hooks": {"PreToolUse": {"not": "an array"}}
+    }))
+    .unwrap();
+    fs::write(p.as_path(), &before).unwrap();
+    let err = install_hook(&p, "/x/cort hook-suggest").unwrap_err();
+    assert!(format!("{err}").contains("not an array"), "{err}");
+    assert_eq!(fs::read_to_string(&p).unwrap(), before, "the file was written");
+}
+
+/// Collapsing our own duplicates is not licence to tidy the file. An empty group the user keeps for
+/// their own reasons used to vanish, because the sweep was "remove every empty group" gated on a
+/// single flag rather than on which groups this call actually emptied.
+#[test]
+fn the_users_own_empty_group_survives_a_collapse() {
+    let (_d, p) = tmp();
+    fs::write(
+        p.as_path(),
+        serde_json::to_string_pretty(&json!({
+            "hooks": {"PreToolUse": [
+                {"matcher": "Read", "hooks": []},
+                {"matcher": "Bash", "hooks": [{"command": "/a/cort hook-suggest || true"}]},
+                {"matcher": "Bash", "hooks": [{"command": "/a/cort hook-suggest || true"}]},
+            ]}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    install_hook(&p, "/x/cort hook-suggest").unwrap();
+    let pre = read(&p)["hooks"]["PreToolUse"].as_array().unwrap().clone();
+    assert_eq!(pre.len(), 2, "expected the Read group plus one of ours: {pre:?}");
+    assert_eq!(pre[0]["matcher"], "Read");
+    assert!(pre[0]["hooks"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn the_users_own_empty_group_survives_a_remove() {
+    let (_d, p) = tmp();
+    fs::write(
+        p.as_path(),
+        serde_json::to_string_pretty(&json!({
+            "hooks": {"PreToolUse": [
+                {"matcher": "Read", "hooks": []},
+                {"matcher": "Bash", "hooks": [{"command": "/a/cort hook-suggest"}]},
+            ]}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    remove_hook(&p).unwrap();
+    let v = read(&p);
+    let pre = v["hooks"]["PreToolUse"].as_array().unwrap();
+    assert_eq!(pre.len(), 1, "the user's empty group went with ours: {v}");
+    assert_eq!(pre[0]["matcher"], "Read");
+}

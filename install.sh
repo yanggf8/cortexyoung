@@ -704,11 +704,31 @@ do_check() {
   fi
   # Read-only: --status never writes. A skill deployed without the hook is half the routing, and
   # --check is the only place that can say so before the numbers go missing.
-  if command -v cort >/dev/null 2>&1; then
+  # Ask the binary this installation owns, not whatever `cort` PATH resolves to. `deploy_hook` wires
+  # an absolute path, so on a machine carrying two copies -- a newer one earlier in PATH -- the PATH
+  # copy would answer for a hook that fires the other one, and --check would print OK about a binary
+  # it never asked. That divergence is the thing this line exists to catch. The manifest is the
+  # record of what was installed; resolve_bin_dir is the fallback before there is one.
+  local managed_cort
+  managed_cort="$(manifest_get cort_bin)"
+  if [ -z "$managed_cort" ]; then
+    resolve_bin_dir
+    managed_cort="$BIN_DIR/cort"
+  fi
+  if [ -x "$managed_cort" ]; then
     local hook_out
-    if hook_out="$(cort hook-install --settings "$HOOK_SETTINGS" --status 2>&1)"; then
+    if hook_out="$("$managed_cort" hook-install --settings "$HOOK_SETTINGS" --status 2>&1)"; then
       if printf '%s' "$hook_out" | grep -q '"wired"[[:space:]]*:[[:space:]]*true'; then
-        echo "hook: $HOOK_SETTINGS (wired)"
+        # Wired is not enough: it has to be wired to the binary we just checked. A command naming a
+        # different cort is a live hook nobody here has verified.
+        if printf '%s' "$hook_out" | grep -q "\"command\"[[:space:]]*:[[:space:]]*\"$managed_cort "; then
+          echo "hook: $HOOK_SETTINGS (wired)"
+        else
+          echo "hook: $HOOK_SETTINGS (WIRED TO A DIFFERENT BINARY — re-run ./install.sh)"
+          echo "  wired: $(printf '%s' "$hook_out" | tr -d '\n' | sed 's/.*"command"[[:space:]]*:[[:space:]]*"//; s/".*//')"
+          echo "  managed: $managed_cort"
+          if [ "$WITH_HOOK" -eq 1 ]; then ok=0; fi
+        fi
       else
         echo "hook: $HOOK_SETTINGS (NOT WIRED — re-run ./install.sh)"
         if [ "$WITH_HOOK" -eq 1 ]; then ok=0; fi

@@ -97,17 +97,26 @@ pub fn default_settings_path() -> Option<PathBuf> {
 /// with `--status` answering `wired: false` while the hook fires hundreds of times, and with every
 /// redeploy appending one more copy instead of updating the one that is there. Match the subcommand
 /// as a token, and keep it ours only when the token in front of it is the binary.
+///
+/// It equally cannot be a suffix test in the other direction. `hook-suggest` is only ever a
+/// *subcommand* here: `cort hook-install` writes `<exe> hook-suggest`, two tokens, always. A path
+/// that merely ends in `/hook-suggest` is somebody else's binary that happens to share the name,
+/// and claiming it is not a mislabelling -- install rewrites the whole entry and remove deletes it,
+/// so a vendor's `/opt/vendor/bin/hook-suggest --daemon` is silently destroyed by an unrelated
+/// `./install.sh`. This module's first promise is that every hook the user already has survives,
+/// and that promise is only ever as good as this predicate.
 fn is_ours(command: &str) -> bool {
     let tokens: Vec<&str> = command
         .split_whitespace()
         .map(|t| t.trim_matches(|c| c == '"' || c == '\''))
         .collect();
     tokens.iter().enumerate().any(|(i, t)| {
-        if *t != "hook-suggest" && !t.ends_with("/hook-suggest") {
+        if *t != "hook-suggest" {
             return false;
         }
         match i.checked_sub(1).map(|prev| tokens[prev]) {
-            // A bare `hook-suggest`, or a binary named that: ours by the same rule as before.
+            // A bare `hook-suggest` resolved through PATH -- the one shape with no binary token in
+            // front of it. Never a path: `/opt/vendor/bin/hook-suggest` is not this token at all.
             None => true,
             Some(prev) => prev == "cort" || prev.ends_with("/cort"),
         }
@@ -182,21 +191,32 @@ fn backup(path: &Path) -> Result<Option<PathBuf>, SettingsError> {
     Ok(Some(dest))
 }
 
-fn pre_tool_use(root: &mut Map<String, Value>) -> &mut Vec<Value> {
+/// The `PreToolUse` list, created when absent -- and refused, never replaced, when it is there with
+/// the wrong shape.
+///
+/// Replacing it was the same unrecoverable act `SettingsError::Unparsable` exists to forbid, one
+/// level in: a `hooks` that is a string is a file we do not understand, and overwriting it discards
+/// data the user has no reason to go looking for. Claude Code's schema does not produce that shape,
+/// which is precisely why nobody would notice.
+fn pre_tool_use(root: &mut Map<String, Value>) -> Result<&mut Vec<Value>, SettingsError> {
     let hooks = root
         .entry("hooks")
         .or_insert_with(|| Value::Object(Map::new()));
     if !hooks.is_object() {
-        *hooks = Value::Object(Map::new());
+        return Err(SettingsError::Unparsable(
+            "`hooks` is present but is not an object; refusing to overwrite it".into(),
+        ));
     }
     let obj = hooks.as_object_mut().expect("hooks is an object");
     let entry = obj
         .entry("PreToolUse")
         .or_insert_with(|| Value::Array(Vec::new()));
     if !entry.is_array() {
-        *entry = Value::Array(Vec::new());
+        return Err(SettingsError::Unparsable(
+            "`hooks.PreToolUse` is present but is not an array; refusing to overwrite it".into(),
+        ));
     }
-    entry.as_array_mut().expect("PreToolUse is an array")
+    Ok(entry.as_array_mut().expect("PreToolUse is an array"))
 }
 
 /// The outcome of a call, with the backup path when one was taken.
@@ -209,14 +229,14 @@ pub struct Outcome {
 /// Add (or refresh) the `PreToolUse` entry that runs `command`.
 pub fn install_hook(path: &Path, command: &str) -> Result<Outcome, SettingsError> {
     let mut root = read_root(path)?;
-    let list = pre_tool_use(&mut root);
+    let list = pre_tool_use(&mut root)?;
 
     let canonical = hook_command_entry(command);
     let mut seen_ours = false;
     let mut found_same = false;
     let mut changed = false;
-    let mut emptied_a_group = false;
-    for group in list.iter_mut() {
+    let mut we_emptied: Vec<usize> = Vec::new();
+    for (idx, group) in list.iter_mut().enumerate() {
         let Some(hooks) = group.get_mut("hooks").and_then(Value::as_array_mut) else {
             continue;
         };
@@ -249,17 +269,15 @@ pub fn install_hook(path: &Path, command: &str) -> Result<Outcome, SettingsError
             true
         });
         if hooks.is_empty() && before > 0 {
-            emptied_a_group = true;
+            we_emptied.push(idx);
         }
     }
-    // Only when collapsing duplicates actually emptied one, so a group the user keeps empty for
-    // their own reasons is not swept up by an unrelated install.
-    if emptied_a_group {
-        list.retain(|g| {
-            g.get("hooks")
-                .and_then(Value::as_array)
-                .is_none_or(|h| !h.is_empty())
-        });
+    // Drop only the groups this call emptied, addressed by index. A blanket "remove every empty
+    // group" reached the user's own empty groups as well -- an empty `{"matcher":"Read"}` they keep
+    // for their own reasons vanished on an unrelated install, which is what the comment here used
+    // to claim could not happen.
+    for idx in we_emptied.iter().rev() {
+        list.remove(*idx);
     }
 
     if found_same && !changed {
@@ -292,10 +310,11 @@ pub fn remove_hook(path: &Path) -> Result<Outcome, SettingsError> {
         });
     }
     let mut root = read_root(path)?;
-    let list = pre_tool_use(&mut root);
+    let list = pre_tool_use(&mut root)?;
 
     let mut removed = false;
-    for group in list.iter_mut() {
+    let mut we_emptied: Vec<usize> = Vec::new();
+    for (idx, group) in list.iter_mut().enumerate() {
         let Some(hooks) = group.get_mut("hooks").and_then(Value::as_array_mut) else {
             continue;
         };
@@ -307,14 +326,17 @@ pub fn remove_hook(path: &Path) -> Result<Outcome, SettingsError> {
         });
         if hooks.len() != before {
             removed = true;
+            if hooks.is_empty() {
+                we_emptied.push(idx);
+            }
         }
     }
-    // A group we emptied is ours and goes; a group that still has hooks belongs to someone else.
-    list.retain(|g| {
-        g.get("hooks")
-            .and_then(Value::as_array)
-            .is_none_or(|h| !h.is_empty())
-    });
+    // A group *this call* emptied was ours and goes. The sweep used to be unconditional, which
+    // took the user's own empty groups with it -- and, once `PreToolUse` was empty as a result,
+    // the whole `hooks` key. Uninstalling our hook is not licence to tidy someone else's file.
+    for idx in we_emptied.iter().rev() {
+        list.remove(*idx);
+    }
 
     if !removed {
         return Ok(Outcome {

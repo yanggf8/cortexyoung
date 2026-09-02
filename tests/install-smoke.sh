@@ -635,9 +635,13 @@ fi
 # provably not at fault -- a wrong pointer in the check whose whole job is to stop the hook going
 # down silently. Reproduced with a double that answers the way a pre-hook-install binary does.
 echo "--- Test 19: --check blames the binary, not settings.json ---"
-STALEBIN="$TMPHOME/stalebin"
-mkdir -p "$STALEBIN"
-cat > "$STALEBIN/cort" <<'FAKESTALECORT'
+# The double has to stand where the *managed* binary stands, not merely earlier in PATH: --check
+# asks the binary the manifest records, because that is the one `deploy_hook` wired into
+# settings.json. A stale copy on PATH is the case that must NOT be consulted, and it gets its own
+# assertion below.
+MANAGED_CORT="$(grep '^cort_bin:' "$HOME/.local/share/cortexyoung/manifest" | tail -1 | cut -d: -f2-)"
+cp "$MANAGED_CORT" "$TMPHOME/cort.real"
+cat > "$MANAGED_CORT" <<'FAKESTALECORT'
 #!/usr/bin/env bash
 # A cort from before `hook-install` existed: unknown subcommand on stderr, non-zero exit.
 if [ "$1" = "hook-install" ]; then
@@ -646,8 +650,8 @@ if [ "$1" = "hook-install" ]; then
 fi
 echo "cort 0.1.0 (rust)"
 FAKESTALECORT
-chmod +x "$STALEBIN/cort"
-PATH="$STALEBIN:$PATH" bash "$INSTALL_SH" --check > /tmp/smoke19.log 2>&1 || true
+chmod +x "$MANAGED_CORT"
+bash "$INSTALL_SH" --check > /tmp/smoke19.log 2>&1 || true
 if grep -q "predates hook-install" /tmp/smoke19.log; then
   pass "--check names the stale binary as the cause"
 else
@@ -658,6 +662,44 @@ if grep -q "hook: could not read" /tmp/smoke19.log; then
 else
   pass "--check no longer blames settings.json for a stale-binary failure"
 fi
+cp "$TMPHOME/cort.real" "$MANAGED_CORT"
+
+# A newer cort earlier in PATH must not answer for the hook: the wired command names the managed
+# binary, so a PATH copy that knows `hook-install` would have reported a healthy hook it never
+# examined. The double here answers `wired: true` about a settings file it never read.
+STALEBIN="$TMPHOME/pathbin"
+mkdir -p "$STALEBIN"
+cat > "$STALEBIN/cort" <<'FAKEPATHCORT'
+#!/usr/bin/env bash
+if [ "$1" = "hook-install" ]; then
+  echo '{"settings":"/nowhere","wired":true,"command":"/somewhere/else/cort hook-suggest"}'
+  exit 0
+fi
+echo "cort 0.1.0 (rust)"
+FAKEPATHCORT
+chmod +x "$STALEBIN/cort"
+PATH="$STALEBIN:$PATH" bash "$INSTALL_SH" --check > /tmp/smoke19b.log 2>&1 || true
+if grep -q "^hook: $HOME/.claude/settings.json (wired)" /tmp/smoke19b.log; then
+  pass "--check consults the managed binary, not a different cort earlier in PATH"
+else
+  fail "a PATH cort answered for the hook"; sed 's/^/    /' /tmp/smoke19b.log
+fi
+
+# Wired is not enough: it has to name the binary this installation manages.
+python3 - "$HOME/.claude/settings.json" <<'REWIRE'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p))
+d["hooks"]["PreToolUse"][0]["hooks"][0]["command"] = "/some/other/cort hook-suggest"
+json.dump(d, open(p, "w"), indent=2)
+REWIRE
+bash "$INSTALL_SH" --check > /tmp/smoke19c.log 2>&1 || true
+if grep -q "WIRED TO A DIFFERENT BINARY" /tmp/smoke19c.log; then
+  pass "--check flags a hook wired to a cort it does not manage"
+else
+  fail "--check reported OK for a hook wired elsewhere"; sed 's/^/    /' /tmp/smoke19c.log
+fi
+bash "$INSTALL_SH" > /dev/null 2>&1  # put the wiring back for any later assertion
 rm -rf "$STALEBIN"
 
 # ── summary ──────────────────────────────────────────────────────
