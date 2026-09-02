@@ -281,7 +281,14 @@ hook 是全域(`~/.claude/settings.json`),2026-09-01 下午已在 5 個非稽核
 (hesocial 281 次 grep/rg、ft 164、travel 11、cc-router 15、home 5,**注入 0**——半天 551 次
 grep/rg 無呼叫點形狀機會,符合 1/200 機會率模型,不是 hook 壞了)。
 
-**基線(2026-09-01 收隊時)**:預設 cache `hook-suggest ok=485 / impact ok=14`(impact 多半是
+**⚠ 2026-09-02 更正**:下面這兩段(hook 全域已觸發、預設 cache 的基線計數)在 09-02 早上查不到
+對應狀態——`~/.claude/settings.json` 無 `cort hook-suggest` entry,`usage.db` 09-01 全天 0 列。
+hook 自 09-02 09:24 起由 `install.sh` 一併部署(`cort hook-install`),gate 也從「db 檔存在」
+改成「`indexed: true`」。**09-04 照本協定執行時,累積窗起點是 2026-09-02 09:24,母體是當時已
+建索引的 13 個專案**,並先用 `./install.sh --check` 確認印出 `hook: ... (wired)`。
+見 [`2026-09-02-hook-wiring-correction.md`](2026-09-02-hook-wiring-correction.md)。
+
+**基線(2026-09-01 收隊時;見上方更正)**:預設 cache `hook-suggest ok=485 / impact ok=14`(impact 多半是
 稽核 session 自己的)。挖掘看的是:機會來時有沒有被攔(注入數)、注入後有沒有 impact tool_use
 (採納)、`--coverage` 的 gap 列有沒有改變結論(效果);原始呼叫次數不是成功指標。
 

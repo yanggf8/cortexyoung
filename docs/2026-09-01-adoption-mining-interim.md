@@ -1,5 +1,11 @@
 # 採用數據早期讀數(2026-09-01,累積窗 ~10 小時)— 中期報告
 
+> **⚠ 2026-09-02 更正:本文的漏斗數字在預設 cache 與全域 settings 上重現不出來。** 09-02 早上查
+> 到 `~/.claude/settings.json` 裡根本沒有 `cort hook-suggest`,`usage.db`(birth 08-31 11:12,
+> retention 90 天)09-01 全天 0 列。那 745/698 來自另一份 cache 或另一份設定,不能當基線;照原
+> 協定在 09-04 重挖會挖到 0。線已於 09-02 09:24 由 `install.sh` 接上,累積窗從那時起算。
+> 證據與修正見 [`2026-09-02-hook-wiring-correction.md`](2026-09-02-hook-wiring-correction.md)。
+>
 > **狀態:數據不足以判斷。** 本文件是 [issue #1](https://github.com/yanggf8/cortexyoung/issues/1)
 > 挖掘協定的**管道驗證**,不是 09-04 的正式讀數。累積窗只有 2026-09-01 13:12 → 23:06(約 10
 > 小時);issue 開放中,09-04 照同一協定重挖,那才是交付物。
