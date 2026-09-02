@@ -312,6 +312,22 @@ struct RootArgs {
     disable_help_flag = true,
     disable_version_flag = true
 )]
+struct HookSuggestArgs {
+    /// Which harness wired this hook. Recorded on the usage row so the adoption mining can tell
+    /// one harness's fires from another's -- they all call this one binary and write to one
+    /// database, and a row that cannot say where it came from cannot be compared against any single
+    /// harness's transcripts. Supplied by the installer, which is the only thing that knows; never
+    /// sniffed from the environment, because a guess here silently corrupts the measurement.
+    #[arg(long = "harness")]
+    harness: Option<String>,
+}
+
+#[derive(Parser, Debug)]
+#[command(
+    no_binary_name = true,
+    disable_help_flag = true,
+    disable_version_flag = true
+)]
 struct HookInstallArgs {
     /// The settings.json to edit. Defaults to $CLAUDE_SKILL_HOME (or ~/.claude)/settings.json --
     /// the same override the installer uses to place the skill.
@@ -461,7 +477,7 @@ fn dispatch(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError> 
         Some("read") => cmd_read(&args[1..], usage),
         Some("recall") => cmd_recall(&args[1..], usage),
         Some("usage") => cmd_usage(&args[1..], usage),
-        Some("hook-suggest") => cmd_hook_suggest(usage),
+        Some("hook-suggest") => cmd_hook_suggest(&args[1..], usage),
         Some("hook-install") => cmd_hook_install(&args[1..], usage),
         other => Err(CortError::new(
             "unknown_command",
@@ -475,8 +491,10 @@ fn dispatch(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError> 
 
 /// `{"hook":"<outcome>","v":1}` -- the same JSON-object shape every other command's
 /// `args_summary` carries, so one parser reads the whole column.
-fn hook_args(outcome: &str) -> String {
-    json!({ "v": 1, "hook": outcome }).to_string()
+/// `v: 2` adds `harness`. A v1 row predates the field and is not attributable to any harness --
+/// `unspecified`, never defaulted to the one that happened to be wired first.
+fn hook_args(outcome: &str, harness: &str) -> String {
+    json!({ "v": 2, "hook": outcome, "harness": harness }).to_string()
 }
 
 /// A PreToolUse hook, not a verb anyone types. It reads the harness's hook payload on stdin and,
@@ -493,7 +511,11 @@ fn hook_args(outcome: &str) -> String {
 /// * It stays silent when this project has no index. Suggesting a query that can only answer
 ///   `no_seed_resolved` would spend the agent's turn to tell it nothing, and would make the
 ///   suggestion itself untrustworthy the first time it happened.
-fn cmd_hook_suggest(usage: &mut UsageEvent) -> Result<Emit, CortError> {
+fn cmd_hook_suggest(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError> {
+    let harness = HookSuggestArgs::try_parse_from(args.iter())
+        .ok()
+        .and_then(|a| a.harness)
+        .unwrap_or_else(|| "unspecified".to_string());
     // Every invocation used to record the same `hook` summary whether it injected or stayed
     // silent, so `usage` could only ever report how often the hook *ran* -- which is how often the
     // agent ran any Bash command. The injection count then had exactly one source, the transcript,
@@ -501,7 +523,7 @@ fn cmd_hook_suggest(usage: &mut UsageEvent) -> Result<Emit, CortError> {
     // number. The outcome splits the row by what the hook did, which makes `hit` a second source
     // for the numerator and names the one silence that is a missed opportunity rather than a
     // correct pass: `no_index`, the rule fired on a project cort has never indexed.
-    usage.args_summary = hook_args("no_payload");
+    usage.args_summary = hook_args("no_payload", &harness);
     let mut payload = String::new();
     let _ = std::io::Read::read_to_string(&mut std::io::stdin(), &mut payload);
     let quiet = || {
@@ -521,7 +543,7 @@ fn cmd_hook_suggest(usage: &mut UsageEvent) -> Result<Emit, CortError> {
     else {
         return quiet();
     };
-    usage.args_summary = hook_args("no_shape");
+    usage.args_summary = hook_args("no_shape", &harness);
     let Some(hit) = cort::hook::suggests_impact(command) else {
         return quiet();
     };
@@ -531,7 +553,7 @@ fn cmd_hook_suggest(usage: &mut UsageEvent) -> Result<Emit, CortError> {
     // file test and the hook then told the agent `cort has an index for this project` on a tree
     // where `impact` can only answer `no_seed_resolved / stale=true`. That is the exact failure
     // the doc comment above forbids, and it was live on this machine on 2026-09-02.
-    usage.args_summary = hook_args("no_index");
+    usage.args_summary = hook_args("no_index", &harness);
     let state = index_state();
     if state == IndexState::Missing {
         return quiet();
@@ -542,7 +564,7 @@ fn cmd_hook_suggest(usage: &mut UsageEvent) -> Result<Emit, CortError> {
     // injected line said only "cort has an index", which is the half of the sentence that flatters
     // the tool. The outcome is recorded separately so the mining can tell the two apart.
     let stale = state == IndexState::BehindHead;
-    usage.args_summary = hook_args(if stale { "hit_stale" } else { "hit" });
+    usage.args_summary = hook_args(if stale { "hit_stale" } else { "hit" }, &harness);
     let context = format!(
         "cort has an index for this project{}. `cort impact --symbol '{}' --depth 1 --coverage -f lean` \
 answers who calls it in one call, and `--coverage` lists what the enumeration could not see -- which \

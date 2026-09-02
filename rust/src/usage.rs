@@ -302,7 +302,19 @@ pub fn query_usage_at(path: &Path, days: i64, now_ms: i64) -> Result<Value, Cort
 ///
 /// Rows written before the outcome existed carry the bare summary `hook`; they are counted under
 /// `legacy_unsplit` rather than folded into a silence, because "we do not know" is not "no".
-pub fn hook_outcomes_at(path: &Path, since_ms: i64) -> Result<Map<String, Value>, CortError> {
+///
+/// `want_harness` is the second half of the same discipline. Every harness that wires this hook
+/// calls one binary and writes to one database, and the mining compares these rows against *one*
+/// harness's transcripts. A row from a different harness has no transcript counterpart on that
+/// side, so folding it in inflates the numerator while every guard still reports green. Rows whose
+/// harness does not match are counted under `other_harness`, and rows from before the field existed
+/// under `unspecified` -- never attributed to whichever harness happened to be wired first, which
+/// is true today and silently false the day it is not.
+pub fn hook_outcomes_at(
+    path: &Path,
+    since_ms: i64,
+    want_harness: Option<&str>,
+) -> Result<Map<String, Value>, CortError> {
     let mut out: Map<String, Value> = Map::new();
     if !path.exists() {
         return Ok(out);
@@ -322,11 +334,31 @@ pub fn hook_outcomes_at(path: &Path, since_ms: i64) -> Result<Map<String, Value>
             .map_err(map_query_err)?;
         for row in rows {
             let raw = row.map_err(map_query_err)?;
-            let outcome = serde_json::from_str::<Value>(&raw)
-                .ok()
+            let parsed = serde_json::from_str::<Value>(&raw).ok();
+            let outcome = parsed
+                .as_ref()
                 .and_then(|v| v.get("hook").and_then(Value::as_str).map(str::to_string))
                 .unwrap_or_else(|| "legacy_unsplit".to_string());
-            *counts.entry(outcome).or_insert(0) += 1;
+            // An explicit `unspecified` (a v2 row whose hook was wired without `--harness`) and a
+            // missing field (a v1 row from before the field existed) are the same claim: nobody
+            // recorded where this came from. Both belong in `unspecified`, and neither is evidence
+            // of a *different* harness.
+            let harness = parsed
+                .as_ref()
+                .and_then(|v| v.get("harness").and_then(Value::as_str))
+                .filter(|h| *h != "unspecified");
+            let key = match (want_harness, harness) {
+                // No filter asked for: report the outcomes as they are.
+                (None, _) => outcome,
+                // A row that predates outcome recording stays `legacy_unsplit`. It is unattributable
+                // for a different reason than `unspecified`, and collapsing the two would hide which
+                // of the two upgrades a stale row is waiting on.
+                _ if outcome == "legacy_unsplit" => outcome,
+                (Some(_), None) => "unspecified".to_string(),
+                (Some(want), Some(got)) if want == got => outcome,
+                (Some(_), Some(_)) => "other_harness".to_string(),
+            };
+            *counts.entry(key).or_insert(0) += 1;
         }
     }
     for (k, v) in counts {

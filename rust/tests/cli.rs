@@ -383,10 +383,15 @@ fn coverage_flows_through_the_cli_in_lean() {
 // nothing, which is what makes the next suggestion ignorable.
 
 fn run_hook_suggest(command: &str, cwd: &Path, cache: &Path) -> Run {
+    run_hook_suggest_with(command, &[], cwd, cache)
+}
+
+fn run_hook_suggest_with(command: &str, extra: &[&str], cwd: &Path, cache: &Path) -> Run {
     use std::io::Write;
     use std::process::Stdio;
     let mut child = Command::new(cort_bin())
         .arg("hook-suggest")
+        .args(extra)
         .current_dir(cwd)
         .env("CORT_CACHE_DIR", cache)
         .stdin(Stdio::piped())
@@ -463,12 +468,12 @@ fn the_usage_row_records_which_outcome_the_hook_reached() {
 
     // No index yet: the rule matches, the gate declines.
     run_hook_suggest(FIRING_SEARCH, &cwd, &cache);
-    let counts = cort::usage::hook_outcomes_at(&usage_db, 0).expect("read usage db");
+    let counts = cort::usage::hook_outcomes_at(&usage_db, 0, None).expect("read usage db");
     assert_eq!(counts.get("no_index").and_then(Value::as_i64), Some(1));
 
     // A command the rule has nothing to say about is a different silence.
     run_hook_suggest("cargo test --workspace", &cwd, &cache);
-    let counts = cort::usage::hook_outcomes_at(&usage_db, 0).expect("read usage db");
+    let counts = cort::usage::hook_outcomes_at(&usage_db, 0, None).expect("read usage db");
     assert_eq!(counts.get("no_shape").and_then(Value::as_i64), Some(1));
     assert_eq!(counts.get("no_index").and_then(Value::as_i64), Some(1));
 
@@ -478,7 +483,7 @@ fn the_usage_row_records_which_outcome_the_hook_reached() {
         return;
     }
     run_hook_suggest(FIRING_SEARCH, &cwd, &cache);
-    let counts = cort::usage::hook_outcomes_at(&usage_db, 0).expect("read usage db");
+    let counts = cort::usage::hook_outcomes_at(&usage_db, 0, None).expect("read usage db");
     assert_eq!(
         counts.get("hit").and_then(Value::as_i64),
         Some(1),
@@ -489,7 +494,7 @@ fn the_usage_row_records_which_outcome_the_hook_reached() {
 
     // The window is honoured, so a mining run cannot pick up rows from before the hook was wired.
     let future = cort::usage::now_ms() + 60_000;
-    let later = cort::usage::hook_outcomes_at(&usage_db, future).expect("read usage db");
+    let later = cort::usage::hook_outcomes_at(&usage_db, future, None).expect("read usage db");
     assert!(later.is_empty(), "nothing was recorded after now: {later:?}");
 }
 
@@ -556,7 +561,7 @@ fn a_stale_index_is_disclosed_in_the_line_the_agent_reads() {
     assert!(ctx.contains("cort impact --symbol 'helper'"), "got: {ctx}");
 
     // And the two are countable apart from the db alone.
-    let counts = cort::usage::hook_outcomes_at(&cache.join("usage.db"), 0).expect("read usage db");
+    let counts = cort::usage::hook_outcomes_at(&cache.join("usage.db"), 0, None).expect("read usage db");
     assert_eq!(counts.get("hit").and_then(Value::as_i64), Some(1), "{counts:?}");
     assert_eq!(counts.get("hit_stale").and_then(Value::as_i64), Some(1), "{counts:?}");
 }
@@ -649,4 +654,50 @@ fn deleting_a_path_that_is_neither_a_directory_nor_a_row_still_fails() {
     );
     assert_ne!(r.code, 0, "stdout={}", r.stdout);
     assert_eq!(payload(&r)["error"], "file_not_found", "stdout={}", r.stdout);
+}
+
+/// Every harness that wires this hook calls one binary and writes to one usage.db, and the mining
+/// compares those rows against a single harness's transcripts. A row that cannot say which harness
+/// wrote it cannot be counted on either side, and one from a different harness must not be folded
+/// in -- it would raise the injection count while every guard still read green.
+#[test]
+fn a_usage_row_records_which_harness_fired_the_hook() {
+    let (_p, cwd, _c, cache) = sandbox();
+    let idx = run_cort(&["index"], &cwd, &cache);
+    if idx.code != 0 {
+        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
+        return;
+    }
+    let usage_db = cache.join("usage.db");
+    run_hook_suggest_with(FIRING_SEARCH, &["--harness", "claude-code"], &cwd, &cache);
+    let mine = cort::usage::hook_outcomes_at(&usage_db, 0, Some("claude-code")).unwrap();
+    assert!(
+        mine.get("hit").and_then(|v| v.as_i64()).unwrap_or(0)
+            + mine.get("hit_stale").and_then(|v| v.as_i64()).unwrap_or(0)
+            >= 1,
+        "the claude-code fire was not counted: {mine:?}"
+    );
+
+    // A fire from somewhere else is visible, but never as this harness's injection.
+    run_hook_suggest_with(FIRING_SEARCH, &["--harness", "grok"], &cwd, &cache);
+    let mine = cort::usage::hook_outcomes_at(&usage_db, 0, Some("claude-code")).unwrap();
+    assert_eq!(
+        mine.get("other_harness").and_then(|v| v.as_i64()),
+        Some(1),
+        "a grok fire was not held apart: {mine:?}"
+    );
+
+    // And a row from before the field existed is `unspecified`, not attributed to whichever
+    // harness happened to be wired first.
+    run_hook_suggest_with(FIRING_SEARCH, &[], &cwd, &cache);
+    let mine = cort::usage::hook_outcomes_at(&usage_db, 0, Some("claude-code")).unwrap();
+    assert_eq!(
+        mine.get("unspecified").and_then(|v| v.as_i64()),
+        Some(1),
+        "a harness-less row was attributed anyway: {mine:?}"
+    );
+
+    // With no filter the outcomes are reported as they are, so `cort usage` is unaffected.
+    let all = cort::usage::hook_outcomes_at(&usage_db, 0, None).unwrap();
+    assert!(all.get("other_harness").is_none(), "unfiltered read split by harness: {all:?}");
 }

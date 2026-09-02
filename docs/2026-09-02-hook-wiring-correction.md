@@ -294,3 +294,47 @@ mtime 猜:4.6 有 144 個共 11.75G(保留),4.5 有 121 個共 10.75G(刪除)。
 部署不受影響:`install.sh` 把 binary 裝在 `~/.local/share/cortexyoung/cort`、`~/.cargo/bin/cort`
 只是 shim,不在 `target/` 裡;清完 `cort --version` 與 `./install.sh --check` 仍是 `check: OK`。
 測試結果停在 `a91ef5d2` 的 336 / 92 / 95(此後未改任何程式碼);重跑會重建約 10G,那正是剛清掉的。
+
+## 10. 多 harness:usage 列現在說得出自己是誰寫的(2026-09-02 16:24)
+
+起因是一個看似無關的問題:能不能把 cort 裝進 Grok / Kimi。答案牽出一個會**靜默毀掉 §7 基線**
+的問題,所以先修它。
+
+### 問題
+
+所有 harness 都呼叫同一個 `cort hook-suggest`、寫進同一個 `~/.cache/cortex-ng/usage.db`,而那個
+usage 列**沒有任何欄位記錄是哪個 harness 觸發的**。`adopt-mine` 的 cross-check 是拿
+**`--claude-dir` 的 transcript injections** 比對 **usage 的 `hit` 列**。多接一個 harness,`hit`
+就混進一批在 Claude transcript 裡不存在對應的列,而 `comparable_to_injections` 仍會回 `true`
+——它當時只擋 `legacy_unsplit`。**一個因為沒被問對問題而通過的守衛**,和 §7 那些是同一類。
+
+### 改了什麼
+
+`hook_args` 升到 `v: 2`,多記 `harness`。**由 installer 明示傳入**
+(`cort hook-suggest --harness claude-code`),不從環境變數嗅探——只有 installer 知道自己在接哪個
+harness,而在這裡猜錯等於靜默污染量測。`hook_outcomes_at` 多收一個 `want_harness`,把列分成:
+
+| key | 意思 |
+|---|---|
+| 正常 outcome | harness 相符 |
+| `other_harness` | 別的 harness 寫的,這個窗的 transcript 側沒有對應 |
+| `unspecified` | v2 但沒帶 `--harness`,**或** v1 沒有該欄位 |
+| `legacy_unsplit` | 早於 outcome 記錄,和 `unspecified` 分開保留 |
+
+`unspecified` 刻意不歸給「當時唯一接上的那個 harness」——今天為真,而它變成假的那天不會有人發現。
+`legacy_unsplit` 也刻意不併入 `unspecified`:兩者都不可歸屬,但在等不同的升級。
+
+### 代價:基線第三次往後移
+
+窗起點從 `10:58` 移到 **`2026-09-02T16:30:00+08:00`**(重新部署在 16:24:26)。10:58–16:24 之間的
+**513 列**現在正確地報成 `unspecified` 並拒絕比較。已驗證新起點下
+`comparable_to_injections` 為 `true`。
+
+移動基線的成本目前接近零(窗才幾小時),而這正是該做這件事的時機——**在第二個 harness 存在之前**。
+若等到接上 Grok 之後才發現,污染的資料無法事後拆開。
+
+指令:`cort-evals adopt-mine --since 2026-09-02T16:30:00+08:00`。
+
+測試:`rust/tests/cli.rs` 一條(claude-code 記到、grok 被隔開、無標記的不被冒領、無 filter 時
+`cort usage` 不受影響)、`evals/tests/adopt.rs` 兩條(別的 harness 阻擋比較而非灌水、無標記的不被
+記到被挖的 harness 頭上)。全樹 337 + evals 92 + smoke 95,零失敗。

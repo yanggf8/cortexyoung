@@ -594,7 +594,16 @@ pub fn mine(
     // manufacturing it is worse than omitting the field. The db carries cort's own `project_id`
     // hash while transcripts carry the harness's directory name, and this report does not map
     // between them -- so with any exclusion the comparison is refused rather than approximated.
-    let cross_check = usage_db.map(|path| match cort::usage::hook_outcomes_at(path, since_ms) {
+    // The transcript side of this comparison is `--claude-dir`, so the db side must be restricted to
+    // the rows Claude Code's hook wrote. Every harness that wires `cort hook-suggest` shares one
+    // usage.db, and a Grok or Codex fire has no Claude transcript to match -- counted in, it would
+    // raise `injections_recorded` while every guard still read green.
+    const MINED_HARNESS: &str = "claude-code";
+    let cross_check = usage_db.map(|path| match cort::usage::hook_outcomes_at(
+        path,
+        since_ms,
+        Some(MINED_HARNESS),
+    ) {
         Ok(counts) => {
             let get = |k: &str| counts.get(k).and_then(Value::as_i64).unwrap_or(0);
             // `hit_stale` is an injection too. Comparing against `hit` alone would make an
@@ -613,6 +622,21 @@ pub fn mine(
                 blockers.push(format!(
                     "{legacy} rows predate outcome recording (`legacy_unsplit`) and cannot be \
                      attributed to either side"
+                ));
+            }
+            let unspecified = get("unspecified");
+            if unspecified > 0 {
+                blockers.push(format!(
+                    "{unspecified} rows predate harness recording (`unspecified`); they were \
+                     written when only one harness was wired, but the row does not say so and this \
+                     report will not assume it"
+                ));
+            }
+            let other = get("other_harness");
+            if other > 0 {
+                blockers.push(format!(
+                    "{other} rows were written by a harness other than `{MINED_HARNESS}` and have \
+                     no counterpart in the transcripts this window read"
                 ));
             }
             json!({

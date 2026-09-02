@@ -600,8 +600,14 @@ fn seed_usage_db(path: &StdPath, outcomes: &[(&str, i64)]) {
     for (outcome, n) in outcomes {
         let args_summary = if *outcome == "legacy_unsplit" {
             "hook".to_string()
+        } else if *outcome == "unspecified" {
+            // A v2 row whose hook was wired without `--harness`: it says an outcome but not where
+            // it came from, so it is no more attributable than a v1 row.
+            r#"{"hook":"hit","harness":"unspecified","v":2}"#.to_string()
+        } else if let Some(other) = outcome.strip_prefix("harness:") {
+            format!(r#"{{"hook":"hit","harness":"{other}","v":2}}"#)
         } else {
-            format!(r#"{{"hook":"{outcome}","v":1}}"#)
+            format!(r#"{{"hook":"{outcome}","harness":"claude-code","v":2}}"#)
         };
         for _ in 0..*n {
             cort::usage::record_command_at(
@@ -624,4 +630,64 @@ fn seed_usage_db(path: &StdPath, outcomes: &[(&str, i64)]) {
             );
         }
     }
+}
+
+/// Every harness that wires `cort hook-suggest` writes to one usage.db, but this funnel reads one
+/// harness's transcripts. A fire from elsewhere has no transcript counterpart, so counting it would
+/// raise the injection total while `comparable_to_injections` still read true -- the exact shape of
+/// a guard that passes because it was never asked the right question.
+#[test]
+fn another_harnesss_rows_block_the_comparison_instead_of_inflating_it() {
+    let db = tempfile::Builder::new()
+        .prefix("usage-")
+        .tempdir()
+        .unwrap();
+    let path = db.path().join("usage.db");
+    seed_usage_db(&path, &[("hit", 2), ("harness:grok", 7)]);
+    let dir = tree(&[("-home-u-real", "s1", "")]);
+    let r = mine(
+        dir.path(),
+        parse_since("2026-09-02T00:00:00Z").unwrap(),
+        Some(&path),
+        50,
+        DEFAULT_FOLLOW_CALLS,
+        &[],
+    );
+    let cc = &r["usage_db_cross_check"];
+    assert_eq!(cc["injections_recorded"], json!(2), "{cc}");
+    assert_eq!(cc["outcomes"]["other_harness"], json!(7), "{cc}");
+    assert_eq!(cc["comparable_to_injections"], json!(false), "{cc}");
+    assert!(
+        cc["not_comparable_because"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|b| b.as_str().unwrap_or("").contains("other than `claude-code`")),
+        "{cc}"
+    );
+}
+
+/// A row written by a hook wired without `--harness` is not evidence that it came from the harness
+/// that happened to be wired first.
+#[test]
+fn a_harnessless_row_is_not_credited_to_the_mined_harness() {
+    let db = tempfile::Builder::new()
+        .prefix("usage-")
+        .tempdir()
+        .unwrap();
+    let path = db.path().join("usage.db");
+    seed_usage_db(&path, &[("hit", 1), ("unspecified", 5)]);
+    let dir = tree(&[("-home-u-real", "s1", "")]);
+    let r = mine(
+        dir.path(),
+        parse_since("2026-09-02T00:00:00Z").unwrap(),
+        Some(&path),
+        50,
+        DEFAULT_FOLLOW_CALLS,
+        &[],
+    );
+    let cc = &r["usage_db_cross_check"];
+    assert_eq!(cc["injections_recorded"], json!(1), "{cc}");
+    assert_eq!(cc["outcomes"]["unspecified"], json!(5), "{cc}");
+    assert_eq!(cc["comparable_to_injections"], json!(false), "{cc}");
 }

@@ -457,7 +457,7 @@ deploy_hook() {
     return 0
   fi
   local out change
-  if ! out="$("$cort_bin" hook-install --settings "$HOOK_SETTINGS" --command "$cort_bin hook-suggest" 2>&1)"; then
+  if ! out="$("$cort_bin" hook-install --settings "$HOOK_SETTINGS" --command "$cort_bin hook-suggest --harness claude-code" 2>&1)"; then
     info "hook: NOT wired — $out"
     return 0
   fi
