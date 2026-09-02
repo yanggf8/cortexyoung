@@ -84,7 +84,7 @@ never appears in its own report.
 ./install.sh --force      # on unmanaged skill collision: backup and replace
 ./install.sh --with-rustup # bootstrap rustup if cargo is missing
 ./install.sh --with-xgrep  # opt-in: also install xg v0.7.0 (xgrep-search crate) + xgrep skill
-./install.sh --no-hook    # skip wiring the PreToolUse hook into settings.json
+./install.sh --no-hook    # skip wiring the PreToolUse hook into Claude Code / Codex settings
 ```
 
 **What it does (default, without `--with-xgrep`):**
@@ -92,7 +92,7 @@ never appears in its own report.
 - Downloads pinned `ast-grep` v0.45.2 prebuilt `app-<target>.zip` for your platform (Linux x86_64/aarch64, macOS x86_64/arm64) from GitHub Releases and verifies SHA-256 (repo-maintained; upstream publishes no checksums) — fail-closed: an empty or mismatched checksum refuses to install. Falls back to `cargo install ast-grep --version 0.45.2 --locked` (requires Rust 1.88+).
 - Builds `cort` from `rust/` with `cargo build --release --locked` on **every** run and installs the binary plus its ast-grep pack (`src/pack`, located at runtime via `CORT_PACK_DIR`) to `~/.local/share/cortexyoung/cort`, shimming `~/.cargo/bin/cort` or `~/.local/bin/cort`.
 - Deploys `skills/ast-grep/SKILL.md` to **both** agent homes — `~/.claude/skills/ast-grep/SKILL.md` and `~/.codex/skills/ast-grep/SKILL.md` (honouring `CODEX_HOME`) — **byte-for-byte the repo file**. The installer writes nothing inside the document: the frontmatter block holds keys only (`name`, `description`, and nothing of ours), both loaders anchor that fence to line 1, and `rust/tests/skill_format.rs` fails the build if a source stops parsing. Ownership lives in `.cortexyoung-managed` beside the skill, which records the SHA-256 of the bytes we deployed — so a hand-edit of a deployed `SKILL.md` reads as someone else's file and is refused, not silently overwritten. Edit `skills/<name>/SKILL.md` in this repo instead; one source feeds both homes. Preflights collisions before mutating: skips if hash-equal, replaces what it owns, refuses what it does not (use `--force` to backup and replace). Uninstall removes the document and its stamp, and nothing else.
-- Wires the `PreToolUse` hook into `~/.claude/settings.json` in the **same run** as the skill (skip with `--no-hook`). The JSON merge is `cort hook-install`, not `jq`: it preserves every hook you already have, rewrites our own entry when the binary moves instead of adding a second, collapses duplicates down to one, and refuses outright to overwrite a `settings.json` it could not parse. See [the hook section](#the-pretooluse-hook--the-retrospective-half-of-the-routing) for what it does at runtime. A hook that has to be wired by hand is a hook that stays unwired — that is not a hypothesis, it is what this repo measured on its own machine twice.
+- Wires the `PreToolUse` hook into `~/.claude/settings.json` **and** `~/.codex/config.toml` in the **same run** as the skill (skip both with `--no-hook`). `cort hook-install` picks the merge by the target file's extension — JSON via `rust/src/settings.rs`, TOML via `rust/src/settings_toml.rs` — never `jq`: either way it preserves every hook you already have, rewrites our own entry when the binary moves instead of adding a second, collapses duplicates down to one, and refuses outright to overwrite a settings file it could not parse. Grok reads the same `settings.json` for Claude Code compatibility and needs no entry of its own. See [the hook section](#the-pretooluse-hook--the-retrospective-half-of-the-routing) for what it does at runtime. A hook that has to be wired by hand is a hook that stays unwired — that is not a hypothesis, it is what this repo measured on its own machine three times, once per harness.
 - Adds a single bounded idempotent `PATH` block to your shell profile (`.bashrc`/`.zshrc`/`.profile`) so `cort` and `ast-grep` are on `PATH`; removed on `--uninstall`.
 - Records ownership in `~/.local/share/cortexyoung/manifest` (v2 `key:value` lines) — uninstall only removes what it installed, never a pre-existing binary.
 
@@ -465,6 +465,24 @@ whether `cort impact` answers it better. Nothing depends on the model rememberin
 It runs as a `PreToolUse` hook matched to `Bash`, reads the harness payload on stdin, and either
 prints one suggestion or stays silent. `cort hook-suggest` is not a verb to type.
 
+**What it is worth when it fires.** The hook is the delivery mechanism; the number it is delivering
+is the [`cort impact` cost result](#re-analysis-2026-08-28-the-gate-was-measured-on-the-wrong-case):
+992 tokens and one tool call against a baseline arm's 7,642 tokens and four, at 10/10 vs 4/10
+correct on the same tasks. Read that section's caveats along with the number — it is a floor on
+what a caller-set question is worth in this harness, not a controlled `cort` vs `rg` comparison, and
+the demand-side numbers a few paragraphs below it say plainly that this shape of question is rare in
+daily use. The hook only pays out when it fires, and it is built to stay silent otherwise.
+
+**Three harnesses, one rule.** Claude Code and Codex each get their own wired entry — JSON in
+`~/.claude/settings.json`, TOML in `~/.codex/config.toml`, both installed in the same run (see
+[Install](#install)). Grok reads Claude Code's `settings.json` for compatibility and fires the same
+entry with no wiring of its own; `harness_of` (`rust/src/main.rs`) tells the three apart from the
+harness's own `transcript_path` rather than trusting a flag, because a flag stays right only as long
+as one settings file serves one harness. Codex additionally never receives `suppressOutput` in the
+hook's JSON reply — the field is legal by Codex's own schema but makes it discard the whole response
+if present (`docs/2026-09-02-hook-wiring-correction.md` §12) — while Claude Code and Grok both get
+it, to keep the raw JSON out of the transcript view.
+
 **When it fires.** The first pipeline segment must be `rg`, `grep` or `egrep`; the pattern must
 resolve to a single symbol; and the search must look like a caller-set question. It stays silent
 on: any `-A`/`-B`/`-C` context flag (that is `cort context`'s question, not `impact`'s), searches
@@ -492,10 +510,12 @@ attributable to neither side. `cort usage` rolls up counts only; the outcome spl
 `cort-evals adopt-mine`, whose cross-check refuses to compare two sides drawn from different
 populations rather than quietly reporting a ratio across them.
 
-**Turning it off.** `./install.sh --no-hook` skips it; `./install.sh --uninstall` unwires it;
-`./install.sh --check` prints `hook: <path> (wired)` or names what is wrong. That last line
-exists because both times the wiring silently went down on this repo's own machine, nothing said
-so — see `docs/2026-09-02-hook-wiring-correction.md`.
+**Turning it off.** `./install.sh --no-hook` skips both entries; `./install.sh --uninstall` unwires
+both; `./install.sh --check` prints `hook: <path> (wired)` and `hook_codex: <path> (wired)`, or
+names what is wrong with each independently. Those lines exist because the wiring silently went
+down on this repo's own machine more than once, nothing said so, and Codex's TOML entry was left
+deliberately hand-wired (not deployed by `install.sh`) for a full day before this document's §13
+closed that gap — see `docs/2026-09-02-hook-wiring-correction.md`.
 
 ## Upstream credits
 

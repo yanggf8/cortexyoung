@@ -499,10 +499,30 @@ approvals-and-sandbox --dangerously-bypass-hook-trust` 這個組合被執行環�
 改成 `pub(crate)` 直接 import 進 `settings_toml.rs`,沒有第二份拷貝——重寫一份等於在兩個地方
 放同一個未來會走樣的 bug。
 
-**還開著的一件事,寫在這裡而不是靠人記得:** 在一台裝有真正 Codex 的機器上,找一個許可分類器
-會放行的方式(或直接由使用者手動)跑一次 `codex exec` 全端到端驗證(灌好 hook → 觸發一個 grep →
-確認模型真的收到 `additionalContext`),把結果記回本節。在那之前,`hook_codex: ... (wired)` 這行
-只保證「格式被 codex 的 TOML 解析器接受」,不保證「hook 真的會被執行」。
-
 測試:`rust/tests/settings_toml.rs` 新增 21 條。全樹 360 + evals 94 + smoke 95,零失敗
 (`is_ours` 移出的可見性變更沒有新增測試,因為行為完全沒變,只是換了呼叫路徑)。
+
+### 端到端驗證補上了(同日稍晚)
+
+上一節留的洞:`--dangerously-bypass-approvals-and-sandbox` 這個組合被執行環境的權限分類器擋下。
+拿掉它、只留 `--sandbox read-only --dangerously-bypass-hook-trust` 就放行了——真正擋下的是「連
+approval 帶 sandbox 一起繞過」這個危險組合,不是「跑 codex exec」本身。OpenAI 官方 provider 先撞
+到帳號額度上限(`usage limit`),改用 `bdcodex`(同一支 codex、同一份 `~/.codex/config.toml`,只
+是換 ModelStudio provider)才把這次驗證跑完,這件事本身也再次確認了 §5 附錄記錄過的事實:
+provider 覆蓋不影響 hook 是否被讀取,兩者是同一份設定檔。
+
+跑法:`bdcodex exec --sandbox read-only --dangerously-bypass-hook-trust --skip-git-repo-check "<prompt
+要求模型跑一個 grep 並逐字回報context裡多出來什麼>"`。結果,兩個獨立來源一致:
+
+1. **模型自己的回合記錄**:印出 `hook: PreToolUse` 接著 `hook: PreToolUse Completed`(不是 §11/§12
+   之前那個 `Failed`),而且模型的最終回答逐字引用了注入文字:「cort has an index for this
+   project. `cort impact --symbol 'harness_of' --depth 1 --coverage -f lean` answers who calls it
+   in one call...」——跟 `cmd_hook_suggest` 產生的 `context` 字串一字不差。
+2. **usage.db**(獨立於模型自述的第二個來源):同一時刻寫入 `{"harness":"codex","hook":"hit","v":2}`,
+   沒有 `harness_declared` 分歧欄位——代表 `--harness codex`(TOML 裡寫死的宣告值)跟
+   `harness_of` 從 `transcript_path` 反推出的值一致,兩條路徑互相印證。
+
+**這證實了什麼**:TOML 形狀(`matcher`/`hooks`/`type`/`command`/`timeout`)不只是被 codex 的解析
+器接受,是真的被讀進 hook 執行引擎、真的觸發、產生的 `additionalContext` 真的送達模型上下文。
+`hook_codex: ... (wired)` 現在跟 `hook: ... (wired)` 站在同一個證據等級上——上一節列的那個
+「還開著的一件事」關掉。
