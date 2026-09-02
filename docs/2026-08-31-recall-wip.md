@@ -269,11 +269,28 @@ source 改了到部署生效差**約 8.75 小時**(要等 `install.sh` 跑)。�
 9d95f8a9 之後的 body-only 編輯對那個方法不可見。挖掘基準 sha:`208722c8`(2026-09-01 13:12 起,
 含三觸發面 + description 帶指令)。
 
-**配對(確定性,已在本 session 驗證)**:hook 每次觸發在 transcript 裡是 `type=attachment`——
+**⚠ 2026-09-02 第二次更正:配對法不再是散文,是指令。**
+
+```
+cort-evals adopt-mine --since 2026-09-02T09:24:00+08:00
+```
+
+`--since` 沒有預設值,而且**拒絕不帶時區位移的時間**。這條規則是買來的:本協定第一次手工執行時,
+把文件記的本地時間 `09:24` 當成 UTC 餵給掃描器,截止點落在八小時後的未來,漏斗每一格都回 0——
+方法完全正確,讀數完全錯誤,而且錯得像「hook 又斷了」。這是本 repo 第三次踩同一個失效模式
+(skill 靠模型記得、hook 靠人記得接、挖掘靠人記得時區)。實作與測試:`evals/src/adopt.rs`、
+`evals/tests/adopt.rs`。
+
+配對的機制(指令已實作,此處保留供稽核):hook 每次觸發在 transcript 裡是 `type=attachment`——
 `attachment.type == "hook_additional_context"` 且 **`hookName` 以 `PreToolUse` 開頭**(必須過濾:
 superpowers 的 SessionStart hook 用同一個 attachment.type,naive grep 會把它的注入誤當攔截)。
-注入文字含 `--symbol '<name>'`;經 `parentUuid` 鄰接觸發的 Bash tool_use。採納判定看
-**tool_use 結構**(`"name":"Bash"` + `input.command` 含 `cort impact`),字串 contains 不是執行。
+注入文字含 `--symbol '<name>'`,這個字串同時是**歸屬標記**——同一個 harness 可以裝多個 PreToolUse
+hook(本機的 `mos hook` 就是),光看事件名不能歸屬給 cort。
+
+配對鍵用 **`attachment.toolUseID`**,不是 `parentUuid` 鄰接:真實紀錄上這個欄位直接指名 hook 掛在
+哪一次 tool_use 上,比鄰接嚴格。採納判定看 **tool_use 結構**且必須是**執行**——`shell_without_heredocs`
+先剝掉 heredoc 內容再判,因為第一次真跑就把「用 heredoc 寫這支測試檔」誤判成一次採用。字串
+contains 不是執行,寫下這個字串更不是。
 
 **覆蓋面**:musecode 就是 claude(settings 只 override model 為 muse-spark),hook/skill/usage.db/
 session 位置與 Claude Code 同源——挖掘照掃 `~/.claude/projects`。Codex 只有 skill、沒有 hook。

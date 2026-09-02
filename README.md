@@ -242,6 +242,16 @@ sections 13f and 13n: the comparator is **an agent's whole shell**, not `rg` —
 averaged as a tool-vs-tool A/B — and the labels are the graph's own output confirmed against file text,
 which rules out fabrication but is not compiler-grade truth.
 
+**The payload ratio is not the money, and the money is smaller.** The same committed rows carry
+`cost_usd`, and it had never been quoted here. Per cell, averaged over the same 20 cells: the `cort`
+arm cost **$0.28** against the baseline arm's **$0.79** — **2.8x**, not 7.7x, because the tool payload
+is one term in a bill dominated by cached context (`cache_read` 102k vs 438k). Anyone comparing
+"7.7x smaller payload" with a monthly invoice will not find it, so the honest headline is the pair:
+**2.8x cheaper at 10/10 success against 4/10**, with the payload and turn ratios (7.7x, 4.0x)
+as the mechanism rather than the result. Both are re-derivable from the committed rows —
+`cort-evals summarize evals/runs/2026-08-30-graph{,-sample2}/*/rows.json`, or the `cost_usd` field
+of those files. The `arm_held` caveat above applies to every one of these numbers equally.
+
 The demand side points the other way and is measured separately:
 [`docs/2026-08-28-real-session-cost.md`](docs/2026-08-28-real-session-cost.md) goes through 1,565 real
 prompts from the two heaviest repos and finds relational questions rare in daily use. `cort` is cheap

@@ -68,10 +68,19 @@ uninstall 解線)。全樹 317 + smoke 91,零失敗。
 - **index 覆蓋面**:13 個專案已建索引(cc-router、cct、claudecat、cortexyoung、dac、fortuneT、
   ft、mos、zencat、AttentionOS、ainews、gwebcdb、tsheet)。gate 修好之後,只有這 13 個會出聲
   ——這同時是機會母體的定義,挖掘時要一起報。
-- **配對法不變**:`2026-08-31-recall-wip.md` §6 的 `hook_additional_context` +
-  `hookName` 以 `PreToolUse` 開頭 + `parentUuid` 鄰接。
+- **配對法**:`2026-08-31-recall-wip.md` §6 的 `hook_additional_context` +
+  `hookName` 以 `PreToolUse` 開頭 + 注入文字帶 `cort impact --symbol '` 這個歸屬標記。配對鍵
+  已從 `parentUuid` 鄰接換成 `attachment.toolUseID`——真實紀錄上這個欄位直接指名 hook 掛在哪
+  一次 tool_use 上,比鄰接嚴格。
 - **先驗證再挖**:`./install.sh --check` 必須印 `hook: ... (wired)`。這一行就是為了讓
   「線斷了」不能再無聲發生。
+- **挖掘是指令,不是散文**:`cort-evals adopt-mine --since 2026-09-02T09:24:00+08:00`。
+  `--since` 拒絕不帶時區位移的時間——本協定第一次手工執行就是把本地 `09:24` 當 UTC 讀,截止點
+  落在未來,漏斗全回 0,錯得像 hook 又斷了。報告的 `usage_db_cross_check` 是第二個獨立來源:
+  `hook-suggest` 的 usage 列現在記 outcome(`hit` / `no_index` / `no_shape` / `no_payload`),
+  `hit` 少於 `injections` 就代表有第二份 cache 在跑,也就是 09-01 基線遺失的那個方式。
+  `legacy_unsplit` 是舊 binary 寫的列,不歸任何一邊;交叉驗證要生效,必須先 `./install.sh`
+  部署帶 outcome 的 binary。
 
 ## 6. 附帶更正
 
