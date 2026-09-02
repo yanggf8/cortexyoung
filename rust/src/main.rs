@@ -574,18 +574,47 @@ edges added since -- re-run `cort index` first if the answer has to be complete"
 /// Does the cwd's project have an index with a `projects` row -- the same question `cort status`
 /// answers as `indexed`. Every failure is a `false`: a hook that cannot read the index has nothing
 /// to suggest, and must never turn a broken cache into a broken tool call.
+/// How long the hook will wait for git before deciding it cannot tell.
+///
+/// `git rev-parse HEAD` is milliseconds on a warm local checkout and can be seconds on a network
+/// mount or a cold worktree. This runs inside a PreToolUse hook the harness gives 5 seconds, and
+/// spending that budget to decide whether to add one sentence would cost the injection entirely --
+/// which the funnel would then read as the hook correctly staying silent. Timing out is neither
+/// fresh nor stale; it is `HeadUnknown`.
+const HOOK_GIT_BUDGET_MS: u64 = 400;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum IndexState {
     /// No index the hook may speak for. Every failure lands here.
     Missing,
-    /// Indexed, and the commit it was built on is the commit checked out now.
-    Fresh,
-    /// Indexed on a different commit. Provably behind; the full `compute_stale` walk is too
+    /// Indexed, and `git rev-parse HEAD` returned the commit the index was built on.
+    ///
+    /// Deliberately not called `Fresh`. It is "the same commit was observed", which is weaker: a
+    /// tree at that commit with uncommitted edits is stale and lands here, and so does a tree whose
+    /// head could not be read at all (no git, or git too slow -- see `HOOK_GIT_BUDGET_MS`). The
+    /// recorded `hit` outcome inherits exactly that meaning and no more; `impact` still computes
+    /// real staleness and still reports `stale=true` on those trees.
+    HeadMatches,
+    /// Indexed on a different commit. Provably behind: the full `compute_stale` walk is too
     /// expensive for a hook with a 5s budget, and one `git rev-parse HEAD` catches the case that
-    /// actually bites -- an index left behind by commits made since it was built. A clean tree at
-    /// the same head can still be stale through uncommitted edits; that is the residue this cheap
-    /// check knowingly does not cover, and `impact` still reports it as `stale=true`.
+    /// actually bites -- an index left behind by commits made since it was built.
     BehindHead,
+}
+
+/// `git rev-parse HEAD`, abandoned if it does not answer inside the hook's budget.
+///
+/// The worker thread is left running when it times out. That is deliberate and bounded: this
+/// process is a hook that exits within milliseconds of returning, so the thread cannot outlive
+/// anything, and the alternative -- killing a child mid-`rev-parse` -- buys nothing.
+fn git_head_quickly(root: &Path) -> Option<String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let root = root.to_path_buf();
+    std::thread::spawn(move || {
+        let _ = tx.send(git_head_of(&root));
+    });
+    rx.recv_timeout(std::time::Duration::from_millis(HOOK_GIT_BUDGET_MS))
+        .ok()
+        .flatten()
 }
 
 fn index_state() -> IndexState {
@@ -605,11 +634,13 @@ fn index_state() -> IndexState {
     if !status.indexed {
         return IndexState::Missing;
     }
-    match (status.git_head.as_deref(), git_head_of(&canon.path)) {
-        // Only a definite disagreement is called stale. A tree with no git, or a head that cannot
-        // be read, is not evidence of staleness and must not be reported as if it were.
+    match (status.git_head.as_deref(), git_head_quickly(&canon.path)) {
+        // Only a definite disagreement is called stale. A tree with no git, or a head that could
+        // not be read inside the budget, is not evidence of staleness and must not be reported as
+        // if it were -- but it is not evidence of freshness either, which is why the other arm is
+        // named for what was observed rather than for what the reader would like it to mean.
         (Some(stored), Some(now)) if stored != now => IndexState::BehindHead,
-        _ => IndexState::Fresh,
+        _ => IndexState::HeadMatches,
     }
 }
 
