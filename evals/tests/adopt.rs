@@ -1,6 +1,7 @@
 //! The §6 funnel, gated on the mistakes that actually happened when it was run by hand.
 
 use cort_evals::adopt::{format_utc, mine, parse_since, runs_cort_impact, DEFAULT_FOLLOW_CALLS};
+use std::path::Path as StdPath;
 use serde_json::{json, Value};
 use std::path::Path;
 
@@ -443,4 +444,184 @@ fn a_multibyte_command_is_split_without_panicking() {
         runs_cort_impact("build 2>&1 && cort impact --symbol y"),
         Some(Some("y".to_string()))
     );
+}
+
+/// Codex's first re-review finding: `--exclude` filtered one side of the cross-check and not the
+/// other, printing `injections=0` beside `hit=2` on a machine where nothing was wrong. A
+/// manufactured shortfall reads as "a second cache was in play", which is the one conclusion the
+/// field exists to support.
+#[test]
+fn a_filtered_funnel_refuses_to_compare_itself_to_an_unfiltered_db() {
+    let body = [
+        bash("2026-09-02T02:00:00.000Z", "toolu_1", "grep -rn 'helper(' src"),
+        injection("2026-09-02T02:00:01.000Z", "toolu_1", "helper"),
+    ]
+    .join("\n");
+    let dir = tree(&[("-home-u-audit", "s1", &body), ("-home-u-real", "s2", &body)]);
+    // A usage db that does not exist is reported as absent, not as zero.
+    let absent = mine(
+        dir.path(),
+        parse_since("2026-09-02T00:00:00Z").unwrap(),
+        None,
+        50,
+        DEFAULT_FOLLOW_CALLS,
+        &["-home-u-audit".to_string()],
+    );
+    assert_eq!(absent["usage_db_cross_check"], Value::Null);
+
+    // With a db present and an exclusion in force, the comparison is refused and says why.
+    let db = dir.path().join("usage.db");
+    seed_usage_db(&db, &[("hit", 2), ("no_shape", 5)]);
+    let filtered = mine(
+        dir.path(),
+        parse_since("2026-09-02T00:00:00Z").unwrap(),
+        Some(&db),
+        50,
+        DEFAULT_FOLLOW_CALLS,
+        &["-home-u-audit".to_string()],
+    );
+    let cc = &filtered["usage_db_cross_check"];
+    assert_eq!(filtered["injections"], json!(1));
+    assert_eq!(cc["injections_recorded"], json!(2));
+    assert_eq!(cc["comparable_to_injections"], json!(false), "{cc:#}");
+    assert!(
+        cc["not_comparable_because"][0]
+            .as_str()
+            .unwrap()
+            .contains("--exclude"),
+        "{cc:#}"
+    );
+
+    // Unfiltered, the same db is comparable and the two sides agree.
+    let whole = mine(
+        dir.path(),
+        parse_since("2026-09-02T00:00:00Z").unwrap(),
+        Some(&db),
+        50,
+        DEFAULT_FOLLOW_CALLS,
+        &[],
+    );
+    assert_eq!(whole["injections"], json!(2));
+    assert_eq!(whole["usage_db_cross_check"]["injections_recorded"], json!(2));
+    assert_eq!(
+        whole["usage_db_cross_check"]["comparable_to_injections"],
+        json!(true)
+    );
+}
+
+/// `hit_stale` is an injection too. Counting only `hit` made an injection onto a behind-head index
+/// look like a row the db had lost.
+#[test]
+fn a_stale_injection_still_counts_as_an_injection() {
+    let db = tempfile::Builder::new()
+        .prefix("usage-")
+        .tempdir()
+        .unwrap();
+    let path = db.path().join("usage.db");
+    seed_usage_db(&path, &[("hit", 1), ("hit_stale", 3), ("legacy_unsplit", 0)]);
+    let dir = tree(&[("-home-u-real", "s1", "")]);
+    let r = mine(
+        dir.path(),
+        parse_since("2026-09-02T00:00:00Z").unwrap(),
+        Some(&path),
+        50,
+        DEFAULT_FOLLOW_CALLS,
+        &[],
+    );
+    assert_eq!(r["usage_db_cross_check"]["injections_recorded"], json!(4));
+}
+
+/// Rows written before the outcome existed cannot be attributed, and the report must say so rather
+/// than let them silently widen a gap.
+#[test]
+fn legacy_rows_block_the_comparison_instead_of_skewing_it() {
+    let db = tempfile::Builder::new()
+        .prefix("usage-")
+        .tempdir()
+        .unwrap();
+    let path = db.path().join("usage.db");
+    seed_usage_db(&path, &[("hit", 1), ("legacy_unsplit", 108)]);
+    let dir = tree(&[("-home-u-real", "s1", "")]);
+    let r = mine(
+        dir.path(),
+        parse_since("2026-09-02T00:00:00Z").unwrap(),
+        Some(&path),
+        50,
+        DEFAULT_FOLLOW_CALLS,
+        &[],
+    );
+    let cc = &r["usage_db_cross_check"];
+    assert_eq!(cc["comparable_to_injections"], json!(false));
+    assert!(
+        cc["not_comparable_because"][0]
+            .as_str()
+            .unwrap()
+            .contains("legacy_unsplit"),
+        "{cc:#}"
+    );
+}
+
+/// Out-of-order records must not let a later injection take the call that belongs to an earlier one.
+#[test]
+fn claims_are_resolved_in_timestamp_order_not_file_order() {
+    // The 02:00 injection is written to the file *after* the 02:10 one, as a compacted transcript
+    // can do. The single `cort impact --symbol alpha` belongs to the earlier injection.
+    let body = [
+        bash("2026-09-02T02:00:00.000Z", "toolu_a", "grep -rn 'alpha(' src"),
+        bash("2026-09-02T02:00:05.000Z", "toolu_c", "cort impact --symbol alpha --depth 1"),
+        bash("2026-09-02T02:10:00.000Z", "toolu_b", "grep -rn 'beta(' src"),
+        injection("2026-09-02T02:10:01.000Z", "toolu_b", "beta"),
+        injection("2026-09-02T02:00:01.000Z", "toolu_a", "alpha"),
+    ]
+    .join("\n");
+    let dir = tree(&[("-home-u-repo", "s1", &body)]);
+    let r = run(dir.path(), "2026-09-02T00:00:00Z");
+    assert_eq!(r["injections"], json!(2));
+    assert_eq!(
+        r["adopted_same_symbol"],
+        json!(1),
+        "the alpha call belongs to the alpha injection: {r:#}"
+    );
+    let alpha = r["injection_rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["symbol"] == "alpha")
+        .expect("alpha row");
+    assert_eq!(alpha["verdict"], json!("adopted_same_symbol"), "{alpha:#}");
+}
+
+/// Seed `hook-suggest` rows through the product's own writer.
+///
+/// Hand-rolling the `INSERT` here would be a second implementation of a schema the product owns,
+/// and it would keep passing after the real one changed. `legacy_unsplit` is spelled the way the
+/// old binary spelled it -- the bare `hook` summary -- because that is the row this is about.
+fn seed_usage_db(path: &StdPath, outcomes: &[(&str, i64)]) {
+    for (outcome, n) in outcomes {
+        let args_summary = if *outcome == "legacy_unsplit" {
+            "hook".to_string()
+        } else {
+            format!(r#"{{"hook":"{outcome}","v":1}}"#)
+        };
+        for _ in 0..*n {
+            cort::usage::record_command_at(
+                path,
+                &cort::usage::CommandRecord {
+                    now_ms: cort::usage::now_ms(),
+                    project_id: None,
+                    command: "hook-suggest".to_string(),
+                    args_summary: args_summary.clone(),
+                    status: "ok".to_string(),
+                    error_code: None,
+                    read_source: None,
+                    requested_content_mode: None,
+                    effective_content_mode: None,
+                    receipt_hit: None,
+                    index_stale: None,
+                    bytes_out: 0,
+                    saved_bytes: 0,
+                },
+            );
+        }
+    }
 }

@@ -507,8 +507,16 @@ pub fn mine(
 
         // One call can only be taken once. Without this, two injections a few lines apart both
         // claimed the same later `cort impact` and the funnel reported two adoptions from one act.
+        //
+        // Claiming is resolved in timestamp order, not file order. A compacted or resumed
+        // transcript can carry records out of order, and in file order a later injection could take
+        // the call that belongs to the earlier one -- a swap that leaves the totals identical and
+        // both rows wrong. The set is still per file: two transcripts describing one real session
+        // could each claim the same call, which is `A8` in the review and is not fixed here.
+        let mut ordered: Vec<&Injection> = here.iter().collect();
+        ordered.sort_by_key(|i| i.ts);
         let mut claimed: std::collections::HashSet<usize> = std::collections::HashSet::new();
-        for inj in &here {
+        for inj in ordered {
             // The harness names the tool call it attached the context to, which pairs the injection
             // with its trigger exactly. `parentUuid` adjacency was the fallback before this field
             // was confirmed on real records; it is not needed and would be looser.
@@ -577,8 +585,43 @@ pub fn mine(
         }
     }
 
+    // Whether the db counts can be set beside `injections` at all.
+    //
+    // They were printed side by side unconditionally, and with `--exclude` in play that produced
+    // `injections=0` next to `hit=2` on a machine where nothing was wrong: the transcript side had
+    // been filtered to a population the db side knows nothing about. A shortfall there reads as
+    // "a second cache was in play", which is the one conclusion this field exists to support, so
+    // manufacturing it is worse than omitting the field. The db carries cort's own `project_id`
+    // hash while transcripts carry the harness's directory name, and this report does not map
+    // between them -- so with any exclusion the comparison is refused rather than approximated.
     let cross_check = usage_db.map(|path| match cort::usage::hook_outcomes_at(path, since_ms) {
-        Ok(counts) => json!(counts),
+        Ok(counts) => {
+            let get = |k: &str| counts.get(k).and_then(Value::as_i64).unwrap_or(0);
+            // `hit_stale` is an injection too. Comparing against `hit` alone would make an
+            // injection onto a behind-head index look like a lost row.
+            let recorded = get("hit") + get("hit_stale");
+            let legacy = get("legacy_unsplit");
+            let mut blockers: Vec<String> = Vec::new();
+            if !exclude.is_empty() {
+                blockers.push(
+                    "--exclude filtered the transcript side; the db side is every project on this \
+                     machine and cannot be filtered the same way"
+                        .to_string(),
+                );
+            }
+            if legacy > 0 {
+                blockers.push(format!(
+                    "{legacy} rows predate outcome recording (`legacy_unsplit`) and cannot be \
+                     attributed to either side"
+                ));
+            }
+            json!({
+                "outcomes": counts,
+                "injections_recorded": recorded,
+                "comparable_to_injections": blockers.is_empty(),
+                "not_comparable_because": blockers,
+            })
+        }
         Err(e) => json!({ "unreadable": e.to_string() }),
     });
 
@@ -616,13 +659,21 @@ pub fn mine(
                     its own audit. Adoption is only counted inside `follow_calls_window` calls of \
                     the intercepted one; `impact_later_in_session` marks a row where the tool was \
                     used further on, which is a fact for a reader and not an adoption. Nothing here \
-                    says the enumeration that followed was correct; `verify-impact` grades an edge.",
-        "cross_check_reading": "`usage_db_cross_check.hit` counts the injections cort itself \
-                    recorded, from a file the transcript scan never reads. It should equal \
-                    `injections` for a window where one machine ran one cache; a shortfall means a \
-                    second CORT_CACHE_DIR was in play, which is exactly how the 09-01 baseline was \
-                    lost. `legacy_unsplit` counts rows written before the outcome was recorded and \
-                    cannot be attributed either way.",
+                    says the enumeration that followed was correct; `verify-impact` grades an edge. \
+                    The adoption test reads shell syntax, not shell semantics, and the residue is \
+                    named rather than hidden: a short-circuited branch (`false && cort impact`) is \
+                    counted though it never ran, and `sh -c`, `xargs`, `env`, an alias, a command \
+                    substitution or a prefix redirection are missed though they did. Read \
+                    `followed_by` on each row; that is what it is printed for.",
+        "cross_check_reading": "`injections_recorded` is `hit + hit_stale`: the injections cort \
+                    itself recorded, from a file the transcript scan never reads. Compare it to \
+                    `injections` ONLY when `comparable_to_injections` is true -- otherwise the two \
+                    have different populations and a difference between them means nothing. When \
+                    they are comparable, a shortfall means a second CORT_CACHE_DIR was in play, \
+                    which is how the 09-01 baseline was lost. Two limits on the word `independent`: \
+                    this report reads one cache (`--usage-db`) and cannot discover others, and a \
+                    row is only written when the hook ran to completion, so a hook killed by the \
+                    harness timeout is missing from both sides at once rather than from one.",
     })
 }
 
