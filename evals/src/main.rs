@@ -8,6 +8,8 @@
 //!   cort-evals summarize     <rows.json>... [--strict]
 //!   cort-evals demand        [--claude-dir DIR] [--codex-dir DIR] [--exclude a,b]
 //!                            [--show] [--out FILE]
+//!   cort-evals adopt-mine    --since RFC3339 [--claude-dir DIR] [--usage-db FILE]
+//!                            [--rows N] [--follow-calls N] [--exclude p,q] [--out FILE]
 
 use cort_evals::arms::{self, build_args, build_env, build_row, make_jail, AGENT_ARMS};
 use cort_evals::grade::{load_tasks, Task};
@@ -52,6 +54,15 @@ const RUN_AGENTS_FLAGS: &[&str] = &[
 const VERIFY_IMPACT_FLAGS: &[&str] = &["--repo", "--depth", "--symbols"];
 const RECALL_EXP_FLAGS: &[&str] = &["--venue", "--top"];
 const HOOK_PROBE_FLAGS: &[&str] = &["--claude-dir", "--codex-dir", "--examples"];
+const ADOPT_MINE_FLAGS: &[&str] = &[
+    "--since",
+    "--claude-dir",
+    "--usage-db",
+    "--rows",
+    "--follow-calls",
+    "--exclude",
+    "--out",
+];
 const SUMMARIZE_FLAGS: &[&str] = &["--strict"];
 const DEMAND_FLAGS: &[&str] = &[
     "--claude-dir",
@@ -62,7 +73,7 @@ const DEMAND_FLAGS: &[&str] = &[
 ];
 
 const USAGE_TOP: &str =
-    "usage: cort-evals <run-agents|verify-impact|summarize|demand|recall-exp|hook-probe> [options]";
+    "usage: cort-evals <run-agents|verify-impact|summarize|demand|recall-exp|hook-probe|adopt-mine> [options]";
 const USAGE_RUN_AGENTS: &str = "usage: cort-evals run-agents --venue DIR [--tasks FILE] [--only ID[,ID...]] [--arms a,b] [--max-turns N] [--config-dir DIR] [--cache-dir DIR] [--jail-dir DIR] [--jail] [--out DIR] [--concurrency N] [--delay-secs N]";
 const USAGE_VERIFY_IMPACT: &str =
     "usage: cort-evals verify-impact --repo DIR --symbols A,B [--depth N]";
@@ -70,6 +81,7 @@ const USAGE_SUMMARIZE: &str = "usage: cort-evals summarize [--strict] rows.json 
 const USAGE_DEMAND: &str = "usage: cort-evals demand [--claude-dir DIR] [--codex-dir DIR] [--exclude a,b,c] [--out FILE] [--show]";
 const USAGE_HOOK_PROBE: &str =
     "usage: cort-evals hook-probe [--claude-dir DIR] [--codex-dir DIR] [--examples N]  (replays the routing rule over transcripts already on disk; no model calls)";
+const USAGE_ADOPT_MINE: &str = "usage: cort-evals adopt-mine --since RFC3339 [--claude-dir DIR] [--usage-db FILE] [--rows N] [--follow-calls N] [--exclude proj,proj] [--out FILE]  (the docs/2026-08-31-recall-wip.md §6 funnel; reads transcripts already on disk, no model calls)";
 const USAGE_RECALL_EXP: &str =
     "usage: cort-evals recall-exp --venue DIR [--top N]  (text-side counterfactual; no cort index needed)";
 
@@ -804,6 +816,91 @@ fn demand_main(argv: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// The adoption funnel of `docs/2026-08-31-recall-wip.md` §6, executed rather than described.
+///
+/// `--since` is mandatory and has no default. A default would have to be either the epoch, which
+/// silently mixes in every session recorded before the hook was wired, or "today", which is a local
+/// wall-clock guess -- and a wrong window here does not fail, it reports zeros that read exactly
+/// like a hook that never fired. That is not hypothetical: it is what the first hand-run of this
+/// protocol produced on 2026-09-02.
+fn adopt_mine_main(argv: &[String]) -> Result<(), String> {
+    guard_options(argv, ADOPT_MINE_FLAGS, USAGE_ADOPT_MINE)?;
+    let home = std::env::var("HOME").unwrap_or_default();
+    let since_raw = at(argv, "--since", "");
+    if since_raw.is_empty() {
+        return Err(format!(
+            "adopt-mine needs --since: the window start is the measurement, not a detail\n{USAGE_ADOPT_MINE}"
+        ));
+    }
+    let since_ms = cort_evals::adopt::parse_since(&since_raw)?;
+    let rows: usize = at(argv, "--rows", "200")
+        .parse()
+        .map_err(|_| "--rows must be a number".to_string())?;
+    let follow_calls: usize = at(
+        argv,
+        "--follow-calls",
+        &cort_evals::adopt::DEFAULT_FOLLOW_CALLS.to_string(),
+    )
+    .parse()
+    .map_err(|_| "--follow-calls must be a number".to_string())?;
+    // The project cort is developed in produces injections that are audit traffic, not use. It is
+    // not excluded by default -- a silent default exclusion is its own way of shaping a number --
+    // but the reading field says to pass it, and the report echoes what was dropped.
+    let exclude: Vec<String> = at(argv, "--exclude", "")
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+    let claude_dir = at(argv, "--claude-dir", &format!("{home}/.claude/projects"));
+    let dir = std::path::Path::new(&claude_dir);
+    if !dir.is_dir() {
+        return Err(format!("{claude_dir} is not a directory"));
+    }
+    // The default is cort's own default cache. Naming it in the report matters: the 09-01 baseline
+    // was lost precisely because a run's rows landed in a second CORT_CACHE_DIR nobody recorded.
+    let usage_db = at(argv, "--usage-db", &format!("{home}/.cache/cortex-ng/usage.db"));
+    let usage_path = std::path::Path::new(&usage_db);
+    let mut report = cort_evals::adopt::mine(
+        dir,
+        since_ms,
+        usage_path.exists().then_some(usage_path),
+        rows,
+        follow_calls,
+        &exclude,
+    );
+    if let Some(map) = report.as_object_mut() {
+        // $HOME is replaced so the artefact says which tree was read without publishing the account.
+        let hide = |p: &str| -> Value {
+            if home.is_empty() {
+                json!(p)
+            } else {
+                json!(p.replacen(&home, "<home>", 1))
+            }
+        };
+        map.insert("tree_read".to_string(), hide(&claude_dir));
+        map.insert(
+            "usage_db_read".to_string(),
+            if usage_path.exists() {
+                hide(&usage_db)
+            } else {
+                json!(null)
+            },
+        );
+        map.insert("since_as_given".to_string(), json!(since_raw));
+    }
+    let out = at(argv, "--out", "");
+    if !out.is_empty() {
+        std::fs::write(
+            &out,
+            format!("{}\n", serde_json::to_string_pretty(&report).unwrap()),
+        )
+        .map_err(|e| format!("{out}: {e}"))?;
+    }
+    println!("{}", serde_json::to_string_pretty(&report).unwrap());
+    Ok(())
+}
+
 fn main() {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let result = match argv.first().map(String::as_str) {
@@ -813,6 +910,7 @@ fn main() {
         Some("demand") => demand_main(&argv[1..]),
         Some("recall-exp") => recall_exp_main(&argv[1..]),
         Some("hook-probe") => hook_probe_main(&argv[1..]),
+        Some("adopt-mine") => adopt_mine_main(&argv[1..]),
         other => {
             // Asking how to use the tool is never an error and never a run — including at the top
             // level, which is where F-17 stopped. `wants_help` already answered true for a bare
@@ -823,6 +921,10 @@ fn main() {
                 println!("  {USAGE_RUN_AGENTS}");
                 println!("  {USAGE_VERIFY_IMPACT}");
                 println!("  {USAGE_SUMMARIZE}");
+                println!("  {USAGE_DEMAND}");
+                println!("  {USAGE_HOOK_PROBE}");
+                println!("  {USAGE_RECALL_EXP}");
+                println!("  {USAGE_ADOPT_MINE}");
                 return;
             }
             eprintln!("{USAGE_TOP}\n(got {:?})", other.unwrap_or(""));
@@ -1072,6 +1174,7 @@ mod whitelist_coverage {
                         .chain(DEMAND_FLAGS.iter())
                         .chain(RECALL_EXP_FLAGS.iter())
                         .chain(HOOK_PROBE_FLAGS.iter())
+                        .chain(ADOPT_MINE_FLAGS.iter())
                         .any(|f| *f == name.as_str());
                     if !known {
                         orphans.push(format!("{name} (src/main.rs:{})", n + 1));

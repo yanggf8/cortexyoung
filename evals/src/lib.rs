@@ -4,6 +4,7 @@
 //! depend on it. It exists to answer one question with numbers that cannot lie: does an agent
 //! holding `cort` reach the labelled answer for less than an agent holding a shell?
 
+pub mod adopt;
 pub mod arms;
 pub mod demand;
 pub mod grade;
