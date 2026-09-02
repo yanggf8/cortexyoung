@@ -518,7 +518,18 @@ pub fn mine(
                 .and_then(|id| calls.iter().position(|c| c.id.as_deref() == Some(id.as_str())));
             let trigger_at = exact.or_else(|| calls.iter().rposition(|c| c.ts <= inj.ts));
             let paired_exactly = exact.is_some();
-            let start = trigger_at.map(|i| i + 1).unwrap_or(0);
+            // Falling back to 0 was wrong. When neither the `toolUseID` nor any earlier call can be
+            // found -- a truncated or compacted transcript -- the window became the session's first
+            // five calls, which happened *before* the injection. A call that precedes the
+            // suggestion cannot be an adoption of it, so with no trigger the window opens at the
+            // first call the injection could possibly have caused.
+            let start = match trigger_at {
+                Some(i) => i + 1,
+                None => calls
+                    .iter()
+                    .position(|c| c.ts >= inj.ts)
+                    .unwrap_or(calls.len()),
+            };
             let end = (start + follow_calls).min(calls.len());
             let follow = (start..end).find(|i| {
                 !claimed.contains(i) && runs_cort_impact(&calls[*i].command).is_some()

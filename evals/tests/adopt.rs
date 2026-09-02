@@ -393,3 +393,54 @@ fn unreadable_records_are_counted_not_swallowed() {
         "only records that could have carried what we read count as missing: {r:#}"
     );
 }
+
+/// A call that happened *before* the injection cannot be an adoption of it.
+///
+/// With no `toolUseID` and no earlier call to anchor on -- a truncated or compacted transcript --
+/// the window used to open at index 0, which is the start of the session. The first five calls of
+/// a session are exactly the ones the injection could not have caused.
+#[test]
+fn the_window_never_opens_before_the_injection() {
+    // An impact call early in the session, then an injection with no resolvable trigger.
+    let injection_without_trigger = json!({
+        "type": "attachment",
+        "timestamp": "2026-09-02T02:30:00.000Z",
+        "attachment": {
+            "type": "hook_additional_context",
+            "hookName": "PreToolUse:Bash",
+            "content": [injected("helper")],
+        },
+    })
+    .to_string();
+    let body = [
+        bash("2026-09-02T02:00:00.000Z", "toolu_1", "cort impact --symbol helper --depth 1"),
+        injection_without_trigger,
+    ]
+    .join("\n");
+    let dir = tree(&[("-home-u-repo", "s1", &body)]);
+    let r = run(dir.path(), "2026-09-02T00:00:00Z");
+    assert_eq!(r["injections"], json!(1));
+    assert_eq!(
+        r["not_adopted"],
+        json!(1),
+        "a call that preceded the suggestion is not an adoption of it: {r:#}"
+    );
+    assert_eq!(r["injection_rows"][0]["paired_by"], json!("nearest_earlier_call"));
+    assert_eq!(r["injection_rows"][0]["followed_by"], Value::Null);
+}
+
+/// `command_starts` indexes bytes; every byte it splits on is ASCII, so a multibyte command must
+/// neither panic nor lose a segment.
+#[test]
+fn a_multibyte_command_is_split_without_panicking() {
+    assert_eq!(
+        runs_cort_impact("echo '改名前先確認'; cort impact --symbol 名前"),
+        Some(Some("名前".to_string()))
+    );
+    assert_eq!(runs_cort_impact("echo '確認; cort impact --symbol x'"), None);
+    // A redirection carries `&` and must not lose the command that follows.
+    assert_eq!(
+        runs_cort_impact("build 2>&1 && cort impact --symbol y"),
+        Some(Some("y".to_string()))
+    );
+}
