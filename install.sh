@@ -465,7 +465,18 @@ check_hook_at() {
       # Wired is not enough: it has to be wired to the binary we just checked. A command naming a
       # different cort is a live hook nobody here has verified.
       if printf '%s' "$hook_out" | grep -q "\"command\"[[:space:]]*:[[:space:]]*\"$managed_cort "; then
-        echo "$label: $settings_path (wired)"
+        # Wired is still not enough on Codex: it will not run a hook it has not been shown, and an
+        # unreviewed entry sits in config.toml firing nothing. `--status` answers `"trusted": null`
+        # where the question does not apply (Claude Code, Grok), so only an explicit false is a
+        # finding. It is reported, not failed: this hook is deployed unconditionally, exactly like
+        # CODEX_SKILL_DEST, so "wired and never reviewed" is also the resting state of a machine
+        # with no Codex on it -- and failing --check there would be crying wolf. Trust is the
+        # user's to give; naming it is ours.
+        if printf '%s' "$hook_out" | grep -q '"trusted"[[:space:]]*:[[:space:]]*false'; then
+          echo "$label: $settings_path (wired, NOT TRUSTED — start \`codex\` once and review the hook)"
+        else
+          echo "$label: $settings_path (wired)"
+        fi
       else
         echo "$label: $settings_path (WIRED TO A DIFFERENT BINARY — re-run ./install.sh)"
         echo "  wired: $(printf '%s' "$hook_out" | tr -d '\n' | sed 's/.*"command"[[:space:]]*:[[:space:]]*"//; s/".*//')"
@@ -520,6 +531,13 @@ deploy_one_hook() {
     already_present) info "hook ($harness): already wired in $settings_path" ;;
     *)         info "hook ($harness): $out" ;;
   esac
+  # Codex gates a hook behind a one-time review, and the trust it persists is bound to the exact
+  # command string. Writing or rewriting that command therefore always leaves the hook inert until
+  # it is reviewed again -- and nothing downstream can tell a stale trust from a current one, so the
+  # only honest moment to say so is here, where we are the ones who moved it.
+  if [ "$harness" = "codex" ] && { [ "$change" = "installed" ] || [ "$change" = "updated" ]; }; then
+    info "hook (codex): Codex runs it only after a one-time review — start \`codex\` and trust the hook"
+  fi
   record_manifest "$manifest_key" "$settings_path"
 }
 

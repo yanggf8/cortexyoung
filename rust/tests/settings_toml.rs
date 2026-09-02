@@ -6,7 +6,7 @@
 //! token-matching rule itself.
 
 use cort::settings::Change;
-use cort::settings_toml::{install_hook, installed_command, remove_hook};
+use cort::settings_toml::{install_hook, installed_command, installed_entry, remove_hook};
 use std::fs;
 use std::path::PathBuf;
 use toml_edit::DocumentMut;
@@ -420,4 +420,119 @@ command = "/a/cort hook-suggest"
     let v = read(&p);
     assert_eq!(group_count(&v), 1, "the user's empty group went with ours: {v}");
     assert_eq!(v["hooks"]["PreToolUse"][0]["matcher"].as_str(), Some("Read"));
+}
+
+// --- Codex's trust gate -------------------------------------------------------------------------
+//
+// Wiring is only half of it on this side: Codex will not run a hook it has not been shown once, and
+// an unreviewed entry sits in config.toml firing nothing. `--check` called that state `wired` until
+// 2026-09-02, on a machine where the hook had never run. These pin the reading of the
+// `[hooks.state]` table Codex writes when a hook is reviewed; they do not pretend to validate the
+// hash, which only Codex can recompute.
+
+/// The `[hooks.state]` key Codex writes: the config file's own path, then the event, then the
+/// position of the entry inside `hooks.PreToolUse`.
+fn trust_block(path: &str, group: usize, hook: usize) -> String {
+    format!(
+        "\n[hooks.state.\"{path}:pre_tool_use:{group}:{hook}\"]\ntrusted_hash = \"sha256:deadbeef\"\n"
+    )
+}
+
+fn append(p: &PathBuf, s: &str) {
+    let mut cur = fs::read_to_string(p).unwrap();
+    cur.push_str(s);
+    fs::write(p, cur).unwrap();
+}
+
+#[test]
+fn a_wired_entry_with_no_state_table_reads_as_untrusted() {
+    let (_d, p) = tmp();
+    install_hook(&p, "/bin/cort hook-suggest").unwrap();
+    let (command, trusted) = installed_entry(&p).unwrap();
+    assert_eq!(command, "/bin/cort hook-suggest");
+    assert!(!trusted, "no [hooks.state] at all cannot read as trusted");
+}
+
+#[test]
+fn a_trusted_hash_at_our_position_reads_as_trusted() {
+    let (_d, p) = tmp();
+    install_hook(&p, "/bin/cort hook-suggest").unwrap();
+    append(&p, &trust_block(&p.to_string_lossy(), 0, 0));
+    assert_eq!(installed_entry(&p).unwrap().1, true);
+}
+
+/// The path half of the key is Codex's spelling of the same file, so it is deliberately not
+/// compared -- a trust entry written against a symlinked or `CODEX_HOME`-relative spelling still
+/// counts. Anchoring recognition to two processes agreeing on how to write a path is the mistake
+/// §7/§9 already paid for once on the command line.
+#[test]
+fn the_path_half_of_the_key_is_not_compared() {
+    let (_d, p) = tmp();
+    install_hook(&p, "/bin/cort hook-suggest").unwrap();
+    append(&p, &trust_block("/some/other/spelling/config.toml", 0, 0));
+    assert_eq!(installed_entry(&p).unwrap().1, true);
+}
+
+/// Position is compared, though: trust granted to somebody else's entry is not ours. `0:0` must
+/// also not read as a suffix of `10:0`.
+#[test]
+fn a_trusted_hash_at_a_different_position_does_not_count() {
+    let (_d, p) = tmp();
+    install_hook(&p, "/bin/cort hook-suggest").unwrap();
+    let path = p.to_string_lossy().to_string();
+    append(&p, &trust_block(&path, 1, 0));
+    append(&p, &trust_block(&path, 10, 0));
+    assert!(!installed_entry(&p).unwrap().1);
+}
+
+/// An empty `trusted_hash` is not a trust decision, and neither is a state entry without one.
+#[test]
+fn a_state_entry_without_a_hash_does_not_count() {
+    let (_d, p) = tmp();
+    install_hook(&p, "/bin/cort hook-suggest").unwrap();
+    let path = p.to_string_lossy().to_string();
+    append(
+        &p,
+        &format!("\n[hooks.state.\"{path}:pre_tool_use:0:0\"]\ntrusted_hash = \"\"\n"),
+    );
+    assert!(!installed_entry(&p).unwrap().1);
+}
+
+/// The trust table is Codex's, and a reinstall must leave it exactly where it was -- otherwise
+/// every redeploy silently un-trusts the hook it just wired. Both paths matter: the no-op reinstall
+/// and the one that actually rewrites the command.
+#[test]
+fn install_preserves_a_trust_table_it_did_not_write() {
+    let (_d, p) = tmp();
+    install_hook(&p, "/bin/cort hook-suggest").unwrap();
+    append(&p, &trust_block(&p.to_string_lossy(), 0, 0));
+
+    assert_eq!(
+        install_hook(&p, "/bin/cort hook-suggest").unwrap().change,
+        Change::AlreadyPresent
+    );
+    assert!(installed_entry(&p).unwrap().1, "no-op reinstall dropped it");
+
+    assert_eq!(
+        install_hook(&p, "/other/cort hook-suggest").unwrap().change,
+        Change::Updated
+    );
+    assert!(
+        installed_entry(&p).unwrap().1,
+        "rewriting the command dropped it"
+    );
+}
+
+/// `installed_command` is the same scan with the trust half discarded; it must not start
+/// disagreeing with `installed_entry` about what is wired.
+#[test]
+fn installed_command_still_agrees_with_installed_entry() {
+    let (_d, p) = tmp();
+    assert_eq!(installed_command(&p), None);
+    assert!(installed_entry(&p).is_none());
+    install_hook(&p, "/bin/cort hook-suggest").unwrap();
+    assert_eq!(
+        installed_command(&p).unwrap(),
+        installed_entry(&p).unwrap().0
+    );
 }

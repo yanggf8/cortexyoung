@@ -483,6 +483,17 @@ hook's JSON reply — the field is legal by Codex's own schema but makes it disc
 if present (`docs/2026-09-02-hook-wiring-correction.md` §12) — while Claude Code and Grok both get
 it, to keep the raw JSON out of the transcript view.
 
+**Codex wiring is two steps, and only one of them is ours.** Codex will not run a hook it has not
+been shown. A wired entry sits in `config.toml` and fires nothing until it is reviewed once in an
+interactive `codex` session, which persists `[hooks.state."<config>:pre_tool_use:<group>:<hook>"]`
+with a `trusted_hash` beside our entry; `codex exec --dangerously-bypass-hook-trust` is the flag
+that skips the gate, and a run carrying it proves the shape works without proving the hook is live.
+So `install.sh` says the review is needed at the moment it writes or rewrites the command — trust is
+bound to that exact string, so moving the binary always invalidates it — and `--check` reports
+`wired, NOT TRUSTED` instead of `wired` until it has happened. What `install.sh` deliberately does
+not do is compute that hash itself: stamping "reviewed" on behalf of the thing being installed is
+the one thing the gate exists to prevent (`docs/2026-09-02-hook-wiring-correction.md` §14).
+
 **When it fires.** The first pipeline segment must be `rg`, `grep` or `egrep`; the pattern must
 resolve to a single symbol; and the search must look like a caller-set question. It stays silent
 on: any `-A`/`-B`/`-C` context flag (that is `cort context`'s question, not `impact`'s), searches
@@ -511,11 +522,14 @@ attributable to neither side. `cort usage` rolls up counts only; the outcome spl
 populations rather than quietly reporting a ratio across them.
 
 **Turning it off.** `./install.sh --no-hook` skips both entries; `./install.sh --uninstall` unwires
-both; `./install.sh --check` prints `hook: <path> (wired)` and `hook_codex: <path> (wired)`, or
-names what is wrong with each independently. Those lines exist because the wiring silently went
-down on this repo's own machine more than once, nothing said so, and Codex's TOML entry was left
-deliberately hand-wired (not deployed by `install.sh`) for a full day before this document's §13
-closed that gap — see `docs/2026-09-02-hook-wiring-correction.md`.
+both; `./install.sh --check` prints `hook: <path> (wired)` and `hook_codex: <path> (wired)` — the
+latter reading `(wired, NOT TRUSTED — start codex once and review the hook)` while Codex has not
+been shown the entry — or names what is wrong with each independently. Those lines exist because the
+wiring silently went down on this repo's own machine more than once, nothing said so, and Codex's
+TOML entry was left deliberately hand-wired (not deployed by `install.sh`) for a full day before
+this document's §13 closed that gap — after which §14 found the deployed entry still inert, because
+`wired` had been answering a question one step short of the one that matters. See
+`docs/2026-09-02-hook-wiring-correction.md`.
 
 ## Upstream credits
 

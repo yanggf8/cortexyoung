@@ -312,30 +312,73 @@ pub fn remove_hook(path: &Path) -> Result<Outcome, SettingsError> {
     })
 }
 
-/// Is our entry currently configured, and with which command? Used by `install.sh --check`, which
-/// must be able to say "the hook is wired" without mutating anything.
-pub fn installed_command(path: &Path) -> Option<String> {
+/// Is our entry currently configured, with which command, and has Codex been told to run it?
+///
+/// Wiring is only half of it here, which is the one way this file differs in kind from the JSON
+/// side. Codex will not execute a hook it has not been shown: a wired-but-unreviewed entry sits in
+/// `config.toml` and never fires, and `codex exec --dangerously-bypass-hook-trust` is the flag that
+/// skips that gate. Reviewing it once in an interactive session persists, beside our entry:
+///
+/// ```toml
+/// [hooks.state."<absolute config path>:pre_tool_use:<group>:<hook>"]
+/// trusted_hash = "sha256:..."
+/// ```
+///
+/// (observed on a real `~/.codex/config.toml`, 2026-09-02, Codex 0.152.1). Until this function,
+/// `--check` answered `wired` for an entry in exactly that state, and the hook had never once run
+/// on a normally-invoked Codex -- the same class of lie as `wired: false` while it fired hundreds
+/// of times (`docs/2026-09-02-hook-wiring-correction.md` §7, §9), pointing the other way.
+pub fn installed_entry(path: &Path) -> Option<(String, bool)> {
     let doc = read_doc(path).ok()?;
-    let list = doc
-        .as_table()
-        .get("hooks")?
-        .as_table()?
-        .get("PreToolUse")?
-        .as_array_of_tables()?;
-    for group in list.iter() {
+    let hooks = doc.as_table().get("hooks")?.as_table()?;
+    let list = hooks.get("PreToolUse")?.as_array_of_tables()?;
+    for (gi, group) in list.iter().enumerate() {
         // `continue`, not `?`: a group without a hooks array is somebody else's malformed entry,
         // and letting it end the scan would report `wired: false` for an entry sitting right after
         // it -- the same bug §7 of the wiring doc found on the JSON side.
-        let Some(hooks) = group.get("hooks").and_then(Item::as_array_of_tables) else {
+        let Some(entries) = group.get("hooks").and_then(Item::as_array_of_tables) else {
             continue;
         };
-        for h in hooks.iter() {
+        for (hi, h) in entries.iter().enumerate() {
             if let Some(c) = h.get("command").and_then(Item::as_str) {
                 if is_ours(c) {
-                    return Some(c.to_string());
+                    return Some((c.to_string(), trusted_at(hooks, gi, hi)));
                 }
             }
         }
     }
     None
+}
+
+/// Our entry's command alone, for callers that have no use for the trust half.
+pub fn installed_command(path: &Path) -> Option<String> {
+    installed_entry(path).map(|(command, _)| command)
+}
+
+/// Does `hooks.state` carry a `trusted_hash` for the entry at `gi`/`hi`?
+///
+/// Only the `:pre_tool_use:<gi>:<hi>` tail of the key is matched. The half in front of it is
+/// Codex's spelling of the same file we were handed, and making recognition of our own entry
+/// depend on two processes agreeing on how to write a path is the mistake §7/§9 already paid for
+/// once on the command line. The tail cannot collide: `:pre_tool_use:0:0` is not a suffix of
+/// `:pre_tool_use:10:0`.
+///
+/// Presence is the whole of what this can report, and the doc comment on `installed_entry` is
+/// where that limit is stated rather than hidden: the hash covers something only Codex can
+/// recompute, so an entry trusted under an *older* command reads here exactly like a current one.
+/// That is why `install.sh` says trust has to be renewed at the moment it rewrites the command,
+/// instead of trying to detect it afterwards.
+fn trusted_at(hooks: &Table, gi: usize, hi: usize) -> bool {
+    let Some(state) = hooks.get("state").and_then(Item::as_table) else {
+        return false;
+    };
+    let suffix = format!(":pre_tool_use:{gi}:{hi}");
+    state.iter().any(|(key, entry)| {
+        key.ends_with(&suffix)
+            && entry
+                .as_table_like()
+                .and_then(|t| t.get("trusted_hash"))
+                .and_then(Item::as_str)
+                .is_some_and(|h| !h.is_empty())
+    })
 }

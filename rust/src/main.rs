@@ -517,6 +517,16 @@ fn hook_args(outcome: &str, harness: &str, declared: Option<&str>) -> String {
 /// not an environment variable that happens to be set. When it names a harness we know, that wins
 /// over the flag and the flag is recorded alongside so the disagreement stays visible. When it
 /// names nothing we recognise, the flag stands -- a declared value is still better than none.
+///
+/// Kimi (`kimi-code`) is deliberately absent from the list below. Its `PreToolUse` payload carries
+/// `tool_name` / `tool_input` / `tool_call_id` and nothing else: neither spelling of a transcript
+/// path occurs anywhere in the shipped `@moonshot-ai/kimi-code` bundle (grep over `dist/main.mjs`,
+/// 2026-09-02). A `/.kimi-code/` arm sat here until that was checked -- it could never match, and
+/// an arm that cannot fire made this list look like it covered a harness that is not wired at all.
+/// Kimi is also the one harness this hook has nothing to say to: its `PreToolUse` keeps only
+/// results whose `action` is `block` and drops every allow-shaped one before the model sees it
+/// (`blockDecision`, same bundle), and `cort hook-suggest` never blocks. Re-add the arm when a Kimi
+/// payload actually carries the path -- not on the assumption that it does.
 fn harness_of(payload: &Value, declared: &str) -> (String, Option<String>) {
     let path = payload
         .get("transcript_path")
@@ -529,8 +539,6 @@ fn harness_of(payload: &Value, declared: &str) -> (String, Option<String>) {
         Some("codex")
     } else if path.contains("/.claude/") {
         Some("claude-code")
-    } else if path.contains("/.kimi-code/") {
-        Some("kimi-code")
     } else {
         None
     };
@@ -767,10 +775,16 @@ fn cmd_hook_install(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, Co
     };
     let toml = is_toml_settings(&path);
     if a.status {
-        let wired = if toml {
-            settings_toml::installed_command(&path)
+        // `trusted` is `null`, never `false`, wherever the question does not apply: Claude Code and
+        // Grok have no trust gate, and a file with no entry of ours has nothing to be trusted. Only
+        // a wired Codex entry can answer it, and `false` there is a hook that will not run.
+        let (wired, trusted) = if toml {
+            match settings_toml::installed_entry(&path) {
+                Some((command, trusted)) => (Some(command), Some(trusted)),
+                None => (None, None),
+            }
         } else {
-            settings::installed_command(&path)
+            (settings::installed_command(&path), None)
         };
         return Ok(Emit {
             render_command: None,
@@ -779,6 +793,7 @@ fn cmd_hook_install(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, Co
                 "settings": path.to_string_lossy(),
                 "wired": wired.is_some(),
                 "command": wired,
+                "trusted": trusted,
             }),
         });
     }

@@ -526,3 +526,89 @@ provider 覆蓋不影響 hook 是否被讀取,兩者是同一份設定檔。
 器接受,是真的被讀進 hook 執行引擎、真的觸發、產生的 `additionalContext` 真的送達模型上下文。
 `hook_codex: ... (wired)` 現在跟 `hook: ... (wired)` 站在同一個證據等級上——上一節列的那個
 「還開著的一件事」關掉。
+
+> **後續更正(§14):** 上面這句「站在同一個證據等級上」多跨了一步。這次跑法帶了
+> `--dangerously-bypass-hook-trust`,而 Codex 的 hook 有一道 persisted trust 閘;拿掉那個 flag 之
+> 後,同一個條目一次也沒有執行過。本節證明的是形狀被讀懂、注入送達;「正常路徑會不會執行」由 §14
+> 補上(答案:要先在互動式 Codex 裡審過一次)。
+
+## 14. `wired` 回答的是一個差一步的問題(2026-09-02 21:20-21:50)
+
+§13 收尾那句「`hook_codex: ... (wired)` 現在跟 `hook: ... (wired)` 站在同一個證據等級上」是錯的,
+而且錯的方式跟本文件反覆講的是同一件事。用**正常路徑**(不帶任何 bypass flag)重跑一次 §13 的端到
+端:
+
+```
+codex exec --skip-git-repo-check "<要求模型跑一個 grep,並逐字回報 harness 附加了什麼>"
+```
+
+模型回 `NONE`。`cort usage` 的 `hook-suggest` 計數 2140 → **2140**,一次都沒動(安靜命中也會寫一
+列,所以這是零執行,不是零建議)。
+
+**原因:Codex 的 hook 有一道 persisted trust 閘。** `codex exec --help`:
+
+> `--dangerously-bypass-hook-trust` — Run enabled hooks without requiring persisted hook trust for
+> this invocation.
+
+§13 那次跑的正是 `--sandbox read-only --dangerously-bypass-hook-trust`。commit message 有誠實寫出這
+個 flag,但結論多跨了一步:它證明的是**形狀被 hook 執行引擎讀懂、`additionalContext` 送得到模型**
+——這部分至今仍然成立——而不是「正常叫起來的 Codex 會執行它」。後者當時從未被驗過,答案是不會。
+
+閘的形狀,兩個來源:
+
+- codex 二進位的 serde 型別表:`internally tagged enum HookHandlerConfig` 之後接
+  `state` / `matcher` / `hooks` / `HookStateToml` / `trusted_hash`。我們寫出去的群組只有
+  `matcher` 和 `hooks`。
+- TUI 字串:`' hooks need review before they can run.`、`1 hook is new or changed.`,以及
+  `tui/src/bottom_pane/hooks_browser_view.rs`。
+
+使用者在互動式 Codex 裡按下信任之後,真實的 `~/.codex/config.toml` 多出來的正是:
+
+```toml
+[hooks.state."/home/yanggf/.codex/config.toml:pre_tool_use:0:0"]
+trusted_hash = "sha256:e7c909599d16022fe2a529bccd32cfd347d4b0a1723ae7d1f02f8a3a98d78178"
+```
+
+**重驗:通過。** 同一條指令、**不帶任何 bypass flag**,三個獨立訊號一致:模型的回合記錄印出
+`hook: PreToolUse` → `hook: PreToolUse Completed`;模型逐字引出注入的 `additionalContext`;
+`hook-suggest` 計數 2164 → 2166。這才是正常路徑上的第一次端到端。
+
+### 改了什麼
+
+- `settings_toml::installed_entry` 回傳 `(command, trusted)`,`installed_command` 退化成它的前半。
+  `trusted_at` 只比對 key 的 `:pre_tool_use:<gi>:<hi>` 尾段,**不比對前面那半路徑**——那是 codex
+  對同一個檔案的拼法(symlink、`CODEX_HOME`),讓「認得自己的條目」取決於兩個行程對路徑拼法的共
+  識,正是 §7/§9 在指令行上已經付過一次代價的錯。尾段不會誤撞:`:pre_tool_use:0:0` 不是
+  `:pre_tool_use:10:0` 的後綴。
+- `hook-install --status` 多一個 `trusted` 欄位。**不適用的地方一律 `null`,不是 `false`**:
+  Claude Code 和 Grok 沒有這道閘,沒有我們的條目也就沒有可信任的東西。只有「已接線的 Codex 條目」
+  能回答這個問題,而那裡的 `false` 就是一個不會執行的 hook。
+- `install.sh --check` 據此印 `(wired, NOT TRUSTED — start codex once and review the hook)`。
+  **報告,但不判定失敗**:這個 hook 跟 `CODEX_SKILL_DEST` 一樣是無條件部署的,所以「已接線、從未
+  審過」也是一台根本沒裝 Codex 的機器的靜止狀態,在那裡讓 `--check` 失敗是狼來了。信任是使用者
+  的權利,把它講出來是我們的義務。
+- `deploy_one_hook` 在**寫入或改寫**指令的當下就講。信任綁定在那個指令字串上,所以搬動 binary 必
+  然使它失效——而事後沒有任何東西分得出「過期的信任」和「當前的信任」,所以唯一誠實的時機就是我們
+  自己動它的那一刻。
+- `rust/tests/settings_toml.rs` 新增 7 條(無 state 表、位置命中、路徑半段不比對、位置不符不算、
+  空 hash 不算、重裝兩條路徑都不能洗掉別人的信任表、`installed_command` 與 `installed_entry` 不
+  得對「什麼被接線了」產生分歧)。全樹綠燈。
+
+### 沒做、且不打算做的一件事
+
+**不逆向 `trusted_hash` 的計算方式,不讓 `install.sh` 自己把信任寫進去。** 那等於替使用者偽造一個
+「我審過這個 hook」的安全決定,而那道 review 存在的全部意義,就是不該由被安裝的東西自己蓋章。
+連帶的代價要明說:`trusted_at` 只能報「有沒有」,報不了「對不對」——用舊指令審過的條目,在這裡讀
+起來和當前的一模一樣。這是接受的限制,不是還沒做的功能。
+
+### 順帶修掉的死碼
+
+`harness_of` 裡有一條 `/.kimi-code/` 的 arm,靠 `transcript_path` 比對。但 kimi-code 的
+`PreToolUse` payload 只有 `tool_name` / `tool_input` / `tool_call_id`,兩種拼法的 transcript path
+在它出貨的整份 bundle 裡都是零命中——那條 arm 永遠不會命中,而它讓那份 harness 清單看起來涵蓋了一
+個根本沒接的 harness。刪掉,理由寫進 `harness_of` 的 doc comment。
+
+Kimi 不接,原因不是「還沒做」:kimi-code 的 `PreToolUse` 只保留 `action === "block"` 的結果
+(`blockDecision`,其 bundle 內兩份獨立的 hook engine 一致),allow 形狀的一律在送達模型之前丟棄,
+而 `cort hook-suggest` 從設計上永不阻擋。要在 Kimi 上有效果,只能改成 `permissionDecision: "deny"`
+去擋掉使用者的 grep——那不是「照 Codex 再接一次」,是改契約。
