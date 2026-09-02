@@ -15,6 +15,7 @@ use cort::indexer::{canonicalize_root, full_index, status_of, CanonicalRoot, Ind
 use cort::r#struct::{struct_command, StructOptions};
 use cort::readings::{parse_content_mode, read_fragment, recall_readings, ContentMode};
 use cort::render::{parse_format, render, render_error, Format};
+use cort::settings;
 use cort::staleness::compute_stale;
 use cort::usage::{self, CommandRecord};
 use rusqlite::{params, Connection, OpenFlags};
@@ -24,7 +25,7 @@ use std::path::{Path, PathBuf};
 // `hook-suggest` is here so its rows are recorded under their own name rather than `_unknown`:
 // whether the harness hook fires, and whether a fire is followed by an `impact` call, is the one
 // measurement that has a numerator. It is not a verb anyone types.
-const KNOWN_COMMANDS: [&str; 11] = [
+const KNOWN_COMMANDS: [&str; 12] = [
     "index",
     "status",
     "projects",
@@ -36,6 +37,7 @@ const KNOWN_COMMANDS: [&str; 11] = [
     "recall",
     "usage",
     "hook-suggest",
+    "hook-install",
 ];
 
 fn usage_value() -> Value {
@@ -53,6 +55,7 @@ fn usage_value() -> Value {
             "recall": "cort recall <query> [--limit <n>] [--content full] [-f json|lean]",
             "usage": "cort usage [days] [-f json|lean]",
             "hook-suggest": "cort hook-suggest  (PreToolUse hook: reads the harness payload on stdin, prints a suggestion or nothing; not a verb to type)",
+            "hook-install": "cort hook-install [--settings <path>] [--command <cmd>] [--remove|--status]  (installer-invoked: wires hook-suggest into settings.json; not a verb to type)",
         },
         "env": {
             "CORT_CACHE_DIR": "where indexes live (default ~/.cache/cortex-ng)",
@@ -309,6 +312,28 @@ struct RootArgs {
     disable_help_flag = true,
     disable_version_flag = true
 )]
+struct HookInstallArgs {
+    /// The settings.json to edit. Defaults to $CLAUDE_SKILL_HOME (or ~/.claude)/settings.json --
+    /// the same override the installer uses to place the skill.
+    #[arg(long = "settings")]
+    settings: Option<String>,
+    /// The command line to configure. Defaults to this binary's own path plus `hook-suggest`.
+    #[arg(long = "command")]
+    command: Option<String>,
+    /// Take the entry back out instead of putting one in.
+    #[arg(long = "remove")]
+    remove: bool,
+    /// Report what is wired without writing anything -- what `install.sh --check` needs.
+    #[arg(long = "status")]
+    status: bool,
+}
+
+#[derive(Parser, Debug)]
+#[command(
+    no_binary_name = true,
+    disable_help_flag = true,
+    disable_version_flag = true
+)]
 struct FormatOnlyArgs {
     #[arg(short = 'f', long = "format")]
     format: Option<String>,
@@ -437,6 +462,7 @@ fn dispatch(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError> 
         Some("recall") => cmd_recall(&args[1..], usage),
         Some("usage") => cmd_usage(&args[1..], usage),
         Some("hook-suggest") => cmd_hook_suggest(usage),
+        Some("hook-install") => cmd_hook_install(&args[1..], usage),
         other => Err(CortError::new(
             "unknown_command",
             json!({
@@ -485,9 +511,13 @@ fn cmd_hook_suggest(usage: &mut UsageEvent) -> Result<Emit, CortError> {
     let Some(hit) = cort::hook::suggests_impact(command) else {
         return quiet();
     };
-    let root = cwd();
-    let real = std::fs::canonicalize(&root).unwrap_or(root);
-    if !db_path_for(&real.to_string_lossy()).exists() {
+    // The gate is "this project has an index", which is what `cort status` means by
+    // `indexed: true` -- a row in `projects`. It used to be "a db file exists", and those are not
+    // the same claim: opening a project creates the schema, so a db with 0 chunks satisfied the
+    // file test and the hook then told the agent `cort has an index for this project` on a tree
+    // where `impact` can only answer `no_seed_resolved / stale=true`. That is the exact failure
+    // the doc comment above forbids, and it was live on this machine on 2026-09-02.
+    if !project_is_indexed() {
         return quiet();
     }
     let context = format!(
@@ -507,6 +537,95 @@ literal.",
         }),
         format: Format::Json,
         render_command: Some("hook-suggest"),
+    })
+}
+
+/// Does the cwd's project have an index with a `projects` row -- the same question `cort status`
+/// answers as `indexed`. Every failure is a `false`: a hook that cannot read the index has nothing
+/// to suggest, and must never turn a broken cache into a broken tool call.
+fn project_is_indexed() -> bool {
+    let Ok(canon) = canonicalize_root(cwd()) else {
+        return false;
+    };
+    let path = db_path_for(&canon.path_str);
+    if !path.exists() {
+        return false;
+    }
+    let Ok(db) = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY) else {
+        return false;
+    };
+    status_of(&db, &canon.path)
+        .map(|s| s.indexed)
+        .unwrap_or(false)
+}
+
+/// Wiring the PreToolUse hook into a Claude Code `settings.json`. `install.sh` calls this so the
+/// hook ships with the skill instead of being a separate thing to remember per agent home; it is
+/// not a verb anyone types either. `--remove` is what `install.sh --uninstall` calls.
+fn cmd_hook_install(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, CortError> {
+    let a = HookInstallArgs::try_parse_from(args.iter()).map_err(clap_fail)?;
+    let path = match a.settings {
+        Some(p) => PathBuf::from(p),
+        None => settings::default_settings_path().ok_or_else(|| {
+            CortError::new(
+                "file_not_found",
+                json!({ "message": "no HOME or CLAUDE_SKILL_HOME to resolve settings.json from" }),
+            )
+        })?,
+    };
+    let map_err = |e: settings::SettingsError| match e {
+        settings::SettingsError::Unparsable(m) => {
+            CortError::new("bad_settings", json!({ "message": m }))
+        }
+        settings::SettingsError::Io(io) => {
+            CortError::new("file_not_found", json!({ "message": io.to_string() }))
+        }
+    };
+    if a.status {
+        let wired = settings::installed_command(&path);
+        return Ok(Emit {
+            render_command: None,
+            format: Format::Json,
+            payload: json!({
+                "settings": path.to_string_lossy(),
+                "wired": wired.is_some(),
+                "command": wired,
+            }),
+        });
+    }
+    if a.remove {
+        let out = settings::remove_hook(&path).map_err(map_err)?;
+        return Ok(Emit {
+            render_command: None,
+            format: Format::Json,
+            payload: json!({
+                "settings": path.to_string_lossy(),
+                "change": out.change.as_str(),
+                "backup": out.backup.map(|b| b.to_string_lossy().into_owned()),
+            }),
+        });
+    }
+    // Absolute by default: a hook runs with the harness's environment, not the login shell's, so
+    // a bare `cort` is a PATH bet the installer has no reason to take.
+    let command = match a.command {
+        Some(c) => c,
+        None => {
+            let exe = std::env::current_exe().map_err(|e| {
+                CortError::new("file_not_found", json!({ "message": e.to_string() }))
+            })?;
+            format!("{} hook-suggest", exe.to_string_lossy())
+        }
+    };
+    let out = settings::install_hook(&path, &command).map_err(map_err)?;
+    Ok(Emit {
+        render_command: None,
+        format: Format::Json,
+        payload: json!({
+            "settings": path.to_string_lossy(),
+            "command": command,
+            "change": out.change.as_str(),
+            "backup": out.backup.map(|b| b.to_string_lossy().into_owned()),
+        }),
     })
 }
 

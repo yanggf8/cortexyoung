@@ -134,6 +134,13 @@ assert_frontmatter_keys_only "$HOME/.claude/skills/ast-grep/SKILL.md" "deployed 
 assert_pristine_skill "$HOME/.claude/skills/ast-grep/SKILL.md" "$REPO_ROOT/skills/ast-grep/SKILL.md" "deployed skill is the repo source byte for byte"
 assert_skill_claimed "$HOME/.claude/skills/ast-grep/SKILL.md" "ownership recorded in the stamp file beside the skill"
 assert_file_not_exists "$HOME/.claude/skills/xgrep/SKILL.md" "xgrep skill not installed by default"
+# The hook is deployed in the same run as the skill: a routing half that has to be wired by hand
+# is a routing half that stays unwired, which is what the 2026-09-01 mining window measured (745
+# grep/rg triggers recorded by the harness, zero rows in usage.db, because nothing was wired).
+assert_file_exists "$HOME/.claude/settings.json" "settings.json written by the hook deploy"
+assert_contains "$HOME/.claude/settings.json" "hook-suggest" "PreToolUse hook wired in the same run as the skill"
+assert_contains "$HOME/.claude/settings.json" '"matcher": "Bash"' "the hook is matched to Bash, not to every tool"
+assert_contains "$HOME/.local/share/cortexyoung/manifest" "hook_settings:" "hook_settings recorded in the manifest"
 assert_file_exists "$HOME/.local/share/cortexyoung/manifest" "manifest created"
 assert_contains "$HOME/.local/share/cortexyoung/manifest" "manifest_version:2" "manifest version 2 recorded"
 assert_contains "$HOME/.local/share/cortexyoung/manifest" "skill_ast_grep:" "skill_ast_grep recorded"
@@ -284,6 +291,13 @@ done
 if [ "$PROFILE_STILL" -eq 0 ]; then pass "profile block removed on uninstall"; else fail "profile block removed on uninstall"; fi
 # xg binary: our mock was pre-existing (no legacy_xg_bin in manifest after skip), so must NOT be removed
 assert_file_exists "$HOME/.cargo/bin/xg" "pre-existing xg binary preserved on uninstall"
+# The hook goes out with everything else. Uninstall runs it before the binary is removed, because
+# `cort hook-install --remove` is what owns the JSON edit.
+if [ -f "$HOME/.claude/settings.json" ]; then
+  assert_not_contains "$HOME/.claude/settings.json" "hook-suggest" "PreToolUse hook unwired on uninstall"
+else
+  pass "PreToolUse hook unwired on uninstall (settings.json absent)"
+fi
 
 # ── 9. SHA mismatch is fatal ─────────────────────────────────────
 echo "--- Test 9: SHA mismatch is fatal ---"

@@ -375,3 +375,75 @@ fn coverage_flows_through_the_cli_in_lean() {
     );
     let _ = proj;
 }
+
+// ── the hook's index gate ──────────────────────────────────────────
+// Regression for a live failure: the gate was `the db file exists`, and opening a project creates
+// the schema, so an unindexed tree with a 0-chunk db told the agent "cort has an index for this
+// project". `impact` there can only answer `no_seed_resolved / stale=true` -- a turn spent to learn
+// nothing, which is what makes the next suggestion ignorable.
+
+fn run_hook_suggest(command: &str, cwd: &Path, cache: &Path) -> Run {
+    use std::io::Write;
+    use std::process::Stdio;
+    let mut child = Command::new(cort_bin())
+        .arg("hook-suggest")
+        .current_dir(cwd)
+        .env("CORT_CACHE_DIR", cache)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn cort hook-suggest");
+    let body = serde_json::to_vec(&serde_json::json!({
+        "tool_name": "Bash",
+        "tool_input": { "command": command },
+    }))
+    .unwrap();
+    child.stdin.take().unwrap().write_all(&body).unwrap();
+    let out = child.wait_with_output().expect("wait cort hook-suggest");
+    Run {
+        code: out.status.code().unwrap_or(1),
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+    }
+}
+
+/// A call-site search that the rule fires on, so the only variable under test is the gate.
+const FIRING_SEARCH: &str = "grep -rn 'helper(' src --include=*.ts";
+
+#[test]
+fn the_hook_stays_quiet_when_the_db_exists_but_holds_no_index() {
+    let (_p, cwd, _c, cache) = sandbox();
+    // Any command that opens the project writes the schema without indexing anything.
+    run_cort(&["impact", "--symbol", "helper"], &cwd, &cache);
+    let db = cort::db::db_path_for(cwd.to_str().unwrap());
+    let db = cache.join(db.file_name().unwrap());
+    assert!(db.exists(), "the precondition is a db file that exists");
+
+    let r = run_hook_suggest(FIRING_SEARCH, &cwd, &cache);
+    assert_eq!(r.code, 0);
+    assert_eq!(
+        payload(&r),
+        serde_json::json!({}),
+        "an empty index is not an index: {} {}",
+        r.stdout,
+        r.stderr
+    );
+}
+
+#[test]
+fn the_hook_speaks_once_the_project_is_actually_indexed() {
+    let (_p, cwd, _c, cache) = sandbox();
+    let idx = run_cort(&["index"], &cwd, &cache);
+    if idx.code != 0 {
+        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
+        return;
+    }
+    let r = run_hook_suggest(FIRING_SEARCH, &cwd, &cache);
+    assert_eq!(r.code, 0);
+    let ctx = payload(&r)["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(ctx.contains("cort impact --symbol 'helper'"), "got: {ctx}");
+}

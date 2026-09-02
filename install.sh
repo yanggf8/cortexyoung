@@ -30,6 +30,14 @@ AST_GREP_SKILL_DEST="${CLAUDE_SKILL_HOME:-$HOME/.claude}/skills/ast-grep/SKILL.m
 # ~/.codex/skills). One source of truth in the repo, two agent homes — an agent that never sees the
 # skill routes ordinary lookups into the graph and re-reads whole files.
 CODEX_SKILL_DEST="${CODEX_HOME:-$HOME/.codex}/skills/ast-grep/SKILL.md"
+# The PreToolUse hook ships with the skill rather than being a second thing to wire per agent home.
+# The skill is prospective ("before you rename X, run impact") and measured over the sessions that
+# carried it, it never fired: 409 searches, zero cort calls. The hook is the retrospective half of
+# the same routing, and a routing half that has to be installed by hand is a routing half that is
+# not installed. `cort hook-install` owns the JSON merge -- see rust/src/settings.rs for why that is
+# not a jq pipeline in here.
+HOOK_SETTINGS="${CLAUDE_SKILL_HOME:-$HOME/.claude}/settings.json"
+WITH_HOOK=1
 WITH_XGREP=0
 
 sha256_for_ast_grep_asset() {
@@ -51,6 +59,7 @@ for arg in "$@"; do
     --force)     FORCE=1 ;;
     --with-rustup) WITH_RUSTUP=1 ;;
     --with-xgrep) WITH_XGREP=1 ;;
+    --no-hook)   WITH_HOOK=0 ;;
     --help|-h) cat <<EOF
 Usage: ./install.sh [OPTIONS]
   --check         Verify installation without mutating
@@ -58,6 +67,7 @@ Usage: ./install.sh [OPTIONS]
   --force         On unmanaged skill collision: backup and replace
   --with-rustup   If cargo missing, bootstrap rustup via https://sh.rustup.rs
   --with-xgrep    Also install xg (opt-in; default is cort + ast-grep only)
+  --no-hook       Do not wire the PreToolUse hook into settings.json
   --help          Show this help
 EOF
       exit 0 ;;
@@ -431,6 +441,58 @@ deploy_skill_at() {
   record_deploy "$dest" "$src_hash"
 }
 
+# ── PreToolUse hook (deployed with the skill, same run) ────────────
+# Delegated to `cort hook-install`: preserving the hooks the user already has, staying idempotent
+# across reinstalls, recognising its own entry after the binary moves and refusing a settings.json
+# it cannot parse are all logic, and logic does not go in bash here. Failure is reported, never
+# fatal -- a settings file we could not merge must not cost the user a working binary.
+deploy_hook() {
+  local cort_bin="$1"
+  if [ "$WITH_HOOK" -ne 1 ]; then
+    info "hook: skipped (--no-hook)"
+    return 0
+  fi
+  if [ ! -x "$cort_bin" ]; then
+    info "hook: cort not executable at $cort_bin — skipping"
+    return 0
+  fi
+  local out change
+  if ! out="$("$cort_bin" hook-install --settings "$HOOK_SETTINGS" --command "$cort_bin hook-suggest" 2>&1)"; then
+    info "hook: NOT wired — $out"
+    return 0
+  fi
+  change="$(printf '%s' "$out" | sed -n 's/.*"change"[[:space:]]*:[[:space:]]*"\([a-z_]*\)".*/\1/p')"
+  case "$change" in
+    installed) info "hook: wired PreToolUse -> cort hook-suggest in $HOOK_SETTINGS" ;;
+    updated)   info "hook: updated PreToolUse command in $HOOK_SETTINGS" ;;
+    already_present) info "hook: already wired in $HOOK_SETTINGS" ;;
+    *)         info "hook: $out" ;;
+  esac
+  record_manifest "hook_settings" "$HOOK_SETTINGS"
+}
+
+remove_hook() {
+  local settings cort_bin
+  settings="$(manifest_get hook_settings || true)"
+  [ -n "$settings" ] || settings="$HOOK_SETTINGS"
+  cort_bin="$(manifest_get cort_bin || true)"
+  [ -n "$cort_bin" ] && [ -x "$cort_bin" ] || cort_bin="$(command -v cort 2>/dev/null || true)"
+  if [ -z "$cort_bin" ] || [ ! -x "$cort_bin" ]; then
+    info "hook: no cort to unwire with — leaving $settings alone"
+    return 0
+  fi
+  local out
+  if out="$("$cort_bin" hook-install --settings "$settings" --remove 2>&1)"; then
+    if printf '%s' "$out" | grep -q '"change"[[:space:]]*:[[:space:]]*"removed"'; then
+      info "hook: unwired from $settings"
+    else
+      info "hook: nothing of ours in $settings"
+    fi
+  else
+    info "hook: could not unwire — $out"
+  fi
+}
+
 # ═══════════════════════════════════════════════════════════════════
 # install helpers: xg / ast-grep / cort
 # ═══════════════════════════════════════════════════════════════════
@@ -640,6 +702,22 @@ do_check() {
       echo "xg: NOT FOUND in PATH (opt-in via --with-xgrep)"
     fi
   fi
+  # Read-only: --status never writes. A skill deployed without the hook is half the routing, and
+  # --check is the only place that can say so before the numbers go missing.
+  if command -v cort >/dev/null 2>&1; then
+    local hook_out
+    if hook_out="$(cort hook-install --settings "$HOOK_SETTINGS" --status 2>&1)"; then
+      if printf '%s' "$hook_out" | grep -q '"wired"[[:space:]]*:[[:space:]]*true'; then
+        echo "hook: $HOOK_SETTINGS (wired)"
+      else
+        echo "hook: $HOOK_SETTINGS (NOT WIRED — re-run ./install.sh)"
+        if [ "$WITH_HOOK" -eq 1 ]; then ok=0; fi
+      fi
+    else
+      echo "hook: could not read $HOOK_SETTINGS — $hook_out"
+      ok=0
+    fi
+  fi
   if [ -f "$SKILL_DEST" ]; then
     if skill_is_managed "$SKILL_DEST"; then
       echo "skill: $SKILL_DEST (managed)"
@@ -697,6 +775,7 @@ do_check() {
 
 do_uninstall() {
   echo "=== cortexyoung --uninstall ==="
+  remove_hook
   if [ -f "$MANIFEST_FILE" ]; then
     local cort_owned ag_owned xg_owned skill_ag skill_xg
     cort_owned="$(manifest_get cort_bin || true)"
@@ -839,6 +918,7 @@ do_install() {
   if [ "$WITH_XGREP" -eq 1 ]; then
     deploy_skill_at "$SCRIPT_DIR/$SKILL_SRC_REL" "$SKILL_DEST" "skill_xgrep"
   fi
+  deploy_hook "$BIN_DIR/cort"
   ensure_path_block
   record_manifest "manifest_version" "2"
 
