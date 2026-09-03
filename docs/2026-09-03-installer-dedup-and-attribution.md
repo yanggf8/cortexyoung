@@ -299,3 +299,32 @@ git -C "$REPO_ROOT" checkout -- skills/ast-grep/SKILL.md 2>/dev/null || true
 這條跟 §9 的教訓是同一句話的兩種說法。§9 是**一組收窄不了的候選集必須擴張到全部,不能安靜地縮到
 零**;這裡是**一個收拾不了的還原必須只碰自己碰過的,不能安靜地擴張到整個檔**。兩次都是 `|| true`
 和空 diff 讓「什麼都沒發生」跟「發生了但我不說」長得一模一樣。
+
+## 11. CI 紅了三次推送,而本機每次都回報「全部閘門綠」
+
+`0eabf76b` 推上去之後才去看 CI:今天的三次推送——`--all` 重構、matcher 回退、Codex 結論——
+**全部 failure**,而且死在同一關,`shellcheck`。
+
+```
+SC2034 HOOK_SETTINGS appears unused
+SC2034 CODEX_HOOK_SETTINGS appears unused
+SC2034 KIMI_HOOK_SETTINGS appears unused
+SC2034 line appears unused
+```
+
+前三個正是 §3 那個重構的殘骸。表搬進 `HOOK_TARGETS` 之後,設定檔路徑改由 `hook-install --all`
+的回覆帶回來,這三個 bash 變數就沒人讀了——存在了一整天,唯一注意到的是 linter。第四個是
+`local line` 忘了拿掉。
+
+兩件事值得記下來:
+
+**一,`shellcheck` 排在 `offline install smoke test` 前面,所以那一關這三次一次都沒跑。** 這正是
+`838d17fb`(「a broken gate costs you the gates behind it」)那條教訓,在下一個閘門上原樣重演。
+上一次是 rustfmt 擋住 clippy 和 test,這一次是 shellcheck 擋住 smoke。**修好一個閘門的收穫不是
+它自己,是它後面那些。**
+
+**二,「本機全綠」跟「CI 全綠」是兩個不同的宣稱,而它們的差集就是本機沒裝的東西。** 那三次的
+session 都據實跑了 fmt / clippy / test / smoke 並回報綠,只是本機沒有 shellcheck,那一關在本機
+根本不存在,於是「跑過的都綠」被讀成了「全部綠」。這一輪的收尾是抓一份 static binary 到暫存目錄
+跑一次真正的 CI 指令,`exit=0` 才算數——順帶抓到我自己寫的註解有一行以 `# shellcheck` 開頭,
+被當成 directive 解析(SC1073)。**一個本機跑不到的閘門,回報時要說它沒跑,不能算在綠裡面。**

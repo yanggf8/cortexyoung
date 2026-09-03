@@ -34,21 +34,18 @@ CODEX_SKILL_DEST="${CODEX_HOME:-$HOME/.codex}/skills/ast-grep/SKILL.md"
 # The skill is prospective ("before you rename X, run impact") and measured over the sessions that
 # carried it, it never fired: 409 searches, zero cort calls. The hook is the retrospective half of
 # the same routing, and a routing half that has to be installed by hand is a routing half that is
-# not installed. `cort hook-install` owns the JSON merge -- see rust/src/settings.rs for why that is
-# not a jq pipeline in here. Grok reads this same file for Claude Code compatibility and needs no
-# entry of its own (docs/2026-09-02-hook-wiring-correction.md §6).
-HOOK_SETTINGS="${CLAUDE_SKILL_HOME:-$HOME/.claude}/settings.json"
-# Codex loads a PreToolUse hook only from `[[hooks.PreToolUse]]` in this TOML file -- neither of the
-# JSON locations it might plausibly read (~/.codex/hooks/hooks.json, ~/.codex/hooks.json) is ever
-# consulted (docs/2026-09-02-hook-wiring-correction.md §12). `rust/src/settings_toml.rs` owns this
-# merge for the same reason `rust/src/settings.rs` owns the JSON one. Deployed unconditionally, same
-# as CODEX_SKILL_DEST above: harmless if Codex is not installed on this machine, and the alternative
-# is the exact failure this file is about -- a route wired only when someone remembers Codex exists.
-CODEX_HOOK_SETTINGS="${CODEX_HOME:-$HOME/.codex}/config.toml"
-# Kimi's own config file, and the third dialect: a flat top-level `[[hooks]]` array, not Codex's
-# nested groups. Both files are called config.toml, which is why `hook-install` now takes an
-# explicit --format instead of reading the extension.
-KIMI_HOOK_SETTINGS="${KIMI_CODE_HOME:-$HOME/.kimi-code}/config.toml"
+# not installed.
+#
+# Which harnesses ship, which file each one reads, which dialect it speaks and which subcommand each
+# event runs are all `HOOK_TARGETS` in rust/src/main.rs, reached through `hook-install --all`; the
+# settings path comes back in that call's reply and is recorded from there. This script held its own
+# copy of all four until 2026-09-03 and bash's copy was the one that shipped, so the binary's went
+# unexercised and rotted (docs/2026-09-03-installer-dedup-and-attribution.md §3). The three
+# `*_HOOK_SETTINGS` variables were what that copy left behind -- unread for a day, and the only
+# thing that noticed was the linter. The reasons behind each file live with the code that owns it:
+# rust/src/settings_toml.rs (why Codex reads only `[[hooks.PreToolUse]]` in config.toml),
+# rust/src/settings_kimi.rs (why Kimi's flat array is a third module and not a parameter), and
+# main.rs:582 (why Grok needs no entry of its own).
 WITH_HOOK=1
 WITH_XGREP=0
 
@@ -534,7 +531,7 @@ deploy_hook() {
   #
   # `--command-prefix` is the single thing only this script knows: the harness must run the *shim*
   # at $BIN_DIR/cort, not the real executable behind it, and `check_hook_at` verifies exactly that.
-  local line harness ev outcome settings detail
+  local harness ev outcome settings detail
   while IFS=$'\t' read -r harness ev outcome settings detail; do
     [ -n "$harness" ] || continue
     case "$outcome" in
