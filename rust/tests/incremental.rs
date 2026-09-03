@@ -780,15 +780,42 @@ const IGNORED_SAMPLE: &[(&str, &str)] = &[(
 #[test]
 fn an_indexed_file_git_will_not_speak_for_is_reexamined_when_it_changes() {
     let (_dir, root, mut db, _id, bin) = git_project(IGNORED_SAMPLE);
-    // Untracked and never mentioned by any diff, but not excluded by an ignore file the walk reads
-    // -- so a full pass indexes it and git still says nothing about it either way. That is the
-    // state this sweep exists for.
+    // An untracked file is listed by `ls-files --others`, so it is vouched for and reaches the
+    // ordinary candidate set -- a fixture built on one passes with this sweep deleted. The state
+    // the sweep exists for is the deliberate divergence the walk created: `walk_files` sets
+    // `git_global(false)` because a developer's global ignore file is not a property of the repo,
+    // while git's own `--exclude-standard` honours it. So a globally ignored path is walked and
+    // indexed, and git will not name it in any query.
     fs::create_dir_all(root.join("generated")).unwrap();
     fs::write(
         root.join("generated/gen.ts"),
         "export function generatedAlpha() { return 1; }\n",
     )
     .unwrap();
+    let global_ignore = root.join("global-ignore");
+    fs::write(&global_ignore, "generated/\n").unwrap();
+    git(
+        &root,
+        &[
+            "config",
+            "core.excludesFile",
+            global_ignore.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        !String::from_utf8(
+            Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(["ls-files", "--others", "--exclude-standard"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .contains("generated/gen.ts"),
+        "precondition: git must refuse to name the file"
+    );
     full_index(&mut db, &bin, &root).unwrap();
     let syms: Vec<String> = db
         .prepare("SELECT symbol_name FROM chunks WHERE file_path = 'generated/gen.ts'")
@@ -825,5 +852,48 @@ fn an_indexed_file_git_will_not_speak_for_is_reexamined_when_it_changes() {
         syms,
         vec!["generatedBeta".to_string()],
         "the old symbol must not survive at a line that no longer defines it"
+    );
+}
+
+/// A file the index holds, that is still on disk, and that the walk has stopped covering.
+///
+/// This is what every existing index looked like the moment `walk_files` began honouring ignore
+/// files: the build output it had already absorbed is still there, so the deletion sweep does not
+/// touch it, and `walk_files` no longer returns it, so `compute_stale` counts it as deleted --
+/// `index_is_stale` true on every call with no incremental pass able to clear it, and `impact`
+/// still printing a bundled copy as a caller. Only a full index repaired it, which is exactly the
+/// shape 51832ed6 fixed one layer down. The same thing happens to anyone who adds a path to
+/// `.gitignore` that cort had already indexed.
+///
+/// Removal rather than re-examination is the point: a path the screen has decided not to cover
+/// must leave the index, and the coverage screen reports it as `unindexed` from then on.
+#[test]
+fn an_indexed_file_the_walk_no_longer_covers_is_removed() {
+    let (_dir, root, mut db, project_id, bin) = git_project(IGNORED_SAMPLE);
+    fs::create_dir_all(root.join("generated")).unwrap();
+    fs::write(
+        root.join("generated/gen.ts"),
+        "export function generatedAlpha() { return 1; }\n",
+    )
+    .unwrap();
+    full_index(&mut db, &bin, &root).unwrap();
+    assert_eq!(
+        chunk_rows(&db, &project_id, "generated/gen.ts"),
+        1,
+        "precondition: the walk covered it when the index was built"
+    );
+
+    fs::write(root.join(".gitignore"), "generated/\n").unwrap();
+    let r = incremental_index(&mut db, &bin, &root).unwrap();
+    assert_eq!(
+        r.files_removed, 1,
+        "a path the screen no longer covers has to leave the index, not be refreshed in place"
+    );
+    assert_eq!(chunk_rows(&db, &project_id, "generated/gen.ts"), 0);
+    assert!(
+        !compute_stale(&db, &bin, &root, &project_id)
+            .unwrap()
+            .index_is_stale,
+        "and once it is gone the index is not permanently stale any more"
     );
 }

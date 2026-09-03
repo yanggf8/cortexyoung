@@ -9,7 +9,7 @@ use crate::db::{get_meta, set_meta, Db};
 use crate::graph::rebuild_relationships;
 use crate::indexer::{
     canonicalize_root, extract_one, full_index, git_head_of, insert_chunk, now_ms,
-    replace_file_raw_edges, FullIndexStats, IndexError, IGNORE_DIRS, SOURCE_EXT,
+    replace_file_raw_edges, walk_files, FullIndexStats, IndexError, IGNORE_DIRS, SOURCE_EXT,
 };
 use rusqlite::{params, OptionalExtension};
 use std::collections::BTreeSet;
@@ -355,14 +355,25 @@ pub fn incremental_index(
     // candidates.
     let mut deleted: Vec<String> = cands.deleted.clone();
     let mut changed: Vec<String> = cands.changed.clone();
+    // What the walk covers right now. `full_index` and `compute_stale` both decide membership from
+    // this, so a row the index holds that is no longer in it is a row the two sides disagree about,
+    // and `compute_stale` resolves that disagreement by calling the index stale -- forever, since
+    // nothing here was removing it. That is not hypothetical: it is what every index already
+    // holding build output looked like the moment `walk_files` began honouring ignore files, and
+    // what happens to anyone who adds an already-indexed path to `.gitignore`.
+    let covered: BTreeSet<String> = walk_files(&canon.path).into_iter().collect();
     for file_path in indexed_files(db, &canon.project_id)? {
-        if !canon.path.join(&file_path).exists() {
+        if !canon.path.join(&file_path).exists() || !covered.contains(&file_path) {
+            // Gone from disk, or gone from what this screen claims to read. Both leave the index;
+            // the second keeps the coverage report honest, which is where such a file belongs now
+            // (an `unindexed` row) rather than as a dependent nobody can go and check.
             if !deleted.contains(&file_path) {
                 deleted.push(file_path);
             }
         } else if !cands.vouched.contains(&file_path) && !changed.contains(&file_path) {
-            // Still on disk, and git will not speak for it either way -- gitignored, so absent
-            // from every diff and from `ls-files --others`. The narrowing has nothing to say, so
+            // Still on disk, still covered, and git will not speak for it either way -- the walk
+            // sets `git_global(false)` while git's `--exclude-standard` honours the global ignore
+            // file, so the two disagree about exactly these. The narrowing has nothing to say, so
             // it is examined every pass; `reindex_one_file` still compares the extraction hash, so
             // an unchanged one costs one hash and is skipped rather than rewritten.
             changed.push(file_path);

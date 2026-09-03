@@ -220,11 +220,11 @@ fn an_unreachable_stored_head_falls_back_to_hashing_every_file() {
 /// merely incomplete -- it is confidently incomplete.
 #[test]
 fn an_indexed_file_git_will_not_speak_for_is_stale_when_it_changes() {
-    // Not `.gitignore`d: `walk_files` honours ignore files as of 2026-09-03, so such a file is
-    // never indexed at all and shows up as a coverage `unindexed` row instead. What still lands in
-    // the index with git silent about it is an untracked path no ignore file names -- indexed by a
-    // full pass, absent from every diff and from `ls-files --others` once it is known. Same
-    // predicate, a fixture that still reaches it.
+    // Not `.gitignore`d -- `walk_files` honours ignore files as of 2026-09-03, so such a path is
+    // never indexed at all and surfaces as a coverage `unindexed` row. And not merely untracked
+    // either: `ls-files --others` names those, so they are vouched for and this predicate is never
+    // reached. What lands in the index with git silent is a path the *global* ignore file excludes
+    // -- `walk_files` sets `git_global(false)` on purpose, git's `--exclude-standard` does not.
     let (_dir, root, mut db, project_id, bin) = setup(&[(
         "src/helper.ts",
         "export function helper(n: number) { return n * 2; }\n",
@@ -235,6 +235,16 @@ fn an_indexed_file_git_will_not_speak_for_is_stale_when_it_changes() {
         "export function generatedAlpha() { return 1; }\n",
     )
     .unwrap();
+    let global_ignore = root.join("global-ignore");
+    fs::write(&global_ignore, "generated/\n").unwrap();
+    git(
+        &root,
+        &[
+            "config",
+            "core.excludesFile",
+            global_ignore.to_str().unwrap(),
+        ],
+    );
     cort::indexer::full_index(&mut db, &bin, &root).unwrap();
     assert!(
         !compute_stale(&db, &bin, &root, &project_id)
