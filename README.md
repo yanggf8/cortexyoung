@@ -92,7 +92,7 @@ never appears in its own report.
 - Downloads pinned `ast-grep` v0.45.2 prebuilt `app-<target>.zip` for your platform (Linux x86_64/aarch64, macOS x86_64/arm64) from GitHub Releases and verifies SHA-256 (repo-maintained; upstream publishes no checksums) — fail-closed: an empty or mismatched checksum refuses to install. Falls back to `cargo install ast-grep --version 0.45.2 --locked` (requires Rust 1.88+).
 - Builds `cort` from `rust/` with `cargo build --release --locked` on **every** run and installs the binary plus its ast-grep pack (`src/pack`, located at runtime via `CORT_PACK_DIR`) to `~/.local/share/cortexyoung/cort`, shimming `~/.cargo/bin/cort` or `~/.local/bin/cort`.
 - Deploys `skills/ast-grep/SKILL.md` to **both** agent homes — `~/.claude/skills/ast-grep/SKILL.md` and `~/.codex/skills/ast-grep/SKILL.md` (honouring `CODEX_HOME`) — **byte-for-byte the repo file**. The installer writes nothing inside the document: the frontmatter block holds keys only (`name`, `description`, and nothing of ours), both loaders anchor that fence to line 1, and `rust/tests/skill_format.rs` fails the build if a source stops parsing. Ownership lives in `.cortexyoung-managed` beside the skill, which records the SHA-256 of the bytes we deployed — so a hand-edit of a deployed `SKILL.md` reads as someone else's file and is refused, not silently overwritten. Edit `skills/<name>/SKILL.md` in this repo instead; one source feeds both homes. Preflights collisions before mutating: skips if hash-equal, replaces what it owns, refuses what it does not (use `--force` to backup and replace). Uninstall removes the document and its stamp, and nothing else.
-- Wires the `PreToolUse` hook into `~/.claude/settings.json`, `~/.codex/config.toml` **and** `~/.kimi-code/config.toml` in the **same run** as the skill (skip all three with `--no-hook`). `cort hook-install` takes an explicit `--format` — JSON via `rust/src/settings.rs`, Codex's nested TOML via `rust/src/settings_toml.rs`, Kimi's flat `[[hooks]]` TOML via `rust/src/settings_kimi.rs` — never `jq`: every one of them preserves the hooks you already have, rewrites our own entry when the binary moves instead of adding a second, collapses duplicates down to one, and refuses outright to overwrite a settings file it could not parse. (The format used to be read off the file extension. Two of these three files are called `config.toml`, so each caller now names its own.) Grok reads the same `settings.json` as Claude Code and needs no entry of its own. See [the hook section](#the-pretooluse-hook--the-retrospective-half-of-the-routing) for what it does at runtime. A hook that has to be wired by hand is a hook that stays unwired — that is not a hypothesis, it is what this repo measured on its own machine three times, once per harness.
+- Wires **two** hooks into `~/.claude/settings.json`, `~/.codex/config.toml` and `~/.kimi-code/config.toml` in the **same run** as the skill (skip all of them with `--no-hook`): a `PreToolUse` hook on the search tools that suggests `cort impact`, and a `PostToolUse` hook on the edit tools that runs `cort index --incremental` so the index tracks the tree instead of waiting for somebody to notice it is behind. `cort hook-install` takes an explicit `--format` and `--event` — JSON via `rust/src/settings.rs`, Codex's nested TOML via `rust/src/settings_toml.rs`, Kimi's flat `[[hooks]]` TOML via `rust/src/settings_kimi.rs` — never `jq`: every one of them preserves the hooks you already have, rewrites our own entry when the binary moves instead of adding a second, collapses duplicates down to one, refuses outright to overwrite a settings file it could not parse, and gives an install-then-uninstall cycle back byte for byte. (The format used to be read off the file extension. Two of these three files are called `config.toml`, so each caller now names its own.) Grok reads the same `settings.json` as Claude Code and needs no entry of its own. See [the hook section](#the-pretooluse-hook--the-retrospective-half-of-the-routing) for what they do at runtime. A hook that has to be wired by hand is a hook that stays unwired — that is not a hypothesis, it is what this repo measured on its own machine three times, once per harness.
 - Adds a single bounded idempotent `PATH` block to your shell profile (`.bashrc`/`.zshrc`/`.profile`) so `cort` and `ast-grep` are on `PATH`; removed on `--uninstall`.
 - Records ownership in `~/.local/share/cortexyoung/manifest` (v2 `key:value` lines) — uninstall only removes what it installed, never a pre-existing binary.
 
@@ -515,6 +515,26 @@ bound to that exact string, so moving the binary always invalidates it — and `
 not do is compute that hash itself: stamping "reviewed" on behalf of the thing being installed is
 the one thing the gate exists to prevent (`docs/2026-09-02-hook-wiring-correction.md` §14).
 
+
+**The second hook: telling the agent the index is behind was worth almost nothing, so it stopped
+telling and started fixing.** A `PostToolUse` hook on the edit tools runs `cort index --incremental`.
+The suggestion hook could already detect a stale index and all it could do was say so — measured on
+this machine, 19 `cort index` runs against 2,700+ hook fires in 90 days, and in the one live run
+where a model read the warning it re-ran its grep instead. Worse, the staleness it reports compares
+git heads, so the window in which a file is edited and not yet committed — most of the time anyone
+is working — read as fresh while the answers were already wrong. `--incremental` tracks file
+content, so it closes that window: 23–37ms when nothing changed, ~206ms after one edited file
+(~0.33s wall either way), against a 5-second budget, and after the tool call rather than before it.
+It refuses three things on purpose: it never creates an index where none existed, it gives up rather
+than wait for a busy database, and it is silent and exits 0 whatever happens — a `PostToolUse` hook
+reporting failure would put an error in front of you for a cache you did not ask about.
+
+**`./install.sh --check` also says which indexes are behind.** `cort projects` now carries `stale`
+and `exists` per project — it is the only thing that holds both the head a row was built at and the
+head its tree is on now — and `null`, never `false`, when the two cannot be compared. The check
+lists the stale ones and the ones whose directory is gone, and fails on neither: a stale index still
+answers and discloses `stale=true` while it does, and the refresh hook closes the gap from the next
+edit onward.
 **When it fires.** The first pipeline segment must be `rg`, `grep` or `egrep`; the pattern must
 resolve to a single symbol; and the search must look like a caller-set question. It stays silent
 on: any `-A`/`-B`/`-C` context flag (that is `cort context`'s question, not `impact`'s), searches
@@ -542,14 +562,16 @@ attributable to neither side. `cort usage` rolls up counts only; the outcome spl
 `cort-evals adopt-mine`, whose cross-check refuses to compare two sides drawn from different
 populations rather than quietly reporting a ratio across them.
 
-**Turning it off.** `./install.sh --no-hook` skips all three entries; `./install.sh --uninstall`
-unwires them; `./install.sh --check` prints `hook:`, `hook_codex:` and `hook_kimi:` with `(wired)`
-each — `hook_codex` reading `(wired, NOT TRUSTED — start codex once and review the hook)` while
-Codex has not been shown the entry — or names what is wrong with each independently. Those lines
-exist because the wiring silently went down on this repo's own machine more than once, nothing said
-so, and Codex's TOML entry was left deliberately hand-wired (not deployed by `install.sh`) for a
-full day before this document's §13 closed that gap — after which §14 found the deployed entry still
-inert, because `wired` had been answering a question one step short of the one that matters. See
+**Turning it off.** `./install.sh --no-hook` skips every entry; `./install.sh --uninstall` unwires
+them all and hands each file back exactly as it was found; `./install.sh --check` prints `hook:`,
+`hook_codex:`, `hook_kimi:` for the suggestion and `refresh:`, `refresh_codex:`, `refresh_kimi:` for
+the index refresh — the Codex lines reading `(wired, NOT TRUSTED — start codex once and review the
+hook)` while Codex has not been shown that entry — or names what is wrong with each independently.
+Six lines rather than one because a file can carry one of ours and not the other. Those lines exist
+because the wiring silently went down on this repo's own machine more than once, nothing said so,
+and Codex's TOML entry was left deliberately hand-wired (not deployed by `install.sh`) for a full day
+before this document's §13 closed that gap — after which §14 found the deployed entry still inert,
+because `wired` had been answering a question one step short of the one that matters. See
 `docs/2026-09-02-hook-wiring-correction.md`.
 
 ## Upstream credits

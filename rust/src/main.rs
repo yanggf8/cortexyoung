@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 // `hook-suggest` is here so its rows are recorded under their own name rather than `_unknown`:
 // whether the harness hook fires, and whether a fire is followed by an `impact` call, is the one
 // measurement that has a numerator. It is not a verb anyone types.
-const KNOWN_COMMANDS: [&str; 12] = [
+const KNOWN_COMMANDS: [&str; 13] = [
     "index",
     "status",
     "projects",
@@ -41,6 +41,7 @@ const KNOWN_COMMANDS: [&str; 12] = [
     "recall",
     "usage",
     "hook-suggest",
+    "hook-refresh",
     "hook-install",
 ];
 
@@ -59,6 +60,7 @@ fn usage_value() -> Value {
             "recall": "cort recall <query> [--limit <n>] [--content full] [-f json|lean]",
             "usage": "cort usage [days] [-f json|lean]",
             "hook-suggest": "cort hook-suggest  (PreToolUse hook: reads the harness payload on stdin, prints a suggestion or nothing; not a verb to type)",
+            "hook-refresh": "cort hook-refresh  (PostToolUse hook: brings this project's index up to the tree after an edit; silent, never creates an index; not a verb to type)",
             "hook-install": "cort hook-install [--settings <path>] [--command <cmd>] [--remove|--status]  (installer-invoked: wires hook-suggest into settings.json; not a verb to type)",
         },
         "env": {
@@ -341,6 +343,11 @@ struct HookInstallArgs {
     /// Take the entry back out instead of putting one in.
     #[arg(long = "remove")]
     remove: bool,
+    /// Which of the two hooks to act on: `pre` (the search suggestion) or `post` (the index
+    /// refresh). Defaults to `pre`, so every existing caller keeps its meaning. `--remove` ignores
+    /// it and takes both out, because uninstalling is one act.
+    #[arg(long = "event")]
+    event: Option<String>,
     /// Which settings dialect the target file speaks: `json` (Claude Code, and Grok through it),
     /// `codex` (nested `[[hooks.PreToolUse]]` groups), `kimi` (a flat `[[hooks]]` array). Defaults
     /// to the target's extension -- `.toml` means Codex, anything else JSON -- which held while
@@ -489,6 +496,7 @@ fn dispatch(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError> 
         Some("recall") => cmd_recall(&args[1..], usage),
         Some("usage") => cmd_usage(&args[1..], usage),
         Some("hook-suggest") => cmd_hook_suggest(&args[1..], usage),
+        Some("hook-refresh") => cmd_hook_refresh(&args[1..], usage),
         Some("hook-install") => cmd_hook_install(&args[1..], usage),
         other => Err(CortError::new(
             "unknown_command",
@@ -647,6 +655,76 @@ fn gate_already_fired(session_id: &str, symbol: &str) -> bool {
     line.push('\n');
     // A failed write is the same unrememberable deny as a missing directory.
     std::fs::write(&file, line).is_err()
+}
+
+/// A `PostToolUse` hook on the edit tools, not a verb anyone types. It brings this project's index
+/// up to the tree it now describes, and says nothing either way.
+///
+/// Why it exists. The `PreToolUse` hook could already tell that the index was behind, and all it
+/// could do was say so -- and measured, saying so is worth almost nothing: 19 `cort index` runs
+/// against 2,700+ hook fires in 90 days on this machine, and in the one live run where a model read
+/// the warning it re-ran its grep instead. Worse, the staleness that hook reports compares git
+/// heads, so the window in which a file is edited and not yet committed -- most of the time anyone
+/// is working -- reads as fresh while the answers are already wrong. That window is where the
+/// 2026-09-02 `impact` run put a caller at line 467 that was really at 482.
+///
+/// Three rules, and each one is a refusal:
+///
+/// * **It never creates an index.** No row in `projects` means this tree was never indexed on
+///   purpose, and a hook that starts indexing whatever directory an agent edited in would be a
+///   side effect nobody asked for. Same gate, same reason, as `hook-suggest`'s.
+/// * **It gives up rather than wait.** Another refresh, or a real `cort index`, may hold the write
+///   lock; a busy database is a reason to do nothing, not to block the agent's next tool call.
+///   Nothing is lost -- the next edit refreshes it.
+/// * **It is silent and always succeeds.** Exit 0, `{}` on stdout, whatever happened. A
+///   `PostToolUse` hook that reports failure would put an error in front of the user for a cache
+///   they did not ask about, on a tool call that already succeeded.
+///
+/// The cost was measured before it was built: 23-37ms when nothing changed (the common case, since
+/// most edits touch one file that is already current by the time a second tool call lands), ~206ms
+/// after one edited file. `incremental_index` does its work in transactions, so the harness killing
+/// this at its timeout rolls back rather than leaving a half-written graph.
+fn cmd_hook_refresh(_args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError> {
+    let quiet = |outcome: &str, usage: &mut UsageEvent| {
+        usage.args_summary = format!("outcome={outcome}");
+        Ok(Emit {
+            payload: json!({}),
+            format: Format::Lean,
+            render_command: Some("hook-refresh"),
+        })
+    };
+    // The payload is read and discarded: the harness already decided this was an edit tool by its
+    // matcher, and which file changed is `incremental_index`'s question, not ours.
+    let mut payload = String::new();
+    let _ = std::io::Read::read_to_string(&mut std::io::stdin(), &mut payload);
+
+    if index_state() == IndexState::Missing {
+        return quiet("no_index", usage);
+    }
+    // The same helpers `cmd_index` uses, deliberately: opening the database by anything other than
+    // `db_path_for` silently addresses a different file, which is exactly how the first version of
+    // this function reported success while refreshing nothing.
+    let Ok(bin) = pin_bin() else {
+        return quiet("no_ast_grep", usage);
+    };
+    let Ok((canon, mut db)) = open_project_tracked(&cwd(), usage) else {
+        return quiet("db_unavailable", usage);
+    };
+    match incremental_index(&mut db, &bin, &canon.path) {
+        Ok(r) if r.files_reindexed > 0 || r.files_removed > 0 => {
+            usage.args_summary = format!(
+                "outcome=refreshed reindexed={} removed={}",
+                r.files_reindexed, r.files_removed
+            );
+            Ok(Emit {
+                payload: json!({}),
+                format: Format::Lean,
+                render_command: Some("hook-refresh"),
+            })
+        }
+        Ok(_) => quiet("already_current", usage),
+        Err(_) => quiet("busy_or_failed", usage),
+    }
 }
 fn cmd_hook_suggest(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError> {
     let declared = HookSuggestArgs::try_parse_from(args.iter())
@@ -918,17 +996,26 @@ fn cmd_hook_install(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, Co
         })?,
     };
     let fmt = settings_format(&path, a.format.as_deref())?;
+    let event = match a.event.as_deref() {
+        None => cort::settings::HookEvent::Suggest,
+        Some(s) => cort::settings::HookEvent::parse(s).ok_or_else(|| {
+            CortError::new(
+                "bad_flag",
+                json!({ "message": format!("--event must be pre or post, not `{s}`") }),
+            )
+        })?,
+    };
     if a.status {
         // `trusted` is `null`, never `false`, wherever the question does not apply: Claude Code and
         // Grok have no trust gate, and a file with no entry of ours has nothing to be trusted. Only
         // a wired Codex entry can answer it, and `false` there is a hook that will not run.
         let (wired, trusted) = match fmt {
-            SettingsFormat::CodexToml => match settings_toml::installed_entry(&path) {
+            SettingsFormat::CodexToml => match settings_toml::installed_entry(&path, event) {
                 Some((command, trusted)) => (Some(command), Some(trusted)),
                 None => (None, None),
             },
-            SettingsFormat::KimiToml => (settings_kimi::installed_command(&path), None),
-            SettingsFormat::Json => (settings::installed_command(&path), None),
+            SettingsFormat::KimiToml => (settings_kimi::installed_command(&path, event), None),
+            SettingsFormat::Json => (settings::installed_command(&path, event), None),
         };
         return Ok(Emit {
             render_command: None,
@@ -965,13 +1052,13 @@ fn cmd_hook_install(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, Co
             let exe = std::env::current_exe().map_err(|e| {
                 CortError::new("file_not_found", json!({ "message": e.to_string() }))
             })?;
-            format!("{} hook-suggest", exe.to_string_lossy())
+            format!("{} {}", exe.to_string_lossy(), event.subcommand())
         }
     };
     let out = match fmt {
-        SettingsFormat::CodexToml => settings_toml::install_hook(&path, &command).map_err(map_toml_settings_err)?,
-        SettingsFormat::KimiToml => settings_kimi::install_hook(&path, &command).map_err(map_toml_settings_err)?,
-        SettingsFormat::Json => settings::install_hook(&path, &command).map_err(map_json_settings_err)?,
+        SettingsFormat::CodexToml => settings_toml::install_hook(&path, &command, event).map_err(map_toml_settings_err)?,
+        SettingsFormat::KimiToml => settings_kimi::install_hook(&path, &command, event).map_err(map_toml_settings_err)?,
+        SettingsFormat::Json => settings::install_hook(&path, &command, event).map_err(map_json_settings_err)?,
     };
     Ok(Emit {
         render_command: None,
@@ -1114,6 +1201,17 @@ fn cmd_projects(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, CortEr
     let rows: Vec<Value> = list_projects()
         .into_iter()
         .map(|r| {
+            // `stale` is what an installer or a person actually wants to know, and it is only
+            // answerable here: the row stores the head it was built at, and the tree knows the head
+            // it is on now. `null`, never `false`, when the two cannot be compared -- the directory
+            // is gone, it is not a git tree, or `rev-parse` did not answer inside the budget. A
+            // project that cannot be checked is not a project that is fresh, and saying so is the
+            // same discipline `index_state` and the coverage screen already keep.
+            let exists = Path::new(&r.path).is_dir();
+            let stale = match (r.git_head.as_deref(), git_head_quickly(Path::new(&r.path))) {
+                (Some(stored), Some(now)) => Some(stored != now),
+                _ => None,
+            };
             json!({
                 "project_id": r.project_id,
                 "name": r.name,
@@ -1121,6 +1219,8 @@ fn cmd_projects(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, CortEr
                 "git_head": r.git_head,
                 "last_indexed_at": r.last_indexed_at,
                 "db_path": r.db_path,
+                "exists": exists,
+                "stale": stale,
             })
         })
         .collect();

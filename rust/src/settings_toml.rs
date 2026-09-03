@@ -27,7 +27,8 @@
 //! (`docs/2026-09-02-hook-wiring-correction.md` §7, §9), and a second copy of it here is a second
 //! place for the same bug to reappear.
 
-use crate::settings::{is_ours, Change, Outcome};
+use crate::settings::{is_ours_for, HookEvent, EDIT_MATCHER, EVENTS};
+use crate::settings::{Change, Outcome};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -35,6 +36,13 @@ use toml_edit::{value, ArrayOfTables, DocumentMut, Item, Table};
 
 /// The tool whose payload `hook-suggest` can read -- same rule as the JSON side.
 const MATCHER: &str = "Bash";
+
+fn matcher_for(event: HookEvent) -> &'static str {
+    match event {
+        HookEvent::Suggest => MATCHER,
+        HookEvent::Refresh => EDIT_MATCHER,
+    }
+}
 
 /// Seconds, matching `settings::TIMEOUT_SECS`. Kept as a separate constant rather than a shared one:
 /// the two modules do not share a value type (`i64` here, `u64` there), and coupling them on a
@@ -87,7 +95,7 @@ fn hook_command_table(command: &str) -> Table {
 /// Is this hook entry exactly the one `install_hook` would write for `command` right now? Used to
 /// tell "nothing to do" apart from "ours, but stale" without string-comparing serialized TOML, which
 /// would trip on formatting toml_edit itself introduces.
-fn is_canonical(h: &Table, command: &str) -> bool {
+fn is_canonical(h: &Table, command: &str, _event: HookEvent) -> bool {
     h.get("command").and_then(Item::as_str) == Some(command)
         && h.get("type").and_then(Item::as_str) == Some("command")
         && h.get("timeout").and_then(Item::as_integer) == Some(TIMEOUT_SECS)
@@ -134,7 +142,7 @@ fn backup(path: &Path) -> Result<Option<PathBuf>, SettingsError> {
 /// it is there with the wrong shape. Mirrors `settings::pre_tool_use`'s refusal rule: a `hooks` that
 /// already holds something other than a table, or a `PreToolUse` that already holds something other
 /// than an array of tables, is a file this module does not understand.
-fn pre_tool_use(doc: &mut DocumentMut) -> Result<&mut ArrayOfTables, SettingsError> {
+fn event_list(doc: &mut DocumentMut, event: HookEvent) -> Result<&mut ArrayOfTables, SettingsError> {
     let root = doc.as_table_mut();
     let hooks_item = root.entry("hooks").or_insert(Item::Table(Table::new()));
     if !hooks_item.is_table() {
@@ -144,23 +152,27 @@ fn pre_tool_use(doc: &mut DocumentMut) -> Result<&mut ArrayOfTables, SettingsErr
     }
     let hooks_table = hooks_item.as_table_mut().expect("hooks is a table");
     let pre = hooks_table
-        .entry("PreToolUse")
+        .entry(event.name())
         .or_insert(Item::ArrayOfTables(ArrayOfTables::new()));
     if !pre.is_array_of_tables() {
-        return Err(SettingsError::Unparsable(
-            "`hooks.PreToolUse` is present but is not an array of tables; refusing to overwrite it"
-                .into(),
-        ));
+        return Err(SettingsError::Unparsable(format!(
+            "`hooks.{}` is present but is not an array of tables; refusing to overwrite it",
+            event.name()
+        )));
     }
     Ok(pre
         .as_array_of_tables_mut()
-        .expect("PreToolUse is an array of tables"))
+        .expect("the event list is an array of tables"))
 }
 
 /// Add (or refresh) the `PreToolUse` group that runs `command`.
-pub fn install_hook(path: &Path, command: &str) -> Result<Outcome, SettingsError> {
+pub fn install_hook(
+    path: &Path,
+    command: &str,
+    event: HookEvent,
+) -> Result<Outcome, SettingsError> {
     let mut doc = read_doc(path)?;
-    let list = pre_tool_use(&mut doc)?;
+    let list = event_list(&mut doc, event)?;
 
     let mut seen_ours = false;
     let mut found_same = false;
@@ -179,7 +191,7 @@ pub fn install_hook(path: &Path, command: &str) -> Result<Outcome, SettingsError
             let Some(cur) = h.get("command").and_then(Item::as_str).map(str::to_string) else {
                 continue;
             };
-            if !is_ours(&cur) {
+            if !is_ours_for(&cur, event) {
                 continue;
             }
             // A file can already hold more than one of ours. Keep the first, drop the rest, so a
@@ -191,7 +203,7 @@ pub fn install_hook(path: &Path, command: &str) -> Result<Outcome, SettingsError
                 continue;
             }
             seen_ours = true;
-            if is_canonical(h, command) {
+            if is_canonical(h, command, event) {
                 found_same = true;
             } else {
                 *h = hook_command_table(command);
@@ -222,7 +234,7 @@ pub fn install_hook(path: &Path, command: &str) -> Result<Outcome, SettingsError
         Change::Updated
     } else {
         let mut group = Table::new();
-        group.insert("matcher", value(MATCHER));
+        group.insert("matcher", value(matcher_for(event)));
         let mut hooks = ArrayOfTables::new();
         hooks.push(hook_command_table(command));
         group.insert("hooks", Item::ArrayOfTables(hooks));
@@ -246,9 +258,10 @@ pub fn remove_hook(path: &Path) -> Result<Outcome, SettingsError> {
         });
     }
     let mut doc = read_doc(path)?;
-    let list = pre_tool_use(&mut doc)?;
-
     let mut removed = false;
+
+    for event in EVENTS {
+    let list = event_list(&mut doc, event)?;
     let mut empty_groups: Vec<usize> = Vec::new();
     for gi in 0..list.len() {
         let group = list.get_mut(gi).expect("gi in range");
@@ -261,7 +274,7 @@ pub fn remove_hook(path: &Path) -> Result<Outcome, SettingsError> {
             let h = hooks.get_mut(hi).expect("hi in range");
             if h.get("command")
                 .and_then(Item::as_str)
-                .is_some_and(is_ours)
+                .is_some_and(|c| is_ours_for(c, event))
             {
                 drop_idx.push(hi);
             }
@@ -279,6 +292,7 @@ pub fn remove_hook(path: &Path) -> Result<Outcome, SettingsError> {
     for gi in empty_groups.into_iter().rev() {
         list.remove(gi);
     }
+    }
 
     if !removed {
         return Ok(Outcome {
@@ -288,21 +302,7 @@ pub fn remove_hook(path: &Path) -> Result<Outcome, SettingsError> {
     }
     // Leave no empty scaffolding behind: an install that added `hooks.PreToolUse` to a file that
     // had neither should not leave them once it is uninstalled.
-    let drop_pre = doc
-        .as_table()
-        .get("hooks")
-        .and_then(Item::as_table)
-        .and_then(|h| h.get("PreToolUse"))
-        .and_then(Item::as_array_of_tables)
-        .is_some_and(|a| a.len() == 0);
-    if drop_pre {
-        if let Some(h) = doc.as_table_mut().get_mut("hooks").and_then(Item::as_table_mut) {
-            h.remove("PreToolUse");
-            if h.is_empty() {
-                doc.as_table_mut().remove("hooks");
-            }
-        }
-    }
+    prune_empty_scaffolding(&mut doc);
 
     let bak = backup(path)?;
     write_doc(path, &doc)?;
@@ -328,10 +328,10 @@ pub fn remove_hook(path: &Path) -> Result<Outcome, SettingsError> {
 /// `--check` answered `wired` for an entry in exactly that state, and the hook had never once run
 /// on a normally-invoked Codex -- the same class of lie as `wired: false` while it fired hundreds
 /// of times (`docs/2026-09-02-hook-wiring-correction.md` §7, §9), pointing the other way.
-pub fn installed_entry(path: &Path) -> Option<(String, bool)> {
+pub fn installed_entry(path: &Path, event: HookEvent) -> Option<(String, bool)> {
     let doc = read_doc(path).ok()?;
     let hooks = doc.as_table().get("hooks")?.as_table()?;
-    let list = hooks.get("PreToolUse")?.as_array_of_tables()?;
+    let list = hooks.get(event.name())?.as_array_of_tables()?;
     for (gi, group) in list.iter().enumerate() {
         // `continue`, not `?`: a group without a hooks array is somebody else's malformed entry,
         // and letting it end the scan would report `wired: false` for an entry sitting right after
@@ -341,8 +341,8 @@ pub fn installed_entry(path: &Path) -> Option<(String, bool)> {
         };
         for (hi, h) in entries.iter().enumerate() {
             if let Some(c) = h.get("command").and_then(Item::as_str) {
-                if is_ours(c) {
-                    return Some((c.to_string(), trusted_at(hooks, gi, hi)));
+                if is_ours_for(c, event) {
+                    return Some((c.to_string(), trusted_at(hooks, gi, hi, event)));
                 }
             }
         }
@@ -351,8 +351,8 @@ pub fn installed_entry(path: &Path) -> Option<(String, bool)> {
 }
 
 /// Our entry's command alone, for callers that have no use for the trust half.
-pub fn installed_command(path: &Path) -> Option<String> {
-    installed_entry(path).map(|(command, _)| command)
+pub fn installed_command(path: &Path, event: HookEvent) -> Option<String> {
+    installed_entry(path, event).map(|(command, _)| command)
 }
 
 /// Does `hooks.state` carry a `trusted_hash` for the entry at `gi`/`hi`?
@@ -368,11 +368,15 @@ pub fn installed_command(path: &Path) -> Option<String> {
 /// recompute, so an entry trusted under an *older* command reads here exactly like a current one.
 /// That is why `install.sh` says trust has to be renewed at the moment it rewrites the command,
 /// instead of trying to detect it afterwards.
-fn trusted_at(hooks: &Table, gi: usize, hi: usize) -> bool {
+fn trusted_at(hooks: &Table, gi: usize, hi: usize, event: HookEvent) -> bool {
     let Some(state) = hooks.get("state").and_then(Item::as_table) else {
         return false;
     };
-    let suffix = format!(":pre_tool_use:{gi}:{hi}");
+    let key = match event {
+        HookEvent::Suggest => "pre_tool_use",
+        HookEvent::Refresh => "post_tool_use",
+    };
+    let suffix = format!(":{key}:{gi}:{hi}");
     state.iter().any(|(key, entry)| {
         key.ends_with(&suffix)
             && entry
@@ -381,4 +385,28 @@ fn trusted_at(hooks: &Table, gi: usize, hi: usize) -> bool {
                 .and_then(Item::as_str)
                 .is_some_and(|h| !h.is_empty())
     })
+}
+
+/// Drop any event list this module created and then left empty, and `hooks` itself once nothing of
+/// ours or anyone else's is left in it.
+///
+/// `event_list` creates the key it is asked for, which is what an installer wants and what an
+/// uninstaller must undo: scanning both events on the way out would otherwise leave behind an empty
+/// `hooks.PostToolUse` in a file that never had one. Only empty lists go, and only after the scan
+/// -- somebody else's populated `PostToolUse` is not ours to touch.
+fn prune_empty_scaffolding(doc: &mut DocumentMut) {
+    let Some(h) = doc.as_table_mut().get_mut("hooks").and_then(Item::as_table_mut) else {
+        return;
+    };
+    for event in EVENTS {
+        if h.get(event.name())
+            .and_then(Item::as_array_of_tables)
+            .is_some_and(|a| a.len() == 0)
+        {
+            h.remove(event.name());
+        }
+    }
+    if h.is_empty() {
+        doc.as_table_mut().remove("hooks");
+    }
 }

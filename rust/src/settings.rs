@@ -79,6 +79,55 @@ const MATCHER: &str = "Bash";
 /// case can never hold up the agent's tool call.
 const TIMEOUT_SECS: u64 = 5;
 
+
+/// The tools whose payload `hook-refresh` reacts to -- the ones that change the tree.
+///
+/// A second event was added on 2026-09-03. The first one only ever *told* the agent the index was
+/// behind, and measured that advice is worth almost nothing: 19 `index` runs against 2,700+ hook
+/// fires in 90 days on this machine. Worse, the staleness it reports compares commits, so the whole
+/// window in which a file is edited and not yet committed -- most of the time anyone is working --
+/// looked fresh while the answers were already wrong.
+///
+/// `cort index --incremental` is cheap enough to run on every edit instead: measured 23-37ms when
+/// nothing changed, ~206ms after one edited file, and it tracks file *content*, so it closes that
+/// window rather than the commit-shaped half of it.
+pub(crate) const EDIT_MATCHER: &str = "Edit|Write|MultiEdit|NotebookEdit";
+
+/// Which of the two hooks an entry is, everywhere that has to tell them apart.
+///
+/// The subcommand is the discriminator, not the event name: in Kimi's flat `[[hooks]]` array both
+/// of ours live in the same list and only the command line says which is which.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum HookEvent {
+    /// Before a search: suggest `cort impact`.
+    Suggest,
+    /// After an edit: bring the index up to the tree.
+    Refresh,
+}
+
+pub const EVENTS: [HookEvent; 2] = [HookEvent::Suggest, HookEvent::Refresh];
+
+impl HookEvent {
+    pub fn name(self) -> &'static str {
+        match self {
+            HookEvent::Suggest => "PreToolUse",
+            HookEvent::Refresh => "PostToolUse",
+        }
+    }
+    pub fn subcommand(self) -> &'static str {
+        match self {
+            HookEvent::Suggest => "hook-suggest",
+            HookEvent::Refresh => "hook-refresh",
+        }
+    }
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "pre" | "suggest" | "PreToolUse" => Some(HookEvent::Suggest),
+            "post" | "refresh" | "PostToolUse" => Some(HookEvent::Refresh),
+            _ => None,
+        }
+    }
+}
 /// The default settings file, honouring the same override the installer uses for the skill
 /// destination so a test (or a second agent home) never has to touch the real one.
 pub fn default_settings_path() -> Option<PathBuf> {
@@ -106,20 +155,30 @@ pub fn default_settings_path() -> Option<PathBuf> {
 /// `./install.sh`. This module's first promise is that every hook the user already has survives,
 /// and that promise is only ever as good as this predicate.
 pub(crate) fn is_ours(command: &str) -> bool {
+    ours_subcommand(command).is_some()
+}
+
+/// Is this entry ours *for this event*? Both of our commands satisfy `is_ours`, and in Kimi's flat
+/// `[[hooks]]` array they sit in the same list -- so installing one must never rewrite the other.
+pub(crate) fn is_ours_for(command: &str, event: HookEvent) -> bool {
+    ours_subcommand(command) == Some(event)
+}
+
+/// Which of our subcommands a hook command line runs, by the same token rule.
+pub(crate) fn ours_subcommand(command: &str) -> Option<HookEvent> {
     let tokens: Vec<&str> = command
         .split_whitespace()
         .map(|t| t.trim_matches(|c| c == '"' || c == '\''))
         .collect();
-    tokens.iter().enumerate().any(|(i, t)| {
-        if *t != "hook-suggest" {
-            return false;
-        }
-        match i.checked_sub(1).map(|prev| tokens[prev]) {
+    tokens.iter().enumerate().find_map(|(i, t)| {
+        let event = EVENTS.into_iter().find(|e| e.subcommand() == *t)?;
+        let ok = match i.checked_sub(1).map(|prev| tokens[prev]) {
             // A bare `hook-suggest` resolved through PATH -- the one shape with no binary token in
             // front of it. Never a path: `/opt/vendor/bin/hook-suggest` is not this token at all.
             None => true,
             Some(prev) => prev == "cort" || prev.ends_with("/cort"),
-        }
+        };
+        ok.then_some(event)
     })
 }
 
@@ -133,9 +192,16 @@ fn hook_command_entry(command: &str) -> Value {
     })
 }
 
-fn hook_entry(command: &str) -> Value {
+fn matcher_for(event: HookEvent) -> &'static str {
+    match event {
+        HookEvent::Suggest => MATCHER,
+        HookEvent::Refresh => EDIT_MATCHER,
+    }
+}
+
+fn hook_entry(command: &str, event: HookEvent) -> Value {
     json!({
-        "matcher": MATCHER,
+        "matcher": matcher_for(event),
         "hooks": [hook_command_entry(command)],
     })
 }
@@ -198,7 +264,10 @@ fn backup(path: &Path) -> Result<Option<PathBuf>, SettingsError> {
 /// level in: a `hooks` that is a string is a file we do not understand, and overwriting it discards
 /// data the user has no reason to go looking for. Claude Code's schema does not produce that shape,
 /// which is precisely why nobody would notice.
-fn pre_tool_use(root: &mut Map<String, Value>) -> Result<&mut Vec<Value>, SettingsError> {
+fn event_list(
+    root: &mut Map<String, Value>,
+    event: HookEvent,
+) -> Result<&mut Vec<Value>, SettingsError> {
     let hooks = root
         .entry("hooks")
         .or_insert_with(|| Value::Object(Map::new()));
@@ -209,14 +278,15 @@ fn pre_tool_use(root: &mut Map<String, Value>) -> Result<&mut Vec<Value>, Settin
     }
     let obj = hooks.as_object_mut().expect("hooks is an object");
     let entry = obj
-        .entry("PreToolUse")
+        .entry(event.name())
         .or_insert_with(|| Value::Array(Vec::new()));
     if !entry.is_array() {
-        return Err(SettingsError::Unparsable(
-            "`hooks.PreToolUse` is present but is not an array; refusing to overwrite it".into(),
-        ));
+        return Err(SettingsError::Unparsable(format!(
+            "`hooks.{}` is present but is not an array; refusing to overwrite it",
+            event.name()
+        )));
     }
-    Ok(entry.as_array_mut().expect("PreToolUse is an array"))
+    Ok(entry.as_array_mut().expect("the event list is an array"))
 }
 
 /// The outcome of a call, with the backup path when one was taken.
@@ -227,9 +297,13 @@ pub struct Outcome {
 }
 
 /// Add (or refresh) the `PreToolUse` entry that runs `command`.
-pub fn install_hook(path: &Path, command: &str) -> Result<Outcome, SettingsError> {
+pub fn install_hook(
+    path: &Path,
+    command: &str,
+    event: HookEvent,
+) -> Result<Outcome, SettingsError> {
     let mut root = read_root(path)?;
-    let list = pre_tool_use(&mut root)?;
+    let list = event_list(&mut root, event)?;
 
     let canonical = hook_command_entry(command);
     let mut seen_ours = false;
@@ -245,7 +319,7 @@ pub fn install_hook(path: &Path, command: &str) -> Result<Outcome, SettingsError
             let Some(cur) = h.get("command").and_then(Value::as_str) else {
                 return true;
             };
-            if !is_ours(cur) {
+            if !is_ours_for(cur, event) {
                 return true;
             }
             // A file can already hold more than one of ours -- a hand-wired one did, which is what
@@ -290,7 +364,7 @@ pub fn install_hook(path: &Path, command: &str) -> Result<Outcome, SettingsError
     let change = if changed {
         Change::Updated
     } else {
-        list.push(hook_entry(command));
+        list.push(hook_entry(command, event));
         Change::Installed
     };
     let bak = backup(path)?;
@@ -301,7 +375,10 @@ pub fn install_hook(path: &Path, command: &str) -> Result<Outcome, SettingsError
     })
 }
 
-/// Take our entry back out, leaving every other hook — and any group we shared — intact.
+/// Take our entries back out, leaving every other hook — and any group we shared — intact.
+///
+/// Both events in one pass, and one backup: uninstalling is a single act, and writing the file
+/// twice would leave a backup of a half-uninstalled state that nothing would ever want.
 pub fn remove_hook(path: &Path) -> Result<Outcome, SettingsError> {
     if !path.exists() {
         return Ok(Outcome {
@@ -310,35 +387,41 @@ pub fn remove_hook(path: &Path) -> Result<Outcome, SettingsError> {
         });
     }
     let mut root = read_root(path)?;
-    let list = pre_tool_use(&mut root)?;
-
     let mut removed = false;
-    let mut we_emptied: Vec<usize> = Vec::new();
-    for (idx, group) in list.iter_mut().enumerate() {
-        let Some(hooks) = group.get_mut("hooks").and_then(Value::as_array_mut) else {
-            continue;
-        };
-        let before = hooks.len();
-        hooks.retain(|h| {
-            !h.get("command")
-                .and_then(Value::as_str)
-                .is_some_and(is_ours)
-        });
-        if hooks.len() != before {
-            removed = true;
-            if hooks.is_empty() {
-                we_emptied.push(idx);
+
+    for event in EVENTS {
+        let list = event_list(&mut root, event)?;
+        let mut we_emptied: Vec<usize> = Vec::new();
+        for (idx, group) in list.iter_mut().enumerate() {
+            let Some(hooks) = group.get_mut("hooks").and_then(Value::as_array_mut) else {
+                continue;
+            };
+            let before = hooks.len();
+            hooks.retain(|h| {
+                !h.get("command")
+                    .and_then(Value::as_str)
+                    .is_some_and(|c| is_ours_for(c, event))
+            });
+            if hooks.len() != before {
+                removed = true;
+                if hooks.is_empty() {
+                    we_emptied.push(idx);
+                }
             }
         }
-    }
-    // A group *this call* emptied was ours and goes. The sweep used to be unconditional, which
-    // took the user's own empty groups with it -- and, once `PreToolUse` was empty as a result,
-    // the whole `hooks` key. Uninstalling our hook is not licence to tidy someone else's file.
-    for idx in we_emptied.iter().rev() {
-        list.remove(*idx);
+        // A group *this call* emptied was ours and goes. The sweep used to be unconditional, which
+        // took the user's own empty groups with it -- and, once the event list was empty as a
+        // result, the whole `hooks` key. Uninstalling our hook is not licence to tidy someone
+        // else's file.
+        for idx in we_emptied.iter().rev() {
+            list.remove(*idx);
+        }
     }
 
     if !removed {
+        // `event_list` creates the key it was asked for, so a file we changed nothing in must not
+        // be left carrying scaffolding this call invented.
+        prune_empty_scaffolding(&mut root);
         return Ok(Outcome {
             change: Change::NotPresent,
             backup: None,
@@ -346,19 +429,7 @@ pub fn remove_hook(path: &Path) -> Result<Outcome, SettingsError> {
     }
     // Leave no empty scaffolding behind: an install that added `hooks.PreToolUse` to a file that
     // had neither should not leave them once it is uninstalled.
-    let drop_pre = root
-        .get("hooks")
-        .and_then(|h| h.get("PreToolUse"))
-        .and_then(Value::as_array)
-        .is_some_and(Vec::is_empty);
-    if drop_pre {
-        if let Some(h) = root.get_mut("hooks").and_then(Value::as_object_mut) {
-            h.remove("PreToolUse");
-            if h.is_empty() {
-                root.remove("hooks");
-            }
-        }
-    }
+    prune_empty_scaffolding(&mut root);
 
     let bak = backup(path)?;
     write_root(path, &root)?;
@@ -368,11 +439,29 @@ pub fn remove_hook(path: &Path) -> Result<Outcome, SettingsError> {
     })
 }
 
+/// Drop any of our event lists that are now empty, and `hooks` itself once nothing is left in it.
+fn prune_empty_scaffolding(root: &mut Map<String, Value>) {
+    let Some(h) = root.get_mut("hooks").and_then(Value::as_object_mut) else {
+        return;
+    };
+    for event in EVENTS {
+        if h.get(event.name())
+            .and_then(Value::as_array)
+            .is_some_and(Vec::is_empty)
+        {
+            h.remove(event.name());
+        }
+    }
+    if h.is_empty() {
+        root.remove("hooks");
+    }
+}
+
 /// Is our entry currently configured, and with which command? Used by `install.sh --check`, which
 /// must be able to say "the hook is wired" without mutating anything.
-pub fn installed_command(path: &Path) -> Option<String> {
+pub fn installed_command(path: &Path, event: HookEvent) -> Option<String> {
     let root = read_root(path).ok()?;
-    let list = root.get("hooks")?.get("PreToolUse")?.as_array()?;
+    let list = root.get("hooks")?.get(event.name())?.as_array()?;
     for group in list {
         // `continue`, not `?`: a group without a hooks array is somebody else's malformed entry,
         // and letting it end the scan would report `wired: false` for an entry sitting right
@@ -382,7 +471,7 @@ pub fn installed_command(path: &Path) -> Option<String> {
         };
         for h in hooks {
             if let Some(c) = h.get("command").and_then(Value::as_str) {
-                if is_ours(c) {
+                if is_ours_for(c, event) {
                     return Some(c.to_string());
                 }
             }

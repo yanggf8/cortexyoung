@@ -780,3 +780,81 @@ doc、測試、文件裡的提及排除)。稍早那次 stub 實測它是真的�
 
 `tests/chunker.rs` 或 `tests/coverage.rs` 之中有一條偶發失敗,出現過一次,之後連跑七次未重現。範圍
 縮到兩個 suite,原因未知。
+
+## 17. 第二個事件:說索引落後,不如把它補上(2026-09-03 02:00-05:30)
+
+§16 記了一個開始收資料的裝置。收到的第一筆資料是關於這份文件自己的:**「叫 agent 去重建索引」這件事
+基本上沒有發生過。**
+
+- 90 天內 `cort index` 跑過 **19 次**,`hook-suggest` 開火 **2,700+ 次**。
+- §16 的實測裡,模型讀到了 stale 警告,然後重發 grep、自己推理完。
+
+而且問題比「沒人照做」更深一層:**hook 的 stale 判定只比 commit**
+(`index_state` 拿 `git_head` 對 `git_head`),所以**檔案改了還沒 commit 的那整段時間 —— 也就是實際
+在工作的絕大多數時間 —— 索引已經錯了,但 hook 什麼都不會說。** §16 那個「caller 在 467、實際在 482」
+就是在這種窗口裡產生的。
+
+### 先量,再決定掛哪裡
+
+`cort index --incremental` 的成本(在動工之前量的):
+
+| 情境 | 內部耗時 | 看到變更 |
+|---|---|---|
+| 無變更(cortexyoung,70 檔) | 23-37ms | `files_examined: 0` |
+| 無變更(cct,183 檔) | 37ms | 0 |
+| `touch` 只改 mtime | 27ms | 0(正確——內容沒變) |
+| **未 commit 的真實修改** | **206ms** | `files_examined: 1, reindexed: 1` |
+
+關鍵是最後一列:`--incremental` 跟著**內容**走,不是只跟 commit,所以它補的正好是上面那個窗口。
+實際 wall time 約 0.33 秒(`pin_bin` 要跑一次 `ast-grep --version`),仍遠低於 5 秒預算。
+
+掛在 `PostToolUse` + `matcher = "Edit|Write|MultiEdit|NotebookEdit"`,不掛 idle/Stop:**四個 harness
+都有 `PostToolUse`**(Stop 只有 Claude Code 有,Kimi 的事件表裡沒有),而且它只在樹真的變了才觸發。
+輸出被丟棄無所謂——要的是副作用。
+
+### `cort hook-refresh`:三條規則,每一條都是拒絕
+
+* **絕不建立索引。** `projects` 沒有這個 tree 的列,就代表它從來沒有被刻意索引過;一個 hook 因為
+  agent 編輯了某個目錄就開始索引它,是沒人要求過的副作用。同一道閘、同一個理由,跟 `hook-suggest` 一樣。
+* **拿不到鎖就放棄,不等。** 另一個 refresh 或一個真正的 `cort index` 可能握著寫鎖;資料庫忙碌是
+  「這次不做」的理由,不是阻塞 agent 下一個工具呼叫的理由。什麼都沒損失——下一次編輯就補上。
+* **永遠安靜、永遠成功。** 不論發生什麼都 exit 0、stdout 印 `{}`。一個 `PostToolUse` hook 去為一個
+  使用者根本沒問的 cache 報錯,是把噪音塞進一個已經成功的工具呼叫。
+
+`incremental_index` 在 transaction 裡做事,所以 harness 逾時砍掉它是 rollback,不是留下半寫的圖。
+
+### 一條規則,兩個事件:辨識靠子命令
+
+三個 settings module 都參數化到 `HookEvent`。JSON 與 Codex 側兩個 entry 各住自己的事件 key,天然分開;
+**Kimi 的扁平 `[[hooks]]` 裡兩個是鄰居,只有指令行說得出誰是誰**——所以 `is_ours` 改成回答
+「這是我們的哪一個」(`ours_subcommand`),而 install/status 一律用 `is_ours_for(command, event)`。
+釘住的測試:裝一個不會動到另一個、搬 binary 只更新對應那個、`--remove` 兩個一起走而別人的留著。
+
+`--format` 的三向分流照舊,manifest 不需要新 key:兩個事件住在同一個檔案裡,而 manifest 記的是檔案。
+
+### 這一輪自己造成、被抓到、修好的兩件事
+
+**`push_after_trailing` 讓移除吃掉別人的註解。** §16 那個把 trailer 搬到我們 entry 前面的修法,安裝
+這一半是對的,移除這一半不是:那行 `# === END kimi-plugin-cc-managed … ===` 變成我們 entry 的 prefix
+裝飾,所以刪 entry 就把它一起刪了。決定性重現:
+
+```
+起始:     markers=2 ours=0
+裝 pre:   markers=2 ours=1
+裝 post:  markers=2 ours=2
+移除:     markers=1 ours=0   ← bug
+```
+
+實機上整個圍欄(BEGIN、說明、END)都掉了,只剩 plugin 裸露的 entry——而那個 block 的註解自己寫著
+「Without this block the plugin's safety contract collapses」,他們的 uninstaller 靠這對 marker 找
+自己的東西。修法是移除時把 entry 的 prefix 裝飾**還回 document trailer**。測試斷言的是整個檔案字串
+相等,不是「marker 還在某處」,並且連跑三輪不變——每輪多一個空行是同一個 bug 的慢速版。實機圍欄已用
+`config.toml.bak.1788365386` 的原文還原,`kimi doctor` 全 valid。
+
+**`KNOWN_COMMANDS` 漏了 `hook-refresh`。** 由既有測試
+`usage_documents_every_command_the_dispatcher_actually_knows` 抓到:usage 文件與 dispatcher 認得的
+指令集必須逐字相同,而我只加了前者。
+
+### 還開著的
+
+`tests/chunker.rs` 或 `tests/coverage.rs` 之中那條偶發失敗,仍未重現。

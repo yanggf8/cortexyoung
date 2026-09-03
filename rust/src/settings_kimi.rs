@@ -31,7 +31,8 @@
 //!   everything we do not own -- including Kimi's `[hooks.state]`-equivalent bookkeeping and other
 //!   people's `[[hooks]]` entries -- survives byte for byte.
 
-use crate::settings::{is_ours, Change, Outcome};
+use crate::settings::{is_ours_for, HookEvent, EDIT_MATCHER, EVENTS};
+use crate::settings::{Change, Outcome};
 use crate::settings_toml::SettingsError;
 use std::fs;
 use std::io;
@@ -40,7 +41,13 @@ use toml_edit::{value, ArrayOfTables, DocumentMut, Item, Table};
 
 /// Both surfaces a search can arrive on. Compiled as a regex against the tool name.
 const MATCHER: &str = "Bash|Grep";
-const EVENT: &str = "PreToolUse";
+
+fn matcher_for(event: HookEvent) -> &'static str {
+    match event {
+        HookEvent::Suggest => MATCHER,
+        HookEvent::Refresh => EDIT_MATCHER,
+    }
+}
 /// Seconds. Kimi's schema allows 1..=600; the other two modules use 5 and there is no reason for
 /// this one to differ, since the work is the same subprocess doing the same lookup.
 const TIMEOUT_SECS: i64 = 5;
@@ -53,10 +60,10 @@ pub fn default_settings_path() -> Option<PathBuf> {
     Some(home.join("config.toml"))
 }
 
-fn hook_table(command: &str) -> Table {
+fn hook_table(command: &str, event: HookEvent) -> Table {
     let mut t = Table::new();
-    t.insert("event", value(EVENT));
-    t.insert("matcher", value(MATCHER));
+    t.insert("event", value(event.name()));
+    t.insert("matcher", value(matcher_for(event)));
     t.insert("command", value(command));
     t.insert("timeout", value(TIMEOUT_SECS));
     t
@@ -64,9 +71,9 @@ fn hook_table(command: &str) -> Table {
 
 /// Is this entry exactly what `install_hook` would write right now? Field-by-field rather than a
 /// serialized comparison, which would trip on formatting `toml_edit` introduces.
-fn is_canonical(h: &Table, command: &str) -> bool {
-    h.get("event").and_then(Item::as_str) == Some(EVENT)
-        && h.get("matcher").and_then(Item::as_str) == Some(MATCHER)
+fn is_canonical(h: &Table, command: &str, event: HookEvent) -> bool {
+    h.get("event").and_then(Item::as_str) == Some(event.name())
+        && h.get("matcher").and_then(Item::as_str) == Some(matcher_for(event))
         && h.get("command").and_then(Item::as_str) == Some(command)
         && h.get("timeout").and_then(Item::as_integer) == Some(TIMEOUT_SECS)
 }
@@ -150,7 +157,11 @@ fn push_after_trailing(doc: &mut DocumentMut, entry: Table) -> Result<(), Settin
     Ok(())
 }
 /// Add, or bring up to date, the one entry that runs `command`.
-pub fn install_hook(path: &Path, command: &str) -> Result<Outcome, SettingsError> {
+pub fn install_hook(
+    path: &Path,
+    command: &str,
+    event: HookEvent,
+) -> Result<Outcome, SettingsError> {
     let mut doc = read_doc(path)?;
     let list = hooks_array(&mut doc)?;
 
@@ -164,7 +175,7 @@ pub fn install_hook(path: &Path, command: &str) -> Result<Outcome, SettingsError
         let Some(cur) = entry.get("command").and_then(Item::as_str).map(str::to_string) else {
             continue;
         };
-        if !is_ours(&cur) {
+        if !is_ours_for(&cur, event) {
             continue;
         }
         // A file can already hold more than one of ours -- hand-wiring, or an older layout. Keep
@@ -175,10 +186,10 @@ pub fn install_hook(path: &Path, command: &str) -> Result<Outcome, SettingsError
             continue;
         }
         seen_ours = true;
-        if is_canonical(entry, command) {
+        if is_canonical(entry, command, event) {
             found_same = true;
         } else {
-            *entry = hook_table(command);
+            *entry = hook_table(command, event);
             changed = true;
         }
     }
@@ -195,7 +206,7 @@ pub fn install_hook(path: &Path, command: &str) -> Result<Outcome, SettingsError
     let change = if changed {
         Change::Updated
     } else {
-        push_after_trailing(&mut doc, hook_table(command))?;
+        push_after_trailing(&mut doc, hook_table(command, event))?;
         Change::Installed
     };
     let bak = backup(path)?;
@@ -223,7 +234,7 @@ pub fn remove_hook(path: &Path) -> Result<Outcome, SettingsError> {
         if entry
             .get("command")
             .and_then(Item::as_str)
-            .is_some_and(is_ours)
+            .is_some_and(|c| EVENTS.into_iter().any(|e| is_ours_for(c, e)))
         {
             drop_idx.push(i);
         }
@@ -234,12 +245,37 @@ pub fn remove_hook(path: &Path) -> Result<Outcome, SettingsError> {
             backup: None,
         });
     }
+    // Salvage anything decorating an entry before it goes. `push_after_trailing` parks the text
+    // that trailed the file -- here, the Kimi plugin's own `# === END … ===` line -- in front of
+    // our entry, so removing the entry naively removes a comment that belongs to somebody else and
+    // that their own uninstaller looks for. Reproduced on 2026-09-03: install kept both markers,
+    // remove left one. It goes back to the trailer, which is where it came from.
+    let mut salvaged = String::new();
     for i in drop_idx.into_iter().rev() {
+        if let Some(prefix) = list
+            .get(i)
+            .and_then(|e| e.decor().prefix())
+            .and_then(|p| p.as_str())
+        {
+            if !prefix.trim().is_empty() {
+                salvaged.insert_str(0, prefix);
+            }
+        }
         list.remove(i);
+    }
+    let now_empty = list.len() == 0;
+    if !salvaged.trim().is_empty() {
+        let existing = doc.trailing().as_str().unwrap_or_default().to_string();
+        // Trimmed at both ends and given exactly one newline: the blank lines around our entry were
+        // ours, and carrying them back would make every install-remove cycle grow the file.
+        let mut restored = salvaged.trim().to_string();
+        restored.push('\n');
+        restored.push_str(&existing);
+        doc.set_trailing(restored);
     }
     // Leave no empty scaffolding: a `hooks` array we created and then emptied should not outlive
     // the entry it was created for.
-    if list.len() == 0 {
+    if now_empty {
         doc.as_table_mut().remove("hooks");
     }
     let bak = backup(path)?;
@@ -252,12 +288,12 @@ pub fn remove_hook(path: &Path) -> Result<Outcome, SettingsError> {
 
 /// Our entry's command, if it is configured. Kimi has no trust gate of Codex's kind, so wired is
 /// the whole question here.
-pub fn installed_command(path: &Path) -> Option<String> {
+pub fn installed_command(path: &Path, event: HookEvent) -> Option<String> {
     let doc = read_doc(path).ok()?;
     let list = doc.as_table().get("hooks")?.as_array_of_tables()?;
     for entry in list.iter() {
         if let Some(c) = entry.get("command").and_then(Item::as_str) {
-            if is_ours(c) {
+            if is_ours_for(c, event) {
                 return Some(c.to_string());
             }
         }

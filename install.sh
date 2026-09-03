@@ -462,10 +462,10 @@ deploy_skill_at() {
 # "wired to a different binary" and "not wired" logic exists exactly once regardless of which
 # settings file is being asked about.
 check_hook_at() {
-  local settings_path="$1" managed_cort="$2" label="$3" fmt="${4:-}"
+  local settings_path="$1" managed_cort="$2" label="$3" fmt="${4:-}" ev="${5:-pre}"
   local hook_out fmt_arg=""
   [ -n "$fmt" ] && fmt_arg="--format $fmt"
-  if hook_out="$("$managed_cort" hook-install --settings "$settings_path" $fmt_arg --status 2>&1)"; then
+  if hook_out="$("$managed_cort" hook-install --settings "$settings_path" $fmt_arg --event "$ev" --status 2>&1)"; then
     if printf '%s' "$hook_out" | grep -q '"wired"[[:space:]]*:[[:space:]]*true'; then
       # Wired is not enough: it has to be wired to the binary we just checked. A command naming a
       # different cort is a live hook nobody here has verified.
@@ -525,22 +525,30 @@ deploy_hook() {
   # machine without Kimi gets a config.toml it never reads, which is the price of not leaving a
   # route to be wired by hand.
   deploy_one_hook "$cort_bin" "$KIMI_HOOK_SETTINGS" "kimi-code" "hook_settings_kimi" "kimi"
+  # The second event, same three files. `PostToolUse` on the edit tools runs `cort index
+  # --incremental`, because the first hook could only ever *say* the index was behind and measured
+  # that is worth almost nothing (19 index runs against 2,700+ fires in 90 days), and because its
+  # staleness compares commits while the window that matters is an edit not yet committed.
+  deploy_one_hook "$cort_bin" "$HOOK_SETTINGS" "claude-code" "hook_settings" "" "post"
+  deploy_one_hook "$cort_bin" "$CODEX_HOOK_SETTINGS" "codex" "hook_settings_codex" "codex" "post"
+  deploy_one_hook "$cort_bin" "$KIMI_HOOK_SETTINGS" "kimi-code" "hook_settings_kimi" "kimi" "post"
 }
 
 deploy_one_hook() {
-  local cort_bin="$1" settings_path="$2" harness="$3" manifest_key="$4" fmt="${5:-}"
-  local out change fmt_arg=""
+  local cort_bin="$1" settings_path="$2" harness="$3" manifest_key="$4" fmt="${5:-}" ev="${6:-pre}"
+  local out change fmt_arg="" verb="hook-suggest"
   [ -n "$fmt" ] && fmt_arg="--format $fmt"
-  if ! out="$("$cort_bin" hook-install --settings "$settings_path" $fmt_arg --command "$cort_bin hook-suggest --harness $harness" 2>&1)"; then
-    info "hook ($harness): NOT wired — $out"
+  [ "$ev" = "post" ] && verb="hook-refresh"
+  if ! out="$("$cort_bin" hook-install --settings "$settings_path" $fmt_arg --event "$ev" --command "$cort_bin $verb --harness $harness" 2>&1)"; then
+    info "hook ($harness/$ev): NOT wired — $out"
     return 0
   fi
   change="$(printf '%s' "$out" | sed -n 's/.*"change"[[:space:]]*:[[:space:]]*"\([a-z_]*\)".*/\1/p')"
   case "$change" in
-    installed) info "hook ($harness): wired PreToolUse -> cort hook-suggest in $settings_path" ;;
-    updated)   info "hook ($harness): updated PreToolUse command in $settings_path" ;;
-    already_present) info "hook ($harness): already wired in $settings_path" ;;
-    *)         info "hook ($harness): $out" ;;
+    installed) info "hook ($harness/$ev): wired -> cort $verb in $settings_path" ;;
+    updated)   info "hook ($harness/$ev): updated command in $settings_path" ;;
+    already_present) info "hook ($harness/$ev): already wired in $settings_path" ;;
+    *)         info "hook ($harness/$ev): $out" ;;
   esac
   # Codex gates a hook behind a one-time review, and the trust it persists is bound to the exact
   # command string. Writing or rewriting that command therefore always leaves the hook inert until
@@ -811,6 +819,11 @@ do_check() {
     # Codex is on this machine, so --check expects it wired the same way it expects the skill file.
     check_hook_at "$CODEX_HOOK_SETTINGS" "$managed_cort" "hook_codex" "codex"
     check_hook_at "$KIMI_HOOK_SETTINGS" "$managed_cort" "hook_kimi" "kimi"
+    # The refresh hook is a separate entry in the same three files, so it is checked separately: a
+    # file can carry one of ours and not the other, and a single line saying "wired" would hide it.
+    check_hook_at "$HOOK_SETTINGS" "$managed_cort" "refresh" "" "post"
+    check_hook_at "$CODEX_HOOK_SETTINGS" "$managed_cort" "refresh_codex" "codex" "post"
+    check_hook_at "$KIMI_HOOK_SETTINGS" "$managed_cort" "refresh_kimi" "kimi" "post"
   fi
   if [ -f "$SKILL_DEST" ]; then
     if skill_is_managed "$SKILL_DEST"; then
@@ -844,6 +857,32 @@ do_check() {
     ok=0
   fi
   if [ -f "$MANIFEST_FILE" ]; then
+  # Indexes. An index built on an older commit still answers, and says `stale=true` when it does --
+  # but the hook that used to be the only thing saying so was measured at 19 re-index runs against
+  # 2,700+ fires, so it is named here too, where somebody is already reading. `cort projects` owns
+  # the comparison (it has the head the row was built at and the head the tree is on now); this is
+  # a report, not a decision, so a stale index is listed and never fails the check -- the refresh
+  # hook closes the gap on its own from the next edit onward.
+  local proj_json stale_names gone_names
+  if proj_json="$("$managed_cort" projects 2>/dev/null)"; then
+    stale_names="$(printf '%s' "$proj_json" | awk -F'"' '/"name":/{n=$4} /"stale": true/{print "    "n}')"
+    # Keys come out in alphabetical order, so `exists` is read before the `name` it belongs to and
+    # the flag has to be held until the object's last field. Keying off `name` alone named the
+    # previous project.
+    gone_names="$(printf '%s' "$proj_json" | awk -F'"' '/"exists": false/{e=1} /"exists": true/{e=0} /"name":/{n=$4} /"stale"/{if (e) print "    "n}')"
+    if [ -n "$stale_names" ]; then
+      echo "indexes: STALE — re-run \`cort index\` in each (or let the refresh hook catch up):"
+      printf '%s\n' "$stale_names"
+    else
+      echo "indexes: all current"
+    fi
+    if [ -n "$gone_names" ]; then
+      echo "  directories gone (candidates for \`cort delete\`):"
+      printf '%s\n' "$gone_names"
+    fi
+  else
+    echo "indexes: could not query — installed cort predates \`cort projects --stale\`"
+  fi
     echo "manifest: $MANIFEST_FILE"
     cat "$MANIFEST_FILE" | sed 's/^/  /'
     local mv

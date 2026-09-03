@@ -89,3 +89,15 @@ Everything executable is Rust except two files bash actually requires: `install.
 `rust/Cargo.toml` and covered by `rust/tests/fixture.rs`), always built so `cargo test` needs no
 special feature and never installed — `tests/install-smoke.sh` asserts the payload ships nothing
 but `cort` and the pack.
+
+**Two hook events, and the second one repairs rather than reports.** `PreToolUse` on the search
+tools suggests `cort impact`; `PostToolUse` on the edit tools runs `cort index --incremental`. The
+second exists because the first could only ever *say* the index was behind and that was measured at
+19 re-index runs against 2,700+ fires in 90 days -- and because `PreToolUse`'s staleness compares
+git heads, so an edited-but-uncommitted tree read as fresh while its answers were already wrong.
+`hook-refresh` never creates an index, gives up rather than wait on a busy database, and is silent
+and exits 0 whatever happens. Both entries live in the same three files, told apart by their
+subcommand rather than by position -- in Kimi's flat `[[hooks]]` array nothing else can tell them
+apart. An install-then-uninstall cycle must hand every one of those files back byte for byte,
+including comments that belong to other owners; that is a test, because it was a bug first
+(`docs/2026-09-02-hook-wiring-correction.md` §17).
