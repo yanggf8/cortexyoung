@@ -272,3 +272,30 @@ diff 變空，它不再是候選，於是 `index_is_stale: false`。測試覆蓋
 順帶一提，找 `git_candidates` 的三個呼叫點是 hook 攔下 `grep` 之後用
 `cort impact --symbol git_candidates --depth 1 --coverage -f lean` 做的，一次到齊，兩筆 `miss`
 是 import 不是呼叫。這是本文件裡唯一一次產品用在自己身上並且真的省了事。
+
+## 10. 一個測試把我未提交的編輯 `git checkout` 掉了
+
+寫 §9 的時候改了 `skills/ast-grep/SKILL.md`,存檔、確認,然後跑閘門,再回頭看——改動不見了,
+`git status` 乾淨,檔案的 mtime 卻是幾分鐘前。改了第二次才發現是誰。
+
+`tests/install-smoke.sh` 的 Test 18b 要驗「只動 body、不動 frontmatter description 的編輯,
+deploy log 也要記一筆」。install.sh 是從它自己所在的 repo 讀 skill 的,所以這條斷言確實得弄髒
+開發者工作樹裡一個被追蹤的檔。它附加一行,然後這樣收拾:
+
+```sh
+git -C "$REPO_ROOT" checkout -- skills/ast-grep/SKILL.md 2>/dev/null || true
+```
+
+`git checkout --` 丟掉的不是它自己附加的那一行,是**那個檔案裡所有未提交的東西**。而
+`2>/dev/null || true` 保證它安靜地成功。這不是清理,是還原到 HEAD,兩者只有在開發者剛好沒在
+改那個檔的時候才等價——而 §9 正好在改。中途 Ctrl-C 的話下場相反:附加的那行留在 repo 裡。
+
+改法:在附加之前拷一份位元組備份,從備份還原,並掛 `trap … EXIT`,這樣中斷也收得乾淨。判準是
+**一個測試只能還原它自己造成的改動,不能還原到 HEAD**;git 不是收拾自己垃圾的工具,它是丟掉別人
+東西的工具。
+
+驗證:改動存在 → 跑 smoke(119 passed, 0 failed)→ md5 不變。
+
+這條跟 §9 的教訓是同一句話的兩種說法。§9 是**一組收窄不了的候選集必須擴張到全部,不能安靜地縮到
+零**;這裡是**一個收拾不了的還原必須只碰自己碰過的,不能安靜地擴張到整個檔**。兩次都是 `|| true`
+和空 diff 讓「什麼都沒發生」跟「發生了但我不說」長得一模一樣。

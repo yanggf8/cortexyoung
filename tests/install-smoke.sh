@@ -607,9 +607,18 @@ fi
 # A body-only edit is the case the transcript-grep method cannot see: the frontmatter description is
 # untouched, so only the sha moves. The log has to catch exactly this.
 DESC_BEFORE="$(sed -n 3p "$AG_DEST")"
-printf "\nA line appended by the smoke test.\n" >> "$REPO_ROOT/skills/ast-grep/SKILL.md"
+# This is the one assertion that has to dirty a tracked file in the developer's own tree, because
+# install.sh reads the skill from the repo it lives in. Restore it from a byte copy taken here --
+# never with `git checkout --`, which discards whatever uncommitted edit the developer had in that
+# file (it silently ate one on 2026-09-03) -- and arm a trap so an interrupt cannot leave the
+# appended line behind either.
+AG_SRC="$REPO_ROOT/skills/ast-grep/SKILL.md"
+AG_SRC_BACKUP="$(mktemp)"
+cp "$AG_SRC" "$AG_SRC_BACKUP"
+trap 'cp -f "$AG_SRC_BACKUP" "$AG_SRC" 2>/dev/null || true; rm -f "$AG_SRC_BACKUP"' EXIT
+printf "\nA line appended by the smoke test.\n" >> "$AG_SRC"
 bash "$INSTALL_SH" > /tmp/smoke18b.log 2>&1
-git -C "$REPO_ROOT" checkout -- skills/ast-grep/SKILL.md 2>/dev/null || true
+cp -f "$AG_SRC_BACKUP" "$AG_SRC"
 LINES_EDITED="$(wc -l < "$DEPLOY_LOG_FILE" 2>/dev/null || echo 0)"
 if [ "$LINES_EDITED" -gt "$LINES_AFTER" ]; then
   pass "a body-only edit appends a line even though the description never changed"
