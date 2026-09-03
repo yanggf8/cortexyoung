@@ -101,3 +101,14 @@ subcommand rather than by position -- in Kimi's flat `[[hooks]]` array nothing e
 apart. An install-then-uninstall cycle must hand every one of those files back byte for byte,
 including comments that belong to other owners; that is a test, because it was a bug first
 (`docs/2026-09-02-hook-wiring-correction.md` §17).
+
+**CI's first gate is `rustfmt`, and a gate that fails is a gate that hides the ones behind it.** Both
+jobs run fmt, then clippy with warnings as errors, then `cargo test --locked --all-targets`; a
+rustfmt failure skips the rest, so the repo spent days reporting on every push while checking
+nothing (`docs/2026-09-02-hook-wiring-correction.md` §18). Editing this repo through `sed`/`perl`
+formats nothing, so run `cargo fmt --all` in **both** crates before committing, and run clippy too
+-- the pass that finally ran caught a doc comment that had been separated from its function and was
+silently documenting a different one. **Storage failures are returned, never panicked on.** A
+transient `SQLITE_IOERR_FSYNC` on a CI runner killed eight tests through four `.expect()` calls in
+`rust/src/db.rs`, and the same panic would break `hook-refresh`'s promise to be silent and exit 0 on
+every edit for as long as a disk misbehaved.

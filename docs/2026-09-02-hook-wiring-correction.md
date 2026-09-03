@@ -858,3 +858,99 @@ doc、測試、文件裡的提及排除)。稍早那次 stub 實測它是真的�
 ### 還開著的
 
 `tests/chunker.rs` 或 `tests/coverage.rs` 之中那條偶發失敗,仍未重現。
+
+## 18. 修好一個把關機制之後,它自己找出了三件事(2026-09-03 01:30-02:30)
+
+起點是清單上最不起眼的一項:`cargo fmt` 有 35 條漂移,「不是我造成的,動它會產生一大包無關 diff」。
+查下去發現那句話對,但結論錯得離譜。
+
+### CI 已經空轉好幾天
+
+`gh run list` 顯示**連續五次以上 push 都是 failure**,而且掛的永遠是同一步:
+
+```
+X cort-evals (ubuntu-latest) in 5s
+  ✓ ensure rustfmt + clippy
+  X rustfmt                        ← 掛在這
+  - clippy (warnings are errors)   ← 從沒跑到
+  - cargo test                     ← 從沒跑到
+```
+
+`rustfmt` 是兩個 job 的**第一關**,它失敗之後 clippy 與 `cargo test --locked --all-targets` 全部
+skip。也就是說:CI 每次 push 都照常回報,但實際上什麼都沒檢查。macOS 那兩個 job 只跑 5-7 秒就結束,
+更是連編譯都沒到。
+
+漂移數:這輪工作開始前(`b629ab84`)**35**,之後 **67** —— 既存問題,而用 `sed`/`perl` 改這個 repo
+又加了 32 條(那兩個工具不會格式化任何東西)。
+
+### clippy 第一次跑起來,抓到一個編輯事故
+
+`cargo fmt --all` 兩個 crate 之後,clippy 報了 5 個 error,四個是這輪自己造成的:
+
+* `is_ours` 成為死碼 —— §17 加第二個事件時所有呼叫點都換成 `is_ours_for` / `ours_subcommand`,
+  沒人刪掉它,三個檔案的註解還在指名它。
+* **`search_of_payload` 被插進了 `cmd_hook_suggest` 的 doc comment 與函式本體之間**,結果一段
+  十四行、解釋 PreToolUse hook 三條規則的說明,變成掛在 payload 解析器上。這不是 lint 能忍的那種
+  問題:它改變了檔案在說什麼,而唯一讓它浮出來的原因是那道關卡終於跑了。
+* 兩個 `assert_eq!(..., true)`,四個 `len() == 0`。
+
+順帶把 `actions/checkout@v4` 升到 v5 —— 每個 job 都在警告它的 Node 20 已棄用、正被強制跑在
+Node 24 上。四個 annotation 因此歸零。
+
+### 綠了之後,才看得見一次真正的磁碟故障
+
+`checkout@v5` 那次 push 掛了,但不是 v5 的錯:`cort (macos-latest)` 的 `cargo test` 掛掉,同 push
+另外三個 job 全綠,而**六分鐘前同一份程式碼**在同一個 runner 上是綠的。八個 CLI 測試同時死在
+`src/db.rs:149`,錯誤是:
+
+```
+SqliteFailure(Error { code: SystemIoFailure, extended_code: 1034 }, Some("disk I/O error"))
+```
+
+`1034` 是 `SQLITE_IOERR_FSYNC`。log 裡沒有 `no space left`,重跑即綠 —— GitHub macOS runner 的一次
+瞬時 fsync 故障,八個測試同時中彈是因為它們平行跑、共用那一瞬間的壞磁碟。
+
+**但它暴露的是我們的問題。** `ensure_schema` 與 `open_db` 之間有四個 `.expect()` 壓在儲存失敗上,
+其中一個的訊息還寫著「JS rethrows raw sqlite errors」——從這個 crate 取代掉的 JavaScript 版繼承下來
+的遺跡。任何瞬時磁碟錯誤都會讓 binary panic,而不是產出這個檔案其他每一條路徑都會產出的結構化錯誤。
+
+而昨天 `hook-refresh` 落地之後,這個形狀的代價變大了:它透過 `open_project_tracked` 會經過這兩個
+函式,而它自己的 doc comment 承諾「永遠安靜、永遠 exit 0」—— 只要磁碟持續出問題,一個 panic 會在
+**每一次編輯**上打破那個承諾。
+
+全部改成回傳。`ensure_schema` 交給 `classify_sqlite`;`open_db` 那三個是 `io::Error` 而函式回傳
+`rusqlite::Result`,所以轉成 `SQLITE_CANTOPEN` 並帶上失敗的那一步:
+
+```
+$ CORT_CACHE_DIR=<不可寫> cort index
+{ "detail": { "message": "could not create the cache directory: Permission denied (os error 13)" },
+  "error": "storage_busy" }
+
+$ echo '{"tool_name":"Edit"}' | CORT_CACHE_DIR=<不可寫> cort hook-refresh
+{}          exit=0
+```
+
+資料庫檔的 0600 **選擇回傳錯誤而不是忽略**:那不是裝飾,是隱私屬性(那個檔存的是使用者的原始碼),
+設不上就安靜降級會留下一個沒人被告知的 world-readable 索引。它現在是結構化錯誤,所以 hook 的安靜
+路徑照樣接得住。檔案裡另外兩個 `.expect()` 刻意留著,性質不同:`HOME` 缺失是設定前提,busy-retry
+迴圈那個斷言的是該迴圈的不變式,都不是任何 I/O 的結果。
+
+### 這一節真正的結論
+
+清單上原本沒有任何一件是這些。順序是:一個看起來最無關緊要的格式問題 → 查出 CI 空轉 → 修好之後
+clippy 第一次執行 → 抓到一個把說明文件掛錯函式的編輯事故 → CI 綠了之後,一次瞬時磁碟故障才**看得
+見** → 而它暴露了昨天剛寫下的承諾根本兌現不了。
+
+**一道壞掉的把關機制,代價不是它漏掉的那件事,是它讓後面每一道都不會執行。** 這份文件前面十七節
+講的都是「hook 接了但不會跑」的各種形狀;這一節是同一件事發生在 CI 上。
+
+### 順帶關掉的兩件
+
+* `hook-probe` 的 `index_check` 把兩種「查不了」報成同一個 `unchecked_tree_unreadable`。一個是路徑
+  解析不到(20 次),另一個是目錄就在那裡、只是不含這個掃描器會讀的副檔名(4 次,例如 Godot 專案)。
+  後者被講成「unreadable」會把讀的人送去找一個不存在的權限問題。已拆成
+  `unchecked_tree_missing` 與 `unchecked_no_source_this_screen_reads`,並用一個
+  `DeclCheck` 列舉讓計數器的 key 與逐次開火的標籤不可能各自漂移。
+* `claw-skills` 的 `unparsed=16` 查過了,是結構性的、正常的:13 個 crate 的 `lib.rs` 全部只有
+  `pub mod` 宣告,加上三個純型別檔。對照組 `cortexyoung` 有 2 個 crate,`unparsed` 正好是 2。
+  cort 自己已把它標為 `advisory: text-scanned, no edges; does not flip incomplete`,判斷是對的。
