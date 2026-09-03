@@ -40,14 +40,17 @@ use toml_edit::{value, ArrayOfTables, DocumentMut, Item, Table};
 /// and on 2026-09-03 that looked like the reason a wired, trusted, `Active`-reported entry never
 /// fired on this machine across 323 tool calls. It is not. A second machine on the *same* codex-cli
 /// 0.152.1, with the *same* tool vocabulary and byte-identical `matcher = "Bash"` and command, fires
-/// 417 times. So the matcher is not compared for equality against the tool name, and changing this
-/// constant was a change with no evidence behind it: reverted.
+/// 417 times. Later the same day a live payload settled why: Codex normalises the tool name in the
+/// *hook payload* to Claude Code's vocabulary (`tool_name: "Bash"` while the rollout calls the same
+/// tool `exec_command`), so the matcher is compared against `Bash` and always was. Both machines
+/// agree; the 0-vs-417 gap was an entry created that morning plus a matcher edited into something
+/// that could not match. Changing this constant was a change with no evidence behind it: reverted.
+/// `docs/2026-09-03-installer-dedup-and-attribution.md` §7.
 ///
-/// What is still unexplained is why two identically configured machines differ at all. It is not
-/// the feature flag (`hooks` is enabled), not trust (`--dangerously-bypass-hook-trust` changed
-/// nothing), not the matcher, and not the command's shape. The one uncontrolled variable left is
-/// the working directory -- the machine that fires runs Codex inside a project, the one that does
-/// not was run from `$HOME`. `docs/2026-09-03-installer-dedup-and-attribution.md` §7.
+/// What that payload does **not** establish is whether the matcher is a regex. `"Bash"` is the only
+/// value ever observed firing, and the one alternative tried (`exec_command|shell`) could not have
+/// matched on either reading. `matcher_for(Refresh)` now hands Codex an alternation, and until one
+/// live run proves Codex compiles it, that entry is unverified -- §13.
 const MATCHER: &str = "Bash";
 
 fn matcher_for(event: HookEvent) -> &'static str {

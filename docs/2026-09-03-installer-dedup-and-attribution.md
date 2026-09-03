@@ -328,3 +328,62 @@ session 都據實跑了 fmt / clippy / test / smoke 並回報綠,只是本機沒
 根本不存在,於是「跑過的都綠」被讀成了「全部綠」。這一輪的收尾是抓一份 static binary 到暫存目錄
 跑一次真正的 CI 指令,`exit=0` 才算數——順帶抓到我自己寫的註解有一行以 `# shellcheck` 開頭,
 被當成 directive 解析(SC1073)。**一個本機跑不到的閘門,回報時要說它沒跑,不能算在綠裡面。**
+
+## 12. `--status` 報的是狀態存在,不是狀態新鮮 —— 第三次同一個形狀
+
+`7be1cab1` 之後這台重裝,post 三條全部 `updated`,installer 也照規矩印了「Codex 要重新信任」。
+然後 `hook-install --all --status --lean` 說:
+
+```
+codex pre  wired trusted=true
+codex post wired trusted=true
+```
+
+這不是矛盾,是 `settings_toml.rs:416-420` 已經寫明的限制:`trusted_at` 只檢查那個 `gi:hi` 位置
+**有沒有** `trusted_hash`,不比對它是否對應現在的 entry。所以一條剛被改寫的 entry,在這裡必然
+還是 `true`。
+
+值得記下來的是這是**第三次同一個形狀**:`--status` 兩次把正在觸發的 hook 報成 `wired: false`
+(§7/§9,錨在行尾的後綴比對),這次把需要重新信任的 entry 報成 `trusted=true`。三次都不是這個
+欄位算錯,是**它回答的問題跟讀的人以為的不同**——它報的是「某個東西在那裡」,讀的人要的是
+「那個東西還對嗎」。
+
+**規矩:改寫當下 installer 印的那行是權威訊號;`--status` 的 `trusted` 不能拿來驗收重新信任。**
+真正能結案的只有一次真實的 `codex` 執行。
+
+## 13. Codex 的 post matcher 是一次沒有證據的加寬
+
+`EDIT_MATCHER` 從 `Edit|Write|MultiEdit|NotebookEdit` 加上 `Bash` 之後,三個方言的 post 都拿到
+`Bash|Edit|Write|MultiEdit|NotebookEdit`。Claude Code 和 Kimi 沒問題——兩者的 matcher 都確認是
+regex(Kimi 是 `new RegExp()`,見 `settings_kimi.rs`)。**Codex 這一格沒有這個確認。**
+
+本機 `usage.db` 裡 `harness=codex` 的列有 **417 筆,全部是 `hook-suggest`,全部 `no_shape`**,
+最後一筆 09-03 12:49。(順帶把 §6 那筆對帳結清:417 在 `machine=09a907a06cdea300`,另一台是
+`2eb02d46ec5c4319` 的 2 筆。)這 417 筆證明的是一件很窄的事:**字面字串 `"Bash"` 會燒**。它沒有
+證明 matcher 是 regex,而 §7 唯一試過的另一個值(`exec_command|shell`)本來就不會中,所以那次
+不燒也不能反證。
+
+於是有兩個未決風險,而且方向相反:
+
+1. **若 Codex 是對 `tool_name` 做相等比對**,`"Bash|Edit|Write|MultiEdit|NotebookEdit"` 永遠不等於
+   `"Bash"`,Codex 的 post hook **靜默失效**。§7 的結論原話是「changing this constant was a change
+   with no evidence behind it: reverted」——這次是同一個動作,只是換到 post 那格。
+2. **就算 regex 成立**,`Edit|Write|MultiEdit|NotebookEdit` 是 Claude Code 的工具名。Codex 的編輯
+   工具是 `apply_patch`;它確實會把 shell 工具正規化成 `Bash`(§7 攔到的 payload),但**沒有任何
+   證據說它把 `apply_patch` 正規化成 `Edit`**。所以 Codex 的 refresh 只會在 shell 指令後燒,永遠
+   不會在 Codex 自己的檔案編輯後燒——而那正是這個 hook 存在的主要理由。
+
+支持這份疑慮的現況:`harness=codex` 的 `hook-refresh` 列,**至今 0 筆**。
+
+兩個都由同一次實驗結案,而且必須是真實的 `codex` 執行,不是自餵(§7 的教訓):在專案目錄裡跑
+一次 `codex`,叫它 (a) 跑一個 shell 指令、(b) 改一個檔,然後查
+
+```sh
+sqlite3 ~/.cache/cortex-ng/usage.db \
+  "SELECT ts,command,args_summary FROM command_log
+    WHERE args_summary LIKE '%\"codex\"%' AND command='hook-refresh' ORDER BY ts DESC LIMIT 5"
+```
+
+(a) 沒有列 → 風險 1 成立,Codex 的 matcher 不是 regex,post 那格要退回 `Bash`。
+(a) 有、(b) 沒有 → 風險 2 成立,`apply_patch` 需要自己的 matcher。
+兩者都有 → 加寬是對的,把這件事寫成 `MATCHER` 旁邊的證據行。
