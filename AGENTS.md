@@ -143,6 +143,20 @@ apart. An install-then-uninstall cycle must hand every one of those files back b
 including comments that belong to other owners; that is a test, because it was a bug first
 (`docs/2026-09-02-hook-wiring-correction.md` §17).
 
+**Both staleness checks are one-sided, and they lean opposite ways.** The head comparison
+(`main.rs`, what `hook-suggest` reads) misses an edited-but-uncommitted tree; the content
+comparison (`staleness.rs`, the `index_is_stale` printed beside every `impact` row) missed
+everything that moves HEAD *without* dirtying the tree -- `pull`, `checkout`, `rebase`, `reset`, a
+teammate's commit -- because its candidate set was `git diff HEAD` and after a pull that diff is
+empty. Fixed on 2026-09-03 by giving `git_candidates` the head the index was built from and
+diffing against it too. The half worth remembering is the second one: `index --incremental` shared
+that candidate set, so it re-extracted nothing and then stamped the new head on anyway, which means
+the `PostToolUse` repair hook was not merely failing to repair a pulled tree -- on the next edit it
+*erased the one signal* saying repair was needed. Measured on this repo at `70e228f5..0d51e55b`:
+`index_is_stale: false` over 17 changed files and a 5-commit-old graph. **A candidate set that
+cannot be narrowed honestly must widen to everything**, never quietly to nothing, which is what
+`narrowed: false` now means for a missing git *and* for a stored head git cannot resolve.
+
 **CI's first gate is `rustfmt`, and a gate that fails is a gate that hides the ones behind it.** Both
 jobs run fmt, then clippy with warnings as errors, then `cargo test --locked --all-targets`; a
 rustfmt failure skips the rest, so the repo spent days reporting on every push while checking

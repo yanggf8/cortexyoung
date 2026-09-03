@@ -1,7 +1,7 @@
 //! Staleness: `index_is_stale` signalling.
 //! Compared extraction hash, not git dirty and not raw file bytes (spec §7.5).
 
-use crate::db::{get_meta, Db};
+use crate::db::{get_meta, indexed_head, Db};
 use crate::incremental::git_candidates;
 use crate::indexer::{canonicalize_root, extract_one, walk_files, IndexError};
 use rusqlite::{params, OptionalExtension};
@@ -57,8 +57,8 @@ pub fn compute_stale(
         .collect();
     deleted.sort();
 
-    let cands = git_candidates(&base);
-    let candidates: Vec<String> = if cands.git_available {
+    let cands = git_candidates(&base, indexed_head(db, project_id)?.as_deref());
+    let candidates: Vec<String> = if cands.narrowed {
         let mut set: HashSet<String> = cands.changed.into_iter().collect();
         for f in &disk_files {
             if !stored.contains_key(f) {

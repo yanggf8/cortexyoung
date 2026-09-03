@@ -114,6 +114,18 @@ pub fn get_meta(db: &Db, key: &str) -> rusqlite::Result<Option<String>> {
     }
 }
 
+/// The head the index was actually built from. Staleness and the incremental candidate set both
+/// need it, and neither can get it from the working tree: after a `git pull` the tree agrees with
+/// the *new* head while every chunk still describes the old one.
+pub fn indexed_head(db: &Db, project_id: &str) -> rusqlite::Result<Option<String>> {
+    let mut stmt = db.prepare("SELECT git_head FROM projects WHERE project_id = ?1")?;
+    let mut rows = stmt.query(params![project_id])?;
+    match rows.next()? {
+        Some(row) => row.get(0),
+        None => Ok(None),
+    }
+}
+
 pub fn set_meta(db: &Db, key: &str, value: &str) -> rusqlite::Result<()> {
     db.execute(
         "INSERT INTO _cortex_meta (key, value) VALUES (?1, ?2)

@@ -2,6 +2,7 @@
 //!
 //! Git argv (spec §2):
 //!   git -C root diff --name-status -M HEAD
+//!   git -C root diff --name-status -M <indexed-head> HEAD
 //!   git -C root ls-files --others --exclude-standard
 
 use crate::db::{get_meta, set_meta, Db};
@@ -21,7 +22,9 @@ use std::time::Instant;
 pub struct GitCandidates {
     pub changed: Vec<String>,
     pub deleted: Vec<String>,
-    pub git_available: bool,
+    /// Whether this list may be trusted as a *narrowing* of what changed. False is not "git is
+    /// missing" -- it is "git would not tell me", which for a caller means: examine everything.
+    pub narrowed: bool,
 }
 
 fn git_stdout(root: &Path, args: &[&str]) -> Option<String> {
@@ -52,17 +55,7 @@ fn is_indexable(rel: &str) -> bool {
     !rel.split('/').any(|seg| IGNORE_DIRS.contains(&seg))
 }
 
-pub fn git_candidates(root: impl AsRef<Path>) -> GitCandidates {
-    let root = root.as_ref();
-    let Some(diff) = git_stdout(root, &["diff", "--name-status", "-M", "HEAD"]) else {
-        return GitCandidates {
-            changed: Vec::new(),
-            deleted: Vec::new(),
-            git_available: false,
-        };
-    };
-    let mut changed = BTreeSet::new();
-    let mut deleted = BTreeSet::new();
+fn absorb_name_status(diff: &str, changed: &mut BTreeSet<String>, deleted: &mut BTreeSet<String>) {
     for line in diff.lines().filter(|l| !l.is_empty()) {
         let parts: Vec<&str> = line.split('\t').collect();
         if parts.is_empty() {
@@ -85,6 +78,49 @@ pub fn git_candidates(root: impl AsRef<Path>) -> GitCandidates {
             changed.insert(parts[1].to_string());
         }
     }
+}
+
+fn cannot_narrow() -> GitCandidates {
+    GitCandidates {
+        changed: Vec::new(),
+        deleted: Vec::new(),
+        narrowed: false,
+    }
+}
+
+/// What might have changed since the index was built.
+///
+/// `indexed_head` is the head the index was built from, and passing it is not optional bookkeeping:
+/// `git diff HEAD` compares the tree to wherever HEAD points *now*, so every commit that arrives
+/// without dirtying the tree -- `pull`, `checkout`, `rebase`, `reset`, a teammate's or another
+/// agent's commit -- produces an empty diff over a tree the index has never seen. The second diff
+/// below is the only thing that closes that window.
+///
+/// The two ways this can fail are both answered by refusing to narrow at all (`narrowed: false`),
+/// because a diff git declined to compute is not evidence that nothing moved: no git in the
+/// directory, and a stored head git cannot resolve (force-push, shallow clone, a rebased-away
+/// commit, a database carried in from elsewhere).
+pub fn git_candidates(root: impl AsRef<Path>, indexed_head: Option<&str>) -> GitCandidates {
+    let root = root.as_ref();
+    let Some(diff) = git_stdout(root, &["diff", "--name-status", "-M", "HEAD"]) else {
+        return cannot_narrow();
+    };
+    let mut changed = BTreeSet::new();
+    let mut deleted = BTreeSet::new();
+    absorb_name_status(&diff, &mut changed, &mut deleted);
+
+    if let Some(indexed) = indexed_head {
+        // Only a definite agreement lets us skip the second diff -- an unreadable current head is
+        // not the same fact as an unmoved one.
+        if git_head_of(root).as_deref() != Some(indexed) {
+            let Some(moved) = git_stdout(root, &["diff", "--name-status", "-M", indexed, "HEAD"])
+            else {
+                return cannot_narrow();
+            };
+            absorb_name_status(&moved, &mut changed, &mut deleted);
+        }
+    }
+
     let others =
         git_stdout(root, &["ls-files", "--others", "--exclude-standard"]).unwrap_or_default();
     for rel in others.lines().filter(|l| !l.is_empty()) {
@@ -92,10 +128,12 @@ pub fn git_candidates(root: impl AsRef<Path>) -> GitCandidates {
             changed.insert(rel.to_string());
         }
     }
+    // A path can be deleted by the commits we moved past and restored in the working tree; the
+    // caller removes before it reindexes, so listing it in both is the correct instruction.
     GitCandidates {
         changed: changed.into_iter().collect(),
         deleted: deleted.into_iter().collect(),
-        git_available: true,
+        narrowed: true,
     }
 }
 
@@ -251,8 +289,9 @@ pub fn incremental_index(
         return Ok(from_full(full, started));
     }
 
-    let cands = git_candidates(&canon.path);
-    if !cands.git_available {
+    let indexed_head = crate::db::indexed_head(db, &canon.project_id)?;
+    let cands = git_candidates(&canon.path, indexed_head.as_deref());
+    if !cands.narrowed {
         let full = full_index(db, bin, &canon.path)?;
         return Ok(from_full(full, started));
     }

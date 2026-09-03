@@ -1,7 +1,7 @@
 //! C2-8..C2-16 — the Rust port kept the case ids (audit F-12).
 
 use cort::ast_grep::resolve_ast_grep_bin;
-use cort::db::{ensure_schema, get_meta, open_db, project_id_for, set_meta};
+use cort::db::{ensure_schema, get_meta, indexed_head, open_db, project_id_for, set_meta};
 use cort::graph::get_transitive_dependents;
 use cort::incremental::{git_candidates, incremental_index, reindex_one_file, remove_file};
 use cort::indexer::full_index;
@@ -169,7 +169,7 @@ fn a_new_untracked_file_is_picked_up_via_git_ls_files_others() {
         "export function brandNew() { return 1; }\n",
     )
     .unwrap();
-    let cands = git_candidates(&root);
+    let cands = git_candidates(&root, indexed_head(&db, &_id).unwrap().as_deref());
     assert!(cands.changed.iter().any(|p| p == "src/brand-new.ts"));
     let r = incremental_index(&mut db, &bin, &root).unwrap();
     assert_eq!(r.files_reindexed, 1);
@@ -655,5 +655,46 @@ fn a_bare_and_a_receiver_call_of_the_same_name_on_one_line_are_two_rows() {
             ("receiver".to_string(), "t.take".to_string()),
         ],
         "both shapes of the same name on one line, neither swallowed by the other"
+    );
+}
+
+/// The other half of the moved-head hole, and the worse half. `git diff HEAD` is empty after a
+/// pull, so the candidate set is empty, so nothing is reindexed -- and then the run stamps the new
+/// head onto the untouched index anyway. That stamp is what `hook-suggest` compares, so the
+/// PostToolUse refresh hook does not merely fail to repair a pulled tree: on the first edit
+/// afterwards it destroys the one signal that said repair was needed.
+#[test]
+fn a_head_that_moved_without_dirtying_the_tree_is_reindexed_not_just_restamped() {
+    let (_dir, root, mut db, project_id, bin) = git_project(SAMPLE);
+    fs::write(
+        root.join("src/helper.ts"),
+        "export function helper(n: number) { return n * 3; }\nexport function pulled() { return 0; }\n",
+    )
+    .unwrap();
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-qm", "pulled"]);
+
+    let r = incremental_index(&mut db, &bin, &root).unwrap();
+    assert_eq!(r.files_reindexed, 1, "the pulled file must be re-extracted");
+
+    let syms: Vec<String> = db
+        .prepare(
+            "SELECT symbol_name FROM chunks WHERE file_path = 'src/helper.ts' ORDER BY start_line",
+        )
+        .unwrap()
+        .query_map([], |c| c.get(0))
+        .unwrap()
+        .map(|c| c.unwrap())
+        .collect();
+    assert_eq!(
+        syms,
+        vec!["helper".to_string(), "pulled".to_string()],
+        "a restamp without a re-extraction leaves the old chunks behind the new head"
+    );
+    assert!(
+        !compute_stale(&db, &bin, &root, &project_id)
+            .unwrap()
+            .index_is_stale,
+        "and only then may the index call itself fresh"
     );
 }

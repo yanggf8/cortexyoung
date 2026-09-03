@@ -149,3 +149,67 @@ fn a_deleted_file_makes_the_index_stale_and_is_reported() {
     assert!(s.index_is_stale);
     assert_eq!(s.deleted_files, vec!["src/helper.ts".to_string()]);
 }
+
+/// A commit that arrives without dirtying the tree -- `git pull`, `checkout`, `rebase`, `reset`,
+/// or simply another agent committing -- moves HEAD while `git diff HEAD` stays empty. The
+/// candidate set is built from that diff, so nothing gets hashed and the index looks fresh at a
+/// head it was never built from. This is C2-19's edit, made invisible by committing it.
+#[test]
+fn a_commit_that_moves_head_without_dirtying_the_tree_is_stale() {
+    let (_dir, root, db, project_id, bin) = setup(SAMPLE);
+    fs::write(
+        root.join("src/helper.ts"),
+        "export function helper(n: number) { return n * 99; }\n",
+    )
+    .unwrap();
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-qm", "pulled"]);
+    assert!(
+        Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["diff", "--quiet", "HEAD"])
+            .status()
+            .unwrap()
+            .success(),
+        "precondition: the tree must be clean against the new head"
+    );
+
+    let s = compute_stale(&db, &bin, &root, &project_id).unwrap();
+    assert!(
+        s.index_is_stale,
+        "the index was built at the previous head; a clean tree at a different head is not fresh"
+    );
+    assert!(
+        s.changed_files.iter().any(|f| f == "src/helper.ts"),
+        "a moved head must name the files it moved past, not just flip the flag: {:?}",
+        s.changed_files
+    );
+}
+
+/// The stored head can be unreachable: a force-push, a shallow clone, a rebased-away commit. The
+/// diff against it fails, and a failed diff is not evidence that nothing changed -- fall back to
+/// hashing every file rather than trusting an answer git refused to give.
+#[test]
+fn an_unreachable_stored_head_falls_back_to_hashing_every_file() {
+    let (_dir, root, db, project_id, bin) = setup(SAMPLE);
+    db.execute(
+        "UPDATE projects SET git_head = ?1 WHERE project_id = ?2",
+        rusqlite::params!["0000000000000000000000000000000000000000", &project_id],
+    )
+    .unwrap();
+    fs::write(
+        root.join("src/helper.ts"),
+        "export function helper(n: number) { return n * 99; }\n",
+    )
+    .unwrap();
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-qm", "pulled"]);
+
+    let s = compute_stale(&db, &bin, &root, &project_id).unwrap();
+    assert!(
+        s.index_is_stale,
+        "a head git cannot resolve must widen the search, never narrow it"
+    );
+    assert!(s.changed_files.iter().any(|f| f == "src/helper.ts"));
+}
