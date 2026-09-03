@@ -145,6 +145,20 @@ pub struct ReindexOneResult {
     pub removed: bool,
 }
 
+/// Every file the index believes it holds, from its own bookkeeping rather than from a walk of the
+/// tree. The caller needs this to notice a file that stopped existing without git being able to say
+/// so; `file_state` carries one row per indexed file and is written in the same transaction the
+/// chunks are.
+fn indexed_files(db: &Db, project_id: &str) -> Result<Vec<String>, IndexError> {
+    let mut stmt = db.prepare("SELECT file_path FROM file_state WHERE project_id = ?1")?;
+    let rows = stmt.query_map(params![project_id], |r| r.get::<_, String>(0))?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
+}
+
 pub fn remove_file(db: &mut Db, project_id: &str, file_path: &str) -> Result<(), IndexError> {
     let tx = db.transaction()?;
     tx.execute(
@@ -300,7 +314,31 @@ pub fn incremental_index(
     let mut skipped = 0i64;
     let mut removed = 0i64;
 
-    for file_path in &cands.deleted {
+    // Files git can name as deleted, plus the ones it structurally cannot.
+    //
+    // An *untracked* file that was indexed and then deleted is listed by neither half of the
+    // narrowing: `git diff --name-status <head> HEAD` never mentions it (it was never committed)
+    // and `git ls-files --others` only lists paths that still exist. So it stayed in the index
+    // forever, and `impact --symbol` went on reporting a definition in a file that is not there --
+    // a claim the screen cannot support, which is worse than a missing row.
+    //
+    // Reproduced 2026-09-03 on a two-file fixture: creating an untracked file reindexed it
+    // (`files_reindexed: 1`), deleting it examined nothing (`files_examined: 0`), and the symbol
+    // survived until a full index. The tracked control behaved correctly, which is why nothing
+    // caught it.
+    //
+    // `file_state` is the index's own record of what it believes it holds, so it is the only thing
+    // that can answer "did something I know about stop existing". One `stat` per indexed file; on
+    // this repo that is 70 of them, and it runs in the same pass that was already walking
+    // candidates.
+    let mut deleted: Vec<String> = cands.deleted.clone();
+    for file_path in indexed_files(db, &canon.project_id)? {
+        if !canon.path.join(&file_path).exists() && !deleted.contains(&file_path) {
+            deleted.push(file_path);
+        }
+    }
+
+    for file_path in &deleted {
         remove_file(db, &canon.project_id, file_path)?;
         removed += 1;
     }
@@ -344,7 +382,7 @@ pub fn incremental_index(
         files: 0,
         chunks: 0,
         unparsed: 0,
-        files_examined: (cands.changed.len() + cands.deleted.len()) as i64,
+        files_examined: (cands.changed.len() + deleted.len()) as i64,
         files_reindexed: reindexed,
         files_skipped: skipped,
         files_removed: removed,

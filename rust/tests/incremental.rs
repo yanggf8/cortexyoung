@@ -698,3 +698,62 @@ fn a_head_that_moved_without_dirtying_the_tree_is_reindexed_not_just_restamped()
         "and only then may the index call itself fresh"
     );
 }
+
+/// An untracked file that is indexed and then deleted must leave the index.
+///
+/// Neither half of the git narrowing can name it: `git diff --name-status <head> HEAD` never
+/// mentions a path that was never committed, and `git ls-files --others` only lists paths that
+/// still exist. So the row survived every incremental pass and `impact --symbol` went on reporting
+/// a definition in a file that is not there -- a claim the screen cannot support, which is worse
+/// than a missing row. Reproduced on 2026-09-03 with a scratch file an agent created and removed.
+///
+/// The tracked control is asserted in the same test because it always worked, and that is exactly
+/// why nothing caught this: the case that fails is the one nobody writes a fixture for.
+#[test]
+fn an_untracked_file_that_is_deleted_leaves_the_index() {
+    let (_dir, root, mut db, project_id, bin) = git_project(SAMPLE);
+
+    let ghost = root.join("src/ghost.ts");
+    fs::write(&ghost, "export function ghost() { return 2; }\n").unwrap();
+    let r = incremental_index(&mut db, &bin, &root).unwrap();
+    assert!(
+        r.files_reindexed >= 1,
+        "the untracked file was never indexed, so this test proves nothing: {r:?}"
+    );
+    assert_eq!(
+        chunk_rows(&db, &project_id, "src/ghost.ts"),
+        1,
+        "the untracked file should be in the index before it is deleted"
+    );
+
+    fs::remove_file(&ghost).unwrap();
+    let r = incremental_index(&mut db, &bin, &root).unwrap();
+    assert_eq!(
+        r.files_removed, 1,
+        "a deleted untracked file must be counted as removed: {r:?}"
+    );
+    assert_eq!(
+        chunk_rows(&db, &project_id, "src/ghost.ts"),
+        0,
+        "the index still holds a file that does not exist"
+    );
+
+    // The tracked files are untouched: this closes a hole, it does not open a wider one.
+    assert!(
+        chunk_rows(&db, &project_id, "src/helper.ts") > 0,
+        "a tracked file was removed along with the ghost"
+    );
+
+    // And it converges: the next pass has nothing left to remove.
+    let r = incremental_index(&mut db, &bin, &root).unwrap();
+    assert_eq!(r.files_removed, 0, "the removal repeated itself: {r:?}");
+}
+
+fn chunk_rows(db: &rusqlite::Connection, project_id: &str, file_path: &str) -> i64 {
+    db.query_row(
+        "SELECT COUNT(*) FROM chunks WHERE project_id = ?1 AND file_path = ?2",
+        params![project_id, file_path],
+        |r| r.get(0),
+    )
+    .unwrap()
+}
