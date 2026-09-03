@@ -1113,7 +1113,13 @@ fn golden_json_and_lean_snapshots() {
         None,
         None,
     );
-    let report = query_usage_at(&path, 30, NOW_MS).unwrap();
+    let mut report = query_usage_at(&path, 30, NOW_MS).unwrap();
+    // The machine block is the one part of this report that is different on every machine, which is
+    // its whole purpose. Pinned to sentinels here so the golden stays a statement about the
+    // aggregation; `a_report_names_the_machine_and_says_when_a_db_holds_two` owns the real thing.
+    for k in ["id", "source", "db_created_on", "db_created_on_source"] {
+        report["machine"][k] = serde_json::json!(format!("<{k}>"));
+    }
     let json = format!("{}\n", serde_json::to_string_pretty(&report).unwrap());
     const GOLDEN_JSON: &str = r#"{
   "best_effort": true,
@@ -1138,6 +1144,13 @@ fn golden_json_and_lean_snapshots() {
     }
   },
   "days": 30,
+  "machine": {
+    "db_created_on": "<db_created_on>",
+    "db_created_on_source": "<db_created_on_source>",
+    "id": "<id>",
+    "mixed": false,
+    "source": "<source>"
+  },
   "note": "saved_bytes is raw body bytes omitted, not total-output savings",
   "projects": {
     "_global": {
@@ -1165,6 +1178,7 @@ fn golden_json_and_lean_snapshots() {
 
     const GOLDEN_LEAN: &str = "\
 # usage days=30 best_effort=true
+# machine=<id> source=<source>
 # saved_bytes is raw body bytes omitted, not total-output savings
 read\tok=2 error=0 bytes_out=300 saved_bytes=50 receipt_hit_rate=0.5 stale=0/0
 status\tok=1 error=1 bytes_out=30 saved_bytes=0 receipt_hit_rate=- stale=0/0
@@ -1196,4 +1210,120 @@ fn recorded_ts_is_utc_unix_ms() {
         ts >= before - 1000 && ts <= after + 1000,
         "ts={ts} before={before} after={after}"
     );
+}
+
+/// A report says which machine its rows came from, and shouts when one file holds two.
+///
+/// Numbers out of this database end up quoted in documents. Two machines averaged into one figure
+/// is wrong in a way that cannot be recovered once the figure is written down -- the rows carry no
+/// machine of their own, so after the fact nothing can separate them. All the report can honestly
+/// do is refuse to be quiet about it, which is why the warning is a header line and not a footnote.
+#[test]
+fn a_report_names_the_machine_and_says_when_a_db_holds_two() {
+    let dir = tempfile::Builder::new()
+        .prefix("cort-usage-machine-")
+        .tempdir()
+        .unwrap();
+    let path = dir.path().join("usage.db");
+    seed_schema(&path);
+
+    // A database this machine created: stamped with us, and nothing to disagree with.
+    let report = query_usage_at(&path, 30, NOW_MS).unwrap();
+    let m = &report["machine"];
+    let here = cort::usage::machine_id();
+    assert_eq!(m["id"].as_str(), Some(here));
+    assert_eq!(m["db_created_on"].as_str(), Some(here));
+    assert_eq!(m["mixed"].as_bool(), Some(false));
+    assert_ne!(
+        m["source"].as_str(),
+        Some(""),
+        "the source is recorded so a reader knows how much the id is worth"
+    );
+    assert!(
+        !render_usage_lean(&report).contains("mixed_machines"),
+        "a single-machine database must not carry the warning"
+    );
+    assert!(
+        render_usage_lean(&report).contains(&format!("# machine={here}")),
+        "the lean header is the line people paste into documents"
+    );
+
+    // Now the same file as it would look carried to a second machine: the stamp names the machine
+    // that created it and we are not that machine.
+    let db = Connection::open(&path).unwrap();
+    db.execute(
+        "INSERT INTO _usage_meta (key, value) VALUES ('MACHINE_ID', 'aaaaaaaaaaaaaaaa')
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        [],
+    )
+    .unwrap();
+    drop(db);
+
+    let report = query_usage_at(&path, 30, NOW_MS).unwrap();
+    assert_eq!(report["machine"]["mixed"].as_bool(), Some(true));
+    assert_eq!(
+        report["machine"]["db_created_on"].as_str(),
+        Some("aaaaaaaaaaaaaaaa")
+    );
+    assert_eq!(report["machine"]["id"].as_str(), Some(here));
+    let lean = render_usage_lean(&report);
+    assert!(
+        lean.contains("WARNING mixed_machines"),
+        "a file holding two machines must say so in the header: {lean}"
+    );
+
+    // And the stamp is never rewritten -- a database that keeps naming its origin is what makes the
+    // disagreement visible at all. Reopening for a write must not quietly adopt this machine.
+    record_command_at(&path, &rec("usage"));
+    let after = query_usage_at(&path, 30, NOW_MS).unwrap();
+    assert_eq!(
+        after["machine"]["db_created_on"].as_str(),
+        Some("aaaaaaaaaaaaaaaa"),
+        "writing from a second machine overwrote the stamp, hiding the mixture"
+    );
+    assert_eq!(after["machine"]["mixed"].as_bool(), Some(true));
+}
+
+/// The id is derived, so deleting the cache does not invent a second machine.
+#[test]
+fn the_machine_id_is_stable_across_a_deleted_database() {
+    let dir = tempfile::Builder::new()
+        .prefix("cort-usage-machine2-")
+        .tempdir()
+        .unwrap();
+    let path = dir.path().join("usage.db");
+    seed_schema(&path);
+    let first = query_usage_at(&path, 30, NOW_MS).unwrap()["machine"]["db_created_on"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    std::fs::remove_file(&path).unwrap();
+    seed_schema(&path);
+    let second = query_usage_at(&path, 30, NOW_MS).unwrap()["machine"]["db_created_on"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        first, second,
+        "a regenerated id would read as a second machine, which is the confusion this removes"
+    );
+}
+
+/// The id is a hash, never the machine's name -- the same discipline `project_id` keeps.
+#[test]
+fn the_machine_id_never_carries_a_hostname() {
+    let id = cort::usage::machine_id();
+    if id == "unknown" {
+        return; // No stable source on this host; `unknown` is the honest answer, not a leak.
+    }
+    assert_eq!(id.len(), 16, "expected 16 hex chars, got {id:?}");
+    assert!(
+        id.bytes().all(|b| b.is_ascii_hexdigit()),
+        "not a hash: {id:?}"
+    );
+    if let Ok(host) = std::env::var("HOSTNAME") {
+        if !host.is_empty() {
+            assert!(!id.contains(&host), "the hostname leaked into the id");
+        }
+    }
 }

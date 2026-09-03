@@ -11,6 +11,9 @@ rust/tests/.gate-probe/
 .claude/settings.local.json
 CORTEX_REPORT.md
 
+# Codex drops a zero-byte marker in the working directory it was started from.
+.codex
+
 # OS / editor (minimal)
 .DS_Store
 *.swp

@@ -461,49 +461,57 @@ deploy_skill_at() {
 # Read-only: never writes. Shared by `--check` for both the Claude/Grok and the Codex hook, so the
 # "wired to a different binary" and "not wired" logic exists exactly once regardless of which
 # settings file is being asked about.
-check_hook_at() {
-  local settings_path="$1" managed_cort="$2" label="$3" fmt="${4:-}" ev="${5:-pre}"
-  local hook_out fmt_arg=""
-  [ -n "$fmt" ] && fmt_arg="--format $fmt"
-  if hook_out="$("$managed_cort" hook-install --settings "$settings_path" $fmt_arg --event "$ev" --status 2>&1)"; then
-    if printf '%s' "$hook_out" | grep -q '"wired"[[:space:]]*:[[:space:]]*true'; then
-      # Wired is not enough: it has to be wired to the binary we just checked. A command naming a
-      # different cort is a live hook nobody here has verified.
-      if printf '%s' "$hook_out" | grep -q "\"command\"[[:space:]]*:[[:space:]]*\"$managed_cort "; then
-        # Wired is still not enough on Codex: it will not run a hook it has not been shown, and an
-        # unreviewed entry sits in config.toml firing nothing. `--status` answers `"trusted": null`
-        # where the question does not apply (Claude Code, Grok), so only an explicit false is a
-        # finding. It is reported, not failed: this hook is deployed unconditionally, exactly like
-        # CODEX_SKILL_DEST, so "wired and never reviewed" is also the resting state of a machine
-        # with no Codex on it -- and failing --check there would be crying wolf. Trust is the
-        # user's to give; naming it is ours.
-        if printf '%s' "$hook_out" | grep -q '"trusted"[[:space:]]*:[[:space:]]*false'; then
-          echo "$label: $settings_path (wired, NOT TRUSTED — start \`codex\` once and review the hook)"
-        else
-          echo "$label: $settings_path (wired)"
-        fi
-      else
-        echo "$label: $settings_path (WIRED TO A DIFFERENT BINARY — re-run ./install.sh)"
-        echo "  wired: $(printf '%s' "$hook_out" | tr -d '\n' | sed 's/.*"command"[[:space:]]*:[[:space:]]*"//; s/".*//')"
-        echo "  managed: $managed_cort"
-        if [ "$WITH_HOOK" -eq 1 ]; then ok=0; fi
-      fi
+# Read every entry from `hook-install --all --status --lean` and apply the same three tests
+# `check_hook_at` applies to one: wired at all, wired to the binary we manage, and (Codex only)
+# actually reviewed. The tests live here rather than in the binary because "is this the cort this
+# installer deployed" is a question about the install, not about the settings file.
+check_all_hooks() {
+  local managed_cort="$1"
+  local harness ev outcome settings detail label out
+  if ! out="$("$managed_cort" hook-install --all --status --lean 2>&1)"; then
+    if printf '%s' "$out" | grep -q '"unknown_command"'; then
+      echo "hook: installed cort predates hook-install --all — re-run ./install.sh to redeploy the binary"
     else
-      echo "$label: $settings_path (NOT WIRED — re-run ./install.sh)"
-      if [ "$WITH_HOOK" -eq 1 ]; then ok=0; fi
-    fi
-  else
-    # Not the file's fault, ever: --status resolves an unreadable or unparsable settings file to
-    # `wired: false` rather than failing, so reaching here means the invocation itself did not run.
-    # The usual reason is a deployed cort older than the subcommand. Blaming the settings path sent
-    # the reader to the wrong file -- the silent line-down this check exists to catch.
-    if printf '%s' "$hook_out" | grep -q '"unknown_command"'; then
-      echo "$label: installed cort predates hook-install — re-run ./install.sh to redeploy the binary"
-    else
-      echo "$label: could not query hook state — $hook_out"
+      echo "hook: could not query hook state — $out"
     fi
     ok=0
+    return 0
   fi
+  while IFS=$'\t' read -r harness ev outcome settings detail command; do
+    [ -n "$harness" ] || continue
+    label="$harness/$ev"
+    if [ "$outcome" != "wired" ]; then
+      echo "$label: $settings (NOT WIRED — re-run ./install.sh)"
+      if [ "$WITH_HOOK" -eq 1 ]; then ok=0; fi
+      continue
+    fi
+    # Wired is not enough: it has to be wired to the binary we just checked. A command naming a
+    # different cort is a live hook nobody here has verified. Compared per entry, against the
+    # command that entry actually carries -- an aggregate "some entry names it" would pass a file
+    # where five of six point somewhere else.
+    case "$command" in
+      "$managed_cort "*) : ;;
+      *)
+        echo "$label: $settings (WIRED TO A DIFFERENT BINARY — re-run ./install.sh)"
+        echo "  wired: $command"
+        echo "  managed: $managed_cort"
+        if [ "$WITH_HOOK" -eq 1 ]; then ok=0; fi
+        continue
+        ;;
+    esac
+    # Codex will not run a hook it has not been shown, so an unreviewed entry sits in config.toml
+    # firing nothing. Reported, not failed: this hook deploys unconditionally, so "wired and never
+    # reviewed" is also the resting state of a machine with no Codex on it. Trust is the user's to
+    # give; naming it is ours.
+    [ "$detail" = "-" ] && detail=""
+    if [ "$detail" = "trusted=false" ]; then
+      echo "$label: $settings (wired, NOT TRUSTED — start \`codex\` once and review the hook)"
+    else
+      echo "$label: $settings (wired)"
+    fi
+  done <<EOF
+$out
+EOF
 }
 
 deploy_hook() {
@@ -516,79 +524,93 @@ deploy_hook() {
     info "hook: cort not executable at $cort_bin — skipping"
     return 0
   fi
-  deploy_one_hook "$cort_bin" "$HOOK_SETTINGS" "claude-code" "hook_settings"
-  # Three files, three dialects, one installer. `hook-install` used to pick the merge from the
-  # target's extension; two of these are now called config.toml, so each names its own --format.
-  deploy_one_hook "$cort_bin" "$CODEX_HOOK_SETTINGS" "codex" "hook_settings_codex" "codex"
-  # Kimi: a flat `[[hooks]]` entry whose matcher is a regex over the tool name, covering both its
-  # shell and its structured Grep surface. Same unconditional deployment as the other two -- a
-  # machine without Kimi gets a config.toml it never reads, which is the price of not leaving a
-  # route to be wired by hand.
-  deploy_one_hook "$cort_bin" "$KIMI_HOOK_SETTINGS" "kimi-code" "hook_settings_kimi" "kimi"
-  # The second event, same three files. `PostToolUse` on the edit tools runs `cort index
-  # --incremental`, because the first hook could only ever *say* the index was behind and measured
-  # that is worth almost nothing (19 index runs against 2,700+ fires in 90 days), and because its
-  # staleness compares commits while the window that matters is an edit not yet committed.
-  deploy_one_hook "$cort_bin" "$HOOK_SETTINGS" "claude-code" "hook_settings" "" "post"
-  deploy_one_hook "$cort_bin" "$CODEX_HOOK_SETTINGS" "codex" "hook_settings_codex" "codex" "post"
-  deploy_one_hook "$cort_bin" "$KIMI_HOOK_SETTINGS" "kimi-code" "hook_settings_kimi" "kimi" "post"
-}
-
-deploy_one_hook() {
-  local cort_bin="$1" settings_path="$2" harness="$3" manifest_key="$4" fmt="${5:-}" ev="${6:-pre}"
-  local out change fmt_arg="" verb="hook-suggest"
-  [ -n "$fmt" ] && fmt_arg="--format $fmt"
-  [ "$ev" = "post" ] && verb="hook-refresh"
-  if ! out="$("$cort_bin" hook-install --settings "$settings_path" $fmt_arg --event "$ev" --command "$cort_bin $verb --harness $harness" 2>&1)"; then
-    info "hook ($harness/$ev): NOT wired — $out"
-    return 0
-  fi
-  change="$(printf '%s' "$out" | sed -n 's/.*"change"[[:space:]]*:[[:space:]]*"\([a-z_]*\)".*/\1/p')"
-  case "$change" in
-    installed) info "hook ($harness/$ev): wired -> cort $verb in $settings_path" ;;
-    updated)   info "hook ($harness/$ev): updated command in $settings_path" ;;
-    already_present) info "hook ($harness/$ev): already wired in $settings_path" ;;
-    *)         info "hook ($harness/$ev): $out" ;;
-  esac
-  # Codex gates a hook behind a one-time review, and the trust it persists is bound to the exact
-  # command string. Writing or rewriting that command therefore always leaves the hook inert until
-  # it is reviewed again -- and nothing downstream can tell a stale trust from a current one, so the
-  # only honest moment to say so is here, where we are the ones who moved it.
-  if [ "$harness" = "codex" ] && { [ "$change" = "installed" ] || [ "$change" = "updated" ]; }; then
-    info "hook (codex): Codex runs it only after a one-time review — start \`codex\` and trust the hook"
-  fi
-  record_manifest "$manifest_key" "$settings_path"
+  # One call. The binary owns the table -- which harnesses ship, which file each one reads, which
+  # dialect it speaks, which subcommand each event runs -- and this script owns none of it.
+  #
+  # It used to own all four, restated on every one of six calls, and bash's copy was the one that
+  # ran: `cort hook-install --status --format kimi` was answering about ~/.claude/settings.json for
+  # who knows how long, because no shipped path ever exercised the binary's own defaults. Two
+  # implementations of one rule, and the one without a caller is the one that rots.
+  #
+  # `--command-prefix` is the single thing only this script knows: the harness must run the *shim*
+  # at $BIN_DIR/cort, not the real executable behind it, and `check_hook_at` verifies exactly that.
+  local line harness ev outcome settings detail
+  while IFS=$'\t' read -r harness ev outcome settings detail; do
+    [ -n "$harness" ] || continue
+    case "$outcome" in
+      installed) info "hook ($harness/$ev): wired -> cort in $settings" ;;
+      updated)   info "hook ($harness/$ev): updated in $settings" ;;
+      already_present) info "hook ($harness/$ev): already wired in $settings" ;;
+      error)     info "hook ($harness/$ev): NOT wired — $detail" ;;
+      *)         info "hook ($harness/$ev): $outcome $detail" ;;
+    esac
+    # Codex gates a hook behind a one-time review and the trust it persists is bound to the exact
+    # entry, so writing or rewriting one always leaves it inert until reviewed again. Nothing
+    # downstream can tell a stale trust from a current one; the honest moment to say so is here,
+    # where we are the ones who moved it.
+    if [ "$harness" = "codex" ] && { [ "$outcome" = "installed" ] || [ "$outcome" = "updated" ]; }; then
+      info "hook (codex): Codex runs it only after a one-time review — start \`codex\` and trust the hook"
+    fi
+    # The manifest records the path the binary resolved, rather than one this script worked out for
+    # itself. That keeps it a record of what actually happened -- which is what uninstall needs --
+    # instead of a second copy of the resolution rule.
+    case "$harness" in
+      claude-code) record_manifest "hook_settings" "$settings" ;;
+      codex)       record_manifest "hook_settings_codex" "$settings" ;;
+      kimi-code)   record_manifest "hook_settings_kimi" "$settings" ;;
+    esac
+  done <<EOF
+$("$cort_bin" hook-install --all --lean --command-prefix "$cort_bin" 2>/dev/null)
+EOF
 }
 
 remove_hook() {
   local cort_bin
   cort_bin="$(manifest_get cort_bin || true)"
   [ -n "$cort_bin" ] && [ -x "$cort_bin" ] || cort_bin="$(command -v cort 2>/dev/null || true)"
-  remove_one_hook "$cort_bin" hook_settings "$HOOK_SETTINGS"
-  remove_one_hook "$cort_bin" hook_settings_codex "$CODEX_HOOK_SETTINGS" "codex"
-  remove_one_hook "$cort_bin" hook_settings_kimi "$KIMI_HOOK_SETTINGS" "kimi"
-}
-
-remove_one_hook() {
-  local cort_bin="$1" manifest_key="$2" default_settings="$3" fmt="${4:-}"
-  local settings fmt_arg=""
-  [ -n "$fmt" ] && fmt_arg="--format $fmt"
-  settings="$(manifest_get "$manifest_key" || true)"
-  [ -n "$settings" ] || settings="$default_settings"
   if [ -z "$cort_bin" ] || [ ! -x "$cort_bin" ]; then
-    info "hook: no cort to unwire with — leaving $settings alone"
+    info "hook: no cort to unwire with — leaving the settings files alone"
     return 0
   fi
-  local out
-  if out="$("$cort_bin" hook-install --settings "$settings" $fmt_arg --remove 2>&1)"; then
-    if printf '%s' "$out" | grep -q '"change"[[:space:]]*:[[:space:]]*"removed"'; then
-      info "hook: unwired from $settings"
+
+  # The binary's own table first: same six entries the deploy wired, resolved the same way, so an
+  # uninstall cannot miss a file the install created because this script disagreed about its path.
+  local harness ev outcome settings detail command
+  local seen=""
+  while IFS=$'\t' read -r harness ev outcome settings detail command; do
+    [ -n "$harness" ] || continue
+    case "$seen" in *"|$settings|"*) continue ;; esac
+    seen="$seen|$settings|"
+    case "$outcome" in
+      removed)     info "hook: unwired from $settings" ;;
+      not_present) info "hook: nothing of ours in $settings" ;;
+      error)       info "hook: could not unwire $settings — $detail" ;;
+    esac
+  done <<EOF
+$("$cort_bin" hook-install --all --remove --lean 2>/dev/null)
+EOF
+
+  # Then anything the manifest records that the table did not reach. The manifest is the record of
+  # what actually happened, so it is the only thing that knows where an entry went when a harness
+  # home variable pointed somewhere else at install time than it does now. Reported by exit status
+  # rather than by reading the reply, because a regex over our own JSON is the second parser this
+  # refactor exists to delete.
+  local key path
+  for key in hook_settings hook_settings_codex hook_settings_kimi; do
+    path="$(manifest_get "$key" || true)"
+    [ -n "$path" ] || continue
+    case "$seen" in *"|$path|"*) continue ;; esac
+    local fmt_arg=""
+    case "$key" in
+      hook_settings_codex) fmt_arg="--format codex" ;;
+      hook_settings_kimi)  fmt_arg="--format kimi" ;;
+    esac
+    if "$cort_bin" hook-install --settings "$path" $fmt_arg --remove >/dev/null 2>&1; then
+      info "hook: unwired from $path (recorded in the manifest, outside the current table)"
     else
-      info "hook: nothing of ours in $settings"
+      info "hook: could not unwire $path"
     fi
-  else
-    info "hook: could not unwire — $out"
-  fi
+  done
 }
 
 # ═══════════════════════════════════════════════════════════════════
@@ -814,16 +836,11 @@ do_check() {
     managed_cort="$BIN_DIR/cort"
   fi
   if [ -x "$managed_cort" ]; then
-    check_hook_at "$HOOK_SETTINGS" "$managed_cort" "hook"
-    # Codex is checked the same unconditional way CODEX_SKILL_DEST is below: deployed whether or not
-    # Codex is on this machine, so --check expects it wired the same way it expects the skill file.
-    check_hook_at "$CODEX_HOOK_SETTINGS" "$managed_cort" "hook_codex" "codex"
-    check_hook_at "$KIMI_HOOK_SETTINGS" "$managed_cort" "hook_kimi" "kimi"
-    # The refresh hook is a separate entry in the same three files, so it is checked separately: a
-    # file can carry one of ours and not the other, and a single line saying "wired" would hide it.
-    check_hook_at "$HOOK_SETTINGS" "$managed_cort" "refresh" "" "post"
-    check_hook_at "$CODEX_HOOK_SETTINGS" "$managed_cort" "refresh_codex" "codex" "post"
-    check_hook_at "$KIMI_HOOK_SETTINGS" "$managed_cort" "refresh_kimi" "kimi" "post"
+    # One query, six answers, and the same table the deploy used -- so --check cannot disagree with
+    # the installer about which files exist, which is a way this pair has been wrong before. Every
+    # entry is still reported on its own line: a file can carry one of ours and not the other, and a
+    # single "wired" would hide it.
+    check_all_hooks "$managed_cort"
   fi
   if [ -f "$SKILL_DEST" ]; then
     if skill_is_managed "$SKILL_DEST"; then

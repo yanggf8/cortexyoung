@@ -679,7 +679,7 @@ echo "cort 0.1.0 (rust)"
 FAKEPATHCORT
 chmod +x "$STALEBIN/cort"
 PATH="$STALEBIN:$PATH" bash "$INSTALL_SH" --check > /tmp/smoke19b.log 2>&1 || true
-if grep -q "^hook: $HOME/.claude/settings.json (wired)" /tmp/smoke19b.log; then
+if grep -q "^claude-code/pre: $HOME/.claude/settings.json (wired)" /tmp/smoke19b.log; then
   pass "--check consults the managed binary, not a different cort earlier in PATH"
 else
   fail "a PATH cort answered for the hook"; sed 's/^/    /' /tmp/smoke19b.log
@@ -693,14 +693,87 @@ d = json.load(open(p))
 d["hooks"]["PreToolUse"][0]["hooks"][0]["command"] = "/some/other/cort hook-suggest"
 json.dump(d, open(p, "w"), indent=2)
 REWIRE
-bash "$INSTALL_SH" --check > /tmp/smoke19c.log 2>&1 || true
+# Captured with `|| CHECK_RC=$?` rather than `; CHECK_RC=$?`: this file runs under `set -e`
+# (line 2), so a plain call to a command that is *expected* to exit 1 kills the suite.
+CHECK_RC=0
+bash "$INSTALL_SH" --check > /tmp/smoke19c.log 2>&1 || CHECK_RC=$?
 if grep -q "WIRED TO A DIFFERENT BINARY" /tmp/smoke19c.log; then
   pass "--check flags a hook wired to a cort it does not manage"
 else
   fail "--check reported OK for a hook wired elsewhere"; sed 's/^/    /' /tmp/smoke19c.log
 fi
+# The message is not the contract -- the exit code is. `--check` reports through `ok=0`, and the
+# rewrite from six independent calls to one loop is exactly the shape where that gets dropped: a
+# `cmd | while read` loop runs in a subshell and its `ok=0` never reaches the caller. Nothing
+# asserted this before, so the whole accounting could have gone silent while every line still read
+# correctly.
+if [ "$CHECK_RC" -ne 0 ]; then
+  pass "--check exits non-zero when a hook is wired elsewhere"
+else
+  fail "--check printed the finding but exited 0 (ok=0 did not propagate out of the loop)"
+fi
+# And one bad entry must not collapse the other five: they are separate entries in separate files
+# and a single verdict would hide a partial install.
+HEALTHY="$(grep -cE '^(claude-code|codex|kimi-code)/(pre|post): .* \(wired' /tmp/smoke19c.log || true)"
+if [ "$HEALTHY" -ge 4 ]; then
+  pass "the five healthy entries are still reported individually ($HEALTHY wired lines)"
+else
+  fail "one rewired entry collapsed the others ($HEALTHY wired lines)"; sed 's/^/    /' /tmp/smoke19c.log
+fi
 bash "$INSTALL_SH" > /dev/null 2>&1  # put the wiring back for any later assertion
 rm -rf "$STALEBIN"
+
+# ── 20. all six wired entries, not just the one this file used to check ──
+# Six entries ship: three harnesses times two events. Until 2026-09-03 every hook assertion in this
+# file pointed at `~/.claude/settings.json` and at the pre event, so five of the six were deployed
+# with no install-level test at all -- including both of Kimi's, whose file is a third TOML dialect,
+# and both post events. A deploy path with no assertion is the failure mode this whole file exists
+# for; `--check` reading green is not the same claim, because `--check` asks the same binary that
+# wrote the entry.
+echo "--- Test 20: all six hook entries are deployed, one per harness per event ---"
+bash "$INSTALL_SH" > /tmp/smoke20.log 2>&1; sed 's/^/    /' /tmp/smoke20.log
+CODEX_CFG="$HOME/.codex/config.toml"
+KIMI_CFG="$HOME/.kimi-code/config.toml"
+assert_file_exists "$CODEX_CFG" "Codex config.toml written by the hook deploy"
+assert_file_exists "$KIMI_CFG"  "Kimi config.toml written by the hook deploy"
+for pair in "claude-code:$HOME/.claude/settings.json" "codex:$CODEX_CFG" "kimi-code:$KIMI_CFG"; do
+  h="${pair%%:*}"; f="${pair#*:}"
+  assert_contains "$f" "hook-suggest --harness $h" "$h pre-event wired in $(basename "$f")"
+  assert_contains "$f" "hook-refresh --harness $h" "$h post-event wired in $(basename "$f")"
+done
+# The two TOML dialects are not each other. Codex nests its groups; Kimi is flat with the event as
+# a field. Asserting the entry's own shape is what would catch a `--format` mixup that both files
+# would otherwise absorb silently, since both are called config.toml.
+assert_contains "$CODEX_CFG" "[[hooks.PreToolUse]]" "Codex got the nested dialect"
+# Each harness is matched on the tool names it actually has. Codex's entries carried Claude Code's
+# vocabulary (`Bash`, `Edit|Write|MultiEdit|NotebookEdit`) until 2026-09-03, which made both of them
+# wired, trusted, green in `--check`, and incapable of ever firing -- Codex has no tool by any of
+# those names. The negative assertion is the one that matters: the bug was a default reused across a
+# harness boundary, not a typo.
+assert_contains "$CODEX_CFG" 'matcher = "exec_command|shell"' "Codex is matched on its own shell tool"
+assert_contains "$CODEX_CFG" 'matcher = "apply_patch"' "Codex is matched on its own edit tool"
+assert_not_contains "$CODEX_CFG" 'matcher = "Bash"' "Codex did not inherit Claude Code's tool names"
+assert_contains "$KIMI_CFG"  'event = "PreToolUse"' "Kimi got the flat dialect with the event as a field"
+assert_not_contains "$KIMI_CFG" "[[hooks.PreToolUse]]" "Kimi did not get Codex's nested shape"
+# Kimi's matcher has to reach its structured Grep tool, which is the majority of that harness's
+# search traffic; a Bash-only matcher there is silent on most of what the rule exists for.
+assert_contains "$KIMI_CFG" 'matcher = "Bash|Grep"' "Kimi's matcher covers its structured Grep tool"
+# Idempotence, per file: a redeploy converges instead of stacking a second entry.
+bash "$INSTALL_SH" > /dev/null 2>&1
+for f in "$HOME/.claude/settings.json" "$CODEX_CFG" "$KIMI_CFG"; do
+  n="$(grep -c "hook-suggest --harness" "$f" 2>/dev/null || echo 0)"
+  if [ "$n" = "1" ]; then pass "$(basename "$f") holds exactly one pre-event entry after a redeploy"
+  else fail "$(basename "$f") holds $n pre-event entries after a redeploy"; fi
+done
+# And uninstall hands all three files back. `--check` cannot see this: it asks about our entry, not
+# about what we left behind in somebody else's file.
+bash "$INSTALL_SH" --uninstall > /tmp/smoke20b.log 2>&1
+for f in "$HOME/.claude/settings.json" "$CODEX_CFG" "$KIMI_CFG"; do
+  if [ ! -f "$f" ]; then pass "$(basename "$f") unwired on uninstall (file absent)"; continue; fi
+  assert_not_contains "$f" "hook-suggest --harness" "$(basename "$f"): pre-event unwired on uninstall"
+  assert_not_contains "$f" "hook-refresh --harness" "$(basename "$f"): post-event unwired on uninstall"
+done
+bash "$INSTALL_SH" > /dev/null 2>&1  # put the wiring back for any later assertion
 
 # ── summary ──────────────────────────────────────────────────────
 echo ""

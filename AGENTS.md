@@ -48,21 +48,56 @@ hook by `install.sh` in the same run as the skill, so while working in this repo
 `grep`/`rg` will sometimes come back with a `cort impact` suggestion attached -- that is the
 product talking, and it is the retrospective half of the routing the skill's prose could not
 carry (409 searches in skill-bearing sessions, zero `cort` calls). Be precise about which half is
-singular: **parsing is per-harness and plural, the verdict is singular.** A shell line, Codex's
-`["bash","-lc",…]` and Kimi's structured `Grep` fields are three different extractions and each gets
-its own function; all three build a `Search` and all three hand it to the one `judge`. A second copy
-of a *parser* is just code; a second copy of the *decision* makes `cort-evals hook-probe`'s
-calibration describe something other than what ships, which is the only thing that number is for. So
-`hook-probe` replays `judge` itself, and never reimplements it -- a hand-rolled approximation of the
-rule was tried on 2026-09-02 and over-counted its own corpus by 48% and 4x on the two surfaces
-(`docs/2026-09-02-hook-wiring-correction.md` §15, §16). `cort hook-install` owns the settings merge
-for the same reason a `jq` pipeline would not: preserving other people's hooks, collapsing
-duplicates, and refusing a file it cannot parse are logic, and logic needs tests -- one module per
-dialect (`settings.rs` JSON, `settings_toml.rs` Codex, `settings_kimi.rs` Kimi), chosen by an
-explicit `--format` since two of the three files are called `config.toml`. Recognition of our own
-entry is a token test, never a suffix test -- anchoring it to the end of the command line is what
-let `--status` report `wired: false` on a machine where the hook was firing, twice
+singular: **parsing is per-harness and plural, the verdict is singular.** Two spellings arrive in a
+*hook payload* and each gets its own constructor in `hook.rs`: a shell line (`search_from_shell` --
+Claude Code, Codex and Grok all send `tool_input.command` as a string) and Kimi's structured `Grep`
+fields. Codex's `["bash","-lc",…]` is a third spelling but not a third one there: it is the *rollout
+transcript* dialect, which only `cort-evals hook-probe` reads, so its extraction lives in
+`evals/src/hook.rs` and hands the recovered script to `search_from_shell`. All of them build a
+`Search` and hand it to the one `judge`. A second copy of a *parser* is just code; a second copy of
+the *decision* makes `hook-probe`'s calibration describe something other than what ships, which is
+the only thing that number is for. So `hook-probe` replays `judge` itself, and never reimplements it
+-- a hand-rolled approximation of the rule was tried on 2026-09-02 and over-counted its own corpus
+by 48% and 4x on the two surfaces (`docs/2026-09-02-hook-wiring-correction.md` §15, §16).
+
+**A parser may be plural; the table may not.** `cort hook-install` owns the settings merge for the
+same reason a `jq` pipeline would not -- preserving other people's hooks, collapsing duplicates, and
+refusing a file it cannot parse are logic, and logic needs tests -- one module per dialect
+(`settings.rs` JSON, `settings_toml.rs` Codex, `settings_kimi.rs` Kimi). It also owns **which
+harnesses ship, which file each reads, which dialect it speaks, and which subcommand each event
+runs**: that is `HOOK_TARGETS` in `main.rs`, reached through `hook-install --all`, and `install.sh`
+holds none of it. It used to hold all four, restated on each of six calls, and bash's copy was the
+one that shipped -- so the binary's own defaults were never exercised and had rotted into answering
+`--status --format kimi` about `~/.claude/settings.json`
+(`docs/2026-09-03-installer-dedup-and-attribution.md` §2, §3). The one fact only the installer has
+is which binary the harness should run: the installed layout puts a shim in front of the real
+executable and `--check` verifies the shim, so `--command-prefix` is required and never defaults to
+`current_exe()`. `--all --lean` speaks TSV **with no empty field ever** -- tab is an IFS whitespace
+character, so `read` collapses runs of tabs and drops the empty one between them. Recognition of our
+own entry is a token test, never a suffix test -- anchoring it to the end of the command line is
+what let `--status` report `wired: false` on a machine where the hook was firing, twice
 (`docs/2026-09-02-hook-wiring-correction.md`).
+
+**Each harness is matched on the tool names it actually has.** Codex's entries carried Claude Code's
+vocabulary (`Bash`, `Edit|Write|MultiEdit|NotebookEdit`) until 2026-09-03; Codex has `exec_command`,
+`shell` and `apply_patch` and none of those. `is_canonical` could not notice, because the matcher
+lives on the *group* and it only ever sees the entry -- so a stale matcher survived every redeploy
+as `already_present`, the same "a hash match must not excuse the shape" the skill deploy already
+enforces. **That diagnosis is not closed**: another machine fires 417 times under `matcher = "Bash"`,
+and the local zero is equally explained by nobody having issued a tool call in those sessions. Read
+`docs/2026-09-03-installer-dedup-and-attribution.md` §7 before quoting it, and run the experiment it
+names before relying on the change.
+
+**A number that cannot say which machine produced it is not comparable to anything.** `usage.db`
+stamps `MACHINE_ID` once and never rewrites it, so a database carried to a second machine keeps
+naming its origin and the report can say `mixed`; `cort usage`'s lean header and every `cort-evals`
+report carry the id and its source. This is not hypothetical bookkeeping -- on 2026-09-03 a table of
+417 Codex fires was reconciled against this machine's 2 before anyone noticed they were different
+computers. Rows carry no machine of their own, so once two machines have written to one database
+nothing can separate them again; the report's only honest move is to refuse to be quiet about it.
+**Harness is which program ran, model is who answered, and machine is where** -- three dimensions,
+and the harness total stays whole regardless of the other two (`hook_models_at` is a second lens,
+never a split of the first).
 
 **The hook never blocks -- except on Kimi, where it can only block.** Kimi's `PreToolUse` keeps only
 results whose `action` is `block` and discards every allow-shaped one before the model sees it, so a

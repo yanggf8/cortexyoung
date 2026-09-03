@@ -27,20 +27,40 @@
 //! (`docs/2026-09-02-hook-wiring-correction.md` §7, §9), and a second copy of it here is a second
 //! place for the same bug to reappear.
 
-use crate::settings::{is_ours_for, HookEvent, EDIT_MATCHER, EVENTS};
+use crate::settings::{is_ours_for, HookEvent, EVENTS};
 use crate::settings::{Change, Outcome};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use toml_edit::{value, ArrayOfTables, DocumentMut, Item, Table};
 
-/// The tool whose payload `hook-suggest` can read -- same rule as the JSON side.
-const MATCHER: &str = "Bash";
+/// Codex's own tool names, which are not Claude Code's.
+///
+/// This file used to write `"Bash"` here and `settings::EDIT_MATCHER`
+/// (`Edit|Write|MultiEdit|NotebookEdit`) for the other event, both inherited wholesale from the
+/// JSON side. Codex has never had a tool by any of those names: its shell surface is
+/// `exec_command` (1,272 calls in this machine's rollouts against zero of anything Claude-shaped)
+/// with `shell` as the older spelling, and its edit surface is `apply_patch`. The 0.152.1 binary
+/// contains the strings `exec_command`, `shell` and `apply_patch` and contains `Bash`, `Edit`,
+/// `MultiEdit`, `Grep` and `Glob` exactly zero times, so it does not normalise into Claude Code's
+/// vocabulary either -- the matcher is compared against the name Codex uses, and a `Bash` matcher
+/// there cannot fire. Both entries were wired, trusted, and structurally incapable of running
+/// (reproduced 2026-09-03: `usage.db` holds two `harness=codex` rows in 90 days and both were
+/// hand-fed on stdin by a developer).
+///
+/// This is the defect `settings_kimi` was written to avoid -- its `"Bash|Grep"` exists precisely
+/// because a Bash-only matcher misses the surface the rule is for -- never carried back here.
+const MATCHER: &str = "exec_command|shell";
+
+/// `apply_patch` is Codex's only edit tool. `write_stdin` feeds an already-running process and is
+/// not a file edit, so it is deliberately absent: a post-hook that reindexes on it would run the
+/// incremental pass against a tree nothing changed in.
+const CODEX_EDIT_MATCHER: &str = "apply_patch";
 
 fn matcher_for(event: HookEvent) -> &'static str {
     match event {
         HookEvent::Suggest => MATCHER,
-        HookEvent::Refresh => EDIT_MATCHER,
+        HookEvent::Refresh => CODEX_EDIT_MATCHER,
     }
 }
 
@@ -185,42 +205,69 @@ pub fn install_hook(
 
     for gi in 0..list.len() {
         let group = list.get_mut(gi).expect("gi in range");
-        let Some(hooks) = group
-            .get_mut("hooks")
-            .and_then(Item::as_array_of_tables_mut)
-        else {
+        let mut ours_in_this_group = false;
+        let Some((before, remaining)) = ({
+            match group
+                .get_mut("hooks")
+                .and_then(Item::as_array_of_tables_mut)
+            {
+                None => None,
+                Some(hooks) => {
+                    let before = hooks.len();
+                    let mut drop_idx: Vec<usize> = Vec::new();
+                    for hi in 0..hooks.len() {
+                        let h = hooks.get_mut(hi).expect("hi in range");
+                        let Some(cur) = h.get("command").and_then(Item::as_str).map(str::to_string)
+                        else {
+                            continue;
+                        };
+                        if !is_ours_for(&cur, event) {
+                            continue;
+                        }
+                        // A file can already hold more than one of ours. Keep the first, drop the
+                        // rest, so a redeploy converges on one entry instead of adding to the pile
+                        // -- same rule as the JSON side, same reason (§7 of the wiring doc).
+                        if seen_ours {
+                            changed = true;
+                            drop_idx.push(hi);
+                            continue;
+                        }
+                        seen_ours = true;
+                        ours_in_this_group = true;
+                        if is_canonical(h, command, event) {
+                            found_same = true;
+                        } else {
+                            *h = hook_command_table(command);
+                            changed = true;
+                        }
+                    }
+                    for hi in drop_idx.into_iter().rev() {
+                        hooks.remove(hi);
+                    }
+                    Some((before, hooks.len()))
+                }
+            }
+        }) else {
             continue;
         };
-        let before = hooks.len();
-        let mut drop_idx: Vec<usize> = Vec::new();
-        for hi in 0..hooks.len() {
-            let h = hooks.get_mut(hi).expect("hi in range");
-            let Some(cur) = h.get("command").and_then(Item::as_str).map(str::to_string) else {
-                continue;
-            };
-            if !is_ours_for(&cur, event) {
-                continue;
-            }
-            // A file can already hold more than one of ours. Keep the first, drop the rest, so a
-            // redeploy converges on one entry instead of adding to the pile -- same rule as the
-            // JSON side, same reason (§7 of the wiring doc).
-            if seen_ours {
-                changed = true;
-                drop_idx.push(hi);
-                continue;
-            }
-            seen_ours = true;
-            if is_canonical(h, command, event) {
-                found_same = true;
-            } else {
-                *h = hook_command_table(command);
-                changed = true;
-            }
+        // The matcher lives on the group, not on the entry, so `is_canonical` -- which only ever
+        // sees the entry -- cannot notice a stale one. That gap shipped a Codex hook that was
+        // wired, trusted, green in `--check` and matched against `Bash`, a tool Codex does not
+        // have: every redeploy read the command as unchanged and reported `already_present` while
+        // the matcher stayed dead. Same lesson as the skill's "a hash match must not excuse the
+        // shape" (`tests/install-smoke.sh` Test 17), which this file never learned.
+        //
+        // Only when the group holds our entry and nothing else. A matcher on a shared group is
+        // also somebody else's routing, and rewriting it would silently re-aim their hook.
+        if ours_in_this_group
+            && remaining == 1
+            && group.get("matcher").and_then(Item::as_str) != Some(matcher_for(event))
+        {
+            group.insert("matcher", value(matcher_for(event)));
+            changed = true;
+            found_same = false;
         }
-        for hi in drop_idx.into_iter().rev() {
-            hooks.remove(hi);
-        }
-        if hooks.is_empty() && before > 0 {
+        if remaining == 0 && before > 0 {
             empty_groups.push(gi);
         }
     }

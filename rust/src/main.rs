@@ -228,6 +228,15 @@ fn finish_record(ev: &UsageEvent, status: &str, error_code: Option<&str>, bytes_
 fn render_emit(emit: &Emit) -> String {
     if emit.render_command == Some("usage") && emit.format == Format::Lean {
         usage::render_usage_lean(&emit.payload)
+    } else if emit.render_command == Some("hook-install-all-lean") {
+        // Emitted raw. Wrapping these lines in a JSON string would put the installer back where it
+        // started -- reaching into a serialised object with a regex -- which is the whole thing
+        // `--all --lean` exists to stop.
+        emit.payload
+            .get("lean")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
     } else {
         render(emit.render_command, emit.format, &emit.payload)
     }
@@ -360,6 +369,21 @@ struct HookInstallArgs {
     /// Report what is wired without writing anything -- what `install.sh --check` needs.
     #[arg(long = "status")]
     status: bool,
+    /// Act on every harness and both events in one call, resolving each file and each command from
+    /// the table in this binary rather than from the caller. Ignores `--settings`, `--format`,
+    /// `--event` and `--command`: naming any of them would be the caller restating what `--all`
+    /// exists to own.
+    #[arg(long = "all")]
+    all: bool,
+    /// With `--all`: the cort the harness should run. Required, never defaulted to this binary --
+    /// the installed layout puts a shim in front of the real executable and the wired command has
+    /// to name the shim.
+    #[arg(long = "command-prefix")]
+    command_prefix: Option<String>,
+    /// With `--all`: one tab-separated line per entry instead of JSON, so `install.sh` reads the
+    /// result with `read` rather than with a second JSON parser written in `sed`.
+    #[arg(long = "lean")]
+    lean: bool,
 }
 
 #[derive(Parser, Debug)]
@@ -516,12 +540,40 @@ fn dispatch(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError> 
 /// `declared` is recorded only when it disagrees with `harness`, because a disagreement is the
 /// finding: one settings file can be read by more than one harness, and the flag then names the
 /// installer's intent rather than the process that actually ran.
-fn hook_args(outcome: &str, harness: &str, declared: Option<&str>) -> String {
-    let mut v = json!({ "v": 2, "hook": outcome, "harness": harness });
+///
+/// `v: 3` adds `model`, and the harness field alone is why it had to. A router -- this machine runs
+/// one, `kimicode` -> `~/.claude-code-router/.../cc_claude` -- launches real Claude Code against a
+/// different model's endpoint. Same binary, same `settings.json`, same `~/.claude/projects`, so
+/// `harness_of` correctly answers `claude-code` and there is nothing left to tell the rows apart:
+/// on 2026-09-03 the local Claude Code corpus held ~2,167 assistant messages from
+/// `muse-spark-1.2-contributor`, `stealth/ox-alpha`, four `glm-5.*` variants, `deepseek-v4-flash`,
+/// `k3` and `qwen3.5:4b` against ~5,072 Anthropic ones -- about 30% of a corpus quoted as evidence
+/// about how *the agent* behaves. Harness is which program ran; model is who answered, and every
+/// behavioural claim (search-without-cort rates, multi-hop error rates, uptake) is a claim about
+/// the second one. The payload has carried it all along (`model`, beside `transcript_path` and
+/// `session_id`; `docs/2026-09-02-hook-wiring-correction.md` §12) and nothing read it.
+///
+/// Omitted rather than guessed when the payload has none, and a v1/v2 row is a row from before the
+/// field existed -- the version tells a reader which of the two silences it is looking at.
+fn hook_row(outcome: &str, harness: &str, declared: Option<&str>, model: Option<&str>) -> Value {
+    let mut v = json!({ "v": 3, "hook": outcome, "harness": harness });
     if let Some(d) = declared {
         v["harness_declared"] = json!(d);
     }
-    v.to_string()
+    if let Some(m) = model.filter(|m| !m.is_empty()) {
+        v["model"] = json!(m);
+    }
+    v
+}
+
+fn hook_args(outcome: &str, harness: &str, declared: Option<&str>, model: Option<&str>) -> String {
+    hook_row(outcome, harness, declared, model).to_string()
+}
+
+/// The model that answered, as the harness named it in its own payload. Never inferred: a guess
+/// here is worse than the absence, because absence is visible and a wrong model name is not.
+fn model_of_payload(v: &Value) -> Option<&str> {
+    v.get("model").and_then(Value::as_str)
 }
 
 /// Which harness is running this hook, taken from what the harness said about itself.
@@ -675,19 +727,46 @@ fn gate_already_fired(session_id: &str, symbol: &str) -> bool {
 /// most edits touch one file that is already current by the time a second tool call lands), ~206ms
 /// after one edited file. `incremental_index` does its work in transactions, so the harness killing
 /// this at its timeout rolls back rather than leaving a half-written graph.
-fn cmd_hook_refresh(_args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError> {
+fn cmd_hook_refresh(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError> {
+    // Same `--harness` the installer already passes on this entry's command line (`install.sh`
+    // builds both events' commands from one template), and same `v: 2` row shape `hook-suggest`
+    // writes. It was being discarded: the argument list arrived as `_args` and the summary was a
+    // bare `outcome=`, so once three harnesses were wired every reindex became an anonymous row and
+    // "is Kimi's post-hook actually firing?" had no answer in the data. That is the defect
+    // `f3cb567f` fixed for the pre-event and never carried across to this one.
+    let declared = HookSuggestArgs::try_parse_from(args.iter())
+        .ok()
+        .and_then(|a| a.harness)
+        .unwrap_or_else(|| "unspecified".to_string());
+    // The payload is read for two fields only. Which file changed is `incremental_index`'s
+    // question, not ours -- but `transcript_path` is the harness naming its own session file and it
+    // outranks the flag for the reason `harness_of` documents (Grok runs the entry installed as
+    // `claude-code`), and `model` is the only thing that separates a router's session from the
+    // harness it is wearing.
+    let mut payload = String::new();
+    let _ = std::io::Read::read_to_string(&mut std::io::stdin(), &mut payload);
+    let parsed = serde_json::from_str::<Value>(&payload).ok();
+    let (harness, declared_differs) = match parsed.as_ref() {
+        Some(v) => harness_of(v, &declared),
+        None => (declared, None),
+    };
+    let model = parsed
+        .as_ref()
+        .and_then(model_of_payload)
+        .map(str::to_string);
     let quiet = |outcome: &str, usage: &mut UsageEvent| {
-        usage.args_summary = format!("outcome={outcome}");
+        usage.args_summary = hook_args(
+            outcome,
+            &harness,
+            declared_differs.as_deref(),
+            model.as_deref(),
+        );
         Ok(Emit {
             payload: json!({}),
             format: Format::Lean,
             render_command: Some("hook-refresh"),
         })
     };
-    // The payload is read and discarded: the harness already decided this was an edit tool by its
-    // matcher, and which file changed is `incremental_index`'s question, not ours.
-    let mut payload = String::new();
-    let _ = std::io::Read::read_to_string(&mut std::io::stdin(), &mut payload);
 
     if index_state() == IndexState::Missing {
         return quiet("no_index", usage);
@@ -703,10 +782,18 @@ fn cmd_hook_refresh(_args: &[String], usage: &mut UsageEvent) -> Result<Emit, Co
     };
     match incremental_index(&mut db, &bin, &canon.path) {
         Ok(r) if r.files_reindexed > 0 || r.files_removed > 0 => {
-            usage.args_summary = format!(
-                "outcome=refreshed reindexed={} removed={}",
-                r.files_reindexed, r.files_removed
+            // The counts stay, but inside the object rather than beside it: this row used to be a
+            // bare `outcome=refreshed reindexed=N removed=M`, which is not the JSON shape
+            // `hook_args` documents for the whole column, so one parser could not read it.
+            let mut row = hook_row(
+                "refreshed",
+                &harness,
+                declared_differs.as_deref(),
+                model.as_deref(),
             );
+            row["reindexed"] = json!(r.files_reindexed);
+            row["removed"] = json!(r.files_removed);
+            usage.args_summary = row.to_string();
             Ok(Emit {
                 payload: json!({}),
                 format: Format::Lean,
@@ -743,7 +830,7 @@ fn cmd_hook_suggest(args: &[String], usage: &mut UsageEvent) -> Result<Emit, Cor
     // number. The outcome splits the row by what the hook did, which makes `hit` a second source
     // for the numerator and names the one silence that is a missed opportunity rather than a
     // correct pass: `no_index`, the rule fired on a project cort has never indexed.
-    usage.args_summary = hook_args("no_payload", &declared, None);
+    usage.args_summary = hook_args("no_payload", &declared, None, None);
     let mut payload = String::new();
     let _ = std::io::Read::read_to_string(&mut std::io::stdin(), &mut payload);
     let quiet = || {
@@ -764,7 +851,9 @@ fn cmd_hook_suggest(args: &[String], usage: &mut UsageEvent) -> Result<Emit, Cor
         return quiet();
     }
     let (harness, declared_differs) = harness_of(&v, &declared);
-    let harness_args = |outcome: &str| hook_args(outcome, &harness, declared_differs.as_deref());
+    let model = model_of_payload(&v);
+    let harness_args =
+        |outcome: &str| hook_args(outcome, &harness, declared_differs.as_deref(), model);
     usage.args_summary = harness_args("no_shape");
     let Some(search) = search_of_payload(&v) else {
         return quiet();
@@ -970,10 +1059,13 @@ enum SettingsFormat {
     KimiToml,
 }
 
-fn settings_format(path: &Path, declared: Option<&str>) -> Result<SettingsFormat, CortError> {
+fn settings_format(
+    path: Option<&Path>,
+    declared: Option<&str>,
+) -> Result<SettingsFormat, CortError> {
     match declared {
         None => Ok(
-            if path.extension().and_then(|e| e.to_str()) == Some("toml") {
+            if path.and_then(|p| p.extension()).and_then(|e| e.to_str()) == Some("toml") {
                 SettingsFormat::CodexToml
             } else {
                 SettingsFormat::Json
@@ -989,18 +1081,250 @@ fn settings_format(path: &Path, declared: Option<&str>) -> Result<SettingsFormat
     }
 }
 
+/// Where each dialect lives when `--settings` did not say. Each harness owns its own home variable
+/// (`CLAUDE_SKILL_HOME`, `CODEX_HOME`, `KIMI_CODE_HOME`), so the message names the one that would
+/// have answered rather than a generic "no HOME".
+fn default_settings_path_for(fmt: SettingsFormat) -> Result<PathBuf, CortError> {
+    let (path, vars, file) = match fmt {
+        SettingsFormat::Json => (
+            settings::default_settings_path(),
+            "HOME or CLAUDE_SKILL_HOME",
+            "settings.json",
+        ),
+        SettingsFormat::CodexToml => (
+            settings_toml::default_settings_path(),
+            "HOME or CODEX_HOME",
+            "Codex config.toml",
+        ),
+        SettingsFormat::KimiToml => (
+            settings_kimi::default_settings_path(),
+            "HOME or KIMI_CODE_HOME",
+            "Kimi config.toml",
+        ),
+    };
+    path.ok_or_else(|| {
+        CortError::new(
+            "file_not_found",
+            json!({ "message": format!("no {vars} to resolve {file} from") }),
+        )
+    })
+}
+
+/// Every hook entry that ships, in one place.
+///
+/// `install.sh` used to hold this table in bash and restate four things the binary already knew on
+/// every call (`install.sh:542`): the settings path per harness, the `--format`/`--harness` pairing,
+/// the event-to-subcommand mapping, and then a `sed` that re-parsed cort's own JSON reply. Bash's
+/// copy was the one that shipped, so the Rust copy was never exercised and rotted -- which is
+/// exactly how `--status --format kimi` came to answer `wired: false` about a file that was never
+/// Kimi's. Two implementations of one rule, and the untested one is always the one that is wrong.
+///
+/// This is the same reason `judge` is single and `hook-probe` replays it rather than
+/// reimplementing it. The parsers may be plural; the table may not.
+const HOOK_TARGETS: [(SettingsFormat, &str); 3] = [
+    (SettingsFormat::Json, "claude-code"),
+    (SettingsFormat::CodexToml, "codex"),
+    (SettingsFormat::KimiToml, "kimi-code"),
+];
+
+/// Wire, unwire or report every entry in `HOOK_TARGETS` in one call.
+///
+/// `--command-prefix` is required rather than defaulted, and that is not a convenience. The default
+/// for a single `--command` is `current_exe()`, which inside the installed layout resolves to
+/// `~/.local/share/cortexyoung/cort/cort` -- the real binary behind the shim. But `install.sh`
+/// wires, and `check_hook_at` verifies, the *shim* at `~/.cargo/bin/cort`; a command naming the
+/// real binary would read as "wired to a different binary" and fail `--check` on every machine.
+/// Only the installer knows which of the two it wants named, so it has to say.
+fn hook_install_all(a: &HookInstallArgs) -> Result<Emit, CortError> {
+    let mut rows: Vec<Value> = Vec::new();
+    for (fmt, harness) in HOOK_TARGETS {
+        let path = default_settings_path_for(fmt)?;
+        for event in cort::settings::EVENTS {
+            let mut row = json!({
+                "harness": harness,
+                "event": event.flag_name(),
+                "settings": path.to_string_lossy(),
+            });
+            if a.status {
+                let (wired, trusted) = status_of_entry(fmt, &path, event);
+                row["wired"] = json!(wired.is_some());
+                row["command"] = json!(wired);
+                row["trusted"] = json!(trusted);
+            } else if a.remove {
+                // Removal takes both events at once in every dialect, so it runs once per file and
+                // the second event reports what the first one did rather than re-editing.
+                if event == cort::settings::HookEvent::Suggest {
+                    match remove_from(fmt, &path) {
+                        Ok(out) => {
+                            row["change"] = json!(out.change.as_str());
+                            row["backup"] =
+                                json!(out.backup.map(|b| b.to_string_lossy().into_owned()));
+                        }
+                        Err(e) => row["error"] = json!(e.to_string()),
+                    }
+                } else {
+                    row["change"] = json!("covered_by_pre");
+                }
+            } else {
+                let Some(prefix) = a.command_prefix.as_deref() else {
+                    return Err(CortError::new(
+                        "bad_flag",
+                        json!({ "message": "--all needs --command-prefix <path to the cort the harness should run>" }),
+                    ));
+                };
+                let command = format!("{prefix} {} --harness {harness}", event.subcommand());
+                match install_into(fmt, &path, &command, event) {
+                    Ok(out) => {
+                        row["command"] = json!(command);
+                        row["change"] = json!(out.change.as_str());
+                        row["backup"] = json!(out.backup.map(|b| b.to_string_lossy().into_owned()));
+                    }
+                    // One target's failure is reported and the rest still deploy. Six independent
+                    // calls had that property for free and it is worth keeping: a machine with an
+                    // unparsable Codex config should still get its Claude Code hook.
+                    Err(e) => row["error"] = json!(e.to_string()),
+                }
+            }
+            rows.push(row);
+        }
+    }
+    let payload = json!({ "entries": rows });
+    if a.lean {
+        return Ok(Emit {
+            render_command: Some("hook-install-all-lean"),
+            format: Format::Lean,
+            payload: json!({ "lean": render_hook_entries_lean(&payload) }),
+        });
+    }
+    Ok(Emit {
+        render_command: None,
+        format: Format::Json,
+        payload,
+    })
+}
+
+/// One tab-separated line per entry: `harness  event  outcome  settings  detail  command`.
+///
+/// This exists so the installer stops re-parsing our JSON with `sed` (`install.sh:546`). A regex
+/// over a serialised object is a second parser for a format we own, it is the one nobody tests, and
+/// a field that grows a newline or a nested object silently changes what it captures. Five fields,
+/// no quoting rules, `while IFS=$'\t' read` on the other side.
+fn render_hook_entries_lean(payload: &Value) -> String {
+    let mut out = String::new();
+    let Some(entries) = payload.get("entries").and_then(Value::as_array) else {
+        return out;
+    };
+    for e in entries {
+        let s = |k: &str| e.get(k).and_then(Value::as_str).unwrap_or("");
+        let outcome = if e.get("error").is_some() {
+            "error"
+        } else if let Some(c) = e.get("change").and_then(Value::as_str) {
+            c
+        } else if e.get("wired").and_then(Value::as_bool) == Some(true) {
+            "wired"
+        } else if e.get("wired").is_some() {
+            "not_wired"
+        } else {
+            "unknown"
+        };
+        let detail = if let Some(err) = e.get("error").and_then(Value::as_str) {
+            err.replace(['\t', '\n'], " ")
+        } else if let Some(t) = e.get("trusted").and_then(Value::as_bool) {
+            format!("trusted={t}")
+        } else {
+            String::new()
+        };
+        // `command` is last because it is the field with spaces in it, and it is present at all so
+        // that `--check` can ask "is this wired to the binary I manage?" without reaching back into
+        // the JSON -- which is the habit this whole format exists to break. Tabs and newlines are
+        // stripped from every field: five separators, and nothing that can invent a sixth.
+        //
+        // No field is ever empty, and that is not cosmetic. Tab is an IFS *whitespace* character, so
+        // `read` collapses a run of them into one delimiter and drops the empty field between --
+        // `a\t\tb` reads as two fields, not three. An empty `detail` therefore shifted `command`
+        // into `detail` on exactly the rows that had no trust to report, which is how the first
+        // version of this passed for Codex and failed for the other two. `-` means empty.
+        let clean = |v: &str| {
+            let t = v.replace(['\t', '\n'], " ");
+            if t.is_empty() {
+                "-".to_string()
+            } else {
+                t
+            }
+        };
+        out.push_str(&format!(
+            "{}\t{}\t{}\t{}\t{}\t{}\n",
+            clean(s("harness")),
+            clean(s("event")),
+            outcome,
+            clean(s("settings")),
+            clean(&detail),
+            clean(s("command")),
+        ));
+    }
+    out
+}
+
+fn status_of_entry(
+    fmt: SettingsFormat,
+    path: &Path,
+    event: cort::settings::HookEvent,
+) -> (Option<String>, Option<bool>) {
+    match fmt {
+        SettingsFormat::CodexToml => match settings_toml::installed_entry(path, event) {
+            Some((command, trusted)) => (Some(command), Some(trusted)),
+            None => (None, None),
+        },
+        SettingsFormat::KimiToml => (settings_kimi::installed_command(path, event), None),
+        SettingsFormat::Json => (settings::installed_command(path, event), None),
+    }
+}
+
+fn install_into(
+    fmt: SettingsFormat,
+    path: &Path,
+    command: &str,
+    event: cort::settings::HookEvent,
+) -> Result<cort::settings::Outcome, CortError> {
+    match fmt {
+        SettingsFormat::CodexToml => {
+            settings_toml::install_hook(path, command, event).map_err(map_toml_settings_err)
+        }
+        SettingsFormat::KimiToml => {
+            settings_kimi::install_hook(path, command, event).map_err(map_toml_settings_err)
+        }
+        SettingsFormat::Json => {
+            settings::install_hook(path, command, event).map_err(map_json_settings_err)
+        }
+    }
+}
+
+fn remove_from(fmt: SettingsFormat, path: &Path) -> Result<cort::settings::Outcome, CortError> {
+    match fmt {
+        SettingsFormat::CodexToml => {
+            settings_toml::remove_hook(path).map_err(map_toml_settings_err)
+        }
+        SettingsFormat::KimiToml => settings_kimi::remove_hook(path).map_err(map_toml_settings_err),
+        SettingsFormat::Json => settings::remove_hook(path).map_err(map_json_settings_err),
+    }
+}
+
 fn cmd_hook_install(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, CortError> {
     let a = HookInstallArgs::try_parse_from(args.iter()).map_err(clap_fail)?;
-    let path = match a.settings {
+    if a.all {
+        return hook_install_all(&a);
+    }
+    // Format is decided before the path, not after it. The other order defaulted every
+    // `--settings`-less invocation to Claude Code's `settings.json` and then read it as whichever
+    // dialect `--format` named, so `--status --format kimi` reported `wired: false` against a file
+    // that was never Kimi's -- the same false negative as `docs/2026-09-02-hook-wiring-correction.md`,
+    // arriving by a different route. `install.sh` always passes `--settings` and so never saw it.
+    let declared = a.settings.as_deref().map(Path::new);
+    let fmt = settings_format(declared, a.format.as_deref())?;
+    let path = match a.settings.as_deref() {
         Some(p) => PathBuf::from(p),
-        None => settings::default_settings_path().ok_or_else(|| {
-            CortError::new(
-                "file_not_found",
-                json!({ "message": "no HOME or CLAUDE_SKILL_HOME to resolve settings.json from" }),
-            )
-        })?,
+        None => default_settings_path_for(fmt)?,
     };
-    let fmt = settings_format(&path, a.format.as_deref())?;
     let event = match a.event.as_deref() {
         None => cort::settings::HookEvent::Suggest,
         Some(s) => cort::settings::HookEvent::parse(s).ok_or_else(|| {

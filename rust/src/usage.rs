@@ -18,6 +18,59 @@ const SCHEMA_SQL: &str = include_str!("usage_schema.sql");
 const NOTE: &str = "saved_bytes is raw body bytes omitted, not total-output savings";
 const LAST_PRUNE_KEY: &str = "LAST_PRUNE_DAY";
 const VERSION_KEY: &str = "USAGE_SCHEMA_VERSION";
+const MACHINE_KEY: &str = "MACHINE_ID";
+const MACHINE_SOURCE_KEY: &str = "MACHINE_ID_SOURCE";
+
+/// Which machine these rows were recorded on, as a hash rather than a name.
+///
+/// Numbers from this database get quoted in documents, and a document that silently averages two
+/// machines is wrong in a way nobody can see afterwards. The id is derived, never stored as a
+/// random value, so the same machine answers the same thing after the cache is deleted -- a
+/// regenerated id would read as a second machine and reintroduce exactly the confusion this exists
+/// to remove.
+///
+/// Hashed for the same reason `project_id` is: a hostname is a name for a person's laptop, and this
+/// file already refuses to keep query text (`privacy_sentinels_...` in `rust/tests/usage.rs`). The
+/// source is recorded beside it because the sources are not equally trustworthy -- `/etc/machine-id`
+/// is stable across renames, a hostname is not, and `unknown` means the answer is a guess and
+/// should not be leaned on.
+pub fn machine_id() -> &'static str {
+    static ID: std::sync::OnceLock<(String, &'static str)> = std::sync::OnceLock::new();
+    &ID.get_or_init(resolve_machine).0
+}
+
+pub fn machine_id_source() -> &'static str {
+    static ID: std::sync::OnceLock<(String, &'static str)> = std::sync::OnceLock::new();
+    ID.get_or_init(resolve_machine).1
+}
+
+fn resolve_machine() -> (String, &'static str) {
+    use sha2::{Digest, Sha256};
+    // `CORT_MACHINE_ID` first so a test can pin one, and so a user on a platform none of the
+    // fallbacks fit can say what their machines are called rather than being told `unknown`.
+    let (raw, source) = if let Ok(v) = std::env::var("CORT_MACHINE_ID") {
+        if v.is_empty() {
+            (String::new(), "unknown")
+        } else {
+            (v, "env")
+        }
+    } else if let Ok(v) = std::fs::read_to_string("/etc/machine-id") {
+        (v.trim().to_string(), "etc-machine-id")
+    } else if let Ok(v) = std::fs::read_to_string("/var/lib/dbus/machine-id") {
+        (v.trim().to_string(), "dbus-machine-id")
+    } else if let Some(v) = std::env::var_os("HOSTNAME").and_then(|h| h.into_string().ok()) {
+        (v, "hostname-env")
+    } else {
+        (String::new(), "unknown")
+    };
+    if raw.is_empty() {
+        return ("unknown".to_string(), "unknown");
+    }
+    // Sixteen hex characters: enough that two machines colliding is not a thing that happens, short
+    // enough to sit in a report line a person reads.
+    let full = format!("{:x}", Sha256::digest(raw.as_bytes()));
+    (full[..16].to_string(), source)
+}
 
 #[derive(Debug, Clone)]
 pub struct CommandRecord {
@@ -64,6 +117,16 @@ pub fn empty_report(days: i64) -> Value {
         "best_effort": true,
         "commands": {},
         "days": days,
+        // No database to have been stamped, so nothing to disagree with -- but the machine is still
+        // named, because a report that omits the field on some runs makes every consumer treat it
+        // as optional and stop checking it.
+        "machine": {
+            "id": machine_id(),
+            "source": machine_id_source(),
+            "db_created_on": Value::Null,
+            "db_created_on_source": Value::Null,
+            "mixed": false,
+        },
         "note": NOTE,
         "projects": {},
     })
@@ -287,6 +350,7 @@ pub fn query_usage_at(path: &Path, days: i64, now_ms: i64) -> Result<Value, Cort
         "best_effort": true,
         "commands": commands,
         "days": days,
+        "machine": machine_block(&conn),
         "note": NOTE,
         "projects": projects,
     }))
@@ -315,6 +379,22 @@ pub fn hook_outcomes_at(
     since_ms: i64,
     want_harness: Option<&str>,
 ) -> Result<Map<String, Value>, CortError> {
+    outcomes_of_hook_at(path, "hook-suggest", since_ms, want_harness)
+}
+
+/// The same split for either hook event, told apart by the command that wrote the row.
+///
+/// Two events ship (`hook-suggest` on search, `hook-refresh` on edit) and they answer different
+/// questions -- one is the suggestion funnel, the other is whether the index stayed level with the
+/// tree -- so they are never summed. They do share the `v: 2` row shape and therefore this reader:
+/// a second copy of the harness-attribution rule is how one of them would quietly start counting
+/// `unspecified` differently from the other.
+pub fn outcomes_of_hook_at(
+    path: &Path,
+    command: &str,
+    since_ms: i64,
+    want_harness: Option<&str>,
+) -> Result<Map<String, Value>, CortError> {
     let mut out: Map<String, Value> = Map::new();
     if !path.exists() {
         return Ok(out);
@@ -326,11 +406,11 @@ pub fn hook_outcomes_at(
         let mut stmt = conn
             .prepare(
                 "SELECT args_summary FROM command_log
-                  WHERE command = 'hook-suggest' AND ts >= ?1",
+                  WHERE command = ?2 AND ts >= ?1",
             )
             .map_err(map_query_err)?;
         let rows = stmt
-            .query_map(params![since_ms], |r| r.get::<_, String>(0))
+            .query_map(params![since_ms, command], |r| r.get::<_, String>(0))
             .map_err(map_query_err)?;
         for row in rows {
             let raw = row.map_err(map_query_err)?;
@@ -367,6 +447,69 @@ pub fn hook_outcomes_at(
     Ok(out)
 }
 
+/// Which model answered, *within* a harness -- a second lens on the same rows, never a replacement
+/// for the first.
+///
+/// The harness total is the primary number and stays whole: "how often did the hook intercept on
+/// Claude Code" is a real question with a real answer, and it does not stop being one because more
+/// than one model sat behind that harness. `hook_outcomes_at` therefore ignores `model` entirely
+/// and its counts are unchanged by anything here -- a property `a_model_breakdown_never_splits_the_harness_total`
+/// pins, because the tempting mistake is to make every figure conditional on a dimension that only
+/// some rows carry.
+///
+/// Three silences, kept apart because they mean different things:
+/// * `unrecorded` -- a v1/v2 row, written before `model` existed. Not evidence of anything.
+/// * `unreported` -- a v3 row whose payload named no model. The harness did not say.
+/// * anything else -- what the harness called it, verbatim, never normalised into a family name.
+pub fn hook_models_at(
+    path: &Path,
+    command: &str,
+    since_ms: i64,
+    want_harness: Option<&str>,
+) -> Result<Map<String, Value>, CortError> {
+    let mut out: Map<String, Value> = Map::new();
+    if !path.exists() {
+        return Ok(out);
+    }
+    let conn = open_query(path)?;
+    ensure_schema_readable(&conn)?;
+    let mut counts: std::collections::BTreeMap<String, i64> = std::collections::BTreeMap::new();
+    {
+        let mut stmt = conn
+            .prepare(
+                "SELECT args_summary FROM command_log
+                  WHERE command = ?2 AND ts >= ?1",
+            )
+            .map_err(map_query_err)?;
+        let rows = stmt
+            .query_map(params![since_ms, command], |r| r.get::<_, String>(0))
+            .map_err(map_query_err)?;
+        for row in rows {
+            let raw = row.map_err(map_query_err)?;
+            let Some(parsed) = serde_json::from_str::<Value>(&raw).ok() else {
+                continue;
+            };
+            if let Some(want) = want_harness {
+                let got = parsed.get("harness").and_then(Value::as_str);
+                if got != Some(want) {
+                    continue;
+                }
+            }
+            let v = parsed.get("v").and_then(Value::as_i64).unwrap_or(1);
+            let key = match parsed.get("model").and_then(Value::as_str) {
+                Some(m) if !m.is_empty() => m.to_string(),
+                _ if v < 3 => "unrecorded".to_string(),
+                _ => "unreported".to_string(),
+            };
+            *counts.entry(key).or_insert(0) += 1;
+        }
+    }
+    for (k, v) in counts {
+        out.insert(k, json!(v));
+    }
+    Ok(out)
+}
+
 pub fn render_usage_lean(payload: &Value) -> String {
     let days = payload.get("days").and_then(Value::as_i64).unwrap_or(0);
     let best = payload
@@ -374,10 +517,29 @@ pub fn render_usage_lean(payload: &Value) -> String {
         .and_then(Value::as_bool)
         .unwrap_or(true);
     let note = payload.get("note").and_then(Value::as_str).unwrap_or(NOTE);
+    let m = payload.get("machine");
+    let mstr = |k: &str| {
+        m.and_then(|m| m.get(k))
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+    };
+    let mixed = m
+        .and_then(|m| m.get("mixed"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let mut lines = vec![
         format!("# usage days={days} best_effort={best}"),
+        format!("# machine={} source={}", mstr("id"), mstr("source")),
         format!("# {note}"),
     ];
+    // Loud, and in the header rather than a footnote: every number below it is an average over two
+    // machines, and that is not a caveat a reader can recover once the figure is in a document.
+    if mixed {
+        lines.push(format!(
+            "# WARNING mixed_machines: rows here were written on more than one machine (db created on {}); no row can be attributed to either",
+            mstr("db_created_on")
+        ));
+    }
     if let Some(cmds) = payload.get("commands").and_then(Value::as_object) {
         for (name, row) in cmds {
             lines.push(format!(
@@ -467,6 +629,7 @@ fn open_query(path: &Path) -> Result<Connection, CortError> {
 
 fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(SCHEMA_SQL)?;
+    stamp_machine(conn)?;
     let found: Option<String> = meta(conn, VERSION_KEY)?;
     let expected = USAGE_SCHEMA_VERSION.to_string();
     match found.as_deref() {
@@ -481,6 +644,51 @@ fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
         Some(v) if v == expected => Ok(()),
         Some(_) => Err(rusqlite::Error::InvalidQuery),
     }
+}
+
+/// Write the machine down the first time, and never overwrite it.
+///
+/// Never overwriting is the whole point. A database carried to a second machine -- a synced cache
+/// dir, a restored backup -- keeps naming the machine it was created on, so the two ids disagree
+/// and `query_usage_at` can say the file holds more than one machine's rows. Rewriting the stamp
+/// would make that file look native to whichever machine opened it last, which is the silent
+/// version of the same problem.
+///
+/// A pre-existing database from before this key gets stamped on its next open. That is the one case
+/// where the stamp can be wrong, and it is why the report reads `machine_id_source` rather than
+/// treating the stamp as gospel.
+fn stamp_machine(conn: &Connection) -> rusqlite::Result<()> {
+    if meta(conn, MACHINE_KEY)?.is_none() {
+        conn.execute(
+            "INSERT INTO _usage_meta (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO NOTHING",
+            params![MACHINE_KEY, machine_id()],
+        )?;
+        conn.execute(
+            "INSERT INTO _usage_meta (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO NOTHING",
+            params![MACHINE_SOURCE_KEY, machine_id_source()],
+        )?;
+    }
+    Ok(())
+}
+
+/// What the report says about where these rows came from.
+///
+/// `mixed` is the field that matters and it is deliberately a claim about the *file*, not about any
+/// single row: rows carry no machine of their own, so once two machines have written to one
+/// database nothing can separate them again. All this can honestly report is that it happened.
+fn machine_block(conn: &Connection) -> Value {
+    let stamped = meta(conn, MACHINE_KEY).ok().flatten();
+    let stamped_source = meta(conn, MACHINE_SOURCE_KEY).ok().flatten();
+    let here = machine_id();
+    json!({
+        "id": here,
+        "source": machine_id_source(),
+        "db_created_on": stamped,
+        "db_created_on_source": stamped_source,
+        "mixed": stamped.as_deref().is_some_and(|s| s != here),
+    })
 }
 
 fn ensure_schema_readable(conn: &Connection) -> Result<(), CortError> {

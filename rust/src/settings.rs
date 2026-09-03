@@ -126,6 +126,14 @@ impl HookEvent {
             _ => None,
         }
     }
+    /// What `--event` calls this, so a report names an event the way the flag that sets it does.
+    /// The inverse of `parse`'s first spelling, and `flag_name_round_trips` keeps it that way.
+    pub fn flag_name(self) -> &'static str {
+        match self {
+            HookEvent::Suggest => "pre",
+            HookEvent::Refresh => "post",
+        }
+    }
 }
 /// The default settings file, honouring the same override the installer uses for the skill
 /// destination so a test (or a second agent home) never has to touch the real one.

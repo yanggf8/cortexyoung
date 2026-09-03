@@ -19,6 +19,31 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
+/// Print a report, stamped with the machine that produced it.
+///
+/// Every number this harness emits gets quoted somewhere -- into a document, into another agent's
+/// summary, into a comparison against "the other machine". On 2026-09-03 exactly that happened: a
+/// hook-attribution table showing 417 Codex fires was set beside this machine's 2, and reconciling
+/// them cost real time before anyone noticed the two sides were different computers. Nothing in
+/// either report said so. A figure that cannot name where it came from is not comparable to
+/// anything, and the only reliable moment to attach that is where the figure is printed.
+fn print_report(value: &Value) {
+    let mut v = value.clone();
+    if let Some(o) = v.as_object_mut() {
+        o.insert(
+            "machine".to_string(),
+            json!({
+                "id": cort::usage::machine_id(),
+                "source": cort::usage::machine_id_source(),
+            }),
+        );
+    }
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&v).expect("the report is serialisable")
+    );
+}
+
 fn at(argv: &[String], name: &str, default: &str) -> String {
     argv.iter()
         .position(|a| a == name)
@@ -578,17 +603,13 @@ fn run_agents(argv: &[String]) -> Result<(), String> {
         format!("{}\n", serde_json::to_string_pretty(&json!(rows)).unwrap()),
     )
     .map_err(|e| format!("{out_dir}/rows.json: {e}"))?;
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&json!({
-            "gate": { "coverage": cort_evals::grade::GATE_COVERAGE, "precision": cort_evals::grade::GATE_PRECISION },
-            "venue_head": head,
-            "cells": rows.len(),
-            "jailed": jailed,
-            "out": out_dir,
-        }))
-        .unwrap()
-    );
+    print_report(&json!({
+        "gate": { "coverage": cort_evals::grade::GATE_COVERAGE, "precision": cort_evals::grade::GATE_PRECISION },
+        "venue_head": head,
+        "cells": rows.len(),
+        "jailed": jailed,
+        "out": out_dir,
+    }));
     Ok(())
 }
 
@@ -612,11 +633,7 @@ fn verify_impact_main(argv: &[String]) -> Result<(), String> {
     for s in &symbols {
         report.push(cort_evals::verify::verify_impact(&cort, &repo, s, depth)?);
     }
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&json!({ "repo": repo, "depth": depth, "report": report }))
-            .unwrap()
-    );
+    print_report(&json!({ "repo": repo, "depth": depth, "report": report }));
     Ok(())
 }
 
@@ -636,10 +653,7 @@ fn recall_exp_main(argv: &[String]) -> Result<(), String> {
         return Err(format!("--venue {venue}: not a directory"));
     }
     let report = cort_evals::recall::report(path, top)?;
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&report).expect("the report is serialisable")
-    );
+    print_report(&report);
     Ok(())
 }
 
@@ -679,10 +693,7 @@ fn hook_probe_main(argv: &[String]) -> Result<(), String> {
         ),
     ];
     let report = cort_evals::hook::probe(&dirs, examples);
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&report).expect("the report is serialisable")
-    );
+    print_report(&report);
     Ok(())
 }
 
@@ -724,7 +735,7 @@ fn summarize_main(argv: &[String]) -> Result<(), String> {
         );
         map.insert("batch_problems".to_string(), json!(problems));
     }
-    println!("{}", serde_json::to_string_pretty(&out).unwrap());
+    print_report(&out);
     Ok(())
 }
 

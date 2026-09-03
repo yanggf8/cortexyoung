@@ -210,8 +210,15 @@ pub fn suggests_impact(command: &str) -> Option<HookHit> {
 /// resolved.
 ///
 /// The split exists because parsing and deciding are not the same job and do not have the same
-/// number of right answers. Parsing is per-harness by necessity -- a shell line, Codex's
-/// `["bash","-lc",…]`, Kimi's `Grep` fields -- and each of those gets its own function below.
+/// number of right answers. Parsing is per-harness by necessity, and the two spellings a *hook
+/// payload* arrives in each get their own constructor below: a shell line (`search_from_shell` --
+/// Claude Code, Codex and Grok all send `tool_input.command` as a string, byte-identical fields,
+/// `docs/2026-09-02-hook-wiring-correction.md` §12) and Kimi's `Grep` fields
+/// (`search_from_grep_fields`). Codex's `["bash","-lc",…]` is a third spelling but not a third one
+/// here: it is the *rollout transcript* dialect, which only `cort-evals hook-probe` reads, so its
+/// extraction lives in `evals/src/hook.rs` and hands the recovered script to `search_from_shell`.
+/// Adding an array arm to the payload parser would be an arm that cannot fire -- the mistake the
+/// `/.kimi-code/` branch in `harness_of` was deleted for.
 /// Deciding is one function, not out of tidiness but because its only justification is a measured
 /// number: `cort-evals hook-probe` grades exactly this predicate, so a second copy would leave the
 /// calibration describing something other than what ships. The data says the split is drawn in the

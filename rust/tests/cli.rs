@@ -1085,3 +1085,508 @@ fn run_hook_refresh(cwd: &Path, cache: &Path) -> Run {
         stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
     }
 }
+
+// ── hook-install: which file a format defaults to ──────────────────────────────
+
+/// `hook-install` with the three harness homes pointed at a sandbox, so a test never reads or
+/// writes the developer's own `~/.claude`, `~/.codex` or `~/.kimi-code`.
+fn run_hook_install(args: &[&str], home: &Path) -> Run {
+    let out = Command::new(cort_bin())
+        .arg("hook-install")
+        .args(args)
+        .current_dir(home)
+        .env("HOME", home)
+        .env("CLAUDE_SKILL_HOME", home.join(".claude"))
+        .env("CODEX_HOME", home.join(".codex"))
+        .env("KIMI_CODE_HOME", home.join(".kimi-code"))
+        .output()
+        .expect("spawn cort hook-install");
+    Run {
+        code: out.status.code().unwrap_or(1),
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+    }
+}
+
+/// Without `--settings`, the file follows `--format` -- and nothing else.
+///
+/// The path used to be resolved before the format was read, so every `--settings`-less call landed
+/// on Claude Code's `settings.json` and was then parsed as whichever dialect `--format` named.
+/// `--status --format kimi` therefore answered `wired: false` on a machine where the Kimi entry was
+/// wired and firing: the same false negative as `docs/2026-09-02-hook-wiring-correction.md`, by a
+/// different route. `install.sh` always passes `--settings`, which is why nothing caught it.
+#[test]
+fn each_format_resolves_its_own_settings_file_when_settings_is_not_given() {
+    let home = tempfile::Builder::new()
+        .prefix("cort-hook-home-")
+        .tempdir()
+        .unwrap();
+    let h = home.path();
+    let cases = [
+        (vec![], ".claude/settings.json"),
+        (vec!["--format", "codex"], ".codex/config.toml"),
+        (vec!["--format", "kimi"], ".kimi-code/config.toml"),
+    ];
+
+    for (fmt, rel) in &cases {
+        let expected = h.join(rel);
+        let mut install = fmt.clone();
+        install.extend_from_slice(&["--command", "/bin/cort hook-suggest"]);
+        let r = run_hook_install(&install, h);
+        assert_eq!(r.code, 0, "install {fmt:?}: {}", r.stderr);
+        assert_eq!(
+            payload(&r)["settings"].as_str(),
+            Some(expected.to_string_lossy().as_ref()),
+            "install {fmt:?} wrote the wrong file"
+        );
+        assert!(expected.exists(), "install {fmt:?} created no {rel}");
+
+        let mut status = fmt.clone();
+        status.push("--status");
+        let s = run_hook_install(&status, h);
+        assert_eq!(s.code, 0, "status {fmt:?}: {}", s.stderr);
+        let p = payload(&s);
+        assert_eq!(
+            p["settings"].as_str(),
+            Some(expected.to_string_lossy().as_ref()),
+            "status {fmt:?} read the wrong file"
+        );
+        assert_eq!(
+            p["wired"].as_bool(),
+            Some(true),
+            "status {fmt:?} could not see the entry it had just written"
+        );
+    }
+
+    // Each install landed in its own file rather than three times in one: the bug's other half.
+    for (_, rel) in &cases {
+        let body = fs::read_to_string(h.join(rel)).unwrap();
+        assert_eq!(
+            body.matches("hook-suggest").count(),
+            1,
+            "{rel} holds more than one entry"
+        );
+    }
+}
+
+/// `--settings` still wins, and with it the extension still picks the dialect for the two files
+/// that are not Kimi's -- the rule `install.sh` has always relied on.
+#[test]
+fn an_explicit_settings_path_still_overrides_the_format_default() {
+    let home = tempfile::Builder::new()
+        .prefix("cort-hook-home-")
+        .tempdir()
+        .unwrap();
+    let h = home.path();
+    let elsewhere = h.join("elsewhere/config.toml");
+
+    let r = run_hook_install(
+        &[
+            "--format",
+            "kimi",
+            "--settings",
+            elsewhere.to_str().unwrap(),
+            "--command",
+            "/bin/cort hook-suggest",
+        ],
+        h,
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(elsewhere.exists(), "explicit path was not written");
+    assert!(
+        !h.join(".kimi-code/config.toml").exists(),
+        "the format's default file was written despite an explicit --settings"
+    );
+}
+
+/// `hook-refresh` with a `--harness` on its command line, which is what the installer wires.
+fn run_hook_refresh_with(
+    extra: &[&str],
+    payload: serde_json::Value,
+    cwd: &Path,
+    cache: &Path,
+) -> Run {
+    use std::io::Write;
+    use std::process::Stdio;
+    let mut child = Command::new(cort_bin())
+        .arg("hook-refresh")
+        .args(extra)
+        .current_dir(cwd)
+        .env("CORT_CACHE_DIR", cache)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn cort hook-refresh");
+    let body = serde_json::to_vec(&payload).unwrap();
+    child.stdin.take().unwrap().write_all(&body).unwrap();
+    let out = child.wait_with_output().expect("wait cort hook-refresh");
+    Run {
+        code: out.status.code().unwrap_or(1),
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+    }
+}
+
+fn edit_payload(transcript: Option<&str>) -> serde_json::Value {
+    let mut v = serde_json::json!({
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Edit",
+        "tool_input": { "file_path": "src/helper.ts" },
+    });
+    if let Some(t) = transcript {
+        v["transcript_path"] = serde_json::json!(t);
+    }
+    v
+}
+
+/// A post-event row has to say which harness wrote it, for the same reason the pre-event one does.
+///
+/// Six entries ship -- three harnesses times two events -- and they all call this one binary and
+/// write to one database. `hook-refresh` was discarding its whole argument list (`_args`) and
+/// writing a bare `outcome=…` summary, so every reindex was an anonymous, non-JSON row: with three
+/// harnesses wired, "is Kimi's post-hook firing at all?" had no answer in the data. That is
+/// `f3cb567f`'s defect surviving on the event it was never carried across to.
+#[test]
+fn a_refresh_row_says_which_harness_wrote_it_and_is_never_summed_with_the_suggest_rows() {
+    let (_p, cwd, _c, cache) = sandbox();
+    let idx = run_cort(&["index"], &cwd, &cache);
+    if idx.code != 0 {
+        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
+        return;
+    }
+    let usage_db = cache.join("usage.db");
+    let refresh = |h: Option<&str>| match h {
+        Some(h) => cort::usage::outcomes_of_hook_at(&usage_db, "hook-refresh", 0, Some(h)).unwrap(),
+        None => cort::usage::outcomes_of_hook_at(&usage_db, "hook-refresh", 0, None).unwrap(),
+    };
+
+    let r = run_hook_refresh_with(
+        &["--harness", "kimi-code"],
+        edit_payload(None),
+        &cwd,
+        &cache,
+    );
+    assert_eq!(r.code, 0, "the refresh hook must exit 0 whatever happens");
+    let mine = refresh(Some("kimi-code"));
+    let attributed: i64 = mine.values().filter_map(Value::as_i64).sum::<i64>()
+        - mine.get("unspecified").and_then(Value::as_i64).unwrap_or(0)
+        - mine
+            .get("other_harness")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+    assert!(
+        attributed >= 1,
+        "the kimi refresh was not attributed: {mine:?}"
+    );
+
+    // Another harness's fire is visible but held apart, never folded into kimi's.
+    run_hook_refresh_with(&["--harness", "codex"], edit_payload(None), &cwd, &cache);
+    assert_eq!(
+        refresh(Some("kimi-code"))
+            .get("other_harness")
+            .and_then(Value::as_i64),
+        Some(1),
+        "a codex refresh was not held apart from kimi's"
+    );
+
+    // No `--harness` at all is `unspecified`, not whichever harness was wired first.
+    run_hook_refresh_with(&[], edit_payload(None), &cwd, &cache);
+    assert_eq!(
+        refresh(Some("kimi-code"))
+            .get("unspecified")
+            .and_then(Value::as_i64),
+        Some(1),
+        "a harness-less refresh row was attributed anyway"
+    );
+
+    // The transcript outranks the flag here too: Grok runs the entry installed as `claude-code`.
+    run_hook_refresh_with(
+        &["--harness", "claude-code"],
+        edit_payload(Some("/home/u/.grok/sessions/s.jsonl")),
+        &cwd,
+        &cache,
+    );
+    assert_eq!(
+        refresh(Some("grok"))
+            .values()
+            .filter_map(Value::as_i64)
+            .sum::<i64>()
+            - refresh(Some("grok"))
+                .get("other_harness")
+                .and_then(Value::as_i64)
+                .unwrap_or(0)
+            - refresh(Some("grok"))
+                .get("unspecified")
+                .and_then(Value::as_i64)
+                .unwrap_or(0),
+        1,
+        "a grok refresh was recorded as claude-code"
+    );
+
+    // The two events are never summed: the suggest funnel saw none of these four rows.
+    let suggest = cort::usage::hook_outcomes_at(&usage_db, 0, None).unwrap();
+    assert!(
+        suggest.values().filter_map(Value::as_i64).sum::<i64>() == 0,
+        "refresh rows leaked into the suggestion funnel: {suggest:?}"
+    );
+    assert_eq!(
+        refresh(None)
+            .values()
+            .filter_map(Value::as_i64)
+            .sum::<i64>(),
+        4,
+        "the four refresh fires are not all readable: {:?}",
+        refresh(None)
+    );
+}
+
+/// The row says which model answered, not just which harness ran.
+///
+/// A router launches the real Claude Code against another vendor's endpoint: same binary, same
+/// `settings.json`, same `~/.claude/projects`, so `harness_of` correctly answers `claude-code` and
+/// nothing downstream can tell the two apart. On this machine that is not hypothetical -- the local
+/// Claude Code corpus held ~2,167 assistant messages from `glm-5.*`, `stealth/ox-alpha`,
+/// `muse-spark-1.2-contributor`, `deepseek-v4-flash`, `k3` and `qwen3.5:4b` against ~5,072
+/// Anthropic ones on 2026-09-03. Every behavioural number this repo quotes is a claim about the
+/// model, so a corpus that cannot name it cannot support the claim. The payload has always carried
+/// `model`; nothing read it.
+#[test]
+fn a_hook_row_names_the_model_that_answered_and_never_invents_one() {
+    let (_p, cwd, _c, cache) = sandbox();
+    let idx = run_cort(&["index"], &cwd, &cache);
+    if idx.code != 0 {
+        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
+        return;
+    }
+    let usage_db = cache.join("usage.db");
+    // A router session: the harness is genuinely claude-code, the model is not Anthropic's.
+    let mut routed = serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "session_id": "routed",
+        "transcript_path": "/home/u/.claude/projects/p/s.jsonl",
+        "tool_name": "Bash",
+        "tool_input": { "command": FIRING_SEARCH },
+    });
+    routed["model"] = serde_json::json!("glm-5.3");
+    let r = run_hook_suggest_payload(routed, &["--harness", "claude-code"], &cwd, &cache);
+    assert_eq!(r.code, 0);
+
+    let rows = read_hook_rows(&usage_db, "hook-suggest");
+    let last = rows.last().expect("a row was written");
+    assert_eq!(
+        last.get("harness").and_then(Value::as_str),
+        Some("claude-code"),
+        "the harness really is claude-code -- that was never the ambiguous part"
+    );
+    assert_eq!(
+        last.get("model").and_then(Value::as_str),
+        Some("glm-5.3"),
+        "the model the payload named was dropped: {last}"
+    );
+    assert_eq!(last.get("v").and_then(Value::as_i64), Some(3));
+
+    // A payload with no model gets no model. Absence is visible; a wrong name would not be.
+    let bare = serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "session_id": "bare",
+        "tool_name": "Bash",
+        "tool_input": { "command": FIRING_SEARCH },
+    });
+    run_hook_suggest_payload(bare, &["--harness", "claude-code"], &cwd, &cache);
+    let rows = read_hook_rows(&usage_db, "hook-suggest");
+    let last = rows.last().expect("a second row was written");
+    assert!(
+        last.get("model").is_none(),
+        "a model was invented for a payload that named none: {last}"
+    );
+}
+
+/// Every `args_summary` this command wrote, parsed, oldest first.
+fn read_hook_rows(usage_db: &Path, command: &str) -> Vec<Value> {
+    let conn =
+        rusqlite::Connection::open_with_flags(usage_db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("open usage db");
+    let mut stmt = conn
+        .prepare("SELECT args_summary FROM command_log WHERE command = ?1 ORDER BY id")
+        .expect("prepare");
+    let rows: Vec<String> = stmt
+        .query_map([command], |r| r.get::<_, String>(0))
+        .expect("query")
+        .map(|r| r.expect("row"))
+        .collect();
+    rows.iter()
+        .filter_map(|r| serde_json::from_str::<Value>(r).ok())
+        .collect()
+}
+
+/// The model breakdown is a second lens, never a split of the first.
+///
+/// "How often did the hook intercept on Claude Code" is a real question with one answer, and it
+/// does not stop being one because a router put several models behind that harness. So the harness
+/// total is computed without reference to `model` and must be identical whether the rows carry one
+/// model, five, or none -- the tempting mistake is to make every figure conditional on a dimension
+/// only some rows have, which would leave the primary number unquotable the moment a v1 row appears.
+#[test]
+fn a_model_breakdown_never_splits_the_harness_total() {
+    let (_p, cwd, _c, cache) = sandbox();
+    let idx = run_cort(&["index"], &cwd, &cache);
+    if idx.code != 0 {
+        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
+        return;
+    }
+    let usage_db = cache.join("usage.db");
+    let fire = |model: Option<&str>| {
+        let mut p = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "session_id": "s",
+            "transcript_path": "/home/u/.claude/projects/p/s.jsonl",
+            "tool_name": "Bash",
+            "tool_input": { "command": FIRING_SEARCH },
+        });
+        if let Some(m) = model {
+            p["model"] = serde_json::json!(m);
+        }
+        run_hook_suggest_payload(p, &["--harness", "claude-code"], &cwd, &cache);
+    };
+
+    fire(Some("claude-opus-5"));
+    fire(Some("glm-5.3"));
+    fire(Some("glm-5.3"));
+    fire(None); // the harness named no model
+    let total_before = cort::usage::hook_outcomes_at(&usage_db, 0, Some("claude-code")).unwrap();
+    let fired: i64 = total_before.values().filter_map(Value::as_i64).sum();
+    assert_eq!(
+        fired, 4,
+        "the harness total must count every fire: {total_before:?}"
+    );
+
+    let models =
+        cort::usage::hook_models_at(&usage_db, "hook-suggest", 0, Some("claude-code")).unwrap();
+    assert_eq!(models.get("claude-opus-5").and_then(Value::as_i64), Some(1));
+    assert_eq!(models.get("glm-5.3").and_then(Value::as_i64), Some(2));
+    assert_eq!(
+        models.get("unreported").and_then(Value::as_i64),
+        Some(1),
+        "a payload that named no model is `unreported`, not folded into a model that did"
+    );
+
+    // The two lenses see the same rows: the breakdown sums to the total, and neither is derived
+    // from the other.
+    let model_sum: i64 = models.values().filter_map(Value::as_i64).sum();
+    assert_eq!(
+        model_sum, fired,
+        "the breakdown and the total disagree about how many rows exist: {models:?} vs {total_before:?}"
+    );
+
+    // Adding the lens changed nothing about the primary number.
+    let total_after = cort::usage::hook_outcomes_at(&usage_db, 0, Some("claude-code")).unwrap();
+    assert_eq!(total_before, total_after);
+
+    // A different harness's rows are not in this harness's breakdown.
+    assert!(
+        cort::usage::hook_models_at(&usage_db, "hook-suggest", 0, Some("codex"))
+            .unwrap()
+            .is_empty(),
+        "codex has fired nothing here"
+    );
+}
+
+/// `--all` speaks one line per entry, and no field is ever empty.
+///
+/// Tab is an IFS *whitespace* character, so `read` collapses a run of tabs into one delimiter and
+/// silently drops the empty field between them: `a\t\tb` arrives as two fields, not three. The
+/// first version of this format left `detail` empty when there was no trust to report, so the
+/// installer read `command` into `detail` on Claude Code and Kimi and got it right on Codex --
+/// wrong on four of six entries and green on the two that happened to carry a value. The rule is
+/// therefore "never emit an empty field", not "be careful in bash".
+#[test]
+fn the_lean_hook_report_has_six_non_empty_fields_on_every_line() {
+    let home = tempfile::Builder::new()
+        .prefix("cort-hook-lean-")
+        .tempdir()
+        .unwrap();
+    let h = home.path();
+    let run = |args: &[&str]| -> Run {
+        let out = Command::new(cort_bin())
+            .arg("hook-install")
+            .args(args)
+            .current_dir(h)
+            .env("HOME", h)
+            .env("CLAUDE_SKILL_HOME", h.join(".claude"))
+            .env("CODEX_HOME", h.join(".codex"))
+            .env("KIMI_CODE_HOME", h.join(".kimi-code"))
+            .output()
+            .expect("spawn");
+        Run {
+            code: out.status.code().unwrap_or(1),
+            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        }
+    };
+
+    let r = run(&["--all", "--lean", "--command-prefix", "/bin/cort"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let lines: Vec<&str> = r.stdout.lines().filter(|l| !l.is_empty()).collect();
+    assert_eq!(
+        lines.len(),
+        6,
+        "three harnesses times two events: {lines:?}"
+    );
+    for l in &lines {
+        let f: Vec<&str> = l.split('\t').collect();
+        assert_eq!(f.len(), 6, "expected six fields, got {}: {l:?}", f.len());
+        for (i, v) in f.iter().enumerate() {
+            assert!(
+                !v.is_empty(),
+                "field {i} is empty, which `read` would drop: {l:?}"
+            );
+        }
+    }
+
+    // The command names what the caller asked for, never this test binary -- the installed layout
+    // puts a shim in front of the real executable and the wired command has to name the shim.
+    for l in &lines {
+        let command = l.split('\t').nth(5).unwrap();
+        assert!(
+            command.starts_with("/bin/cort "),
+            "--command-prefix was not honoured: {command:?}"
+        );
+        assert!(
+            command.contains("--harness "),
+            "the entry must carry the harness it was wired for: {command:?}"
+        );
+    }
+
+    // Round-trips: status sees exactly what install wrote, and each harness kept its own file.
+    let s = run(&["--all", "--status", "--lean"]);
+    let files: Vec<&str> = s
+        .stdout
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| l.split('\t').nth(3).unwrap())
+        .collect();
+    assert_eq!(files.len(), 6);
+    for l in s.stdout.lines().filter(|l| !l.is_empty()) {
+        assert_eq!(l.split('\t').nth(2), Some("wired"), "not wired: {l}");
+    }
+    assert_eq!(
+        files.iter().collect::<std::collections::HashSet<_>>().len(),
+        3,
+        "six entries across three files: {files:?}"
+    );
+
+    // And `--all` needs to be told which binary to name; defaulting to this one would wire the
+    // executable behind the installer's shim.
+    let missing = run(&["--all", "--lean"]);
+    assert_ne!(
+        missing.code, 0,
+        "--all without --command-prefix must refuse"
+    );
+    assert!(
+        missing.stdout.contains("command-prefix") || missing.stderr.contains("command-prefix"),
+        "the refusal must name the missing flag: {} {}",
+        missing.stdout,
+        missing.stderr
+    );
+}

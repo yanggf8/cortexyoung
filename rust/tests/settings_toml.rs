@@ -85,9 +85,11 @@ fn installs_into_a_file_that_does_not_exist_yet() {
     assert_eq!(out.change, Change::Installed);
     assert!(out.backup.is_none(), "nothing to back up");
     let v = read(&p);
+    // Codex's own tool names, never Claude Code's. A `Bash` matcher here is wired, trustable and
+    // dead: the 0.152.1 binary has no tool by that name, so the entry can never fire.
     assert_eq!(
         v["hooks"]["PreToolUse"][0]["matcher"].as_str(),
-        Some("Bash")
+        Some("exec_command|shell")
     );
     assert_eq!(cmd_at(&v, 0, 0), "/bin/cort hook-suggest");
     assert_eq!(
@@ -798,4 +800,121 @@ fn an_install_and_remove_cycle_returns_the_file_exactly_as_it_was() {
         cort::settings_kimi::remove_hook(&p).unwrap();
     }
     assert_eq!(fs::read_to_string(&p).unwrap(), original);
+}
+
+/// Each harness gets matched on the tool names it actually has.
+///
+/// Codex's entries were wired with Claude Code's vocabulary -- `Bash` for the search event and
+/// `Edit|Write|MultiEdit|NotebookEdit` for the edit event -- inherited wholesale when this module
+/// was written from `settings.rs`. Codex has no tool by any of those names: `exec_command` (the
+/// older spelling is `shell`) and `apply_patch` are what it calls, and the 0.152.1 binary contains
+/// zero occurrences of `Bash`, `Edit`, `MultiEdit`, `Grep` or `Glob`, so it does not normalise into
+/// them either. Both entries were therefore installed, trusted, reported `wired: true` by
+/// `--check`, and could never fire -- confirmed 2026-09-03 by two `harness=codex` rows in 90 days
+/// of `usage.db`, both hand-fed on stdin.
+///
+/// The assertion is written as "not Claude Code's" as well as "is Codex's" on purpose: the failure
+/// was not a typo, it was a default silently reused across a harness boundary, and only the
+/// negative half catches that happening again.
+#[test]
+fn codex_is_matched_on_codex_tool_names_and_never_on_claude_codes() {
+    let (_d, p) = tmp();
+    cort::settings_toml::install_hook(&p, "/bin/cort hook-suggest", HookEvent::Suggest).unwrap();
+    cort::settings_toml::install_hook(&p, "/bin/cort hook-refresh", HookEvent::Refresh).unwrap();
+    let v = read(&p);
+
+    let pre = v["hooks"]["PreToolUse"][0]["matcher"].as_str().unwrap();
+    let post = v["hooks"]["PostToolUse"][0]["matcher"].as_str().unwrap();
+    assert!(
+        pre.contains("exec_command"),
+        "the pre event must match Codex's shell tool, got {pre:?}"
+    );
+    assert_eq!(
+        post, "apply_patch",
+        "the post event must match Codex's edit tool"
+    );
+    for m in [pre, post] {
+        for claude_only in ["Bash", "Edit", "Write", "MultiEdit", "NotebookEdit", "Grep"] {
+            assert!(
+                !m.contains(claude_only),
+                "{m:?} carries Claude Code's tool name {claude_only:?}, which Codex does not have"
+            );
+        }
+    }
+}
+
+/// A redeploy repairs a stale matcher, and an unchanged command is not a licence to leave it.
+///
+/// `is_canonical` only ever sees the hook entry, and the matcher lives on the group above it, so
+/// an entry whose command was already current reported `already_present` and the matcher was never
+/// looked at. That is how the Codex hook stayed matched on `Bash` -- a tool Codex does not have --
+/// across every reinstall: wired, trusted, green in `--check`, dead. It is the same rule the skill
+/// deploy already enforces ("a hash match must not excuse the shape", `tests/install-smoke.sh`
+/// Test 17), which this module never had.
+#[test]
+fn a_redeploy_repairs_a_stale_matcher_even_when_the_command_is_unchanged() {
+    let (_d, p) = tmp();
+    fs::write(
+        &p,
+        "[[hooks.PreToolUse]]\n\
+         matcher = \"Bash\"\n\n\
+         [[hooks.PreToolUse.hooks]]\n\
+         type = \"command\"\n\
+         command = \"/bin/cort hook-suggest\"\n\
+         timeout = 5\n",
+    )
+    .unwrap();
+
+    let out = install_hook(&p, "/bin/cort hook-suggest", HookEvent::Suggest).unwrap();
+    assert_eq!(
+        out.change,
+        Change::Updated,
+        "an unchanged command must not report already_present while the matcher is stale"
+    );
+    let v = read(&p);
+    assert_eq!(
+        v["hooks"]["PreToolUse"][0]["matcher"].as_str(),
+        Some("exec_command|shell")
+    );
+    assert_eq!(group_count(&v), 1, "repaired in place, not added beside");
+
+    // Converged: the next run has nothing left to do.
+    assert_eq!(
+        install_hook(&p, "/bin/cort hook-suggest", HookEvent::Suggest)
+            .unwrap()
+            .change,
+        Change::AlreadyPresent
+    );
+}
+
+/// A matcher on a group we share is somebody else's routing, and we do not re-aim it.
+#[test]
+fn a_shared_groups_matcher_is_left_alone() {
+    let (_d, p) = tmp();
+    fs::write(
+        &p,
+        "[[hooks.PreToolUse]]\n\
+         matcher = \"Bash\"\n\n\
+         [[hooks.PreToolUse.hooks]]\n\
+         type = \"command\"\n\
+         command = \"mos hook\"\n\n\
+         [[hooks.PreToolUse.hooks]]\n\
+         type = \"command\"\n\
+         command = \"/bin/cort hook-suggest\"\n\
+         timeout = 5\n",
+    )
+    .unwrap();
+
+    install_hook(&p, "/bin/cort hook-suggest", HookEvent::Suggest).unwrap();
+    let v = read(&p);
+    assert_eq!(
+        v["hooks"]["PreToolUse"][0]["matcher"].as_str(),
+        Some("Bash"),
+        "rewriting a shared group's matcher would silently re-aim the other owner's hook"
+    );
+    assert_eq!(
+        cmd_at(&v, 0, 0),
+        "mos hook",
+        "their entry survives untouched"
+    );
 }

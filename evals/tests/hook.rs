@@ -103,3 +103,47 @@ fn a_readable_tree_with_no_source_is_not_an_unreadable_tree() {
         "unchecked_no_source_this_screen_reads"
     );
 }
+
+/// Every report this harness prints names the machine that produced it.
+///
+/// On 2026-09-03 a hook-attribution table showing 417 Codex fires was set beside this machine's 2
+/// and reconciled as if the two were comparable. They were different computers, and neither report
+/// said so. The stamp goes on at the print site because that is the last point where the number is
+/// still attached to the process that computed it.
+#[test]
+fn a_printed_report_names_the_machine_that_produced_it() {
+    let empty = tempfile::Builder::new()
+        .prefix("cort-evals-machine-")
+        .tempdir()
+        .unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_cort-evals"))
+        .args([
+            "hook-probe",
+            "--claude-dir",
+            empty.path().to_str().unwrap(),
+            "--codex-dir",
+            empty.path().to_str().unwrap(),
+            "--kimi-dir",
+            empty.path().to_str().unwrap(),
+        ])
+        .output()
+        .expect("spawn cort-evals");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let v: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|e| {
+        panic!(
+            "not json: {e}; stdout={stdout} stderr={}",
+            String::from_utf8_lossy(&out.stderr)
+        )
+    });
+    let m = &v["machine"];
+    assert!(
+        m.get("id").and_then(serde_json::Value::as_str).is_some(),
+        "the report does not name its machine: {v}"
+    );
+    assert!(
+        m.get("source")
+            .and_then(serde_json::Value::as_str)
+            .is_some(),
+        "the machine id must say where it came from, so a reader knows what it is worth: {v}"
+    );
+}
