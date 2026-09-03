@@ -78,22 +78,21 @@ own entry is a token test, never a suffix test -- anchoring it to the end of the
 what let `--status` report `wired: false` on a machine where the hook was firing, twice
 (`docs/2026-09-02-hook-wiring-correction.md`).
 
-**When two machines disagree, the cause is not in the file they share.** Codex's matcher is `Bash`,
-a tool Codex does not have -- its rollouts name `exec_command`, `exec` and `apply_patch` -- and on
-2026-09-03 that looked like the reason a wired, trusted, `Active`-reported entry never fired here
-across 323 tool calls. It was not. A second machine on the same codex-cli 0.152.1, with the same
-tool vocabulary and a byte-identical entry, fires 417 times. Three hypotheses died in a row (the
-matcher's value, stale trust, the command's shape) and all three had the same defect: they looked
-for the cause inside a config file that is identical on both machines. `--status` reporting
-`trusted: true` is worth naming separately -- `trusted_at` checks that a hash *exists*, never that
-it matches, so an entry trusted under an older command reads exactly like a current one. The one
-working directory went the same way (run inside the repo via `bdcodex exec`, still nothing). And one
-of those rounds was spent on a row this session had written itself: all five `harness=codex` rows in
-the local database are hand-fed self-tests, so **this machine has never once fired that hook for
-real** and the "first real fire" two hypotheses were built on did not exist. A figure that cannot say
-what produced it is not evidence -- the same rule as the machine stamp above, one level down. **Do
-not make another obvious-looking change to Codex's wiring before a real payload is captured**;
-`docs/2026-09-03-installer-dedup-and-attribution.md` §7 is the record of doing it four times.
+**The name in a transcript is not the name in a payload.** Codex's rollouts call its shell tool
+`exec_command`; its `PreToolUse` payload calls the same tool `Bash`, captured live on 2026-09-03
+(`tool_name: "Bash"`, `tool_input.command: "ls"`, alongside `model`, `cwd` and `transcript_path`).
+So `matcher = "Bash"` is correct and always was -- that is what §12's "Codex's payload is Claude
+Code's byte for byte" covers, values and not just field names. Reading the rollout name and changing
+the matcher to `exec_command` broke a hook that worked, and then four hypotheses were spent chasing
+a symptom that change had created (the matcher's value, stale trust, the command's shape, the
+working directory). **Judge a matcher only from an intercepted payload, never from a transcript.**
+
+That interception has to be able to prove who called it. One round was lost to a `harness=codex`
+row this session had written itself: all five in the local database were hand-fed self-tests, so the
+"first real fire" two hypotheses rested on never happened. The probe that finally settled it logged
+its parent's command line. **A figure that cannot say what produced it is not evidence** -- the same
+rule as the machine stamp below, one level down: there it cannot name its machine, here it cannot
+name its process. `docs/2026-09-03-installer-dedup-and-attribution.md` §7.
 
 **A number that cannot say which machine produced it is not comparable to anything.** `usage.db`
 stamps `MACHINE_ID` once and never rewrites it, so a database carried to a second machine keeps

@@ -138,60 +138,63 @@ codex 2、kimi-code 1。與那份 3,653 列的表不是同一個母體。
 
 措辭刻意保守：**列本身不帶機器**，兩台寫進同一個檔之後就再也分不開了。報告能做的只有拒絕沉默。
 
-## 7. Codex：四個假設連續被推翻，而我還把自己的自測當成了證據
+## 7. Codex：rollout 的函式名不是 payload 的 tool_name，而我拿前者判了後者
 
-`settings_toml.rs` 寫的是 `matcher = "Bash"`，整組從 JSON 那側抄來。Codex 0.152.1 的工具是
-`exec_command` / `exec` / `apply_patch`，binary 裡 `MultiEdit`、`NotebookEdit`、`Grep` 各 0 次。
-本機 codex 全歷史只有 2 列且都是手動餵的，今天 323 次 `exec_command` 呼叫一列都沒產生——
-`cort hook-suggest` 只要被執行就會寫一列（連 `no_payload` 都會），所以零列代表**行程根本沒啟動**。
+`settings_toml.rs` 寫 `matcher = "Bash"`，而 Codex 0.152.1 的 rollout 裡工具叫 `exec_command`
+（今天 323 次）、`exec`、`apply_patch`，binary 裡 `MultiEdit`／`NotebookEdit`／`Grep` 各 0 次。
+本機 codex 一列都沒有。看起來鐵證如山，所以我把 matcher 改成 `exec_command|shell` 與 `apply_patch`。
 
-看起來很清楚，所以我把 matcher 改成 `exec_command|shell` 與 `apply_patch`。**那是錯的。**
+**錯的。** 實地攔截到的 `PreToolUse` payload 是：
 
-### 依序被推翻的四個假設
+```json
+{"session_id":"…","turn_id":"…","transcript_path":"…/rollout-2026-09-03T13-29-23-….jsonl",
+ "cwd":"/home/yanggf/a/cortexyoung","hook_event_name":"PreToolUse",
+ "model":"deepseek-v4-flash-0731","permission_mode":"default",
+ "tool_name":"Bash","tool_input":{"command":"ls"},"tool_use_id":"call_…"}
+```
 
-| 假設 | 怎麼死的 |
-|---|---|
-| matcher 值配不到 | `matcher = "exec_command"` 精確吻合實際工具名，仍然不燒 |
-| trust 過期（`--status` 只查 hash 存不存在，不重算） | `--dangerously-bypass-hook-trust` 開新 session，仍然不燒 |
-| command 含空格、Codex 不做 shell 切詞 | 另一台的 command 就是含空格的那一串，燒了 417 次 |
-| 工作目錄不在專案裡 | 在 repo 內以 `bdcodex exec` 跑（同一顆 codex、同一份 config、只換模型供應商所以不吃 quota），仍然不燒 |
+**`tool_name` 是 `Bash`。** Codex 在 hook payload 裡把工具名正規化成 Claude Code 的詞彙；
+rollout 記的 `exec_command` 是**模型看到的函式名**，兩者是不同的東西，而我從第一輪就混為一談。
+`matcher = "Bash"` 從頭到尾都是對的，也就是 §12 說「Codex 的 payload 與 Claude Code 逐字相同」
+的真正含意——那句話連 `tool_name` 的**值**都涵蓋，不只欄位名。
 
-一併排除的還有：feature flag（`doctor --all` 顯示 `hooks` 在 47 個啟用旗標裡）、entry 沒載入
-（Codex 自報 `PreToolUse Installed 1 / Active 1`）、session 讀到舊設定（重開過）。
+### 我製造了自己在追的症狀
 
-### 兩台的並排
+| 時間 | matcher | 結果 |
+|---|---|---|
+| 11:01 之前 | entry 不存在（11:01 那次 install 回報 `installed` 而非 `updated`） | 今天早上那 323 次呼叫沒有 hook 可燒 |
+| 12:2x–13:2x | 被我改成 `exec_command\|shell` / `exec_command` | 全部不燒 |
+| 回退成 `Bash` 後 | `Bash` | **一次就燒** |
 
-| | codex-cli | 工具名 | matcher | command | 結果 |
-|---|---|---|---|---|---|
-| 另一台 | 0.152.1 | `exec_command` 711 / `exec` 143 | `Bash` | 含空格 | **417 次** |
-| 本機 | 0.152.1 | `exec_command` 323 | `Bash` | 含空格 | **0 次** |
-
-**同版本、同工具詞彙、逐字相同的設定，一台燒一台不燒。** 所以 `Bash` 並不是按工具名做等值比對
-——它在另一台照樣配到 `exec_command`。差別不在設定檔裡，而我連續四輪都在設定檔裡找。
+所以「本機 0 次 vs 另一台 417 次」這個謎題，一半是 entry 當天才剛建立，另一半是我親手改壞的。
+中間為了解釋它而生的四個假設（matcher 值、trust 過期、command 形狀、工作目錄）全部是在追一個
+我自己製造的症狀。
 
 ### 一次歸屬錯誤，以及它花掉的兩輪
 
-過程中我把一筆 13:10:26 的 `harness=codex` 列當成「第一筆真實觸發」，並據此推出「command 必須是
-單一 token」，還用它判了另外兩個假設的生死。**那筆是我自己的自測**——建立 probe 腳本後用
-`echo … | /tmp/codex-hook-probe.sh` 驗證它可用，而那條管線的下游就是
-`cort hook-suggest --harness codex`。查全部五筆 codex 列的毫秒時戳，每一筆都對得上我自己的指令。
+過程中我把一筆 13:10:26 的 `harness=codex` 列當成「第一筆真實觸發」，據此推出「command 必須是單一
+token」，還用它判了另外兩個假設的生死。**那筆是我自己的自測**——建完 probe 腳本後
+`echo … | /tmp/codex-hook-probe.sh` 驗證可用，而那條管線下游就是
+`cort hook-suggest --harness codex`。五筆 codex 列的毫秒時戳，每一筆都對得上我自己的指令。
 
-**這台機器至今沒有一次真實的 Codex 觸發。** 一個沒有立足點的東西被當成立足點，代價是兩輪。
-教訓與 §6 同源：**一筆數字說不出它是誰產生的，就不能拿來當證據**——那裡是機器，這裡是行程。
+最終那次真實觸發之所以可信，是因為 probe 記下了**父行程的命令列**：
+`parent=codex -c model_reasoning_effort="medium" …`。攔截手段本身要能證明是誰叫的，否則它產生的
+證據跟 §6 那份說不出自己是哪台機器的數字是同一種東西——**只是低一層：那裡分不出機器，這裡分不出
+行程。**
 
-### 這一節目前的結論
+### 順帶確認的兩件事
 
-四個假設全滅，而且沒有任何一次真實觸發可以當立足點。已知的只有：本機的 Codex 把 hook 報成
-`Active`，卻在試過的每一種設定下都沒有執行過它。
+* **Codex 的 payload 帶 `model`**（此例 `deepseek-v4-flash-0731`，因為是透過 `bdcodex` wrapper
+  跑的）。這坐實了 §5 的 v3 `model` 欄位在 Codex 這側收得到值——Claude Code 那側收不到。
+* **`bdcodex` 是可用的測試載具**：同一顆 codex 二進位、同一份 config、同一組 hooks，只換模型供應商，
+  所以不消耗 OpenAI quota。互動模式才驗得準——`codex exec` 那輪的陰性有弱點，本節不採信它。
 
-減損一併記下：最後一輪用的 `codex exec` 是非互動模式，**它本身可能就不跑 hook**，所以那一輪的
-陰性證據力弱於互動模式。另一台的 config 也無法確認與貼出來的那份是同一份（該機 session resume
-失敗），所以 417 這個數字與「`matcher = "Bash"` + 含空格 command」的綁定，比本文前一版寫得要鬆。
+### 留下來的規矩
 
-matcher 已回退為 `Bash`：沒有證據支持改動它。
+**攔截路徑（rollout / transcript）記的名字，不等於 hook payload 送來的名字。** 要判斷 matcher，
+只能看實地攔截到的 payload，不能看 rollout。這一節記的是不這樣做的代價：四個假設、兩次錯誤修改、
+一次把自己的自測當成證據。
 
-**在拿到一次真實 payload 之前，不要再對 Codex 的接線做任何「看起來很明顯」的修改。** 這一節記錄的
-就是連續四次這樣做、外加一次歸屬錯誤的結果。
 
 ### 順帶修掉的一個真 bug
 
