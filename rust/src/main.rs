@@ -137,8 +137,8 @@ fn open_project_tracked(
     match canonicalize_root(root) {
         Ok(canon) => {
             usage.project_id = Some(canon.project_id.clone());
-            let db = open_db(db_path_for(&canon.path_str))
-                .map_err(|e| cort::db::classify_sqlite(&e))?;
+            let db =
+                open_db(db_path_for(&canon.path_str)).map_err(|e| cort::db::classify_sqlite(&e))?;
             ensure_schema(&db)?;
             Ok((canon, db))
         }
@@ -575,21 +575,6 @@ fn harness_of(payload: &Value, declared: &str) -> (String, Option<String>) {
     }
 }
 
-/// A PreToolUse hook, not a verb anyone types. It reads the harness's hook payload on stdin and,
-/// when the shell command about to run is a caller-set search, hands back one line of context
-/// naming the query that answers it.
-///
-/// Three rules, each measured rather than assumed:
-///
-/// * It never blocks and never denies. The agent is right about `rg` most of the time -- 409
-///   searches in the sampled sessions, ~6 of them caller-set work -- so anything stronger than a
-///   suggestion would be wrong far more often than right.
-/// * Silence is the default. No fire, no output, exit 0. A hook that prints on every search is
-///   noise, and noise is what gets ignored.
-/// * It stays silent when this project has no index. Suggesting a query that can only answer
-///   `no_seed_resolved` would spend the agent's turn to tell it nothing, and would make the
-///   suggestion itself untrustworthy the first time it happened.
-
 /// The search a hook payload describes, on either surface.
 ///
 /// `tool_input.command` is a shell line and is parsed as one. A payload without it may still be a
@@ -605,7 +590,12 @@ fn search_of_payload(v: &Value) -> Option<cort::hook::Search> {
     if v.get("tool_name").and_then(Value::as_str) != Some("Grep") {
         return None;
     }
-    let field = |k: &str| input.get(k).and_then(Value::as_str).filter(|s| !s.is_empty());
+    let field = |k: &str| {
+        input
+            .get(k)
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+    };
     cort::hook::search_from_grep_fields(
         field("pattern")?,
         field("path"),
@@ -628,7 +618,8 @@ fn search_of_payload(v: &Value) -> Option<cort::hook::Search> {
 /// re-issued and allowed. State lives beside the index rather than in `usage.db` because it is a
 /// gate, not a measurement: losing it costs one extra deny, and nothing reads it afterwards.
 fn gate_already_fired(session_id: &str, symbol: &str) -> bool {
-    let Some(dir) = cort::usage::usage_db_path().and_then(|p| p.parent().map(|d| d.join("hook-gate")))
+    let Some(dir) =
+        cort::usage::usage_db_path().and_then(|p| p.parent().map(|d| d.join("hook-gate")))
     else {
         // No cache directory means no memory of a previous fire, and a deny we cannot remember is
         // the loop this gate exists to prevent. Treat it as already fired: stay silent.
@@ -726,6 +717,20 @@ fn cmd_hook_refresh(_args: &[String], usage: &mut UsageEvent) -> Result<Emit, Co
         Err(_) => quiet("busy_or_failed", usage),
     }
 }
+/// A PreToolUse hook, not a verb anyone types. It reads the harness's hook payload on stdin and,
+/// when the shell command about to run is a caller-set search, hands back one line of context
+/// naming the query that answers it.
+///
+/// Three rules, each measured rather than assumed:
+///
+/// * It never blocks and never denies. The agent is right about `rg` most of the time -- 409
+///   searches in the sampled sessions, ~6 of them caller-set work -- so anything stronger than a
+///   suggestion would be wrong far more often than right.
+/// * Silence is the default. No fire, no output, exit 0. A hook that prints on every search is
+///   noise, and noise is what gets ignored.
+/// * It stays silent when this project has no index. Suggesting a query that can only answer
+///   `no_seed_resolved` would spend the agent's turn to tell it nothing, and would make the
+///   suggestion itself untrustworthy the first time it happened.
 fn cmd_hook_suggest(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError> {
     let declared = HookSuggestArgs::try_parse_from(args.iter())
         .ok()
@@ -821,7 +826,7 @@ edges added since -- re-run `cort index` first if the answer has to be complete"
                     "permissionDecision": "deny",
                     "permissionDecisionReason": format!(
                         "{context} This search was not run. Issue exactly the same search again and \
-it will run -- this fires once per symbol per session."
+            it will run -- this fires once per symbol per session."
                     ),
                 },
             }),
@@ -1030,8 +1035,12 @@ fn cmd_hook_install(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, Co
     }
     if a.remove {
         let out = match fmt {
-            SettingsFormat::CodexToml => settings_toml::remove_hook(&path).map_err(map_toml_settings_err)?,
-            SettingsFormat::KimiToml => settings_kimi::remove_hook(&path).map_err(map_toml_settings_err)?,
+            SettingsFormat::CodexToml => {
+                settings_toml::remove_hook(&path).map_err(map_toml_settings_err)?
+            }
+            SettingsFormat::KimiToml => {
+                settings_kimi::remove_hook(&path).map_err(map_toml_settings_err)?
+            }
             SettingsFormat::Json => settings::remove_hook(&path).map_err(map_json_settings_err)?,
         };
         return Ok(Emit {
@@ -1055,11 +1064,16 @@ fn cmd_hook_install(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, Co
             format!("{} {}", exe.to_string_lossy(), event.subcommand())
         }
     };
-    let out = match fmt {
-        SettingsFormat::CodexToml => settings_toml::install_hook(&path, &command, event).map_err(map_toml_settings_err)?,
-        SettingsFormat::KimiToml => settings_kimi::install_hook(&path, &command, event).map_err(map_toml_settings_err)?,
-        SettingsFormat::Json => settings::install_hook(&path, &command, event).map_err(map_json_settings_err)?,
-    };
+    let out =
+        match fmt {
+            SettingsFormat::CodexToml => settings_toml::install_hook(&path, &command, event)
+                .map_err(map_toml_settings_err)?,
+            SettingsFormat::KimiToml => settings_kimi::install_hook(&path, &command, event)
+                .map_err(map_toml_settings_err)?,
+            SettingsFormat::Json => {
+                settings::install_hook(&path, &command, event).map_err(map_json_settings_err)?
+            }
+        };
     Ok(Emit {
         render_command: None,
         format: Format::Json,

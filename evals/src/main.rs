@@ -646,7 +646,9 @@ fn recall_exp_main(argv: &[String]) -> Result<(), String> {
 fn hook_probe_main(argv: &[String]) -> Result<(), String> {
     guard_options(argv, HOOK_PROBE_FLAGS, USAGE_HOOK_PROBE)?;
     let Ok(home) = std::env::var("HOME") else {
-        return Err("HOME is unset: pass --claude-dir, --codex-dir and --kimi-dir explicitly".to_string());
+        return Err(
+            "HOME is unset: pass --claude-dir, --codex-dir and --kimi-dir explicitly".to_string(),
+        );
     };
     let examples: usize = at(argv, "--examples", "40")
         .parse()
@@ -669,7 +671,11 @@ fn hook_probe_main(argv: &[String]) -> Result<(), String> {
         // learn a second surface rather than a third harness flag alone.
         (
             "kimi",
-            std::path::PathBuf::from(at(argv, "--kimi-dir", &format!("{home}/.kimi-code/sessions"))),
+            std::path::PathBuf::from(at(
+                argv,
+                "--kimi-dir",
+                &format!("{home}/.kimi-code/sessions"),
+            )),
         ),
     ];
     let report = cort_evals::hook::probe(&dirs, examples);
@@ -866,7 +872,11 @@ fn adopt_mine_main(argv: &[String]) -> Result<(), String> {
     }
     // The default is cort's own default cache. Naming it in the report matters: the 09-01 baseline
     // was lost precisely because a run's rows landed in a second CORT_CACHE_DIR nobody recorded.
-    let usage_db = at(argv, "--usage-db", &format!("{home}/.cache/cortex-ng/usage.db"));
+    let usage_db = at(
+        argv,
+        "--usage-db",
+        &format!("{home}/.cache/cortex-ng/usage.db"),
+    );
     let usage_path = std::path::Path::new(&usage_db);
     let mut report = cort_evals::adopt::mine(
         dir,

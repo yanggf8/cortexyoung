@@ -98,8 +98,7 @@ fn definition_lines(
     project_id: &str,
     name: &str,
 ) -> Result<HashSet<(String, i64)>, CortError> {
-    let err =
-        |e: rusqlite::Error| crate::db::classify_sqlite(&e);
+    let err = |e: rusqlite::Error| crate::db::classify_sqlite(&e);
     let mut stmt = db
         .prepare(
             "SELECT file_path, start_line FROM chunks
@@ -373,8 +372,7 @@ fn extracted_but_unresolved(
     seed: &SeedRef,
     name: &str,
 ) -> Result<Vec<Value>, CortError> {
-    let err =
-        |e: rusqlite::Error| crate::db::classify_sqlite(&e);
+    let err = |e: rusqlite::Error| crate::db::classify_sqlite(&e);
     let mut stmt = db
         .prepare(
             "SELECT file_path, source_symbol, raw_target, start_line FROM raw_edges
@@ -501,8 +499,7 @@ fn blind_files(
     root: &Path,
     indexed: &HashSet<String>,
 ) -> Result<Value, CortError> {
-    let err =
-        |e: rusqlite::Error| crate::db::classify_sqlite(&e);
+    let err = |e: rusqlite::Error| crate::db::classify_sqlite(&e);
     // Paths, not just a count: "1 file is blind" is not actionable, "rust/src/legacy.rs is blind" is.
     let mut unparsed_stmt = db
         .prepare(

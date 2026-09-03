@@ -1,6 +1,6 @@
 //! The Codex `config.toml` merge, judged against the same shapes `rust/tests/settings.rs` judges
 //! the JSON side against: other things already in `hooks.PreToolUse`, and a file the installer must
-//! never make unreadable. The predicate under test (`is_ours`) is the JSON module's, imported rather
+//! never make unreadable. The predicate under test (`is_ours_for`) is the JSON module's, imported rather
 //! than reimplemented -- these tests exist to pin the TOML-specific plumbing around it (the nested
 //! array-of-tables navigation, refusal rules, and empty-scaffolding cleanup), not to re-litigate the
 //! token-matching rule itself.
@@ -21,7 +21,10 @@ fn tmp() -> (tempfile::TempDir, PathBuf) {
 }
 
 fn read(p: &PathBuf) -> DocumentMut {
-    fs::read_to_string(p).unwrap().parse::<DocumentMut>().unwrap()
+    fs::read_to_string(p)
+        .unwrap()
+        .parse::<DocumentMut>()
+        .unwrap()
 }
 
 fn cmd_at(doc: &DocumentMut, group: usize, hook: usize) -> String {
@@ -46,7 +49,10 @@ fn group_hook_count(doc: &DocumentMut, group: usize) -> usize {
 }
 
 fn group_count(doc: &DocumentMut) -> usize {
-    doc["hooks"]["PreToolUse"].as_array_of_tables().unwrap().len()
+    doc["hooks"]["PreToolUse"]
+        .as_array_of_tables()
+        .unwrap()
+        .len()
 }
 
 /// A plausible real `config.toml`: an ordinary top-level key, an unrelated hook event
@@ -79,7 +85,10 @@ fn installs_into_a_file_that_does_not_exist_yet() {
     assert_eq!(out.change, Change::Installed);
     assert!(out.backup.is_none(), "nothing to back up");
     let v = read(&p);
-    assert_eq!(v["hooks"]["PreToolUse"][0]["matcher"].as_str(), Some("Bash"));
+    assert_eq!(
+        v["hooks"]["PreToolUse"][0]["matcher"].as_str(),
+        Some("Bash")
+    );
     assert_eq!(cmd_at(&v, 0, 0), "/bin/cort hook-suggest");
     assert_eq!(
         v["hooks"]["PreToolUse"][0]["hooks"][0]["type"].as_str(),
@@ -110,7 +119,11 @@ fn every_hook_the_user_already_had_survives() {
         v["hooks"]["SessionStart"][0]["hooks"][0]["command"].as_str(),
         Some("mos hook")
     );
-    assert_eq!(group_count(&v), 2, "ours is added beside theirs, not over it");
+    assert_eq!(
+        group_count(&v),
+        2,
+        "ours is added beside theirs, not over it"
+    );
     assert_eq!(cmd_at(&v, 0, 0), "mos hook");
     assert_eq!(cmd_at(&v, 1, 0), "/bin/cort hook-suggest");
 }
@@ -118,10 +131,23 @@ fn every_hook_the_user_already_had_survives() {
 #[test]
 fn a_moved_binary_updates_the_entry_instead_of_adding_a_second_one() {
     let (_d, p) = tmp();
-    install_hook(&p, "/home/u/.cargo/bin/cort hook-suggest", HookEvent::Suggest).unwrap();
-    let out = install_hook(&p, "/home/u/.local/bin/cort hook-suggest", HookEvent::Suggest).unwrap();
+    install_hook(
+        &p,
+        "/home/u/.cargo/bin/cort hook-suggest",
+        HookEvent::Suggest,
+    )
+    .unwrap();
+    let out = install_hook(
+        &p,
+        "/home/u/.local/bin/cort hook-suggest",
+        HookEvent::Suggest,
+    )
+    .unwrap();
     assert_eq!(out.change, Change::Updated);
-    assert!(out.backup.is_some(), "a rewrite of an existing file is backed up");
+    assert!(
+        out.backup.is_some(),
+        "a rewrite of an existing file is backed up"
+    );
     let v = read(&p);
     assert_eq!(group_count(&v), 1);
     assert_eq!(cmd_at(&v, 0, 0), "/home/u/.local/bin/cort hook-suggest");
@@ -173,7 +199,10 @@ fn a_config_file_we_cannot_parse_is_refused_not_overwritten() {
     fs::write(&p, "this = [ is not valid toml").unwrap();
     let err = install_hook(&p, "/bin/cort hook-suggest", HookEvent::Suggest).unwrap_err();
     assert!(format!("{err}").contains("not valid TOML"), "{err}");
-    assert_eq!(fs::read_to_string(&p).unwrap(), "this = [ is not valid toml");
+    assert_eq!(
+        fs::read_to_string(&p).unwrap(),
+        "this = [ is not valid toml"
+    );
 }
 
 #[test]
@@ -181,7 +210,10 @@ fn check_can_report_the_wired_command_without_touching_the_file() {
     let (_d, p) = tmp();
     assert!(installed_command(&p, HookEvent::Suggest).is_none());
     install_hook(&p, "/bin/cort hook-suggest", HookEvent::Suggest).unwrap();
-    assert_eq!(installed_command(&p, HookEvent::Suggest).unwrap(), "/bin/cort hook-suggest");
+    assert_eq!(
+        installed_command(&p, HookEvent::Suggest).unwrap(),
+        "/bin/cort hook-suggest"
+    );
     remove_hook(&p).unwrap();
     assert!(installed_command(&p, HookEvent::Suggest).is_none());
 }
@@ -225,7 +257,12 @@ fn a_command_with_a_redirection_suffix_is_still_ours() {
 fn a_redeploy_collapses_hand_wired_duplicates_to_one_entry() {
     let (_d, p) = tmp();
     with_hand_wired_duplicates(&p);
-    let out = install_hook(&p, "/home/u/.cargo/bin/cort hook-suggest", HookEvent::Suggest).unwrap();
+    let out = install_hook(
+        &p,
+        "/home/u/.cargo/bin/cort hook-suggest",
+        HookEvent::Suggest,
+    )
+    .unwrap();
     assert_eq!(out.change, Change::Updated);
     let v = read(&p);
     assert_eq!(group_hook_count(&v, 0), 1, "two copies fire the hook twice");
@@ -237,10 +274,18 @@ fn a_redeploy_collapses_hand_wired_duplicates_to_one_entry() {
 fn the_surviving_entry_keeps_no_hand_typed_field() {
     let (_d, p) = tmp();
     with_hand_wired_duplicates(&p);
-    install_hook(&p, "/home/u/.cargo/bin/cort hook-suggest", HookEvent::Suggest).unwrap();
+    install_hook(
+        &p,
+        "/home/u/.cargo/bin/cort hook-suggest",
+        HookEvent::Suggest,
+    )
+    .unwrap();
     let v = read(&p);
     let entry = &v["hooks"]["PreToolUse"][0]["hooks"][0];
-    assert!(entry.get("async").is_none(), "stale field survived: {entry}");
+    assert!(
+        entry.get("async").is_none(),
+        "stale field survived: {entry}"
+    );
     assert_eq!(entry["type"].as_str(), Some("command"));
     assert_eq!(entry["timeout"].as_integer(), Some(5));
 }
@@ -249,8 +294,18 @@ fn the_surviving_entry_keeps_no_hand_typed_field() {
 fn collapsing_duplicates_is_idempotent() {
     let (_d, p) = tmp();
     with_hand_wired_duplicates(&p);
-    install_hook(&p, "/home/u/.cargo/bin/cort hook-suggest", HookEvent::Suggest).unwrap();
-    let out = install_hook(&p, "/home/u/.cargo/bin/cort hook-suggest", HookEvent::Suggest).unwrap();
+    install_hook(
+        &p,
+        "/home/u/.cargo/bin/cort hook-suggest",
+        HookEvent::Suggest,
+    )
+    .unwrap();
+    let out = install_hook(
+        &p,
+        "/home/u/.cargo/bin/cort hook-suggest",
+        HookEvent::Suggest,
+    )
+    .unwrap();
     assert_eq!(out.change, Change::AlreadyPresent);
     assert_eq!(out.backup, None);
 }
@@ -263,7 +318,10 @@ fn remove_takes_out_a_hand_wired_entry_too() {
     assert_eq!(out.change, Change::Removed);
     assert!(installed_command(&p, HookEvent::Suggest).is_none());
     let v = read(&p);
-    assert!(v.get("hooks").is_none(), "empty scaffolding left behind: {v}");
+    assert!(
+        v.get("hooks").is_none(),
+        "empty scaffolding left behind: {v}"
+    );
 }
 
 #[test]
@@ -284,7 +342,10 @@ command = "/bin/cort hook-suggest"
     )
     .unwrap();
     // A `continue`-worthy group (no `hooks` array) must not end the scan before the real entry.
-    assert_eq!(installed_command(&p, HookEvent::Suggest).unwrap(), "/bin/cort hook-suggest");
+    assert_eq!(
+        installed_command(&p, HookEvent::Suggest).unwrap(),
+        "/bin/cort hook-suggest"
+    );
 }
 
 #[test]
@@ -324,7 +385,10 @@ timeout = 30
 "#,
     )
     .unwrap();
-    assert!(installed_command(&p, HookEvent::Suggest).is_none(), "claimed a vendor binary");
+    assert!(
+        installed_command(&p, HookEvent::Suggest).is_none(),
+        "claimed a vendor binary"
+    );
 
     install_hook(&p, "/x/cort hook-suggest", HookEvent::Suggest).unwrap();
     let v = read(&p);
@@ -333,7 +397,8 @@ timeout = 30
         .map(|(g, h)| cmd_at(&v, g, h))
         .collect();
     assert!(
-        all.iter().any(|c| c == "/opt/vendor/bin/hook-suggest --daemon"),
+        all.iter()
+            .any(|c| c == "/opt/vendor/bin/hook-suggest --daemon"),
         "the vendor's hook was rewritten: {v}"
     );
     assert!(
@@ -394,8 +459,15 @@ command = "/a/cort hook-suggest || true"
     .unwrap();
     install_hook(&p, "/x/cort hook-suggest", HookEvent::Suggest).unwrap();
     let v = read(&p);
-    assert_eq!(group_count(&v), 2, "expected the Read group plus one of ours");
-    assert_eq!(v["hooks"]["PreToolUse"][0]["matcher"].as_str(), Some("Read"));
+    assert_eq!(
+        group_count(&v),
+        2,
+        "expected the Read group plus one of ours"
+    );
+    assert_eq!(
+        v["hooks"]["PreToolUse"][0]["matcher"].as_str(),
+        Some("Read")
+    );
     assert_eq!(group_hook_count(&v, 0), 0);
 }
 
@@ -418,8 +490,15 @@ command = "/a/cort hook-suggest"
     .unwrap();
     remove_hook(&p).unwrap();
     let v = read(&p);
-    assert_eq!(group_count(&v), 1, "the user's empty group went with ours: {v}");
-    assert_eq!(v["hooks"]["PreToolUse"][0]["matcher"].as_str(), Some("Read"));
+    assert_eq!(
+        group_count(&v),
+        1,
+        "the user's empty group went with ours: {v}"
+    );
+    assert_eq!(
+        v["hooks"]["PreToolUse"][0]["matcher"].as_str(),
+        Some("Read")
+    );
 }
 
 // --- Codex's trust gate -------------------------------------------------------------------------
@@ -458,7 +537,7 @@ fn a_trusted_hash_at_our_position_reads_as_trusted() {
     let (_d, p) = tmp();
     install_hook(&p, "/bin/cort hook-suggest", HookEvent::Suggest).unwrap();
     append(&p, &trust_block(&p.to_string_lossy(), 0, 0));
-    assert_eq!(installed_entry(&p, HookEvent::Suggest).unwrap().1, true);
+    assert!(installed_entry(&p, HookEvent::Suggest).unwrap().1);
 }
 
 /// The path half of the key is Codex's spelling of the same file, so it is deliberately not
@@ -470,7 +549,7 @@ fn the_path_half_of_the_key_is_not_compared() {
     let (_d, p) = tmp();
     install_hook(&p, "/bin/cort hook-suggest", HookEvent::Suggest).unwrap();
     append(&p, &trust_block("/some/other/spelling/config.toml", 0, 0));
-    assert_eq!(installed_entry(&p, HookEvent::Suggest).unwrap().1, true);
+    assert!(installed_entry(&p, HookEvent::Suggest).unwrap().1);
 }
 
 /// Position is compared, though: trust granted to somebody else's entry is not ours. `0:0` must
@@ -508,13 +587,20 @@ fn install_preserves_a_trust_table_it_did_not_write() {
     append(&p, &trust_block(&p.to_string_lossy(), 0, 0));
 
     assert_eq!(
-        install_hook(&p, "/bin/cort hook-suggest", HookEvent::Suggest).unwrap().change,
+        install_hook(&p, "/bin/cort hook-suggest", HookEvent::Suggest)
+            .unwrap()
+            .change,
         Change::AlreadyPresent
     );
-    assert!(installed_entry(&p, HookEvent::Suggest).unwrap().1, "no-op reinstall dropped it");
+    assert!(
+        installed_entry(&p, HookEvent::Suggest).unwrap().1,
+        "no-op reinstall dropped it"
+    );
 
     assert_eq!(
-        install_hook(&p, "/other/cort hook-suggest", HookEvent::Suggest).unwrap().change,
+        install_hook(&p, "/other/cort hook-suggest", HookEvent::Suggest)
+            .unwrap()
+            .change,
         Change::Updated
     );
     assert!(
@@ -554,15 +640,28 @@ fn kimi_tmp() -> (tempfile::TempDir, PathBuf) {
 }
 
 fn kimi_entries(p: &PathBuf) -> Vec<(String, String)> {
-    let doc = fs::read_to_string(p).unwrap().parse::<DocumentMut>().unwrap();
-    let Some(list) = doc.as_table().get("hooks").and_then(|h| h.as_array_of_tables()) else {
+    let doc = fs::read_to_string(p)
+        .unwrap()
+        .parse::<DocumentMut>()
+        .unwrap();
+    let Some(list) = doc
+        .as_table()
+        .get("hooks")
+        .and_then(|h| h.as_array_of_tables())
+    else {
         return Vec::new();
     };
     list.iter()
         .map(|t| {
             (
-                t.get("event").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                t.get("command").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                t.get("event")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                t.get("command")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
             )
         })
         .collect()
@@ -603,7 +702,11 @@ fn a_moved_binary_updates_each_event_in_place() {
     cort::settings_kimi::install_hook(&p, "/new/cort hook-refresh", HookEvent::Refresh).unwrap();
 
     let entries = kimi_entries(&p);
-    assert_eq!(entries.len(), 2, "updating must not add a third: {entries:?}");
+    assert_eq!(
+        entries.len(),
+        2,
+        "updating must not add a third: {entries:?}"
+    );
     assert!(entries.contains(&(
         "PreToolUse".to_string(),
         "/old/cort hook-suggest".to_string()
@@ -677,7 +780,10 @@ fn an_install_and_remove_cycle_returns_the_file_exactly_as_it_was() {
     cort::settings_kimi::install_hook(&p, "/bin/cort hook-suggest", HookEvent::Suggest).unwrap();
     cort::settings_kimi::install_hook(&p, "/bin/cort hook-refresh", HookEvent::Refresh).unwrap();
     assert_eq!(
-        fs::read_to_string(&p).unwrap().matches("cc-managed").count(),
+        fs::read_to_string(&p)
+            .unwrap()
+            .matches("cc-managed")
+            .count(),
         2,
         "installing must not disturb the fence either"
     );
@@ -687,7 +793,8 @@ fn an_install_and_remove_cycle_returns_the_file_exactly_as_it_was() {
 
     // And repeatedly, because a cycle that grows the file by a line is the same bug slowed down.
     for _ in 0..3 {
-        cort::settings_kimi::install_hook(&p, "/bin/cort hook-suggest", HookEvent::Suggest).unwrap();
+        cort::settings_kimi::install_hook(&p, "/bin/cort hook-suggest", HookEvent::Suggest)
+            .unwrap();
         cort::settings_kimi::remove_hook(&p).unwrap();
     }
     assert_eq!(fs::read_to_string(&p).unwrap(), original);

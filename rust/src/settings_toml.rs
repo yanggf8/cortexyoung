@@ -22,7 +22,7 @@
 //! Everything past the shape mirrors `settings.rs`'s guarantees line for line, because the failure
 //! mode is the same regardless of which parser is doing the reading: preserve every hook the user
 //! already configured, be idempotent across reinstalls, recognise its own entry after the binary
-//! moves, and refuse to touch a file it cannot parse. `is_ours` is imported rather than
+//! moves, and refuse to touch a file it cannot parse. `is_ours_for` is imported rather than
 //! reimplemented -- the token-matching rule it encodes cost two rounds of hardening
 //! (`docs/2026-09-02-hook-wiring-correction.md` §7, §9), and a second copy of it here is a second
 //! place for the same bug to reappear.
@@ -107,8 +107,9 @@ fn read_doc(path: &Path) -> Result<DocumentMut, SettingsError> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(DocumentMut::new()),
         Err(e) => return Err(e.into()),
     };
-    raw.parse::<DocumentMut>()
-        .map_err(|e| SettingsError::Unparsable(format!("{} is not valid TOML: {e}", path.display())))
+    raw.parse::<DocumentMut>().map_err(|e| {
+        SettingsError::Unparsable(format!("{} is not valid TOML: {e}", path.display()))
+    })
 }
 
 /// Write next to the target and rename, so an interrupted install cannot leave a half-written
@@ -142,7 +143,10 @@ fn backup(path: &Path) -> Result<Option<PathBuf>, SettingsError> {
 /// it is there with the wrong shape. Mirrors `settings::pre_tool_use`'s refusal rule: a `hooks` that
 /// already holds something other than a table, or a `PreToolUse` that already holds something other
 /// than an array of tables, is a file this module does not understand.
-fn event_list(doc: &mut DocumentMut, event: HookEvent) -> Result<&mut ArrayOfTables, SettingsError> {
+fn event_list(
+    doc: &mut DocumentMut,
+    event: HookEvent,
+) -> Result<&mut ArrayOfTables, SettingsError> {
     let root = doc.as_table_mut();
     let hooks_item = root.entry("hooks").or_insert(Item::Table(Table::new()));
     if !hooks_item.is_table() {
@@ -181,7 +185,10 @@ pub fn install_hook(
 
     for gi in 0..list.len() {
         let group = list.get_mut(gi).expect("gi in range");
-        let Some(hooks) = group.get_mut("hooks").and_then(Item::as_array_of_tables_mut) else {
+        let Some(hooks) = group
+            .get_mut("hooks")
+            .and_then(Item::as_array_of_tables_mut)
+        else {
             continue;
         };
         let before = hooks.len();
@@ -213,7 +220,7 @@ pub fn install_hook(
         for hi in drop_idx.into_iter().rev() {
             hooks.remove(hi);
         }
-        if hooks.len() == 0 && before > 0 {
+        if hooks.is_empty() && before > 0 {
             empty_groups.push(gi);
         }
     }
@@ -261,37 +268,40 @@ pub fn remove_hook(path: &Path) -> Result<Outcome, SettingsError> {
     let mut removed = false;
 
     for event in EVENTS {
-    let list = event_list(&mut doc, event)?;
-    let mut empty_groups: Vec<usize> = Vec::new();
-    for gi in 0..list.len() {
-        let group = list.get_mut(gi).expect("gi in range");
-        let Some(hooks) = group.get_mut("hooks").and_then(Item::as_array_of_tables_mut) else {
-            continue;
-        };
-        let before = hooks.len();
-        let mut drop_idx: Vec<usize> = Vec::new();
-        for hi in 0..hooks.len() {
-            let h = hooks.get_mut(hi).expect("hi in range");
-            if h.get("command")
-                .and_then(Item::as_str)
-                .is_some_and(|c| is_ours_for(c, event))
-            {
-                drop_idx.push(hi);
+        let list = event_list(&mut doc, event)?;
+        let mut empty_groups: Vec<usize> = Vec::new();
+        for gi in 0..list.len() {
+            let group = list.get_mut(gi).expect("gi in range");
+            let Some(hooks) = group
+                .get_mut("hooks")
+                .and_then(Item::as_array_of_tables_mut)
+            else {
+                continue;
+            };
+            let before = hooks.len();
+            let mut drop_idx: Vec<usize> = Vec::new();
+            for hi in 0..hooks.len() {
+                let h = hooks.get_mut(hi).expect("hi in range");
+                if h.get("command")
+                    .and_then(Item::as_str)
+                    .is_some_and(|c| is_ours_for(c, event))
+                {
+                    drop_idx.push(hi);
+                }
+            }
+            for hi in drop_idx.into_iter().rev() {
+                hooks.remove(hi);
+            }
+            if hooks.len() != before {
+                removed = true;
+                if hooks.is_empty() {
+                    empty_groups.push(gi);
+                }
             }
         }
-        for hi in drop_idx.into_iter().rev() {
-            hooks.remove(hi);
+        for gi in empty_groups.into_iter().rev() {
+            list.remove(gi);
         }
-        if hooks.len() != before {
-            removed = true;
-            if hooks.len() == 0 {
-                empty_groups.push(gi);
-            }
-        }
-    }
-    for gi in empty_groups.into_iter().rev() {
-        list.remove(gi);
-    }
     }
 
     if !removed {
@@ -395,13 +405,17 @@ fn trusted_at(hooks: &Table, gi: usize, hi: usize, event: HookEvent) -> bool {
 /// `hooks.PostToolUse` in a file that never had one. Only empty lists go, and only after the scan
 /// -- somebody else's populated `PostToolUse` is not ours to touch.
 fn prune_empty_scaffolding(doc: &mut DocumentMut) {
-    let Some(h) = doc.as_table_mut().get_mut("hooks").and_then(Item::as_table_mut) else {
+    let Some(h) = doc
+        .as_table_mut()
+        .get_mut("hooks")
+        .and_then(Item::as_table_mut)
+    else {
         return;
     };
     for event in EVENTS {
         if h.get(event.name())
             .and_then(Item::as_array_of_tables)
-            .is_some_and(|a| a.len() == 0)
+            .is_some_and(|a| a.is_empty())
         {
             h.remove(event.name());
         }

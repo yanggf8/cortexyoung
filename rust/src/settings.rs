@@ -79,7 +79,6 @@ const MATCHER: &str = "Bash";
 /// case can never hold up the agent's tool call.
 const TIMEOUT_SECS: u64 = 5;
 
-
 /// The tools whose payload `hook-refresh` reacts to -- the ones that change the tree.
 ///
 /// A second event was added on 2026-09-03. The first one only ever *told* the agent the index was
@@ -154,11 +153,8 @@ pub fn default_settings_path() -> Option<PathBuf> {
 /// so a vendor's `/opt/vendor/bin/hook-suggest --daemon` is silently destroyed by an unrelated
 /// `./install.sh`. This module's first promise is that every hook the user already has survives,
 /// and that promise is only ever as good as this predicate.
-pub(crate) fn is_ours(command: &str) -> bool {
-    ours_subcommand(command).is_some()
-}
-
-/// Is this entry ours *for this event*? Both of our commands satisfy `is_ours`, and in Kimi's flat
+/// Is this entry ours *for this event*? Both of our commands pass the token rule below, and in
+/// Kimi's flat
 /// `[[hooks]]` array they sit in the same list -- so installing one must never rewrite the other.
 pub(crate) fn is_ours_for(command: &str, event: HookEvent) -> bool {
     ours_subcommand(command) == Some(event)
@@ -336,7 +332,7 @@ pub fn install_hook(
                 // Normalise the whole entry, not just its command string. An entry of ours that
                 // carries a hand-typed `if` condition covers less ground than the installer then
                 // reports as wired, and a deployed state nobody can predict from the installer is
-                // exactly what this module exists to rule out. Only entries `is_ours` are touched.
+                // exactly what this module exists to rule out. Only entries of ours are touched.
                 *h = canonical.clone();
                 changed = true;
             }

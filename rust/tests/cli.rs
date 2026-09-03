@@ -508,7 +508,10 @@ fn the_usage_row_records_which_outcome_the_hook_reached() {
     // The window is honoured, so a mining run cannot pick up rows from before the hook was wired.
     let future = cort::usage::now_ms() + 60_000;
     let later = cort::usage::hook_outcomes_at(&usage_db, future, None).expect("read usage db");
-    assert!(later.is_empty(), "nothing was recorded after now: {later:?}");
+    assert!(
+        later.is_empty(),
+        "nothing was recorded after now: {later:?}"
+    );
 }
 
 fn git_in(root: &Path, args: &[&str]) {
@@ -557,7 +560,11 @@ fn a_stale_index_is_disclosed_in_the_line_the_agent_reads() {
     );
 
     // Move the tree on without re-indexing: the index is now provably behind.
-    fs::write(cwd.join("src/gamma.ts"), "export function gamma() { return 3; }\n").unwrap();
+    fs::write(
+        cwd.join("src/gamma.ts"),
+        "export function gamma() { return 3; }\n",
+    )
+    .unwrap();
     git_in(&cwd, &["add", "-A"]);
     git_in(&cwd, &["commit", "-qm", "two"]);
 
@@ -574,9 +581,18 @@ fn a_stale_index_is_disclosed_in_the_line_the_agent_reads() {
     assert!(ctx.contains("cort impact --symbol 'helper'"), "got: {ctx}");
 
     // And the two are countable apart from the db alone.
-    let counts = cort::usage::hook_outcomes_at(&cache.join("usage.db"), 0, None).expect("read usage db");
-    assert_eq!(counts.get("hit").and_then(Value::as_i64), Some(1), "{counts:?}");
-    assert_eq!(counts.get("hit_stale").and_then(Value::as_i64), Some(1), "{counts:?}");
+    let counts =
+        cort::usage::hook_outcomes_at(&cache.join("usage.db"), 0, None).expect("read usage db");
+    assert_eq!(
+        counts.get("hit").and_then(Value::as_i64),
+        Some(1),
+        "{counts:?}"
+    );
+    assert_eq!(
+        counts.get("hit_stale").and_then(Value::as_i64),
+        Some(1),
+        "{counts:?}"
+    );
 }
 
 /// An index built before the current schema is not a busy database. `cort status` opens read-only
@@ -666,7 +682,12 @@ fn deleting_a_path_that_is_neither_a_directory_nor_a_row_still_fails() {
         &cache,
     );
     assert_ne!(r.code, 0, "stdout={}", r.stdout);
-    assert_eq!(payload(&r)["error"], "file_not_found", "stdout={}", r.stdout);
+    assert_eq!(
+        payload(&r)["error"],
+        "file_not_found",
+        "stdout={}",
+        r.stdout
+    );
 }
 
 /// Every harness that wires this hook calls one binary and writes to one usage.db, and the mining
@@ -712,7 +733,10 @@ fn a_usage_row_records_which_harness_fired_the_hook() {
 
     // With no filter the outcomes are reported as they are, so `cort usage` is unaffected.
     let all = cort::usage::hook_outcomes_at(&usage_db, 0, None).unwrap();
-    assert!(all.get("other_harness").is_none(), "unfiltered read split by harness: {all:?}");
+    assert!(
+        all.get("other_harness").is_none(),
+        "unfiltered read split by harness: {all:?}"
+    );
 }
 
 /// One settings file can be read by more than one harness: Grok loads `~/.claude/settings.json` for
@@ -747,7 +771,10 @@ fn the_harness_is_taken_from_the_payload_not_from_the_flag_alone() {
     let as_grok = cort::usage::hook_outcomes_at(&usage_db, 0, Some("grok")).unwrap();
     assert_eq!(
         as_grok.get("hit").and_then(|v| v.as_i64()).unwrap_or(0)
-            + as_grok.get("hit_stale").and_then(|v| v.as_i64()).unwrap_or(0),
+            + as_grok
+                .get("hit_stale")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0),
         1,
         "the fire was not attributed to grok: {as_grok:?}"
     );
@@ -764,7 +791,10 @@ fn the_harness_is_taken_from_the_payload_not_from_the_flag_alone() {
     let as_claude = cort::usage::hook_outcomes_at(&usage_db, 0, Some("claude-code")).unwrap();
     assert_eq!(
         as_claude.get("hit").and_then(|v| v.as_i64()).unwrap_or(0)
-            + as_claude.get("hit_stale").and_then(|v| v.as_i64()).unwrap_or(0),
+            + as_claude
+                .get("hit_stale")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0),
         1,
         "an unrecognised transcript path discarded the declared harness: {as_claude:?}"
     );
@@ -822,7 +852,12 @@ fn suppress_output_is_omitted_for_codex_and_kept_for_the_others() {
 
 /// Send a raw payload rather than a shell command, so a structured tool call can be tested the way
 /// the harness actually sends one.
-fn run_hook_suggest_payload(payload: serde_json::Value, extra: &[&str], cwd: &Path, cache: &Path) -> Run {
+fn run_hook_suggest_payload(
+    payload: serde_json::Value,
+    extra: &[&str],
+    cwd: &Path,
+    cache: &Path,
+) -> Run {
     use std::io::Write;
     use std::process::Stdio;
     let mut child = Command::new(cort_bin())
@@ -891,11 +926,19 @@ fn kimi_denies_once_per_symbol_then_gets_out_of_the_way() {
     }
     let kimi = &["--harness", "kimi-code"];
 
-    let first = run_hook_suggest_payload(kimi_grep("helper", "rust/src", "sess-a"), kimi, &cwd, &cache);
+    let first = run_hook_suggest_payload(
+        kimi_grep("helper", "rust/src", "sess-a"),
+        kimi,
+        &cwd,
+        &cache,
+    );
     let out = payload(&first)["hookSpecificOutput"].clone();
     assert_eq!(out["permissionDecision"].as_str(), Some("deny"));
     let reason = out["permissionDecisionReason"].as_str().unwrap_or_default();
-    assert!(reason.contains("cort impact --symbol 'helper'"), "got: {reason}");
+    assert!(
+        reason.contains("cort impact --symbol 'helper'"),
+        "got: {reason}"
+    );
     assert!(
         reason.contains("Issue exactly the same search again"),
         "a stop the agent cannot get past is worse than any false positive: {reason}"
@@ -906,11 +949,21 @@ fn kimi_denies_once_per_symbol_then_gets_out_of_the_way() {
     );
 
     // Same symbol, same session: yields.
-    let second = run_hook_suggest_payload(kimi_grep("helper", "rust/src", "sess-a"), kimi, &cwd, &cache);
+    let second = run_hook_suggest_payload(
+        kimi_grep("helper", "rust/src", "sess-a"),
+        kimi,
+        &cwd,
+        &cache,
+    );
     assert_eq!(payload(&second), serde_json::json!({}));
 
     // A different session has not been told anything yet.
-    let other = run_hook_suggest_payload(kimi_grep("helper", "rust/src", "sess-b"), kimi, &cwd, &cache);
+    let other = run_hook_suggest_payload(
+        kimi_grep("helper", "rust/src", "sess-b"),
+        kimi,
+        &cwd,
+        &cache,
+    );
     assert_eq!(
         payload(&other)["hookSpecificOutput"]["permissionDecision"].as_str(),
         Some("deny")

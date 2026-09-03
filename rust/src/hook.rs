@@ -271,9 +271,9 @@ pub fn search_from_shell(command: &str) -> Option<Search> {
         pattern: pattern?,
         targets,
         wants_context: tokens.iter().any(|t| is_context_flag(t)),
-        recursive: tokens.iter().any(|t| {
-            t == "-r" || t == "-R" || t == "--recursive" || is_short_cluster_with(t, 'r')
-        }),
+        recursive: tokens
+            .iter()
+            .any(|t| t == "-r" || t == "-R" || t == "--recursive" || is_short_cluster_with(t, 'r')),
     })
 }
 

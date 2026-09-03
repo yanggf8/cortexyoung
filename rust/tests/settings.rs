@@ -81,8 +81,18 @@ fn every_hook_the_user_already_had_survives() {
 #[test]
 fn a_moved_binary_updates_the_entry_instead_of_adding_a_second_one() {
     let (_d, p) = tmp();
-    install_hook(&p, "/home/u/.cargo/bin/cort hook-suggest", HookEvent::Suggest).unwrap();
-    let out = install_hook(&p, "/home/u/.local/bin/cort hook-suggest", HookEvent::Suggest).unwrap();
+    install_hook(
+        &p,
+        "/home/u/.cargo/bin/cort hook-suggest",
+        HookEvent::Suggest,
+    )
+    .unwrap();
+    let out = install_hook(
+        &p,
+        "/home/u/.local/bin/cort hook-suggest",
+        HookEvent::Suggest,
+    )
+    .unwrap();
     assert_eq!(out.change, Change::Updated);
     assert!(
         out.backup.is_some(),
@@ -151,7 +161,10 @@ fn check_can_report_the_wired_command_without_touching_the_file() {
     let (_d, p) = tmp();
     assert!(installed_command(&p, HookEvent::Suggest).is_none());
     install_hook(&p, "/bin/cort hook-suggest", HookEvent::Suggest).unwrap();
-    assert_eq!(installed_command(&p, HookEvent::Suggest).unwrap(), "/bin/cort hook-suggest");
+    assert_eq!(
+        installed_command(&p, HookEvent::Suggest).unwrap(),
+        "/bin/cort hook-suggest"
+    );
     remove_hook(&p).unwrap();
     assert!(installed_command(&p, HookEvent::Suggest).is_none());
 }
@@ -193,7 +206,12 @@ fn a_command_with_a_redirection_suffix_is_still_ours() {
 fn a_redeploy_collapses_hand_wired_duplicates_to_one_entry() {
     let (_d, p) = tmp();
     with_hand_wired_duplicates(&p);
-    let out = install_hook(&p, "/home/u/.cargo/bin/cort hook-suggest", HookEvent::Suggest).unwrap();
+    let out = install_hook(
+        &p,
+        "/home/u/.cargo/bin/cort hook-suggest",
+        HookEvent::Suggest,
+    )
+    .unwrap();
     assert_eq!(out.change, Change::Updated);
     let v = read(&p);
     let hooks = v["hooks"]["PreToolUse"][0]["hooks"].as_array().unwrap();
@@ -206,12 +224,20 @@ fn a_redeploy_collapses_hand_wired_duplicates_to_one_entry() {
 fn the_surviving_entry_keeps_no_hand_typed_condition() {
     let (_d, p) = tmp();
     with_hand_wired_duplicates(&p);
-    install_hook(&p, "/home/u/.cargo/bin/cort hook-suggest", HookEvent::Suggest).unwrap();
+    install_hook(
+        &p,
+        "/home/u/.cargo/bin/cort hook-suggest",
+        HookEvent::Suggest,
+    )
+    .unwrap();
     let v = read(&p);
     let entry = &v["hooks"]["PreToolUse"][0]["hooks"][0];
     // An `if: Bash(grep:*)` left in place means the hook covers grep alone while the installer
     // reports it wired for Bash -- less coverage than anyone reading the installer would predict.
-    assert!(entry.get("if").is_none(), "stale condition survived: {entry}");
+    assert!(
+        entry.get("if").is_none(),
+        "stale condition survived: {entry}"
+    );
     assert_eq!(entry["type"], "command");
     assert_eq!(entry["timeout"], 5);
 }
@@ -220,8 +246,18 @@ fn the_surviving_entry_keeps_no_hand_typed_condition() {
 fn collapsing_duplicates_is_idempotent() {
     let (_d, p) = tmp();
     with_hand_wired_duplicates(&p);
-    install_hook(&p, "/home/u/.cargo/bin/cort hook-suggest", HookEvent::Suggest).unwrap();
-    let out = install_hook(&p, "/home/u/.cargo/bin/cort hook-suggest", HookEvent::Suggest).unwrap();
+    install_hook(
+        &p,
+        "/home/u/.cargo/bin/cort hook-suggest",
+        HookEvent::Suggest,
+    )
+    .unwrap();
+    let out = install_hook(
+        &p,
+        "/home/u/.cargo/bin/cort hook-suggest",
+        HookEvent::Suggest,
+    )
+    .unwrap();
     assert_eq!(out.change, Change::AlreadyPresent);
     assert_eq!(out.backup, None);
 }
@@ -234,7 +270,10 @@ fn remove_takes_out_a_hand_wired_entry_too() {
     assert_eq!(out.change, Change::Removed);
     assert!(installed_command(&p, HookEvent::Suggest).is_none());
     let v = read(&p);
-    assert!(v.get("hooks").is_none(), "empty scaffolding left behind: {v}");
+    assert!(
+        v.get("hooks").is_none(),
+        "empty scaffolding left behind: {v}"
+    );
 }
 
 #[test]
@@ -254,7 +293,10 @@ fn a_malformed_group_does_not_hide_the_entry_behind_it() {
     )
     .unwrap();
     // A `?` here used to end the whole scan on the first group, reporting not-wired.
-    assert_eq!(installed_command(&p, HookEvent::Suggest).unwrap(), "/bin/cort hook-suggest");
+    assert_eq!(
+        installed_command(&p, HookEvent::Suggest).unwrap(),
+        "/bin/cort hook-suggest"
+    );
 }
 
 #[test]
@@ -274,8 +316,7 @@ fn a_command_merely_mentioning_the_word_is_not_ours() {
     remove_hook(&p).unwrap();
     let v = read(&p);
     assert_eq!(
-        v["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
-        "echo hook-suggest >> /tmp/log",
+        v["hooks"]["PreToolUse"][0]["hooks"][0]["command"], "echo hook-suggest >> /tmp/log",
         "somebody else's hook was removed"
     );
 }
@@ -296,7 +337,10 @@ fn a_third_party_binary_named_hook_suggest_is_not_ours() {
         .unwrap(),
     )
     .unwrap();
-    assert!(installed_command(&p, HookEvent::Suggest).is_none(), "claimed a vendor binary");
+    assert!(
+        installed_command(&p, HookEvent::Suggest).is_none(),
+        "claimed a vendor binary"
+    );
 
     install_hook(&p, "/x/cort hook-suggest", HookEvent::Suggest).unwrap();
     let v = read(&p);
@@ -307,8 +351,9 @@ fn a_third_party_binary_named_hook_suggest_is_not_ours() {
         .flat_map(|g| g["hooks"].as_array().unwrap().iter())
         .collect::<Vec<_>>();
     assert!(
-        hooks.iter().any(|h| h["command"] == "/opt/vendor/bin/hook-suggest --daemon"
-            && h["timeout"] == 30),
+        hooks
+            .iter()
+            .any(|h| h["command"] == "/opt/vendor/bin/hook-suggest --daemon" && h["timeout"] == 30),
         "the vendor's hook was rewritten: {v}"
     );
     assert!(
@@ -319,8 +364,7 @@ fn a_third_party_binary_named_hook_suggest_is_not_ours() {
     remove_hook(&p).unwrap();
     let v = read(&p);
     assert_eq!(
-        v["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
-        "/opt/vendor/bin/hook-suggest --daemon",
+        v["hooks"]["PreToolUse"][0]["hooks"][0]["command"], "/opt/vendor/bin/hook-suggest --daemon",
         "the vendor's hook was deleted by our uninstall: {v}"
     );
 }
@@ -339,7 +383,11 @@ fn a_hooks_key_of_the_wrong_type_is_refused_not_replaced() {
     fs::write(p.as_path(), &before).unwrap();
     let err = install_hook(&p, "/x/cort hook-suggest", HookEvent::Suggest).unwrap_err();
     assert!(format!("{err}").contains("not an object"), "{err}");
-    assert_eq!(fs::read_to_string(&p).unwrap(), before, "the file was written");
+    assert_eq!(
+        fs::read_to_string(&p).unwrap(),
+        before,
+        "the file was written"
+    );
 }
 
 #[test]
@@ -352,7 +400,11 @@ fn a_pretooluse_of_the_wrong_type_is_refused_not_replaced() {
     fs::write(p.as_path(), &before).unwrap();
     let err = install_hook(&p, "/x/cort hook-suggest", HookEvent::Suggest).unwrap_err();
     assert!(format!("{err}").contains("not an array"), "{err}");
-    assert_eq!(fs::read_to_string(&p).unwrap(), before, "the file was written");
+    assert_eq!(
+        fs::read_to_string(&p).unwrap(),
+        before,
+        "the file was written"
+    );
 }
 
 /// Collapsing our own duplicates is not licence to tidy the file. An empty group the user keeps for
@@ -375,7 +427,11 @@ fn the_users_own_empty_group_survives_a_collapse() {
     .unwrap();
     install_hook(&p, "/x/cort hook-suggest", HookEvent::Suggest).unwrap();
     let pre = read(&p)["hooks"]["PreToolUse"].as_array().unwrap().clone();
-    assert_eq!(pre.len(), 2, "expected the Read group plus one of ours: {pre:?}");
+    assert_eq!(
+        pre.len(),
+        2,
+        "expected the Read group plus one of ours: {pre:?}"
+    );
     assert_eq!(pre[0]["matcher"], "Read");
     assert!(pre[0]["hooks"].as_array().unwrap().is_empty());
 }

@@ -26,7 +26,7 @@
 //!   of the traffic the rule exists for. `"*"` is not a wildcard here; it throws, is caught, and
 //!   silently disables the hook.
 //! * **This file already has other owners.** The Kimi plugin writes its own managed block into it,
-//!   one per host, and rewrites the file when it updates. `is_ours` is imported rather than
+//!   one per host, and rewrites the file when it updates. `is_ours_for` is imported rather than
 //!   reimplemented for the same reason as in `settings_toml`, and `toml_edit` is used so that
 //!   everything we do not own -- including Kimi's `[hooks.state]`-equivalent bookkeeping and other
 //!   people's `[[hooks]]` entries -- survives byte for byte.
@@ -84,8 +84,9 @@ fn read_doc(path: &Path) -> Result<DocumentMut, SettingsError> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(DocumentMut::new()),
         Err(e) => return Err(SettingsError::Io(e)),
     };
-    raw.parse::<DocumentMut>()
-        .map_err(|e| SettingsError::Unparsable(format!("{} is not valid TOML: {e}", path.display())))
+    raw.parse::<DocumentMut>().map_err(|e| {
+        SettingsError::Unparsable(format!("{} is not valid TOML: {e}", path.display()))
+    })
 }
 
 /// Write beside the target and rename: Kimi reads this file on every session start, and another
@@ -172,7 +173,11 @@ pub fn install_hook(
 
     for i in 0..list.len() {
         let entry = list.get_mut(i).expect("i in range");
-        let Some(cur) = entry.get("command").and_then(Item::as_str).map(str::to_string) else {
+        let Some(cur) = entry
+            .get("command")
+            .and_then(Item::as_str)
+            .map(str::to_string)
+        else {
             continue;
         };
         if !is_ours_for(&cur, event) {
@@ -263,7 +268,7 @@ pub fn remove_hook(path: &Path) -> Result<Outcome, SettingsError> {
         }
         list.remove(i);
     }
-    let now_empty = list.len() == 0;
+    let now_empty = list.is_empty();
     if !salvaged.trim().is_empty() {
         let existing = doc.trailing().as_str().unwrap_or_default().to_string();
         // Trimmed at both ends and given exactly one newline: the blank lines around our entry were

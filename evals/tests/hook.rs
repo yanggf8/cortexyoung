@@ -55,3 +55,51 @@ fn the_index_check_asks_for_a_callable_not_any_declaration() {
         Some("fn")
     );
 }
+
+/// A directory that is right there and holds nothing the scanner opens is not an unreadable tree.
+///
+/// Both used to answer `None` and both were reported as `unchecked_tree_unreadable`, which sent a
+/// reader looking for a permissions or path problem that did not exist on a Godot project whose
+/// `.gd` files this screen simply does not read. Splitting them cost nothing and the split is not
+/// cosmetic: on the local corpus it separates 20 genuinely unresolvable paths from 4 of these.
+#[test]
+fn a_readable_tree_with_no_source_is_not_an_unreadable_tree() {
+    use cort_evals::hook::{declares_function, DeclCheck};
+
+    let d = tempfile::Builder::new()
+        .prefix("cort-declcheck-")
+        .tempdir()
+        .unwrap();
+
+    // A directory holding only files this scanner has no reason to open.
+    std::fs::write(d.path().join("world.gd"), "func _ready():\n\tpass\n").unwrap();
+    std::fs::write(d.path().join("notes.txt"), "nothing here\n").unwrap();
+    assert_eq!(
+        declares_function(d.path(), "_ready"),
+        DeclCheck::NoSourceRead,
+        "the tree is readable; it is this screen that has nothing to read in it"
+    );
+
+    // A path that is not a directory at all.
+    assert_eq!(
+        declares_function(&d.path().join("no-such-dir"), "_ready"),
+        DeclCheck::TreeMissing
+    );
+
+    // And with something it does read, it answers the actual question again.
+    std::fs::write(d.path().join("lib.rs"), "pub fn helper() {}\n").unwrap();
+    assert_eq!(declares_function(d.path(), "helper"), DeclCheck::Declared);
+    assert_eq!(
+        declares_function(d.path(), "absent_symbol"),
+        DeclCheck::NotDeclared
+    );
+
+    // The verdict strings are the report's keys; drift there is drift in every number read off it.
+    assert_eq!(DeclCheck::Declared.verdict(), "confirmed_function");
+    assert_eq!(DeclCheck::NotDeclared.verdict(), "rejected_not_a_function");
+    assert_eq!(DeclCheck::TreeMissing.verdict(), "unchecked_tree_missing");
+    assert_eq!(
+        DeclCheck::NoSourceRead.verdict(),
+        "unchecked_no_source_this_screen_reads"
+    );
+}

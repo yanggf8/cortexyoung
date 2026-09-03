@@ -1,8 +1,8 @@
 //! The §6 funnel, gated on the mistakes that actually happened when it was run by hand.
 
 use cort_evals::adopt::{format_utc, mine, parse_since, runs_cort_impact, DEFAULT_FOLLOW_CALLS};
-use std::path::Path as StdPath;
 use serde_json::{json, Value};
+use std::path::Path as StdPath;
 use std::path::Path;
 
 /// The exact text the hook injects, so the fixture cannot drift from the product by paraphrase.
@@ -91,10 +91,7 @@ fn a_window_without_an_offset_is_refused_rather_than_guessed() {
     assert_eq!(taipei, utc);
     assert_eq!(format_utc(taipei), "2026-09-02T01:24:00Z");
     // And a negative offset moves the other way.
-    assert_eq!(
-        parse_since("2026-09-01T21:24:00-04:00").unwrap(),
-        utc
-    );
+    assert_eq!(parse_since("2026-09-01T21:24:00-04:00").unwrap(), utc);
 }
 
 #[test]
@@ -120,9 +117,17 @@ fn a_mention_of_the_command_is_not_an_execution_of_it() {
 fn an_injection_pairs_with_its_trigger_and_with_what_followed() {
     let body = [
         session_start_preamble("2026-09-02T01:00:00.000Z"),
-        bash("2026-09-02T01:27:10.000Z", "toolu_1", "grep -rn 'helper(' src --include=*.ts"),
+        bash(
+            "2026-09-02T01:27:10.000Z",
+            "toolu_1",
+            "grep -rn 'helper(' src --include=*.ts",
+        ),
         injection("2026-09-02T01:27:12.193Z", "toolu_1", "helper"),
-        bash("2026-09-02T01:28:00.000Z", "toolu_2", "cort impact --symbol helper --depth 1 --coverage -f lean"),
+        bash(
+            "2026-09-02T01:28:00.000Z",
+            "toolu_2",
+            "cort impact --symbol helper --depth 1 --coverage -f lean",
+        ),
     ]
     .join("\n");
     let dir = tree(&[("-home-u-repo", "s1", &body)]);
@@ -149,7 +154,10 @@ fn an_injection_pairs_with_its_trigger_and_with_what_followed() {
             .contains("grep -rn"),
         "{row:#}"
     );
-    assert!(row["followed_by"].as_str().unwrap().starts_with("cort impact"));
+    assert!(row["followed_by"]
+        .as_str()
+        .unwrap()
+        .starts_with("cort impact"));
     // The db was not passed, and a missing source is reported as absent rather than as zero.
     assert_eq!(r["usage_db_cross_check"], Value::Null);
 }
@@ -157,7 +165,11 @@ fn an_injection_pairs_with_its_trigger_and_with_what_followed() {
 #[test]
 fn an_injection_nobody_acted_on_is_not_an_adoption() {
     let body = [
-        bash("2026-09-02T02:00:00.000Z", "toolu_1", "grep -rn 'helper(' src"),
+        bash(
+            "2026-09-02T02:00:00.000Z",
+            "toolu_1",
+            "grep -rn 'helper(' src",
+        ),
         injection("2026-09-02T02:00:01.000Z", "toolu_1", "helper"),
         // Mentions the command inside a script; never runs it.
         bash(
@@ -180,7 +192,11 @@ fn the_window_excludes_what_happened_before_the_hook_was_wired() {
     let body = [
         bash("2026-09-01T10:00:00.000Z", "toolu_0", "grep -rn 'old(' src"),
         injection("2026-09-01T10:00:01.000Z", "toolu_0", "old"),
-        bash("2026-09-02T02:00:00.000Z", "toolu_1", "grep -rn 'helper(' src"),
+        bash(
+            "2026-09-02T02:00:00.000Z",
+            "toolu_1",
+            "grep -rn 'helper(' src",
+        ),
         injection("2026-09-02T02:00:01.000Z", "toolu_1", "helper"),
     ]
     .join("\n");
@@ -196,7 +212,11 @@ fn the_window_excludes_what_happened_before_the_hook_was_wired() {
 #[test]
 fn a_subagent_sidechain_is_not_a_session_anyone_steered() {
     let body = [
-        bash("2026-09-02T02:00:00.000Z", "toolu_1", "grep -rn 'helper(' src"),
+        bash(
+            "2026-09-02T02:00:00.000Z",
+            "toolu_1",
+            "grep -rn 'helper(' src",
+        ),
         injection("2026-09-02T02:00:01.000Z", "toolu_1", "helper"),
     ]
     .join("\n");
@@ -214,9 +234,11 @@ fn a_project_with_no_index_shows_up_as_the_gap_between_the_rule_and_the_hook() {
     // The offline matcher fires on the search; no injection followed, because the gate declined a
     // project cort has never indexed. The report must let those two numbers disagree rather than
     // reconcile them, since that difference *is* the opportunity the gate passed on.
-    let body = [
-        bash("2026-09-02T02:00:00.000Z", "toolu_1", "grep -rn 'helper(' src --include=*.ts"),
-    ]
+    let body = [bash(
+        "2026-09-02T02:00:00.000Z",
+        "toolu_1",
+        "grep -rn 'helper(' src --include=*.ts",
+    )]
     .join("\n");
     let dir = tree(&[("-home-u-unindexed", "s1", &body)]);
     let r = run(dir.path(), "2026-09-02T00:00:00Z");
@@ -259,7 +281,11 @@ fn a_heredoc_body_is_written_not_executed() {
 #[test]
 fn adoption_is_bounded_to_what_the_agent_did_next() {
     let mut lines = vec![
-        bash("2026-09-02T02:00:00.000Z", "toolu_1", "grep -rn 'helper(' src"),
+        bash(
+            "2026-09-02T02:00:00.000Z",
+            "toolu_1",
+            "grep -rn 'helper(' src",
+        ),
         injection("2026-09-02T02:00:01.000Z", "toolu_1", "helper"),
     ];
     // Six unrelated calls, then an impact run long after the suggestion.
@@ -280,7 +306,10 @@ fn adoption_is_bounded_to_what_the_agent_did_next() {
     assert_eq!(r["not_adopted"], json!(1), "{r:#}");
     assert_eq!(r["adopted_same_symbol"], json!(0));
     // The later call is a fact the reader gets, not a number the funnel claims.
-    assert_eq!(r["injection_rows"][0]["impact_later_in_session"], json!(true));
+    assert_eq!(
+        r["injection_rows"][0]["impact_later_in_session"],
+        json!(true)
+    );
     assert_eq!(r["injection_rows"][0]["followed_by"], Value::Null);
 }
 
@@ -288,11 +317,23 @@ fn adoption_is_bounded_to_what_the_agent_did_next() {
 #[test]
 fn one_impact_call_can_only_be_taken_once() {
     let body = [
-        bash("2026-09-02T02:00:00.000Z", "toolu_1", "grep -rn 'alpha(' src"),
+        bash(
+            "2026-09-02T02:00:00.000Z",
+            "toolu_1",
+            "grep -rn 'alpha(' src",
+        ),
         injection("2026-09-02T02:00:01.000Z", "toolu_1", "alpha"),
-        bash("2026-09-02T02:00:02.000Z", "toolu_2", "grep -rn 'beta(' src"),
+        bash(
+            "2026-09-02T02:00:02.000Z",
+            "toolu_2",
+            "grep -rn 'beta(' src",
+        ),
         injection("2026-09-02T02:00:03.000Z", "toolu_2", "beta"),
-        bash("2026-09-02T02:00:04.000Z", "toolu_3", "cort impact --symbol beta --depth 1"),
+        bash(
+            "2026-09-02T02:00:04.000Z",
+            "toolu_3",
+            "cort impact --symbol beta --depth 1",
+        ),
     ]
     .join("\n");
     let dir = tree(&[("-home-u-repo", "s1", &body)]);
@@ -316,7 +357,11 @@ fn a_leading_env_assignment_does_not_hide_a_search() {
     .join("\n");
     let dir = tree(&[("-home-u-repo", "s1", &body)]);
     let r = run(dir.path(), "2026-09-02T00:00:00Z");
-    assert_eq!(r["searches"], json!(1), "the hook skips VAR=value, so must this: {r:#}");
+    assert_eq!(
+        r["searches"],
+        json!(1),
+        "the hook skips VAR=value, so must this: {r:#}"
+    );
     assert_eq!(r["rule_would_fire"], json!(1));
 }
 
@@ -333,15 +378,27 @@ fn a_command_after_a_semicolon_still_counts_as_run() {
     );
     // ...and the false-positive half: a quoted mention is still not an execution.
     assert_eq!(runs_cort_impact("echo 'run cort impact --symbol z'"), None);
-    assert_eq!(runs_cort_impact("git commit -m \"add; cort impact wiring\""), None);
+    assert_eq!(
+        runs_cort_impact("git commit -m \"add; cort impact wiring\""),
+        None
+    );
 }
 
 /// Codex's ninth finding: refusing offset-less input fixed one silent window error, not all of them.
 #[test]
 fn an_impossible_instant_is_refused_too() {
-    assert!(parse_since("2026-02-31T00:00:00Z").is_err(), "2026-02-31 is not a date");
-    assert!(parse_since("2026-09-02T00:00:00+99:00").is_err(), "no zone is +99");
-    assert!(parse_since("2026-09-02T00:00:00.5xZ").is_err(), "junk is not a fraction");
+    assert!(
+        parse_since("2026-02-31T00:00:00Z").is_err(),
+        "2026-02-31 is not a date"
+    );
+    assert!(
+        parse_since("2026-09-02T00:00:00+99:00").is_err(),
+        "no zone is +99"
+    );
+    assert!(
+        parse_since("2026-09-02T00:00:00.5xZ").is_err(),
+        "junk is not a fraction"
+    );
     // The real leap day is a date.
     assert!(parse_since("2024-02-29T00:00:00Z").is_ok());
     assert!(parse_since("2026-02-28T23:59:59.250Z").is_ok());
@@ -351,11 +408,18 @@ fn an_impossible_instant_is_refused_too() {
 #[test]
 fn an_excluded_project_is_dropped_and_named() {
     let body = [
-        bash("2026-09-02T02:00:00.000Z", "toolu_1", "grep -rn 'helper(' src"),
+        bash(
+            "2026-09-02T02:00:00.000Z",
+            "toolu_1",
+            "grep -rn 'helper(' src",
+        ),
         injection("2026-09-02T02:00:01.000Z", "toolu_1", "helper"),
     ]
     .join("\n");
-    let dir = tree(&[("-home-u-cortexyoung", "s1", &body), ("-home-u-other", "s2", &body)]);
+    let dir = tree(&[
+        ("-home-u-cortexyoung", "s1", &body),
+        ("-home-u-other", "s2", &body),
+    ]);
     let all = run(dir.path(), "2026-09-02T00:00:00Z");
     assert_eq!(all["injections"], json!(2));
 
@@ -382,7 +446,11 @@ fn unreadable_records_are_counted_not_swallowed() {
         // A transcript's ordinary furniture never carries a timestamp and is not missing data.
         json!({"type": "file-history-snapshot", "snapshot": {}}).to_string(),
         json!({"type": "last-prompt"}).to_string(),
-        bash("2026-09-02T02:00:00.000Z", "toolu_1", "grep -rn 'helper(' src"),
+        bash(
+            "2026-09-02T02:00:00.000Z",
+            "toolu_1",
+            "grep -rn 'helper(' src",
+        ),
     ]
     .join("\n");
     let dir = tree(&[("-home-u-repo", "s1", &body)]);
@@ -414,7 +482,11 @@ fn the_window_never_opens_before_the_injection() {
     })
     .to_string();
     let body = [
-        bash("2026-09-02T02:00:00.000Z", "toolu_1", "cort impact --symbol helper --depth 1"),
+        bash(
+            "2026-09-02T02:00:00.000Z",
+            "toolu_1",
+            "cort impact --symbol helper --depth 1",
+        ),
         injection_without_trigger,
     ]
     .join("\n");
@@ -426,7 +498,10 @@ fn the_window_never_opens_before_the_injection() {
         json!(1),
         "a call that preceded the suggestion is not an adoption of it: {r:#}"
     );
-    assert_eq!(r["injection_rows"][0]["paired_by"], json!("nearest_earlier_call"));
+    assert_eq!(
+        r["injection_rows"][0]["paired_by"],
+        json!("nearest_earlier_call")
+    );
     assert_eq!(r["injection_rows"][0]["followed_by"], Value::Null);
 }
 
@@ -438,7 +513,10 @@ fn a_multibyte_command_is_split_without_panicking() {
         runs_cort_impact("echo '改名前先確認'; cort impact --symbol 名前"),
         Some(Some("名前".to_string()))
     );
-    assert_eq!(runs_cort_impact("echo '確認; cort impact --symbol x'"), None);
+    assert_eq!(
+        runs_cort_impact("echo '確認; cort impact --symbol x'"),
+        None
+    );
     // A redirection carries `&` and must not lose the command that follows.
     assert_eq!(
         runs_cort_impact("build 2>&1 && cort impact --symbol y"),
@@ -453,11 +531,18 @@ fn a_multibyte_command_is_split_without_panicking() {
 #[test]
 fn a_filtered_funnel_refuses_to_compare_itself_to_an_unfiltered_db() {
     let body = [
-        bash("2026-09-02T02:00:00.000Z", "toolu_1", "grep -rn 'helper(' src"),
+        bash(
+            "2026-09-02T02:00:00.000Z",
+            "toolu_1",
+            "grep -rn 'helper(' src",
+        ),
         injection("2026-09-02T02:00:01.000Z", "toolu_1", "helper"),
     ]
     .join("\n");
-    let dir = tree(&[("-home-u-audit", "s1", &body), ("-home-u-real", "s2", &body)]);
+    let dir = tree(&[
+        ("-home-u-audit", "s1", &body),
+        ("-home-u-real", "s2", &body),
+    ]);
     // A usage db that does not exist is reported as absent, not as zero.
     let absent = mine(
         dir.path(),
@@ -502,7 +587,10 @@ fn a_filtered_funnel_refuses_to_compare_itself_to_an_unfiltered_db() {
         &[],
     );
     assert_eq!(whole["injections"], json!(2));
-    assert_eq!(whole["usage_db_cross_check"]["injections_recorded"], json!(2));
+    assert_eq!(
+        whole["usage_db_cross_check"]["injections_recorded"],
+        json!(2)
+    );
     assert_eq!(
         whole["usage_db_cross_check"]["comparable_to_injections"],
         json!(true)
@@ -513,12 +601,12 @@ fn a_filtered_funnel_refuses_to_compare_itself_to_an_unfiltered_db() {
 /// look like a row the db had lost.
 #[test]
 fn a_stale_injection_still_counts_as_an_injection() {
-    let db = tempfile::Builder::new()
-        .prefix("usage-")
-        .tempdir()
-        .unwrap();
+    let db = tempfile::Builder::new().prefix("usage-").tempdir().unwrap();
     let path = db.path().join("usage.db");
-    seed_usage_db(&path, &[("hit", 1), ("hit_stale", 3), ("legacy_unsplit", 0)]);
+    seed_usage_db(
+        &path,
+        &[("hit", 1), ("hit_stale", 3), ("legacy_unsplit", 0)],
+    );
     let dir = tree(&[("-home-u-real", "s1", "")]);
     let r = mine(
         dir.path(),
@@ -535,10 +623,7 @@ fn a_stale_injection_still_counts_as_an_injection() {
 /// than let them silently widen a gap.
 #[test]
 fn legacy_rows_block_the_comparison_instead_of_skewing_it() {
-    let db = tempfile::Builder::new()
-        .prefix("usage-")
-        .tempdir()
-        .unwrap();
+    let db = tempfile::Builder::new().prefix("usage-").tempdir().unwrap();
     let path = db.path().join("usage.db");
     seed_usage_db(&path, &[("hit", 1), ("legacy_unsplit", 108)]);
     let dir = tree(&[("-home-u-real", "s1", "")]);
@@ -567,9 +652,21 @@ fn claims_are_resolved_in_timestamp_order_not_file_order() {
     // The 02:00 injection is written to the file *after* the 02:10 one, as a compacted transcript
     // can do. The single `cort impact --symbol alpha` belongs to the earlier injection.
     let body = [
-        bash("2026-09-02T02:00:00.000Z", "toolu_a", "grep -rn 'alpha(' src"),
-        bash("2026-09-02T02:00:05.000Z", "toolu_c", "cort impact --symbol alpha --depth 1"),
-        bash("2026-09-02T02:10:00.000Z", "toolu_b", "grep -rn 'beta(' src"),
+        bash(
+            "2026-09-02T02:00:00.000Z",
+            "toolu_a",
+            "grep -rn 'alpha(' src",
+        ),
+        bash(
+            "2026-09-02T02:00:05.000Z",
+            "toolu_c",
+            "cort impact --symbol alpha --depth 1",
+        ),
+        bash(
+            "2026-09-02T02:10:00.000Z",
+            "toolu_b",
+            "grep -rn 'beta(' src",
+        ),
         injection("2026-09-02T02:10:01.000Z", "toolu_b", "beta"),
         injection("2026-09-02T02:00:01.000Z", "toolu_a", "alpha"),
     ]
@@ -638,10 +735,7 @@ fn seed_usage_db(path: &StdPath, outcomes: &[(&str, i64)]) {
 /// a guard that passes because it was never asked the right question.
 #[test]
 fn another_harnesss_rows_block_the_comparison_instead_of_inflating_it() {
-    let db = tempfile::Builder::new()
-        .prefix("usage-")
-        .tempdir()
-        .unwrap();
+    let db = tempfile::Builder::new().prefix("usage-").tempdir().unwrap();
     let path = db.path().join("usage.db");
     seed_usage_db(&path, &[("hit", 2), ("harness:grok", 7)]);
     let dir = tree(&[("-home-u-real", "s1", "")]);
@@ -662,7 +756,10 @@ fn another_harnesss_rows_block_the_comparison_instead_of_inflating_it() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|b| b.as_str().unwrap_or("").contains("other than `claude-code`")),
+            .any(|b| b
+                .as_str()
+                .unwrap_or("")
+                .contains("other than `claude-code`")),
         "{cc}"
     );
 }
@@ -671,10 +768,7 @@ fn another_harnesss_rows_block_the_comparison_instead_of_inflating_it() {
 /// that happened to be wired first.
 #[test]
 fn a_harnessless_row_is_not_credited_to_the_mined_harness() {
-    let db = tempfile::Builder::new()
-        .prefix("usage-")
-        .tempdir()
-        .unwrap();
+    let db = tempfile::Builder::new().prefix("usage-").tempdir().unwrap();
     let path = db.path().join("usage.db");
     seed_usage_db(&path, &[("hit", 1), ("unspecified", 5)]);
     let dir = tree(&[("-home-u-real", "s1", "")]);

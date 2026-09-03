@@ -251,7 +251,9 @@ pub fn runs_cort_impact(command: &str) -> Option<Option<String>> {
         while idx < tokens.len() && tokens[idx].contains('=') && !tokens[idx].starts_with('-') {
             idx += 1;
         }
-        let Some(head) = tokens.get(idx) else { continue };
+        let Some(head) = tokens.get(idx) else {
+            continue;
+        };
         if head.rsplit('/').next().unwrap_or(head) != "cort" {
             continue;
         }
@@ -520,10 +522,11 @@ pub fn mine(
             // The harness names the tool call it attached the context to, which pairs the injection
             // with its trigger exactly. `parentUuid` adjacency was the fallback before this field
             // was confirmed on real records; it is not needed and would be looser.
-            let exact = inj
-                .tool_use_id
-                .as_ref()
-                .and_then(|id| calls.iter().position(|c| c.id.as_deref() == Some(id.as_str())));
+            let exact = inj.tool_use_id.as_ref().and_then(|id| {
+                calls
+                    .iter()
+                    .position(|c| c.id.as_deref() == Some(id.as_str()))
+            });
             let trigger_at = exact.or_else(|| calls.iter().rposition(|c| c.ts <= inj.ts));
             let paired_exactly = exact.is_some();
             // Falling back to 0 was wrong. When neither the `toolUseID` nor any earlier call can be
@@ -539,9 +542,8 @@ pub fn mine(
                     .unwrap_or(calls.len()),
             };
             let end = (start + follow_calls).min(calls.len());
-            let follow = (start..end).find(|i| {
-                !claimed.contains(i) && runs_cort_impact(&calls[*i].command).is_some()
-            });
+            let follow = (start..end)
+                .find(|i| !claimed.contains(i) && runs_cort_impact(&calls[*i].command).is_some());
             if let Some(i) = follow {
                 claimed.insert(i);
             }
@@ -599,54 +601,52 @@ pub fn mine(
     // usage.db, and a Grok or Codex fire has no Claude transcript to match -- counted in, it would
     // raise `injections_recorded` while every guard still read green.
     const MINED_HARNESS: &str = "claude-code";
-    let cross_check = usage_db.map(|path| match cort::usage::hook_outcomes_at(
-        path,
-        since_ms,
-        Some(MINED_HARNESS),
-    ) {
-        Ok(counts) => {
-            let get = |k: &str| counts.get(k).and_then(Value::as_i64).unwrap_or(0);
-            // `hit_stale` is an injection too. Comparing against `hit` alone would make an
-            // injection onto a behind-head index look like a lost row.
-            let recorded = get("hit") + get("hit_stale");
-            let legacy = get("legacy_unsplit");
-            let mut blockers: Vec<String> = Vec::new();
-            if !exclude.is_empty() {
-                blockers.push(
+    let cross_check = usage_db.map(|path| {
+        match cort::usage::hook_outcomes_at(path, since_ms, Some(MINED_HARNESS)) {
+            Ok(counts) => {
+                let get = |k: &str| counts.get(k).and_then(Value::as_i64).unwrap_or(0);
+                // `hit_stale` is an injection too. Comparing against `hit` alone would make an
+                // injection onto a behind-head index look like a lost row.
+                let recorded = get("hit") + get("hit_stale");
+                let legacy = get("legacy_unsplit");
+                let mut blockers: Vec<String> = Vec::new();
+                if !exclude.is_empty() {
+                    blockers.push(
                     "--exclude filtered the transcript side; the db side is every project on this \
                      machine and cannot be filtered the same way"
                         .to_string(),
                 );
-            }
-            if legacy > 0 {
-                blockers.push(format!(
-                    "{legacy} rows predate outcome recording (`legacy_unsplit`) and cannot be \
+                }
+                if legacy > 0 {
+                    blockers.push(format!(
+                        "{legacy} rows predate outcome recording (`legacy_unsplit`) and cannot be \
                      attributed to either side"
-                ));
-            }
-            let unspecified = get("unspecified");
-            if unspecified > 0 {
-                blockers.push(format!(
-                    "{unspecified} rows predate harness recording (`unspecified`); they were \
+                    ));
+                }
+                let unspecified = get("unspecified");
+                if unspecified > 0 {
+                    blockers.push(format!(
+                        "{unspecified} rows predate harness recording (`unspecified`); they were \
                      written when only one harness was wired, but the row does not say so and this \
                      report will not assume it"
-                ));
-            }
-            let other = get("other_harness");
-            if other > 0 {
-                blockers.push(format!(
+                    ));
+                }
+                let other = get("other_harness");
+                if other > 0 {
+                    blockers.push(format!(
                     "{other} rows were written by a harness other than `{MINED_HARNESS}` and have \
                      no counterpart in the transcripts this window read"
                 ));
+                }
+                json!({
+                    "outcomes": counts,
+                    "injections_recorded": recorded,
+                    "comparable_to_injections": blockers.is_empty(),
+                    "not_comparable_because": blockers,
+                })
             }
-            json!({
-                "outcomes": counts,
-                "injections_recorded": recorded,
-                "comparable_to_injections": blockers.is_empty(),
-                "not_comparable_because": blockers,
-            })
+            Err(e) => json!({ "unreadable": e.to_string() }),
         }
-        Err(e) => json!({ "unreadable": e.to_string() }),
     });
 
     json!({

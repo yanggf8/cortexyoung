@@ -17,8 +17,8 @@
 //! failure the demand screen already documented for over-broad skill prose.
 
 use cort::hook::is_redirection;
-pub use cort::hook::{suggests_impact, HookHit};
 use cort::hook::{judge, search_from_grep_fields, search_from_shell, Search};
+pub use cort::hook::{suggests_impact, HookHit};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
@@ -64,20 +64,42 @@ pub fn declares_callable_in(line: &str, name: &str) -> Option<&'static str> {
     None
 }
 
-/// The shape test cannot know whether a name is a function. Every false positive left after three
-/// rounds of adjudication was the same mistake: `confidence` is a struct field, `TIMEOUT_S` a
-/// constant, `trace_file` a local. `impact` has nothing to say about any of them -- it would answer
-/// `no_seed_resolved` -- so suggesting it is a wrong answer wearing a helpful face.
+/// What the index-free declaration check could establish.
 ///
-/// In production the hook asks the index. Offline there is no index for five of the six projects in
-/// the corpus, so this is the index-free equivalent of the same question, reusing the declaration
-/// scanner `recall` already ships: is this name declared as a function anywhere in the tree the
-/// search covered? `None` means the tree could not be read, which must be reported as unchecked and
-/// never silently counted as a pass -- that is the false-safe shape the coverage screen exists to
-/// refuse.
-pub fn declares_function(root: &Path, symbol: &str) -> Option<bool> {
+/// Three outcomes, not two-plus-`None`, because the two ways of failing to check are not the same
+/// finding and were reported as one. `unchecked_tree_unreadable` was printed for a Godot project
+/// whose directory was right there and perfectly readable -- `walk_source` simply reads none of the
+/// extensions it contains. Calling that "unreadable" sends the reader to look for a permissions or
+/// path problem that does not exist, and hides the real one: this screen has nothing to say about
+/// that language at all, which is also why `impact` would have nothing to say about it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeclCheck {
+    /// The name is declared as something callable somewhere in the searched tree.
+    Declared,
+    /// The tree was read and the name is not declared callable in it.
+    NotDeclared,
+    /// The path is not a directory: gone, renamed, or never resolvable from this session's cwd.
+    TreeMissing,
+    /// The directory is there and readable, and holds no file this scanner reads.
+    NoSourceRead,
+}
+
+impl DeclCheck {
+    /// The verdict string the report carries, kept as one function so the counter keys and the
+    /// per-fire label can never drift apart.
+    pub fn verdict(self) -> &'static str {
+        match self {
+            DeclCheck::Declared => "confirmed_function",
+            DeclCheck::NotDeclared => "rejected_not_a_function",
+            DeclCheck::TreeMissing => "unchecked_tree_missing",
+            DeclCheck::NoSourceRead => "unchecked_no_source_this_screen_reads",
+        }
+    }
+}
+
+pub fn declares_function(root: &Path, symbol: &str) -> DeclCheck {
     if !root.is_dir() {
-        return None;
+        return DeclCheck::TreeMissing;
     }
     // `Type::method` is declared as `method`.
     let bare = symbol.rsplit("::").next().unwrap_or(symbol);
@@ -95,9 +117,13 @@ pub fn declares_function(root: &Path, symbol: &str) -> Option<bool> {
         }
     });
     if files == 0 {
-        return None;
+        return DeclCheck::NoSourceRead;
     }
-    Some(found)
+    if found {
+        DeclCheck::Declared
+    } else {
+        DeclCheck::NotDeclared
+    }
 }
 
 /// Bounded: 4,000 files is well past any tree in the corpus and keeps a probe over a home directory
@@ -259,8 +285,11 @@ fn collect_structured(v: &Value, out: &mut Vec<Search>) {
                     .or_else(|| map.get("input"))
                     .and_then(Value::as_object)
                 {
-                    let field =
-                        |k: &str| args.get(k).and_then(Value::as_str).filter(|s| !s.is_empty());
+                    let field = |k: &str| {
+                        args.get(k)
+                            .and_then(Value::as_str)
+                            .filter(|s| !s.is_empty())
+                    };
                     if let Some(pattern) = field("pattern") {
                         let wants_context =
                             ["-A", "-B", "-C"].iter().any(|k| args.contains_key(*k));
@@ -316,7 +345,8 @@ pub fn probe(dirs: &[(&str, PathBuf)], max_examples: usize) -> Value {
     let mut fires: Vec<Value> = Vec::new();
     let mut passed_over: Vec<Value> = Vec::new();
     let mut symbols: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
-    let (mut confirmed, mut rejected, mut unchecked) = (0usize, 0usize, 0usize);
+    let (mut confirmed, mut rejected, mut tree_missing, mut no_source) =
+        (0usize, 0usize, 0usize, 0usize);
 
     for (_kind, dir) in dirs {
         for file in jsonl_files(dir, 8) {
@@ -353,24 +383,26 @@ pub fn probe(dirs: &[(&str, PathBuf)], max_examples: usize) -> Value {
                 }
                 for search in structured_searches_of_line(line) {
                     structured_searches += 1;
-                    let shown = format!("Grep pattern={} targets={:?}", search.pattern, search.targets);
+                    let shown = format!(
+                        "Grep pattern={} targets={:?}",
+                        search.pattern, search.targets
+                    );
                     candidates.push(("structured", search, shown));
                 }
 
                 for (source, search, shown) in candidates {
                     match judge(&search) {
                         Some(hit) => {
-                            let verdict = match root_of_targets(&search.targets, cwd.as_deref())
-                                .and_then(|root| declares_function(&root, &hit.symbol))
-                            {
-                                Some(true) => "confirmed_function",
-                                Some(false) => "rejected_not_a_function",
-                                None => "unchecked_tree_unreadable",
+                            let check = match root_of_targets(&search.targets, cwd.as_deref()) {
+                                Some(root) => declares_function(&root, &hit.symbol),
+                                None => DeclCheck::TreeMissing,
                             };
-                            match verdict {
-                                "confirmed_function" => confirmed += 1,
-                                "rejected_not_a_function" => rejected += 1,
-                                _ => unchecked += 1,
+                            let verdict = check.verdict();
+                            match check {
+                                DeclCheck::Declared => confirmed += 1,
+                                DeclCheck::NotDeclared => rejected += 1,
+                                DeclCheck::TreeMissing => tree_missing += 1,
+                                DeclCheck::NoSourceRead => no_source += 1,
                             }
                             match source {
                                 "structured" => fired_structured += 1,
@@ -419,7 +451,8 @@ pub fn probe(dirs: &[(&str, PathBuf)], max_examples: usize) -> Value {
         "index_check": {
             "confirmed_function": confirmed,
             "rejected_not_a_function": rejected,
-            "unchecked_tree_unreadable": unchecked,
+            "unchecked_tree_missing": tree_missing,
+            "unchecked_no_source_this_screen_reads": no_source,
         },
         "confirmed_callable_in_searched_tree": confirmed,
         "distinct_symbols": symbols.len(),
@@ -434,7 +467,12 @@ pub fn probe(dirs: &[(&str, PathBuf)], max_examples: usize) -> Value {
                     caller search run from a directory that does not contain the definition \
                     (`updatePaymentStatus` under `frontend/src`). In production the hook can ask a \
                     real index instead of the text, which fixes the second case and not the first. \
-                    Treat a rejection as 'no seed here', never as 'do not suggest'.",
+                    Treat a rejection as 'no seed here', never as 'do not suggest'. The two unchecked \
+                    counts are separate on purpose: `unchecked_tree_missing` is a path this session \
+                    could not resolve, while `unchecked_no_source_this_screen_reads` is a directory \
+                    that is right there and holds nothing this scanner opens -- a Godot tree, say. \
+                    They were one count called `unchecked_tree_unreadable`, which sent the reader \
+                    hunting a permissions problem that did not exist.",
         "reading": "`fired` is how often the rule would have suggested `cort impact` on traffic that \
                     already happened. It is an upper bound on usefulness and says nothing about whether \
                     the suggestion was right: read the `fires` array and adjudicate each command by \
