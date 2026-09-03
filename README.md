@@ -298,7 +298,7 @@ set the flag for every one of 60 sampled seeds. What remains is the receiver gat
 
 ## Documented limitations (contracts, not apologies)
 
-1. **Index staleness:** the index lags unsaved edits and brand-new untracked files. Every `cort` command returns JSON with `index_is_stale`; when `true`, run `cort index --incremental` before trusting the answer, or fall back to `rg`. A brand-new untracked file is invisible to `cort` until the next index. `cort index` must have been run once for the project. Staleness covers two things, not one: a file whose indexed content no longer matches disk, and a relationship graph that has not been recomputed since its chunks changed (the `graph_pending` marker — set by an interrupted index or an older-schema database — makes every graph answer stale instead of quietly wrong).
+1. **Index staleness:** the index lags unsaved edits and brand-new untracked files. Every `cort` command returns JSON with `index_is_stale`; when `true`, run `cort index --incremental` before trusting the answer, or fall back to `rg`. A brand-new untracked file is invisible to `cort` until the next index. `cort index` must have been run once for the project. Staleness covers three things, not one: a file whose indexed content no longer matches disk; a relationship graph that has not been recomputed since its chunks changed (the `graph_pending` marker — set by an interrupted index or an older-schema database — makes every graph answer stale instead of quietly wrong); and a HEAD the index was never built from, which is how a `git pull`, `checkout`, `rebase` or someone else's commit arrives — the tree is clean against the new head while every chunk still describes the old one.
 2. **`chunk_id` stability:** `chunk_id` is stable only while a symbol's first line does not move — inserting lines above a symbol changes its id.
 3. **`context` is FTS-only:** `cort context` uses SQLite FTS keyword recall, not semantic search or embeddings. No vector, no RRF, no reranking.
 4. **Const-bound functions are chunks; plain aliases and collection transforms are not.** `const f = (x) => ...`,
@@ -529,6 +529,13 @@ content, so it closes that window: 23–37ms when nothing changed, ~206ms after 
 It refuses three things on purpose: it never creates an index where none existed, it gives up rather
 than wait for a busy database, and it is silent and exits 0 whatever happens — a `PostToolUse` hook
 reporting failure would put an error in front of you for a cache you did not ask about.
+
+That "tracks file content" was true of the files git named and of no others, which until 2026-09-03
+left the opposite window wide open: after a `git pull` the tree is clean against the new head, so
+`git diff HEAD` is empty, so nothing was re-extracted — and the run stamped the new head on anyway,
+erasing the very mismatch the suggestion hook compares. The candidate set is now diffed against the
+head the index was built from as well, and a candidate set git will not narrow honestly widens to
+every file rather than quietly to none (`docs/2026-09-03-installer-dedup-and-attribution.md` §9).
 
 **`./install.sh --check` also says which indexes are behind.** `cort projects` now carries `stale`
 and `exists` per project — it is the only thing that holds both the head a row was built at and the

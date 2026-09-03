@@ -149,7 +149,7 @@ comparison (`staleness.rs`, the `index_is_stale` printed beside every `impact` r
 everything that moves HEAD *without* dirtying the tree -- `pull`, `checkout`, `rebase`, `reset`, a
 teammate's commit -- because its candidate set was `git diff HEAD` and after a pull that diff is
 empty. Fixed on 2026-09-03 by giving `git_candidates` the head the index was built from and
-diffing against it too. The half worth remembering is the second one: `index --incremental` shared
+diffing against it too (`docs/2026-09-03-installer-dedup-and-attribution.md` §9). The half worth remembering is the second one: `index --incremental` shared
 that candidate set, so it re-extracted nothing and then stamped the new head on anyway, which means
 the `PostToolUse` repair hook was not merely failing to repair a pulled tree -- on the next edit it
 *erased the one signal* saying repair was needed. Measured on this repo at `70e228f5..0d51e55b`:

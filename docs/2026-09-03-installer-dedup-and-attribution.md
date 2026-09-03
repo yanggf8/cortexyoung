@@ -217,3 +217,58 @@ token」，還用它判了另外兩個假設的生死。**那筆是我自己的�
 `install.sh` 這一側更直接：出貨六個 hook 條目，smoke 的斷言全部指向 `~/.claude/settings.json`，
 **codex 與 kimi 的四條、以及全部三條 post 事件，共五條，install 層 0 個斷言**。現已 121 條斷言，
 六條全覆蓋。
+
+## 9. 兩個 staleness 判準都是單向的，而它們往相反方向瞎
+
+這一輪的最後一件事跟安裝器無關，是同步完 `838d17fb..0d51e55b` 之後順手撞到的：`cort status` 說
+`index_is_stale: false`，同一份輸出裡 `git_head` 卻是 `70e228f5`——落後 5 個 commit，`git pull`
+剛剛重寫了 16 個檔。
+
+根因在 `rust/src/incremental.rs` 的 `git_candidates`：候選集是
+`git diff --name-status -M HEAD`，拿工作樹跟 **HEAD 現在指的地方** 比。所以任何「不弄髒工作樹就
+搬動 HEAD」的動作——`pull`、`checkout`、`rebase`、`reset`、同事或另一個 agent 的 commit——都產生
+空 diff，而那棵樹索引從沒看過。存下來的 `projects.git_head` 從頭到尾沒有人拿來比。
+
+**同一個編輯，commit 之前抓得到，commit 之後就隱形。** C2-19（`a_changed_chunk_body_makes_the_index_stale`）
+測的正是這個編輯：dirty 時它在 `git diff HEAD` 裡，是候選，hash 對不上，判 stale。把它 commit 掉，
+diff 變空，它不再是候選，於是 `index_is_stale: false`。測試覆蓋率沒有掉，因為 384 條測試裡沒有
+一條讓 HEAD 動過。這跟 §8 的結論是同一個形狀，再往下一層：不是「邏輯沒測到」，是**「輸入從哪來」
+沒測到**——這次連 path 都不是,是 HEAD。
+
+### 第二個後果才是真的難看
+
+`incremental_index` 共用同一組候選集，所以 pull 之後它重抽 0 個檔，**然後照樣把新 head 蓋上去**
+（`UPDATE projects SET git_head = …`）。而那個戳章正是 `hook-suggest` 拿來比對的東西
+（`main.rs` 的 `IndexState::BehindHead`）。
+
+所以 PostToolUse 的 refresh hook 不是「修不動 pull 過的樹」而已——**下一次編輯,它會把「需要修」
+這個唯一訊號抹掉**。README 說 `--incremental` 追檔案內容所以關上了 head 比較的窗;那句話只對了
+一半:它追的是 *git 願意列出來的那些檔* 的內容。兩個判準各瞎一邊,而修復機制站在會抹掉證據的那邊。
+
+### 改法
+
+`git_candidates` 收下索引當初的 head（新增 `db::indexed_head`），多做一次
+`git diff -M <indexed-head> HEAD`。git 不肯回答時——沒有 repo，或存下的 head 解析不了
+（force-push、shallow clone、db 從別台搬來，正好接上 §6 那條）——候選集**拒絕收窄**，呼叫端去看
+全部。`git_available` 改名 `narrowed` 就是為了讓這個語義說得出口：false 不是「沒有 git」，是
+「git 不告訴我」。**一組收窄不了的候選集必須擴張到全部，絕不能安靜地縮到零。**
+
+### 證據
+
+先寫三個失敗測試（`a_commit_that_moves_head_without_dirtying_the_tree_is_stale`、
+`an_unreachable_stored_head_falls_back_to_hashing_every_file`、
+`a_head_that_moved_without_dirtying_the_tree_is_reindexed_not_just_restamped`），再改。
+
+端到端在一份 clone 上重現 `70e228f5..0d51e55b`：
+
+| | 修前 | 修後 |
+|---|---|---|
+| `index_is_stale` | `false` | `true`，並列出 17 個檔 |
+| `index --incremental` | `files_reindexed: 0`，只蓋新 head | `files_reindexed: 17` |
+| 結果 | 5 commit 舊的圖 | 1206 chunks / 2146 relationships |
+
+最後那組數字與同一 head 上跑完整 `cort index` 相同，所以 incremental 這條路是真的補齊，不是補一半。
+
+順帶一提，找 `git_candidates` 的三個呼叫點是 hook 攔下 `grep` 之後用
+`cort impact --symbol git_candidates --depth 1 --coverage -f lean` 做的，一次到齊，兩筆 `miss`
+是 import 不是呼叫。這是本文件裡唯一一次產品用在自己身上並且真的省了事。
