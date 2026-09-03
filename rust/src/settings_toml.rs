@@ -47,10 +47,14 @@ use toml_edit::{value, ArrayOfTables, DocumentMut, Item, Table};
 /// that could not match. Changing this constant was a change with no evidence behind it: reverted.
 /// `docs/2026-09-03-installer-dedup-and-attribution.md` §7.
 ///
-/// What that payload does **not** establish is whether the matcher is a regex. `"Bash"` is the only
-/// value ever observed firing, and the one alternative tried (`exec_command|shell`) could not have
-/// matched on either reading. `matcher_for(Refresh)` now hands Codex an alternation, and until one
-/// live run proves Codex compiles it, that entry is unverified -- §13.
+/// That payload did not establish whether the matcher is a regex -- `"Bash"` was the only value ever
+/// observed firing, and the one alternative tried (`exec_command|shell`) could not have matched on
+/// either reading. A live run on 2026-09-03 16:48 settled it: `matcher_for(Refresh)`'s alternation
+/// fired on a `Bash` call, so Codex compiles it. The same run showed the refresh entry firing on a
+/// file edit with *no* `hook-suggest` beside it -- and since `Suggest`'s matcher is the bare `Bash`
+/// above, the tool was not Bash, which means Codex normalises its edit tool into Claude Code's
+/// vocabulary too, exactly as it does `exec_command`. Which of the four edit names it lands on is
+/// still unread; the gate is the whole alternation, so it does not change what to write here. §13.
 const MATCHER: &str = "Bash";
 
 fn matcher_for(event: HookEvent) -> &'static str {

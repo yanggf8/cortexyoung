@@ -351,6 +351,11 @@ codex post wired trusted=true
 **規矩:改寫當下 installer 印的那行是權威訊號;`--status` 的 `trusted` 不能拿來驗收重新信任。**
 真正能結案的只有一次真實的 `codex` 執行。
 
+當天稍後那次執行結案了,而且比規矩更強:**Codex 真的跳出了 review**。這次改寫**只動 matcher,
+command 字串一個字沒變**,所以那次 prompt 證明 `trusted_hash` 涵蓋的不只是 command——整條 entry
+的形狀都在裡面。於是 installer 那行提示從「保守起見」升級成有證據的必要提醒,而 `--status` 在同
+一時刻回報的 `trusted=true` 是實測誤導,不是理論上可能誤導。
+
 ## 13. Codex 的 post matcher 是一次沒有證據的加寬
 
 `EDIT_MATCHER` 從 `Edit|Write|MultiEdit|NotebookEdit` 加上 `Bash` 之後,三個方言的 post 都拿到
@@ -387,3 +392,30 @@ sqlite3 ~/.cache/cortex-ng/usage.db \
 (a) 沒有列 → 風險 1 成立,Codex 的 matcher 不是 regex,post 那格要退回 `Bash`。
 (a) 有、(b) 沒有 → 風險 2 成立,`apply_patch` 需要自己的 matcher。
 兩者都有 → 加寬是對的,把這件事寫成 `MATCHER` 旁邊的證據行。
+
+### 結果:兩個風險都被推翻
+
+2026-09-03 16:44:20 釘基準線(`codex hook-suggest = 417`、`codex hook-refresh = 0`),在 repo 目錄
+內跑一次真實 `codex`(`model=gpt-5.6-sol`),之後新增的 codex 列只有三筆:
+
+```
+16:48:20  hook-suggest  no_shape         ← (a) shell 指令
+16:48:20  hook-refresh  already_current  ← (a) 同一次呼叫
+16:50:16  hook-refresh  already_current  ← (b) 檔案編輯
+```
+
+**風險 1 推翻**:16:48:20 那筆 `hook-refresh` 是 matcher 為 `Bash|Edit|Write|MultiEdit|NotebookEdit`
+的 entry 對一次 `tool_name = "Bash"` 的呼叫燒出來的。Codex 會編譯這個交替式,它的 matcher 是
+regex。
+
+**風險 2 也推翻,而判別它的是 pre 那條的窄 matcher。** 16:50:16 只有 `hook-refresh`,**沒有**
+`hook-suggest`——而 pre 的 matcher 是純 `Bash`。所以那次觸發的工具不是 Bash,是編輯工具;而
+`Bash|Edit|Write|MultiEdit|NotebookEdit` 裡沒有任何一段是 `apply_patch` 的子字串,交替式又是唯一
+的閘門。結論只能是:**Codex 把自己的編輯工具也正規化成了 Claude Code 的詞彙**,和 §7 的
+`exec_command → Bash` 是同一條規律,不是特例。
+
+這裡有個方法論上的意外收穫:**pre 那條窄 matcher 在這次實驗裡是對照組。** 我們沒有攔 payload,
+卻靠「哪一條沒燒」反推出了觸發的工具類別。兩條 matcher 寬窄不同,本來只是歷史,這次變成了儀器。
+
+**仍未知(而且不打算為它再跑一次):** 四個名字裡實際命中的是哪一個。要知道得攔 payload 讀
+`tool_name`。不知道也不影響結論——閘門是整個交替式,不是其中某一段。
