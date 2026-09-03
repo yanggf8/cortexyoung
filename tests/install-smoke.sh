@@ -760,6 +760,10 @@ assert_contains "$CODEX_CFG" "[[hooks.PreToolUse]]" "Codex got the nested dialec
 # the matcher is not an equality test against the tool name, and this pins what actually ships
 # rather than what a string table suggested (docs/2026-09-03-installer-dedup-and-attribution.md §7).
 assert_contains "$CODEX_CFG" 'matcher = "Bash"' "Codex's pre-event matcher is deployed as written"
+# The refresh hook has to see shell edits too: a heredoc, a `sed -i` and a `git checkout` all change
+# the tree and none of them is an `Edit`. A session that wrote through shell went two hours and three
+# commits on 2026-09-03 without firing this hook once.
+assert_contains "$CODEX_CFG" 'matcher = "Bash|Edit|Write|MultiEdit|NotebookEdit"' "the refresh matcher covers shell edits, not just the edit tools"
 assert_contains "$KIMI_CFG"  'event = "PreToolUse"' "Kimi got the flat dialect with the event as a field"
 assert_not_contains "$KIMI_CFG" "[[hooks.PreToolUse]]" "Kimi did not get Codex's nested shape"
 # Kimi's matcher has to reach its structured Grep tool, which is the majority of that harness's

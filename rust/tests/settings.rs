@@ -456,3 +456,119 @@ fn the_users_own_empty_group_survives_a_remove() {
     assert_eq!(pre.len(), 1, "the user's empty group went with ours: {v}");
     assert_eq!(pre[0]["matcher"], "Read");
 }
+
+/// The refresh hook watches the shell too, not only the edit tools.
+///
+/// An agent does not only edit through `Edit`/`Write`: a `python3 - <<PY` heredoc, a `sed -i`, a
+/// `git checkout` all change the tree and none of them is an edit tool. Measured on this repo on
+/// 2026-09-03 -- a session that wrote most of its changes through shell went two hours and three
+/// commits without firing this hook once, and the index sat at the head it held when the last
+/// `Write` happened, reporting `stale` on answers that were in fact correct and would have reported
+/// fresh on answers that were not.
+///
+/// The negative half matters as much: the *pre* event must stay narrow. `hook-suggest` reads
+/// `tool_input.command` and has nothing to say about an `Edit`, so widening both would put a hook on
+/// every tool call in the session to return `{}`.
+#[test]
+fn the_refresh_event_watches_the_shell_and_the_suggest_event_does_not() {
+    let (_d, p) = tmp();
+    install_hook(&p, "/bin/cort hook-suggest", HookEvent::Suggest).unwrap();
+    install_hook(&p, "/bin/cort hook-refresh", HookEvent::Refresh).unwrap();
+    let v = read(&p);
+
+    let post = v["hooks"]["PostToolUse"][0]["matcher"].as_str().unwrap();
+    for tool in ["Bash", "Edit", "Write", "MultiEdit", "NotebookEdit"] {
+        assert!(
+            post.contains(tool),
+            "the refresh matcher must cover {tool}: {post:?}"
+        );
+    }
+
+    let pre = v["hooks"]["PreToolUse"][0]["matcher"].as_str().unwrap();
+    assert_eq!(
+        pre, "Bash",
+        "the suggest event reads a command line and must not fire on the edit tools"
+    );
+}
+
+/// A redeploy repairs a stale matcher on the JSON side too.
+///
+/// The matcher lives on the group and `canonical` only ever describes the entry, so an entry whose
+/// command was already current reported `already_present` with the matcher never examined -- on
+/// every redeploy, forever. Reproduced on 2026-09-03 by widening `EDIT_MATCHER`: Codex and Kimi
+/// picked it up and Claude Code silently did not. `settings_toml` had been given this repair hours
+/// earlier and this module was not; `settings_kimi` never needed it, because its shape is flat and
+/// `matcher` is a field of the entry its `is_canonical` already compares.
+#[test]
+fn a_redeploy_repairs_a_stale_matcher_even_when_the_command_is_unchanged() {
+    let (_d, p) = tmp();
+    fs::write(
+        &p,
+        serde_json::to_string_pretty(&serde_json::json!({
+            "hooks": { "PostToolUse": [ {
+                "matcher": "Edit|Write",
+                "hooks": [ { "type": "command", "command": "/bin/cort hook-refresh", "timeout": 5 } ]
+            } ] }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let out = install_hook(&p, "/bin/cort hook-refresh", HookEvent::Refresh).unwrap();
+    assert_eq!(
+        out.change,
+        Change::Updated,
+        "an unchanged command must not report already_present while the matcher is stale"
+    );
+    let v = read(&p);
+    assert_eq!(
+        v["hooks"]["PostToolUse"][0]["matcher"].as_str(),
+        Some("Bash|Edit|Write|MultiEdit|NotebookEdit")
+    );
+    assert_eq!(
+        v["hooks"]["PostToolUse"].as_array().unwrap().len(),
+        1,
+        "repaired in place, not added beside"
+    );
+
+    // Converged: the next run has nothing left to do.
+    assert_eq!(
+        install_hook(&p, "/bin/cort hook-refresh", HookEvent::Refresh)
+            .unwrap()
+            .change,
+        Change::AlreadyPresent
+    );
+}
+
+/// A matcher on a group we share is somebody else's routing, and we do not re-aim it.
+#[test]
+fn a_shared_groups_matcher_is_left_alone_on_the_json_side() {
+    let (_d, p) = tmp();
+    fs::write(
+        &p,
+        serde_json::to_string_pretty(&serde_json::json!({
+            "hooks": { "PostToolUse": [ {
+                "matcher": "SomebodyElsesMatcher",
+                "hooks": [
+                    { "type": "command", "command": "mos hook" },
+                    { "type": "command", "command": "/bin/cort hook-refresh", "timeout": 5 }
+                ]
+            } ] }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    install_hook(&p, "/bin/cort hook-refresh", HookEvent::Refresh).unwrap();
+    let v = read(&p);
+    assert_eq!(
+        v["hooks"]["PostToolUse"][0]["matcher"].as_str(),
+        Some("SomebodyElsesMatcher"),
+        "rewriting a shared group's matcher would silently re-aim the other owner's hook"
+    );
+    assert_eq!(
+        v["hooks"]["PostToolUse"][0]["hooks"][0]["command"].as_str(),
+        Some("mos hook"),
+        "their entry survives untouched"
+    );
+}

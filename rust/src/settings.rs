@@ -90,7 +90,20 @@ const TIMEOUT_SECS: u64 = 5;
 /// `cort index --incremental` is cheap enough to run on every edit instead: measured 23-37ms when
 /// nothing changed, ~206ms after one edited file, and it tracks file *content*, so it closes that
 /// window rather than the commit-shaped half of it.
-pub(crate) const EDIT_MATCHER: &str = "Edit|Write|MultiEdit|NotebookEdit";
+///
+/// `Bash` is in the list, and it is the reason this constant is not just the edit tools. An agent
+/// does not only edit through the harness's edit tools: a `python3 - <<PY` heredoc, a `sed -i`, a
+/// `git checkout` all change the tree and none of them is an `Edit`. Measured on this repo on
+/// 2026-09-03 -- a session that wrote most of its changes through shell went 2 hours and 3 commits
+/// without firing this hook once, and the index sat at the head it held when the last `Write`
+/// happened. That is the same blind spot the repo already names for formatting ("editing through
+/// `sed`/`perl` formats nothing"), one organ over.
+///
+/// The cost of the wider net is bounded by the same measurement: a `Bash` call that changed nothing
+/// is the 23-37ms case, which is what almost all of them are. Being silent and exiting 0 whatever
+/// happens is what makes that trade payable -- an expensive or noisy hook on every shell command
+/// would not be.
+pub(crate) const EDIT_MATCHER: &str = "Bash|Edit|Write|MultiEdit|NotebookEdit";
 
 /// Which of the two hooks an entry is, everywhere that has to tell them apart.
 ///
@@ -315,6 +328,7 @@ pub fn install_hook(
     let mut changed = false;
     let mut we_emptied: Vec<usize> = Vec::new();
     for (idx, group) in list.iter_mut().enumerate() {
+        let mut ours_here = 0usize;
         let Some(hooks) = group.get_mut("hooks").and_then(Value::as_array_mut) else {
             continue;
         };
@@ -334,6 +348,7 @@ pub fn install_hook(
                 return false;
             }
             seen_ours = true;
+            ours_here += 1;
             if *h == canonical {
                 found_same = true;
             } else {
@@ -346,8 +361,31 @@ pub fn install_hook(
             }
             true
         });
-        if hooks.is_empty() && before > 0 {
+        let remaining = hooks.len();
+        if remaining == 0 && before > 0 {
             we_emptied.push(idx);
+        }
+        // `hooks` is not used past this point, so its borrow of `group` has ended and the group's
+        // own `matcher` can be read and written here without a scope.
+        //
+        // It has to be checked here at all because `canonical` describes the *entry*, and the
+        // matcher lives one level up on the group -- so an entry whose command was already current
+        // reported `already_present` with the matcher never examined, on every redeploy, forever.
+        // That is why widening `EDIT_MATCHER` updated Codex and Kimi and silently skipped Claude
+        // Code. `settings_toml` was given this same repair earlier today; `settings_kimi` never
+        // needed it, because its shape is flat and `matcher` is a field of the entry, so
+        // `is_canonical` there compares it already. One defect, one module immune by shape, one
+        // module fixed, and this one left.
+        //
+        // Only when the group holds our entry and nothing else: a matcher on a shared group is also
+        // somebody else's routing, and rewriting it would silently re-aim their hook.
+        if ours_here == 1
+            && remaining == 1
+            && group.get("matcher").and_then(Value::as_str) != Some(matcher_for(event))
+        {
+            group["matcher"] = json!(matcher_for(event));
+            changed = true;
+            found_same = false;
         }
     }
     // Drop only the groups this call emptied, addressed by index. A blanket "remove every empty
