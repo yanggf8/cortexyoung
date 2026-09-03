@@ -213,3 +213,44 @@ fn an_unreachable_stored_head_falls_back_to_hashing_every_file() {
     );
     assert!(s.changed_files.iter().any(|f| f == "src/helper.ts"));
 }
+
+/// `compute_stale` narrows through the same git call, so it goes blind the same way: a gitignored
+/// file that a full index picked up, then edited, leaves `index_is_stale` reading `false` over a
+/// row that is already wrong. The flag is what the skill tells agents to check, so this one is not
+/// merely incomplete -- it is confidently incomplete.
+#[test]
+fn an_indexed_file_git_will_not_speak_for_is_stale_when_it_changes() {
+    let (_dir, root, db, project_id, bin) = setup(&[
+        (".gitignore", "generated/\n"),
+        (
+            "src/helper.ts",
+            "export function helper(n: number) { return n * 2; }\n",
+        ),
+        (
+            "generated/gen.ts",
+            "export function generatedAlpha() { return 1; }\n",
+        ),
+    ]);
+    assert!(
+        !compute_stale(&db, &bin, &root, &project_id)
+            .unwrap()
+            .index_is_stale,
+        "precondition: freshly indexed, nothing changed yet"
+    );
+
+    fs::write(
+        root.join("generated/gen.ts"),
+        "export function generatedBeta() { return 2; }\n",
+    )
+    .unwrap();
+    let s = compute_stale(&db, &bin, &root, &project_id).unwrap();
+    assert!(
+        s.index_is_stale,
+        "the screen must not vouch for a row it has no way to keep true"
+    );
+    assert!(
+        s.changed_files.iter().any(|f| f == "generated/gen.ts"),
+        "and it must name the file: {:?}",
+        s.changed_files
+    );
+}

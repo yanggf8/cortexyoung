@@ -757,3 +757,62 @@ fn chunk_rows(db: &rusqlite::Connection, project_id: &str, file_path: &str) -> i
     )
     .unwrap()
 }
+
+const IGNORED_SAMPLE: &[(&str, &str)] = &[
+    (".gitignore", "generated/\n"),
+    (
+        "src/helper.ts",
+        "export function helper(n: number) { return n * 2; }\n",
+    ),
+    (
+        "generated/gen.ts",
+        "export function generatedAlpha() { return 1; }\n",
+    ),
+];
+
+/// The other half of the "git cannot name it" family, and the one the deletion sweep does not
+/// reach. `walk_files` does not consult `.gitignore` -- it skips `IGNORE_DIRS` and filters on
+/// extension -- so a gitignored source file is indexed by a full pass. But `git ls-files --others`
+/// excludes ignored paths and the diffs never mention them, so once indexed, every later edit is
+/// invisible: `impact` keeps printing the old symbol at a line that no longer defines it, with
+/// `stale=false` beside it.
+#[test]
+fn an_indexed_file_git_will_not_speak_for_is_reexamined_when_it_changes() {
+    let (_dir, root, mut db, _id, bin) = git_project(IGNORED_SAMPLE);
+    let syms: Vec<String> = db
+        .prepare("SELECT symbol_name FROM chunks WHERE file_path = 'generated/gen.ts'")
+        .unwrap()
+        .query_map([], |c| c.get(0))
+        .unwrap()
+        .map(|c| c.unwrap())
+        .collect();
+    assert_eq!(
+        syms,
+        vec!["generatedAlpha".to_string()],
+        "precondition: a full index does pick up a gitignored source file"
+    );
+
+    fs::write(
+        root.join("generated/gen.ts"),
+        "export function generatedBeta() { return 2; }\n",
+    )
+    .unwrap();
+    let r = incremental_index(&mut db, &bin, &root).unwrap();
+    assert_eq!(
+        r.files_reindexed, 1,
+        "an indexed file git cannot vouch for must be examined by us"
+    );
+
+    let syms: Vec<String> = db
+        .prepare("SELECT symbol_name FROM chunks WHERE file_path = 'generated/gen.ts'")
+        .unwrap()
+        .query_map([], |c| c.get(0))
+        .unwrap()
+        .map(|c| c.unwrap())
+        .collect();
+    assert_eq!(
+        syms,
+        vec!["generatedBeta".to_string()],
+        "the old symbol must not survive at a line that no longer defines it"
+    );
+}

@@ -61,7 +61,9 @@ pub fn compute_stale(
     let candidates: Vec<String> = if cands.narrowed {
         let mut set: HashSet<String> = cands.changed.into_iter().collect();
         for f in &disk_files {
-            if !stored.contains_key(f) {
+            // Not indexed yet, so nothing git said can rule it out; and indexed but unvouched --
+            // gitignored, invisible to every git query -- which the narrowing can never reach.
+            if !stored.contains_key(f) || !cands.vouched.contains(f) {
                 set.insert(f.clone());
             }
         }

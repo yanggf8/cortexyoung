@@ -25,6 +25,13 @@ pub struct GitCandidates {
     /// Whether this list may be trusted as a *narrowing* of what changed. False is not "git is
     /// missing" -- it is "git would not tell me", which for a caller means: examine everything.
     pub narrowed: bool,
+    /// Every indexable path git can account for at all: tracked, plus untracked-but-not-ignored.
+    /// The narrowing above is only sound for paths in here. An indexed file *outside* it -- a
+    /// gitignored source file that a full pass picked up, since `walk_files` filters on extension
+    /// and `IGNORE_DIRS` and never reads `.gitignore` -- can be edited without appearing in any
+    /// diff or in `ls-files --others`, so the caller must re-examine it on its own. Empty and
+    /// meaningless when `narrowed` is false.
+    pub vouched: BTreeSet<String>,
 }
 
 fn git_stdout(root: &Path, args: &[&str]) -> Option<String> {
@@ -85,6 +92,7 @@ fn cannot_narrow() -> GitCandidates {
         changed: Vec::new(),
         deleted: Vec::new(),
         narrowed: false,
+        vouched: BTreeSet::new(),
     }
 }
 
@@ -121,11 +129,24 @@ pub fn git_candidates(root: impl AsRef<Path>, indexed_head: Option<&str>) -> Git
         }
     }
 
+    let mut vouched = BTreeSet::new();
     let others =
         git_stdout(root, &["ls-files", "--others", "--exclude-standard"]).unwrap_or_default();
     for rel in others.lines().filter(|l| !l.is_empty()) {
         if is_indexable(rel) {
             changed.insert(rel.to_string());
+            vouched.insert(rel.to_string());
+        }
+    }
+    // The tracked list is the other half of "paths git can speak for". It is not a candidate
+    // source -- adding every tracked file would hash the whole tree and undo the narrowing -- it
+    // is the set the caller subtracts its own bookkeeping from to find what git is silent about.
+    let Some(cached) = git_stdout(root, &["ls-files", "--cached"]) else {
+        return cannot_narrow();
+    };
+    for rel in cached.lines().filter(|l| !l.is_empty()) {
+        if is_indexable(rel) {
+            vouched.insert(rel.to_string());
         }
     }
     // A path can be deleted by the commits we moved past and restored in the working tree; the
@@ -134,6 +155,7 @@ pub fn git_candidates(root: impl AsRef<Path>, indexed_head: Option<&str>) -> Git
         changed: changed.into_iter().collect(),
         deleted: deleted.into_iter().collect(),
         narrowed: true,
+        vouched,
     }
 }
 
@@ -332,9 +354,18 @@ pub fn incremental_index(
     // this repo that is 70 of them, and it runs in the same pass that was already walking
     // candidates.
     let mut deleted: Vec<String> = cands.deleted.clone();
+    let mut changed: Vec<String> = cands.changed.clone();
     for file_path in indexed_files(db, &canon.project_id)? {
-        if !canon.path.join(&file_path).exists() && !deleted.contains(&file_path) {
-            deleted.push(file_path);
+        if !canon.path.join(&file_path).exists() {
+            if !deleted.contains(&file_path) {
+                deleted.push(file_path);
+            }
+        } else if !cands.vouched.contains(&file_path) && !changed.contains(&file_path) {
+            // Still on disk, and git will not speak for it either way -- gitignored, so absent
+            // from every diff and from `ls-files --others`. The narrowing has nothing to say, so
+            // it is examined every pass; `reindex_one_file` still compares the extraction hash, so
+            // an unchanged one costs one hash and is skipped rather than rewritten.
+            changed.push(file_path);
         }
     }
 
@@ -342,7 +373,7 @@ pub fn incremental_index(
         remove_file(db, &canon.project_id, file_path)?;
         removed += 1;
     }
-    for file_path in &cands.changed {
+    for file_path in &changed {
         let r = reindex_one_file(db, bin, &canon.path, &canon.project_id, file_path)?;
         if r.removed {
             removed += 1;
@@ -382,7 +413,7 @@ pub fn incremental_index(
         files: 0,
         chunks: 0,
         unparsed: 0,
-        files_examined: (cands.changed.len() + deleted.len()) as i64,
+        files_examined: (changed.len() + deleted.len()) as i64,
         files_reindexed: reindexed,
         files_skipped: skipped,
         files_removed: removed,
