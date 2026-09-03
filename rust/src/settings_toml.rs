@@ -27,40 +27,33 @@
 //! (`docs/2026-09-02-hook-wiring-correction.md` §7, §9), and a second copy of it here is a second
 //! place for the same bug to reappear.
 
-use crate::settings::{is_ours_for, HookEvent, EVENTS};
+use crate::settings::{is_ours_for, HookEvent, EDIT_MATCHER, EVENTS};
 use crate::settings::{Change, Outcome};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use toml_edit::{value, ArrayOfTables, DocumentMut, Item, Table};
 
-/// Codex's own tool names, which are not Claude Code's.
+/// The tool this hook is matched to on Codex.
 ///
-/// This file used to write `"Bash"` here and `settings::EDIT_MATCHER`
-/// (`Edit|Write|MultiEdit|NotebookEdit`) for the other event, both inherited wholesale from the
-/// JSON side. Codex has never had a tool by any of those names: its shell surface is
-/// `exec_command` (1,272 calls in this machine's rollouts against zero of anything Claude-shaped)
-/// with `shell` as the older spelling, and its edit surface is `apply_patch`. The 0.152.1 binary
-/// contains the strings `exec_command`, `shell` and `apply_patch` and contains `Bash`, `Edit`,
-/// `MultiEdit`, `Grep` and `Glob` exactly zero times, so it does not normalise into Claude Code's
-/// vocabulary either -- the matcher is compared against the name Codex uses, and a `Bash` matcher
-/// there cannot fire. Both entries were wired, trusted, and structurally incapable of running
-/// (reproduced 2026-09-03: `usage.db` holds two `harness=codex` rows in 90 days and both were
-/// hand-fed on stdin by a developer).
+/// `Bash` is not a tool Codex has -- its rollouts name `exec_command`, `exec` and `apply_patch` --
+/// and on 2026-09-03 that looked like the reason a wired, trusted, `Active`-reported entry never
+/// fired on this machine across 323 tool calls. It is not. A second machine on the *same* codex-cli
+/// 0.152.1, with the *same* tool vocabulary and byte-identical `matcher = "Bash"` and command, fires
+/// 417 times. So the matcher is not compared for equality against the tool name, and changing this
+/// constant was a change with no evidence behind it: reverted.
 ///
-/// This is the defect `settings_kimi` was written to avoid -- its `"Bash|Grep"` exists precisely
-/// because a Bash-only matcher misses the surface the rule is for -- never carried back here.
-const MATCHER: &str = "exec_command|shell";
-
-/// `apply_patch` is Codex's only edit tool. `write_stdin` feeds an already-running process and is
-/// not a file edit, so it is deliberately absent: a post-hook that reindexes on it would run the
-/// incremental pass against a tree nothing changed in.
-const CODEX_EDIT_MATCHER: &str = "apply_patch";
+/// What is still unexplained is why two identically configured machines differ at all. It is not
+/// the feature flag (`hooks` is enabled), not trust (`--dangerously-bypass-hook-trust` changed
+/// nothing), not the matcher, and not the command's shape. The one uncontrolled variable left is
+/// the working directory -- the machine that fires runs Codex inside a project, the one that does
+/// not was run from `$HOME`. `docs/2026-09-03-installer-dedup-and-attribution.md` §7.
+const MATCHER: &str = "Bash";
 
 fn matcher_for(event: HookEvent) -> &'static str {
     match event {
         HookEvent::Suggest => MATCHER,
-        HookEvent::Refresh => CODEX_EDIT_MATCHER,
+        HookEvent::Refresh => EDIT_MATCHER,
     }
 }
 

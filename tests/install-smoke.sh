@@ -745,14 +745,12 @@ done
 # a field. Asserting the entry's own shape is what would catch a `--format` mixup that both files
 # would otherwise absorb silently, since both are called config.toml.
 assert_contains "$CODEX_CFG" "[[hooks.PreToolUse]]" "Codex got the nested dialect"
-# Each harness is matched on the tool names it actually has. Codex's entries carried Claude Code's
-# vocabulary (`Bash`, `Edit|Write|MultiEdit|NotebookEdit`) until 2026-09-03, which made both of them
-# wired, trusted, green in `--check`, and incapable of ever firing -- Codex has no tool by any of
-# those names. The negative assertion is the one that matters: the bug was a default reused across a
-# harness boundary, not a typo.
-assert_contains "$CODEX_CFG" 'matcher = "exec_command|shell"' "Codex is matched on its own shell tool"
-assert_contains "$CODEX_CFG" 'matcher = "apply_patch"' "Codex is matched on its own edit tool"
-assert_not_contains "$CODEX_CFG" 'matcher = "Bash"' "Codex did not inherit Claude Code's tool names"
+# The matcher is asserted as deployed, not as theorised. `Bash` is not a tool Codex has, and on
+# 2026-09-03 that looked like the reason this machine never fired -- until a second machine on the
+# same codex-cli 0.152.1, same tool vocabulary and a byte-identical entry turned up 417 fires. So
+# the matcher is not an equality test against the tool name, and this pins what actually ships
+# rather than what a string table suggested (docs/2026-09-03-installer-dedup-and-attribution.md §7).
+assert_contains "$CODEX_CFG" 'matcher = "Bash"' "Codex's pre-event matcher is deployed as written"
 assert_contains "$KIMI_CFG"  'event = "PreToolUse"' "Kimi got the flat dialect with the event as a field"
 assert_not_contains "$KIMI_CFG" "[[hooks.PreToolUse]]" "Kimi did not get Codex's nested shape"
 # Kimi's matcher has to reach its structured Grep tool, which is the majority of that harness's

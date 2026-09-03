@@ -138,28 +138,68 @@ codex 2、kimi-code 1。與那份 3,653 列的表不是同一個母體。
 
 措辭刻意保守：**列本身不帶機器**，兩台寫進同一個檔之後就再也分不開了。報告能做的只有拒絕沉默。
 
-## 7. Codex 的 matcher，以及一個還沒結案的診斷
+## 7. Codex：四個假設連續被推翻，而我還把自己的自測當成了證據
 
-`settings_toml.rs` 寫的是 `matcher = "Bash"` 與 `"Edit|Write|MultiEdit|NotebookEdit"`，
-整組從 JSON 那側抄來。Codex 0.152.1 的工具是 `exec_command`（rollout 裡 1,272 次）、`shell`、
-`apply_patch`；binary 裡 `MultiEdit`、`NotebookEdit`、`Grep` 各 0 次。已改為
-`exec_command|shell` 與 `apply_patch`。
+`settings_toml.rs` 寫的是 `matcher = "Bash"`，整組從 JSON 那側抄來。Codex 0.152.1 的工具是
+`exec_command` / `exec` / `apply_patch`，binary 裡 `MultiEdit`、`NotebookEdit`、`Grep` 各 0 次。
+本機 codex 全歷史只有 2 列且都是手動餵的，今天 323 次 `exec_command` 呼叫一列都沒產生——
+`cort hook-suggest` 只要被執行就會寫一列（連 `no_payload` 都會），所以零列代表**行程根本沒啟動**。
 
-順帶修掉第二個 bug：`is_canonical` 只看 hook entry（command / type / timeout），而
-**matcher 掛在上一層的 group 上**，所以錯的 matcher 每次重裝都被當成「無事可做」。這是 skill
-部署早就有的規矩（smoke Test 17「a hash match must not excuse the shape」），這個模組從沒學到。
-修法：group 只有我們這一條時才校正 matcher；共用的 group 不動——別人的 matcher 也是別人的路由。
+看起來很清楚，所以我把 matcher 改成 `exec_command|shell` 與 `apply_patch`。**那是錯的。**
 
-**但這個診斷還沒結案，證據互相矛盾，記下來不要當成定論：**
+### 依序被推翻的四個假設
 
-* 支持：本機 codex 全歷史只有 2 列，且都是手動餵 stdin 的。`cort hook-suggest` 只要被執行就會
-  寫一列（連 `no_payload` 都會），所以零列代表行程根本沒啟動。
-* 反對：另一台在 `matcher = "Bash"` 下有 417 次觸發，且 `trusted_hash` 與本機改動前相同。
-* 未排除的第三種解釋：本機進 codex 主要是去看 trust 狀態，**可能根本沒有下過會觸發的工具呼叫**。
-  零列同樣被這個解釋涵蓋。
+| 假設 | 怎麼死的 |
+|---|---|
+| matcher 值配不到 | `matcher = "exec_command"` 精確吻合實際工具名，仍然不燒 |
+| trust 過期（`--status` 只查 hash 存不存在，不重算） | `--dangerously-bypass-hook-trust` 開新 session，仍然不燒 |
+| command 含空格、Codex 不做 shell 切詞 | 另一台的 command 就是含空格的那一串，燒了 417 次 |
+| 工作目錄不在專案裡 | 在 repo 內以 `bdcodex exec` 跑（同一顆 codex、同一份 config、只換模型供應商所以不吃 quota），仍然不燒 |
 
-決定性的實驗還沒做：在本機 codex 裡實際下一個 shell 指令，看 usage.db 是否出現 codex 列。
-在那之前，`exec_command|shell` 這個改動是**根據一份未被新證據支持的診斷**做的，可能需要回退。
+一併排除的還有：feature flag（`doctor --all` 顯示 `hooks` 在 47 個啟用旗標裡）、entry 沒載入
+（Codex 自報 `PreToolUse Installed 1 / Active 1`）、session 讀到舊設定（重開過）。
+
+### 兩台的並排
+
+| | codex-cli | 工具名 | matcher | command | 結果 |
+|---|---|---|---|---|---|
+| 另一台 | 0.152.1 | `exec_command` 711 / `exec` 143 | `Bash` | 含空格 | **417 次** |
+| 本機 | 0.152.1 | `exec_command` 323 | `Bash` | 含空格 | **0 次** |
+
+**同版本、同工具詞彙、逐字相同的設定，一台燒一台不燒。** 所以 `Bash` 並不是按工具名做等值比對
+——它在另一台照樣配到 `exec_command`。差別不在設定檔裡，而我連續四輪都在設定檔裡找。
+
+### 一次歸屬錯誤，以及它花掉的兩輪
+
+過程中我把一筆 13:10:26 的 `harness=codex` 列當成「第一筆真實觸發」，並據此推出「command 必須是
+單一 token」，還用它判了另外兩個假設的生死。**那筆是我自己的自測**——建立 probe 腳本後用
+`echo … | /tmp/codex-hook-probe.sh` 驗證它可用，而那條管線的下游就是
+`cort hook-suggest --harness codex`。查全部五筆 codex 列的毫秒時戳，每一筆都對得上我自己的指令。
+
+**這台機器至今沒有一次真實的 Codex 觸發。** 一個沒有立足點的東西被當成立足點，代價是兩輪。
+教訓與 §6 同源：**一筆數字說不出它是誰產生的，就不能拿來當證據**——那裡是機器，這裡是行程。
+
+### 這一節目前的結論
+
+四個假設全滅，而且沒有任何一次真實觸發可以當立足點。已知的只有：本機的 Codex 把 hook 報成
+`Active`，卻在試過的每一種設定下都沒有執行過它。
+
+減損一併記下：最後一輪用的 `codex exec` 是非互動模式，**它本身可能就不跑 hook**，所以那一輪的
+陰性證據力弱於互動模式。另一台的 config 也無法確認與貼出來的那份是同一份（該機 session resume
+失敗），所以 417 這個數字與「`matcher = "Bash"` + 含空格 command」的綁定，比本文前一版寫得要鬆。
+
+matcher 已回退為 `Bash`：沒有證據支持改動它。
+
+**在拿到一次真實 payload 之前，不要再對 Codex 的接線做任何「看起來很明顯」的修改。** 這一節記錄的
+就是連續四次這樣做、外加一次歸屬錯誤的結果。
+
+### 順帶修掉的一個真 bug
+
+`is_canonical` 只看 hook entry（command / type / timeout），而 **matcher 掛在上一層的 group 上**，
+所以過期的 matcher 每次重裝都被當成 `already_present`。這是 skill 部署早就有的規矩
+（smoke Test 17「a hash match must not excuse the shape」），這個模組從沒學到。修法：group 只有
+我們這一條時才校正 matcher；共用的 group 不動——別人的 matcher 也是別人的路由。這個修正與上面
+那三個死掉的假設無關，獨立成立，留著。
 
 ## 8. 這一輪關於測試的結論
 

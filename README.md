@@ -462,10 +462,9 @@ sessions that carried it, that never fired — 409 searches, zero `cort` calls. 
 same rule in the **retrospective** shape: given the `grep`/`rg` the agent actually just ran, say
 whether `cort impact` answers it better. Nothing depends on the model remembering anything.
 
-It runs as a `PreToolUse` hook matched to whichever tool names the harness actually has -- `Bash`
-on Claude Code and Grok, `Bash|Grep` on Kimi (whose search surface is mostly its structured tool),
-`exec_command|shell` on Codex -- reads the harness payload on stdin, and either prints one
-suggestion or stays silent. `cort hook-suggest` is not a verb to type.
+It runs as a `PreToolUse` hook matched to `Bash` (`Bash|Grep` on Kimi, whose search surface is
+mostly its structured tool), reads the harness payload on stdin, and either prints one suggestion
+or stays silent. `cort hook-suggest` is not a verb to type.
 
 **What it is worth when it fires.** The hook is the delivery mechanism; the number it is delivering
 is the [`cort impact` cost result](#re-analysis-2026-08-28-the-gate-was-measured-on-the-wrong-case):

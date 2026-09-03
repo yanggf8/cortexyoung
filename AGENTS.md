@@ -78,15 +78,22 @@ own entry is a token test, never a suffix test -- anchoring it to the end of the
 what let `--status` report `wired: false` on a machine where the hook was firing, twice
 (`docs/2026-09-02-hook-wiring-correction.md`).
 
-**Each harness is matched on the tool names it actually has.** Codex's entries carried Claude Code's
-vocabulary (`Bash`, `Edit|Write|MultiEdit|NotebookEdit`) until 2026-09-03; Codex has `exec_command`,
-`shell` and `apply_patch` and none of those. `is_canonical` could not notice, because the matcher
-lives on the *group* and it only ever sees the entry -- so a stale matcher survived every redeploy
-as `already_present`, the same "a hash match must not excuse the shape" the skill deploy already
-enforces. **That diagnosis is not closed**: another machine fires 417 times under `matcher = "Bash"`,
-and the local zero is equally explained by nobody having issued a tool call in those sessions. Read
-`docs/2026-09-03-installer-dedup-and-attribution.md` §7 before quoting it, and run the experiment it
-names before relying on the change.
+**When two machines disagree, the cause is not in the file they share.** Codex's matcher is `Bash`,
+a tool Codex does not have -- its rollouts name `exec_command`, `exec` and `apply_patch` -- and on
+2026-09-03 that looked like the reason a wired, trusted, `Active`-reported entry never fired here
+across 323 tool calls. It was not. A second machine on the same codex-cli 0.152.1, with the same
+tool vocabulary and a byte-identical entry, fires 417 times. Three hypotheses died in a row (the
+matcher's value, stale trust, the command's shape) and all three had the same defect: they looked
+for the cause inside a config file that is identical on both machines. `--status` reporting
+`trusted: true` is worth naming separately -- `trusted_at` checks that a hash *exists*, never that
+it matches, so an entry trusted under an older command reads exactly like a current one. The one
+working directory went the same way (run inside the repo via `bdcodex exec`, still nothing). And one
+of those rounds was spent on a row this session had written itself: all five `harness=codex` rows in
+the local database are hand-fed self-tests, so **this machine has never once fired that hook for
+real** and the "first real fire" two hypotheses were built on did not exist. A figure that cannot say
+what produced it is not evidence -- the same rule as the machine stamp above, one level down. **Do
+not make another obvious-looking change to Codex's wiring before a real payload is captured**;
+`docs/2026-09-03-installer-dedup-and-attribution.md` §7 is the record of doing it four times.
 
 **A number that cannot say which machine produced it is not comparable to anything.** `usage.db`
 stamps `MACHINE_ID` once and never rewrites it, so a database carried to a second machine keeps
