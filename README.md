@@ -22,7 +22,8 @@ Six shipped commands (plus `status`/`projects`/`delete` utilities):
 - `cort usage [days]` — local per-machine usage stats (best-effort; 1–90 days, default 30)
 
 All query/read verbs take `-f lean`: the same answer in a compact agent-oriented format, at about a
-fifth of the tokens of the default JSON. Agents should pass it; see "Token cost" below.
+fifth of the tokens of the default JSON. Agents should pass it; see [Token cost](#token-cost)
+below.
 
 Rust (`.rs`) is indexed through the pinned `ast-grep` 0.45.2 rule pack. Top-level functions and `impl`
 methods are stored as symbol-scoped chunks, so `cort context <symbol> --content full -f lean` returns one
@@ -34,6 +35,48 @@ use and reports `source:"store"` on an unchanged repeat. Each entry carries file
 a remembered reading. Run `cort index` once before using either command.
 
 Routing for agents is in `skills/ast-grep/SKILL.md` — it states when to use `rg`, `ast-grep run`, `cort struct`/`context`/`impact`, and `xg`.
+
+## Token cost
+
+`cort` is cheap when the question is a caller set. One recursive SQL walk replaces the
+multi-hop `rg` + Read loop, so the cost stays nearly flat in depth while the grep path
+grows with every hop — reads are 83–87% of `rg`'s cost, and each hop hands back names
+that must be searched and opened again.
+
+Deterministic probe, no model in the loop (historical numbers from
+`evals/relation-cost.mjs`; recover with `git show 1a4052cc^:evals/relation-cost.mjs`):
+
+| hops | `cort impact -f lean` | `rg` + reads to the same set | ratio |
+|---|---|---|---|
+| 1 | 968 tok | 16,584 tok | 14.8x |
+| 2 | 1,022 tok | 86,949 tok | 67x |
+| 3 | 1,136 tok | 127,531 tok | 62x |
+
+End-to-end agent eval (2026-08-30, 5 graph-required tasks × 2 arms × 2 rounds = 20
+cells): `cort` 10/10 success at a mean **992 tool-return tokens** against the baseline
+arm's 4/10 at **7,642** — **$0.28 vs $0.79 per cell (2.8x)**, carried by a **7.7x
+smaller tool payload** at **~4x fewer turns**.
+
+Two readings must travel with the numbers: the payload ratio is not the invoice
+(cached context dominates the bill, so the honest headline is the pair — 2.8x cheaper
+at 10/10 vs 4/10), and `cort` pays out only when a relationship walk is actually
+wanted (0.08% of 1,214 real instructions — see the `Demand, re-measured` section
+below). Treat these as a floor on what the tool is worth in the harness it actually
+runs in, not a controlled `cort`-vs-`rg` comparison. Full evidence: the `Eval results`
+and `Re-analysis (2026-08-28)` sections below, `docs/2026-08-28-real-session-cost.md`
+and `evals/runs/2026-08-30-graph{,-sample2}/`.
+
+The cheapest supported case is a Rust symbol slice: `cort context <symbol> --content full
+-f lean` measures 27k → 89 tokens (`docs/2026-08-28-real-session-cost.md` §1.3).
+
+**What keeps it true over time.** Every invocation appends one local-only row to
+`usage.db` (see the `Local usage recording` section above), and every hook fire records
+the outcome it reached; `cort-evals` replays the same `judge` over real transcripts
+(`hook-probe`), counts how often the walk is actually wanted (`demand`), and grades
+every reported edge against file text (`verify-impact`). Features are gated until `cort`
+wins on both token count and success rate — [`evals/README.md`](evals/README.md).
+
+繁體中文版(僅此段): [Token cost · 台灣中文](docs/token-cost.zh-TW.md)
 
 ## What each language actually gets
 
