@@ -87,6 +87,28 @@ the matcher to `exec_command` broke a hook that worked, and then four hypotheses
 a symptom that change had created (the matcher's value, stale trust, the command's shape, the
 working directory). **Judge a matcher only from an intercepted payload, never from a transcript.**
 
+That normalisation is a rule and not a special case: a live run on 2026-09-03 16:48 showed Codex
+firing the `PostToolUse` entry on a *file edit* -- so it renames its edit tool into Claude Code's
+vocabulary the same way it renames `exec_command`, and `apply_patch` needs no matcher of its own.
+The same run showed the alternation `Bash|Edit|Write|MultiEdit|NotebookEdit` matching a `Bash` call,
+so Codex compiles a matcher as a regex, which nothing before had established (`"Bash"` was the only
+value ever seen firing, and the one alternative tried could not have matched on either reading).
+Neither fact came from an intercepted payload: the edit was identified by which hook *stayed
+silent*. `Suggest`'s matcher is the bare `Bash`, so a fire on `Refresh` alone is a fire on something
+that is not Bash. **Two entries with deliberately different matcher widths are an instrument, and
+the narrow one is the control** -- worth keeping in mind before anyone tidies them into agreement.
+
+**`--status` reports that a state exists, not that it is still current, and that has now misled
+three times.** Twice it called a firing hook `wired: false` (a suffix test anchored to the end of
+the command line, `docs/2026-09-02-hook-wiring-correction.md`); on 2026-09-03 it called
+`trusted=true` an entry `install.sh` had just rewritten. The field is not miscomputed -- `trusted_at`
+only ever asks whether a `trusted_hash` exists at that `gi:hi`, which its own doc comment says --
+but that is a different question from the one a reader brings. Codex re-prompted for review on a
+rewrite that changed **only the matcher** and left the command byte-identical, so `trusted_hash`
+covers the entry's shape and the installer's notice at the moment of the rewrite is the
+authoritative signal. Nothing after the fact can verify a trust; only a live run can
+(`docs/2026-09-03-installer-dedup-and-attribution.md` §12, §13).
+
 That interception has to be able to prove who called it. One round was lost to a `harness=codex`
 row this session had written itself: all five in the local database were hand-fed self-tests, so the
 "first real fire" two hypotheses rested on never happened. The probe that finally settled it logged
