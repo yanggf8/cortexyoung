@@ -220,17 +220,22 @@ fn an_unreachable_stored_head_falls_back_to_hashing_every_file() {
 /// merely incomplete -- it is confidently incomplete.
 #[test]
 fn an_indexed_file_git_will_not_speak_for_is_stale_when_it_changes() {
-    let (_dir, root, db, project_id, bin) = setup(&[
-        (".gitignore", "generated/\n"),
-        (
-            "src/helper.ts",
-            "export function helper(n: number) { return n * 2; }\n",
-        ),
-        (
-            "generated/gen.ts",
-            "export function generatedAlpha() { return 1; }\n",
-        ),
-    ]);
+    // Not `.gitignore`d: `walk_files` honours ignore files as of 2026-09-03, so such a file is
+    // never indexed at all and shows up as a coverage `unindexed` row instead. What still lands in
+    // the index with git silent about it is an untracked path no ignore file names -- indexed by a
+    // full pass, absent from every diff and from `ls-files --others` once it is known. Same
+    // predicate, a fixture that still reaches it.
+    let (_dir, root, mut db, project_id, bin) = setup(&[(
+        "src/helper.ts",
+        "export function helper(n: number) { return n * 2; }\n",
+    )]);
+    fs::create_dir_all(root.join("generated")).unwrap();
+    fs::write(
+        root.join("generated/gen.ts"),
+        "export function generatedAlpha() { return 1; }\n",
+    )
+    .unwrap();
+    cort::indexer::full_index(&mut db, &bin, &root).unwrap();
     assert!(
         !compute_stale(&db, &bin, &root, &project_id)
             .unwrap()

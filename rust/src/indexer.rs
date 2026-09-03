@@ -141,42 +141,74 @@ fn is_source_ext(ext: &str) -> bool {
     SOURCE_EXT.contains(&ext)
 }
 
+/// Every file in the tree this screen considers project source.
+///
+/// `.gitignore` is honoured, and that is a correctness rule rather than a speed one. The filter
+/// used to be extension plus a hard-coded `IGNORE_DIRS` list, which let build output in: on this
+/// machine on 2026-09-03 the indexes held `out/_next/static/<hash>/_buildManifest.js`,
+/// `backend/.wrangler/tmp/bundle-<hash>/middleware-loader.entry.ts` and 60-odd more like them
+/// across three projects. Those are not callers. `impact --symbol` counted a bundled copy of a
+/// function as a dependent of the original, and the path it printed dies at the next build, since
+/// the hash directory is regenerated -- an edge nobody can go and check, which is the one thing
+/// this product may not produce.
+///
+/// `IGNORE_DIRS` stays underneath as the answer for a tree with no git in it at all, and for the
+/// directories every project ignores whether or not it wrote them down.
+///
+/// Symlinks are still skipped, unreadable directories are still skipped rather than fatal, and the
+/// result is still sorted -- three properties `full_index`, `compute_stale` and the coverage screen
+/// all depend on.
 pub fn walk_files(root: impl AsRef<Path>) -> Vec<String> {
-    let root = root.as_ref();
-    let mut out = Vec::new();
-    walk_dir(root, root, &mut out);
-    out.sort();
-    out
+    walk_files_inner(root.as_ref(), true)
 }
 
-fn walk_dir(dir: &Path, root: &Path, out: &mut Vec<String>) {
-    let mut entries: Vec<fs::DirEntry> = fs::read_dir(dir)
-        .expect("walkFiles readdir")
-        .map(|e| e.expect("walkFiles dirent"))
-        .collect();
-    entries.sort_by_key(|a| a.file_name());
-    for entry in entries {
-        let ft = entry.file_type().expect("walkFiles file_type");
-        if ft.is_symlink() {
+/// The same walk with `.gitignore` switched off: every file that *looks* like project source,
+/// whether or not the project generates it.
+///
+/// This exists for the coverage screen and nothing else. Narrowing what gets indexed is a
+/// correctness win; narrowing it silently is not, because `enumeration_may_be_incomplete` has
+/// exactly two causes and one of them is "a file this screen never read". A file skipped for being
+/// generated is still a file this screen never read, so it has to appear as an `unindexed` row --
+/// visible, countable, and able to flip the boolean -- rather than vanishing from both sides of the
+/// subtraction and leaving `incomplete: false` on an enumeration that skipped a directory.
+pub fn walk_files_unfiltered(root: impl AsRef<Path>) -> Vec<String> {
+    walk_files_inner(root.as_ref(), false)
+}
+
+fn walk_files_inner(root: &Path, respect_ignore_files: bool) -> Vec<String> {
+    let mut out = Vec::new();
+    let walker = ignore::WalkBuilder::new(root)
+        .hidden(false) // `.github/` and friends are source; only ignore files decide here.
+        .git_ignore(respect_ignore_files)
+        .git_global(false) // A developer's global ignore file is not a property of this repo.
+        .git_exclude(respect_ignore_files)
+        .ignore(respect_ignore_files)
+        .parents(false) // Ignore rules above the project root are not this project's rules.
+        .follow_links(false)
+        .filter_entry(|e| {
+            e.file_type().is_some_and(|t| !t.is_dir())
+                || !is_ignore_dir(&e.file_name().to_string_lossy())
+        })
+        .build();
+    for entry in walker.flatten() {
+        if !entry.file_type().is_some_and(|t| t.is_file()) {
             continue;
         }
-        let abs = entry.path();
-        if ft.is_dir() {
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if !is_ignore_dir(&name) {
-                walk_dir(&abs, root, out);
-            }
-        } else if ft.is_file() && is_source_ext(&ext_of(&entry.file_name())) {
-            let rel = abs.strip_prefix(root).expect("walk path under root");
-            let posix = rel
-                .components()
+        if !is_source_ext(&ext_of(entry.file_name())) {
+            continue;
+        }
+        let Ok(rel) = entry.path().strip_prefix(root) else {
+            continue;
+        };
+        out.push(
+            rel.components()
                 .map(|c| c.as_os_str().to_string_lossy().into_owned())
                 .collect::<Vec<_>>()
-                .join("/");
-            out.push(posix);
-        }
+                .join("/"),
+        );
     }
+    out.sort();
+    out
 }
 
 pub fn git_head_of(root: impl AsRef<Path>) -> Option<String> {

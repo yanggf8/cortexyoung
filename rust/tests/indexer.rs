@@ -313,3 +313,57 @@ fn canonicalize_then_hash_equals_js_project_id_for_the_same_directory() {
         "must hash the real path, not the symlink path string"
     );
 }
+
+/// Build output is not source, and `.gitignore` is where a project already says so.
+///
+/// The filter used to be extension plus a hard-coded `IGNORE_DIRS` list, which let generated files
+/// in: on 2026-09-03 the local indexes held `out/_next/static/<hash>/_buildManifest.js` and
+/// `backend/.wrangler/tmp/bundle-<hash>/middleware-loader.entry.ts`, 65 such files across three
+/// projects. That is not a cost problem. `impact --symbol` counted a bundled copy of a function as
+/// a dependent of the original, and printed a path that dies at the next build because the hash
+/// directory is regenerated -- an edge nobody can go and check, which is the one thing this product
+/// may not produce.
+#[test]
+fn walk_files_honours_gitignore_so_build_output_is_not_indexed() {
+    let (dir, root, _db, _id, _bin) = setup(&[
+        ("src/real.ts", "export function real() { return 1; }\n"),
+        (
+            "out/_next/static/abc123/_buildManifest.js",
+            "export function built() { return 2; }\n",
+        ),
+        (
+            "backend/.wrangler/tmp/bundle-XY/loader.ts",
+            "export function bundled() { return 3; }\n",
+        ),
+        (".gitignore", "out/\nbackend/.wrangler/\n"),
+    ]);
+    let _ = dir;
+    assert_eq!(
+        walk_files(&root),
+        vec!["src/real.ts".to_string()],
+        "generated files reached the index"
+    );
+
+    // Without a .gitignore the hard-coded list is still the whole answer: this narrows the walk
+    // where a project has said what it generates, and narrows nothing where it has not.
+    std::fs::remove_file(root.join(".gitignore")).unwrap();
+    let all = walk_files(&root);
+    assert!(
+        all.len() == 3,
+        "removing .gitignore must restore the unfiltered walk: {all:?}"
+    );
+}
+
+/// A dot-directory is not automatically ignored: `.github/workflows` is source people edit, and the
+/// `ignore` crate hides dotfiles by default.
+#[test]
+fn walk_files_keeps_dot_directories_that_no_ignore_file_excludes() {
+    let (_dir, root, _db, _id, _bin) = setup(&[
+        ("src/real.ts", "export function real() { return 1; }\n"),
+        (".config/tool.ts", "export function cfg() { return 2; }\n"),
+    ]);
+    assert_eq!(
+        walk_files(&root),
+        vec![".config/tool.ts".to_string(), "src/real.ts".to_string()]
+    );
+}

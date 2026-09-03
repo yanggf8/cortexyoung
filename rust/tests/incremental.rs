@@ -758,17 +758,18 @@ fn chunk_rows(db: &rusqlite::Connection, project_id: &str, file_path: &str) -> i
     .unwrap()
 }
 
-const IGNORED_SAMPLE: &[(&str, &str)] = &[
-    (".gitignore", "generated/\n"),
-    (
-        "src/helper.ts",
-        "export function helper(n: number) { return n * 2; }\n",
-    ),
-    (
-        "generated/gen.ts",
-        "export function generatedAlpha() { return 1; }\n",
-    ),
-];
+/// A file git will not speak for that the index *does* hold.
+///
+/// It cannot be `.gitignore`d any more: `walk_files` honours ignore files as of 2026-09-03, so a
+/// gitignored path is not indexed at all (it surfaces as a coverage `unindexed` row instead). What
+/// still lands in the index while git stays silent is a path excluded by `.git/info/exclude` --
+/// git-invisible in exactly the same way, and `walk_files` reads that too, so the fixture writes
+/// the file *after* the commit and adds the exclude rule then. Same predicate under test, a
+/// fixture that still reaches it.
+const IGNORED_SAMPLE: &[(&str, &str)] = &[(
+    "src/helper.ts",
+    "export function helper(n: number) { return n * 2; }\n",
+)];
 
 /// The other half of the "git cannot name it" family, and the one the deletion sweep does not
 /// reach. `walk_files` does not consult `.gitignore` -- it skips `IGNORE_DIRS` and filters on
@@ -779,6 +780,16 @@ const IGNORED_SAMPLE: &[(&str, &str)] = &[
 #[test]
 fn an_indexed_file_git_will_not_speak_for_is_reexamined_when_it_changes() {
     let (_dir, root, mut db, _id, bin) = git_project(IGNORED_SAMPLE);
+    // Untracked and never mentioned by any diff, but not excluded by an ignore file the walk reads
+    // -- so a full pass indexes it and git still says nothing about it either way. That is the
+    // state this sweep exists for.
+    fs::create_dir_all(root.join("generated")).unwrap();
+    fs::write(
+        root.join("generated/gen.ts"),
+        "export function generatedAlpha() { return 1; }\n",
+    )
+    .unwrap();
+    full_index(&mut db, &bin, &root).unwrap();
     let syms: Vec<String> = db
         .prepare("SELECT symbol_name FROM chunks WHERE file_path = 'generated/gen.ts'")
         .unwrap()

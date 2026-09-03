@@ -36,7 +36,7 @@
 
 use crate::db::Db;
 use crate::errors::CortError;
-use crate::indexer::{walk_files, SOURCE_EXT};
+use crate::indexer::{walk_files_unfiltered, SOURCE_EXT};
 use rusqlite::params;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -512,7 +512,10 @@ fn blind_files(
         .map_err(err)?
         .flatten()
         .collect();
-    let mut unindexed: Vec<String> = walk_files(root)
+    // Unfiltered on purpose: `walk_files` stops at `.gitignore`, and a file skipped for being
+    // generated is still a file this screen never read. Counting it here is what keeps
+    // `incomplete` honest about a directory the index declined to enter.
+    let mut unindexed: Vec<String> = walk_files_unfiltered(root)
         .into_iter()
         .filter(|rel| {
             let path = root.join(rel);

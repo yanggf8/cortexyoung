@@ -752,3 +752,48 @@ fn gap_count_is_the_number_the_boolean_reads_not_the_mention_layers_alone() {
     );
     assert_eq!(seed["enumeration_may_be_incomplete"], json!(true));
 }
+
+/// A file the index skipped for being generated is still a file this screen never read.
+///
+/// `walk_files` honours `.gitignore` as of 2026-09-03, which keeps build output out of the graph --
+/// bundled copies of a function were being counted as dependents, at paths that die at the next
+/// build. But narrowing what gets indexed must never narrow what gets *disclosed*:
+/// `enumeration_may_be_incomplete` has two causes and one of them is "a file this screen never
+/// read". If the coverage walk had inherited the same filter, the skipped directory would have
+/// vanished from both sides of the subtraction and left `incomplete: false` on an enumeration that
+/// declined to enter it -- the exact false clearance this layer exists to prevent.
+#[test]
+fn a_gitignored_file_is_disclosed_as_unindexed_rather_than_silently_dropped() {
+    let (dir, root, db, project_id, bin) =
+        indexed(&[("src/d.ts", "export function d() { return 1; }\n")]);
+    fs::write(dir.path().join(".gitignore"), "generated/\n").unwrap();
+    fs::create_dir_all(dir.path().join("generated")).unwrap();
+    fs::write(
+        dir.path().join("generated/bundle.ts"),
+        "import { d } from '../src/d';\nexport function bundled() { return d(); }\n",
+    )
+    .unwrap();
+
+    // It is not in the graph: that is the point of honouring the ignore file.
+    let files: Vec<String> = cort::indexer::walk_files(&root);
+    assert!(
+        !files.iter().any(|f| f.starts_with("generated/")),
+        "the ignored directory reached the index: {files:?}"
+    );
+
+    // But the screen says out loud that it never read it.
+    let cov = coverage_of(&db, &project_id, &root, &bin, "d");
+    let blind = &cov["blind_files"];
+    assert!(
+        blind["unindexed"].as_u64().unwrap_or(0) >= 1,
+        "an ignored source file must still count as unread: {cov}"
+    );
+    assert!(
+        blind["unindexed_example"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v.as_str() == Some("generated/bundle.ts")),
+        "the row has to name the file, because the instruction is read the rows: {blind}"
+    );
+}
