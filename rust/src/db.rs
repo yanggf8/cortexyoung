@@ -53,13 +53,27 @@ pub fn db_path_for(real_path: &str) -> PathBuf {
     cache_dir().join(format!("{}.db", project_id_for(real_path)))
 }
 
+/// An OS-level failure while preparing the database file, as a sqlite error.
+///
+/// `open_db` returns `rusqlite::Result`, and these are `io::Error`s, so they need a shape the
+/// caller already handles. `SQLITE_CANTOPEN` is the honest one: whatever went wrong, the outcome is
+/// that this file could not be made usable. `classify_sqlite` folds it into `storage_busy`, which
+/// is exactly how a caller should treat a disk that is not cooperating.
+fn cantopen(what: &str, e: std::io::Error) -> rusqlite::Error {
+    rusqlite::Error::SqliteFailure(
+        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CANTOPEN),
+        Some(format!("{what}: {e}")),
+    )
+}
+
 pub fn open_db(db_path: impl AsRef<Path>) -> rusqlite::Result<Db> {
     let db_path = db_path.as_ref();
     let is_memory = db_path.as_os_str() == std::ffi::OsStr::new(":memory:");
     if !is_memory {
         if let Some(parent) = db_path.parent() {
             if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent).expect("mkdir cache dir");
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| cantopen("could not create the cache directory", e))?;
             }
         }
     }
@@ -75,11 +89,17 @@ pub fn open_db(db_path: impl AsRef<Path>) -> rusqlite::Result<Db> {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
+            // 0600 is a privacy property, not a nicety: this file holds the contents of the user's
+            // source. A failure to set it is returned rather than ignored -- degrading quietly here
+            // would leave a world-readable index that nobody was told about -- and returned rather
+            // than panicked on, because every caller of `open_db` already has an error path and one
+            // of them is a hook that must never do anything but exit 0.
             let mut perms = std::fs::metadata(db_path)
-                .expect("chmod: db file exists after open")
+                .map_err(|e| cantopen("could not stat the database file", e))?
                 .permissions();
             perms.set_mode(0o600);
-            std::fs::set_permissions(db_path, perms).expect("chmod 0o600");
+            std::fs::set_permissions(db_path, perms)
+                .map_err(|e| cantopen("could not restrict the database file to 0600", e))?;
         }
     }
     Ok(conn)
@@ -144,25 +164,39 @@ fn migrate_v4(db: &Db) -> Result<(), CortError> {
     Ok(())
 }
 
+/// Bring a freshly opened database up to the current schema.
+///
+/// Every sqlite failure here is returned, not panicked on. It used to `expect` on four of them,
+/// with a message ("JS rethrows raw sqlite errors") inherited from the JavaScript version this crate
+/// replaced -- and the effect was that any storage error at all killed the process instead of
+/// producing the structured error every other path in this file produces. Not hypothetical: on
+/// 2026-09-03 a macOS CI runner returned `SQLITE_IOERR_FSYNC` for a few seconds and eight tests died
+/// on this line, reporting a panic rather than a disk problem.
+///
+/// The cost of the old shape grew when `hook-refresh` arrived. That hook reaches `ensure_schema`
+/// through `open_project_tracked`, and it promises in its own doc comment to be silent and exit 0
+/// whatever happens -- a promise a panic here would break on every edit for as long as the disk
+/// misbehaved. `classify_sqlite` already knows how to tell a stale schema from a busy store, and
+/// `cmd_hook_refresh` already has a quiet path (`db_unavailable`) waiting to catch it.
 pub fn ensure_schema(db: &Db) -> Result<(), CortError> {
     db.execute_batch(SCHEMA_SQL)
-        .expect("schema.sql (JS rethrows raw sqlite errors)");
-    let existing = get_meta(db, "SCHEMA_VERSION").expect("getMeta");
+        .map_err(|e| classify_sqlite(&e))?;
+    let existing = get_meta(db, "SCHEMA_VERSION").map_err(|e| classify_sqlite(&e))?;
     let expected = SCHEMA_VERSION.to_string();
     let upgrading = existing
         .as_deref()
         .and_then(|v| v.parse::<i64>().ok())
         .is_some_and(|v| v < SCHEMA_VERSION);
     if existing.is_none() {
-        set_meta(db, "SCHEMA_VERSION", &expected).expect("setMeta");
+        set_meta(db, "SCHEMA_VERSION", &expected).map_err(|e| classify_sqlite(&e))?;
     } else if upgrading {
         migrate_v4(db)?;
         // v3 added `raw_edges`; v4 adds `call_form` and the call-site line. An older database has
         // chunks whose edges cannot be re-derived with the new columns filled in, so a rebuild would
         // silently wipe the graph. Mark it pending: `status` reports stale and the next incremental
         // index falls back to a full one.
-        set_meta(db, "graph_pending", "1").expect("setMeta");
-        set_meta(db, "SCHEMA_VERSION", &expected).expect("setMeta");
+        set_meta(db, "graph_pending", "1").map_err(|e| classify_sqlite(&e))?;
+        set_meta(db, "SCHEMA_VERSION", &expected).map_err(|e| classify_sqlite(&e))?;
     } else if existing.as_deref() != Some(expected.as_str()) {
         return Err(CortError::new(
             "schema_version_mismatch",

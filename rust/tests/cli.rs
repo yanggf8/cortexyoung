@@ -989,3 +989,99 @@ fn no_other_harness_ever_receives_a_deny() {
         assert!(out["additionalContext"].is_string(), "{harness} got: {out}");
     }
 }
+
+/// A disk that will not cooperate is an error, never a panic — and never a noisy hook.
+///
+/// `ensure_schema` and `open_db` used to `expect` on four storage failures, one of them carrying a
+/// message inherited from the JavaScript version this crate replaced. On 2026-09-03 a macOS CI
+/// runner returned `SQLITE_IOERR_FSYNC` for a few seconds and eight tests died reporting a panic
+/// instead of a disk problem. The cost grew when `hook-refresh` arrived: it reaches both functions
+/// and promises to be silent and exit 0 whatever happens, which a panic would break on every edit
+/// for as long as the disk misbehaved.
+#[test]
+#[cfg(unix)]
+fn a_cache_directory_that_cannot_be_created_is_an_error_not_a_panic() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let d = tempfile::Builder::new()
+        .prefix("cort-ro-cache-")
+        .tempdir()
+        .unwrap();
+    let readonly = d.path().join("readonly");
+    std::fs::create_dir(&readonly).unwrap();
+    let cache = readonly.join("nested");
+    std::fs::set_permissions(&readonly, std::fs::Permissions::from_mode(0o500)).unwrap();
+
+    let r = run_cort(&["index"], d.path(), &cache);
+    // Restore before asserting, so a failure cannot leave an undeletable tempdir behind.
+    std::fs::set_permissions(&readonly, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    let v = payload(&r);
+    assert_eq!(
+        v["error"].as_str(),
+        Some("storage_busy"),
+        "expected a structured error, got: {}",
+        r.stdout
+    );
+    assert!(
+        v["detail"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("could not create the cache directory"),
+        "the message has to name what failed: {}",
+        r.stdout
+    );
+    assert!(
+        !r.stderr.contains("panicked"),
+        "storage failures must not panic: {}",
+        r.stderr
+    );
+}
+
+/// The same disk, through the hook that must never say anything.
+#[test]
+#[cfg(unix)]
+fn hook_refresh_stays_silent_when_the_cache_is_unwritable() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let d = tempfile::Builder::new()
+        .prefix("cort-ro-hook-")
+        .tempdir()
+        .unwrap();
+    let readonly = d.path().join("readonly");
+    std::fs::create_dir(&readonly).unwrap();
+    let cache = readonly.join("nested");
+    std::fs::set_permissions(&readonly, std::fs::Permissions::from_mode(0o500)).unwrap();
+
+    let r = run_hook_refresh(d.path(), &cache);
+    std::fs::set_permissions(&readonly, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    assert_eq!(r.code, 0, "stderr={}", r.stderr);
+    assert!(!r.stderr.contains("panicked"), "stderr={}", r.stderr);
+}
+
+/// `hook-refresh` with an edit payload on stdin, which is all the harness ever sends it.
+fn run_hook_refresh(cwd: &Path, cache: &Path) -> Run {
+    use std::io::Write;
+    use std::process::Stdio;
+    let mut child = Command::new(cort_bin())
+        .arg("hook-refresh")
+        .current_dir(cwd)
+        .env("CORT_CACHE_DIR", cache)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn cort hook-refresh");
+    let body = serde_json::to_vec(
+        &serde_json::json!({ "tool_name": "Edit", "tool_input": { "file_path": "x.rs" } }),
+    )
+    .unwrap();
+    child.stdin.take().unwrap().write_all(&body).unwrap();
+    let out = child.wait_with_output().expect("wait cort hook-refresh");
+    Run {
+        code: out.status.code().unwrap_or(1),
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+    }
+}
