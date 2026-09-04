@@ -385,12 +385,16 @@ set the flag for every one of 60 sampled seeds. What remains is the receiver gat
    and `:1036` attaches to its own definition. Graded on six type seeds: **146 of 146 dependents
    confirmed**, and hand-adjudicating all 21 `SettingsError` rows for the phantom the grader cannot
    see (an edge to the wrong same-named module) found **zero**. Cost, isolated on the same binary and
-   tree by removing the three rules: chunks 1,236 → 1,356, relationships 2,222 → 2,714, raw edges
-   12,463 → 15,850, index 978ms → 1,140ms (+17%).
+   tree by removing the three rules and re-indexing both ways: chunks 1,236 → 1,356, relationships
+   2,222 → 2,714, raw edges 12,523 → 15,850 (+27%), index 978ms → 1,140ms (+17%).
 
    Three things this does **not** do, stated because the first was the reason it was built. It does
-   not move the routing numbers: over the same 236 hook fires the eval screen's confirmed bucket went
-   60 → 63, three fires, not the ~26 a name-shape estimate predicted. Spot-checking the CamelCase
+   not move the routing numbers: over one corpus of 58,826 commands and 236 hook fires, the eval
+   screen's confirmed bucket went **59 → 63**, four fires, not the ~26 a name-shape estimate
+   predicted. (Method note, because it caught this measurement out once: `hook-probe` has no
+   `--since` and reads whatever transcripts are on disk when it runs, so a before/after has to be two
+   binaries run **back to back** — an earlier version of this paragraph compared a 57,143-command run
+   against a 58,637-command one and called them the same corpus.) Spot-checking the CamelCase
    symbols still rejected — `StellarHazard`, `UnitDestroyed`, `AnalyticsEngine`, `D1ExecResult` —
    none is declared anywhere in those repositories: they are dependency and std types, and `cort` has
    no seed for them either, so the rejections are correct. It does not cover `const`/`static`
