@@ -85,11 +85,59 @@ wins on both token count and success rate — [`evals/README.md`](evals/README.m
 Capability is per language, because the extractor pack is per language. Do not assume a verb works
 just because the binary runs.
 
-| Language | `struct` | `context` (symbol slice) | `read`/`recall` | `impact` (relationship graph) |
-|---|---|---|---|---|
-| TypeScript, TSX, JavaScript | yes | yes | yes | **yes** — `edge:calls` + `edge:imports` rules ship |
-| Python | yes | yes | yes | **yes** — same |
-| Rust | yes | **yes** (free functions, `impl`/trait methods as `Type::method`, `struct`/`enum`/`trait`) | **yes** | **partial** — bare, qualified `Type::method()`, module-path `crate::m::f()` via suffix + `use` (`edge:calls` + `edge:imports`), gated receiver `x.m()`, and type references to a `struct`/`enum`/`trait` (`edge:references`, bare and qualified). Not `const`/`static`; generic parameters are extracted and normally resolve to nothing |
+The `impact` column is split in two, because the old single column conflated them and the split
+changed the ranking. **Relations** is which kinds of edge exist at all; **call-shape coverage** is how
+much of one language's calling syntax the `calls` rules actually reach. Rust has the most relations
+and the least complete call coverage — those are not the same axis.
+
+| Language | `struct` | `context` (symbol slice) | `read`/`recall` | `impact`: relations | `impact`: call-shape coverage |
+|---|---|---|---|---|---|
+| TypeScript, TSX, JavaScript | yes | yes | yes | `calls` only | **whole** — one undifferentiated `call_expression` rule |
+| Python | yes | yes | yes | `calls` only | **whole** — same |
+| Rust | yes | **yes** (free functions, `impl`/trait methods as `Type::method`, `struct`/`enum`/`trait`) | **yes** | `calls` **+ `references`** | **partial** — bare, qualified `Type::method()`, module-path `crate::m::f()` via suffix + `use`, gated receiver `x.m()` |
+
+Rust's `references` edge covers a `struct`/`enum`/`trait` named in a type position, bare or qualified.
+It does **not** cover `const`/`static`, and generic parameters are extracted but normally resolve to
+nothing. TS/JS/Python have no equivalent: a type annotation, an `interface`, and `class A extends B`
+produce no edge in those languages today.
+
+Every language also ships an `edge:imports` rule, but **an import never becomes a dependent** — see
+the relations section below for why.
+
+## What relations the graph actually holds
+
+Three kinds of edge are emitted by the rule pack, and only two of them can ever produce a dependent
+row. The counts are this repository, indexed 2026-09-04.
+
+| Relation | Languages | Raw edges | Relationships | Produces a dependent? |
+|---|---|---:|---:|---|
+| `calls` | all five | 12,107 | 2,222 | **yes** |
+| `references` | **Rust only** | 3,327 | 492 | **yes** |
+| `imports` | all five | 416 | **0** | **no** |
+| `exports` | *none emit it* | 0 | 0 | — |
+
+Three facts a reader should not have to reconstruct from the limitations list:
+
+**An `imports` edge never becomes a relationship, by construction.** A top-level `use` or `import`
+belongs to no function chunk, so its raw edge carries an empty `source_symbol` and is dropped before
+resolution. Imports exist to narrow ambiguous call targets, nothing else. This is scope, not a defect
+to fix later: attaching a file-level import to some chunk would be inventing an answer. What a
+dropped import means for a caller set is disclosed by `--coverage` instead (limitation 11).
+
+**`exports` is dead vocabulary.** `chunker::EDGE_REL_TYPES` and the schema CHECK both allow it and no
+rule in `src/pack/rules/` emits it. It is listed here so nobody reads the schema and concludes the
+graph tracks exports.
+
+**"What implements this trait" is already answered, under another name.** In `impl Emit for FeedSpec`
+both `Emit` and `FeedSpec` are `type_identifier` nodes, so the Rust `references` rule attaches both.
+There is no separate `implements`/`inherits`/`extends` relation and none is planned: the edge exists,
+it carries the line that names the trait, and a distinct label would add a word rather than an answer.
+The honest gap is the other direction — TS/JS/Python have no type-reference rule at all, which is
+where `extends`, `implements` and type annotations live in those languages.
+
+There is no callee direction anywhere in the product. `impact` emits `dependents`; there is no
+`dependencies` verb, and `cort context` answers "what else deals with X" rather than "what does X
+call".
 
 For Rust, `cort context <symbol> --content full -f lean` is the supported use (that is the case the
 27k→89-token measurement below covers). Rust `impact` covers the indexed call shapes and resolves
