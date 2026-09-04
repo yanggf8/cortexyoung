@@ -15,8 +15,8 @@ Six shipped commands (plus `status`/`projects`/`delete` utilities):
 - `cort context <symbol-or-query>` — "what else deals with X" (exact symbol or FTS recall, depth-1 neighbours, ~1500-token budget; seed bodies are head-truncated to 12 lines, pass `--content full` for the whole body)
 - `cort impact --symbol <name[,name2,...]>` — "what breaks if I change X": reverse dependents to
   depth 3, accepting a comma-separated batch. In `lean`, each row carries the dependent's definition
-  line *and* the call site that ties it to the seed (`@626`), tagged with the call shape that attached
-  it (`bare` / `scoped` / `receiver`)
+  line *and* the site that ties it to the seed (`@626`), tagged with the shape that attached it
+  (`bare` / `scoped` / `receiver` / `type`)
 - `cort read <file> [--start N] [--end N]` — read a file or line range and persist it as a reading note; unchanged repeats come from SQLite
 - `cort recall <query>` — FTS lookup over previously read files/fragments (default 12-line heads; pass `--content full` for stored bodies)
 - `cort usage [days]` — local per-machine usage stats (best-effort; 1–90 days, default 30)
@@ -25,9 +25,11 @@ All query/read verbs take `-f lean`: the same answer in a compact agent-oriented
 fifth of the tokens of the default JSON. Agents should pass it; see [Token cost](#token-cost)
 below.
 
-Rust (`.rs`) is indexed through the pinned `ast-grep` 0.45.2 rule pack. Top-level functions and `impl`
-methods are stored as symbol-scoped chunks, so `cort context <symbol> --content full -f lean` returns one
-function body rather than forcing an agent to read a large source file.
+Rust (`.rs`) is indexed through the pinned `ast-grep` 0.45.2 rule pack. Top-level functions, `impl`
+methods and type declarations (`struct`, `enum`, `trait`) are stored as symbol-scoped chunks, so
+`cort context <symbol> --content full -f lean` returns one function body rather than forcing an agent to
+read a large source file — and `cort impact --symbol <Type>` answers for a type the way it does for a
+function. A type alias and a `const` are deliberately not chunks; see limitation 8.
 
 Reading notes are content-addressed and project-local. `cort read` records the exact file/range on first
 use and reports `source:"store"` on an unchanged repeat. Each entry carries file hash, size, and mtime;
@@ -87,7 +89,7 @@ just because the binary runs.
 |---|---|---|---|---|
 | TypeScript, TSX, JavaScript | yes | yes | yes | **yes** — `edge:calls` + `edge:imports` rules ship |
 | Python | yes | yes | yes | **yes** — same |
-| Rust | yes | **yes** (free functions, `impl`/trait methods as `Type::method`) | **yes** | **partial** — bare, qualified `Type::method()`, module-path `crate::m::f()` via suffix + `use` (`edge:calls` + `edge:imports`), and gated receiver `x.m()` |
+| Rust | yes | **yes** (free functions, `impl`/trait methods as `Type::method`, `struct`/`enum`/`trait`) | **yes** | **partial** — bare, qualified `Type::method()`, module-path `crate::m::f()` via suffix + `use` (`edge:calls` + `edge:imports`), gated receiver `x.m()`, and type references to a `struct`/`enum`/`trait` (`edge:references`, bare and qualified). Not `const`/`static`; generic parameters are extracted and normally resolve to nothing |
 
 For Rust, `cort context <symbol> --content full -f lean` is the supported use (that is the case the
 27k→89-token measurement below covers). Rust `impact` covers the indexed call shapes and resolves
@@ -154,7 +156,7 @@ With xgrep (opt-in):
 ./install.sh --with-xgrep # idempotent xg install + xgrep skill deploy
 ```
 
-## Upgrade note — index schema v3 and v4
+## Upgrade note — index schema v3, v4 and v5
 
 Schema v3 adds a `raw_edges` table: the unresolved call/import matches that the relationship graph
 is derived from. It exists because resolution spans files — re-indexing one file used to delete its
@@ -167,7 +169,17 @@ form exists because a receiver call (`tally.add()`) is resolved by a different r
 and the line exists so that one edge can be checked by reading one line. Both are carried into
 `impact` output (`@626 receiver`), and both are recorded for every edge, not only receiver ones.
 
-Nothing to do by hand in either case. An index written by an older cort is detected on first use,
+Schema v5 widens two CHECK constraints: `rel_type` gains `references` and `call_form` gains `type`.
+SQLite cannot alter a CHECK in place, so `relationships` and `raw_edges` are rebuilt in place, each
+inside its own transaction, with **every column named explicitly on both sides of the copy**. That
+last detail is not fussiness: `migrate_v4` adds its columns with `ALTER TABLE ADD COLUMN`, which
+appends, so a v3-then-v4 database carries `call_site_line`/`call_form` at the end while a fresh one
+from `schema.sql` carries them in the middle — five of eight columns differ, and a positional
+`SELECT *` copy would put `confidence` into `call_site_line`. This repo's own index was such a file;
+the upgrade was run against it and its 2,210 relationships and 12,463 raw edges came through with the
+column order afterwards identical to a fresh database.
+
+Nothing to do by hand in any of the three cases. An index written by an older cort is detected on first use,
 reported as stale, and rebuilt in full by the next `cort index --incremental` (which falls back to a
 full index while the graph is pending, then clears the marker). An older database is upgraded in
 place with `ALTER TABLE` — `CREATE TABLE IF NOT EXISTS` never adds a column to a table that already
@@ -353,8 +365,10 @@ set the flag for every one of 60 sampled seeds. What remains is the receiver gat
 6. **`--lang` is required on `struct`:** `cort struct -p '<pattern>' --lang <lang>` fails with `{"error":"missing_lang"}` if `--lang` is absent. It also drives the pattern pre-flight that turns a malformed pattern into `{"error":"parse_failed"}` instead of a silent empty result. The binary is `ast-grep`, never `sg`.
 7. **FTS tokenizer is bare `unicode61`:** the design calls for `unicode61 "remove_diacritics 1" "tokenchars ._$"`, but the bundled SQLite that ships with rusqlite 0.32 rejects every parameterised `unicode61` form (the JS reference via `better-sqlite3` had the same limit). Consequence: `cort context` keyword recall splits identifiers on `.`, `_` and `$` — searching `foo.bar` matches `foo` and `bar` separately, and diacritics are not folded. CJK still tokenizes. `src/schema.sql` carries a `NOTE` and reverting is one line once a SQLite build accepts the parameters.
 8. **`impact` is only as good as a language's edge rules:** the relationship graph indexes the call
-   shapes the language's `edge:calls`/`edge:imports` rules in `src/pack/rules/` capture. For Rust that
-   is three shapes — bare (`foo()`), qualified (`Type::method()`) and receiver (`x.method()`) — plus
+   shapes the language's `edge:calls`/`edge:imports`/`edge:references` rules in `src/pack/rules/`
+   capture. For Rust that is three call shapes — bare (`foo()`), qualified (`Type::method()`) and
+   receiver (`x.method()`) — plus a fourth, non-call shape (a `struct`/`enum`/`trait` named in a type
+   position, `call_form: type`, added 2026-09-04), plus
    module-path calls (`crate::m::f()`) resolved by name and module-path suffix with `use` statements
    feeding the same map; only the internal prefixes `crate::`, `self::`, `super::`, `::` are rescued,
    so a dependency call like `Vec::new` stays unresolved and visible instead of inventing an edge
@@ -362,6 +376,29 @@ set the flag for every one of 60 sampled seeds. What remains is the receiver gat
    module-path edges, all real (`usage::now_ms()`, `arms::resolve_binary()`, `coverage::attach()`), and
    narrowed six previously-`AMBIGUOUS` bare calls onto the module their `use` names; `Vec::new` (75
    sites), `fs::write` (44) and `String::new` (28) still attach nothing and stay visible as gaps.
+
+   **Type references (2026-09-04, measured).** `struct`, `enum` and `trait` declarations are chunks,
+   and a use of one in a type position is a `references` edge carrying the line that names it — so
+   `cort impact --symbol CallForm` went from `seeds=0 dependents=0` to `seeds=1 dependents=4`, each
+   row checkable by reading one line. Qualified paths keep their module: `settings::SettingsError`
+   and `settings_toml::SettingsError` are two live types in this repo, and each of `main.rs:1025`
+   and `:1036` attaches to its own definition. Graded on six type seeds: **146 of 146 dependents
+   confirmed**, and hand-adjudicating all 21 `SettingsError` rows for the phantom the grader cannot
+   see (an edge to the wrong same-named module) found **zero**. Cost, isolated on the same binary and
+   tree by removing the three rules: chunks 1,236 → 1,356, relationships 2,222 → 2,714, raw edges
+   12,463 → 15,850, index 978ms → 1,140ms (+17%).
+
+   Three things this does **not** do, stated because the first was the reason it was built. It does
+   not move the routing numbers: over the same 236 hook fires the eval screen's confirmed bucket went
+   60 → 63, three fires, not the ~26 a name-shape estimate predicted. Spot-checking the CamelCase
+   symbols still rejected — `StellarHazard`, `UnitDestroyed`, `AnalyticsEngine`, `D1ExecResult` —
+   none is declared anywhere in those repositories: they are dependency and std types, and `cort` has
+   no seed for them either, so the rejections are correct. It does not cover `const`/`static`
+   (`HOOK_TARGETS` still reports `seeds=0`): a const use is a plain `identifier` in this grammar,
+   indistinguishable without scope analysis from every local and parameter. And it does not exclude
+   generic parameters — `T` and `E` are extracted and normally resolve to nothing, but a project that
+   declares a real type by that name would get a phantom; measured at zero here, unmeasured
+   elsewhere.
 
    **Import edges themselves never become relationships** (2026-09-01, measured): a top-level `use`
    belongs to no function chunk, so its raw edge carries an empty `source_symbol` and drops before
