@@ -477,6 +477,66 @@ that pass only fixed recall and payload inside the four verbs that already ship,
 - `search` as a first-class verb (`cort search` — use `cort struct` / `cort context` instead)
 - `embeddings` / `cort embed --backfill` (`ALTER TABLE chunks ADD COLUMN embedding BLOB`, BGE, dense search, three-arm RRF)
 
+## Prior art — the two other ways a caller-set question gets answered
+
+Read at the versions named. Both of these move; quote them with their commit, the same rule this
+README applies to its own numbers.
+
+**Graphify** ([Graphify-Labs/graphify](https://github.com/Graphify-Labs/graphify), v0.9.53 at
+`33362d96`, read 2026-09-04) is the closest thing to this repo that exists. Tree-sitter extraction with
+no LLM anywhere in the code path, fully local, roughly 40 languages, a `calls` relation resolved across
+files, and `graphify affected` — a reverse traversal over fourteen relations by default (`calls`,
+`imports`, `inherits`, `dynamic_import`, …), which is `cort impact` under another name. Two of its
+choices are ahead of ours: its import resolution is far more complete than our suffix rule
+(`graphify/extractors/resolution.py`, 3,166 lines of tsconfig `paths`, `extends` chains, JSONC, pnpm
+workspaces, TS ESM `.js`→`.ts`), and `graphify/scip_ingest.py` ingests SCIP, a compiler-grade edge
+source `cort` has no equivalent of. It also reached, independently, the fix schema v4 landed here:
+`AffectedHit.via_location` is "the actual call/import/reference SITE in this node's file, not the
+node's own definition line" (`graphify/affected.py:40-42`). **Printing the call site is not a
+differentiator.**
+
+The divergence is what happens to an edge that does not resolve. `x.m()` is skipped as a class
+(`is_member_call`, `graphify/symbol_resolution.py:265` and `:336`), and a bare name whose candidates do
+not collapse to exactly one is skipped as well (`:352`) — both by a bare `continue` that records
+nothing. Its three confidence tiers (`EXTRACTED` 1.0, `INFERRED` 0.85, `AMBIGUOUS` 0.2,
+`graphify/export.py:177`) grade the edges it printed; nothing grades the ones it dropped. Graphify does
+make a completeness statement, but at the **rendering** layer — `_subgraph_to_text` refuses to truncate
+edges and prints `Complete answer over budget` rather than cutting silently
+(`graphify/serve.py:1111-1127`) — which answers *did the answer fit*, not *did the graph ever hold the
+edge*. `cort` puts its statement at the **resolution** layer instead: a call the extractor saw but
+resolution could not place stays unresolved and visible on purpose (`rust/src/graph.rs:191-194`) and
+surfaces as the `extracted_but_unresolved` row of `impact --coverage`. Our receiver gap is the same
+gap. The difference is that ours is a row you can read and count.
+
+The second divergence is routing, and it decides whether any of the rest is ever used. Graphify's hooks
+are git hooks (`post-commit`/`post-checkout`, `graphify/hooks.py`) that rebuild the graph — the job
+`cort hook-refresh` does on `PostToolUse`. Nothing intercepts the agent's search. Routing is prose
+injected into `CLAUDE.md`/`AGENTS.md`/`GEMINI.md` (`graphify/always_on/`), escalating to "This applies
+to YOU and to every subagent you spawn … Do not skip graphify because files are 'already known'"
+(`graphify/install.py:1115`). That is the arm measured here at 409 searches and zero `cort` calls in
+skill-bearing sessions, and it is why the routing rule lives in `rust/src/hook.rs` on `PreToolUse`.
+
+Its numbers are not comparable to the ones above and should not be set beside them. Graphify's own
+`BENCHMARKS.md` reports the code-intelligence result as ERPNext (~1M LOC), **n=6** graded questions,
+key-fact coverage 70.8% → 82.0%, at **~140K tokens per query** — an accuracy claim, not a token claim.
+The widely quoted "71.5x fewer tokens" is a worked example over a 52-file corpus mixing code, papers and
+images, with no published methodology; it is the same shape as this README's deterministic-probe column
+(14.8x / 67x / 62x), not as its end-to-end 992-token, 10-of-10 cell. Graphify's headline suite is
+conversational memory (LOCOMO, LongMemEval-S), where the code graph is one input among several.
+
+**LSP bridges** — `agent-lsp`, `mcpls`, `lsp-mcp-server`, `karellen-lsp-mcp` and the rest of that family
+expose `callHierarchy/incomingCalls` as an MCP tool. They beat `cort` on soundness outright: a language
+server resolves receivers and generics that a name-resolved graph can only gate. What they cannot do is
+the third clause — `incomingCalls` returns a list with no field saying whether the list is whole, and a
+server that failed to index a file returns fewer results rather than an admission. They also need a
+working build, which is the condition under which `cargo check` is the better answer anyway; see `What
+each language actually gets` above, which already routes Rust caller precision to the compiler.
+
+**What this leaves.** Cheapness has several credible implementations and Graphify is one of them.
+Per-edge checkability has two — ours, and any LSP that returns a location. Nothing read so far states
+whether an enumeration is complete. That is the clause `impact --coverage` exists for, and the only one
+of the three where being first still means anything.
+
 ## Archival access to V6
 
 Cortex V6 (AST chunking, embeddings, Turso, relationship graph, `cortex` CLI) is archived at tag `v6-final`:
