@@ -755,9 +755,41 @@ file-exists test and let the hook announce an index on a tree where `impact` cou
 `no_seed_resolved`. When the index is real but built on an older commit, the injected text says
 so and tells you to re-run `cort index`.
 
+**It asks about the symbol, not just the project (2026-09-05).** Until this change the gate answered
+"can `cort` answer anything here" while the agent needed "can it answer *this*". Measured over the 110
+fires that landed in projects which do have an index, by running the suggested command in each:
+**74 (67%) returned `seeds=0 dependents=0`** — a constant, a dependency type, a struct field or a
+domain word. An empty answer is worse than silence, because it teaches the agent the hook is noise.
+
+The predicate now asks the index directly, and fires when it holds **a seed or a raw edge naming the
+symbol**. The second half is not an afterthought: `reindex_one_file` drops a changed file's chunks
+and the `PostToolUse` hook re-indexes on every edit, so a just-deleted symbol has no seed — and
+"verify this deletion is complete" is the exact task the goal sentence names. `raw_edges` outlives
+the `chunks` row it pointed at (schema F-01), so the surviving caller's edge is what keeps that
+search firing. Gating on a seed alone would have silenced the single case worth the most.
+
+Measured on the same 110 fires: 36 have a seed, 14 have only a raw edge, 60 have neither. Firing on
+seed-or-edge cuts empty answers from **74 to 14** and leaves the deletion case untouched. Live on
+this machine after deployment: `tide(`, `HOOK_TARGETS` and `owner` are silent; `compose_symbol_name(`,
+`CallForm` and `evidence_in(` still get their suggestion.
+
+Two costs, both stated rather than buried. The lookup runs **only after every shape check passes** —
+about one search in twenty — because the `raw_edges` half is a scan of the project's raw edges
+(~2.95ms over 15,850 rows here), and the hook's whole budget is 5s with `git rev-parse` already
+allowed 400ms of it. And the deletion case still *fires* while `impact` still answers `seeds=0`
+there: this change declines to make that worse, it does not fix it. Fixing it needs a tombstone
+capability (`docs/2026-09-04-hook-precision-and-the-seed-gate.md` §10 exit B).
+
 **What it records.** Each fire appends one `hook-suggest` row to the same local `usage.db`
-described above, tagged with the outcome it reached: `hit`, `hit_stale`, `no_index`, `no_shape`
-or `no_payload`. Rows written before outcome recording existed read as `legacy_unsplit` and are
+described above, tagged with the outcome it reached: `hit`, `hit_stale`, `no_index`, `no_shape`,
+`no_evidence` or `no_payload`. `no_index` and `no_evidence` are different silences and the split is
+the point:
+`no_shape` is "not a caller-set question", `no_index` is a **missed opportunity** (index the project
+and the hook would help), and `no_evidence` is a **correct refusal** (the project is indexed and
+holds nothing about this symbol). Measured in the hour after deployment on this machine:
+60 `no_shape`, 5 `no_evidence`, 4 `hit`.
+
+Rows written before outcome recording existed read as `legacy_unsplit` and are
 attributable to neither side. `cort usage` rolls up counts only; the outcome split is read by
 `cort-evals adopt-mine`, whose cross-check refuses to compare two sides drawn from different
 populations rather than quietly reporting a ratio across them.

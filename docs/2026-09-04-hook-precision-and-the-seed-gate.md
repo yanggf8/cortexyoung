@@ -199,7 +199,7 @@ blind	unparsed=2	unindexed=0	unread=-
 編譯器級證明」。沒有別的 cort 指令能更好地做刪除檢查,所以這是**警語不是替代指令**;它是否比沉默好
 要量了才知道。
 
-**丁:把謂詞放寬到「有種子 **或** 有 raw edge 指名它」。這是選定的方向。**
+**丁:把謂詞放寬到「有種子 **或** 有 raw edge 指名它」。已於 2026-09-05 出貨。**
 
 甲的兩難建立在一個未經檢查的前提上:被刪除的符號在索引裡什麼都不剩。**不對。** `raw_edges` 因為
 跨檔重建的理由獨立於 `chunks` 存活(schema 的 F-01 註解),所以倖存的呼叫端還指名著被刪掉的目標。
@@ -235,6 +235,64 @@ C 桶正是問題的來源——`tide`、`owner`、`chart` 在 `raw_edges` 裡�
 丁也繞開了 §6 的兩難:謂詞在刪除案例上回答「開火」,所以放 `judge` 或放 `cmd_hook_suggest` 都不會
 讓 `tests/hook.rs:108-116` 變紅。判決仍應單一(進 `judge`),但那是為了 `hook-probe` 能重放,不再是
 一個要付代價的選擇。
+
+### 出貨結果(2026-09-05)
+
+實作分四個 commit(`9b03e47c`、`26e63529`、`9053bd3b`、`36d258e7`),計畫與三輪審查記在
+`docs/superpowers/plans/2026-09-04-hook-seed-or-edge-predicate.md`(20 列 review record)。
+
+謂詞最終比 §10 的預測**更緊**一格。審查指出 `evidence_in` 該精確鏡射 `coverage::extracted_but_unresolved`,
+包含它的 `rel_type IN ('calls','references')` 過濾——少了那個過濾,`imports` 邊會混進來。加上過濾後重測:
+
+| | 開火 | 空答案 |
+|---|---:|---:|
+| 改前 | 110 | 74 (67%) |
+| 預測(未過濾 rel_type) | 57 | 21 (19%) |
+| **出貨(過濾後)** | **50** | **14 (13%)** |
+
+7 次從「有 raw edge」移到「兩者皆無」,零損失——`imports` 邊本來就永遠不會變成 relationship。
+
+**漏的是哪一種 import,值得寫下來,因為第一版寫錯了。** 審查的說法(以及我照抄進 doc comment 的說法)
+是 JS/TS 的 `./tide` 尾巴撞上 `LIKE '%.' || 'tide'`。**不對**,實測:
+
+```
+./tide              %.tide=0  %:tide=0
+crate::gone::tide   %.tide=0  %:tide=1     <- 真正會漏的
+```
+
+`./tide` 結尾是 `/tide` 不是 `.tide`,兩個 arm 都不配。真正洩漏的是 **Rust 的 `use`**——
+`use crate::gone::tide;` 存下的路徑結尾是 `:tide`,撞上 `%:` 那個 arm。7 次的數字是真的,成因是錯的,
+而它之所以被抓到,是因為我為這個過濾器補測試時發現原本的 fixture(JS import)**根本紅不起來**。
+從審查抄一句解釋而不先驗,是這整輪唯一一次我沒照自己的規矩做。
+
+部署後在本機實測,六個符號:
+
+```
+compose_symbol_name(   SUGGEST      tide(          silent
+CallForm               SUGGEST      HOOK_TARGETS   silent
+evidence_in(           SUGGEST      owner          silent
+```
+
+而歸屬也對,這是 §10 的新約束要求「改完拿什麼量它」的答案——真實 `usage.db`,部署後一小時:
+
+```
+  60  no_shape
+   5  no_evidence      <- 新 outcome
+   4  hit
+```
+
+`no_evidence` 是**正確的拒絕**(專案有索引,但索引裡沒有這個符號),與 `no_index` 的**錯失機會**
+分開計數。`hook-probe` 量不到這一半(它只能重放形狀),所以 `usage.db` 是唯一的量測面,而
+`shape_fired` 家族改名就是為了讓這件事在報告裡說得出口。
+
+三輪審查各自抓到不同的東西,值得記:Codex 在 v1 抓到兩個 blocker(第一個 commit 編不過、漏掉
+`index_state` 第二個呼叫端);v2 我自己抓到兩個(`no_index` 被窄化、開火路徑探測兩次);Kimi 在 v2.1
+抓到兩個 blocker 加四個 major,包括我點名要它找的那一類——**沒有任何測試斷言新 outcome 會進到
+`usage.db`**。兩種沉默的 stdout 都是 `{}`,所以把 `NoEvidence` 接錯成 `"no_index"` 會讓全部測試照樣綠,
+而這整個改動要產出的量測永遠不會多出那一列。那條斷言現在在 `rust/tests/cli.rs`。
+
+Kimi 預言的 blocker 在實作時**真的發生了**:更新完全部呼叫端、`cd rust && cargo test` 419 綠——
+而 evals crate 編不過。計畫寫「每個 task 驗兩個 crate」擋下了一個會靜默提交的破口。
 
 ### 角度三(注入答案而非指令)已排除
 
