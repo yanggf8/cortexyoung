@@ -810,3 +810,59 @@ fn a_gitignored_file_is_disclosed_as_unindexed_rather_than_silently_dropped() {
         "the row has to name the file, because the instruction is read the rows: {blind}"
     );
 }
+
+/// The suppression half. A reference edge that WAS built must not also be reported as a missing one,
+/// or a type seed's screen is pure noise and the boolean is permanently true. This is what
+/// `extracted_edges` covering `references` buys: left filtering `calls` only, every resolved type
+/// reference would appear in both columns at once.
+#[test]
+fn a_resolved_type_reference_is_not_also_reported_as_a_mention_gap() {
+    let (_dir, root, db, project_id, bin) = indexed(&[(
+        "src/lib.rs",
+        "pub struct FeedSpec { pub url: String }\npub fn take(s: FeedSpec) -> u8 { 1 }\n",
+    )]);
+    let cov = coverage_of(&db, &project_id, &root, &bin, "FeedSpec");
+    let seed = &cov["seeds"][0];
+    let mentions = seed["mentions_without_edge"].as_array().unwrap();
+    assert!(
+        !mentions.iter().any(|m| m["line"].as_i64() == Some(2)),
+        "line 2 has an edge; it is not a gap: {cov}"
+    );
+    assert_eq!(
+        seed["enumeration_may_be_incomplete"].as_bool(),
+        Some(false),
+        "a clean, fully-resolved type answer says so: {cov}"
+    );
+}
+
+/// The disclosure half. A reference the extractor SAW but resolution could not place must be named.
+/// The fixture uses a qualified path to a module the project does not contain: the suffix resolver
+/// finds no chunk whose module path ends in `nowhere`, so the edge is dropped -- unlike a bare
+/// multi-candidate name, which attaches as AMBIGUOUS rather than being dropped (`graph.rs`, the
+/// comment above `resolve_edge_targets`). Getting that distinction wrong is how the first draft of
+/// this test asserted a path it could never reach.
+#[test]
+fn a_dropped_type_reference_is_reported_as_an_unresolved_extraction() {
+    let (_dir, root, db, project_id, bin) = indexed(&[
+        ("src/real.rs", "pub struct Widget { pub x: u8 }\n"),
+        (
+            "src/user.rs",
+            "pub fn take(w: nowhere::Widget) -> u8 { 1 }\n",
+        ),
+    ]);
+    let cov = coverage_of(&db, &project_id, &root, &bin, "Widget");
+    let seed = &cov["seeds"][0];
+    let unresolved = seed["extracted_but_unresolved"].as_array().unwrap();
+    assert!(
+        unresolved
+            .iter()
+            .any(|r| r["raw_target"].as_str() == Some("nowhere::Widget")
+                && r["file_path"].as_str() == Some("src/user.rs")),
+        "the dropped reference is named, not silently absent: {cov}"
+    );
+    assert_eq!(
+        seed["enumeration_may_be_incomplete"].as_bool(),
+        Some(true),
+        "a named gap flips the boolean: {cov}"
+    );
+}
