@@ -160,17 +160,57 @@ CLAUDE.md 要求**解析可以多份,判決只能一份**——`hook-probe` 重�
 **任何 before/after 都必須兩個 binary 背靠背跑**,否則語料會在中間漂掉。這個坑是工具自己缺一個旗標
 造成的,所以它會反覆咬人。
 
-## 9. 兩條出路
+## 9. 一條被實證排除的路
 
-**甲:接受損失。** 種子閘門上,改掉 `tests/hook.rs:107-116`,並在 SKILL 與 README 明說「刪除驗證」
-這條路不再由 hook 提示。換到的是 110 次 fire 裡 75 次轉為安靜、0 次空答案、35 次保留。
+在寫下兩條出路之前,有第三條看起來能同時解決兩難:**也許 `seeds=0` 的建議對刪除驗證並不是空答案。**
+`cort impact --symbol X --coverage` 對一個不存在的符號,直覺上該回報 mention 列與 blind files——
+而「這個名字還在哪些行出現」正是「刪除完成了嗎」要問的東西。若成立,閘門的條件就該是
+「`seeds=0` **且沒有 mention**」而非「`seeds=0`」,測試不必紅,刪除驗證不必犧牲。
 
-**乙:先給 `impact` 墓碑能力。** 讓被刪除的符號在索引裡留下可回答的殘跡(懸空目標解析),種子閘門才
-不會殺掉刪除驗證。這是另一個計畫,而且它會動到 `incremental.rs` 的刪除語意。
+**不成立。** 實測一個有 3 處提及、沒有種子的符號:
 
-兩者都不該在沒有決定之前實作。這份文件的用途是讓那個決定有據可依。
+```
+$ cort impact --symbol HOOK_TARGETS --depth 1 --coverage -f lean
+# impact HOOK_TARGETS depth=1 seeds=0 dependents=0 stale=false
+coverage	no_seed_resolved	not a clean answer: nothing was looked at
+blind	unparsed=2	unindexed=0	unread=-
+```
 
-## 10. 這一輪關於審查的結論
+一條 mention 列都沒有。病因在 `rust/src/coverage.rs:204`:種子為空時 `attach` 直接 `return Ok(())`,
+做 mention 掃描的 `coverage_for`(`:206`)根本不會被呼叫。`render.rs` 那句
+"not a clean answer: nothing was looked at" 說的是字面意思。
+
+所以 `seeds=0` 是一個**誠實的成功非答案**,不是刪除驗證。第三條路關閉。
+
+## 10. 兩條出路,以及一個新約束
+
+**甲:接受損失。** 種子閘門放進 `judge`(判決必須單一,見 §6),`tests/hook.rs:108-116` **移到
+`rust/tests/cli.rs` 並反轉**——建一個不含該符號的已索引專案,跑同一條刪除驗證 grep,斷言 payload 為
+空加上 `no_seed` outcome。從「必須開火」變成「必須沉默」。SKILL 與 README 要明說刪除驗證不再由 hook
+提示。換到的是 110 次 fire 裡 75 次轉為安靜、0 次空答案、35 次保留。
+
+**乙:先給 `impact` 墓碑能力。** 讓被刪除的符號留下可回答的殘跡(懸空目標解析),閘門才不會殺掉刪除
+驗證。這會動到 `incremental.rs:243` 的刪除語意,是另一個計畫。
+
+**丙(降級,而非沉默)。** `Option<HookHit>` 換成 `HookDecision::{Impact, NoSeed}`,`NoSeed` 不注入
+`impact` 建議而注入警語:「沒有索引種子,`impact` 無法列舉呼叫者——保留字面 grep,不要把空結果當成
+編譯器級證明」。沒有別的 cort 指令能更好地做刪除檢查,所以這是**警語不是替代指令**;它是否比沉默好
+要量了才知道。
+
+### 新約束:種子閘門一旦上線,歷史重放就不再誠實
+
+這是原本沒寫到的,而它比表面上重。`judge` 現在只吃一個 `Search`;要讓它問種子,得把證據傳進去
+(`judge(search, seed_state)`——資料庫不該進 `judge`)。但**歷史語料拿不回當時的索引狀態**:
+`hook-probe` 只能從 transcript 還原命令與 cwd,然後看**今天**的檔案系統
+(`evals/src/hook.rs:353-412`)。那 236 次 fire 發生時,各專案的索引是什麼狀態,不可回溯。
+
+所以舊記錄只能給 `SeedState::Unknown` 或整批排除在種子閘門的指標之外。而 `hook-probe` 是這個產品
+**唯一**的校準工具。這一條與 §8 的「沒有時間窗」疊起來:重放本來就讀今天的磁碟,現在還要多一個
+不可回溯的維度。
+
+任何採用甲或丙的計畫,都必須先回答「改完之後要拿什麼量它」。
+
+## 11. 這一輪關於審查的結論
 
 三輪外部審查(Codex ×3、Kimi ×1)加上逐條 corroborate,規律很一致:
 
@@ -181,3 +221,6 @@ CLAUDE.md 要求**解析可以多份,判決只能一份**——`hook-probe` 重�
   就對 `FeedSpec` 開火。它打到的是**可量測性**,不是**有沒有打中**。另一次它把 `impact.rs:37` 說成
   走圖,實際上遞迴查詢(`graph.rs:781`)根本沒有 `rel_type` 條件。
 * **所以 corroborate 不能省**,而且要對源碼逐行,不是重讀它的論證。
+* **但方向是雙向的。** §9 那條路是我提的,我還特地在提問時寫明「這是我最想被攻擊的一點」而不先講
+  結論。Codex 直球否定,附上 `coverage.rs:150-204` 的 early return,實測一跑就證實了。**先假設自己
+  對、只用審查者找對方的錯,會漏掉這種。** 把自己的假設也送進去被打,成本一樣低。
