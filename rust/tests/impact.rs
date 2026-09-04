@@ -261,3 +261,52 @@ fn only_the_three_internal_rust_prefixes_are_rescued() {
         );
     }
 }
+
+/// The measured gap this whole change exists for: before it, this returned `seeds=0`.
+#[test]
+fn a_struct_reports_the_functions_that_name_it() {
+    let (_dir, root, db, project_id, bin) = indexed(&[(
+        "src/lib.rs",
+        "pub struct FeedSpec { pub url: String }\npub fn take(s: FeedSpec) -> u8 { 1 }\n",
+    )]);
+    let out = impact_command(&db, &bin, &root, &project_id, "FeedSpec", 1).unwrap();
+    assert_eq!(
+        out["seed_count"].as_i64(),
+        Some(1),
+        "the struct resolves as a seed: {out}"
+    );
+    let deps = out["dependents"].as_array().unwrap();
+    assert_eq!(deps.len(), 1, "one function names the type: {deps:?}");
+    assert_eq!(deps[0]["symbol_name"].as_str(), Some("take"));
+    assert_eq!(deps[0]["call_form"].as_str(), Some("type"));
+    assert_eq!(
+        deps[0]["call_site_line"].as_i64(),
+        Some(2),
+        "the line that names the type, so one read checks the edge"
+    );
+}
+
+/// The v1 stop-ship, as a test. Two same-named types in different modules, each used by qualified
+/// path: the qualifier is the only thing that can tell them apart, and a leaf-only capture would
+/// attach BOTH to BOTH -- a phantom no screen in this product can see, because `impact` drops
+/// confidence, coverage counts any edge to the seed as resolved, and `verify-impact` only checks
+/// that the printed line contains the word.
+#[test]
+fn a_qualified_type_reference_resolves_to_the_module_it_names() {
+    let (_dir, root, db, project_id, bin) = indexed(&[
+        ("src/settings.rs", "pub enum SettingsError { Io }\n"),
+        ("src/settings_toml.rs", "pub enum SettingsError { Io }\n"),
+        (
+            "src/main.rs",
+            "pub fn from_json(e: settings::SettingsError) -> u8 { 1 }\n",
+        ),
+    ]);
+    let out = impact_command(&db, &bin, &root, &project_id, "SettingsError", 1).unwrap();
+    let deps = out["dependents"].as_array().unwrap();
+    assert_eq!(
+        deps.len(),
+        1,
+        "exactly one dependent -- attaching to both definitions is the phantom: {deps:?}"
+    );
+    assert_eq!(deps[0]["symbol_name"].as_str(), Some("from_json"));
+}

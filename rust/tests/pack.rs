@@ -399,3 +399,100 @@ fn without_the_override_the_default_is_the_repo_pack() {
     set_pack_env(None);
     assert!(pack_dir().join("sgconfig.yml").exists());
 }
+
+/// A Rust type declaration must produce a chunk, and a use of that type must produce a reference
+/// edge. Three properties are load-bearing and asserted separately below:
+///   * a declaration's own name is not a reference to itself, or every type would be its own
+///     dependent -- and `union_item` and `associated_type` are distinct nodes that each need saying;
+///   * a qualified use keeps its qualifier, because `settings::SettingsError` and
+///     `settings_toml::SettingsError` are two different types in this very repository and the
+///     module-suffix resolver cannot tell them apart once the path is gone;
+///   * a primitive is not a `type_identifier` at all, so it costs nothing and needs no rule.
+#[test]
+fn the_pack_extracts_rust_type_chunks_and_reference_edges() {
+    let _g = pack_guard();
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("k.rs");
+    fs::write(
+        &file,
+        [
+            "pub struct FeedSpec { pub url: String }",
+            "pub enum SkillStatus { Ok, Degraded }",
+            "pub trait Emit { type Sink; fn emit(&self); }",
+            "pub union Raw { a: u8, b: u16 }",
+            "type Alias = u8;",
+            "pub fn take(s: FeedSpec) -> SkillStatus { SkillStatus::Ok }",
+            "pub fn qualified(e: settings::SettingsError) -> u8 { 1 }",
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+    let bin = resolve_ast_grep_bin().expect("ast-grep on PATH");
+    let sg = sgconfig();
+    let r = exec_ast_grep(
+        &bin,
+        &[
+            "scan",
+            "--json=stream",
+            "--config",
+            sg.to_str().unwrap(),
+            file.to_str().unwrap(),
+        ],
+        ExecOpts::default(),
+    )
+    .unwrap();
+    assert_eq!(r.code, 0);
+    let records: Vec<serde_json::Value> = r
+        .stdout
+        .trim()
+        .split('\n')
+        .filter(|l| !l.is_empty())
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+
+    let mut chunks: Vec<String> = records
+        .iter()
+        .filter(|x| x["message"] == "chunk:class")
+        .map(|x| {
+            x["metaVariables"]["single"]["NAME"]["text"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
+        .collect();
+    chunks.sort();
+    assert_eq!(
+        chunks,
+        ["Emit", "FeedSpec", "SkillStatus"],
+        "struct, enum and trait become class chunks; an alias and a union do not"
+    );
+
+    let mut refs: Vec<String> = records
+        .iter()
+        .filter(|x| x["message"] == "edge:references:type")
+        .map(|x| {
+            x["metaVariables"]["single"]["CALLEE"]["text"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
+        .collect();
+    refs.sort();
+    assert_eq!(
+        refs,
+        [
+            "FeedSpec",
+            "SkillStatus",
+            "String",
+            "settings::SettingsError"
+        ],
+        "uses are references, declarations are not, and a qualified use keeps its path"
+    );
+
+    for own_name in ["Sink", "Alias", "Raw", "u8", "u16"] {
+        assert!(
+            !refs.iter().any(|r| r == own_name),
+            "{own_name} must not be a reference: {refs:?}"
+        );
+    }
+}

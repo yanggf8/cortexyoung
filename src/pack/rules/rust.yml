@@ -88,3 +88,63 @@ language: Rust
 severity: hint
 message: edge:imports
 rule: { kind: use_declaration, has: { field: argument, pattern: $SRC } }
+---
+# struct / enum / trait become `chunk:class`, the bucket JS/TS/Python type declarations already use.
+# A dedicated `chunk_type` would mean widening the CHECK on `chunks` and rebuilding its
+# external-content FTS mirror for a label the chunk's own content already shows.
+#
+# `type_item` (a plain alias) and `union_item` are deliberately NOT chunks: an alias has no body to
+# slice, and a union's members are not a caller set anyone asks about. Both still have their own
+# names excluded from the reference rule below -- not being a chunk is not the same as being a use.
+id: cort-rust-chunk-type
+language: Rust
+severity: hint
+message: chunk:class
+rule:
+  any:
+    - { kind: struct_item, has: { field: name, pattern: $NAME } }
+    - { kind: enum_item, has: { field: name, pattern: $NAME } }
+    - { kind: trait_item, has: { field: name, pattern: $NAME } }
+---
+# Two reference rules, for the same reason there are two call rules: a qualified target must keep its
+# path. `settings::SettingsError` and `settings_toml::SettingsError` are both live in this repo, and
+# the module-suffix branch of `graph::resolve_targets` only runs when the stored target contains
+# `::`. Capture the leaf alone and both definitions match, both are written AMBIGUOUS, and no screen
+# this product has can see the phantom -- `impact` drops confidence, coverage counts any edge to the
+# seed as resolved, and `verify-impact` only asks whether the line contains the word.
+id: cort-rust-edge-references-scoped
+language: Rust
+severity: hint
+message: edge:references:type
+rule:
+  kind: scoped_type_identifier
+  pattern: $CALLEE
+---
+# The bare half. The `not` drops each declaration's OWN name -- `associated_type` and `union_item`
+# are distinct nodes from `type_item` in this grammar and each needs naming, or a trait cites its own
+# associated type and a union cites itself -- and drops any leaf already covered by the scoped rule,
+# so one qualified path yields one edge rather than two.
+#
+# Generic parameters (`T`, `E`) are knowingly NOT excluded: ast-grep cannot do the scope analysis, a
+# single-uppercase-letter regex is a naming convention pretending to be semantics, and `T` resolves
+# to nothing unless the project declares a real type by that name. Primitives need no rule either --
+# `u8` is a `primitive_type`, a different node, so it never enters the graph at all.
+id: cort-rust-edge-references-bare
+language: Rust
+severity: hint
+message: edge:references:type
+rule:
+  kind: type_identifier
+  pattern: $CALLEE
+  not:
+    any:
+      - inside:
+          any:
+            - { kind: struct_item }
+            - { kind: enum_item }
+            - { kind: union_item }
+            - { kind: trait_item }
+            - { kind: type_item }
+            - { kind: associated_type }
+          field: name
+      - inside: { kind: scoped_type_identifier }

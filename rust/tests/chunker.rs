@@ -676,10 +676,10 @@ fn an_import_edge_keeps_the_matched_node_line_because_it_has_no_callee() {
     assert_eq!(out.edges[0].raw_target, "crate::lib::T");
 }
 
-/// The pack side of v4: three Rust call shapes, three forms. This is the only test that reads the
-/// real grammar, because `method_call_expression` does not exist in the Rust grammar ast-grep
-/// 0.45.2 ships -- a rule written against it matches nothing and looks exactly like a file with no
-/// method calls in it.
+/// The pack side of v4 and v5: three Rust call shapes plus the type form, four forms in all. This is
+/// the only test that reads the real grammar, because `method_call_expression` does not exist in the
+/// Rust grammar ast-grep 0.45.2 ships -- a rule written against it matches nothing and looks exactly
+/// like a file with no method calls in it.
 #[test]
 fn the_rust_pack_tags_each_call_shape_with_the_form_it_is() {
     let body = concat!(
@@ -699,11 +699,15 @@ fn the_rust_pack_tags_each_call_shape_with_the_form_it_is() {
     assert_eq!(
         got,
         [
+            // Two type references: `impl T` names T, and `go(t: &T)` names it again. Both are
+            // real uses -- the declaration on line 1 is excluded, or T would be its own dependent.
             // The head, receiver included: `graph::receiver_binds` needs it, and it is what makes
             // the edge checkable at a glance instead of at a guess.
             ("receiver".to_string(), "t.take".to_string()),
             ("scoped".to_string(), "T::take".to_string()),
             ("scoped".to_string(), "crate::free".to_string()),
+            ("type".to_string(), "T".to_string()),
+            ("type".to_string(), "T".to_string()),
         ],
         "{out:?}"
     );
