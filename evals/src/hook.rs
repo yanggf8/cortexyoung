@@ -25,16 +25,30 @@ use std::path::{Path, PathBuf};
 /// Does this line declare `name` as something `impact` could hold a seed for? Returns the keyword
 /// that decided it, so a verdict can be quoted rather than trusted.
 ///
-/// Narrower than `recall::declared_names`, deliberately. That scanner accepts every declaration
-/// keyword including `const`, `static` and `let`, which is right for counting what a rule could
-/// bind to and wrong here: a constant and a struct field are declared and are not callable, and
-/// treating them as seeds is what made `TIMEOUT_S` and `trace_file` pass the first index check.
-pub fn declares_callable_in(line: &str, name: &str) -> Option<&'static str> {
+/// The question is "does the pack chunk this", NOT "is this callable" -- those stopped being the
+/// same question when struct, enum and trait became `chunk:class` records. A type is now a seed and
+/// has to be counted as one, or the screen keeps filing every `FeedSpec` fire under
+/// `rejected_not_a_seed` and the improvement it measures is invisible to it.
+///
+/// Still narrower than `recall::declared_names`, deliberately. That scanner accepts every
+/// declaration keyword including `const`, `static` and `let`, which is right for counting what a
+/// rule could bind to and wrong here: nothing chunks a constant or a struct field, so `impact` has
+/// no seed to offer for one. Treating them as seeds is what made `TIMEOUT_S` and `trace_file` pass
+/// the first index check.
+pub fn declares_seedable_in(line: &str, name: &str) -> Option<&'static str> {
     for (kw, tag) in [
         ("fn ", "fn"),
         ("function ", "function"),
         ("def ", "def"),
         ("fn(", "fn"),
+        // `class` is not new capability -- the TS/JS/Python packs have emitted `chunk:class` for a
+        // class declaration since before this screen existed. Its absence here was an undercount of
+        // what `impact` could already answer. TS `interface` and `type` are deliberately absent:
+        // nothing in the pack chunks them, so a seed does not exist to be found.
+        ("class ", "class"),
+        ("struct ", "struct"),
+        ("enum ", "enum"),
+        ("trait ", "trait"),
     ] {
         let mut rest = line;
         while let Some(at) = rest.find(kw) {
@@ -89,8 +103,8 @@ impl DeclCheck {
     /// per-fire label can never drift apart.
     pub fn verdict(self) -> &'static str {
         match self {
-            DeclCheck::Declared => "confirmed_function",
-            DeclCheck::NotDeclared => "rejected_not_a_function",
+            DeclCheck::Declared => "confirmed_seed",
+            DeclCheck::NotDeclared => "rejected_not_a_seed",
             DeclCheck::TreeMissing => "unchecked_tree_missing",
             DeclCheck::NoSourceRead => "unchecked_no_source_this_screen_reads",
         }
@@ -110,7 +124,7 @@ pub fn declares_function(root: &Path, symbol: &str) -> DeclCheck {
             return;
         }
         for line in text.lines() {
-            if declares_callable_in(line, bare).is_some() {
+            if declares_seedable_in(line, bare).is_some() {
                 found = true;
                 return;
             }
@@ -449,17 +463,25 @@ pub fn probe(dirs: &[(&str, PathBuf)], max_examples: usize) -> Value {
         "fire_rate_shell": rate(fired_shell, shell_searches),
         "fire_rate_structured": rate(fired_structured, structured_searches),
         "index_check": {
-            "confirmed_function": confirmed,
-            "rejected_not_a_function": rejected,
+            "confirmed_seed": confirmed,
+            "rejected_not_a_seed": rejected,
             "unchecked_tree_missing": tree_missing,
             "unchecked_no_source_this_screen_reads": no_source,
         },
-        "confirmed_callable_in_searched_tree": confirmed,
+        "confirmed_seeds_in_searched_tree": confirmed,
         "distinct_symbols": symbols.len(),
         "symbols": symbols,
         "fires": fires,
         "passed_over_examples": passed_over,
-        "index_check_reading": "`index_check` is reported, NOT applied. Gating on it was measured and \
+        "index_check_reading": "The buckets were renamed on 2026-09-04, when struct, enum and trait \
+                    became chunks the pack extracts: `confirmed_function`/`rejected_not_a_function` \
+                    are now `confirmed_seed`/`rejected_not_a_seed`, and the question is 'does the \
+                    pack chunk this', not 'is this callable'. A type fire therefore moves from the \
+                    rejected bucket to the confirmed one, so any figure quoted from a run before \
+                    that date -- the 63% rejected share among 236 fires, for one -- counts a \
+                    different population on the same corpus and is NOT comparable to a later run. \
+                    Re-measure rather than subtract. `index_check` is reported, NOT applied. \
+                    Gating on it was measured and \
                     is wrong in both directions. It rejects the highest-value case there is: a symbol \
                     being checked for complete removal has no declaration left in the tree, which is \
                     the whole reason the agent is searching -- `ensureSeedUserPasswords`, verbatim \

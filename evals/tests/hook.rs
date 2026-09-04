@@ -2,7 +2,7 @@
 //! stand-in for the seed check. The matcher itself moved to `cort::hook` so the measured rule and
 //! the installed rule cannot drift; its fixtures moved with it to `rust/tests/hook.rs`.
 
-use cort_evals::hook::{commands_of_line, declares_callable_in};
+use cort_evals::hook::{commands_of_line, declares_seedable_in};
 
 #[test]
 fn both_transcript_dialects_yield_their_executed_commands() {
@@ -22,28 +22,42 @@ fn both_transcript_dialects_yield_their_executed_commands() {
 /// are not callable.
 #[test]
 fn the_index_check_asks_for_a_callable_not_any_declaration() {
-    assert!(declares_callable_in("pub const TIMEOUT_S: u64 = 30;", "TIMEOUT_S").is_none());
-    assert!(declares_callable_in("    trace_file: PathBuf,", "trace_file").is_none());
-    assert!(declares_callable_in("    let trace_file = dir.join(\"t\");", "trace_file").is_none());
-    assert!(declares_callable_in("pub struct Confidence;", "Confidence").is_none());
+    assert!(declares_seedable_in("pub const TIMEOUT_S: u64 = 30;", "TIMEOUT_S").is_none());
+    assert!(declares_seedable_in("    trace_file: PathBuf,", "trace_file").is_none());
+    assert!(declares_seedable_in("    let trace_file = dir.join(\"t\");", "trace_file").is_none());
+    // A struct is now a seed `impact` can hold -- the pack chunks struct, enum and trait as of the
+    // type-reference work -- so the screen must stop filing them under "not a function". A const, a
+    // struct field and a `let` still are not: nothing chunks them, so `impact` has no seed to offer.
+    assert_eq!(
+        declares_seedable_in("pub struct Confidence;", "Confidence"),
+        Some("struct")
+    );
+    assert_eq!(
+        declares_seedable_in("pub enum CallForm {", "CallForm"),
+        Some("enum")
+    );
+    assert_eq!(
+        declares_seedable_in("pub trait Emit {", "Emit"),
+        Some("trait")
+    );
 
     assert_eq!(
-        declares_callable_in("pub async fn deliver_news(x: u8) {}", "deliver_news"),
+        declares_seedable_in("pub async fn deliver_news(x: u8) {}", "deliver_news"),
         Some("fn")
     );
     assert_eq!(
-        declares_callable_in(
+        declares_seedable_in(
             "export function updatePaymentStatus(id) {",
             "updatePaymentStatus"
         ),
         Some("function")
     );
     assert_eq!(
-        declares_callable_in("def rate_limit(self):", "rate_limit"),
+        declares_seedable_in("def rate_limit(self):", "rate_limit"),
         Some("def")
     );
     assert_eq!(
-        declares_callable_in(
+        declares_seedable_in(
             "const ensureSeedUserPasswords = async () => {",
             "ensureSeedUserPasswords"
         ),
@@ -51,7 +65,7 @@ fn the_index_check_asks_for_a_callable_not_any_declaration() {
     );
     // `impl T { pub fn take(&self) -> u32 { 1 } }` -- one line, two items, the callable is found.
     assert_eq!(
-        declares_callable_in("impl T { pub fn take(&self) -> u32 { 1 } }", "take"),
+        declares_seedable_in("impl T { pub fn take(&self) -> u32 { 1 } }", "take"),
         Some("fn")
     );
 }
@@ -95,8 +109,8 @@ fn a_readable_tree_with_no_source_is_not_an_unreadable_tree() {
     );
 
     // The verdict strings are the report's keys; drift there is drift in every number read off it.
-    assert_eq!(DeclCheck::Declared.verdict(), "confirmed_function");
-    assert_eq!(DeclCheck::NotDeclared.verdict(), "rejected_not_a_function");
+    assert_eq!(DeclCheck::Declared.verdict(), "confirmed_seed");
+    assert_eq!(DeclCheck::NotDeclared.verdict(), "rejected_not_a_seed");
     assert_eq!(DeclCheck::TreeMissing.verdict(), "unchecked_tree_missing");
     assert_eq!(
         DeclCheck::NoSourceRead.verdict(),
