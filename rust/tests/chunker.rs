@@ -2,8 +2,8 @@
 
 use cort::ast_grep::resolve_ast_grep_bin;
 use cort::chunker::{
-    chunk_id_for, edge_string, extract_file, file_content_hash, parse_scan_stream, CallForm, Chunk,
-    Edge, ExtractFileArgs,
+    chunk_id_for, edge_string, extract_file, file_content_hash, parse_edge_tag, parse_scan_stream,
+    CallForm, Chunk, Edge, ExtractFileArgs, EDGE_REL_TYPES,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -718,4 +718,40 @@ fn the_rust_pack_tags_each_call_shape_with_the_form_it_is() {
         "the receiver call must still be attributed to its enclosing function"
     );
     assert_eq!(receiver.start_line, 4);
+}
+
+/// `type` is a fourth call form, not a fourth rel type in disguise. It ranks last because
+/// `insertion_rank` decides which row survives a duplicate key, and a call is a stronger claim about
+/// a line than a type mention on the same line.
+#[test]
+fn a_type_reference_parses_as_its_own_form_and_rel_type() {
+    assert_eq!(CallForm::Type.as_str(), "type");
+    assert_eq!(CallForm::parse("type"), Some(CallForm::Type));
+    assert_eq!(CallForm::Type.insertion_rank(), 3);
+    assert!(CallForm::Type.insertion_rank() > CallForm::Bare.insertion_rank());
+
+    assert!(EDGE_REL_TYPES.contains(&"references"));
+    assert_eq!(
+        parse_edge_tag("references:type"),
+        Some(("references".to_string(), CallForm::Type)),
+        "the pack rule's own message is the only channel that can supply the form"
+    );
+}
+
+/// `chunk_id` is project:file:start_line with no chunk type (`chunker::chunk_id_for`), so a type
+/// declared on the same line as one of its own methods collides. Which one survived used to depend
+/// on the order ast-grep emitted records in, i.e. on a directory listing. The loss is accepted, but
+/// it must be the same loss every time: the method is the chunk `impact` can hold a seed for, so it
+/// wins.
+#[test]
+fn a_type_sharing_a_line_with_its_method_loses_deterministically() {
+    let source = "pub trait T { fn f(&self) {} }\n";
+    let (_dir, abs) = tmp_file("t.rs", source);
+    let r = extract_real(&abs, "t.rs", source);
+    let kinds: Vec<&str> = r.chunks.iter().map(|c| c.chunk_type.as_str()).collect();
+    assert_eq!(
+        kinds,
+        ["method"],
+        "the method survives the id collision, every time: {kinds:?}"
+    );
 }

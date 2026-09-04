@@ -38,6 +38,9 @@ pub enum CallForm {
     Receiver,
     /// `Worker::add()` / `crate::m::f()` -- carries its own path, so it is matched exactly.
     Scoped,
+    /// `FeedSpec` in a type position -- not a call at all. Carried as a form so an `impact` row can
+    /// say what kind of edge it is inside the six fixed columns, instead of the row changing shape.
+    Type,
 }
 
 impl CallForm {
@@ -46,6 +49,7 @@ impl CallForm {
             Self::Bare => "bare",
             Self::Receiver => "receiver",
             Self::Scoped => "scoped",
+            Self::Type => "type",
         }
     }
 
@@ -55,6 +59,7 @@ impl CallForm {
             "bare" => Some(Self::Bare),
             "receiver" => Some(Self::Receiver),
             "scoped" => Some(Self::Scoped),
+            "type" => Some(Self::Type),
             _ => None,
         }
     }
@@ -69,6 +74,7 @@ impl CallForm {
             Self::Receiver => 0,
             Self::Scoped => 1,
             Self::Bare => 2,
+            Self::Type => 3,
         }
     }
 }
@@ -76,7 +82,7 @@ impl CallForm {
 /// The rel types the schema allows. Checked here so one typo in a pack rule message cannot take
 /// down `cort index` for a whole project: the CHECK constraint would reject the insert mid-
 /// transaction, and every chunk and edge already gathered would be lost with it.
-pub const EDGE_REL_TYPES: &[&str] = &["imports", "exports", "calls"];
+pub const EDGE_REL_TYPES: &[&str] = &["imports", "exports", "calls", "references"];
 
 /// Split an `edge:` tag remainder into (rel_type, call_form).
 ///
@@ -143,6 +149,26 @@ pub struct ScanStream {
     pub total: usize,
 }
 
+/// Which chunk wins when two share a `chunk_id`. Only reachable when a type is declared on the same
+/// line as one of its own methods (`pub trait T { fn f(&self) {} }`), because `chunk_id_for` keys on
+/// the start line alone. The method wins: it is the chunk a caller-set question can hold a seed for.
+///
+/// The tie-break fires in exactly one shape. A method is nested inside its type, so
+/// `method.end_line <= type.end_line` always, and the `end_line` key already puts the method first
+/// whenever the type spans more lines -- which is every ordinary multi-line declaration. Only a type
+/// whose entire body sits on the declaration line reaches this comparison, which is why adding it
+/// cannot reorder anything else.
+fn chunk_specificity(chunk_type: &str) -> u8 {
+    match chunk_type {
+        "method" => 0,
+        "function" => 1,
+        _ => 2,
+    }
+}
+
+/// The chunk's identity: project, file and start line. Deliberately *not* the chunk type, because
+/// two foreign keys point at this value; a same-line collision is resolved by `chunk_specificity`
+/// rather than by widening the key.
 pub fn chunk_id_for(project_id: &str, file_path: &str, start_line: i64) -> String {
     format!("{project_id}:{file_path}:{start_line}")
 }
@@ -585,6 +611,7 @@ pub fn extract_file(args: ExtractFileArgs<'_>) -> Result<ExtractResult, CortErro
         a.start_line
             .cmp(&b.start_line)
             .then(a.end_line.cmp(&b.end_line))
+            .then(chunk_specificity(&a.chunk_type).cmp(&chunk_specificity(&b.chunk_type)))
     });
     let mut seen = HashSet::new();
     let mut deduped = Vec::new();
