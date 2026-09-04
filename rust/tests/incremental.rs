@@ -524,8 +524,8 @@ fn a_v3_index_is_upgraded_and_its_rebuilt_graph_carries_forms_and_call_sites() {
     ensure_schema(&db).unwrap();
     assert_eq!(
         get_meta(&db, "SCHEMA_VERSION").unwrap().as_deref(),
-        Some("4"),
-        "the upgrade writes the version only after the columns land"
+        Some("5"),
+        "the upgrade writes the version only after every migration lands"
     );
     assert_eq!(
         get_meta(&db, "graph_pending").unwrap().as_deref(),

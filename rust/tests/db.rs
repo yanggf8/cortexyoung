@@ -538,3 +538,101 @@ fn an_ordinary_sqlite_failure_is_still_storage_busy() {
     let err = db.execute_batch("this is not sql").unwrap_err();
     assert_eq!(cort::db::classify_sqlite(&err).code, "storage_busy");
 }
+
+/// The alignment property, on a REAL v3 file rather than a fresh one with its metadata rewritten.
+///
+/// `migrate_v4` adds columns with `ALTER TABLE ADD COLUMN`, which APPENDS, so a v3→v4 database has
+/// `[... rel_type, confidence, confidence_score, confidence_reasoning, call_site_line, call_form]`
+/// while a fresh one from `schema.sql` has
+/// `[... rel_type, call_site_line, call_form, confidence, confidence_score, confidence_reasoning]`.
+/// Five of eight columns differ. A `SELECT *` rebuild would silently misalign them — `confidence`
+/// would land in `call_site_line` — and a test that starts from a fresh schema can never see it.
+#[test]
+fn migrating_a_real_v3_database_to_v5_preserves_and_aligns_every_row() {
+    let db = open_db(":memory:").unwrap();
+    db.execute_batch(V3_SHAPED_DB).unwrap();
+    ensure_schema(&db).unwrap();
+
+    assert_eq!(
+        get_meta(&db, "SCHEMA_VERSION").unwrap().as_deref(),
+        Some("5")
+    );
+    assert_eq!(
+        get_meta(&db, "graph_pending").unwrap().as_deref(),
+        Some("1"),
+        "a widened graph is not trusted until a full re-index"
+    );
+
+    // Read every field back BY NAME. This is what a `SELECT *` rebuild breaks.
+    let (rel, conf, score, reasoning): (String, String, f64, Option<String>) = db
+        .query_row(
+            "SELECT rel_type, confidence, confidence_score, confidence_reasoning
+               FROM relationships WHERE source_chunk_id = 'p:b.rs:1'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(rel, "calls");
+    assert_eq!(conf, "INFERRED");
+    assert_eq!(score, 0.7);
+    assert_eq!(reasoning.as_deref(), Some("resolved: take"));
+
+    let (target, line, start): (String, String, i64) = db
+        .query_row(
+            "SELECT raw_target, rel_type, start_line FROM raw_edges WHERE source_symbol = 'go'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        (target.as_str(), line.as_str(), start),
+        ("take", "calls", 2)
+    );
+
+    // The anti-drift assertion, and the one that pins what this migration exists for.
+    // `V5_RELATIONSHIPS`/`V5_RAW_EDGES` are a THIRD copy of these table bodies — `schema.sql` plus
+    // two consts — and nothing else checks that they agree. The v4 misalignment this migration fixes
+    // WAS that kind of drift. A migrated database must end up with the same column ORDER as a fresh
+    // one, not merely the same column set, or the next `SELECT *` anywhere silently lies.
+    let fresh = fresh();
+    for table in ["relationships", "raw_edges"] {
+        assert_eq!(
+            columns(&db, table),
+            columns(&fresh, table),
+            "{table}: a migrated database must match a fresh one column for column, in order"
+        );
+    }
+
+    // And the point of the whole migration.
+    db.execute(
+        "INSERT INTO raw_edges (project_id, file_path, source_symbol, raw_target, rel_type,
+           call_form, start_line)
+         VALUES ('p','a.rs','caller','settings::SettingsError','references','type',9)",
+        [],
+    )
+    .expect("v5 accepts a qualified type reference");
+}
+
+/// A rebuild that died half way must leave the database retryable, not wedged behind a stray table.
+#[test]
+fn a_stale_v5_temporary_table_does_not_wedge_the_next_upgrade() {
+    let db = open_db(":memory:").unwrap();
+    db.execute_batch(V3_SHAPED_DB).unwrap();
+    db.execute_batch("CREATE TABLE relationships__v5 (bogus TEXT);")
+        .unwrap();
+
+    ensure_schema(&db).expect("a stale temporary table is cleared, not fatal");
+
+    let stale: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name LIKE '%__v5'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(stale, 0, "the rebuild renames its temporary table away");
+    assert_eq!(
+        get_meta(&db, "SCHEMA_VERSION").unwrap().as_deref(),
+        Some("5")
+    );
+}

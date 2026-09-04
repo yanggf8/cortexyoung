@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 5;
 
 /// Every `TEXT NOT NULL DEFAULT` column an `ALTER TABLE ADD COLUMN` has to supply, per table.
 /// Kept as one list so the upgrade path and `schema.sql` cannot drift: a column that exists in the
@@ -25,6 +25,51 @@ const V4_ADDED_COLUMNS: &[(&str, &str, &str)] = &[
         "TEXT NOT NULL DEFAULT 'bare' CHECK(call_form IN ('bare','receiver','scoped'))",
     ),
 ];
+
+/// The v5 rebuild for `relationships`: `(table, CREATE, explicit column list)`.
+///
+/// The column list is written out because it is used on BOTH sides of the INSERT. `SELECT *` is
+/// wrong here and the reason is not obvious: `migrate_v4` appends its columns with `ALTER TABLE ADD
+/// COLUMN`, so a v3-then-v4 database carries `call_site_line`/`call_form` at the END while a fresh
+/// one from `schema.sql` carries them in the MIDDLE. Five of eight columns differ, and a positional
+/// copy would put `confidence` into `call_site_line`.
+///
+/// The body is `schema.sql`'s, suffixed `__v5`. It is a third copy of that text and nothing but
+/// `migrating_a_real_v3_database_to_v5_preserves_and_aligns_every_row` checks that it has not
+/// drifted -- that test compares the migrated column order against a fresh database for exactly
+/// this reason.
+const V5_RELATIONSHIPS: (&str, &str, &str) = (
+    "relationships",
+    "CREATE TABLE relationships__v5 (
+       source_chunk_id TEXT NOT NULL REFERENCES chunks(chunk_id) ON DELETE CASCADE,
+       target_chunk_id TEXT NOT NULL REFERENCES chunks(chunk_id) ON DELETE CASCADE,
+       rel_type TEXT NOT NULL CHECK(rel_type IN ('imports','exports','calls','references')),
+       call_site_line INTEGER,
+       call_form TEXT NOT NULL DEFAULT 'bare'
+         CHECK(call_form IN ('bare','receiver','scoped','type')),
+       confidence TEXT NOT NULL CHECK(confidence IN ('EXTRACTED','INFERRED','AMBIGUOUS')),
+       confidence_score REAL NOT NULL CHECK(confidence_score BETWEEN 0 AND 1),
+       confidence_reasoning TEXT,
+       PRIMARY KEY (source_chunk_id, target_chunk_id, rel_type))",
+    "source_chunk_id, target_chunk_id, rel_type, call_site_line, call_form,
+     confidence, confidence_score, confidence_reasoning",
+);
+
+/// The v5 rebuild for `raw_edges`. Same contract as [`V5_RELATIONSHIPS`].
+const V5_RAW_EDGES: (&str, &str, &str) = (
+    "raw_edges",
+    "CREATE TABLE raw_edges__v5 (
+       project_id TEXT NOT NULL REFERENCES projects(project_id) ON DELETE CASCADE,
+       file_path TEXT NOT NULL,
+       source_symbol TEXT NOT NULL DEFAULT '',
+       raw_target TEXT NOT NULL,
+       rel_type TEXT NOT NULL CHECK(rel_type IN ('imports','exports','calls','references')),
+       call_form TEXT NOT NULL DEFAULT 'bare'
+         CHECK(call_form IN ('bare','receiver','scoped','type')),
+       start_line INTEGER NOT NULL,
+       PRIMARY KEY (project_id, file_path, rel_type, raw_target, source_symbol, start_line))",
+    "project_id, file_path, source_symbol, raw_target, rel_type, call_form, start_line",
+);
 
 const SCHEMA_SQL: &str = include_str!("schema.sql");
 
@@ -176,6 +221,72 @@ fn migrate_v4(db: &Db) -> Result<(), CortError> {
     Ok(())
 }
 
+/// Widen the v5 CHECK constraints on `relationships` and `raw_edges`.
+///
+/// SQLite cannot alter a CHECK in place, so this is the documented rebuild. Four properties, each of
+/// which was wrong in a draft and is now pinned by a test:
+///
+/// * Columns are named on both sides of the INSERT -- see [`V5_RELATIONSHIPS`] for why `SELECT *`
+///   silently misaligns a real upgraded database.
+/// * Each table's rebuild runs inside its own transaction, so a mid-rebuild failure rolls back
+///   instead of leaving a half-copied table behind.
+/// * No `PRAGMA foreign_keys` dance. Nothing in `schema.sql` references `relationships` or
+///   `raw_edges` -- only their own indexes do, and those drop and recreate with the table -- and
+///   dropping a table is never an FK violation. A draft turned enforcement off and restored it with
+///   `let _ =`, which would have left foreign keys silently OFF for the rest of the process if the
+///   restore failed. The pragma protected against a hazard this schema does not have.
+/// * The error path does not delete `{table}__v5`. The only state in which a populated temporary
+///   table outlives this batch is one where the transaction never committed, and if the ROLLBACK
+///   itself failed -- the transient IOERR class that already killed eight tests on a CI runner --
+///   that table may hold the only surviving copy of the rows. The retry clears it, because the batch
+///   opens with `DROP TABLE IF EXISTS`. Cleaning up here can only destroy data, never save any.
+///
+/// Rows are copied rather than re-derived because README's upgrade note promises that `impact` keeps
+/// answering from the pre-upgrade graph until the forced re-index runs. `chunks` is untouched: Rust
+/// type declarations are stored as `chunk:class`, a value its CHECK already allows, so the largest
+/// table and its external-content FTS mirror never move.
+///
+/// Runs before `SCHEMA_VERSION` is written, so a failure leaves the database at its old version and
+/// the next open retries. Every sqlite error is returned, never panicked on -- `hook-refresh` reaches
+/// this path on every edit and promises to be silent and exit 0.
+///
+/// One behaviour worth knowing before diagnosing it twice: this is the first *write transaction* on
+/// the open path (v4's were quick ALTERs). Between deploying this binary and the first successful
+/// migration, a concurrent open serialises on `BEGIN IMMEDIATE` for up to the busy timeout set in
+/// `open_db`. A racing `hook-refresh` blocks rather than failing fast, then lands on its quiet
+/// `db_unavailable` path. The race itself is safe: the loser re-runs the rebuild, which is idempotent
+/// and lossless precisely because both sides of the INSERT name their columns.
+fn migrate_v5(db: &Db) -> Result<(), CortError> {
+    let fail = |stage: &str, e: rusqlite::Error| {
+        CortError::new(
+            "schema_migration_failed",
+            json!({ "version": 5, "stage": stage, "message": e.to_string() }),
+        )
+    };
+    for (table, create, columns) in [V5_RELATIONSHIPS, V5_RAW_EDGES] {
+        db.execute_batch(&format!(
+            "BEGIN IMMEDIATE;
+             DROP TABLE IF EXISTS {table}__v5;
+             {create};
+             INSERT INTO {table}__v5 ({columns}) SELECT {columns} FROM {table};
+             DROP TABLE {table};
+             ALTER TABLE {table}__v5 RENAME TO {table};
+             COMMIT;"
+        ))
+        .map_err(|e| {
+            let _ = db.execute_batch("ROLLBACK");
+            fail(table, e)
+        })?;
+    }
+    // The indexes named in SCHEMA_SQL went with the dropped tables.
+    db.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_rel_source ON relationships(source_chunk_id);
+         CREATE INDEX IF NOT EXISTS idx_rel_target ON relationships(target_chunk_id);
+         CREATE INDEX IF NOT EXISTS idx_raw_edges_file ON raw_edges(project_id, file_path);",
+    )
+    .map_err(|e| fail("indexes", e))
+}
+
 /// Bring a freshly opened database up to the current schema.
 ///
 /// Every sqlite failure here is returned, not panicked on. It used to `expect` on four of them,
@@ -203,6 +314,7 @@ pub fn ensure_schema(db: &Db) -> Result<(), CortError> {
         set_meta(db, "SCHEMA_VERSION", &expected).map_err(|e| classify_sqlite(&e))?;
     } else if upgrading {
         migrate_v4(db)?;
+        migrate_v5(db)?;
         // v3 added `raw_edges`; v4 adds `call_form` and the call-site line. An older database has
         // chunks whose edges cannot be re-derived with the new columns filled in, so a rebuild would
         // silently wipe the graph. Mark it pending: `status` reports stale and the next incremental
