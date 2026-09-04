@@ -39,6 +39,68 @@ pub enum Evidence {
     Unknown,
 }
 
+/// Ask one project's index what it holds about `symbol`, in at most two queries.
+///
+/// `chunks` first: a seed is the strong answer and the common one, and the query is covered by
+/// `idx_chunks_symbol (project_id, symbol_name)`.
+///
+/// `raw_edges` second, matched **exactly** the way `coverage::extracted_but_unresolved` matches
+/// (`coverage.rs`, the `rel_type IN ('calls','references')` query): the same relation filter, and
+/// the leaf passed for all three parameters. Both halves matter and a first draft got both wrong.
+/// Without the filter the query also counts `imports`, whose raw targets are module specifiers --
+/// `./tide` ends with `.tide` and matches the `LIKE '%.'` arm -- so a bare `tide` search would fire
+/// in any project that imports a file by that name. Measured on the hook corpus, filtering moves 7
+/// of 110 fires out of the firing set and costs nothing: an `imports` raw edge never becomes a
+/// relationship at all, so `impact` could not have answered those anyway.
+///
+/// Using the same splitter and parameters as the coverage screen is deliberate: two answers to
+/// "which name is this" is how a gate and a report start disagreeing. One shared looseness comes
+/// with it -- `LIKE` treats `_` as a single-character wildcard, so every snake_case leaf is a
+/// pattern rather than a literal. Coverage has always had that; neither place has measured it.
+///
+/// That second query is a **scan** of the project's raw edges, not an indexed seek: the only index
+/// on the table is `(project_id, file_path)` and the `LIKE` terms lead with a wildcard. Measured on
+/// this repository's ~15,850 rows: ~2.95ms for an absent symbol. Affordable only because this runs
+/// after the shape gate, on about one search in twenty. If it stops being affordable the fix is a
+/// stored `raw_target_leaf` column with its own index -- not a tighter match, which would cost the
+/// deletion case.
+///
+/// Errors are returned. A caller that read a storage failure as "absent" would silence the hook on
+/// a disk problem, which is the opposite of this crate's rule that storage failures degrade loudly.
+pub fn evidence_in(
+    db: &rusqlite::Connection,
+    project_id: &str,
+    symbol: &str,
+) -> rusqlite::Result<Evidence> {
+    use rusqlite::OptionalExtension;
+    let seed = db
+        .query_row(
+            "SELECT 1 FROM chunks WHERE project_id = ?1 AND symbol_name = ?2 LIMIT 1",
+            rusqlite::params![project_id, symbol],
+            |_| Ok(()),
+        )
+        .optional()?;
+    if seed.is_some() {
+        return Ok(Evidence::Seed);
+    }
+    let leaf = crate::chunker::bare_name(symbol);
+    let edge = db
+        .query_row(
+            "SELECT 1 FROM raw_edges
+              WHERE project_id = ?1 AND rel_type IN ('calls', 'references')
+                AND (raw_target = ?2 OR raw_target LIKE '%:' || ?3 OR raw_target LIKE '%.' || ?4)
+              LIMIT 1",
+            rusqlite::params![project_id, leaf, leaf, leaf],
+            |_| Ok(()),
+        )
+        .optional()?;
+    Ok(if edge.is_some() {
+        Evidence::RawOnly
+    } else {
+        Evidence::Neither
+    })
+}
+
 /// Why the hook stayed quiet. Separate variants because the mining has to tell a heuristic problem
 /// from an index problem from a missing index, and a single `None` collapses all three.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

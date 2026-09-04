@@ -4,8 +4,8 @@
 //! is exactly the error the demand re-measurement was written to correct.
 
 use cort::hook::{
-    judge, search_from_grep_fields, search_from_shell, suggests_impact_shape, Evidence,
-    SilenceReason, Verdict,
+    evidence_in, judge, search_from_grep_fields, search_from_shell, suggests_impact_shape,
+    Evidence, SilenceReason, Verdict,
 };
 
 #[test]
@@ -404,5 +404,83 @@ fn the_evidence_lookup_is_not_consulted_when_the_shape_gate_rejects() {
     assert!(
         !consulted,
         "a shape rejection must not open a database or run git"
+    );
+}
+
+fn indexed_project(
+    files: &[(&str, &str)],
+) -> (
+    tempfile::TempDir,
+    std::path::PathBuf,
+    rusqlite::Connection,
+    String,
+    String,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    for (rel, body) in files {
+        let abs = dir.path().join(rel);
+        std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
+        std::fs::write(&abs, body).unwrap();
+    }
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let mut db = cort::db::open_db(":memory:").unwrap();
+    cort::db::ensure_schema(&db).unwrap();
+    let project_id = cort::db::project_id_for(root.to_str().unwrap());
+    let bin = cort::ast_grep::resolve_ast_grep_bin().expect("ast-grep on PATH");
+    cort::indexer::full_index(&mut db, &bin, &root).unwrap();
+    (dir, root, db, project_id, bin)
+}
+
+/// The three states against a real index. The `RawOnly` case is built the way it happens in life --
+/// index, delete the definition, re-index incrementally, which is what the PostToolUse hook does --
+/// because a hand-inserted row would not prove that `raw_edges` survives that path.
+///
+/// The surviving caller uses a QUALIFIED path on purpose. A bare call leaves a raw target the
+/// exact-match arm alone would find, so both `LIKE` arms -- the half covering `crate::m::f`, which
+/// `graph.rs` documents as the common shape -- would go unexercised and could be deleted with every
+/// test still green.
+#[test]
+fn evidence_reads_chunks_then_raw_edges() {
+    let (_dir, root, mut db, project_id, bin) = indexed_project(&[
+        (
+            "src/gone.rs",
+            "pub fn ensure_seed_user_passwords() -> u8 { 1 }\n",
+        ),
+        (
+            "src/user.rs",
+            "pub fn boot() -> u8 { crate::gone::ensure_seed_user_passwords() }\n",
+        ),
+    ]);
+    assert_eq!(
+        evidence_in(&db, &project_id, "ensure_seed_user_passwords").unwrap(),
+        Evidence::Seed
+    );
+    assert_eq!(
+        evidence_in(&db, &project_id, "no_such_name_anywhere").unwrap(),
+        Evidence::Neither
+    );
+
+    std::fs::remove_file(root.join("src/gone.rs")).unwrap();
+    cort::incremental::incremental_index(&mut db, &bin, &root).unwrap();
+
+    assert_eq!(
+        evidence_in(&db, &project_id, "ensure_seed_user_passwords").unwrap(),
+        Evidence::RawOnly,
+        "the definition is gone but the surviving qualified call still names it"
+    );
+}
+
+/// A storage failure must be returned, not flattened into `Neither`. `Neither` silences the hook; an
+/// unreadable database has to fire instead, which is the caller's job and it needs the error to do
+/// it. Both queries must fail, or the test would pass for the wrong reason.
+#[test]
+fn a_storage_failure_is_returned_rather_than_read_as_absence() {
+    let (_dir, _root, db, project_id, _bin) =
+        indexed_project(&[("src/lib.rs", "pub fn helper() -> u8 { 1 }\n")]);
+    db.execute_batch("DROP TABLE relationships; DROP TABLE chunks; DROP TABLE raw_edges")
+        .unwrap();
+    assert!(
+        evidence_in(&db, &project_id, "helper").is_err(),
+        "a missing table is an error, not an absent symbol"
     );
 }
