@@ -15,7 +15,7 @@
 //! whether an adoption was correct: every injection is emitted as a row carrying its triggering
 //! command and whatever followed, to be adjudicated the way the demand screen's hits are.
 
-use cort::hook::{first_segment, suggests_impact, tokenize};
+use cort::hook::{first_segment, suggests_impact_shape, tokenize};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -444,7 +444,7 @@ pub fn mine(
                     };
                     if is_search(command) {
                         s_searches += 1;
-                        if suggests_impact(command).is_some() {
+                        if suggests_impact_shape(command).is_some() {
                             s_fire += 1;
                         }
                     }

@@ -18,6 +18,47 @@
 //! orientation greps trains the agent to ignore it, which is how the over-broad version of the
 //! skill's prose failed.
 
+/// What this project's index has to say about one symbol, asked as cheaply as it can be.
+///
+/// `RawOnly` is the variant this whole design turns on. `raw_edges` is rebuilt across files and
+/// therefore outlives the `chunks` row it pointed at (schema F-01), so a symbol whose definition was
+/// just deleted still has a surviving caller's raw edge naming it. Gating on `Seed` alone would
+/// silence the hook on exactly the deletion-verification search the goal sentence names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Evidence {
+    /// A `chunks` row: `impact` can seed on it.
+    Seed,
+    /// No chunk, but a `raw_edges` row names it: deleted, or an external type this project uses.
+    RawOnly,
+    /// Nothing in the index names it at all: a concept, a field, a domain word.
+    Neither,
+    /// This project has no index, so there was nothing to ask.
+    NoIndex,
+    /// The lookup could not run -- a replay with no recoverable state, or a database that would not
+    /// open or answer. Fires: a question that was never put is not a negative answer.
+    Unknown,
+}
+
+/// Why the hook stayed quiet. Separate variants because the mining has to tell a heuristic problem
+/// from an index problem from a missing index, and a single `None` collapses all three.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SilenceReason {
+    /// Not the narrow shape where `impact` beats `rg`.
+    NoShape,
+    /// Right shape, no index for this project -- a missed opportunity, not a refusal.
+    NoIndex,
+    /// Right shape, indexed project, and the index holds neither a seed nor a raw edge naming the
+    /// symbol. `impact` would answer `seeds=0 dependents=0` and nothing else.
+    NoEvidence,
+}
+
+/// The whole routing decision for one search.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Verdict {
+    Fire(HookHit),
+    Silent(SilenceReason),
+}
+
 /// What the rule concluded about one command.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HookHit {
@@ -202,8 +243,11 @@ pub fn first_segment(command: &str) -> &str {
 /// source. Everything else -- alternations, phrases, logs, transcripts, build output -- stays with
 /// `rg`, which is what the routing skill already says and what the traffic shows the agent doing
 /// correctly hundreds of times.
-pub fn suggests_impact(command: &str) -> Option<HookHit> {
-    judge(&search_from_shell(command)?)
+pub fn suggests_impact_shape(command: &str) -> Option<HookHit> {
+    match judge(&search_from_shell(command)?, |_| Evidence::Unknown) {
+        Verdict::Fire(hit) => Some(hit),
+        Verdict::Silent(_) => None,
+    }
 }
 
 /// One search in the terms the decision needs, with every harness-specific spelling already
@@ -326,27 +370,29 @@ pub fn search_from_grep_fields(
 /// source. Everything else -- alternations, phrases, logs, transcripts, build output -- stays with
 /// `rg`, which is what the routing skill already says and what the traffic shows the agent doing
 /// correctly hundreds of times.
-pub fn judge(search: &Search) -> Option<HookHit> {
-    let symbol = symbol_of_pattern(&search.pattern)?;
+pub fn judge(search: &Search, evidence: impl FnOnce(&str) -> Evidence) -> Verdict {
+    let Some(symbol) = symbol_of_pattern(&search.pattern) else {
+        return Verdict::Silent(SilenceReason::NoShape);
+    };
 
     // A context flag means the agent wants to read the body around the match, not enumerate who
     // reaches it. `cort context` is that verb, and suggesting `impact` there is a wrong answer
     // dressed as a helpful one. Adjudicated on the first probe run: every `-A`/`-B`/`-C` fire was a
     // false positive.
     if search.wants_context {
-        return None;
+        return Verdict::Silent(SilenceReason::NoShape);
     }
 
     let targets = search.targets.join(" ");
     if NON_SOURCE_MARKERS.iter().any(|m| targets.contains(m)) {
-        return None;
+        return Verdict::Silent(SilenceReason::NoShape);
     }
     // If the search names any file extension at all, at least one has to be a language the rule
     // pack actually indexes. Without this a Zig or Go file under `src/` fires, and `impact` has
     // nothing to say about a language it never parsed -- the worst kind of suggestion, because it
     // looks answerable.
     if names_an_extension(&targets) && !SOURCE_EXTENSIONS.iter().any(|e| targets.contains(e)) {
-        return None;
+        return Verdict::Silent(SilenceReason::NoShape);
     }
     // A caller set is cross-file by definition. A search that names concrete files and nothing
     // recursive or glob-shaped is asking "where does this appear in the file I already have open",
@@ -358,7 +404,7 @@ pub fn judge(search: &Search) -> Option<HookHit> {
         .iter()
         .any(|t| !t.starts_with('-') && !names_an_extension(t) && !t.contains('*'));
     if !targets.trim().is_empty() && !search.recursive && !has_glob && !concrete_dirs {
-        return None;
+        return Verdict::Silent(SilenceReason::NoShape);
     }
 
     // No path at all means the current directory, which in an agent session is the project.
@@ -367,7 +413,16 @@ pub fn judge(search: &Search) -> Option<HookHit> {
     } else if SOURCE_MARKERS.iter().any(|m| targets.contains(m)) {
         "bare symbol, search scoped to project source"
     } else {
-        return None;
+        return Verdict::Silent(SilenceReason::NoShape);
     };
-    Some(HookHit { symbol, reason })
+    // Only now, with every shape check passed, is the index asked -- and the closure is what opens
+    // it. This ordering is the budget: the shape gate turns down about 95% of searches and none of
+    // them may cost a database open or a `git rev-parse`.
+    match evidence(&symbol) {
+        Evidence::Neither => Verdict::Silent(SilenceReason::NoEvidence),
+        Evidence::NoIndex => Verdict::Silent(SilenceReason::NoIndex),
+        Evidence::Seed | Evidence::RawOnly | Evidence::Unknown => {
+            Verdict::Fire(HookHit { symbol, reason })
+        }
+    }
 }

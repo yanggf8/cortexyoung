@@ -17,8 +17,8 @@
 //! failure the demand screen already documented for over-broad skill prose.
 
 use cort::hook::is_redirection;
-use cort::hook::{judge, search_from_grep_fields, search_from_shell, Search};
-pub use cort::hook::{suggests_impact, HookHit};
+use cort::hook::{judge, search_from_grep_fields, search_from_shell, Evidence, Search, Verdict};
+pub use cort::hook::{suggests_impact_shape, HookHit};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
@@ -405,8 +405,8 @@ pub fn probe(dirs: &[(&str, PathBuf)], max_examples: usize) -> Value {
                 }
 
                 for (source, search, shown) in candidates {
-                    match judge(&search) {
-                        Some(hit) => {
+                    match judge(&search, |_| Evidence::Unknown) {
+                        Verdict::Fire(hit) => {
                             let check = match root_of_targets(&search.targets, cwd.as_deref()) {
                                 Some(root) => declares_function(&root, &hit.symbol),
                                 None => DeclCheck::TreeMissing,
@@ -434,7 +434,7 @@ pub fn probe(dirs: &[(&str, PathBuf)], max_examples: usize) -> Value {
                                 }));
                             }
                         }
-                        None => {
+                        Verdict::Silent(_) => {
                             if passed_over.len() < max_examples {
                                 passed_over.push(json!({
                                     "session": session,

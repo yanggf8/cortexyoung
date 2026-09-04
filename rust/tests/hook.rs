@@ -3,13 +3,16 @@
 //! plausible-looking greps would measure the rule against my imagination of agent behaviour, which
 //! is exactly the error the demand re-measurement was written to correct.
 
-use cort::hook::{judge, search_from_grep_fields, suggests_impact};
+use cort::hook::{
+    judge, search_from_grep_fields, search_from_shell, suggests_impact_shape, Evidence,
+    SilenceReason, Verdict,
+};
 
 #[test]
 fn the_one_call_site_search_in_the_corpus_fires() {
     // The agent hand-rolled "drop the declaration line" with a second grep -- that is cort's
     // DECLARATION_KEYWORDS, rebuilt inline and worse. If the rule misses this, it has no purpose.
-    let hit = suggests_impact(
+    let hit = suggests_impact_shape(
         "grep -rn 'rate_limit(' /home/yanggf/a/ft/crates/api/src/routes/*.rs | grep -v 'pub async fn'",
     )
     .expect("the call-site shape must fire");
@@ -19,24 +22,27 @@ fn the_one_call_site_search_in_the_corpus_fires() {
 #[test]
 fn orientation_searches_from_the_same_corpus_stay_with_rg() {
     // Alternations are text hunts: several names OR'd together is not one symbol.
-    assert!(suggests_impact(
+    assert!(suggests_impact_shape(
         r"grep -n 'thinking\|MAX_TOKENS\|max_tokens\|LLM_TIMEOUT_S\|model' crates/cct2/src/llm.rs"
     )
     .is_none());
     // Transcripts, logs and state files are not project source.
-    assert!(suggests_impact("grep -a 'cct2' ~/.nullclaw/skill-traces.jsonl | tail -4").is_none());
     assert!(
-        suggests_impact("rg -l 'muse-spark' ~/.claude/projects --glob '*.jsonl' 2>/dev/null")
+        suggests_impact_shape("grep -a 'cct2' ~/.nullclaw/skill-traces.jsonl | tail -4").is_none()
+    );
+    assert!(
+        suggests_impact_shape("rg -l 'muse-spark' ~/.claude/projects --glob '*.jsonl' 2>/dev/null")
             .is_none(),
         "a hyphenated string in a transcript tree is not a symbol"
     );
-    assert!(suggests_impact(
+    assert!(suggests_impact_shape(
         "grep -inE 'quota|429|rate.?limit|credit|exhaust' /home/yanggf/.claude/"
     )
     .is_none());
     // CJK prose.
     assert!(
-        suggests_impact(r"grep -rn '雙模型\|單模型\|no text block' crates/cct2/src/").is_none()
+        suggests_impact_shape(r"grep -rn '雙模型\|單模型\|no text block' crates/cct2/src/")
+            .is_none()
     );
 }
 
@@ -44,61 +50,68 @@ fn orientation_searches_from_the_same_corpus_stay_with_rg() {
 fn the_shape_of_the_symbol_is_what_decides_not_the_tool() {
     // Qualified Rust methods are the form cort asks for.
     assert_eq!(
-        suggests_impact("rg 'Tally::add' rust/src").unwrap().symbol,
+        suggests_impact_shape("rg 'Tally::add' rust/src")
+            .unwrap()
+            .symbol,
         "Tally::add"
     );
     // No path means the working tree, which in an agent session is the project.
     assert_eq!(
-        suggests_impact("rg resolve_targets").unwrap().symbol,
+        suggests_impact_shape("rg resolve_targets").unwrap().symbol,
         "resolve_targets"
     );
     // Short names are noise on any corpus.
-    assert!(suggests_impact("rg fs src/").is_none());
+    assert!(suggests_impact_shape("rg fs src/").is_none());
     // A flag that takes a value must not be read as the pattern.
     assert_eq!(
-        suggests_impact("rg --glob '*.rs' receiver_binds src/")
+        suggests_impact_shape("rg --glob '*.rs' receiver_binds src/")
             .unwrap()
             .symbol,
         "receiver_binds"
     );
     // `-e` names the pattern explicitly.
     assert_eq!(
-        suggests_impact("grep -rn -e cause_of rust/src/coverage.rs")
+        suggests_impact_shape("grep -rn -e cause_of rust/src/coverage.rs")
             .unwrap()
             .symbol,
         "cause_of"
     );
     // Not a search at all.
-    assert!(suggests_impact("cargo test --locked").is_none());
-    assert!(suggests_impact("sed -n '1,20p' src/lib.rs").is_none());
+    assert!(suggests_impact_shape("cargo test --locked").is_none());
+    assert!(suggests_impact_shape("sed -n '1,20p' src/lib.rs").is_none());
 }
 
 #[test]
 fn the_three_shapes_the_first_probe_run_got_wrong() {
     // 1. A language cort does not index. `~/nullclaw/src/cron.zig` matched on the `src/` marker,
     //    but there is no Zig rule pack, so `impact` has nothing to say about it. Three of the 31.
-    assert!(suggests_impact(r#"grep -n "timeout" ~/nullclaw/src/cron.zig | head -40"#).is_none());
-    assert!(suggests_impact(
+    assert!(
+        suggests_impact_shape(r#"grep -n "timeout" ~/nullclaw/src/cron.zig | head -40"#).is_none()
+    );
+    assert!(suggests_impact_shape(
         r#"grep -rn "reloadJobs(" ~/nullclaw/src/*.zig ~/nullclaw/src/**/*.zig 2>/dev/null"#
     )
     .is_none());
 
     // 2. Config and manifests are not source. This fired through the `crates/` marker.
-    assert!(suggests_impact("grep name backend-rust/crates/core/Cargo.toml | head -1").is_none());
+    assert!(
+        suggests_impact_shape("grep name backend-rust/crates/core/Cargo.toml | head -1").is_none()
+    );
 
     // 3. Context flags mean the agent is reading the code, not enumerating its callers. Whoever
     //    asks for 10 lines around a match wants the body, and `cort context` is that verb.
-    assert!(suggests_impact(
+    assert!(suggests_impact_shape(
         r#"grep -n -B2 -A10 "getVisitorAnalytics" backend/src/services/analyticsService.ts"#
     )
     .is_none());
-    assert!(
-        suggests_impact(r#"grep -n -A 18 "validate" crates/worker/src/auth_handlers.rs"#).is_none()
-    );
+    assert!(suggests_impact_shape(
+        r#"grep -n -A 18 "validate" crates/worker/src/auth_handlers.rs"#
+    )
+    .is_none());
 
     // Still fires: the shapes adjudicated as genuine caller-set work in the same run.
     assert_eq!(
-        suggests_impact(
+        suggests_impact_shape(
             "grep -rn 'deliver_news' crates/news/src/*.rs | grep -v '^crates/news/src/deliver.rs'"
         )
         .unwrap()
@@ -106,7 +119,7 @@ fn the_three_shapes_the_first_probe_run_got_wrong() {
         "deliver_news"
     );
     assert_eq!(
-        suggests_impact(
+        suggests_impact_shape(
             r#"grep -rn "ensureSeedUserPasswords" backend/src frontend/src 2>/dev/null; echo "---(empty = fully removed)---""#
         )
         .unwrap()
@@ -115,7 +128,7 @@ fn the_three_shapes_the_first_probe_run_got_wrong() {
         "verifying a deletion is complete is the exact task the goal sentence names"
     );
     assert_eq!(
-        suggests_impact(
+        suggests_impact_shape(
             r#"grep -rn "updatePaymentStatus" frontend/src --include="*.tsx" | grep -v "registrationService""#
         )
         .unwrap()
@@ -126,16 +139,20 @@ fn the_three_shapes_the_first_probe_run_got_wrong() {
 
 #[test]
 fn a_search_inside_one_named_file_is_reading_not_enumerating() {
-    assert!(suggests_impact("grep -n 'confidence' crates/cct2/src/merge.rs | head -30").is_none());
-    assert!(suggests_impact(
+    assert!(
+        suggests_impact_shape("grep -n 'confidence' crates/cct2/src/merge.rs | head -30").is_none()
+    );
+    assert!(suggests_impact_shape(
         r#"grep -n "AI_SUBSTAGE_CACHE_VARIANT" crates/news/src/summarize.rs | head -2"#
     )
     .is_none());
-    assert!(suggests_impact(r#"grep -n "sales" crates/worker/src/lib.rs | head -20"#).is_none());
+    assert!(
+        suggests_impact_shape(r#"grep -n "sales" crates/worker/src/lib.rs | head -20"#).is_none()
+    );
 
     // Cross-file shapes survive: a directory, a glob, or a recursive flag.
     assert_eq!(
-        suggests_impact(
+        suggests_impact_shape(
             r#"grep -rn "ensureSeedUserPasswords" backend/src frontend/src 2>/dev/null"#
         )
         .unwrap()
@@ -143,13 +160,13 @@ fn a_search_inside_one_named_file_is_reading_not_enumerating() {
         "ensureSeedUserPasswords"
     );
     assert_eq!(
-        suggests_impact("grep -rn 'SkillStatus::Degraded' crates/*/src/*.rs | sort -u")
+        suggests_impact_shape("grep -rn 'SkillStatus::Degraded' crates/*/src/*.rs | sort -u")
             .unwrap()
             .symbol,
         "SkillStatus::Degraded"
     );
     assert_eq!(
-        suggests_impact(
+        suggests_impact_shape(
             "grep -rn 'rate_limit(' /home/yanggf/a/ft/crates/api/src/routes/*.rs | grep -v 'pub async fn'"
         )
         .unwrap()
@@ -157,7 +174,7 @@ fn a_search_inside_one_named_file_is_reading_not_enumerating() {
         "rate_limit"
     );
     // Two named files is still a scoped read, not an enumeration.
-    assert!(suggests_impact(
+    assert!(suggests_impact_shape(
         r#"grep -n "DUCKDB_PATH" backend/src/database/duckdb-connection.ts backend/src/database/duckdb-pool.ts"#
     )
     .is_none());
@@ -165,12 +182,12 @@ fn a_search_inside_one_named_file_is_reading_not_enumerating() {
 
 #[test]
 fn a_redirection_is_not_a_search_target() {
-    assert!(suggests_impact(
+    assert!(suggests_impact_shape(
         r#"grep -n "DUCKDB_PATH" backend/src/database/duckdb-connection.ts backend/src/database/duckdb-pool.ts 2>/dev/null"#
     )
     .is_none());
     assert_eq!(
-        suggests_impact(r#"grep -rn "ensureSeedUserPasswords" backend/src 2>/dev/null"#)
+        suggests_impact_shape(r#"grep -rn "ensureSeedUserPasswords" backend/src 2>/dev/null"#)
             .unwrap()
             .symbol,
         "ensureSeedUserPasswords",
@@ -250,7 +267,13 @@ mod hook_command {
 // twin does.
 
 fn grep_tool(pattern: &str, path: Option<&str>) -> Option<cort::hook::HookHit> {
-    judge(&search_from_grep_fields(pattern, path, None, false).expect("a non-empty pattern parses"))
+    match judge(
+        &search_from_grep_fields(pattern, path, None, false).expect("a non-empty pattern parses"),
+        |_| Evidence::Unknown,
+    ) {
+        Verdict::Fire(hit) => Some(hit),
+        Verdict::Silent(_) => None,
+    }
 }
 
 #[test]
@@ -261,7 +284,7 @@ fn a_bare_symbol_grep_tool_call_fires_the_same_as_its_shell_twin() {
     assert_eq!(hit.symbol, "enumeration_may_be_incomplete");
     assert_eq!(
         hit.symbol,
-        suggests_impact("rg -e 'enumeration_may_be_incomplete' rust/src")
+        suggests_impact_shape("rg -e 'enumeration_may_be_incomplete' rust/src")
             .unwrap()
             .symbol,
         "two parsers, one verdict -- that is the whole point of the split"
@@ -276,11 +299,11 @@ fn a_context_flag_in_the_fields_silences_it_the_way_a_shell_flag_does() {
     let s = search_from_grep_fields("updatePaymentStatus", Some("frontend/src"), None, true)
         .expect("parses");
     assert!(
-        judge(&s).is_none(),
+        matches!(judge(&s, |_| Evidence::Unknown), Verdict::Silent(_)),
         "a `-C` field is `cort context`'s question, not `impact`'s"
     );
     assert!(
-        suggests_impact("rg -C 4 -e 'updatePaymentStatus' frontend/src").is_none(),
+        suggests_impact_shape("rg -C 4 -e 'updatePaymentStatus' frontend/src").is_none(),
         "and the shell twin must agree"
     );
 }
@@ -315,7 +338,10 @@ fn a_type_filtered_tree_wide_call_still_fires() {
 #[test]
 fn a_glob_field_counts_as_a_cross_file_target() {
     let s = search_from_grep_fields("visitorTracking", None, Some("*.ts"), false).expect("parses");
-    assert_eq!(judge(&s).unwrap().symbol, "visitorTracking");
+    let Verdict::Fire(hit) = judge(&s, |_| Evidence::Unknown) else {
+        panic!("a globbed structured search is the shape");
+    };
+    assert_eq!(hit.symbol, "visitorTracking");
 }
 
 /// No shell, so no quoting, so no class of pattern the parser has to refuse. The only `None` left
@@ -324,4 +350,59 @@ fn a_glob_field_counts_as_a_cross_file_target() {
 fn the_only_unparseable_structured_call_is_an_empty_pattern() {
     assert!(search_from_grep_fields("", Some("rust/src"), None, false).is_none());
     assert!(search_from_grep_fields("it's a \"quote\"", None, None, false).is_some());
+}
+
+/// The predicate is "a seed OR a raw edge naming this symbol", and the second half is what keeps the
+/// deletion case alive: `raw_edges` outlives the `chunks` row it pointed at, so a just-deleted symbol
+/// still has evidence even though `impact` can no longer seed on it.
+///
+/// `Unknown` fires because a lookup that could not run is not a finding. `NoIndex` is a distinct
+/// silence from `NoEvidence`: one is a missed opportunity, the other is a correct refusal, and
+/// `tests/cli.rs` documents why that distinction has to survive into the usage row.
+#[test]
+fn the_verdict_names_which_silence_it_chose() {
+    let s = search_from_shell("grep -rn 'ensureSeedUserPasswords' src/").expect("parses");
+
+    for (ev, label) in [
+        (Evidence::Seed, "a symbol impact can seed on"),
+        (
+            Evidence::RawOnly,
+            "a deleted symbol a surviving caller still names",
+        ),
+        (
+            Evidence::Unknown,
+            "a lookup that could not run must not silence",
+        ),
+    ] {
+        assert!(
+            matches!(judge(&s, |_| ev), Verdict::Fire(_)),
+            "{label}: expected Fire"
+        );
+    }
+    assert_eq!(
+        judge(&s, |_| Evidence::Neither),
+        Verdict::Silent(SilenceReason::NoEvidence)
+    );
+    assert_eq!(
+        judge(&s, |_| Evidence::NoIndex),
+        Verdict::Silent(SilenceReason::NoIndex)
+    );
+}
+
+/// The lookup must not run for a search the shape gate already rejects, and the lookup is what opens
+/// the database and shells out to git. On this machine's corpus the shape gate turns down about 95%
+/// of searches; the hook's whole budget is 5s and `git rev-parse` may take 400ms of it.
+#[test]
+fn the_evidence_lookup_is_not_consulted_when_the_shape_gate_rejects() {
+    let s = search_from_shell("grep -rn -A 3 'helper' src/").expect("parses");
+    let mut consulted = false;
+    let v = judge(&s, |_| {
+        consulted = true;
+        Evidence::Seed
+    });
+    assert_eq!(v, Verdict::Silent(SilenceReason::NoShape));
+    assert!(
+        !consulted,
+        "a shape rejection must not open a database or run git"
+    );
 }

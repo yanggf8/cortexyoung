@@ -858,8 +858,9 @@ fn cmd_hook_suggest(args: &[String], usage: &mut UsageEvent) -> Result<Emit, Cor
     let Some(search) = search_of_payload(&v) else {
         return quiet();
     };
-    let Some(hit) = cort::hook::judge(&search) else {
-        return quiet();
+    let hit = match cort::hook::judge(&search, |_| cort::hook::Evidence::Unknown) {
+        cort::hook::Verdict::Fire(hit) => hit,
+        cort::hook::Verdict::Silent(_) => return quiet(),
     };
     // The gate is "this project has an index", which is what `cort status` means by
     // `indexed: true` -- a row in `projects`. It used to be "a db file exists", and those are not
