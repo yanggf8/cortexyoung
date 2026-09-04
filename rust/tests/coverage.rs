@@ -766,6 +766,19 @@ fn gap_count_is_the_number_the_boolean_reads_not_the_mention_layers_alone() {
 fn a_gitignored_file_is_disclosed_as_unindexed_rather_than_silently_dropped() {
     let (dir, root, db, project_id, bin) =
         indexed(&[("src/d.ts", "export function d() { return 1; }\n")]);
+    // `walk_files` reads `.gitignore` through the `ignore` crate, whose `git_ignore` switch only
+    // applies inside a git repository -- outside one the file is not consulted at all. Production
+    // projects always are one (the staleness checks key on git heads), so a fixture that omits
+    // `git init` is asserting against a configuration the product never runs in. Only this test
+    // needs it: the shared `indexed` helper stays git-free so the other twenty tests keep exercising
+    // the unfiltered walk.
+    let init = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir.path())
+        .args(["init", "-q"])
+        .output()
+        .expect("git is on PATH");
+    assert!(init.status.success(), "git init: {init:?}");
     fs::write(dir.path().join(".gitignore"), "generated/\n").unwrap();
     fs::create_dir_all(dir.path().join("generated")).unwrap();
     fs::write(

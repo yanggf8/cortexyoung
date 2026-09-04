@@ -337,6 +337,16 @@ fn walk_files_honours_gitignore_so_build_output_is_not_indexed() {
         ),
         (".gitignore", "out/\nbackend/.wrangler/\n"),
     ]);
+    // The `ignore` crate consults `.gitignore` only inside a git repository, so a fixture without
+    // `git init` asserts against a configuration the product never runs in -- every real project
+    // this indexes is a repo, which is what the staleness checks key on.
+    let init = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .args(["init", "-q"])
+        .output()
+        .expect("git is on PATH");
+    assert!(init.status.success(), "git init: {init:?}");
     let _ = dir;
     assert_eq!(
         walk_files(&root),
