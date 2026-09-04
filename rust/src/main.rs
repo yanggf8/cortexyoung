@@ -5,8 +5,8 @@ use cort::ast_grep::{assert_ast_grep_version, resolve_ast_grep_bin};
 use cort::context::{context_command, ContextOptions, DEFAULT_BUDGET};
 use cort::coverage;
 use cort::db::{
-    db_path_for, delete_project, ensure_schema, list_projects, open_db, with_busy_retry, Db,
-    SqliteErrorCode, WithBusyRetryError,
+    db_path_for, delete_project, ensure_schema, list_projects, open_db, project_id_for,
+    with_busy_retry, Db, SqliteErrorCode, WithBusyRetryError,
 };
 use cort::errors::CortError;
 use cort::impact::{impact_command, DEFAULT_DEPTH};
@@ -858,9 +858,37 @@ fn cmd_hook_suggest(args: &[String], usage: &mut UsageEvent) -> Result<Emit, Cor
     let Some(search) = search_of_payload(&v) else {
         return quiet();
     };
-    let hit = match cort::hook::judge(&search, |_| cort::hook::Evidence::Unknown) {
+    // The probe runs inside the closure and nowhere else. A search rejected on shape therefore pays
+    // for no canonicalize, no database open, no `status_of` and no `git rev-parse` -- and the shape
+    // gate turns down about 95% of searches against a 5s budget. The `Cell` carries the freshness
+    // half back out, so the fire path probes once rather than twice.
+    let observed: std::cell::Cell<Option<IndexState>> = std::cell::Cell::new(None);
+    let hit = match cort::hook::judge(&search, |symbol| {
+        let (state, db, project_id) = probe_index();
+        observed.set(Some(state));
+        match db {
+            None => cort::hook::Evidence::NoIndex,
+            // A storage failure fires. A hook that went quiet because a disk hiccuped would be
+            // silently narrowing the product on a transient.
+            Some(db) => cort::hook::evidence_in(&db, &project_id, symbol)
+                .unwrap_or(cort::hook::Evidence::Unknown),
+        }
+    }) {
         cort::hook::Verdict::Fire(hit) => hit,
-        cort::hook::Verdict::Silent(_) => return quiet(),
+        cort::hook::Verdict::Silent(reason) => {
+            usage.args_summary = harness_args(match reason {
+                cort::hook::SilenceReason::NoShape => "no_shape",
+                // Unchanged meaning: the rule matched a real call-site search and the gate declined
+                // it -- a missed opportunity, which `tests/cli.rs` pins as its own name. An empty
+                // index reaches here, not `no_evidence`, because `probe_index` applies the same
+                // `status.indexed` test the old gate did.
+                cort::hook::SilenceReason::NoIndex => "no_index",
+                // New: the rule matched, the project is genuinely indexed, and the index holds
+                // neither a seed nor a raw edge naming the symbol. A refusal, not a missed chance.
+                cort::hook::SilenceReason::NoEvidence => "no_evidence",
+            });
+            return quiet();
+        }
     };
     // The gate is "this project has an index", which is what `cort status` means by
     // `indexed: true` -- a row in `projects`. It used to be "a db file exists", and those are not
@@ -868,17 +896,21 @@ fn cmd_hook_suggest(args: &[String], usage: &mut UsageEvent) -> Result<Emit, Cor
     // file test and the hook then told the agent `cort has an index for this project` on a tree
     // where `impact` can only answer `no_seed_resolved / stale=true`. That is the exact failure
     // the doc comment above forbids, and it was live on this machine on 2026-09-02.
-    usage.args_summary = harness_args("no_index");
-    let state = index_state();
-    if state == IndexState::Missing {
-        return quiet();
-    }
+
     // A stale index is still worth suggesting -- most seeds resolve, and `impact` discloses
     // `stale=true` itself -- but the suggestion must not arrive claiming more than it has. Every
     // `impact` row recorded on this machine up to 2026-09-02 ran against a stale index, and the
     // injected line said only "cort has an index", which is the half of the sentence that flatters
     // the tool. The outcome is recorded separately so the mining can tell the two apart.
-    let stale = state == IndexState::BehindHead;
+    // `Fire` is only reachable from inside `match evidence(&symbol)`, so the closure ran and this is
+    // `Some`. That coupling is invisible from here: the day someone adds a fast path to `judge` that
+    // fires without consulting evidence, this would read `None` and silently downgrade `hit_stale`
+    // to `hit` with no test noticing. Assert it rather than trust it.
+    debug_assert!(
+        observed.get().is_some(),
+        "judge fired without consulting the evidence closure"
+    );
+    let stale = observed.get() == Some(IndexState::BehindHead);
     usage.args_summary = harness_args(if stale { "hit_stale" } else { "hit" });
     let context = format!(
         "cort has an index for this project{}. `cort impact --symbol '{}' --depth 1 --coverage -f lean` \
@@ -993,31 +1025,39 @@ fn git_head_quickly(root: &Path) -> Option<String> {
         .flatten()
 }
 
-fn index_state() -> IndexState {
+fn probe_index() -> (IndexState, Option<Connection>, String) {
     let Ok(canon) = canonicalize_root(cwd()) else {
-        return IndexState::Missing;
+        return (IndexState::Missing, None, String::new());
     };
     let path = db_path_for(&canon.path_str);
     if !path.exists() {
-        return IndexState::Missing;
+        return (IndexState::Missing, None, String::new());
     }
     let Ok(db) = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY) else {
-        return IndexState::Missing;
+        return (IndexState::Missing, None, String::new());
     };
     let Ok(status) = status_of(&db, &canon.path) else {
-        return IndexState::Missing;
+        return (IndexState::Missing, None, String::new());
     };
     if !status.indexed {
-        return IndexState::Missing;
+        return (IndexState::Missing, None, String::new());
     }
-    match (status.git_head.as_deref(), git_head_quickly(&canon.path)) {
+    let state = match (status.git_head.as_deref(), git_head_quickly(&canon.path)) {
         // Only a definite disagreement is called stale. A tree with no git, or a head that could
         // not be read inside the budget, is not evidence of staleness and must not be reported as
         // if it were -- but it is not evidence of freshness either, which is why the other arm is
         // named for what was observed rather than for what the reader would like it to mean.
         (Some(stored), Some(now)) if stored != now => IndexState::BehindHead,
         _ => IndexState::HeadMatches,
-    }
+    };
+    (state, Some(db), project_id_for(&canon.path_str))
+}
+
+/// The index state alone, for callers that do not also need to ask about a symbol. `hook-refresh`
+/// compares this against `IndexState::Missing` and must keep compiling against the shape it has
+/// always used.
+fn index_state() -> IndexState {
+    probe_index().0
 }
 
 /// Wiring the PreToolUse hook into a Claude Code `settings.json`. `install.sh` calls this so the

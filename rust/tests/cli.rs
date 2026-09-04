@@ -1590,3 +1590,98 @@ fn the_lean_hook_report_has_six_non_empty_fields_on_every_line() {
         missing.stderr
     );
 }
+
+/// A concept search in an indexed project: right shape, and nothing in the index named `tide`. The
+/// hook must stay silent rather than send the agent to `impact` for an answer that would be
+/// `seeds=0 dependents=0` and nothing else.
+#[test]
+fn the_hook_is_silent_when_the_index_holds_nothing_about_the_symbol() {
+    let (_p, cwd, _c, cache) = sandbox();
+    // Without this guard the test passes vacuously when ast-grep is missing: indexing fails, the
+    // project has no index, the hook silences as `no_index`, stdout is still `{}` -- and nothing
+    // about the evidence predicate was exercised.
+    let idx = run_cort(&["index"], &cwd, &cache);
+    if idx.code != 0 {
+        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
+        return;
+    }
+    // Same shape as FIRING_SEARCH -- only the symbol differs -- so the shape gate accepts it and
+    // the silence can only come from the evidence half.
+    let r = run_hook_suggest("grep -rn 'tide(' src --include=*.ts", &cwd, &cache);
+    assert_eq!(
+        payload(&r),
+        serde_json::json!({}),
+        "a name the index never heard of: {} {}",
+        r.stdout,
+        r.stderr
+    );
+    // The silence has to be attributed, not merely observed. Both silences print `{}`, so without
+    // this a one-token slip wiring NoEvidence to "no_index" would leave every test green while the
+    // measurement this change exists to produce never gained a row.
+    let counts =
+        cort::usage::hook_outcomes_at(&cache.join("usage.db"), 0, None).expect("read usage db");
+    assert_eq!(
+        counts.get("no_evidence").and_then(Value::as_i64),
+        Some(1),
+        "an indexed project holding nothing about the symbol is `no_evidence`: {counts:?}"
+    );
+}
+
+/// The same project, a symbol it does hold. Still fires.
+#[test]
+fn the_hook_still_fires_for_a_symbol_the_index_holds() {
+    let (_p, cwd, _c, cache) = sandbox();
+    let idx = run_cort(&["index"], &cwd, &cache);
+    if idx.code != 0 {
+        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
+        return;
+    }
+    let r = run_hook_suggest(FIRING_SEARCH, &cwd, &cache);
+    assert!(
+        r.stdout.contains("cort impact --symbol 'helper'"),
+        "expected a suggestion: {} {}",
+        r.stdout,
+        r.stderr
+    );
+}
+
+/// The case the whole predicate exists for, end to end through the shipped binary rather than
+/// through the shape-only wrapper. Index, delete the definition, re-index incrementally -- exactly
+/// what the PostToolUse hook does after an edit -- then run the deletion-verification grep. The
+/// `chunks` row is gone, so a seed-only gate would go quiet here; the surviving caller's raw edge is
+/// what keeps it firing.
+#[test]
+fn the_hook_still_fires_after_the_definition_is_deleted_and_reindexed() {
+    let (p, cwd, _c, cache) = sandbox();
+    std::fs::write(
+        p.path().join("src/gone.ts"),
+        "export function ensureSeedUserPasswords() { return 1; }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        p.path().join("src/user.ts"),
+        "import { ensureSeedUserPasswords } from './gone';\n\
+export function boot() { return ensureSeedUserPasswords(); }\n",
+    )
+    .unwrap();
+    let idx = run_cort(&["index"], &cwd, &cache);
+    if idx.code != 0 {
+        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
+        return;
+    }
+
+    std::fs::remove_file(p.path().join("src/gone.ts")).unwrap();
+    run_cort(&["index", "--incremental"], &cwd, &cache);
+
+    let r = run_hook_suggest(
+        "grep -rn 'ensureSeedUserPasswords' src --include=*.ts 2>/dev/null",
+        &cwd,
+        &cache,
+    );
+    assert!(
+        r.stdout.contains("ensureSeedUserPasswords"),
+        "a deleted symbol its callers still name must keep firing: {} {}",
+        r.stdout,
+        r.stderr
+    );
+}
