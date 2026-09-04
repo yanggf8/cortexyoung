@@ -24,7 +24,9 @@ pub const DEFAULT_DEPTH: i64 = 3;
 /// parameter list is the sort of thing that turns into a `SQLITE_TOOBIGPARAMS` on someone else's
 /// repository. The whole project's edges fit in memory at the sizes this tool indexes, and reading
 /// them once is also what keeps `--depth 3` on a hub no more expensive than `--depth 1`.
-/// One stored call site: `(line that names the callee, form it was extracted as, callee chunk)`.
+/// One stored site: `(line that names the target, form it was extracted as, target chunk)`. The
+/// target is a callee for a `calls` row and a named type for a `references` one -- the column means
+/// "the one line to read to check this edge" either way, which is the property it exists for.
 type CallSite = (i64, String, String);
 
 fn call_sites_by_source(
@@ -34,7 +36,8 @@ fn call_sites_by_source(
     let mut stmt = db.prepare(
         "SELECT r.source_chunk_id, r.call_site_line, r.call_form, r.target_chunk_id
            FROM relationships r JOIN chunks c ON c.chunk_id = r.source_chunk_id
-          WHERE r.rel_type = 'calls' AND r.call_site_line IS NOT NULL AND c.project_id = ?1
+          WHERE r.rel_type IN ('calls', 'references')
+            AND r.call_site_line IS NOT NULL AND c.project_id = ?1
           ORDER BY r.source_chunk_id, r.call_site_line, r.call_form",
     )?;
     let rows = stmt.query_map(params![project_id], |r| {

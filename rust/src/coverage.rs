@@ -14,9 +14,11 @@
 //! * `mentions_without_edge` — a line on disk names the seed and produced no edge at all. Covers
 //!   extractor blind spots (receiver and module-path call forms, unindexed call styles, and the
 //!   const-binding shape that cost round 2 its labels).
-//! * `extracted_but_unresolved` — the extractor saw the call, but resolution dropped it, which is how
-//!   `relationship_rows_for_symbol_map`'s `targets.is_empty() { continue }` looks from the outside:
-//!   silently.
+//! * `extracted_but_unresolved` — the extractor saw the call or the type reference, but resolution
+//!   dropped it, which is how `relationship_rows_for_symbol_map`'s `targets.is_empty() { continue }`
+//!   looks from the outside: silently. Both edge kinds are screened, because a type seed that could
+//!   not see its own dropped resolutions would report `enumeration_may_be_incomplete: false` while
+//!   being structurally blind — the one failure this layer exists to prevent.
 //! * `blind_files` — files with no chunks (parse degraded) or not indexed at all, where an edge is
 //!   impossible by construction.
 //!
@@ -305,15 +307,18 @@ pub fn cause_of(line_text: &str, column: usize, name_len: usize) -> &'static str
     "mention"
 }
 
-/// (file, bare target) -> lines the extractor recorded a call on.
-fn extracted_calls(
+/// (file, bare target) -> lines the extractor recorded an edge on, for both edge kinds. This is the
+/// suppression map: a mention on a line the extractor already turned into an edge is not a gap. It
+/// has to cover `references` as well as `calls`, or every type reference that resolved would also be
+/// reported as missing and the screen would be pure noise for a type seed.
+fn extracted_edges(
     db: &Db,
     project_id: &str,
 ) -> Result<HashMap<(String, String), Vec<i64>>, CortError> {
     let mut stmt = db
         .prepare(
             "SELECT file_path, raw_target, start_line FROM raw_edges
-          WHERE project_id = ?1 AND rel_type = 'calls'",
+          WHERE project_id = ?1 AND rel_type IN ('calls', 'references')",
         )
         .map_err(|e| crate::db::classify_sqlite(&e))?;
     let rows = stmt
@@ -376,7 +381,7 @@ fn extracted_but_unresolved(
     let mut stmt = db
         .prepare(
             "SELECT file_path, source_symbol, raw_target, start_line FROM raw_edges
-          WHERE project_id = ?1 AND rel_type = 'calls'
+          WHERE project_id = ?1 AND rel_type IN ('calls', 'references')
             AND (raw_target = ?2 OR raw_target LIKE '%:' || ?3 OR raw_target LIKE '%.' || ?4)
           ORDER BY file_path, start_line",
         )
@@ -546,7 +551,7 @@ pub fn coverage_for(
 ) -> Result<Value, CortError> {
     let indexed = indexed_files(db, project_id)?;
     let index_set: HashSet<String> = indexed.iter().cloned().collect();
-    let extracted = extracted_calls(db, project_id)?;
+    let extracted = extracted_edges(db, project_id)?;
     // Read each indexed source file once, not once per seed: a batched `--symbol a,b,c` should cost
     // one walk of the tree.
     let mut skipped: Vec<String> = Vec::new();
