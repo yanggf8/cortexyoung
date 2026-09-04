@@ -274,7 +274,7 @@ pub fn runs_cort_impact(command: &str) -> Option<Option<String>> {
 ///
 /// `suggests_impact` skips leading `VAR=value` assignments and a `sudo`-style prefix before it
 /// looks at the verb; this predicate did not, so `LC_ALL=C rg helper src` was dropped from
-/// `searches` and from `rule_would_fire` while the installed hook fired on it. Same input, two
+/// `searches` and from `shape_would_fire` while the installed hook fired on it. Same input, two
 /// answers, and the disagreement was invisible because both numbers stayed plausible.
 fn is_search(command: &str) -> bool {
     let tokens = tokenize(first_segment(command.trim()));
@@ -657,7 +657,7 @@ pub fn mine(
         },
         "sessions_in_window": sessions,
         "searches": searches,
-        "rule_would_fire": would_fire,
+        "shape_would_fire": would_fire,
         "injections": injection_count,
         "adopted_same_symbol": adopted_same,
         "adopted_other_symbol": adopted_other,
@@ -673,7 +673,11 @@ pub fn mine(
         "injection_rows": rows,
         "reading": "`injections` is how often the hook actually put the query in front of the \
                     agent, and it is the only stage that means anything on its own: `searches` is \
-                    the population, and `rule_would_fire` is the offline matcher's opinion of it, \
+                    the population, and `shape_would_fire` is the offline matcher's opinion of the \
+                    SHAPE half only -- since 2026-09-04 the shipped rule also asks the index \
+                    whether it holds a seed or a raw edge naming the symbol, and that half cannot \
+                    be replayed here because the index state at the time of each historical search \
+                    is not recoverable. It is therefore an upper bound on what would ship today, \
                     which will disagree with `injections` wherever a project has no index -- that \
                     difference is the opportunity the gate declined, not a bug. Adoption is \
                     reported per injection and must be adjudicated row by row: `adopted_other_symbol` \

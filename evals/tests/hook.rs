@@ -2,7 +2,7 @@
 //! stand-in for the seed check. The matcher itself moved to `cort::hook` so the measured rule and
 //! the installed rule cannot drift; its fixtures moved with it to `rust/tests/hook.rs`.
 
-use cort_evals::hook::{commands_of_line, declares_seedable_in};
+use cort_evals::hook::{commands_of_line, declares_seedable_in, probe};
 
 #[test]
 fn both_transcript_dialects_yield_their_executed_commands() {
@@ -159,5 +159,30 @@ fn a_printed_report_names_the_machine_that_produced_it() {
             .and_then(serde_json::Value::as_str)
             .is_some(),
         "the machine id must say where it came from, so a reader knows what it is worth: {v}"
+    );
+}
+
+/// The probe replays the shape half and its field names have to say so, because the evidence half is
+/// not replayable: the index state at the time of each historical fire is not recoverable.
+#[test]
+fn the_probe_names_its_numbers_shape_only_and_says_why() {
+    let report = probe(&[], 0);
+    assert_eq!(report["method"].as_str(), Some("hook-probe-v3"));
+    for key in [
+        "shape_fired",
+        "shape_fired_shell",
+        "shape_fired_structured",
+        "shape_fire_rate_of_searches",
+    ] {
+        assert!(report.get(key).is_some(), "missing {key}: {report}");
+    }
+    assert!(
+        report.get("fired").is_none(),
+        "the old full-verdict name must not survive: {report}"
+    );
+    let reading = report["index_check_reading"].as_str().unwrap();
+    assert!(
+        reading.contains("not replayable") || reading.contains("cannot be replayed"),
+        "the report must disclaim what it cannot know: {reading}"
     );
 }

@@ -135,7 +135,7 @@ fn an_injection_pairs_with_its_trigger_and_with_what_followed() {
 
     assert_eq!(r["sessions_in_window"], json!(1));
     assert_eq!(r["searches"], json!(1));
-    assert_eq!(r["rule_would_fire"], json!(1));
+    assert_eq!(r["shape_would_fire"], json!(1));
     // The preamble shares the attachment type and is not an interception.
     assert_eq!(r["injections"], json!(1), "{r:#}");
     assert_eq!(r["adopted_same_symbol"], json!(1));
@@ -242,7 +242,7 @@ fn a_project_with_no_index_shows_up_as_the_gap_between_the_rule_and_the_hook() {
     .join("\n");
     let dir = tree(&[("-home-u-unindexed", "s1", &body)]);
     let r = run(dir.path(), "2026-09-02T00:00:00Z");
-    assert_eq!(r["rule_would_fire"], json!(1));
+    assert_eq!(r["shape_would_fire"], json!(1));
     assert_eq!(r["injections"], json!(0));
     assert_eq!(r["by_project"]["-home-u-unindexed"]["searches"], json!(1));
 }
@@ -362,7 +362,7 @@ fn a_leading_env_assignment_does_not_hide_a_search() {
         json!(1),
         "the hook skips VAR=value, so must this: {r:#}"
     );
-    assert_eq!(r["rule_would_fire"], json!(1));
+    assert_eq!(r["shape_would_fire"], json!(1));
 }
 
 /// Codex's sixth finding, the false-negative half: `;` starts a new command.

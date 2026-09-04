@@ -354,7 +354,7 @@ fn jsonl_files(dir: &Path, depth: usize) -> Vec<PathBuf> {
 /// the precision number is adjudicated rather than asserted.
 pub fn probe(dirs: &[(&str, PathBuf)], max_examples: usize) -> Value {
     let (mut shell_searches, mut structured_searches) = (0usize, 0usize);
-    let (mut fired_shell, mut fired_structured) = (0usize, 0usize);
+    let (mut shape_fired_shell, mut shape_fired_structured) = (0usize, 0usize);
     let mut commands_seen = 0usize;
     let mut fires: Vec<Value> = Vec::new();
     let mut passed_over: Vec<Value> = Vec::new();
@@ -419,8 +419,8 @@ pub fn probe(dirs: &[(&str, PathBuf)], max_examples: usize) -> Value {
                                 DeclCheck::NoSourceRead => no_source += 1,
                             }
                             match source {
-                                "structured" => fired_structured += 1,
-                                _ => fired_shell += 1,
+                                "structured" => shape_fired_structured += 1,
+                                _ => shape_fired_shell += 1,
                             }
                             *symbols.entry(hit.symbol.clone()).or_insert(0) += 1;
                             if fires.len() < max_examples {
@@ -449,19 +449,19 @@ pub fn probe(dirs: &[(&str, PathBuf)], max_examples: usize) -> Value {
         }
     }
 
-    let fired: usize = symbols.values().sum();
+    let shape_fired: usize = symbols.values().sum();
     json!({
-        "method": "hook-probe-v2",
+        "method": "hook-probe-v3",
         "commands_seen": commands_seen,
         "searches": shell_searches + structured_searches,
         "searches_shell": shell_searches,
         "searches_structured": structured_searches,
-        "fired": fired,
-        "fired_shell": fired_shell,
-        "fired_structured": fired_structured,
-        "fire_rate_of_searches": rate(fired, shell_searches + structured_searches),
-        "fire_rate_shell": rate(fired_shell, shell_searches),
-        "fire_rate_structured": rate(fired_structured, structured_searches),
+        "shape_fired": shape_fired,
+        "shape_fired_shell": shape_fired_shell,
+        "shape_fired_structured": shape_fired_structured,
+        "shape_fire_rate_of_searches": rate(shape_fired, shell_searches + structured_searches),
+        "shape_fire_rate_shell": rate(shape_fired_shell, shell_searches),
+        "shape_fire_rate_structured": rate(shape_fired_structured, structured_searches),
         "index_check": {
             "confirmed_seed": confirmed,
             "rejected_not_a_seed": rejected,
@@ -473,7 +473,15 @@ pub fn probe(dirs: &[(&str, PathBuf)], max_examples: usize) -> Value {
         "symbols": symbols,
         "fires": fires,
         "passed_over_examples": passed_over,
-        "index_check_reading": "The buckets were renamed on 2026-09-04, when struct, enum and trait \
+        "index_check_reading": "This report replays the SHAPE half of the verdict only. Since \
+                    2026-09-04 the shipped rule also asks the project's index whether it holds a \
+                    seed or a raw edge naming the symbol, and that half cannot be replayed: the \
+                    index state at the time of each historical fire is not recoverable, so every \
+                    row here is judged with Evidence::Unknown, which fires. `shape_fired` is \
+                    therefore comparable with runs from before the predicate widened, and is an \
+                    upper bound on what ships today. To measure the evidence half, read the \
+                    `no_evidence` outcome in usage.db from a live deployment. \
+                    The buckets were renamed on 2026-09-04, when struct, enum and trait \
                     became chunks the pack extracts: `confirmed_function`/`rejected_not_a_function` \
                     are now `confirmed_seed`/`rejected_not_a_seed`, and the question is 'does the \
                     pack chunk this', not 'is this callable'. A type fire therefore moves from the \
