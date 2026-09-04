@@ -678,6 +678,11 @@ pub fn mine(
                     whether it holds a seed or a raw edge naming the symbol, and that half cannot \
                     be replayed here because the index state at the time of each historical search \
                     is not recoverable. It is therefore an upper bound on what would ship today, \
+                    and the gap against `injections` now has TWO causes that must not be added \
+                    together: `no_index` is the opportunity the gate declined (index the project \
+                    and the hook would help), while `no_evidence` is a correct refusal (the \
+                    project is indexed and holds nothing about that symbol). Only the first is a \
+                    missed chance, \
                     which will disagree with `injections` wherever a project has no index -- that \
                     difference is the opportunity the gate declined, not a bug. Adoption is \
                     reported per injection and must be adjudicated row by row: `adopted_other_symbol` \

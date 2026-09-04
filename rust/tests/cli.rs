@@ -1671,7 +1671,15 @@ export function boot() { return ensureSeedUserPasswords(); }\n",
     }
 
     std::fs::remove_file(p.path().join("src/gone.ts")).unwrap();
-    run_cort(&["index", "--incremental"], &cwd, &cache);
+    // The incremental run's result cannot be ignored. If it fails, the deleted file's chunk is still
+    // in the index, evidence is `Seed`, and the assertion below passes for the wrong reason -- a
+    // seed-only gate would stay green here whenever incremental did not actually remove the file.
+    let inc = run_cort(&["index", "--incremental"], &cwd, &cache);
+    assert_eq!(
+        inc.code, 0,
+        "incremental must succeed or this test proves nothing: {}",
+        inc.stderr
+    );
 
     let r = run_hook_suggest(
         "grep -rn 'ensureSeedUserPasswords' src --include=*.ts 2>/dev/null",

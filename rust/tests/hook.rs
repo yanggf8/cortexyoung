@@ -484,3 +484,57 @@ fn a_storage_failure_is_returned_rather_than_read_as_absence() {
         "a missing table is an error, not an absent symbol"
     );
 }
+
+/// The `rel_type IN ('calls','references')` filter is load-bearing and nothing else pins it. A Rust
+/// `use` produces an `imports` raw target carrying the full path -- `crate::gone::tide` -- whose leaf
+/// matches the `LIKE '%:'` arm, so without the filter a bare `tide` search would fire on a project
+/// that merely imports the name and never calls it. Delete the filter and every other test stays
+/// green.
+///
+/// (A JS/TS `./tide` specifier does *not* leak: it ends `/tide`, which matches neither arm. That was
+/// worth checking rather than assuming -- an earlier comment here asserted the opposite.)
+#[test]
+fn an_import_path_is_not_evidence_that_a_symbol_exists() {
+    let (_dir, _root, db, project_id, _bin) = indexed_project(&[
+        ("src/gone.rs", "pub fn tide() -> u8 { 1 }\n"),
+        // Imports the name and never calls it, so `tide` appears in an `imports` raw target and in
+        // no `calls` one. The definition lives in a file this fixture then leaves alone, so the
+        // seed half is what has to be removed for the raw-edge half to be the thing under test.
+        (
+            "src/user.rs",
+            "use crate::gone::tide;\npub fn boot() -> u8 { 2 }\n",
+        ),
+    ]);
+    let imports: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM raw_edges
+              WHERE project_id = ?1 AND rel_type = 'imports' AND raw_target LIKE '%tide'",
+            rusqlite::params![project_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        imports, 1,
+        "the fixture must actually produce the import edge it is testing against"
+    );
+
+    // With the definition still indexed this is `Seed`; the raw-edge half only decides once the
+    // chunk is gone, which is the deletion shape. Drop the chunk directly rather than re-indexing:
+    // the point here is the query, not the incremental path (which `evidence_reads_chunks_then_raw_edges`
+    // covers).
+    assert_eq!(
+        evidence_in(&db, &project_id, "tide").unwrap(),
+        Evidence::Seed
+    );
+    db.execute(
+        "DELETE FROM chunks WHERE project_id = ?1 AND symbol_name = 'tide'",
+        rusqlite::params![project_id],
+    )
+    .unwrap();
+
+    assert_eq!(
+        evidence_in(&db, &project_id, "tide").unwrap(),
+        Evidence::Neither,
+        "an import path names a module route, not a call site impact could enumerate"
+    );
+}

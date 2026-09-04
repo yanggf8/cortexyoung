@@ -361,7 +361,8 @@ pub fn query_usage_at(path: &Path, days: i64, now_ms: i64) -> Result<Value, Cort
 /// Aggregating by `command` cannot answer the question the adoption mining asks -- every Bash tool
 /// call the agent makes produces one `hook-suggest` row, so the command total is a measure of agent
 /// activity and not of interception. The outcome is the only column that separates `hit` (context
-/// was injected) from the three silences, which is what makes this db a second source for the
+/// was injected) from the silences -- `no_payload`, `no_shape`, `no_index` and, since
+/// 2026-09-05, `no_evidence` -- which is what makes this db a second source for the
 /// injection count rather than a second reading of the transcript.
 ///
 /// Rows written before the outcome existed carry the bare summary `hook`; they are counted under

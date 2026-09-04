@@ -47,9 +47,11 @@ pub enum Evidence {
 /// `raw_edges` second, matched **exactly** the way `coverage::extracted_but_unresolved` matches
 /// (`coverage.rs`, the `rel_type IN ('calls','references')` query): the same relation filter, and
 /// the leaf passed for all three parameters. Both halves matter and a first draft got both wrong.
-/// Without the filter the query also counts `imports`, whose raw targets are module specifiers --
-/// `./tide` ends with `.tide` and matches the `LIKE '%.'` arm -- so a bare `tide` search would fire
-/// in any project that imports a file by that name. Measured on the hook corpus, filtering moves 7
+/// Without the filter the query also counts `imports`, whose raw targets are module routes: a Rust
+/// `use crate::gone::tide;` stores `crate::gone::tide`, whose leaf matches the `LIKE '%:'` arm, so a
+/// bare `tide` search would fire on a project that merely imports the name and never calls it. (A
+/// JS/TS `./tide` specifier does *not* leak -- it ends `/tide`, matching neither arm. Worth checking
+/// rather than assuming; a first draft of this comment asserted the opposite.) Measured on the hook corpus, filtering moves 7
 /// of 110 fires out of the firing set and costs nothing: an `imports` raw edge never becomes a
 /// relationship at all, so `impact` could not have answered those anyway.
 ///

@@ -890,13 +890,6 @@ fn cmd_hook_suggest(args: &[String], usage: &mut UsageEvent) -> Result<Emit, Cor
             return quiet();
         }
     };
-    // The gate is "this project has an index", which is what `cort status` means by
-    // `indexed: true` -- a row in `projects`. It used to be "a db file exists", and those are not
-    // the same claim: opening a project creates the schema, so a db with 0 chunks satisfied the
-    // file test and the hook then told the agent `cort has an index for this project` on a tree
-    // where `impact` can only answer `no_seed_resolved / stale=true`. That is the exact failure
-    // the doc comment above forbids, and it was live on this machine on 2026-09-02.
-
     // A stale index is still worth suggesting -- most seeds resolve, and `impact` discloses
     // `stale=true` itself -- but the suggestion must not arrive claiming more than it has. Every
     // `impact` row recorded on this machine up to 2026-09-02 ran against a stale index, and the
@@ -910,7 +903,11 @@ fn cmd_hook_suggest(args: &[String], usage: &mut UsageEvent) -> Result<Emit, Cor
         observed.get().is_some(),
         "judge fired without consulting the evidence closure"
     );
-    let stale = observed.get() == Some(IndexState::BehindHead);
+    // `None` is unreachable today, and the assert above says so in debug -- but it compiles out of
+    // the release binary this hook actually ships in, so the release behaviour has to be chosen too.
+    // It fails toward disclosure: an unset cell is treated as behind-head, which over-warns rather
+    // than silently dropping the "built on an older commit" sentence from a suggestion.
+    let stale = observed.get().unwrap_or(IndexState::BehindHead) == IndexState::BehindHead;
     usage.args_summary = harness_args(if stale { "hit_stale" } else { "hit" });
     let context = format!(
         "cort has an index for this project{}. `cort impact --symbol '{}' --depth 1 --coverage -f lean` \
