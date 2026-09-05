@@ -98,7 +98,9 @@ hook **在沒人要求的目錄裡建出索引**,違反它自己的第一條拒�
 | repo 檔 / cwd = `/tmp` | `already_current` |
 | **repo 外的檔 / cwd = repo root** | **`no_index`** |
 
-**cwd 完全不再影響結果。** 而原本的重現 —— 從 `rust/` 編輯 `rust/src/hook.rs` —— 從 `no_index` 變成
+**對一個指名了檔案的 payload,cwd 不再影響結果。** 上表五列都是這種 payload。不指名檔案的形狀
+(`Bash`,以及所有還沒攔截到的)cwd 仍然是全部的答案 —— 只是 payload 自己主張的那個 cwd,不是 hook
+行程繼承到的那個;相對路徑也以前者為基準(2026-09-05 覆審補上,見 §8)。而原本的重現 —— 從 `rust/` 編輯 `rust/src/hook.rs` —— 從 `no_index` 變成
 `refreshed`。
 
 ## 7. 沒有修掉的
@@ -125,3 +127,45 @@ hook **在沒人要求的目錄裡建出索引**,違反它自己的第一條拒�
 
 一個我自己的疏忽也記著:`ddf7cacf` 的 clippy 其實是紅的(`index_state` 成了死碼),但驗證管線尾端用了
 `tail -1`,把退出碼吃掉了。閘門只有在失敗能擋下提交時才有價值。
+
+## 9. 出貨後的第三輪審查(Kimi,2026-09-05)
+
+出貨後把 `f8795581..c6d359c2` 整段送 Kimi 覆審,六個定向問題。六條回覆,**兩條成立、三條不成立、一條
+不動並記下理由** —— 比例本身不是重點,重點是不成立的那三條若照抄都會讓程式碼變差。
+
+**成立(已修)**
+
+1. **相對 `file_path` 的基準用錯了。** `None` 分支早就讓 payload 的 `cwd` 勝過行程的 cwd,`Some`
+   分支卻把原始路徑直接丟給 `project_root_for_path`,於是相對路徑靠 `exists()`/`canonicalize` 對
+   **行程**的 cwd 解析。Claude Code 送絕對路徑所以目前碰不到,但會送相對路徑的正是那兩個還沒攔截到的
+   harness —— 也就是說,這個 bug 會在測試全綠的情況下修錯專案。修法是把同一條優先序套到 `Some` 分支。
+   新測試 `a_relative_path_resolves_against_the_payload_cwd_before_the_process_cwd` 把兩個基準指向
+   **不同專案**;把修正拿掉,它以 `{"no_index": 1}` 變紅,而舊的相對路徑測試照樣綠 —— 舊的那個抓不到。
+2. **README 的分母是錯的。** 寫「79 of 318」,而本文 §2 的表加起來是 315,百分比也是對 315 算的。重新
+   查 `usage.db`(2026-09-04 20:35–09-05 00:35,`command_log`)得 **315**,184/79/20/16/16 逐列吻合;
+   318 哪裡都對不上。改成 315。順帶一提,把窗口往前推五分鐘會得到 320 —— 一個沒帶窗口的數字不可比,
+   這正是 §2 的表要連時間一起寫的原因。
+3. 同一條裡的第二半:「cwd 完全不再影響結果」**說得比量到的寬**。§6 那五列全是指名檔案的 payload;
+   不指名檔案時 cwd 仍是全部的答案。README 與本文的句子都已收窄到量測涵蓋的範圍。
+
+**不成立(逐條驗過)**
+
+4. 「非 UTF-8 路徑元件會讓 `probe_root` 回 `Absent`,是把失敗讀成不存在」—— 不是。`path_to_utf8`
+   (`indexer.rs:108`)對非 UTF-8 路徑直接 panic,所以這種根**從來不可能被索引**;那裡真的沒有索引,
+   `Absent` 是正解。反過來說,是 `probe_root` 的 `to_str` 那道閘讓那個 panic 在 `hook-refresh` 這條
+   路徑上不可達。
+5. 「不可讀的目錄會被走過去,可能接到外層專案」—— 不是。Rust 的 `Path::exists()` 在 `EACCES` 時回
+   false,所以 `d/file` 走上一層到 `d`;而 `d` 自己 `stat` 得到(權限看的是父目錄),`canonicalize(d)`
+   成功,迴圈的**第一次** `probe_root` 問的就是 `d`。結果與可讀情況逐字相同。實測確認。
+6. 「沒有任何測試釘住『path key 不認得時仍從 cwd 解析』」—— 有。
+   `a_refresh_with_no_path_in_the_payload_still_uses_the_working_directory` 送的就是 `tool_input:{}`。
+   這條真正剩下的半邊是「Codex 會不會把路徑放在別的 key」,而那**不准猜** —— 專案規則是欄位名只從攔截到
+   的 payload 判斷,`main.rs` 的註解與 `2026-09-05-posttooluse-payloads.md` 都已經明寫哪些沒攔到。
+
+**不動(記下理由)**
+
+7. 「`probe_root` 的 5 秒 busy timeout 違反『寧可放棄也不等待』,而且沿祖先累加成 N×5s」—— 保留。
+   資料庫是 WAL(`db.rs:130`),讀者不會被寫者擋住;索引檔放在**扁平的** cache 目錄、以路徑雜湊命名,
+   所以只有真的被開過的祖先才有檔案可探(`db_path_for`,`db.rs:97`),典型是 0–1 個而不是 N 個;而真正
+   要幹活的 `open_db` 本來就設同一個 5 秒(`db.rs:131`),探測並沒有把最壞情況拉長。要改的話該連
+   `open_db` 一起改,那是另一個題目。
