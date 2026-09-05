@@ -1084,13 +1084,6 @@ fn probe_index() -> (IndexState, Option<Connection>, String) {
     (state, Some(db), project_id_for(&canon.path_str))
 }
 
-/// The index state alone, for callers that do not also need to ask about a symbol. `hook-refresh`
-/// compares this against `IndexState::Missing` and must keep compiling against the shape it has
-/// always used.
-fn index_state() -> IndexState {
-    probe_index().0
-}
-
 /// Wiring the PreToolUse hook into a Claude Code `settings.json`. `install.sh` calls this so the
 /// hook ships with the skill instead of being a separate thing to remember per agent home; it is
 /// not a verb anyone types either. `--remove` is what `install.sh --uninstall` calls.
