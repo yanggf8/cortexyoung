@@ -1793,6 +1793,47 @@ fn a_relative_path_in_the_payload_resolves_against_the_directory_the_hook_runs_i
     );
 }
 
+/// A relative path needs a base, and the payload's `cwd` is the base -- not the directory the hook
+/// process happens to have inherited. The no-path arm already applied that precedence; this pins
+/// the same rule for the path arm, which is where a review found it missing.
+///
+/// The fixture makes the two bases resolve to **different projects**: the process runs in an
+/// unindexed scratch directory, the payload asserts the indexed one. Reading the process cwd yields
+/// `no_index`, so a `refreshed` here can only come from the payload's `cwd`.
+#[test]
+fn a_relative_path_resolves_against_the_payload_cwd_before_the_process_cwd() {
+    let (p, cwd, _c, cache) = sandbox();
+    git_in_fixture(&cwd);
+    let idx = run_cort(&["index"], &cwd, &cache);
+    if idx.code != 0 {
+        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
+        return;
+    }
+    std::fs::write(
+        p.path().join("src/helper.ts"),
+        "export function helper(n: number) { return n * 7; }\n",
+    )
+    .unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let r = run_hook_refresh_with(
+        &[],
+        serde_json::json!({
+            "tool_name": "Edit",
+            "cwd": cwd.to_str().unwrap(),
+            "tool_input": {"file_path": "src/helper.ts"},
+        }),
+        elsewhere.path(),
+        &cache,
+    );
+    assert_eq!(r.code, 0, "the hook always exits 0: {}", r.stderr);
+    let counts = refresh_outcomes(&cache);
+    assert_eq!(
+        counts.get("refreshed").and_then(Value::as_i64),
+        Some(1),
+        "the process cwd owns no index, so a `refreshed` proves the payload cwd was the base: {counts:?}"
+    );
+}
+
 /// No usable path -- `Bash` carries none, confirmed by interception. cwd stays the answer, which is
 /// the whole of the behaviour before this change for that shape.
 #[test]

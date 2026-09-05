@@ -794,9 +794,18 @@ fn cmd_hook_refresh(args: &[String], usage: &mut UsageEvent) -> Result<Emit, Cor
         .map(PathBuf::from);
     // A path decides on its own. Falling back to cwd when an explicit path owns no index would
     // refresh a project that was never edited.
+    //
+    // A *relative* path still needs a base, and the base is the payload's `cwd` before the
+    // process's, for the same reason the no-path arm below prefers it: one the harness asserts, one
+    // it merely inherited. Claude Code sends absolute paths, so this arm is unexercised there --
+    // but the two uncaptured harnesses are exactly where a relative path would arrive, and
+    // resolving it against a directory the harness never claimed would repair the wrong project
+    // with every test still green.
+    let base = || stated_cwd.clone().unwrap_or_else(cwd);
     let resolved = match edited {
+        Some(p) if p.is_relative() => project_root_for_path(&base().join(p)),
         Some(p) => project_root_for_path(&p),
-        None => project_root_for_path(&stated_cwd.unwrap_or_else(cwd)),
+        None => project_root_for_path(&base()),
     };
     let root = match resolved {
         Ok(Some(root)) => root,
