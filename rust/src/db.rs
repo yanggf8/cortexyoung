@@ -502,3 +502,104 @@ where
         json!({ "message": last.to_string() }),
     )))
 }
+
+/// What one candidate directory turns out to be. Three states, not two: `is_ok()` on the row query
+/// would collapse "no row" with "the database is locked" and with "the file is not a database", and
+/// the walk only stops on a positive row -- so a momentarily locked inner project would be skipped
+/// and the repair would land on the outer one. That refreshes a project nobody edited, files the
+/// usage row under the wrong `project_id`, and leaves the edited project unrepaired behind a row
+/// claiming otherwise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootProbe {
+    /// A `projects` row with `last_indexed_at` set: a real index.
+    Indexed,
+    /// No database, or a database with no such row. Keep walking outward.
+    Absent,
+    /// The database exists and would not answer. Stop; the caller must refuse rather than guess.
+    Unreadable,
+}
+
+/// Does this exact directory have an index -- not merely a database file?
+///
+/// The file test alone is wrong and dangerously so. `ensure_schema` creates the file and an empty
+/// `projects` table the first time anything opens a project, and `status_of` correctly reports
+/// `indexed: false` for that state. But `open_project_tracked` never checks for the row, and
+/// `incremental_index` falls through to `full_index` on a version or candidate mismatch -- and
+/// `full_index` INSERTS the row. A resolver that stopped at a schema-only database would make the
+/// repair hook create an index in a directory nobody asked about, against its first refusal.
+///
+/// The row test is the one `readings` already asks, through a read-only connection so this can never
+/// be the thing that creates a database. It sets the same 5s busy timeout every other connection in
+/// this module sets; rusqlite's default is 0, and a hook whose contract is "give up rather than
+/// wait" should still not trip on the first contended read.
+fn probe_root(dir: &Path) -> RootProbe {
+    let Some(dir) = dir.to_str() else {
+        return RootProbe::Absent;
+    };
+    let path = db_path_for(dir);
+    if !path.exists() {
+        return RootProbe::Absent;
+    }
+    let Ok(db) = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY) else {
+        return RootProbe::Unreadable;
+    };
+    if db.busy_timeout(Duration::from_millis(5000)).is_err() {
+        return RootProbe::Unreadable;
+    }
+    match db.query_row(
+        "SELECT 1 FROM projects WHERE project_id = ?1 AND last_indexed_at IS NOT NULL",
+        params![project_id_for(dir)],
+        |_| Ok(()),
+    ) {
+        Ok(()) => RootProbe::Indexed,
+        Err(rusqlite::Error::QueryReturnedNoRows) => RootProbe::Absent,
+        Err(_) => RootProbe::Unreadable,
+    }
+}
+
+/// A candidate database on the way up exists and would not answer. Its own type rather than `()`,
+/// so a caller cannot read it as "nothing here" -- which is exactly the conflation `RootProbe`
+/// exists to prevent one level down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RootUnreadable;
+
+/// The nearest ancestor of `path` that has an index, or `Ok(None)`.
+///
+/// Walks up rather than scanning `list_projects()`, which opens every database in the cache
+/// directory -- the wrong cost for a hook that runs on every edit. Nearest first, so a file under a
+/// nested indexed project resolves to that project and not to the repository above it.
+///
+/// The path need not exist: an edit hook is handed the file a tool just deleted, so this walks down
+/// to the nearest existing ancestor before canonicalizing.
+///
+/// `Err(RootUnreadable)` means a candidate database exists and would not answer. The caller refuses;
+/// continuing outward would repair a project the agent did not edit.
+pub fn project_root_for_path(path: &Path) -> Result<Option<PathBuf>, RootUnreadable> {
+    let mut probe = path.to_path_buf();
+    while !probe.exists() {
+        let Some(parent) = probe.parent() else {
+            return Ok(None);
+        };
+        probe = parent.to_path_buf();
+    }
+    let Ok(mut dir) = std::fs::canonicalize(&probe) else {
+        return Ok(None);
+    };
+    if dir.is_file() {
+        let Some(parent) = dir.parent() else {
+            return Ok(None);
+        };
+        dir = parent.to_path_buf();
+    }
+    loop {
+        match probe_root(&dir) {
+            RootProbe::Indexed => return Ok(Some(dir)),
+            RootProbe::Unreadable => return Err(RootUnreadable),
+            RootProbe::Absent => {}
+        }
+        let Some(parent) = dir.parent() else {
+            return Ok(None);
+        };
+        dir = parent.to_path_buf();
+    }
+}

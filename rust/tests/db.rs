@@ -2,8 +2,8 @@
 
 use cort::db::{
     cache_dir, db_path_for, delete_project, ensure_schema, get_meta, list_projects, open_db,
-    project_id_for, with_busy_retry, DeleteResult, SqliteErrorCode, WithBusyRetryError,
-    SCHEMA_VERSION,
+    project_id_for, project_root_for_path, with_busy_retry, DeleteResult, SqliteErrorCode,
+    WithBusyRetryError, SCHEMA_VERSION,
 };
 use rusqlite::params;
 use std::path::PathBuf;
@@ -634,5 +634,134 @@ fn a_stale_v5_temporary_table_does_not_wedge_the_next_upgrade() {
     assert_eq!(
         get_meta(&db, "SCHEMA_VERSION").unwrap().as_deref(),
         Some("5")
+    );
+}
+
+/// A database file with a schema and no project row -- the state any command that opens a project
+/// leaves behind, and the one `project_root_for_path` must refuse.
+fn mark_schema_only(root: &std::path::Path) {
+    let db = open_db(db_path_for(root.to_str().unwrap())).unwrap();
+    ensure_schema(&db).unwrap();
+}
+
+/// A real index: schema plus the `projects` row with `last_indexed_at` set, which is what
+/// `full_index` writes and what `status_of` calls `indexed: true`.
+fn mark_indexed(root: &std::path::Path) {
+    let db = open_db(db_path_for(root.to_str().unwrap())).unwrap();
+    ensure_schema(&db).unwrap();
+    db.execute(
+        "INSERT INTO projects (project_id, name, path, last_indexed_at, extractor_version)
+         VALUES (?1, 'p', ?2, 1, 'v')
+         ON CONFLICT(project_id) DO UPDATE SET last_indexed_at = 1",
+        params![
+            project_id_for(root.to_str().unwrap()),
+            root.to_str().unwrap()
+        ],
+    )
+    .unwrap();
+}
+
+/// The nearest indexed ancestor, not the git root: one repository can hold several indexed projects
+/// (this machine has `b/finance-engineering` and `b/finance-engineering/tools/finance-cli`), and a
+/// file under the inner one belongs to the inner one.
+///
+/// A schema-only database is walked past, and that is the property that keeps this hook honest: a
+/// resolver that stopped there would hand the root to `incremental_index`, which falls through to
+/// `full_index` on a version or candidate mismatch, and `full_index` INSERTS the project row -- the
+/// repair hook creating an index in a directory nobody asked about.
+#[test]
+fn a_path_resolves_to_its_nearest_indexed_ancestor() {
+    let _g = env_guard();
+    let cache = tempfile::tempdir().unwrap();
+    let tree = tempfile::tempdir().unwrap();
+    let outer = std::fs::canonicalize(tree.path()).unwrap();
+    std::fs::create_dir_all(outer.join("tools/inner/src")).unwrap();
+    let inner = std::fs::canonicalize(outer.join("tools/inner")).unwrap();
+    std::fs::write(inner.join("src/lib.rs"), "pub fn f() {}\n").unwrap();
+    let file = inner.join("src/lib.rs");
+
+    with_var(
+        "CORT_CACHE_DIR",
+        Some(cache.path().to_str().unwrap()),
+        || {
+            assert_eq!(
+                project_root_for_path(&file),
+                Ok(None),
+                "nothing indexed yet"
+            );
+
+            mark_schema_only(&outer);
+            assert_eq!(
+                project_root_for_path(&file),
+                Ok(None),
+                "a db file with no projects row is not an index"
+            );
+
+            mark_indexed(&outer);
+            assert_eq!(project_root_for_path(&file), Ok(Some(outer.clone())));
+
+            mark_indexed(&inner);
+            assert_eq!(
+                project_root_for_path(&file),
+                Ok(Some(inner.clone())),
+                "the nearer answer wins"
+            );
+        },
+    );
+}
+
+/// A path that does not exist still resolves through its existing ancestors -- an edit hook is
+/// handed the file a tool just deleted.
+#[test]
+fn a_deleted_path_still_resolves_through_its_parents() {
+    let _g = env_guard();
+    let cache = tempfile::tempdir().unwrap();
+    let tree = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tree.path()).unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+
+    with_var(
+        "CORT_CACHE_DIR",
+        Some(cache.path().to_str().unwrap()),
+        || {
+            mark_indexed(&root);
+            assert_eq!(
+                project_root_for_path(&root.join("src/gone.rs")),
+                Ok(Some(root.clone())),
+                "the file is gone; its directory is not"
+            );
+        },
+    );
+}
+
+/// A database that will not answer stops the walk instead of being read as "no row here".
+///
+/// Collapsing the two is how a momentarily locked inner project gets skipped and the repair lands on
+/// the outer one: a project nobody edited is refreshed, the usage row is filed under the wrong
+/// project, and the edited project stays broken behind a row claiming otherwise.
+#[test]
+fn an_unreadable_database_stops_the_walk_rather_than_diverting_it() {
+    let _g = env_guard();
+    let cache = tempfile::tempdir().unwrap();
+    let tree = tempfile::tempdir().unwrap();
+    let outer = std::fs::canonicalize(tree.path()).unwrap();
+    std::fs::create_dir_all(outer.join("inner/src")).unwrap();
+    let inner = std::fs::canonicalize(outer.join("inner")).unwrap();
+    let file = inner.join("src/lib.rs");
+    std::fs::write(&file, "pub fn f() {}\n").unwrap();
+
+    with_var(
+        "CORT_CACHE_DIR",
+        Some(cache.path().to_str().unwrap()),
+        || {
+            mark_indexed(&outer);
+            // The inner project's database is present and is not a database.
+            std::fs::write(db_path_for(inner.to_str().unwrap()), b"not sqlite at all").unwrap();
+            assert_eq!(
+            project_root_for_path(&file),
+            Err(cort::db::RootUnreadable),
+            "an unreadable inner database must not silently route the repair to the outer project"
+        );
+        },
     );
 }
