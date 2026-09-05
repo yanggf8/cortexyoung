@@ -722,6 +722,22 @@ It refuses three things on purpose: it never creates an index where none existed
 than wait for a busy database, and it is silent and exits 0 whatever happens — a `PostToolUse` hook
 reporting failure would put an error in front of you for a cache you did not ask about.
 
+**It repairs the edited file's project, not the shell's (2026-09-05).** It used to resolve the
+project from the working directory, so an agent that ran `cd rust && cargo test` — this repository's
+own workflow — took every later edit's repair with it: 79 of 318 refreshes over four hours were a
+silent `no_index`, and the index then sat two lines behind a source file while `cort status` reported
+`index_is_stale: false`, `changed_files: []` and a `git_head` equal to `HEAD`. All three were true
+statements about a wrong index. The path now comes from `tool_input.file_path`, which was
+**intercepted rather than assumed** (`docs/2026-09-05-posttooluse-payloads.md`; `Bash` sends none, and
+Codex, Kimi, `MultiEdit` and `NotebookEdit` were never captured, so all of those fall back to the
+`cwd` the payload itself asserts). Resolution walks up to the nearest ancestor with a **`projects`
+row** — a database file alone is not an index, and stopping at one would have let `full_index` insert
+the row, the repair hook creating an index nobody asked for. A candidate database that will not
+answer stops the walk instead of being read as "nothing here", because continuing outward would
+repair a project the agent never edited. Measured after: the outcome no longer depends on the working
+directory at all — see `docs/2026-09-05-hook-refresh-follows-the-file.md`, including the 36 refusals
+this did **not** fix.
+
 That "tracks file content" was true of the files git named and of no others, which until 2026-09-03
 left the opposite window wide open: after a `git pull` the tree is clean against the new head, so
 `git diff HEAD` is empty, so nothing was re-extracted — and the run stamped the new head on anyway,
