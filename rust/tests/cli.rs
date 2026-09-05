@@ -1693,3 +1693,190 @@ export function boot() { return ensureSeedUserPasswords(); }\n",
         r.stderr
     );
 }
+
+fn git_in_fixture(root: &Path) {
+    for args in [
+        vec!["init", "-q"],
+        vec!["config", "user.email", "test@example.com"],
+        vec!["config", "user.name", "test"],
+        vec!["add", "-A"],
+        vec!["commit", "-qm", "init"],
+    ] {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(&args)
+            .output()
+            .expect("git runs");
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+    }
+}
+
+fn refresh_outcomes(cache: &Path) -> serde_json::Map<String, Value> {
+    cort::usage::outcomes_of_hook_at(&cache.join("usage.db"), "hook-refresh", 0, None)
+        .expect("read usage db")
+}
+
+/// The bug, as a test -- and the fixture is built so that **cwd and the edited file resolve to
+/// different projects**. That is the whole point. A fixture where both walk up to the same root
+/// cannot tell an implementation that reads the payload from one that ignores it and resolves from
+/// cwd, which is the only property this change exists to establish and the way it will regress.
+///
+/// Here cwd is an unindexed scratch directory: resolving from cwd yields nothing and the hook would
+/// refuse. A `refreshed` therefore proves the payload path was read.
+#[test]
+fn a_refresh_resolves_the_project_from_the_payload_not_the_shell() {
+    let (p, cwd, _c, cache) = sandbox();
+    git_in_fixture(&cwd);
+    let idx = run_cort(&["index"], &cwd, &cache);
+    if idx.code != 0 {
+        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
+        return;
+    }
+    let elsewhere = tempfile::tempdir().unwrap();
+    std::fs::write(
+        p.path().join("src/helper.ts"),
+        "export function helper(n: number) { return n * 3; }\nexport function extra() { return 1; }\n",
+    )
+    .unwrap();
+
+    let payload = format!(
+        r#"{{"tool_name":"Edit","tool_input":{{"file_path":"{}"}}}}"#,
+        p.path().join("src/helper.ts").display()
+    );
+    let r = run_hook_refresh_with(
+        &[],
+        serde_json::from_str(&payload).unwrap(),
+        elsewhere.path(),
+        &cache,
+    );
+    assert_eq!(r.code, 0, "the hook always exits 0: {}", r.stderr);
+    let counts = refresh_outcomes(&cache);
+    assert_eq!(
+        counts.get("refreshed").and_then(Value::as_i64),
+        Some(1),
+        "cwd owns no index, so a `refreshed` here can only come from the payload path: {counts:?}"
+    );
+}
+
+/// The shape the reproduction actually used: a **relative** path, from a subdirectory. Claude Code
+/// sends absolute paths (`docs/2026-09-05-posttooluse-payloads.md`), but Codex and Kimi were never
+/// captured, and a harness that sends a relative one would fail silently in production with the
+/// absolute-path test green.
+#[test]
+fn a_relative_path_in_the_payload_resolves_against_the_directory_the_hook_runs_in() {
+    let (p, cwd, _c, cache) = sandbox();
+    git_in_fixture(&cwd);
+    let idx = run_cort(&["index"], &cwd, &cache);
+    if idx.code != 0 {
+        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
+        return;
+    }
+    std::fs::write(
+        p.path().join("src/helper.ts"),
+        "export function helper(n: number) { return n * 5; }\n",
+    )
+    .unwrap();
+    let sub = cwd.join("src");
+    let r = run_hook_refresh_with(
+        &[],
+        serde_json::json!({"tool_name":"Edit","tool_input":{"file_path":"helper.ts"}}),
+        &sub,
+        &cache,
+    );
+    assert_eq!(r.code, 0);
+    let counts = refresh_outcomes(&cache);
+    assert_eq!(
+        counts.get("refreshed").and_then(Value::as_i64),
+        Some(1),
+        "a relative path resolves against the directory the hook runs in: {counts:?}"
+    );
+}
+
+/// No usable path -- `Bash` carries none, confirmed by interception. cwd stays the answer, which is
+/// the whole of the behaviour before this change for that shape.
+#[test]
+fn a_refresh_with_no_path_in_the_payload_still_uses_the_working_directory() {
+    let (_p, cwd, _c, cache) = sandbox();
+    git_in_fixture(&cwd);
+    let idx = run_cort(&["index"], &cwd, &cache);
+    if idx.code != 0 {
+        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
+        return;
+    }
+    let r = run_hook_refresh_with(
+        &[],
+        serde_json::json!({"tool_name":"Bash","tool_input":{}}),
+        &cwd,
+        &cache,
+    );
+    assert_eq!(r.code, 0);
+    let counts = refresh_outcomes(&cache);
+    assert_eq!(
+        counts.get("already_current").and_then(Value::as_i64),
+        Some(1),
+        "{counts:?}"
+    );
+}
+
+/// An explicit path owning no index is a finding, not a reason to repair something else. Falling
+/// back to cwd here would refresh a project that was never edited.
+#[test]
+fn an_edited_path_outside_every_index_refuses_rather_than_repairing_cwd() {
+    let (_p, cwd, _c, cache) = sandbox();
+    git_in_fixture(&cwd);
+    let idx = run_cort(&["index"], &cwd, &cache);
+    if idx.code != 0 {
+        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
+        return;
+    }
+    let elsewhere = tempfile::tempdir().unwrap();
+    let outside = elsewhere.path().join("stray.ts");
+    std::fs::write(&outside, "export function stray() { return 1; }\n").unwrap();
+    let payload = format!(
+        r#"{{"tool_name":"Write","tool_input":{{"file_path":"{}"}}}}"#,
+        outside.display()
+    );
+    let r = run_hook_refresh_with(&[], serde_json::from_str(&payload).unwrap(), &cwd, &cache);
+    assert_eq!(r.code, 0);
+    let counts = refresh_outcomes(&cache);
+    assert_eq!(
+        counts.get("no_index").and_then(Value::as_i64),
+        Some(1),
+        "an explicit path under nothing indexed must not repair cwd's project: {counts:?}"
+    );
+}
+
+/// A schema-only database at cwd is not an index, and the repair hook must not turn it into one.
+/// This pins a bug the rewrite fixes as a side effect: `index_state()` passed a db file that merely
+/// existed, `open_project_tracked` does not check for the row, and `incremental_index` falls through
+/// to `full_index`, which INSERTS it -- the hook creating an index nobody asked for.
+#[test]
+fn a_schema_only_database_at_cwd_is_not_refreshed_into_an_index() {
+    let (_p, cwd, _c, cache) = sandbox();
+    // Any command that opens the project writes the schema without indexing anything.
+    run_cort(&["impact", "--symbol", "helper"], &cwd, &cache);
+    let r = run_hook_refresh_with(
+        &[],
+        serde_json::json!({"tool_name":"Bash","tool_input":{}}),
+        &cwd,
+        &cache,
+    );
+    assert_eq!(r.code, 0);
+    let counts = refresh_outcomes(&cache);
+    assert_eq!(
+        counts.get("no_index").and_then(Value::as_i64),
+        Some(1),
+        "an empty index is not an index: {counts:?}"
+    );
+    let db_file = cache.join(
+        cort::db::db_path_for(cwd.to_str().unwrap())
+            .file_name()
+            .unwrap(),
+    );
+    let db = cort::db::open_db(db_file).unwrap();
+    let rows: i64 = db
+        .query_row("SELECT COUNT(*) FROM projects", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(rows, 0, "the hook must not have created a project row");
+}

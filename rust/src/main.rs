@@ -6,7 +6,7 @@ use cort::context::{context_command, ContextOptions, DEFAULT_BUDGET};
 use cort::coverage;
 use cort::db::{
     db_path_for, delete_project, ensure_schema, list_projects, open_db, project_id_for,
-    with_busy_retry, Db, SqliteErrorCode, WithBusyRetryError,
+    project_root_for_path, with_busy_retry, Db, SqliteErrorCode, WithBusyRetryError,
 };
 use cort::errors::CortError;
 use cort::impact::{impact_command, DEFAULT_DEPTH};
@@ -768,16 +768,50 @@ fn cmd_hook_refresh(args: &[String], usage: &mut UsageEvent) -> Result<Emit, Cor
         })
     };
 
-    if index_state() == IndexState::Missing {
-        return quiet("no_index", usage);
-    }
+    // Which project to repair comes from the edited file, not from the shell's working directory.
+    // The comment above says which *file* changed is `incremental_index`'s question -- true, and
+    // only once the right project is open. An agent that runs `cd rust && cargo test` used to take
+    // every later edit's repair with it: measured at 79 `no_index` rows in four hours of editing
+    // this repository, while the index drifted two lines behind and `status` still said fresh.
+    //
+    // `tool_input.file_path` is what Claude Code's Write and Edit send, absolute, captured rather
+    // than assumed (`docs/2026-09-05-posttooluse-payloads.md`). `Bash` sends no path, and Codex,
+    // Kimi, MultiEdit and NotebookEdit were never captured -- all of those fall through to the
+    // payload's own `cwd`, which the harness asserts, and then to the process's, which it merely
+    // inherited.
+    let edited = parsed
+        .as_ref()
+        .and_then(|v| v.get("tool_input"))
+        .and_then(|i| i.get("file_path"))
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from);
+    let stated_cwd = parsed
+        .as_ref()
+        .and_then(|v| v.get("cwd"))
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from);
+    // A path decides on its own. Falling back to cwd when an explicit path owns no index would
+    // refresh a project that was never edited.
+    let resolved = match edited {
+        Some(p) => project_root_for_path(&p),
+        None => project_root_for_path(&stated_cwd.unwrap_or_else(cwd)),
+    };
+    let root = match resolved {
+        Ok(Some(root)) => root,
+        Ok(None) => return quiet("no_index", usage),
+        // A candidate database exists and would not answer. Guessing an outer project instead
+        // would repair the wrong index; the outcome for "could not do the work" already exists.
+        Err(_) => return quiet("db_unavailable", usage),
+    };
     // The same helpers `cmd_index` uses, deliberately: opening the database by anything other than
     // `db_path_for` silently addresses a different file, which is exactly how the first version of
     // this function reported success while refreshing nothing.
     let Ok(bin) = pin_bin() else {
         return quiet("no_ast_grep", usage);
     };
-    let Ok((canon, mut db)) = open_project_tracked(&cwd(), usage) else {
+    let Ok((canon, mut db)) = open_project_tracked(&root, usage) else {
         return quiet("db_unavailable", usage);
     };
     match incremental_index(&mut db, &bin, &canon.path) {
