@@ -17,7 +17,7 @@
 - Repo is pure Rust; the only executable Bash is `install.sh` and `tests/install-smoke.sh`.
 - Run `cargo fmt --all` then `cargo clippy --all-targets -- -D warnings` then `cargo test --locked --all-targets` in **both** `rust/` and `evals/` before every commit, and let a non-zero exit stop the commit (never end a verification pipeline in `tail`, which swallows the status).
 - Storage failures are returned, never panicked on.
-- "Unreadable" is never reported as "absent" (precedent: `RootProbe::Unreadable`, `rust/src/db.rs:559-562`), and it is never reported as "drifted" either — a version mismatch is a fact, an unreadable database is an absence of facts.
+- "Unreadable" is never reported as "absent" (precedent: `RootProbe::Unreadable`, produced at `rust/src/db.rs:544` and `:556`), and it is never reported as "drifted" either — a version mismatch is a fact, an unreadable database is an absence of facts.
 - `--lean` TSV must never contain an empty field.
 - No absolute developer paths anywhere, including fixtures.
 
@@ -144,9 +144,13 @@ pub struct ProjectListRow {
     /// The schema this database is stamped at, read from `_cortex_meta`. `None` means the key is
     /// absent -- a database that predates the meta table, which is not the same as a current one.
     pub schema_version: Option<String>,
-    /// The extractor identity the derived rows were built with. This is the same key
-    /// `incremental_index` compares against (`incremental.rs:310`), so the report predicts the
-    /// rebuild decision rather than guessing at it.
+    /// The extractor identity the derived rows were built with -- the same key
+    /// `incremental_index` reads (`incremental.rs:310`).
+    ///
+    /// It reports, and does not predict: `incremental_index` only rebuilds on a mismatch when a
+    /// stored value *exists* (`if let Some(stored)`, `incremental.rs:312-318`), so an index whose
+    /// meta key is absent reads as drifted here and triggers no extractor rebuild there. That
+    /// divergence is on the predates-meta population, and closing it belongs to plan 2.
     pub extractor_version: Option<String>,
 }
 ```
@@ -210,7 +214,11 @@ Two separate breaks, each restored afterwards:
 1. Replace `get_meta(&db, "SCHEMA_VERSION").ok().flatten()` with
    `Some(SCHEMA_VERSION.to_string())`. Expected: RED with `Some("5")` vs `Some("3")`. This is the
    break that matters — a fixture storing the current schema would stay green here.
-2. Delete the `usage_db_path()` skip. Expected: `the_usage_recorder_is_not_a_project` goes RED.
+2. **Do not try to break the recorder skip in this task.** Deleting it leaves the test GREEN, and
+   that is correct rather than a fixture defect: in Task 1 a junk `usage.db` opens fine (SQLite is
+   lazy — verified) and is then swallowed by `if let Ok(row)`, so `list_projects()` is empty with or
+   without the skip. The skip only becomes observable in Task 2, when the failure gains a variant.
+   The test is written here as a canary, and Task 2 Step 5 is where it earns its keep.
 
 - [ ] **Step 6: Run both crates and lint**
 
@@ -229,8 +237,9 @@ git commit -m "feat(db): report each index's schema and extractor, and skip the 
 The two facts that decide whether an index is usable live in _cortex_meta and
 nothing that enumerates projects read either, which is why seven projects sat
 on a superseded extractor while --check said all current. extractor_version
-is read from the key incremental_index compares against, so the report
-predicts the rebuild decision rather than guessing at it.
+is read from the same key incremental_index reads, so the report and the
+rebuild decision cannot disagree about which value is stored -- though they
+do diverge where no value is stored at all, which plan 2 closes.
 
 usage.db shares the cache directory and ends in .db but is the recorder, not
 an index. It was swallowed by a silent continue; excluding it by
@@ -256,7 +265,7 @@ Append to `rust/tests/db.rs`:
 
 ```rust
 /// A database that exists and will not answer is not an absent project -- the same conflation
-/// `RootProbe::Unreadable` exists to prevent one level down (`db.rs:559-562`).
+/// `RootProbe::Unreadable` exists to prevent one level down (`db.rs:544`, `db.rs:556`).
 ///
 /// Both failure arms are exercised, because they are different code: a **directory** named `*.db`
 /// fails at `Connection::open_with_flags`, while a **file of junk** usually opens fine and fails on
@@ -417,8 +426,27 @@ fn cmd_projects(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, CortEr
 }
 ```
 
-Update `rust/tests/db.rs:233` (`list_projects_enumerates_every_indexed_project_in_the_cache_dir`),
-which indexes `rows[0].path`: match on `ProjectEntry::Indexed(r)` and assert on `r`.
+**Two** tests index into the returned Vec and must be updated, or this task's own Step 4 fails to
+compile rather than passing:
+
+- `rust/tests/db.rs:233` (`list_projects_enumerates_every_indexed_project_in_the_cache_dir`), which
+  reads `rows[0].path`.
+- `list_projects_reports_the_schema_and_extractor_each_index_was_built_with`, **the test Task 1 just
+  added**, which reads `rows[0].extractor_version` and `rows[0].schema_version`.
+
+Both take the same shape — bind the row out of the variant first:
+
+```rust
+        let rows = list_projects();
+        assert_eq!(rows.len(), 1);
+        let ProjectEntry::Indexed(r) = &rows[0] else {
+            panic!("expected an indexed project, got {:?}", rows[0]);
+        };
+        assert_eq!(r.extractor_version.as_deref(), Some("stale-extractor"));
+```
+
+Task 1's other test, `the_usage_recorder_is_not_a_project`, needs no change: `is_empty()` works on
+any `Vec`.
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -432,6 +460,11 @@ Expected: PASS.
 
 If either break leaves the test green, the fixture is not reaching that arm and must be fixed before
 continuing.
+
+3. Delete Task 1's `usage_db_path()` skip. Expected: `the_usage_recorder_is_not_a_project` goes RED
+   **now** (it could not in Task 1 — see that task's Step 5), and the three `rust/tests/usage.rs`
+   recorder-isolation tests go red with it. Restore. That pairing is the point: the skip is what
+   keeps `usage.db` out of a population that is now allowed to report failures.
 
 - [ ] **Step 6: Run both crates and lint**
 
@@ -471,17 +504,27 @@ fails at the first query -- and the fixture exercises both."
 
 **Interfaces:**
 - Consumes: `ProjectEntry`, `schema_version`, `extractor_version`.
-- Produces: per-row JSON fields `schema_version`, `extractor_version`, `drifted`; and `cort projects --verdict` printing exactly `indexes\t<word>\t<count>\n` where `<word>` is `compatible`, `drifted` or `unknown`. Plan 3's upgrader consumes both.
+- Produces: per-row JSON fields `schema_version`, `extractor_version`, `drifted`; and `cort projects --verdict` printing exactly `indexes\t<word>\t<drifted>\t<unreadable>\n`. Plan 3's upgrader consumes both.
 
-**What the three words mean.** `drifted` — at least one readable project's stored schema or
-extractor differs from this binary's. `unknown` — no drift found, but at least one entry was
-`Unreadable`, so the population could not be fully inspected; per the spec an unreadable index is an
-absence of facts, not a version mismatch, and it must not be reported as one. `compatible` —
-everything readable matches. `<count>` is the number of entries that are not `compatible`.
+**Two numbers, not one.** A single count cannot stand behind both words: a reader told
+`drifted 3` when two of those three are databases the binary could not open has been told something
+false. So the line carries both counts, always, and each word is answerable by the number beside it:
+
+| field | meaning |
+|---|---|
+| `<word>` | the worst state found: `drifted` if any, else `unknown` if any unreadable, else `compatible` |
+| `<drifted>` | readable projects whose stored schema or extractor differs from this binary's |
+| `<unreadable>` | entries that exist and would not answer |
+
+Both numbers are always present, so the line never carries an empty field.
+
+**`drifted` counts a project whose directory is gone.** Drift is a fact about the index, and the
+index is readable; excluding it from a *count* and denying the *fact* are different decisions, and
+only the first is defensible. The gone directory is already reported on its own line by `--check`
+and as `exists: false` in the JSON row.
 
 **What the verdict deliberately does not cover.** Git staleness (`stale`) and `graph_pending` are
-different axes and keep their own reporting; this line answers compatibility only. A project whose
-directory is gone is excluded from the count, because rebuilding it is not an action anyone can take.
+different axes and keep their own reporting; this line answers compatibility only.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -531,7 +574,7 @@ fn projects_reports_extractor_drift_while_git_says_fresh() {
 
     let v = run_cort(&["projects", "--verdict"], &cwd, &cache);
     assert_eq!(v.code, 0, "{}", v.stderr);
-    assert_eq!(v.stdout, "indexes\tdrifted\t1\n", "verdict was {:?}", v.stdout);
+    assert_eq!(v.stdout, "indexes\tdrifted\t1\t0\n", "verdict was {:?}", v.stdout);
 }
 
 /// Schema drift is a second, independent axis. A `drifted` computed only from the extractor passes
@@ -566,7 +609,7 @@ fn projects_reports_schema_drift_independently_of_the_extractor() {
     assert_eq!(row.get("drifted").and_then(Value::as_bool), Some(true), "{row}");
 
     let v = run_cort(&["projects", "--verdict"], &cwd, &cache);
-    assert_eq!(v.stdout, "indexes\tdrifted\t1\n", "verdict was {:?}", v.stdout);
+    assert_eq!(v.stdout, "indexes\tdrifted\t1\t0\n", "verdict was {:?}", v.stdout);
 }
 
 /// An unreadable index is an absence of facts, not a version mismatch. Reporting it as `drifted`
@@ -577,11 +620,78 @@ fn an_unreadable_index_makes_the_verdict_unknown_not_drifted() {
     std::fs::create_dir(cache.join("adirectory.db")).unwrap();
     let v = run_cort(&["projects", "--verdict"], &cwd, &cache);
     assert_eq!(v.code, 0, "{}", v.stderr);
-    assert_eq!(v.stdout, "indexes\tunknown\t1\n", "verdict was {:?}", v.stdout);
+    assert_eq!(v.stdout, "indexes\tunknown\t0\t1\n", "verdict was {:?}", v.stdout);
+}
+
+/// Drift and unreadable together: the word names the half we know, and each number stands only for
+/// its own fact. An implementation that lets any unreadable entry force `unknown` passes all three
+/// tests above while violating the spec's rule that drift is a fact and must be named.
+#[test]
+fn drift_outranks_unreadable_and_each_count_stands_alone() {
+    let (_p, cwd, _c, cache) = sandbox();
+    git_in_fixture(&cwd);
+    let idx = run_cort(&["index"], &cwd, &cache);
+    if idx.code != 0 {
+        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
+        return;
+    }
+    let db_file = cache.join(
+        cort::db::db_path_for(cwd.to_str().unwrap())
+            .file_name()
+            .unwrap(),
+    );
+    let db = cort::db::open_db(&db_file).unwrap();
+    cort::db::set_meta(&db, "extractor_version", "not-the-one-that-ships").unwrap();
+    drop(db);
+    std::fs::create_dir(cache.join("adirectory.db")).unwrap();
+    std::fs::write(cache.join("junk.db"), b"not a sqlite file").unwrap();
+
+    let v = run_cort(&["projects", "--verdict"], &cwd, &cache);
+    assert_eq!(v.code, 0, "{}", v.stderr);
+    assert_eq!(
+        v.stdout, "indexes\tdrifted\t1\t2\n",
+        "one drifted and two unreadable: the word names the drift, and neither count absorbs the \
+         other: {:?}",
+        v.stdout
+    );
+}
+
+/// A drifted index whose directory is gone is still a drifted index. Excluding it from the count
+/// and denying the fact are different decisions; only the first would be defensible, and this
+/// pins that the fact is not denied.
+#[test]
+fn a_drifted_index_whose_directory_is_gone_is_still_counted_as_drift() {
+    let (_p, _cwd, _c, cache) = sandbox();
+    let gone = tempfile::tempdir().unwrap();
+    let gone_path = gone.path().to_path_buf();
+    git_in_fixture(&gone_path);
+    std::fs::write(gone_path.join("a.ts"), "export function a() { return 1; }\n").unwrap();
+    let idx = run_cort(&["index"], &gone_path, &cache);
+    if idx.code != 0 {
+        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
+        return;
+    }
+    let db_file = cache.join(
+        cort::db::db_path_for(gone_path.to_str().unwrap())
+            .file_name()
+            .unwrap(),
+    );
+    let db = cort::db::open_db(&db_file).unwrap();
+    cort::db::set_meta(&db, "extractor_version", "not-the-one-that-ships").unwrap();
+    drop(db);
+    drop(gone);
+
+    let elsewhere = tempfile::tempdir().unwrap();
+    let v = run_cort(&["projects", "--verdict"], elsewhere.path(), &cache);
+    assert_eq!(
+        v.stdout, "indexes\tdrifted\t1\t0\n",
+        "the index is readable and does not match, whether or not its tree still exists: {:?}",
+        v.stdout
+    );
 }
 
 /// `install.sh --check` parses this line with `read`, so its shape is a contract: exactly one line,
-/// three tab-separated non-empty fields, and a numeric count.
+/// four tab-separated non-empty fields, and two numeric counts.
 #[test]
 fn the_verdict_line_is_one_line_of_three_non_empty_fields() {
     let (_p, cwd, _c, cache) = sandbox();
@@ -589,7 +699,7 @@ fn the_verdict_line_is_one_line_of_three_non_empty_fields() {
     assert_eq!(r.code, 0, "{}", r.stderr);
     assert_eq!(r.stdout.lines().count(), 1, "stdout was {:?}", r.stdout);
     let fields: Vec<&str> = r.stdout.trim_end_matches('\n').split('\t').collect();
-    assert_eq!(fields.len(), 3, "stdout was {:?}", r.stdout);
+    assert_eq!(fields.len(), 4, "stdout was {:?}", r.stdout);
     assert!(fields.iter().all(|f| !f.is_empty()), "stdout was {:?}", r.stdout);
     assert_eq!(fields[0], "indexes");
     assert!(
@@ -598,12 +708,13 @@ fn the_verdict_line_is_one_line_of_three_non_empty_fields() {
         r.stdout
     );
     assert!(fields[2].parse::<u64>().is_ok(), "stdout was {:?}", r.stdout);
+    assert!(fields[3].parse::<u64>().is_ok(), "stdout was {:?}", r.stdout);
 }
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cd rust && cargo test --test cli projects_reports_ an_unreadable_index_makes the_verdict_line_is`
+Run: `cd rust && cargo test --test cli projects_reports_ an_unreadable_index_makes drift_outranks a_drifted_index_whose the_verdict_line_is`
 Expected: FAIL — `unexpected argument '--verdict'`.
 
 - [ ] **Step 3: Write minimal implementation**
@@ -641,16 +752,14 @@ fn cmd_projects(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, CortEr
     let want_schema = cort::db::SCHEMA_VERSION.to_string();
     let want_extractor = cort::pack::extractor_version();
 
-    let mut not_compatible = 0u64;
-    let mut any_unreadable = false;
-    let mut any_drift = false;
+    let mut n_drifted = 0u64;
+    let mut n_unreadable = 0u64;
     let mut rows: Vec<Value> = Vec::new();
 
     for entry in list_projects() {
         match entry {
             ProjectEntry::Unreadable { db_path, reason } => {
-                any_unreadable = true;
-                not_compatible += 1;
+                n_unreadable += 1;
                 rows.push(json!({ "db_path": db_path, "unreadable": reason }));
             }
             ProjectEntry::Indexed(r) => {
@@ -661,11 +770,10 @@ fn cmd_projects(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, CortEr
                 };
                 let drifted = r.schema_version.as_deref() != Some(want_schema.as_str())
                     || r.extractor_version.as_deref() != Some(want_extractor.as_str());
-                // A project whose directory is gone cannot be rebuilt, so it is reported and not
-                // counted -- the count is of work someone could actually do.
-                if drifted && exists {
-                    any_drift = true;
-                    not_compatible += 1;
+                // Counted whether or not the directory still exists: the index is readable and
+                // it does not match, and that is true regardless of whether anyone can act on it.
+                if drifted {
+                    n_drifted += 1;
                 }
                 rows.push(json!({
                     "project_id": r.project_id,
@@ -686,10 +794,11 @@ fn cmd_projects(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, CortEr
 
     if a.verdict {
         // Drift is a fact; unreadable is the absence of one. A population with both is reported as
-        // drifted, because that names work that exists.
-        let word = if any_drift {
+        // drifted, because that names the half we know -- and the other number is printed beside it
+        // rather than folded into it.
+        let word = if n_drifted > 0 {
             "drifted"
-        } else if any_unreadable {
+        } else if n_unreadable > 0 {
             "unknown"
         } else {
             "compatible"
@@ -697,7 +806,11 @@ fn cmd_projects(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, CortEr
         return Ok(Emit {
             render_command: Some("projects"),
             format: Format::Lean,
-            payload: json!({ "indexes": word, "count": not_compatible }),
+            payload: json!({
+                "indexes": word,
+                "drifted": n_drifted,
+                "unreadable": n_unreadable,
+            }),
         });
     }
 
@@ -715,8 +828,9 @@ command without an arm (`rust/src/render.rs:406-413`). Add the renderer:
 ```rust
 fn render_projects(payload: &Value) -> String {
     let word = payload.get("indexes").and_then(Value::as_str).unwrap_or("unknown");
-    let count = payload.get("count").and_then(Value::as_u64).unwrap_or(0);
-    format!("indexes\t{word}\t{count}\n")
+    let drifted = payload.get("drifted").and_then(Value::as_u64).unwrap_or(0);
+    let unreadable = payload.get("unreadable").and_then(Value::as_u64).unwrap_or(0);
+    format!("indexes\t{word}\t{drifted}\t{unreadable}\n")
 }
 ```
 
@@ -727,8 +841,8 @@ Update the CLI help line for `projects` at `rust/src/main.rs:48-54` to
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `cd rust && cargo test --test cli projects_reports_ an_unreadable_index_makes the_verdict_line_is`
-Expected: all four PASS.
+Run: `cd rust && cargo test --test cli projects_reports_ an_unreadable_index_makes drift_outranks a_drifted_index_whose the_verdict_line_is`
+Expected: all six PASS.
 
 - [ ] **Step 5: Verify the tests can actually fail**
 
@@ -736,6 +850,11 @@ Expected: all four PASS.
    RED. If a verdict assertion stays green, the verdict is not derived from the same computation.
 2. Compute `drifted` from the extractor only. Expected: the schema test RED, the extractor test green.
 3. Report `Unreadable` as `drifted`. Expected: `an_unreadable_index_makes_the_verdict_unknown` RED.
+3b. Let any unreadable entry force `unknown` (check `n_unreadable` before `n_drifted`). Expected:
+   `drift_outranks_unreadable_and_each_count_stands_alone` RED — the three tests before it stay
+   green, which is why it exists.
+3c. Restore `if drifted && exists`. Expected:
+   `a_drifted_index_whose_directory_is_gone_is_still_counted_as_drift` RED.
 4. Remove the `Some("projects")` renderer arm. Expected: every verdict assertion RED, because pretty
    JSON is not the TSV line.
 
@@ -785,15 +904,27 @@ name an action that does not exist and leave every drifted machine permanently r
 
 - [ ] **Step 1: Write the failing test**
 
-In `tests/install-smoke.sh`, find the managed-cort double (around `tests/install-smoke.sh:653`) and
-give it a `projects --verdict` arm that returns drift, then assert `--check` reports it. Add beside
-the existing check assertions:
+Test 19 in `tests/install-smoke.sh` already installs the double this needs. `FAKESTALECORT`
+(`tests/install-smoke.sh:653-661`) answers `hook-install` with an error and **every other
+subcommand** with the single line `cort 0.1.0 (rust)` — which for `projects --verdict` is a
+successful exit carrying an unparsable verdict. That is exactly the input the `case *)` arm exists
+for, so no new arm in the double is needed.
+
+Two things the assertion must get right, both of which the first draft of this plan got wrong:
+
+- `assert_contains` takes a **file path** first, not a string: it runs `grep -qF "$2" "$1"`
+  (`tests/install-smoke.sh:25-27`), and every existing call passes a file. Test 19 writes its output
+  to `/tmp/smoke19.log`, so that is the first argument.
+- It must be placed **before** `cp "$TMPHOME/cort.real" "$MANAGED_CORT"` (`tests/install-smoke.sh:674`),
+  which restores the real binary. After that line the double is gone and the assertion tests nothing.
+
+Insert immediately after the existing `hook: could not read` assertion block, just above the restore:
 
 ```bash
-# The double answers every unknown command with a generic success string; without an explicit arm a
-# malformed verdict would be read as "all current", which is the failure this line exists to catch.
-assert_contains "$check_output" "indexes: compatibility unknown" \
-  "the check must not translate an unparsable verdict into all current"
+assert_contains /tmp/smoke19.log "indexes: compatibility unknown (unparsable verdict)" \
+  "--check reads an unparsable verdict as unknown, never as current"
+assert_not_contains /tmp/smoke19.log "schema and extractor current" \
+  "--check must not claim compatibility it could not establish"
 ```
 
 - [ ] **Step 2: Run it to verify it fails**
@@ -811,13 +942,15 @@ exactly as it is), add:
   # head had moved. `--verdict` answers whether the index was built by the schema and extractor this
   # binary uses. It is a report, not a decision -- there is no repair to run yet -- so it never sets
   # ok=0. Fail closed on a line we cannot parse: anything but the three known words is `unknown`.
-  local verdict_line vfield vword vcount
+  # Two counts, because one number cannot stand behind both words: saying "3 built by a superseded
+  # extractor" when two of the three are databases we could not open is a false statement about them.
+  local verdict_line vfield vword vdrift vunread
   if verdict_line="$("$managed_cort" projects --verdict 2>/dev/null)"; then
-    IFS=$'\t' read -r vfield vword vcount <<<"$verdict_line"
+    IFS=$'\t' read -r vfield vword vdrift vunread <<<"$verdict_line"
     case "$vfield/$vword" in
       indexes/compatible) echo "indexes: schema and extractor current" ;;
-      indexes/drifted)    echo "indexes: $vcount built by a superseded schema or extractor" ;;
-      indexes/unknown)    echo "indexes: compatibility unknown ($vcount could not be read)" ;;
+      indexes/drifted)    echo "indexes: $vdrift built by a superseded schema or extractor, $vunread unreadable" ;;
+      indexes/unknown)    echo "indexes: compatibility unknown ($vunread could not be read)" ;;
       *)                  echo "indexes: compatibility unknown (unparsable verdict)" ;;
     esac
   else
@@ -879,7 +1012,42 @@ unavailable verdict reads as unknown, never as current."
 
 ---
 
-## What the review changed
+## What round 2 changed
+
+A second review round, all five findings verified against source before accepting.
+
+1. **Task 4's failing test could never have passed.** `assert_contains` takes a **file path** first
+   (`grep -qF "$2" "$1"`, `tests/install-smoke.sh:25-27`) and the plan passed shell output; and it
+   asserted an `unknown` message while telling the executor to make the double return *drift*, so
+   following the plan literally would have driven the implementation to print `unknown` for a real
+   drift verdict — the exact failure the line exists to catch. It also had to run before the double
+   is restored at `:674`. Rewritten, and simplified: the existing `FAKESTALECORT` double already
+   emits an unparsable line, so no new arm is needed.
+2. **Task 2's own commit was red.** It renamed the return type and named only `db.rs:233` as needing
+   an update — but Task 1's *own new test* reads `rows[0].extractor_version`, so Task 2 Step 4 would
+   have hit a compile error where the plan promised PASS. Both tests are now named, with the
+   binding written out.
+3. **The verdict's single count could not stand behind its word.** `drifted 3` where two of the
+   three are unreadable databases is a false statement about them; and a drifted index whose
+   directory is gone was reported as `compatible` while its own JSON row said `"drifted": true`.
+   The line now carries **two** counts, each answerable on its own, and drift is counted as the fact
+   it is regardless of whether the tree still exists. Two new tests pin the precedence and the gone
+   case — Kimi noted an implementation letting unreadable force `unknown` passed every earlier test.
+4. **Task 1's second deliberate break could never go red.** A junk `usage.db` opens fine (SQLite is
+   lazy — verified empirically) and is then swallowed by `if let Ok(row)`, so the skip is invisible
+   until Task 2 gives the failure a variant. The break moved to Task 2, where it also takes the
+   recorder-isolation tests red with it.
+5. **Three citations were wrong and one claim overclaimed.** The extractor meta write is
+   `indexer.rs:436-437`, not `:416-419`; `RootProbe::Unreadable` is produced at `db.rs:544` and
+   `:556`, not `:559-562` (that is the `RootUnreadable` struct); and "predicts the rebuild decision"
+   was too strong — `incremental_index` only rebuilds on mismatch when a stored value *exists*
+   (`incremental.rs:312-318`), so the report and the rebuild diverge precisely on the predates-meta
+   population. Recorded rather than papered over.
+
+Also fixed by self-check, before this round: `ProjectsArgs` was missing `disable_help_flag` and
+`disable_version_flag`, which every args struct in `main.rs` carries (`main.rs:391-394`).
+
+## What round 1 changed
 
 Recorded so an executor does not reintroduce one. All six were verified against source before being
 accepted.
@@ -914,11 +1082,11 @@ side effect, plus the "unreadable ≠ absent" rule) and §1's build order. Spec 
 
 **Known gap, recorded rather than hidden.** `extractor_version` is stored twice — in
 `projects.extractor_version` and in `_cortex_meta` — written in one transaction by
-`indexer.rs:416-419`. This plan reads the `_cortex_meta` copy because that is what
+`indexer.rs:436-437`, beside the projects-row upsert at `:377-381`. This plan reads the `_cortex_meta` copy because that is what
 `incremental_index` compares against. The duplication is an anti-drift violation inside the database
 and belongs in plan 3.
 
 **Placeholders:** none remain; Task 2's `cmd_projects` is written out in full rather than elided.
 
 **Type consistency:** `ProjectEntry` and `ProjectListRow` field names are identical across Tasks 1-3;
-the three-field TSV contract is defined in Task 3 and consumed in Task 4.
+the four-field TSV contract is defined in Task 3 and consumed in Task 4.
