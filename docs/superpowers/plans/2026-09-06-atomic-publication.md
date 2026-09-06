@@ -1009,3 +1009,29 @@ PASS lines. None blocked execution; all four are fixed in the plan or on landing
 truncating `cat` turns the skill assertion RED while the stamp assertion stays green — the stamp was
 already rename-based in the same change. A test that checks only one half would have missed a
 half-landed fix.
+
+## What execution found (Tasks 3-4)
+
+**Task 3's first break was mine, not the plan's.** Replacing the flip with an old-style copy from
+`$staging` killed the install with `cp: cannot stat '.../.cort-staging.N/cort'` — because the
+promotion step had already `mv`'d staging into the generation. The corrected break copies from the
+validated `$gen_dir` and goes RED exactly as predicted. That mistake is worth recording because it
+is the mechanism working as designed: staging is a one-way door, and anything that reads from it
+after promotion is reading a path that no longer exists.
+
+**Task 3's Breaks 2 and 3 proved the check is content-sensitive, not presence-sensitive.** Deleting a
+rule dies with `staged payload does not match its source (2b5b91… != e52df3…)`; substituting one rule
+for another dies with a *different* hash on the left (`ae6fa8e1…`). A file count would have passed
+the second. The two hashes on the two runs are the evidence the identity names content.
+
+**Task 4's fixture is better than the plan's.** The plan sketched "an unreadable skill source" as
+the refusal shape; the implementer found preflight refuses on the **dest**-side unmanaged collision
+(`install.sh:398-431`) — the source is the repo file and cannot be made unreadable in any meaningful
+sense — and used Test 4's existing shape instead. It also self-checks: if the fixture ever stops
+aborting the install, it FAILs loudly rather than going green.
+
+**Task 4 caught a trap the plan never mentions.** `install.sh:21` reads `MANIFEST_DIR` from
+`XDG_DATA_HOME`, which the smoke script exports once at the top. Moving `HOME` alone for isolation
+sends the installer to a different tree than the assertion watches — every assertion passes and
+nothing was tested. The test saves and restores `HOME`, `XDG_DATA_HOME` and `TMPHOME` together.
+Any future isolation fixture in this file that moves only `HOME` is suspect on sight.
