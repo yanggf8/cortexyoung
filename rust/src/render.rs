@@ -399,6 +399,19 @@ pub fn render_recall(payload: &Value) -> String {
     format!("{}\n", lines.join("\n"))
 }
 
+fn render_projects(payload: &Value) -> String {
+    let word = payload
+        .get("indexes")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let drifted = payload.get("drifted").and_then(Value::as_u64).unwrap_or(0);
+    let unreadable = payload
+        .get("unreadable")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    format!("indexes\t{word}\t{drifted}\t{unreadable}\n")
+}
+
 pub fn render(command: Option<&str>, format: Format, payload: &Value) -> String {
     if format != Format::Lean {
         return pretty(payload);
@@ -409,6 +422,7 @@ pub fn render(command: Option<&str>, format: Format, payload: &Value) -> String 
         Some("context") => render_context(payload),
         Some("read") => render_read(payload),
         Some("recall") => render_recall(payload),
+        Some("projects") => render_projects(payload),
         _ => pretty(payload),
     }
 }

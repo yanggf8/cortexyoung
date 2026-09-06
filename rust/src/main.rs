@@ -6,7 +6,7 @@ use cort::context::{context_command, ContextOptions, DEFAULT_BUDGET};
 use cort::coverage;
 use cort::db::{
     db_path_for, delete_project, ensure_schema, list_projects, open_db, project_id_for,
-    project_root_for_path, with_busy_retry, Db, SqliteErrorCode, WithBusyRetryError,
+    project_root_for_path, with_busy_retry, Db, ProjectEntry, SqliteErrorCode, WithBusyRetryError,
 };
 use cort::errors::CortError;
 use cort::impact::{impact_command, DEFAULT_DEPTH};
@@ -51,7 +51,7 @@ fn usage_value() -> Value {
         "commands": {
             "index": "cort index [root] [--incremental]",
             "status": "cort status [root]",
-            "projects": "cort projects",
+            "projects": "cort projects [--verdict]",
             "delete": "cort delete [root]",
             "struct": "cort struct -p '<pattern>' --lang <lang> [-g <glob>] [--budget <n>] [-f json|lean]",
             "context": "cort context <symbol|query> [--budget <n>] [--include-ambiguous] [--content full] [-f json|lean]",
@@ -395,6 +395,20 @@ struct HookInstallArgs {
 struct FormatOnlyArgs {
     #[arg(short = 'f', long = "format")]
     format: Option<String>,
+}
+
+#[derive(Parser, Debug)]
+#[command(
+    no_binary_name = true,
+    disable_help_flag = true,
+    disable_version_flag = true
+)]
+struct ProjectsArgs {
+    #[arg(short = 'f', long = "format")]
+    format: Option<String>,
+    /// One lean line for a caller that wants the compatibility answer and not the population.
+    #[arg(long)]
+    verdict: bool,
 }
 
 #[derive(Parser, Debug)]
@@ -1609,33 +1623,77 @@ fn cmd_status(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError
 }
 
 fn cmd_projects(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, CortError> {
-    let _a = FormatOnlyArgs::try_parse_from(args.iter()).map_err(clap_fail)?;
-    let rows: Vec<Value> = list_projects()
-        .into_iter()
-        .map(|r| {
-            // `stale` is what an installer or a person actually wants to know, and it is only
-            // answerable here: the row stores the head it was built at, and the tree knows the head
-            // it is on now. `null`, never `false`, when the two cannot be compared -- the directory
-            // is gone, it is not a git tree, or `rev-parse` did not answer inside the budget. A
-            // project that cannot be checked is not a project that is fresh, and saying so is the
-            // same discipline `index_state` and the coverage screen already keep.
-            let exists = Path::new(&r.path).is_dir();
-            let stale = match (r.git_head.as_deref(), git_head_quickly(Path::new(&r.path))) {
-                (Some(stored), Some(now)) => Some(stored != now),
-                _ => None,
-            };
-            json!({
-                "project_id": r.project_id,
-                "name": r.name,
-                "path": r.path,
-                "git_head": r.git_head,
-                "last_indexed_at": r.last_indexed_at,
-                "db_path": r.db_path,
-                "exists": exists,
-                "stale": stale,
-            })
-        })
-        .collect();
+    let a = ProjectsArgs::try_parse_from(args.iter()).map_err(clap_fail)?;
+    let want_schema = cort::db::SCHEMA_VERSION.to_string();
+    let want_extractor = cort::pack::extractor_version();
+
+    let mut n_drifted = 0u64;
+    let mut n_unreadable = 0u64;
+    let mut rows: Vec<Value> = Vec::new();
+
+    for entry in list_projects() {
+        match entry {
+            ProjectEntry::Unreadable { db_path, reason } => {
+                n_unreadable += 1;
+                rows.push(json!({ "db_path": db_path, "unreadable": reason }));
+            }
+            ProjectEntry::Indexed(r) => {
+                // `stale` is what an installer or a person actually wants to know, and it is only
+                // answerable here: the row stores the head it was built at, and the tree knows the
+                // head it is on now. `null`, never `false`, when the two cannot be compared -- the
+                // directory is gone, it is not a git tree, or `rev-parse` did not answer inside the
+                // budget. A project that cannot be checked is not a project that is fresh.
+                let exists = Path::new(&r.path).is_dir();
+                let stale = match (r.git_head.as_deref(), git_head_quickly(Path::new(&r.path))) {
+                    (Some(stored), Some(now)) => Some(stored != now),
+                    _ => None,
+                };
+                let drifted = r.schema_version.as_deref() != Some(want_schema.as_str())
+                    || r.extractor_version.as_deref() != Some(want_extractor.as_str());
+                // Counted whether or not the directory still exists: the index is readable and
+                // it does not match, and that is true regardless of whether anyone can act on it.
+                if drifted {
+                    n_drifted += 1;
+                }
+                rows.push(json!({
+                    "project_id": r.project_id,
+                    "name": r.name,
+                    "path": r.path,
+                    "git_head": r.git_head,
+                    "last_indexed_at": r.last_indexed_at,
+                    "db_path": r.db_path,
+                    "exists": exists,
+                    "stale": stale,
+                    "schema_version": r.schema_version,
+                    "extractor_version": r.extractor_version,
+                    "drifted": drifted,
+                }));
+            }
+        }
+    }
+
+    if a.verdict {
+        // Drift is a fact; unreadable is the absence of one. A population with both is reported as
+        // drifted, because that names the half we know -- and the other number is printed beside it
+        // rather than folded into it.
+        let word = if n_drifted > 0 {
+            "drifted"
+        } else if n_unreadable > 0 {
+            "unknown"
+        } else {
+            "compatible"
+        };
+        return Ok(Emit {
+            render_command: Some("projects"),
+            format: Format::Lean,
+            payload: json!({
+                "indexes": word,
+                "drifted": n_drifted,
+                "unreadable": n_unreadable,
+            }),
+        });
+    }
+
     Ok(Emit {
         render_command: None,
         format: Format::Json,
@@ -1656,6 +1714,10 @@ fn cmd_delete(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError
             let want = root.to_string_lossy().trim_end_matches('/').to_string();
             if let Some(row) = cort::db::list_projects()
                 .into_iter()
+                .filter_map(|e| match e {
+                    ProjectEntry::Indexed(r) => Some(r),
+                    ProjectEntry::Unreadable { .. } => None,
+                })
                 .find(|r| r.path.trim_end_matches('/') == want)
             {
                 usage.project_id = Some(row.project_id.clone());

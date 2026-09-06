@@ -1921,3 +1921,251 @@ fn a_schema_only_database_at_cwd_is_not_refreshed_into_an_index() {
         .unwrap();
     assert_eq!(rows, 0, "the hook must not have created a project row");
 }
+
+/// The incident in one assertion: an index whose stored extractor is not the one this binary uses
+/// must say so, while `stale` stays false because no git head moved -- which is exactly the shape
+/// that read as "all current" on 2026-09-05.
+#[test]
+fn projects_reports_extractor_drift_while_git_says_fresh() {
+    let (_p, cwd, _c, cache) = sandbox();
+    git_in_fixture(&cwd);
+    let idx = run_cort(&["index"], &cwd, &cache);
+    if idx.code != 0 {
+        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
+        return;
+    }
+    let db_file = cache.join(
+        cort::db::db_path_for(cwd.to_str().unwrap())
+            .file_name()
+            .unwrap(),
+    );
+    // The healthy answer, asserted before anything is tampered with. Nothing else pins it: the
+    // shape test runs on an empty population and accepts any of the three words, so an
+    // implementation that can never say `compatible` passes every other test in this file and
+    // tells a fully repaired machine that its compatibility is unknown, forever.
+    let ok = run_cort(&["projects", "--verdict"], &cwd, &cache);
+    assert_eq!(
+        ok.stdout, "indexes\tcompatible\t0\t0\n",
+        "a freshly indexed project is compatible: {:?}",
+        ok.stdout
+    );
+
+    let db = cort::db::open_db(&db_file).unwrap();
+    cort::db::set_meta(&db, "extractor_version", "not-the-one-that-ships").unwrap();
+    drop(db);
+
+    let r = run_cort(&["projects"], &cwd, &cache);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let rows: Value = serde_json::from_str(&r.stdout).expect("projects emits json");
+    let row = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v.get("path").and_then(Value::as_str) == Some(cwd.to_str().unwrap()))
+        .expect("our project is listed");
+    assert_eq!(
+        row.get("extractor_version").and_then(Value::as_str),
+        Some("not-the-one-that-ships")
+    );
+    assert_eq!(
+        row.get("drifted").and_then(Value::as_bool),
+        Some(true),
+        "{row}"
+    );
+    assert_eq!(
+        row.get("stale").and_then(Value::as_bool),
+        Some(false),
+        "git head did not move: {row}"
+    );
+
+    let v = run_cort(&["projects", "--verdict"], &cwd, &cache);
+    assert_eq!(v.code, 0, "{}", v.stderr);
+    assert_eq!(
+        v.stdout, "indexes\tdrifted\t1\t0\n",
+        "verdict was {:?}",
+        v.stdout
+    );
+}
+
+/// Schema drift is a second, independent axis. A `drifted` computed only from the extractor passes
+/// the test above and fails this one.
+#[test]
+fn projects_reports_schema_drift_independently_of_the_extractor() {
+    let (_p, cwd, _c, cache) = sandbox();
+    git_in_fixture(&cwd);
+    let idx = run_cort(&["index"], &cwd, &cache);
+    if idx.code != 0 {
+        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
+        return;
+    }
+    let db_file = cache.join(
+        cort::db::db_path_for(cwd.to_str().unwrap())
+            .file_name()
+            .unwrap(),
+    );
+    let db = cort::db::open_db(&db_file).unwrap();
+    cort::db::set_meta(&db, "SCHEMA_VERSION", "3").unwrap();
+    drop(db);
+
+    let r = run_cort(&["projects"], &cwd, &cache);
+    let rows: Value = serde_json::from_str(&r.stdout).unwrap();
+    let row = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v.get("path").and_then(Value::as_str) == Some(cwd.to_str().unwrap()))
+        .expect("our project is listed");
+    assert_eq!(row.get("schema_version").and_then(Value::as_str), Some("3"));
+    assert_eq!(
+        row.get("drifted").and_then(Value::as_bool),
+        Some(true),
+        "{row}"
+    );
+
+    let v = run_cort(&["projects", "--verdict"], &cwd, &cache);
+    assert_eq!(
+        v.stdout, "indexes\tdrifted\t1\t0\n",
+        "verdict was {:?}",
+        v.stdout
+    );
+}
+
+/// An unreadable index is an absence of facts, not a version mismatch. Reporting it as `drifted`
+/// would claim knowledge the binary does not have (spec §2).
+#[test]
+fn an_unreadable_index_makes_the_verdict_unknown_not_drifted() {
+    let (_p, cwd, _c, cache) = sandbox();
+    std::fs::create_dir(cache.join("adirectory.db")).unwrap();
+    let v = run_cort(&["projects", "--verdict"], &cwd, &cache);
+    assert_eq!(v.code, 0, "{}", v.stderr);
+    assert_eq!(
+        v.stdout, "indexes\tunknown\t0\t1\n",
+        "verdict was {:?}",
+        v.stdout
+    );
+
+    // The row shape itself, which only the verdict counted above. A future consumer reads these
+    // keys, and nothing else in the suite would notice them being renamed.
+    let r = run_cort(&["projects"], &cwd, &cache);
+    let rows: Value = serde_json::from_str(&r.stdout).expect("projects emits json");
+    let row = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v.get("unreadable").is_some())
+        .expect("the unreadable entry is listed, not dropped");
+    assert!(
+        row.get("db_path")
+            .and_then(Value::as_str)
+            .is_some_and(|p| p.ends_with("adirectory.db")),
+        "the unreadable row names the database it could not read: {row}"
+    );
+    assert!(
+        row.get("stale").is_none() && row.get("drifted").is_none(),
+        "an unreadable entry claims neither staleness nor drift: {row}"
+    );
+}
+
+/// Drift and unreadable together: the word names the half we know, and each number stands only for
+/// its own fact. An implementation that lets any unreadable entry force `unknown` passes all three
+/// tests above while violating the spec's rule that drift is a fact and must be named.
+#[test]
+fn drift_outranks_unreadable_and_each_count_stands_alone() {
+    let (_p, cwd, _c, cache) = sandbox();
+    git_in_fixture(&cwd);
+    let idx = run_cort(&["index"], &cwd, &cache);
+    if idx.code != 0 {
+        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
+        return;
+    }
+    let db_file = cache.join(
+        cort::db::db_path_for(cwd.to_str().unwrap())
+            .file_name()
+            .unwrap(),
+    );
+    let db = cort::db::open_db(&db_file).unwrap();
+    cort::db::set_meta(&db, "extractor_version", "not-the-one-that-ships").unwrap();
+    drop(db);
+    std::fs::create_dir(cache.join("adirectory.db")).unwrap();
+    std::fs::write(cache.join("junk.db"), b"not a sqlite file").unwrap();
+
+    let v = run_cort(&["projects", "--verdict"], &cwd, &cache);
+    assert_eq!(v.code, 0, "{}", v.stderr);
+    assert_eq!(
+        v.stdout, "indexes\tdrifted\t1\t2\n",
+        "one drifted and two unreadable: the word names the drift, and neither count absorbs the \
+         other: {:?}",
+        v.stdout
+    );
+}
+
+/// A drifted index whose directory is gone is still a drifted index. Excluding it from the count
+/// and denying the fact are different decisions; only the first would be defensible, and this
+/// pins that the fact is not denied.
+#[test]
+fn a_drifted_index_whose_directory_is_gone_is_still_counted_as_drift() {
+    let (_p, _cwd, _c, cache) = sandbox();
+    let gone = tempfile::tempdir().unwrap();
+    let gone_path = gone.path().to_path_buf();
+    std::fs::write(
+        gone_path.join("a.ts"),
+        "export function a() { return 1; }\n",
+    )
+    .unwrap();
+    git_in_fixture(&gone_path);
+    let idx = run_cort(&["index"], &gone_path, &cache);
+    if idx.code != 0 {
+        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
+        return;
+    }
+    let db_file = cache.join(
+        cort::db::db_path_for(gone_path.to_str().unwrap())
+            .file_name()
+            .unwrap(),
+    );
+    let db = cort::db::open_db(&db_file).unwrap();
+    cort::db::set_meta(&db, "extractor_version", "not-the-one-that-ships").unwrap();
+    drop(db);
+    drop(gone);
+
+    let elsewhere = tempfile::tempdir().unwrap();
+    let v = run_cort(&["projects", "--verdict"], elsewhere.path(), &cache);
+    assert_eq!(
+        v.stdout, "indexes\tdrifted\t1\t0\n",
+        "the index is readable and does not match, whether or not its tree still exists: {:?}",
+        v.stdout
+    );
+}
+
+/// `install.sh --check` parses this line with `read`, so its shape is a contract: exactly one line,
+/// four tab-separated non-empty fields, and two numeric counts.
+#[test]
+fn the_verdict_line_is_one_line_of_four_non_empty_fields() {
+    let (_p, cwd, _c, cache) = sandbox();
+    let r = run_cort(&["projects", "--verdict"], &cwd, &cache);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(r.stdout.lines().count(), 1, "stdout was {:?}", r.stdout);
+    let fields: Vec<&str> = r.stdout.trim_end_matches('\n').split('\t').collect();
+    assert_eq!(fields.len(), 4, "stdout was {:?}", r.stdout);
+    assert!(
+        fields.iter().all(|f| !f.is_empty()),
+        "stdout was {:?}",
+        r.stdout
+    );
+    assert_eq!(fields[0], "indexes");
+    assert!(
+        matches!(fields[1], "compatible" | "drifted" | "unknown"),
+        "stdout was {:?}",
+        r.stdout
+    );
+    assert!(
+        fields[2].parse::<u64>().is_ok(),
+        "stdout was {:?}",
+        r.stdout
+    );
+    assert!(
+        fields[3].parse::<u64>().is_ok(),
+        "stdout was {:?}",
+        r.stdout
+    );
+}

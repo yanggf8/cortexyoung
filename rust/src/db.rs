@@ -338,18 +338,45 @@ pub struct ProjectListRow {
     pub git_head: Option<String>,
     pub last_indexed_at: Option<i64>,
     pub db_path: String,
+    /// The schema this database is stamped at, read from `_cortex_meta`. `None` means the key is
+    /// absent -- a database that predates the meta table, which is not the same as a current one.
+    pub schema_version: Option<String>,
+    /// The extractor identity the derived rows were built with -- the same key
+    /// `incremental_index` reads (`incremental.rs:310`).
+    ///
+    /// It reports, and does not predict: `incremental_index` only rebuilds on a mismatch when a
+    /// stored value *exists* (`if let Some(stored)`, `incremental.rs:312-318`), so an index whose
+    /// meta key is absent reads as drifted here and triggers no extractor rebuild there. That
+    /// divergence is on the predates-meta population, and closing it belongs to plan 2.
+    pub extractor_version: Option<String>,
 }
 
-pub fn list_projects() -> Vec<ProjectListRow> {
+/// One entry from the cache-directory scan. `Unreadable` is a variant rather than an omission so a
+/// caller cannot read a database that exists and will not answer as "nothing here".
+#[derive(Debug, Clone, PartialEq)]
+pub enum ProjectEntry {
+    Indexed(ProjectListRow),
+    Unreadable { db_path: String, reason: String },
+}
+
+pub fn list_projects() -> Vec<ProjectEntry> {
     let dir = cache_dir();
     if !dir.exists() {
         return Vec::new();
     }
+    // A cache directory that will not enumerate is not a machine with no indexes. Returning an
+    // empty population here would let `--verdict` answer `compatible 0 0` about a directory it
+    // never read -- fail-open, in the one place whose whole job is to refuse to be quiet.
     let mut names: Vec<String> = match std::fs::read_dir(&dir) {
         Ok(rd) => rd
             .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
             .collect(),
-        Err(_) => return Vec::new(),
+        Err(e) => {
+            return vec![ProjectEntry::Unreadable {
+                db_path: dir.to_string_lossy().into_owned(),
+                reason: format!("cache directory could not be read: {e}"),
+            }]
+        }
     };
     names.sort();
     let mut out = Vec::new();
@@ -358,27 +385,62 @@ pub fn list_projects() -> Vec<ProjectListRow> {
             continue;
         }
         let db_path = dir.join(&name);
+        if crate::usage::usage_db_path().as_deref() == Some(db_path.as_path()) {
+            continue;
+        }
         let db_path_str = db_path.to_string_lossy().into_owned();
         let db = match Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY) {
             Ok(db) => db,
-            Err(_) => continue,
+            Err(e) => {
+                out.push(ProjectEntry::Unreadable {
+                    db_path: db_path_str.clone(),
+                    reason: e.to_string(),
+                });
+                continue;
+            }
         };
         let row = db.query_row(
             "SELECT project_id, name, path, git_head, last_indexed_at FROM projects",
             [],
             |r| {
-                Ok(ProjectListRow {
-                    project_id: r.get(0)?,
-                    name: r.get(1)?,
-                    path: r.get(2)?,
-                    git_head: r.get(3)?,
-                    last_indexed_at: r.get(4)?,
-                    db_path: db_path_str.clone(),
-                })
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                    r.get::<_, Option<i64>>(4)?,
+                ))
             },
         );
-        if let Ok(row) = row {
-            out.push(row);
+        // A metadata read that *fails* is not a metadata key that is *absent*, and the difference
+        // decides whether this index is reported as a known version mismatch or as one we could not
+        // inspect. `get_meta` keeps them apart (`Err` vs `Ok(None)`); flattening both to `None` here
+        // would make a transient `SQLITE_BUSY` -- this connection takes no busy timeout, and the
+        // refresh hook writes on every edit -- come out as "built by a superseded extractor", a
+        // claim about a database we never read. That is the exact falsehood this screen exists to
+        // remove.
+        let versions = get_meta(&db, "SCHEMA_VERSION")
+            .and_then(|schema| get_meta(&db, "extractor_version").map(|ex| (schema, ex)));
+        match (row, versions) {
+            (Ok((project_id, name, path, git_head, last_indexed_at)), Ok((schema, extractor))) => {
+                out.push(ProjectEntry::Indexed(ProjectListRow {
+                    project_id,
+                    name,
+                    path,
+                    git_head,
+                    last_indexed_at,
+                    db_path: db_path_str,
+                    schema_version: schema,
+                    extractor_version: extractor,
+                }));
+            }
+            // Not a failure: `ensure_schema` creates this shape before anything is indexed, and a
+            // database with no project row is correctly not a project whatever its metadata says.
+            (Err(rusqlite::Error::QueryReturnedNoRows), _) => {}
+            (Err(e), _) | (Ok(_), Err(e)) => out.push(ProjectEntry::Unreadable {
+                db_path: db_path_str,
+                reason: e.to_string(),
+            }),
         }
     }
     out

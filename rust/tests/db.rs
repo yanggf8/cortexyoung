@@ -2,8 +2,8 @@
 
 use cort::db::{
     cache_dir, db_path_for, delete_project, ensure_schema, get_meta, list_projects, open_db,
-    project_id_for, project_root_for_path, with_busy_retry, DeleteResult, SqliteErrorCode,
-    WithBusyRetryError, SCHEMA_VERSION,
+    project_id_for, project_root_for_path, set_meta, with_busy_retry, DeleteResult, ProjectEntry,
+    SqliteErrorCode, WithBusyRetryError, SCHEMA_VERSION,
 };
 use rusqlite::params;
 use std::path::PathBuf;
@@ -256,8 +256,11 @@ fn list_projects_enumerates_every_indexed_project_in_the_cache_dir() {
         drop(db);
         let rows = list_projects();
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].path, root_s);
-        assert!(rows[0]
+        let ProjectEntry::Indexed(r) = &rows[0] else {
+            panic!("expected an indexed project, got {:?}", rows[0]);
+        };
+        assert_eq!(r.path, root_s);
+        assert!(r
             .db_path
             .ends_with(&format!("{}.db", project_id_for(root_s))));
     });
@@ -764,4 +767,196 @@ fn an_unreadable_database_stops_the_walk_rather_than_diverting_it() {
         );
         },
     );
+}
+
+/// The two facts that decide whether an index is usable live in `_cortex_meta`, and until 2026-09-06
+/// nothing that enumerates projects read either. That is why 7 of 10 projects sat on a superseded
+/// extractor while `--check` reported "all current".
+///
+/// The stored schema is asserted at an **old** value on purpose: a fixture that stores the current
+/// one cannot tell a real read from `SCHEMA_VERSION.to_string()`.
+#[test]
+fn list_projects_reports_the_schema_and_extractor_each_index_was_built_with() {
+    let _g = env_guard();
+    let cache = tempfile::tempdir().unwrap();
+    let cache_s = cache.path().to_str().unwrap().to_string();
+    with_var("CORT_CACHE_DIR", Some(&cache_s), || {
+        let root = tempfile::tempdir().unwrap();
+        let root_s = root.path().to_str().unwrap();
+        let db = open_db(db_path_for(root_s)).unwrap();
+        ensure_schema(&db).unwrap();
+        let pid = project_id_for(root_s);
+        let name = root
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        db.execute(
+            "INSERT INTO projects (project_id, name, path, extractor_version)
+             VALUES (?1, ?2, ?3, 'stale-extractor')",
+            params![pid, name, root_s],
+        )
+        .unwrap();
+        set_meta(&db, "extractor_version", "stale-extractor").unwrap();
+        set_meta(&db, "SCHEMA_VERSION", "3").unwrap();
+        drop(db);
+
+        let rows = list_projects();
+        assert_eq!(rows.len(), 1);
+        let ProjectEntry::Indexed(r) = &rows[0] else {
+            panic!("expected an indexed project, got {:?}", rows[0]);
+        };
+        assert_eq!(r.extractor_version.as_deref(), Some("stale-extractor"));
+        assert_eq!(
+            r.schema_version.as_deref(),
+            Some("3"),
+            "the stored schema must be read, not assumed: {:?}",
+            r.schema_version
+        );
+    });
+}
+
+/// A metadata read that *fails* is not a metadata key that is *absent*. Both were flattened to
+/// `None` until 2026-09-06, and `None` is counted as drift -- so a database whose `_cortex_meta`
+/// could not be read was reported as "built by a superseded extractor", a positive claim about a
+/// version this binary never saw. The scan connection takes no busy timeout and the refresh hook
+/// writes on every edit, so a transient `SQLITE_BUSY` is enough to reach it.
+#[test]
+fn a_metadata_read_that_fails_is_unreadable_rather_than_drifted() {
+    let _g = env_guard();
+    let cache = tempfile::tempdir().unwrap();
+    let cache_s = cache.path().to_str().unwrap().to_string();
+    with_var("CORT_CACHE_DIR", Some(&cache_s), || {
+        let root = tempfile::tempdir().unwrap();
+        let root_s = root.path().to_str().unwrap();
+        let db = open_db(db_path_for(root_s)).unwrap();
+        ensure_schema(&db).unwrap();
+        let pid = project_id_for(root_s);
+        let name = root
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        db.execute(
+            "INSERT INTO projects (project_id, name, path, extractor_version)
+             VALUES (?1, ?2, ?3, 'whatever')",
+            params![pid, name, root_s],
+        )
+        .unwrap();
+        // The projects row stays readable; only the metadata becomes unreadable.
+        db.execute_batch("DROP TABLE _cortex_meta").unwrap();
+        drop(db);
+
+        let entries = list_projects();
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        assert!(
+            matches!(entries[0], ProjectEntry::Unreadable { .. }),
+            "a database whose metadata will not answer must not be reported as a known version \
+             mismatch: {entries:?}"
+        );
+    });
+}
+
+/// A cache directory that will not enumerate is not a machine with no indexes. Returning an empty
+/// population made `--verdict` answer `compatible 0 0` about a directory it never read.
+#[test]
+fn a_cache_directory_that_will_not_enumerate_is_not_an_empty_one() {
+    let _g = env_guard();
+    let cache = tempfile::tempdir().unwrap();
+    let cache_s = cache.path().to_str().unwrap().to_string();
+    with_var("CORT_CACHE_DIR", Some(&cache_s), || {
+        // Listing a directory needs its read bit, so 0o600 is not enough -- that still enumerates.
+        // 0o000 is what makes `read_dir` fail while the directory itself still stats.
+        let mut perms = std::fs::metadata(cache.path()).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o000);
+        std::fs::set_permissions(cache.path(), perms.clone()).unwrap();
+
+        let readable = std::fs::read_dir(cache.path()).is_ok();
+        let entries = list_projects();
+
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o700);
+        std::fs::set_permissions(cache.path(), perms).unwrap();
+
+        if readable {
+            // root, or a filesystem that does not enforce this. The property is untestable here
+            // rather than false, and saying so is better than asserting something vacuous.
+            eprintln!("SKIP: this user can read a 0o000 directory");
+            return;
+        }
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        assert!(
+            matches!(entries[0], ProjectEntry::Unreadable { .. }),
+            "an unreadable cache directory is reported, not reduced to an empty population: \
+             {entries:?}"
+        );
+    });
+}
+
+/// `usage.db` lives in the same cache directory and ends in `.db`, but it is the recorder, not an
+/// index: `_usage_meta`, no `projects` table (`usage.rs:100-109`). It must never appear in the
+/// project population. Three recorder-isolation tests (`rust/tests/usage.rs`) deliberately make it
+/// busy or read-only and assert that `cort projects` stdout is byte-identical, so a version of this
+/// scan that notices `usage.db` at all breaks them.
+#[test]
+fn the_usage_recorder_is_not_a_project() {
+    let _g = env_guard();
+    let cache = tempfile::tempdir().unwrap();
+    let cache_s = cache.path().to_str().unwrap().to_string();
+    with_var("CORT_CACHE_DIR", Some(&cache_s), || {
+        std::fs::write(cache.path().join("usage.db"), b"not a project index").unwrap();
+        assert!(
+            list_projects().is_empty(),
+            "the recorder is not part of the project population: {:?}",
+            list_projects()
+        );
+    });
+}
+
+/// A database that exists and will not answer is not an absent project -- the same conflation
+/// `RootProbe::Unreadable` exists to prevent one level down (`db.rs:544`, `db.rs:556`).
+///
+/// Both failure arms are exercised, because they are different code: a **directory** named `*.db`
+/// fails at `Connection::open_with_flags`, while a **file of junk** usually opens fine and fails on
+/// the first query. A fixture with only the second cannot detect a regression in the first.
+///
+/// A database with no `projects` row must stay skipped: `ensure_schema` creates that shape before
+/// anything is indexed, so it is correctly not a project.
+#[test]
+fn an_index_that_will_not_answer_is_reported_rather_than_skipped() {
+    let _g = env_guard();
+    let cache = tempfile::tempdir().unwrap();
+    let cache_s = cache.path().to_str().unwrap().to_string();
+    with_var("CORT_CACHE_DIR", Some(&cache_s), || {
+        std::fs::create_dir(cache.path().join("adirectory.db")).unwrap();
+        std::fs::write(cache.path().join("junk.db"), b"this is not a sqlite file").unwrap();
+
+        let empty_root = tempfile::tempdir().unwrap();
+        let db = open_db(db_path_for(empty_root.path().to_str().unwrap())).unwrap();
+        ensure_schema(&db).unwrap();
+        drop(db);
+
+        let entries = list_projects();
+        let mut unreadable: Vec<String> = entries
+            .iter()
+            .filter_map(|e| match e {
+                ProjectEntry::Unreadable { db_path, .. } => Some(db_path.clone()),
+                ProjectEntry::Indexed(_) => None,
+            })
+            .collect();
+        unreadable.sort();
+        assert_eq!(unreadable.len(), 2, "entries: {entries:?}");
+        assert!(unreadable[0].ends_with("adirectory.db"), "{unreadable:?}");
+        assert!(unreadable[1].ends_with("junk.db"), "{unreadable:?}");
+
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|e| matches!(e, ProjectEntry::Indexed(_)))
+                .count(),
+            0,
+            "a schema-only database is not a project: {entries:?}"
+        );
+    });
 }
