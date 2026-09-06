@@ -611,9 +611,18 @@ Expected: FAIL — `unexpected argument '--verdict'`.
 Add an args struct beside `FormatOnlyArgs` in `rust/src/main.rs`. It must keep `-f/--format`,
 because `cort projects -f json` parses today and removing it is a breaking change:
 
+The three `#[command(...)]` attributes are not decoration: every args struct in this file carries
+all three (`rust/src/main.rs:391-394`), and `dispatch` passes `&args[1..]`, so the subcommand word is
+already stripped by the time the parser sees it (`main.rs:514`). Omitting `disable_help_flag` would
+make `cort projects --help` behave unlike every other command.
+
 ```rust
 #[derive(Parser, Debug)]
-#[command(no_binary_name = true)]
+#[command(
+    no_binary_name = true,
+    disable_help_flag = true,
+    disable_version_flag = true
+)]
 struct ProjectsArgs {
     #[arg(short = 'f', long = "format")]
     format: Option<String>,
