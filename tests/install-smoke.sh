@@ -174,6 +174,34 @@ assert_contains "$MANIFEST" "smoke_probe:value" "the probe key was recorded"
 for k in cort_bin hook_settings manifest_version; do
   assert_contains "$MANIFEST" "$k:" "record_manifest kept $k while adding another"
 done
+# A skill and its stamp are one unit: the stamp records the hash of the bytes beside it, and a
+# mismatch is read as somebody else's file. Truncating the skill in place therefore does not merely
+# corrupt it -- it revokes our own claim to it, and the next run refuses to repair what it no longer
+# recognises as ours. Both must be replaced, so both inodes are checked.
+SK_DIR="$(mktemp -d)"
+printf 'seed\n' > "$SK_DIR/SKILL.md"
+( set --; SOURCE_ONLY=1
+  # shellcheck disable=SC1090
+  . "$INSTALL_SH"
+  write_skill "$REPO_ROOT/skills/ast-grep/SKILL.md" "$SK_DIR/SKILL.md" )
+sk_ino="$(inode_of "$SK_DIR/SKILL.md")"
+st_ino="$(inode_of "$SK_DIR/$STAMP_NAME")"
+( set --; SOURCE_ONLY=1
+  # shellcheck disable=SC1090
+  . "$INSTALL_SH"
+  write_skill "$REPO_ROOT/skills/ast-grep/SKILL.md" "$SK_DIR/SKILL.md" )
+if [ "$sk_ino" != "$(inode_of "$SK_DIR/SKILL.md")" ]; then
+  pass "the skill is published by replacement, not truncated in place"
+else
+  fail "the skill was truncated in place (inode unchanged: $sk_ino)"
+fi
+if [ "$st_ino" != "$(inode_of "$SK_DIR/$STAMP_NAME")" ]; then
+  pass "the stamp is published by replacement too"
+else
+  fail "the stamp was truncated in place (inode unchanged: $st_ino)"
+fi
+assert_contains "$SK_DIR/$STAMP_NAME" "skill_sha256:" "the stamp still names the hash"
+rm -rf "$SK_DIR"
 # `fake_ast_grep` is a test double that cargo builds alongside cort; shipping it would be a
 # second executable in the payload that nobody owns.
 if find "$HOME/.local/share/cortexyoung/cort" -name 'fake_ast_grep' -print -quit | grep -q .; then

@@ -208,13 +208,22 @@ skill_is_managed() {
 
 # ensure_skill_stamp: claim "$1", a SKILL.md we just wrote, in the stamp file beside it.
 ensure_skill_stamp() {
-  printf '%s\nskill_sha256:%s\n' "$MANAGED_SIGNATURE" "$(skill_hash "$1")" > "$(skill_stamp_for "$1")"
+  local stamp; stamp="$(skill_stamp_for "$1")"
+  local tmp; tmp="$(mktemp "$(dirname "$stamp")/.stamp.XXXXXX")"
+  printf '%s\nskill_sha256:%s\n' "$MANAGED_SIGNATURE" "$(skill_hash "$1")" > "$tmp"
+  mv -f "$tmp" "$stamp"
 }
 
 # write_skill: publish "$1" to "$2" byte-for-byte, then claim it. Nothing is inserted into the
 # document -- what lands in an agent home directory is exactly what is in skills/<name>/SKILL.md.
+#
+# Staged and renamed, because the stamp records the hash of the bytes beside it: a half-written
+# skill hashes to something the stamp does not name, and `skill_is_managed` then reads our own file
+# as somebody else's and refuses to repair it.
 write_skill() {
-  cat "$1" > "$2"
+  local tmp; tmp="$(mktemp "$(dirname "$2")/.skill.XXXXXX")"
+  cat "$1" > "$tmp"
+  mv -f "$tmp" "$2"
   ensure_skill_stamp "$2"
 }
 
