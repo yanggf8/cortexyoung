@@ -612,6 +612,15 @@ fn hook_args(outcome: &str, harness: &str, declared: Option<&str>, model: Option
     hook_row(outcome, harness, declared, model).to_string()
 }
 
+/// 在已序列化的 hook row 上補 `decline` 標籤——NoShape 的細分原因（issue #3）。標籤是
+/// 穩定的識別子、永不攜帶 payload 內容：mining 要的是「哪條規則拒絕了它」，不是命令本身。
+fn hook_args_decline(hook_args_json: &str, decline: &str) -> String {
+    let mut v: Value =
+        serde_json::from_str(hook_args_json).unwrap_or_else(|_| json!({ "hook": "unknown" }));
+    v["decline"] = json!(decline);
+    v.to_string()
+}
+
 /// The model that answered, as the harness named it in its own payload. Never inferred: a guess
 /// here is worse than the absence, because absence is visible and a wrong model name is not.
 fn model_of_payload(v: &Value) -> Option<&str> {
@@ -954,9 +963,22 @@ fn cmd_hook_suggest(args: &[String], usage: &mut UsageEvent) -> Result<Emit, Cor
     let model = model_of_payload(&v);
     let harness_args =
         |outcome: &str| hook_args(outcome, &harness, declared_differs.as_deref(), model);
-    usage.args_summary = harness_args("no_shape");
-    let Some(search) = search_of_payload(&v) else {
-        return quiet();
+    let search = match search_of_payload(&v) {
+        Some(s) => s,
+        None => {
+            // The payload could be read but yielded no search at all -- a different silence from
+            // the rule-based declines `judge` emits, and each of its three causes gets its own
+            // stable identifier for the same reason: unattributable silences cannot be tuned.
+            let tag = match v.get("tool_name").and_then(Value::as_str) {
+                Some("Grep") => "grep_fields_no_pattern",
+                _ => match v.get("tool_input").and_then(|ti| ti.get("command")) {
+                    Some(_) => "unparseable_command",
+                    None => "unsupported_tool_surface",
+                },
+            };
+            usage.args_summary = hook_args_decline(&harness_args("no_shape"), tag);
+            return quiet();
+        }
     };
     // The probe runs inside the closure and nowhere else. A search rejected on shape therefore pays
     // for no canonicalize, no database open, no `status_of` and no `git rev-parse` -- and the shape
@@ -976,17 +998,21 @@ fn cmd_hook_suggest(args: &[String], usage: &mut UsageEvent) -> Result<Emit, Cor
     }) {
         cort::hook::Verdict::Fire(hit) => hit,
         cort::hook::Verdict::Silent(reason) => {
-            usage.args_summary = harness_args(match reason {
-                cort::hook::SilenceReason::NoShape => "no_shape",
+            let (outcome, decline) = match reason {
+                cort::hook::SilenceReason::NoShape(tag) => ("no_shape", Some(tag)),
                 // Unchanged meaning: the rule matched a real call-site search and the gate declined
                 // it -- a missed opportunity, which `tests/cli.rs` pins as its own name. An empty
                 // index reaches here, not `no_evidence`, because `probe_index` applies the same
                 // `status.indexed` test the old gate did.
-                cort::hook::SilenceReason::NoIndex => "no_index",
+                cort::hook::SilenceReason::NoIndex => ("no_index", None),
                 // New: the rule matched, the project is genuinely indexed, and the index holds
                 // neither a seed nor a raw edge naming the symbol. A refusal, not a missed chance.
-                cort::hook::SilenceReason::NoEvidence => "no_evidence",
-            });
+                cort::hook::SilenceReason::NoEvidence => ("no_evidence", None),
+            };
+            usage.args_summary = match decline {
+                Some(tag) => hook_args_decline(&harness_args(outcome), tag),
+                None => harness_args(outcome),
+            };
             return quiet();
         }
     };

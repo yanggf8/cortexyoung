@@ -107,8 +107,13 @@ pub fn evidence_in(
 /// from an index problem from a missing index, and a single `None` collapses all three.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SilenceReason {
-    /// Not the narrow shape where `impact` beats `rg`.
-    NoShape,
+    /// Not the narrow shape where `impact` beats `rg`. The payload is a *stable identifier* for
+    /// the rule that declined -- `pattern_not_symbol`, `context_flag`, `non_source_target`,
+    /// `unindexed_extension`, `concrete_file_read`, `target_not_source` -- so the no_shape bucket
+    /// (83% of hook-suggest rows over the 30d window ending 2026-09-06) becomes attributable rule
+    /// by rule instead of one impenetrable number (issue #3). Identifiers, never prose: mining
+    /// groups on them, so renaming one is a breaking change to the log's vocabulary.
+    NoShape(&'static str),
     /// Right shape, no index for this project -- a missed opportunity, not a refusal.
     NoIndex,
     /// Right shape, indexed project, and the index holds neither a seed nor a raw edge naming the
@@ -435,28 +440,28 @@ pub fn search_from_grep_fields(
 /// `rg`, which is what the routing skill already says and what the traffic shows the agent doing
 /// correctly hundreds of times.
 pub fn judge(search: &Search, evidence: impl FnOnce(&str) -> Evidence) -> Verdict {
-    let Some(symbol) = symbol_of_pattern(&search.pattern) else {
-        return Verdict::Silent(SilenceReason::NoShape);
-    };
-
-    // A context flag means the agent wants to read the body around the match, not enumerate who
-    // reaches it. `cort context` is that verb, and suggesting `impact` there is a wrong answer
-    // dressed as a helpful one. Adjudicated on the first probe run: every `-A`/`-B`/`-C` fire was a
-    // false positive.
+    // Context intent is checked before pattern quality, deliberately: a split-form flag like
+    // `-A 3` leaves `3` as the parsed pattern (only the glued `-A3` is skipped whole), so a
+    // pattern-quality check would mislabel an agent asking for context as a symbol-extraction
+    // miss. What the agent wanted is the honest decline reason; both are silent either way.
     if search.wants_context {
-        return Verdict::Silent(SilenceReason::NoShape);
+        return Verdict::Silent(SilenceReason::NoShape("context_flag"));
     }
+
+    let Some(symbol) = symbol_of_pattern(&search.pattern) else {
+        return Verdict::Silent(SilenceReason::NoShape("pattern_not_symbol"));
+    };
 
     let targets = search.targets.join(" ");
     if NON_SOURCE_MARKERS.iter().any(|m| targets.contains(m)) {
-        return Verdict::Silent(SilenceReason::NoShape);
+        return Verdict::Silent(SilenceReason::NoShape("non_source_target"));
     }
     // If the search names any file extension at all, at least one has to be a language the rule
     // pack actually indexes. Without this a Zig or Go file under `src/` fires, and `impact` has
     // nothing to say about a language it never parsed -- the worst kind of suggestion, because it
     // looks answerable.
     if names_an_extension(&targets) && !SOURCE_EXTENSIONS.iter().any(|e| targets.contains(e)) {
-        return Verdict::Silent(SilenceReason::NoShape);
+        return Verdict::Silent(SilenceReason::NoShape("unindexed_extension"));
     }
     // A caller set is cross-file by definition. A search that names concrete files and nothing
     // recursive or glob-shaped is asking "where does this appear in the file I already have open",
@@ -468,7 +473,7 @@ pub fn judge(search: &Search, evidence: impl FnOnce(&str) -> Evidence) -> Verdic
         .iter()
         .any(|t| !t.starts_with('-') && !names_an_extension(t) && !t.contains('*'));
     if !targets.trim().is_empty() && !search.recursive && !has_glob && !concrete_dirs {
-        return Verdict::Silent(SilenceReason::NoShape);
+        return Verdict::Silent(SilenceReason::NoShape("concrete_file_read"));
     }
 
     // No path at all means the current directory, which in an agent session is the project.
@@ -477,7 +482,7 @@ pub fn judge(search: &Search, evidence: impl FnOnce(&str) -> Evidence) -> Verdic
     } else if SOURCE_MARKERS.iter().any(|m| targets.contains(m)) {
         "bare symbol, search scoped to project source"
     } else {
-        return Verdict::Silent(SilenceReason::NoShape);
+        return Verdict::Silent(SilenceReason::NoShape("target_not_source"));
     };
     // Only now, with every shape check passed, is the index asked -- and the closure is what opens
     // it. This ordering is the budget: the shape gate turns down about 95% of searches and none of

@@ -400,7 +400,7 @@ fn the_evidence_lookup_is_not_consulted_when_the_shape_gate_rejects() {
         consulted = true;
         Evidence::Seed
     });
-    assert_eq!(v, Verdict::Silent(SilenceReason::NoShape));
+    assert_eq!(v, Verdict::Silent(SilenceReason::NoShape("context_flag")));
     assert!(
         !consulted,
         "a shape rejection must not open a database or run git"
@@ -542,5 +542,51 @@ fn an_import_path_is_not_evidence_that_a_symbol_exists() {
         evidence_in(&db, &project_id, "tide").unwrap(),
         Evidence::Neither,
         "an import path names a module route, not a call site impact could enumerate"
+    );
+}
+
+/// A no_shape bucket nobody can attribute cannot be tuned: over the 30d window ending 2026-09-06
+/// it held 83% of hook-suggest rows. Each decline now names the rule that rejected it, and the
+/// tags are stable identifiers the mining groups on (issue #3). Fixtures are corpus-shaped, not
+/// invented: every command below mirrors a real decline class from the transcripts already
+/// pinned by the tests above.
+#[test]
+fn each_shape_rejection_names_the_rule_that_declined_it() {
+    // Alternations are text hunts, not one symbol -- the extraction fails first.
+    let s =
+        search_from_shell(r"grep -rn 'thinking\|MAX_TOKENS\|max_tokens' crates/cct2/src/llm.rs")
+            .expect("parses");
+    assert_eq!(
+        judge(&s, |_| Evidence::Seed),
+        Verdict::Silent(SilenceReason::NoShape("pattern_not_symbol"))
+    );
+
+    // -A means "read around the match" -- context work, never caller enumeration.
+    let s = search_from_shell("grep -rn -A 3 'helper' src/").expect("parses");
+    assert_eq!(
+        judge(&s, |_| Evidence::Seed),
+        Verdict::Silent(SilenceReason::NoShape("context_flag"))
+    );
+
+    // Dependencies are not the project's own call sites.
+    let s = search_from_shell("grep -rn 'helper' node_modules/").expect("parses");
+    assert_eq!(
+        judge(&s, |_| Evidence::Seed),
+        Verdict::Silent(SilenceReason::NoShape("non_source_target"))
+    );
+
+    // A language the rule pack never parsed cannot be answered; suggesting impact there is the
+    // worst kind of suggestion -- it looks answerable.
+    let s = search_from_shell("grep -rn 'init' src/main.zig").expect("parses");
+    assert_eq!(
+        judge(&s, |_| Evidence::Seed),
+        Verdict::Silent(SilenceReason::NoShape("unindexed_extension"))
+    );
+
+    // One named file, no recursion: reading, not enumerating.
+    let s = search_from_shell("grep -n 'helper' src/main.rs").expect("parses");
+    assert_eq!(
+        judge(&s, |_| Evidence::Seed),
+        Verdict::Silent(SilenceReason::NoShape("concrete_file_read"))
     );
 }
