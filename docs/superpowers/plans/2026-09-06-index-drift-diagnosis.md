@@ -125,7 +125,7 @@ imports `get_meta` only).
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cd rust && cargo test --test db list_projects_reports_the_schema_and_extractor the_usage_recorder_is_not_a_project`
+Run: `cd rust && cargo test --test db -- list_projects_reports_the_schema_and_extractor the_usage_recorder_is_not_a_project`
 Expected: FAIL to compile — `no field 'extractor_version' on type 'ProjectListRow'`.
 
 - [ ] **Step 3: Write minimal implementation**
@@ -204,7 +204,7 @@ that would also need to borrow `db` for `get_meta`.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `cd rust && cargo test --test db list_projects_reports_the_schema_and_extractor the_usage_recorder_is_not_a_project`
+Run: `cd rust && cargo test --test db -- list_projects_reports_the_schema_and_extractor the_usage_recorder_is_not_a_project`
 Expected: both PASS.
 
 - [ ] **Step 5: Verify each test can actually fail**
@@ -693,7 +693,7 @@ fn a_drifted_index_whose_directory_is_gone_is_still_counted_as_drift() {
 /// `install.sh --check` parses this line with `read`, so its shape is a contract: exactly one line,
 /// four tab-separated non-empty fields, and two numeric counts.
 #[test]
-fn the_verdict_line_is_one_line_of_three_non_empty_fields() {
+fn the_verdict_line_is_one_line_of_four_non_empty_fields() {
     let (_p, cwd, _c, cache) = sandbox();
     let r = run_cort(&["projects", "--verdict"], &cwd, &cache);
     assert_eq!(r.code, 0, "{}", r.stderr);
@@ -714,7 +714,7 @@ fn the_verdict_line_is_one_line_of_three_non_empty_fields() {
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cd rust && cargo test --test cli projects_reports_ an_unreadable_index_makes drift_outranks a_drifted_index_whose the_verdict_line_is`
+Run: `cd rust && cargo test --test cli -- projects_reports_ an_unreadable_index_makes drift_outranks a_drifted_index_whose the_verdict_line_is`
 Expected: FAIL — `unexpected argument '--verdict'`.
 
 - [ ] **Step 3: Write minimal implementation**
@@ -763,6 +763,11 @@ fn cmd_projects(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, CortEr
                 rows.push(json!({ "db_path": db_path, "unreadable": reason }));
             }
             ProjectEntry::Indexed(r) => {
+                // `stale` is what an installer or a person actually wants to know, and it is only
+                // answerable here: the row stores the head it was built at, and the tree knows the
+                // head it is on now. `null`, never `false`, when the two cannot be compared -- the
+                // directory is gone, it is not a git tree, or `rev-parse` did not answer inside the
+                // budget. A project that cannot be checked is not a project that is fresh.
                 let exists = Path::new(&r.path).is_dir();
                 let stale = match (r.git_head.as_deref(), git_head_quickly(Path::new(&r.path))) {
                     (Some(stored), Some(now)) => Some(stored != now),
@@ -841,7 +846,7 @@ Update the CLI help line for `projects` at `rust/src/main.rs:48-54` to
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `cd rust && cargo test --test cli projects_reports_ an_unreadable_index_makes drift_outranks a_drifted_index_whose the_verdict_line_is`
+Run: `cd rust && cargo test --test cli -- projects_reports_ an_unreadable_index_makes drift_outranks a_drifted_index_whose the_verdict_line_is`
 Expected: all six PASS.
 
 - [ ] **Step 5: Verify the tests can actually fail**
