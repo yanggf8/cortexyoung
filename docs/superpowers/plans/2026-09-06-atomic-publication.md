@@ -98,9 +98,14 @@ inode_of() { stat -c %i "$1" 2>/dev/null || stat -f %i "$1"; }
 MANIFEST="$HOME/.local/share/cortexyoung/manifest"
 before_ino="$(inode_of "$MANIFEST")"
 before_body="$(cat "$MANIFEST")"
-( SOURCE_ONLY=1; MANIFEST_FILE="$MANIFEST"; MANIFEST_DIR="$(dirname "$MANIFEST")"
+# `set --` clears the caller's positional parameters: install.sh's argument parser runs on source
+# and would `exit 2` on any argument the smoke script itself was given. The MANIFEST_* assignments
+# come AFTER the source, because sourcing re-runs the constants block (install.sh:21-22) and would
+# overwrite them.
+( set --; SOURCE_ONLY=1
   # shellcheck disable=SC1090
   . "$INSTALL_SH"
+  MANIFEST_FILE="$MANIFEST"; MANIFEST_DIR="$(dirname "$MANIFEST")"
   record_manifest "smoke_probe" "value" )
 after_ino="$(inode_of "$MANIFEST")"
 if [ "$before_ino" != "$after_ino" ]; then
@@ -139,14 +144,32 @@ and would reject `--source-only` with `exit 2` before the guard could see it. Th
 `SOURCE_ONLY=1` and sources the file:
 
 ```bash
-( SOURCE_ONLY=1; MANIFEST_FILE="$MANIFEST"; MANIFEST_DIR="$(dirname "$MANIFEST")"
+# `set --` clears the caller's positional parameters: install.sh's argument parser runs on source
+# and would `exit 2` on any argument the smoke script itself was given. The MANIFEST_* assignments
+# come AFTER the source, because sourcing re-runs the constants block (install.sh:21-22) and would
+# overwrite them.
+( set --; SOURCE_ONLY=1
   # shellcheck disable=SC1090
   . "$INSTALL_SH"
+  MANIFEST_FILE="$MANIFEST"; MANIFEST_DIR="$(dirname "$MANIFEST")"
   record_manifest "smoke_probe" "value" )
 ```
 
-Note the parser still runs when sourced — it sees no arguments, sets `MODE=install`, and stops.
-That is harmless; the guard fires before anything acts on `MODE`.
+Note the parser still runs when sourced. It is harmless **only when the sourcing shell has no
+positional parameters**: the loop at `install.sh:64-85` iterates the *caller's* `"$@"`, so
+`bash tests/install-smoke.sh somearg` would make it hit `exit 2` (`:83`) or the `--help` branch
+inside the probe subshell, and the failure would name unknown options rather than anything about
+publication. The probe therefore clears them first:
+
+```bash
+( set --; SOURCE_ONLY=1; . "$INSTALL_SH"; record_manifest "smoke_probe" "value" )
+```
+
+One further trap to know about rather than to fix: `SCRIPT_DIR` is derived from `$0`
+(`install.sh:87`), which under `source` is the *caller's* path. That is irrelevant to
+`record_manifest` and `write_skill`, neither of which reads it — but the first future test that
+reaches a `SCRIPT_DIR`-dependent function through this seam would silently operate on the wrong
+tree. If this seam grows a third user, that user sets `SCRIPT_DIR` explicitly.
 
 - [ ] **Step 2: Run it to verify it fails**
 
@@ -249,13 +272,13 @@ the known-bad implementation through is worse than no test.
 # recognises as ours. Both must be replaced, so both inodes are checked.
 SK_DIR="$(mktemp -d)"
 printf 'seed\n' > "$SK_DIR/SKILL.md"
-( SOURCE_ONLY=1; MANAGED_SIGNATURE="$MANAGED_SIGNATURE"
+( set --; SOURCE_ONLY=1
   # shellcheck disable=SC1090
   . "$INSTALL_SH"
   write_skill "$REPO_ROOT/skills/ast-grep/SKILL.md" "$SK_DIR/SKILL.md" )
 sk_ino="$(inode_of "$SK_DIR/SKILL.md")"
 st_ino="$(inode_of "$SK_DIR/$STAMP_NAME")"
-( SOURCE_ONLY=1; MANAGED_SIGNATURE="$MANAGED_SIGNATURE"
+( set --; SOURCE_ONLY=1
   # shellcheck disable=SC1090
   . "$INSTALL_SH"
   write_skill "$REPO_ROOT/skills/ast-grep/SKILL.md" "$SK_DIR/SKILL.md" )
@@ -458,8 +481,19 @@ Replace the payload block (`install.sh:744-749`):
     mv "$staging" "$gen_dir"
   fi
 
-  # A pre-symlink installation has a real directory here and no generation to fall back to. This is
-  # the one moment that cannot be made atomic, and it happens once per machine.
+  # Validate what is about to be ACTIVATED, not only what was staged. The reuse arm above trusts an
+  # existing `$gen_dir`, and a previous crash can have left one incomplete; and until Task 5 lands
+  # there is no lock, so two installs computing the same id can race -- the loser's
+  # `mv "$staging" "$gen_dir"` would nest rather than replace (measured: `mv staging gen` with `gen`
+  # present leaves `gen/staging`). Both land a directory here that the flip would publish.
+  if [ ! -x "$gen_dir/cort" ] || [ ! -f "$gen_dir/pack/sgconfig.yml" ]; then
+    die "generation $gen_dir is incomplete; remove it and re-run"
+  fi
+
+  # A pre-symlink installation has a real directory here and no generation to fall back to. Removing
+  # it is the one un-atomic moment, and it happens once per machine -- so it happens only after the
+  # generation it is being replaced by has been validated, and `swap_symlink` never dies, so the
+  # window cannot be left open by a refusal.
   if [ -d "$CORT_HOME" ] && [ ! -L "$CORT_HOME" ]; then
     rm -rf "$CORT_HOME"
   fi
@@ -478,10 +512,20 @@ payload_id() {
   } | skill_hash /dev/stdin | cut -c1-12
 }
 
-# swap_symlink: point "$2" at "$1" with one rename, replacing an existing symlink rather than
-# following it into its target. GNU mv spells that `-T`; BSD and macOS spell it `-h`, and this
-# installer supports Darwin (`install.sh:140-166`). Plain `mv` would move the new link *inside* the
-# directory the old one points at.
+# swap_symlink: point "$2" at "$1", replacing an existing symlink rather than following it into its
+# target. Plain `mv` would move the new link *inside* the directory the old one points at --
+# measured: `mv staging gen` with `gen` present leaves `gen/staging`.
+#
+# GNU spells "replace, do not descend" as `mv -T`. BSD's `mv(1)` synopsis is
+# `mv [-f | -i | -n] [-hv] source target` and documents `-h` as exactly this, so it should work on
+# Darwin -- but **that has not been executed on a Mac**, and a reviewer asserted the opposite. So
+# this never depends on the answer: if neither flag works it falls back to `ln -sfn`, which unlinks
+# and recreates. That is a window of microseconds in which `$CORT_HOME` does not resolve, and it is
+# disclosed rather than hidden. It is still enormously better than what it replaces -- `rm -rf` of a
+# whole directory tree, a window of *seconds*, during which a hook reads a half-copied pack.
+#
+# What it must never do is `die`. A refusal here, after the caller has removed a pre-symlink
+# `$CORT_HOME`, leaves a machine with no payload at all and a rerun that fails identically.
 swap_symlink() {
   local target="$1" link="$2" tmp
   tmp="$(dirname "$link")/.cort-link.$$"
@@ -490,14 +534,33 @@ swap_symlink() {
   if mv -T "$tmp" "$link" 2>/dev/null; then return 0; fi
   if mv -h "$tmp" "$link" 2>/dev/null; then return 0; fi
   rm -f "$tmp"
-  die "no portable atomic symlink swap on this platform (need mv -T or mv -h)"
+  # Sub-atomic, and said out loud. `ln -sfn` on a symlink replaces it without descending.
+  ln -sfn "$target" "$link"
 }
 ```
 
 `skill_hash /dev/stdin` reads the concatenated hashes rather than a file list, so a renamed rule
-file changes the id. Verify `skill_hash` accepts a stream on this platform before relying on it
-(`sha256sum /dev/stdin` and `shasum -a 256 /dev/stdin` both do); if it does not, write the list to
-a `mktemp` file and hash that.
+file changes the id.
+
+**`skill_hash` ends in `|| echo ""` (`install.sh:236-238`), so it never fails — it returns empty.**
+Measured: on a missing file it yields `[]`. A host with neither `sha256sum` nor `shasum` would make
+`payload_id` the hash of N newlines: a valid-looking, twelve-hex, **content-independent** id under
+which every payload collides, and the reuse arm would then serve stale content forever. Worse, the
+staged-vs-source comparison would still pass, because both sides degrade identically — a validation
+that compares two runs of the same broken function.
+
+So the id is checked where it is computed, and the check is one line:
+
+```bash
+  case "$gen_id" in
+    [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) : ;;
+    *) die "cannot compute a payload id (need sha256sum or shasum): got '$gen_id'" ;;
+  esac
+```
+
+Turning an instruction to the implementer into behaviour the machine enforces is the point: a note
+saying "verify your platform hashes streams" is not something CI can check, and it does not cover
+the silent-degradation case at all.
 
 `skill_hash` (`install.sh:236-238`) already is "SHA-256 of a file, or empty", despite its name —
 it is used for skills today but names no skill in its body. Reuse it rather than adding a second
@@ -518,8 +581,16 @@ Against a symlink, `-d` follows it and succeeds, and `rm -rf` then removes **onl
       rm -rf "$CORT_HOME"
       # The link is gone; the generations it and its predecessors named are not. Remove only
       # directories this installer names, inside the directory it owns -- never whatever a
-      # user-created symlink happened to point at.
-      find "$MANIFEST_DIR" -maxdepth 1 -type d -name 'cort-*' -exec rm -rf {} +
+      # user-created symlink happened to point at. `.cort-staging.*` is swept too: a crashed install
+      # leaves one, the `cort-*` glob does not match it, and nothing else would ever remove it.
+      #
+      # The `-d` guard is not decoration: `--uninstall` is exactly what a user runs on a machine
+      # whose data directory is already half-gone, and a `find` over a missing path can exit
+      # non-zero and take the rest of the uninstall with it under `set -e`.
+      if [ -d "$MANIFEST_DIR" ]; then
+        find "$MANIFEST_DIR" -maxdepth 1 -type d \( -name 'cort-*' -o -name '.cort-staging.*' \) \
+          -exec rm -rf {} + || true
+      fi
       info "removed $CORT_HOME and its generations"
     fi
 ```
@@ -684,30 +755,43 @@ installed -- the first step of an upgrade breaking its own ordering rule."
 # of different artifacts. The lock is held for the whole mutating run, so the second waits rather
 # than interleaving.
 LOCK="$HOME/.local/share/cortexyoung/.install.lock"
-# A sleep is not an acquisition handshake: under load the installer can take the lock before the
-# background subshell reaches flock, and the test then fails for a reason that has nothing to do
-# with the code. The holder signals through a sentinel instead.
-ACQUIRED="$(mktemp -u)"
-( flock -x 9; : > "$ACQUIRED"; sleep 5 ) 9>"$LOCK" &
+# "Blocked while held, completes after release" has no threshold to tune. An elapsed-time
+# assertion does: a full install runs `cargo build --release --locked` (install.sh:741), so on a
+# loaded machine an UNLOCKED install can exceed any threshold and pass -- and if it exceeds the
+# `timeout`, the kill is swallowed by `|| true` and the elapsed time passes too, having never
+# installed anything. Both are the false-green this project keeps paying for.
+LOCK="$HOME/.local/share/cortexyoung/.install.lock"
+ACQUIRED="$(mktemp -u)"; DONE="$(mktemp -u)"
+( flock -x 9; : > "$ACQUIRED"; sleep 8 ) 9>"$LOCK" &
 holder=$!
-for _ in $(seq 1 100); do
+for _ in $(seq 1 200); do
   if [ -e "$ACQUIRED" ]; then break; fi
   sleep 0.05
 done
 if [ ! -e "$ACQUIRED" ]; then
-  fail "the probe never acquired the lock; the timing result below would be meaningless"
+  fail "the probe never acquired the lock; every assertion below would be meaningless"
 fi
-start=$(date +%s)
-timeout 20 bash "$INSTALL_SH" >/dev/null 2>&1 || true
-elapsed=$(( $(date +%s) - start ))
-wait "$holder" 2>/dev/null || true
-rm -f "$ACQUIRED"
-if [ "$elapsed" -ge 4 ]; then
-  pass "a second installer waits for the first rather than interleaving"
+
+( bash "$INSTALL_SH" >/dev/null 2>&1; echo "$?" > "$DONE" ) &
+installer=$!
+sleep 2
+if [ -e "$DONE" ]; then
+  fail "the installer completed while another process held the lock"
 else
-  fail "the installer ran while another held the lock (${elapsed}s)"
+  pass "the installer is blocked while the lock is held"
 fi
-```
+wait "$holder" 2>/dev/null || true   # releases the lock
+for _ in $(seq 1 600); do
+  if [ -e "$DONE" ]; then break; fi
+  sleep 0.5
+done
+wait "$installer" 2>/dev/null || true
+if [ "$(cat "$DONE" 2>/dev/null || echo missing)" = "0" ]; then
+  pass "and completes once the lock is released"
+else
+  fail "the installer did not complete after release (status $(cat "$DONE" 2>/dev/null || echo missing))"
+fi
+rm -f "$ACQUIRED" "$DONE"
 
 `flock` is util-linux and is not present everywhere. Guard the test:
 
@@ -754,7 +838,9 @@ Expected: PASS.
 
 - [ ] **Step 5: Verify the test can actually fail**
 
-Remove the `flock -x 9` line (keep the `exec 9>`). Expected: RED with `(0s)`. Restore.
+Remove the `flock -x 9` line (keep the `exec 9>`). Expected: RED on **the first** assertion —
+"the installer completed while another process held the lock" — which is the one that has no
+threshold in it. Restore.
 
 Second break: run `./install.sh --check` while the probe holds the lock. Expected: it completes
 immediately — a report must not be blocked by a running install.
@@ -850,3 +936,57 @@ once and pass the resolved path would fix it, but the shim template moves to Rus
 changing it twice is worse than changing it once. **This is strictly better than today**, where the
 same process reads a pack that is being `rm -rf`'d out from under it — but it is not zero, and plan
 3b owns closing it.
+
+## What round 2 changed
+
+Round 2 blocked. Its blocker I **disagree with**; five of its six findings I accepted, and two were
+confirmed by measurement rather than by reading.
+
+**The blocker, and why the fix does not depend on settling it.** The reviewer asserts `mv -h` does
+not exist on macOS and that Task 3 therefore bricks Darwin on every install. BSD's `mv(1)` synopsis
+is `mv [-f | -i | -n] [-hv] source target` and documents `-h` as "if target is a symlink to a
+directory, do not follow it" — which is exactly this use — so I believe the claim is wrong. **But
+neither of us can execute Darwin**, and the reviewer's structural point stands regardless: a chain
+that ends in `die` turns an unresolved portability question into a machine with no payload, because
+the caller has already removed a pre-symlink `$CORT_HOME` by then.
+
+So the plan stops depending on the answer. `swap_symlink` never dies: it tries `-T`, then `-h`, then
+falls back to `ln -sfn`, which unlinks and recreates — a window of microseconds, **disclosed in the
+comment** rather than hidden, and still enormously better than the `rm -rf` of a whole tree it
+replaces, whose window is seconds long and is the one a hook actually falls into. And the removal of
+a pre-symlink `$CORT_HOME` now happens *after* the generation is validated, not before.
+
+**Validate what you activate, not only what you staged.** The plan validated `$staging` and then
+flipped to `$gen_dir`, which nothing re-checked — the same anti-pattern from the other direction.
+Two real paths land a bad `$gen_dir` there: a previous crash leaving an incomplete generation that
+the reuse arm trusts on the strength of its name, and — because tasks land in order, so Task 3 ships
+before Task 5's lock — two installs racing on one id, where the loser's `mv "$staging" "$gen_dir"`
+**nests** instead of replacing. Measured: `mv staging gen` with `gen` present leaves `gen/staging`.
+One check after promotion closes both.
+
+**`payload_id` could produce a plausible id from a broken hasher.** `skill_hash` ends in
+`|| echo ""` and never fails — measured, it returns `[]` on a missing file. On a host with neither
+`sha256sum` nor `shasum`, `payload_id` becomes the hash of N newlines: twelve valid hex characters,
+identical for every payload, under which the reuse arm serves stale content forever. And the
+staged-vs-source comparison would still pass, because both sides degrade identically — a validation
+comparing two runs of the same broken function. The id is now range-checked where it is computed,
+which is behaviour a machine enforces rather than a note to an implementer.
+
+**The lock test could pass against unlocked code.** It asserted `elapsed >= 4s` on a run that
+includes `cargo build --release --locked`; on a loaded machine an unlocked install exceeds that, and
+if it exceeded the `timeout` the kill was swallowed by `|| true` and the elapsed time passed too,
+having installed nothing. Replaced with "blocked while held, completes with status 0 after release",
+which has no threshold in it. The probe's own comment had rejected sleep-based timing three lines
+above the assertion that reintroduced it.
+
+**The seam reads the caller's `"$@"` and `$0`.** Sourcing re-runs the argument parser, which
+iterates the *sourcing shell's* positional parameters — so `bash tests/install-smoke.sh somearg`
+would `exit 2` inside the probe. `set --` first. `SCRIPT_DIR` derives from the caller's `$0` under
+`source`; irrelevant to both functions this seam exposes, recorded because the third user of the
+seam is where it would bite. The reviewer also caught that the probe assigned `MANIFEST_FILE` before
+sourcing, where the constants block overwrites it — the test worked only because the harness's
+`$HOME` layout equals the defaults.
+
+**One finding did not reproduce.** `find` over a missing directory was said to abort under `set -e`;
+on GNU find here it exits 0. The guard is free and is in anyway, because BSD find may differ and
+`--uninstall` is precisely what runs against a half-deleted data directory.
