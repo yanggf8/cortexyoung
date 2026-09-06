@@ -12,6 +12,14 @@
 
 **Plan 2 of 3.** Plan 1 (`2026-09-06-index-drift-diagnosis.md`) shipped the diagnosis and is merged. Plan 3 is the upgrader itself.
 
+**The state this plan leaves behind is deliberate and worth naming.** After it, a drifted index is
+visible everywhere — `index_is_stale` on every `impact`, `context`, `struct` and `status` row, and
+in `--check` — and the only thing that can discharge the debt is a person running `cort index`.
+There is no automatic actor until plan 3. That is not an oversight: an automatic actor operating
+inside a five-second hook budget is precisely what this plan removes, and shipping the visibility
+without it is what makes the debt actionable rather than hidden. A reviewer should read a permanent
+`index_is_stale: true` on an unrepaired machine as the intended interim behaviour, not a defect.
+
 ## Global Constraints
 
 - Repo is pure Rust; the only executable Bash is `install.sh` and `tests/install-smoke.sh`.
@@ -215,9 +223,15 @@ pub struct StaleReport {
 }
 ```
 
-Then add the **one home for the decision**, above `compute_stale` in the same file. Both the
-visibility path and the refusal path call this and nothing else; a second hand-written copy in
-`incremental.rs` is how Task 2 and Task 3 disagreed with each other in the first draft of this plan:
+Then add the **one home for the decision** — in `rust/src/indexer.rs`, not here.
+
+`staleness.rs` already imports from `incremental.rs` (`staleness.rs:5`, `git_candidates`), so putting
+the reader in `staleness.rs` and calling it from `incremental.rs` would complete a mutual dependency
+between those two modules. `indexer.rs` imports only `db` and `errors` (`indexer.rs:12-13`), owns
+`IndexError`, and is the module that **writes** these facts in the first place
+(`indexer.rs:366`, `:436`). The module that stamps them should own reading them back as a decision.
+
+It is split in two so that **every** caller shares it, including one that has no open connection:
 
 ```rust
 /// Why a full re-extraction is owed, if one is. The single reader behind both halves of the
@@ -231,24 +245,42 @@ visibility path and the refusal path call this and nothing else; a second hand-w
 /// stamps the new value in the transaction that replaces the rows (`indexer.rs:436-438`).
 ///
 /// A **missing** key counts as owed: an index that predates the meta table is not a current one.
-pub fn rebuild_reasons(db: &Db) -> Result<Vec<String>, IndexError> {
+///
+/// Pure, and taking the three stored facts rather than a connection, because one caller does not
+/// have one: `cmd_projects` reads its values through `list_projects`, which opens each database
+/// read-only and closes it (`db.rs`). Before this split that caller computed drift its own way
+/// (`main.rs:1651-1652`) and never read `graph_pending` at all — so `cort status` would call an
+/// interrupted index stale while `cort projects --verdict` called it compatible. That is the same
+/// two-copies defect this function exists to end, one level out.
+pub fn rebuild_reasons_of(
+    schema_version: Option<&str>,
+    extractor_version: Option<&str>,
+    graph_pending: bool,
+) -> Vec<String> {
     let mut reasons = Vec::new();
-    if get_meta(db, "graph_pending")?.as_deref() == Some("1") {
+    if graph_pending {
         reasons.push("graph_incomplete".to_string());
     }
-    if get_meta(db, "extractor_version")?.as_deref()
-        != Some(crate::pack::extractor_version().as_str())
-    {
+    if extractor_version != Some(crate::pack::extractor_version().as_str()) {
         reasons.push("extractor_changed".to_string());
     }
-    if get_meta(db, "SCHEMA_VERSION")?.as_deref()
-        != Some(crate::db::SCHEMA_VERSION.to_string().as_str())
-    {
+    if schema_version != Some(crate::db::SCHEMA_VERSION.to_string().as_str()) {
         reasons.push("schema_changed".to_string());
     }
-    Ok(reasons)
+    reasons
+}
+
+/// The connection-holding wrapper, for callers that have one.
+pub fn rebuild_reasons(db: &Db) -> Result<Vec<String>, IndexError> {
+    Ok(rebuild_reasons_of(
+        get_meta(db, "SCHEMA_VERSION")?.as_deref(),
+        get_meta(db, "extractor_version")?.as_deref(),
+        get_meta(db, "graph_pending")?.as_deref() == Some("1"),
+    ))
 }
 ```
+
+`indexer.rs` imports `crate::db::{set_meta, Db}` today (`indexer.rs:12`); add `get_meta` to it.
 
 and replace the `graph_pending` block at `:92-101` with a call to it:
 
@@ -258,7 +290,7 @@ and replace the `graph_pending` block at `:92-101` with a call to it:
     // binary no longer uses -- on 2026-09-05 no git head had moved in any project tree, so every
     // drifted index read as fresh. Both are staleness, and both must surface through the field
     // agents already check.
-    let rebuild_required = rebuild_reasons(db)?;
+    let rebuild_required = crate::indexer::rebuild_reasons(db)?;
 
     Ok(StaleReport {
         index_is_stale: !rebuild_required.is_empty()
@@ -325,6 +357,150 @@ index_is_stale and incremental_index turns it into a rebuild or a refusal.
 Two copies is the mistake HOOK_TARGETS cost this repository once already, and
 the first draft of this plan had already made it -- its two copies disagreed
 about the schema axis."
+```
+
+---
+
+### Task 1b: `--verdict` answers with the same judgement as everything else
+
+**Files:**
+- Modify: `rust/src/db.rs` (`ProjectListRow`, `list_projects`), `rust/src/main.rs:1651-1652` (`cmd_projects`)
+- Test: `rust/tests/cli.rs`
+
+**Interfaces:**
+- Consumes: `cort::indexer::rebuild_reasons_of` from Task 1.
+- Produces: `ProjectListRow` gains `pub graph_pending: bool`. `cmd_projects`'s `drifted` becomes
+  `!rebuild_reasons_of(..).is_empty()`.
+
+**Why this is a task and not a footnote.** Plan 1 shipped `cmd_projects` computing drift from schema
+and extractor only (`main.rs:1651-1652`), and it never reads `graph_pending`. The moment Task 1
+makes `graph_pending` a cause of `index_is_stale`, the two answers disagree on a real population: an
+index whose incremental was killed mid-run has `graph_pending=1` and current versions, so
+`cort status` says `index_is_stale: true` while `cort projects --verdict` and `install.sh --check`
+say `compatible`. **That is the same two-copies-of-one-decision defect this plan exists to remove**,
+and leaving it would mean the plan created one while claiming to kill one.
+
+- [ ] **Step 1: Write the failing test**
+
+Append to `rust/tests/cli.rs`:
+
+```rust
+/// An index whose incremental was killed mid-run has current versions and an incomplete graph.
+/// `cort status` calls that stale; `--verdict` must not call it compatible. Two answers to one
+/// question, disagreeing on a population that exists, is the defect this plan is about.
+#[test]
+fn the_verdict_and_staleness_agree_about_an_incomplete_graph() {
+    let (_p, cwd, _c, cache) = sandbox();
+    git_in_fixture(&cwd);
+    let idx = run_cort(&["index"], &cwd, &cache);
+    if idx.code != 0 {
+        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
+        return;
+    }
+    let db_file = cache.join(
+        cort::db::db_path_for(cwd.to_str().unwrap())
+            .file_name()
+            .unwrap(),
+    );
+    let db = cort::db::open_db(&db_file).unwrap();
+    cort::db::set_meta(&db, "graph_pending", "1").unwrap();
+    drop(db);
+
+    let st = run_cort(&["status"], &cwd, &cache);
+    let status: Value = serde_json::from_str(&st.stdout).expect("status emits json");
+    assert_eq!(
+        status.get("index_is_stale").and_then(Value::as_bool),
+        Some(true),
+        "an incomplete graph is staleness: {status}"
+    );
+
+    let v = run_cort(&["projects", "--verdict"], &cwd, &cache);
+    assert_eq!(
+        v.stdout, "indexes\tdrifted\t1\t0\n",
+        "the verdict must not call compatible what status calls stale: {:?}",
+        v.stdout
+    );
+}
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `cd rust && cargo test --test cli -- the_verdict_and_staleness_agree`
+Expected: FAIL on the second assertion with `indexes\tcompatible\t0\t0\n` — `status` already
+reports the incomplete graph (`staleness.rs:95`), and `--verdict` already does not.
+
+- [ ] **Step 3: Write minimal implementation**
+
+In `rust/src/db.rs`, `ProjectListRow` gains the third stored fact:
+
+```rust
+    /// Whether a commit changed chunks without rebuilding the derived graph. Read here so the
+    /// verdict can reach the same judgement as `index_is_stale`, which has counted it since 2026-08.
+    pub graph_pending: bool,
+```
+
+populated beside the other two in `list_projects`, from the same connection and the same
+`get_meta` whose `Err` already makes the entry `Unreadable`:
+
+```rust
+        let versions = get_meta(&db, "SCHEMA_VERSION").and_then(|schema| {
+            get_meta(&db, "extractor_version").and_then(|ex| {
+                get_meta(&db, "graph_pending").map(|gp| (schema, ex, gp))
+            })
+        });
+```
+
+and in the `Indexed` arm, `graph_pending: gp.as_deref() == Some("1")`.
+
+In `rust/src/main.rs`, `cmd_projects` stops computing its own answer:
+
+```rust
+                let drifted = !cort::indexer::rebuild_reasons_of(
+                    r.schema_version.as_deref(),
+                    r.extractor_version.as_deref(),
+                    r.graph_pending,
+                )
+                .is_empty();
+```
+
+The `want_schema` and `want_extractor` locals above the loop become unused — delete them, or the
+`-D warnings` gate rejects the build.
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `cd rust && cargo test --test cli -- the_verdict_and_staleness_agree`
+Expected: PASS.
+
+- [ ] **Step 5: Verify the test can actually fail**
+
+1. Restore the hand-written `drifted` comparison. Expected: RED with `compatible 0 0`.
+2. Make `rebuild_reasons_of` ignore its `graph_pending` argument. Expected: RED, and
+   `an_unreadable_index_makes_the_verdict_unknown_not_drifted` plus the two plan-1 drift tests stay
+   green — if they go red too, the argument is being used for something else as well.
+
+- [ ] **Step 6: Run both crates and lint**
+
+```bash
+cd rust && cargo fmt --all && cargo clippy --all-targets -- -D warnings && cargo test --locked --all-targets
+cd ../evals && cargo fmt --all && cargo clippy --all-targets -- -D warnings && cargo test --locked --all-targets
+```
+Expected: both exit 0. Plan 1's `list_projects` tests construct no `ProjectListRow` literally, but
+`rust/tests/db.rs` matches on `ProjectEntry::Indexed(r)` and reads fields — adding a field is
+source-compatible there.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add rust/src/db.rs rust/src/main.rs rust/tests/cli.rs
+git commit -m "fix(projects): the verdict uses the same judgement as staleness
+
+cmd_projects compared schema and extractor and never read graph_pending, so
+an index whose incremental was killed mid-run was stale to status and
+compatible to --check. Plan 2 makes graph_pending a cause of index_is_stale,
+which would have turned that latent disagreement into a live one.
+
+Both now call rebuild_reasons_of, which takes the three stored facts rather
+than a connection precisely so the caller without one can share it."
 ```
 
 ---
@@ -501,7 +677,7 @@ comparison Task 1 uses:
 ```rust
     // The stored-version reasons come from the one reader, so this cannot disagree with what
     // `index_is_stale` says about the same database.
-    let reasons = crate::staleness::rebuild_reasons(db)?;
+    let reasons = crate::indexer::rebuild_reasons(db)?;
     if !reasons.is_empty() {
         if policy == RebuildPolicy::Forbid {
             return Err(IndexError::FullRebuildRequired { reasons });
@@ -588,10 +764,58 @@ Expected: both PASS.
 
 1. Pass `RebuildPolicy::Allow` at the hook call site. Expected:
    `the_refresh_hook_refuses_a_full_rebuild_and_says_so` RED with outcome `refreshed`.
-2. Gate only the extractor reason (leave `graph_pending` and `candidates_not_narrowed` rebuilding
-   under `Forbid`). Expected: **both tests stay green.** That is a gap, not a pass — add a third
-   test that sets `graph_pending` to `1` with a current extractor and asserts the hook still
-   refuses, then confirm break 2 turns *that* one red.
+2. **Filter the reason vector, do not bypass the reader**: after
+   `let reasons = crate::indexer::rebuild_reasons(db)?;`, insert
+   `let reasons: Vec<String> = reasons.into_iter().filter(|r| r == "extractor_changed").collect();`
+   so only the extractor reason can refuse. Expected: **both tests above stay green** — they only
+   ever exercise extractor drift.
+
+   That green is a gap, not a pass. Before restoring, add the test it exposes:
+
+```rust
+/// The extractor is not the only reason a full rebuild is owed. An index whose incremental was
+/// killed mid-run has current versions and `graph_pending=1`, and rebuilding it is the same
+/// unbounded work under the same five-second budget.
+#[test]
+fn the_refresh_hook_refuses_an_incomplete_graph_too() {
+    let (p, cwd, _c, cache) = sandbox();
+    git_in_fixture(&cwd);
+    let idx = run_cort(&["index"], &cwd, &cache);
+    if idx.code != 0 {
+        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
+        return;
+    }
+    let db_file = cache.join(
+        cort::db::db_path_for(cwd.to_str().unwrap())
+            .file_name()
+            .unwrap(),
+    );
+    let db = cort::db::open_db(&db_file).unwrap();
+    cort::db::set_meta(&db, "graph_pending", "1").unwrap();
+    drop(db);
+    std::fs::write(
+        p.path().join("src/helper.ts"),
+        "export function helper(n: number) { return n * 17; }\n",
+    )
+    .unwrap();
+
+    let payload = format!(
+        r#"{{"tool_name":"Edit","tool_input":{{"file_path":"{}"}}}}"#,
+        p.path().join("src/helper.ts").display()
+    );
+    let r = run_hook_refresh_with(&[], serde_json::from_str(&payload).unwrap(), &cwd, &cache);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let counts = refresh_outcomes(&cache);
+    assert_eq!(
+        counts.get("rebuild_required").and_then(Value::as_i64),
+        Some(1),
+        "graph_incomplete is a refusal too: {counts:?}"
+    );
+}
+```
+
+   Run it green first, then apply the filter and confirm **only this one** turns red. A break whose
+   baseline was never observed green proves nothing.
 3. Return `FullRebuildRequired` regardless of policy. Expected: `a_foreground_incremental_still_rebuilds`
    RED — without it, a refusal that also blocks the foreground leaves the debt with no actor.
 
@@ -709,6 +933,15 @@ fn the_refresh_hook_does_not_migrate_the_schema() {
         Some("4"),
         "the hook migrated a schema it has no budget to migrate"
     );
+
+    // Not migrating is half the property. A hook that bailed silently -- opened, gave up, wrote
+    // nothing -- would satisfy the assertion above and leave the debt unrecorded.
+    let counts = refresh_outcomes(&cache);
+    assert_eq!(
+        counts.get("rebuild_required").and_then(Value::as_i64),
+        Some(1),
+        "the hook records the schema debt it declined: {counts:?}"
+    );
 }
 ```
 
@@ -822,9 +1055,33 @@ Vec<String> }` (Task 2) both carry the same literals — `extractor_changed`, `s
 `graph_incomplete` — plus `candidates_not_narrowed`, which is Task 2's alone because it is a
 property of the git candidate set rather than of the stored index.
 
-## What the review changed
+## What the reviews changed
 
-One round of external review on this plan; fourteen defects, all verified against source before
+**Round 2 (adversarial, 2026-09-06) — one blocker, and it was one this plan created.**
+
+`cmd_projects` computes drift from schema and extractor and never reads `graph_pending`
+(`main.rs:1651-1652`). That was harmless while `graph_pending` was not a compatibility question.
+Task 1 makes it one — so an index whose incremental was killed mid-run would have been stale to
+`cort status` and compatible to `install.sh --check`, on a population that exists. **A plan whose
+stated purpose is to give one decision one home would have shipped a second copy of it.** Task 1b
+now collapses them, and `rebuild_reasons_of` takes the three stored facts rather than a connection
+precisely so the caller without one can share it.
+
+The same round moved the reader out of `staleness.rs`: that module already imports from
+`incremental.rs` (`staleness.rs:5`), so a reader there called from `incremental.rs` completes a
+mutual dependency. `indexer.rs` owns `IndexError` and is the module that *writes* these facts
+(`indexer.rs:366`, `:436`) — the stamper should own the judgement.
+
+Two test-quality gaps: Task 2's break-2 instruction was ambiguous about *how* to break it (filter
+the vector, not bypass the reader) and never required observing the new test green before breaking
+it — a break with no baseline proves nothing; and Task 3's test asserted only that no migration
+happened, which a hook that silently bailed would also satisfy, so it now also asserts the debt was
+recorded.
+
+The reviewer tried to find a fourth state where derivation loses to a stored target and **could
+not**, which is the outcome that lets the divergence stand on evidence rather than on argument.
+
+**Round 1 (mechanism, 2026-09-06);** fourteen defects, all verified against source before
 being accepted, plus a refutation of the spec divergence that was checked state by state and
 **partly rejected** — see the divergence section above for which of its three states survived.
 
