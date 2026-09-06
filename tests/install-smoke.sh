@@ -671,6 +671,75 @@ if grep -q "hook: could not read" /tmp/smoke19.log; then
 else
   pass "--check no longer blames settings.json for a stale-binary failure"
 fi
+assert_contains /tmp/smoke19.log "indexes: compatibility unknown (unparsable verdict)" \
+  "--check reads an unparsable verdict as unknown, never as current"
+assert_not_contains /tmp/smoke19.log "schema and extractor current" \
+  "--check must not claim compatibility it could not establish"
+
+# The three positive arms were reachable by no test at all: an unconditional
+# `echo "compatibility unknown (unparsable verdict)"` in do_check passed the whole suite. A double
+# that speaks the real four-field contract pins the parse as well as the message -- if `read` split
+# the fields wrongly the counts would come out swapped or empty.
+cat > "$MANAGED_CORT" <<'FAKEVERDICTCORT'
+#!/usr/bin/env bash
+if [ "$1" = "hook-install" ]; then
+  echo '{"detail":{"command":"hook-install"},"error":"unknown_command"}' >&2
+  exit 2
+fi
+if [ "$1" = "projects" ] && [ "$2" = "--verdict" ]; then
+  printf 'indexes\tdrifted\t2\t1\n'
+  exit 0
+fi
+echo "cort 0.1.0 (rust)"
+FAKEVERDICTCORT
+chmod +x "$MANAGED_CORT"
+bash "$INSTALL_SH" --check > /tmp/smoke19b.log 2>&1 || true
+assert_contains /tmp/smoke19b.log "indexes: 2 built by a superseded schema or extractor, 1 unreadable" \
+  "--check parses all four verdict fields and reports both counts"
+
+# A truncated line keeps a valid two-field prefix. Reading that as "current" is the same class of
+# lie this axis exists to remove, so it must fail closed.
+cat > "$MANAGED_CORT" <<'FAKETRUNCCORT'
+#!/usr/bin/env bash
+if [ "$1" = "hook-install" ]; then
+  echo '{"detail":{"command":"hook-install"},"error":"unknown_command"}' >&2
+  exit 2
+fi
+if [ "$1" = "projects" ] && [ "$2" = "--verdict" ]; then
+  printf 'indexes\tcompatible\n'
+  exit 0
+fi
+echo "cort 0.1.0 (rust)"
+FAKETRUNCCORT
+chmod +x "$MANAGED_CORT"
+bash "$INSTALL_SH" --check > /tmp/smoke19c.log 2>&1 || true
+assert_contains /tmp/smoke19c.log "indexes: compatibility unknown (unparsable verdict)" \
+  "a truncated verdict with a valid prefix fails closed"
+assert_not_contains /tmp/smoke19c.log "schema and extractor current" \
+  "a truncated verdict must never be read as current"
+
+# Counts that are not numbers. The word/count consistency check alone lets these through -- it only
+# compares against 0 -- so without the numeric guard `--check` prints "x built by a superseded
+# schema or extractor, y unreadable" as though it were a measurement.
+cat > "$MANAGED_CORT" <<'FAKEJUNKCOUNTCORT'
+#!/usr/bin/env bash
+if [ "$1" = "hook-install" ]; then
+  echo '{"detail":{"command":"hook-install"},"error":"unknown_command"}' >&2
+  exit 2
+fi
+if [ "$1" = "projects" ] && [ "$2" = "--verdict" ]; then
+  printf 'indexes\tdrifted\tx\ty\n'
+  exit 0
+fi
+echo "cort 0.1.0 (rust)"
+FAKEJUNKCOUNTCORT
+chmod +x "$MANAGED_CORT"
+bash "$INSTALL_SH" --check > /tmp/smoke19d.log 2>&1 || true
+assert_contains /tmp/smoke19d.log "indexes: compatibility unknown (unparsable verdict)" \
+  "counts that are not numbers fail closed"
+assert_not_contains /tmp/smoke19d.log "x built by a superseded" \
+  "--check must not print a non-numeric count as a measurement"
+
 cp "$TMPHOME/cort.real" "$MANAGED_CORT"
 
 # A newer cort earlier in PATH must not answer for the hook: the wired command names the managed

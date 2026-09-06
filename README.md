@@ -750,9 +750,12 @@ every file rather than quietly to none (`docs/2026-09-03-installer-dedup-and-att
 **`./install.sh --check` also says which indexes are behind.** `cort projects` now carries `stale`
 and `exists` per project — it is the only thing that holds both the head a row was built at and the
 head its tree is on now — and `null`, never `false`, when the two cannot be compared. The check
-lists the stale ones and the ones whose directory is gone, and fails on neither: a stale index still
-answers and discloses `stale=true` while it does, and the refresh hook closes the gap from the next
-edit onward.
+lists the stale ones and the ones whose directory is gone. A second `indexes:` line answers the
+axis `stale` cannot see: whether each index was built by the schema and extractor this binary uses
+(`cort projects --verdict`). Neither axis fails the check. A stale index still answers and discloses
+`stale=true` while it does, and the refresh hook closes that gap from the next edit onward. A
+drifted index still answers too; this install ships no repair for it, and failing the check would
+name an action that does not exist.
 **When it fires.** The first pipeline segment must be `rg`, `grep` or `egrep`; the pattern must
 resolve to a single symbol; and the search must look like a caller-set question. It stays silent
 on: any `-A`/`-B`/`-C` context flag (that is `cort context`'s question, not `impact`'s), searches

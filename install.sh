@@ -895,7 +895,43 @@ do_check() {
       printf '%s\n' "$gone_names"
     fi
   else
-    echo "indexes: could not query — installed cort predates \`cort projects --stale\`"
+    echo "indexes: could not query \`cort projects\` — no index report"
+  fi
+  # A second axis, and the one that was missing on 2026-09-05: `stale` compares git heads, and no
+  # head had moved. `--verdict` answers whether the index was built by the schema and extractor this
+  # binary uses. It is a report, not a decision -- there is no repair to run yet -- so it never sets
+  # ok=0. Fail closed on a line we cannot parse: anything but the three known words is `unknown`.
+  # Two counts, because one number cannot stand behind both words: saying "3 built by a superseded
+  # extractor" when two of the three are databases we could not open is a false statement about them.
+  # Fail closed means checking the whole line, not its first two fields. A truncated
+  # `indexes<TAB>compatible` read as "current" is the same class of lie as the one this axis was
+  # added to remove -- so the arity, both counts being numbers, and the word agreeing with those
+  # numbers are all verified before anything is printed. Anything else is `unknown`.
+  local verdict_line vfield vword vdrift vunread vok
+  if verdict_line="$("$managed_cort" projects --verdict 2>/dev/null)"; then
+    vfield=""; vword=""; vdrift=""; vunread=""; vok=1
+    if [ "$(printf '%s' "$verdict_line" | wc -l)" -ne 0 ]; then vok=0; fi
+    IFS=$'\t' read -r vfield vword vdrift vunread <<<"$verdict_line"
+    if [ "$vfield" != "indexes" ]; then vok=0; fi
+    case "$vdrift" in ''|*[!0-9]*) vok=0 ;; esac
+    case "$vunread" in ''|*[!0-9]*) vok=0 ;; esac
+    case "$vword" in
+      compatible) if [ "$vdrift" != 0 ] || [ "$vunread" != 0 ]; then vok=0; fi ;;
+      drifted)    if [ "$vdrift" = 0 ]; then vok=0; fi ;;
+      unknown)    if [ "$vdrift" != 0 ] || [ "$vunread" = 0 ]; then vok=0; fi ;;
+      *)          vok=0 ;;
+    esac
+    if [ "$vok" = 1 ]; then
+      case "$vword" in
+        compatible) echo "indexes: schema and extractor current" ;;
+        drifted)    echo "indexes: $vdrift built by a superseded schema or extractor, $vunread unreadable" ;;
+        unknown)    echo "indexes: compatibility unknown ($vunread could not be read)" ;;
+      esac
+    else
+      echo "indexes: compatibility unknown (unparsable verdict)"
+    fi
+  else
+    echo "indexes: compatibility unknown — installed cort predates \`cort projects --verdict\`"
   fi
     echo "manifest: $MANIFEST_FILE"
     cat "$MANIFEST_FILE" | sed 's/^/  /'
