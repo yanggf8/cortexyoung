@@ -362,7 +362,7 @@ pub fn search_from_shell(command: &str) -> Option<Search> {
         idx += 1;
     }
     let tool = tokens.get(idx)?.rsplit('/').next()?.to_string();
-    if tool != "rg" && tool != "grep" && tool != "egrep" {
+    if !is_search_tool(&tool) {
         return None;
     }
     idx += 1;
@@ -395,6 +395,32 @@ pub fn search_from_shell(command: &str) -> Option<Search> {
             .iter()
             .any(|t| t == "-r" || t == "-R" || t == "--recursive" || is_short_cluster_with(t, 'r')),
     })
+}
+
+/// The shell tools whose searches `search_from_shell` can read. One list, two readers: the
+/// parser above and `shell_search_decline` below -- a second copy would drift.
+const SEARCH_TOOLS: [&str; 3] = ["rg", "grep", "egrep"];
+
+fn is_search_tool(tool: &str) -> bool {
+    SEARCH_TOOLS.contains(&tool)
+}
+
+/// Why a Bash command yielded no search at all, split so the funnel can tell the two silences
+/// apart: most Bash traffic (`cargo test`, `git push`, `ls`) is simply not a search -- correct
+/// silence, the hook's baseline, not a tuning target. A search tool whose pattern still fails to
+/// parse is the real residual. Conflating them would score the rule against its own baseline
+/// (18 of the first 21 tagged rows on 2026-09-07 were the baseline).
+pub fn shell_search_decline(command: &str) -> &'static str {
+    let segment = first_segment(command.trim());
+    let tokens = tokenize(segment);
+    let mut idx = 0;
+    while idx < tokens.len() && tokens[idx].contains('=') && !tokens[idx].starts_with('-') {
+        idx += 1;
+    }
+    match tokens.get(idx).map(|t| t.rsplit('/').next().unwrap_or(t)) {
+        Some(tool) if is_search_tool(tool) => "unparseable_command",
+        _ => "not_a_search_tool",
+    }
 }
 
 /// A search issued as a structured tool call: Kimi's `Grep`, whose 834 calls against 32 shell greps

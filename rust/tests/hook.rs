@@ -4,8 +4,8 @@
 //! is exactly the error the demand re-measurement was written to correct.
 
 use cort::hook::{
-    evidence_in, judge, search_from_grep_fields, search_from_shell, suggests_impact_shape,
-    Evidence, SilenceReason, Verdict,
+    evidence_in, judge, search_from_grep_fields, search_from_shell, shell_search_decline,
+    suggests_impact_shape, Evidence, SilenceReason, Verdict,
 };
 
 #[test]
@@ -588,5 +588,36 @@ fn each_shape_rejection_names_the_rule_that_declined_it() {
     assert_eq!(
         judge(&s, |_| Evidence::Seed),
         Verdict::Silent(SilenceReason::NoShape("concrete_file_read"))
+    );
+}
+
+/// The funnel has to separate the hook's baseline from its tuning targets: most Bash traffic is
+/// not a search at all and the rule is right to stay quiet about it. Counting that traffic as
+/// `unparseable_command` would score every future rule against noise (18 of the first 21 tagged
+/// rows on 2026-09-07 -- `cargo`, `git`, `echo` -- were exactly this).
+#[test]
+fn non_search_tools_are_baseline_not_unparseable() {
+    assert_eq!(
+        shell_search_decline("cargo test --locked --all-targets"),
+        "not_a_search_tool"
+    );
+    assert_eq!(
+        shell_search_decline("git push origin main"),
+        "not_a_search_tool"
+    );
+    assert_eq!(
+        shell_search_decline("CORT_CACHE_DIR=/tmp/x cort status"),
+        "not_a_search_tool",
+        "leading VAR= assignments are skipped, same as the parser"
+    );
+    assert_eq!(
+        shell_search_decline("grep --colour 'x' src/"),
+        "unparseable_command",
+        "a search tool whose pattern still fails to parse is the residual worth mining"
+    );
+    assert_eq!(
+        shell_search_decline("/usr/bin/rg -n 'y'"),
+        "unparseable_command",
+        "absolute paths resolve to the same tool list"
     );
 }

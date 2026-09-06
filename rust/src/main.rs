@@ -972,8 +972,8 @@ fn cmd_hook_suggest(args: &[String], usage: &mut UsageEvent) -> Result<Emit, Cor
             let tag = match v.get("tool_name").and_then(Value::as_str) {
                 Some("Grep") => "grep_fields_no_pattern",
                 _ => match v.get("tool_input").and_then(|ti| ti.get("command")) {
-                    Some(_) => "unparseable_command",
-                    None => "unsupported_tool_surface",
+                    Some(Value::String(cmd)) => cort::hook::shell_search_decline(cmd),
+                    _ => "unsupported_tool_surface",
                 },
             };
             usage.args_summary = hook_args_decline(&harness_args("no_shape"), tag);
