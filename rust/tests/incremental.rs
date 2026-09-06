@@ -3,7 +3,9 @@
 use cort::ast_grep::resolve_ast_grep_bin;
 use cort::db::{ensure_schema, get_meta, indexed_head, open_db, project_id_for, set_meta};
 use cort::graph::get_transitive_dependents;
-use cort::incremental::{git_candidates, incremental_index, reindex_one_file, remove_file};
+use cort::incremental::{
+    git_candidates, incremental_index, reindex_one_file, remove_file, RebuildPolicy,
+};
 use cort::indexer::full_index;
 use cort::staleness::compute_stale;
 use rusqlite::params;
@@ -91,7 +93,7 @@ fn git_project(
 fn an_extractor_version_mismatch_forces_a_full_rebuild() {
     let (_dir, root, mut db, _project_id, bin) = git_project(SAMPLE);
     set_meta(&db, "extractor_version", "stale-version-hash").unwrap();
-    let r = incremental_index(&mut db, &bin, &root).unwrap();
+    let r = incremental_index(&mut db, &bin, &root, RebuildPolicy::Allow).unwrap();
     assert_eq!(r.mode, "full");
     assert_eq!(
         get_meta(&db, "extractor_version").unwrap().as_deref(),
@@ -103,7 +105,7 @@ fn an_extractor_version_mismatch_forces_a_full_rebuild() {
 #[test]
 fn no_changes_means_nothing_is_reindexed() {
     let (_dir, root, mut db, _id, bin) = git_project(SAMPLE);
-    let r = incremental_index(&mut db, &bin, &root).unwrap();
+    let r = incremental_index(&mut db, &bin, &root, RebuildPolicy::Allow).unwrap();
     assert_eq!(r.mode, "incremental");
     assert_eq!(r.files_reindexed, 0);
 }
@@ -117,7 +119,7 @@ fn an_edited_file_is_reindexed_and_its_chunks_replaced() {
         "export function helper(n: number) { return n * 3; }\nexport function extra() { return 0; }\n",
     )
     .unwrap();
-    let r = incremental_index(&mut db, &bin, &root).unwrap();
+    let r = incremental_index(&mut db, &bin, &root, RebuildPolicy::Allow).unwrap();
     assert_eq!(r.mode, "incremental");
     assert_eq!(r.files_reindexed, 1);
     let syms: Vec<String> = db
@@ -146,7 +148,7 @@ fn a_touched_but_identical_file_is_skipped_without_a_write() {
             |r| r.get(0),
         )
         .unwrap();
-    let r = incremental_index(&mut db, &bin, &root).unwrap();
+    let r = incremental_index(&mut db, &bin, &root, RebuildPolicy::Allow).unwrap();
     assert_eq!(r.files_skipped + r.files_reindexed, r.files_examined);
     let after: String = db
         .query_row(
@@ -171,7 +173,7 @@ fn a_new_untracked_file_is_picked_up_via_git_ls_files_others() {
     .unwrap();
     let cands = git_candidates(&root, indexed_head(&db, &_id).unwrap().as_deref());
     assert!(cands.changed.iter().any(|p| p == "src/brand-new.ts"));
-    let r = incremental_index(&mut db, &bin, &root).unwrap();
+    let r = incremental_index(&mut db, &bin, &root, RebuildPolicy::Allow).unwrap();
     assert_eq!(r.files_reindexed, 1);
     let n: i64 = db
         .query_row(
@@ -188,7 +190,7 @@ fn a_new_untracked_file_is_picked_up_via_git_ls_files_others() {
 fn a_deleted_file_drops_its_chunks_fts_rows_and_file_state() {
     let (_dir, root, mut db, _id, bin) = git_project(SAMPLE);
     fs::remove_file(root.join("src/helper.ts")).unwrap();
-    let r = incremental_index(&mut db, &bin, &root).unwrap();
+    let r = incremental_index(&mut db, &bin, &root, RebuildPolicy::Allow).unwrap();
     assert_eq!(r.files_removed, 1);
     let chunks: i64 = db
         .query_row(
@@ -248,7 +250,7 @@ fn an_interrupt_keeps_already_committed_files_and_does_not_advance_git_head() {
     )
     .unwrap();
 
-    let err = incremental_index(&mut db, &bin, &root).unwrap_err();
+    let err = incremental_index(&mut db, &bin, &root, RebuildPolicy::Allow).unwrap_err();
     assert!(
         err.to_string().contains("interrupted"),
         "expected injected interrupt, got {err}"
@@ -286,7 +288,7 @@ fn a_non_git_directory_degrades_to_a_full_index() {
     ensure_schema(&db).unwrap();
     let bin = resolve_ast_grep_bin().expect("ast-grep on PATH");
     full_index(&mut db, &bin, &root).unwrap();
-    let r = incremental_index(&mut db, &bin, &root).unwrap();
+    let r = incremental_index(&mut db, &bin, &root, RebuildPolicy::Allow).unwrap();
     assert_eq!(r.mode, "full");
 }
 
@@ -343,7 +345,7 @@ fn an_incremental_reindex_of_a_callee_keeps_incoming_edges_from_unchanged_files(
         "export function helper(n: number) { return n * 3; }\n",
     )
     .unwrap();
-    incremental_index(&mut db, &bin, &root).unwrap();
+    incremental_index(&mut db, &bin, &root, RebuildPolicy::Allow).unwrap();
 
     assert_eq!(
         edge_exists(&db, "alpha", "helper"),
@@ -387,7 +389,7 @@ fn an_incremental_reindex_reapplies_edges_from_files_that_only_grew_a_new_callee
         "export function helper(n: number) { return n * 4; }\n",
     )
     .unwrap();
-    incremental_index(&mut db, &bin, &root).unwrap();
+    incremental_index(&mut db, &bin, &root, RebuildPolicy::Allow).unwrap();
 
     assert_eq!(
         edge_exists(&db, "alpha", "helper"),
@@ -445,7 +447,7 @@ fn a_completed_incremental_index_clears_the_pending_graph_marker() {
         "export function helper(n: number) { return n * 5; }\n",
     )
     .unwrap();
-    incremental_index(&mut db, &bin, &root).unwrap();
+    incremental_index(&mut db, &bin, &root, RebuildPolicy::Allow).unwrap();
     assert_ne!(
         get_meta(&db, "graph_pending").unwrap().as_deref(),
         Some("1"),
@@ -674,7 +676,7 @@ fn a_head_that_moved_without_dirtying_the_tree_is_reindexed_not_just_restamped()
     git(&root, &["add", "-A"]);
     git(&root, &["commit", "-qm", "pulled"]);
 
-    let r = incremental_index(&mut db, &bin, &root).unwrap();
+    let r = incremental_index(&mut db, &bin, &root, RebuildPolicy::Allow).unwrap();
     assert_eq!(r.files_reindexed, 1, "the pulled file must be re-extracted");
 
     let syms: Vec<String> = db
@@ -715,7 +717,7 @@ fn an_untracked_file_that_is_deleted_leaves_the_index() {
 
     let ghost = root.join("src/ghost.ts");
     fs::write(&ghost, "export function ghost() { return 2; }\n").unwrap();
-    let r = incremental_index(&mut db, &bin, &root).unwrap();
+    let r = incremental_index(&mut db, &bin, &root, RebuildPolicy::Allow).unwrap();
     assert!(
         r.files_reindexed >= 1,
         "the untracked file was never indexed, so this test proves nothing: {r:?}"
@@ -727,7 +729,7 @@ fn an_untracked_file_that_is_deleted_leaves_the_index() {
     );
 
     fs::remove_file(&ghost).unwrap();
-    let r = incremental_index(&mut db, &bin, &root).unwrap();
+    let r = incremental_index(&mut db, &bin, &root, RebuildPolicy::Allow).unwrap();
     assert_eq!(
         r.files_removed, 1,
         "a deleted untracked file must be counted as removed: {r:?}"
@@ -745,7 +747,7 @@ fn an_untracked_file_that_is_deleted_leaves_the_index() {
     );
 
     // And it converges: the next pass has nothing left to remove.
-    let r = incremental_index(&mut db, &bin, &root).unwrap();
+    let r = incremental_index(&mut db, &bin, &root, RebuildPolicy::Allow).unwrap();
     assert_eq!(r.files_removed, 0, "the removal repeated itself: {r:?}");
 }
 
@@ -835,7 +837,7 @@ fn an_indexed_file_git_will_not_speak_for_is_reexamined_when_it_changes() {
         "export function generatedBeta() { return 2; }\n",
     )
     .unwrap();
-    let r = incremental_index(&mut db, &bin, &root).unwrap();
+    let r = incremental_index(&mut db, &bin, &root, RebuildPolicy::Allow).unwrap();
     assert_eq!(
         r.files_reindexed, 1,
         "an indexed file git cannot vouch for must be examined by us"
@@ -884,7 +886,7 @@ fn an_indexed_file_the_walk_no_longer_covers_is_removed() {
     );
 
     fs::write(root.join(".gitignore"), "generated/\n").unwrap();
-    let r = incremental_index(&mut db, &bin, &root).unwrap();
+    let r = incremental_index(&mut db, &bin, &root, RebuildPolicy::Allow).unwrap();
     assert_eq!(
         r.files_removed, 1,
         "a path the screen no longer covers has to leave the index, not be refreshed in place"

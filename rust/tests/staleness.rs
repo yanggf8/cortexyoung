@@ -269,3 +269,60 @@ fn an_indexed_file_git_will_not_speak_for_is_stale_when_it_changes() {
         s.changed_files
     );
 }
+
+/// The 2026-09-05 shape: the tree is clean, the git head has not moved, and every file hash
+/// matches -- but the index was built by an extractor this binary no longer uses. Until now that
+/// read as fresh, which is what let seven projects answer `impact` with `index_is_stale: false`
+/// while their rows were computed by superseded semantics.
+#[test]
+fn an_index_built_by_another_extractor_is_stale() {
+    let (_dir, root, db, project_id, bin) = setup(SAMPLE);
+    cort::db::set_meta(&db, "extractor_version", "not-the-one-that-ships").unwrap();
+
+    let s = compute_stale(&db, &bin, &root, &project_id).unwrap();
+    assert!(
+        s.index_is_stale,
+        "a superseded extractor is staleness: {s:?}"
+    );
+    assert!(
+        s.rebuild_required.iter().any(|r| r == "extractor_changed"),
+        "the reason is named, not merely implied: {s:?}"
+    );
+    assert!(
+        s.changed_files.is_empty() && s.deleted_files.is_empty(),
+        "nothing in the tree moved -- this is the case the old check called fresh: {s:?}"
+    );
+}
+
+/// The schema axis is independent: an index at a superseded schema is stale even when its extractor
+/// is current. A `rebuild_required` computed from the extractor alone passes the test above and
+/// fails this one.
+#[test]
+fn an_index_at_an_older_schema_is_stale_independently() {
+    let (_dir, root, db, project_id, bin) = setup(SAMPLE);
+    cort::db::set_meta(&db, "SCHEMA_VERSION", "3").unwrap();
+
+    let s = compute_stale(&db, &bin, &root, &project_id).unwrap();
+    assert!(s.index_is_stale, "{s:?}");
+    assert!(
+        s.rebuild_required.iter().any(|r| r == "schema_changed"),
+        "{s:?}"
+    );
+    assert!(
+        !s.rebuild_required.iter().any(|r| r == "extractor_changed"),
+        "the extractor was untouched, so only one axis may fire: {s:?}"
+    );
+}
+
+/// And the healthy answer. Plan 1 shipped a verdict word that no test required the implementation
+/// to be able to produce, and an implementation that could never produce it passed everything; that
+/// mistake is not repeated here.
+#[test]
+fn a_freshly_indexed_tree_owes_no_rebuild() {
+    let (_dir, root, db, project_id, bin) = setup(SAMPLE);
+    let s = compute_stale(&db, &bin, &root, &project_id).unwrap();
+    assert!(
+        s.rebuild_required.is_empty(),
+        "an index this binary just built owes nothing: {s:?}"
+    );
+}

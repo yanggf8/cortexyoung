@@ -461,7 +461,13 @@ fn evidence_reads_chunks_then_raw_edges() {
     );
 
     std::fs::remove_file(root.join("src/gone.rs")).unwrap();
-    cort::incremental::incremental_index(&mut db, &bin, &root).unwrap();
+    cort::incremental::incremental_index(
+        &mut db,
+        &bin,
+        &root,
+        cort::incremental::RebuildPolicy::Allow,
+    )
+    .unwrap();
 
     assert_eq!(
         evidence_in(&db, &project_id, "ensure_seed_user_passwords").unwrap(),

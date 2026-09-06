@@ -10,7 +10,7 @@ use cort::db::{
 };
 use cort::errors::CortError;
 use cort::impact::{impact_command, DEFAULT_DEPTH};
-use cort::incremental::incremental_index;
+use cort::incremental::{incremental_index, RebuildPolicy};
 use cort::indexer::{
     canonicalize_root, full_index, git_head_of, status_of, CanonicalRoot, IndexError,
 };
@@ -85,6 +85,9 @@ fn map_index(err: IndexError) -> CortError {
             CortError::new("file_not_found", json!({ "message": io.to_string() }))
         }
         IndexError::Sqlite(e) => cort::db::classify_sqlite(&e),
+        IndexError::FullRebuildRequired { reasons } => {
+            CortError::new("full_rebuild_required", json!({ "reasons": reasons }))
+        }
     }
 }
 
@@ -140,6 +143,31 @@ fn open_project_tracked(
             let db =
                 open_db(db_path_for(&canon.path_str)).map_err(|e| cort::db::classify_sqlite(&e))?;
             ensure_schema(&db)?;
+            Ok((canon, db))
+        }
+        Err(e) => {
+            usage.project_id = Some("_unknown".into());
+            Err(map_index(e))
+        }
+    }
+}
+
+/// Open a project without migrating it.
+///
+/// `open_project_tracked` calls `ensure_schema`, which migrates and sets `graph_pending`
+/// (`db.rs:304-323`). That is right for a command a person ran and wrong for a hook: a migration is
+/// a table rebuild, the hook has a five-second budget, and its contract is to be silent and exit 0
+/// -- so it cannot report a migration it could not finish. It reads the stored version instead and
+/// leaves the database as it found it.
+fn open_project_unmigrated(
+    root: &Path,
+    usage: &mut UsageEvent,
+) -> Result<(CanonicalRoot, Db), CortError> {
+    match canonicalize_root(root) {
+        Ok(canon) => {
+            usage.project_id = Some(canon.project_id.clone());
+            let db =
+                open_db(db_path_for(&canon.path_str)).map_err(|e| cort::db::classify_sqlite(&e))?;
             Ok((canon, db))
         }
         Err(e) => {
@@ -834,10 +862,10 @@ fn cmd_hook_refresh(args: &[String], usage: &mut UsageEvent) -> Result<Emit, Cor
     let Ok(bin) = pin_bin() else {
         return quiet("no_ast_grep", usage);
     };
-    let Ok((canon, mut db)) = open_project_tracked(&root, usage) else {
+    let Ok((canon, mut db)) = open_project_unmigrated(&root, usage) else {
         return quiet("db_unavailable", usage);
     };
-    match incremental_index(&mut db, &bin, &canon.path) {
+    match incremental_index(&mut db, &bin, &canon.path, RebuildPolicy::Forbid) {
         Ok(r) if r.files_reindexed > 0 || r.files_removed > 0 => {
             // The counts stay, but inside the object rather than beside it: this row used to be a
             // bare `outcome=refreshed reindexed=N removed=M`, which is not the JSON shape
@@ -858,6 +886,21 @@ fn cmd_hook_refresh(args: &[String], usage: &mut UsageEvent) -> Result<Emit, Cor
             })
         }
         Ok(_) => quiet("already_current", usage),
+        Err(cort::indexer::IndexError::FullRebuildRequired { reasons }) => {
+            let mut row = hook_row(
+                "rebuild_required",
+                &harness,
+                declared_differs.as_deref(),
+                model.as_deref(),
+            );
+            row["reasons"] = json!(reasons);
+            usage.args_summary = row.to_string();
+            Ok(Emit {
+                payload: json!({}),
+                format: Format::Lean,
+                render_command: Some("hook-refresh"),
+            })
+        }
         Err(_) => quiet("busy_or_failed", usage),
     }
 }
@@ -1506,7 +1549,7 @@ fn cmd_index(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError>
     let stats = unwrap_busy(
         with_busy_retry(|| {
             if a.incremental {
-                incremental_index(&mut db, &bin, &canon.path).map_err(IdxWrap)
+                incremental_index(&mut db, &bin, &canon.path, RebuildPolicy::Allow).map_err(IdxWrap)
             } else {
                 full_index(&mut db, &bin, &canon.path)
                     .map(|s| cort::incremental::IncrementalIndexResult {
@@ -1618,14 +1661,18 @@ fn cmd_status(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError
             "index_is_stale": stale.index_is_stale,
             "deleted_files": stale.deleted_files,
             "changed_files": stale.changed_files,
+            // `deleted_files` and `changed_files` already say why a *tree* moved. This says why the
+            // *index* is owed a full rebuild, which the other two cannot express: an extractor or
+            // schema this binary no longer uses leaves both of them empty. Without it a person who
+            // runs the obvious command learns that the index is stale and never learns that
+            // re-indexing is what fixes it -- which is the whole point of the screen.
+            "rebuild_required": stale.rebuild_required,
         }),
     })
 }
 
 fn cmd_projects(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, CortError> {
     let a = ProjectsArgs::try_parse_from(args.iter()).map_err(clap_fail)?;
-    let want_schema = cort::db::SCHEMA_VERSION.to_string();
-    let want_extractor = cort::pack::extractor_version();
 
     let mut n_drifted = 0u64;
     let mut n_unreadable = 0u64;
@@ -1648,8 +1695,12 @@ fn cmd_projects(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, CortEr
                     (Some(stored), Some(now)) => Some(stored != now),
                     _ => None,
                 };
-                let drifted = r.schema_version.as_deref() != Some(want_schema.as_str())
-                    || r.extractor_version.as_deref() != Some(want_extractor.as_str());
+                let drifted = !cort::indexer::rebuild_reasons_of(
+                    r.schema_version.as_deref(),
+                    r.extractor_version.as_deref(),
+                    r.graph_pending,
+                )
+                .is_empty();
                 // Counted whether or not the directory still exists: the index is readable and
                 // it does not match, and that is true regardless of whether anyone can act on it.
                 if drifted {

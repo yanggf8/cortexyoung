@@ -2169,3 +2169,267 @@ fn the_verdict_line_is_one_line_of_four_non_empty_fields() {
         r.stdout
     );
 }
+
+/// An index whose incremental was killed mid-run has current versions and an incomplete graph.
+/// `cort status` calls that stale; `--verdict` must not call it compatible. Two answers to one
+/// question, disagreeing on a population that exists, is the defect this plan is about.
+#[test]
+fn the_verdict_and_staleness_agree_about_an_incomplete_graph() {
+    let (_p, cwd, _c, cache) = sandbox();
+    git_in_fixture(&cwd);
+    let idx = run_cort(&["index"], &cwd, &cache);
+    if idx.code != 0 {
+        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
+        return;
+    }
+    let db_file = cache.join(
+        cort::db::db_path_for(cwd.to_str().unwrap())
+            .file_name()
+            .unwrap(),
+    );
+    let db = cort::db::open_db(&db_file).unwrap();
+    cort::db::set_meta(&db, "graph_pending", "1").unwrap();
+    drop(db);
+
+    let st = run_cort(&["status"], &cwd, &cache);
+    let status: Value = serde_json::from_str(&st.stdout).expect("status emits json");
+    assert_eq!(
+        status.get("index_is_stale").and_then(Value::as_bool),
+        Some(true),
+        "an incomplete graph is staleness: {status}"
+    );
+
+    let v = run_cort(&["projects", "--verdict"], &cwd, &cache);
+    assert_eq!(
+        v.stdout, "indexes\tdrifted\t1\t0\n",
+        "the verdict must not call compatible what status calls stale: {:?}",
+        v.stdout
+    );
+}
+
+/// The treadmill, as a test. An index whose extractor is superseded used to make every edit hook
+/// attempt a full rebuild inside a five-second budget; killed before commit, it advanced nothing
+/// and tried again on the next edit, forever and silently.
+#[test]
+fn the_refresh_hook_refuses_a_full_rebuild_and_says_so() {
+    let (p, cwd, _c, cache) = sandbox();
+    git_in_fixture(&cwd);
+    let idx = run_cort(&["index"], &cwd, &cache);
+    if idx.code != 0 {
+        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
+        return;
+    }
+    let db_file = cache.join(
+        cort::db::db_path_for(cwd.to_str().unwrap())
+            .file_name()
+            .unwrap(),
+    );
+    let db = cort::db::open_db(&db_file).unwrap();
+    cort::db::set_meta(&db, "extractor_version", "not-the-one-that-ships").unwrap();
+    drop(db);
+    std::fs::write(
+        p.path().join("src/helper.ts"),
+        "export function helper(n: number) { return n * 11; }\n",
+    )
+    .unwrap();
+
+    let payload = format!(
+        r#"{{"tool_name":"Edit","tool_input":{{"file_path":"{}"}}}}"#,
+        p.path().join("src/helper.ts").display()
+    );
+    let r = run_hook_refresh_with(&[], serde_json::from_str(&payload).unwrap(), &cwd, &cache);
+    assert_eq!(r.code, 0, "the hook always exits 0: {}", r.stderr);
+    let counts = refresh_outcomes(&cache);
+    assert_eq!(
+        counts.get("rebuild_required").and_then(Value::as_i64),
+        Some(1),
+        "the hook records the debt instead of attempting it: {counts:?}"
+    );
+
+    // And it records *which* debt. Asserting only the counter lets an implementation write an
+    // empty reason vector, or one hardcoded name for every refusal, and still pass -- the name of
+    // this test says "and says so", so the "so" has to be checked.
+    let st = run_cort(&["status"], &cwd, &cache);
+    let status: Value = serde_json::from_str(&st.stdout).expect("status emits json");
+    let reasons = status
+        .get("rebuild_required")
+        .and_then(Value::as_array)
+        .expect("status names why a rebuild is owed");
+    assert!(
+        reasons
+            .iter()
+            .any(|r| r.as_str() == Some("extractor_changed")),
+        "the extractor is the reason here, and nothing else is: {status}"
+    );
+    assert!(
+        !reasons.iter().any(|r| r.as_str() == Some("schema_changed")),
+        "the schema was untouched: {status}"
+    );
+
+    // And the stored extractor is untouched: a refusal must not look like a repair.
+    let db = cort::db::open_db(&db_file).unwrap();
+    assert_eq!(
+        cort::db::get_meta(&db, "extractor_version")
+            .unwrap()
+            .as_deref(),
+        Some("not-the-one-that-ships"),
+        "refusing must not stamp a version it did not build"
+    );
+}
+
+/// The foreground keeps its rebuild. `cort index --incremental` is a typed command a person ran on
+/// purpose; refusing it would leave the debt with no actor at all, which this repository has
+/// measured as worthless (19 re-index runs against 2,700+ hook fires).
+#[test]
+fn a_foreground_incremental_still_rebuilds() {
+    let (_p, cwd, _c, cache) = sandbox();
+    git_in_fixture(&cwd);
+    let idx = run_cort(&["index"], &cwd, &cache);
+    if idx.code != 0 {
+        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
+        return;
+    }
+    let db_file = cache.join(
+        cort::db::db_path_for(cwd.to_str().unwrap())
+            .file_name()
+            .unwrap(),
+    );
+    let db = cort::db::open_db(&db_file).unwrap();
+    cort::db::set_meta(&db, "extractor_version", "not-the-one-that-ships").unwrap();
+    drop(db);
+
+    let r = run_cort(&["index", "--incremental"], &cwd, &cache);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let db = cort::db::open_db(&db_file).unwrap();
+    assert_eq!(
+        cort::db::get_meta(&db, "extractor_version").unwrap(),
+        Some(cort::pack::extractor_version()),
+        "the foreground path repaid the debt"
+    );
+}
+
+/// The extractor is not the only reason a full rebuild is owed. An index whose incremental was
+/// killed mid-run has current versions and `graph_pending=1`, and rebuilding it is the same
+/// unbounded work under the same five-second budget.
+#[test]
+fn the_refresh_hook_refuses_an_incomplete_graph_too() {
+    let (p, cwd, _c, cache) = sandbox();
+    git_in_fixture(&cwd);
+    let idx = run_cort(&["index"], &cwd, &cache);
+    if idx.code != 0 {
+        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
+        return;
+    }
+    let db_file = cache.join(
+        cort::db::db_path_for(cwd.to_str().unwrap())
+            .file_name()
+            .unwrap(),
+    );
+    let db = cort::db::open_db(&db_file).unwrap();
+    cort::db::set_meta(&db, "graph_pending", "1").unwrap();
+    drop(db);
+    std::fs::write(
+        p.path().join("src/helper.ts"),
+        "export function helper(n: number) { return n * 17; }\n",
+    )
+    .unwrap();
+
+    let payload = format!(
+        r#"{{"tool_name":"Edit","tool_input":{{"file_path":"{}"}}}}"#,
+        p.path().join("src/helper.ts").display()
+    );
+    let r = run_hook_refresh_with(&[], serde_json::from_str(&payload).unwrap(), &cwd, &cache);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let counts = refresh_outcomes(&cache);
+    assert_eq!(
+        counts.get("rebuild_required").and_then(Value::as_i64),
+        Some(1),
+        "graph_incomplete is a refusal too: {counts:?}"
+    );
+}
+
+/// The third refusal reason has its own gate, because it is the only one not derived from stored
+/// metadata: a git candidate set that cannot be narrowed honestly widens to everything, which is a
+/// full re-extraction under the same five-second budget. Removing that gate left all 453 tests
+/// green while restoring the treadmill for every project git will not speak for.
+#[test]
+fn the_refresh_hook_refuses_when_git_cannot_narrow_the_candidates() {
+    let (p, cwd, _c, cache) = sandbox();
+    // Deliberately NOT a git repository: `git_candidates` cannot narrow, so it widens to
+    // everything rather than quietly to nothing (`incremental.rs`, `narrowed: false`).
+    let idx = run_cort(&["index"], &cwd, &cache);
+    if idx.code != 0 {
+        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
+        return;
+    }
+    std::fs::write(
+        p.path().join("src/helper.ts"),
+        "export function helper(n: number) { return n * 19; }\n",
+    )
+    .unwrap();
+
+    let payload = format!(
+        r#"{{"tool_name":"Edit","tool_input":{{"file_path":"{}"}}}}"#,
+        p.path().join("src/helper.ts").display()
+    );
+    let r = run_hook_refresh_with(&[], serde_json::from_str(&payload).unwrap(), &cwd, &cache);
+    assert_eq!(r.code, 0, "the hook always exits 0: {}", r.stderr);
+    let counts = refresh_outcomes(&cache);
+    assert_eq!(
+        counts.get("rebuild_required").and_then(Value::as_i64),
+        Some(1),
+        "a candidate set git will not narrow is a refusal, not a rebuild: {counts:?}"
+    );
+}
+
+/// A schema migration is a table rebuild. The edit hook has a five-second budget and no way to
+/// report failure, so it must not be the thing that performs one -- it records the debt and leaves
+/// the database exactly as it found it.
+#[test]
+fn the_refresh_hook_does_not_migrate_the_schema() {
+    let (p, cwd, _c, cache) = sandbox();
+    git_in_fixture(&cwd);
+    let idx = run_cort(&["index"], &cwd, &cache);
+    if idx.code != 0 {
+        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
+        return;
+    }
+    let db_file = cache.join(
+        cort::db::db_path_for(cwd.to_str().unwrap())
+            .file_name()
+            .unwrap(),
+    );
+    let db = cort::db::open_db(&db_file).unwrap();
+    cort::db::set_meta(&db, "SCHEMA_VERSION", "4").unwrap();
+    drop(db);
+    std::fs::write(
+        p.path().join("src/helper.ts"),
+        "export function helper(n: number) { return n * 13; }\n",
+    )
+    .unwrap();
+
+    let payload = format!(
+        r#"{{"tool_name":"Edit","tool_input":{{"file_path":"{}"}}}}"#,
+        p.path().join("src/helper.ts").display()
+    );
+    let r = run_hook_refresh_with(&[], serde_json::from_str(&payload).unwrap(), &cwd, &cache);
+    assert_eq!(r.code, 0, "the hook always exits 0: {}", r.stderr);
+
+    let db = cort::db::open_db(&db_file).unwrap();
+    assert_eq!(
+        cort::db::get_meta(&db, "SCHEMA_VERSION")
+            .unwrap()
+            .as_deref(),
+        Some("4"),
+        "the hook migrated a schema it has no budget to migrate"
+    );
+
+    // Not migrating is half the property. A hook that bailed silently -- opened, gave up, wrote
+    // nothing -- would satisfy the assertion above and leave the debt unrecorded.
+    let counts = refresh_outcomes(&cache);
+    assert_eq!(
+        counts.get("rebuild_required").and_then(Value::as_i64),
+        Some(1),
+        "the hook records the schema debt it declined: {counts:?}"
+    );
+}

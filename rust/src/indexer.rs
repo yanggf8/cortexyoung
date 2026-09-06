@@ -9,7 +9,7 @@
 //! Plan §7 B-gap: index/status entry points canonicalize `root` before
 //! `cort::db::project_id_for`.
 
-use crate::db::{set_meta, Db};
+use crate::db::{get_meta, set_meta, Db};
 use crate::errors::CortError;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::fs;
@@ -50,6 +50,11 @@ pub enum IndexError {
     Io(io::Error),
     Sqlite(rusqlite::Error),
     Cort(CortError),
+    /// A full rebuild is owed and this call site may not spend one. Carries the reasons so the
+    /// caller can record which debt it declined, rather than an anonymous refusal.
+    FullRebuildRequired {
+        reasons: Vec<String>,
+    },
 }
 
 impl std::fmt::Display for IndexError {
@@ -58,6 +63,9 @@ impl std::fmt::Display for IndexError {
             Self::Io(e) => write!(f, "{e}"),
             Self::Sqlite(e) => write!(f, "{e}"),
             Self::Cort(e) => write!(f, "{e}"),
+            Self::FullRebuildRequired { reasons } => {
+                write!(f, "full rebuild required: {}", reasons.join(", "))
+            }
         }
     }
 }
@@ -352,6 +360,51 @@ pub(crate) fn replace_file_raw_edges(
         insert_raw_edge(conn, project_id, file_path, edge)?;
     }
     Ok(())
+}
+
+/// Why a full re-extraction is owed, if one is. The single reader behind both halves of the
+/// contract: `compute_stale` turns it into `index_is_stale`, and `incremental_index` turns it into
+/// a rebuild or a refusal. Two copies of this decision is the mistake `HOOK_TARGETS` cost this
+/// repository once already.
+///
+/// Derived, never stored. The two version facts are already durable in `_cortex_meta`, and a
+/// recorded target would be a third copy that can disagree with them; nothing here can be cleared
+/// wrongly because there is nothing to clear -- a reason stops holding exactly when `full_index`
+/// stamps the new value in the transaction that replaces the rows (`indexer.rs:436-438`).
+///
+/// A **missing** key counts as owed: an index that predates the meta table is not a current one.
+///
+/// Pure, and taking the three stored facts rather than a connection, because one caller does not
+/// have one: `cmd_projects` reads its values through `list_projects`, which opens each database
+/// read-only and closes it (`db.rs`). Before this split that caller computed drift its own way
+/// (`main.rs:1651-1652`) and never read `graph_pending` at all — so `cort status` would call an
+/// interrupted index stale while `cort projects --verdict` called it compatible. That is the same
+/// two-copies defect this function exists to end, one level out.
+pub fn rebuild_reasons_of(
+    schema_version: Option<&str>,
+    extractor_version: Option<&str>,
+    graph_pending: bool,
+) -> Vec<String> {
+    let mut reasons = Vec::new();
+    if graph_pending {
+        reasons.push("graph_incomplete".to_string());
+    }
+    if extractor_version != Some(crate::pack::extractor_version().as_str()) {
+        reasons.push("extractor_changed".to_string());
+    }
+    if schema_version != Some(crate::db::SCHEMA_VERSION.to_string().as_str()) {
+        reasons.push("schema_changed".to_string());
+    }
+    reasons
+}
+
+/// The connection-holding wrapper, for callers that have one.
+pub fn rebuild_reasons(db: &Db) -> Result<Vec<String>, IndexError> {
+    Ok(rebuild_reasons_of(
+        get_meta(db, "SCHEMA_VERSION")?.as_deref(),
+        get_meta(db, "extractor_version")?.as_deref(),
+        get_meta(db, "graph_pending")?.as_deref() == Some("1"),
+    ))
 }
 
 /// Entry: canonicalize root, then `project_id_for`.

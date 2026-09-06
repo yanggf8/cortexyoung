@@ -1,7 +1,7 @@
 //! Staleness: `index_is_stale` signalling.
 //! Compared extraction hash, not git dirty and not raw file bytes (spec §7.5).
 
-use crate::db::{get_meta, indexed_head, Db};
+use crate::db::{indexed_head, Db};
 use crate::incremental::git_candidates;
 use crate::indexer::{canonicalize_root, extract_one, walk_files, IndexError};
 use rusqlite::{params, OptionalExtension};
@@ -14,6 +14,16 @@ pub struct StaleReport {
     pub index_is_stale: bool,
     pub deleted_files: Vec<String>,
     pub changed_files: Vec<String>,
+    /// Why a full rebuild is owed, if one is: zero or more of `extractor_changed`,
+    /// `schema_changed`, `graph_incomplete`. Derived, never stored -- the two version facts are
+    /// already durable in `_cortex_meta`, and a third copy could disagree with them.
+    ///
+    /// **This vocabulary is narrower than the refusal channel's.**
+    /// `IndexError::FullRebuildRequired` can also carry `candidates_not_narrowed`, which is a
+    /// property of the working tree and git rather than of the stored index, so it has no place
+    /// here: it is already staleness by the changed-files route, and it says nothing about whether
+    /// the index this binary is looking at was built by semantics it still uses.
+    pub rebuild_required: Vec<String>,
 }
 
 /// `base` is always `projects.path` when a row exists, never cwd (C2-22).
@@ -90,13 +100,18 @@ pub fn compute_stale(
     }
 
     // The per-file hash comparison above cannot see a half-rebuilt graph: every file hash can
-    // match while cross-file edges are missing. `graph_pending` is the derived-state equivalent
-    // of staleness, and it must surface through the same field agents already check.
-    let graph_pending = get_meta(db, "graph_pending")?.as_deref() == Some("1");
+    // match while cross-file edges are missing. Nor can it see an index built by semantics this
+    // binary no longer uses -- on 2026-09-05 no git head had moved in any project tree, so every
+    // drifted index read as fresh. Both are staleness, and both must surface through the field
+    // agents already check.
+    let rebuild_required = crate::indexer::rebuild_reasons(db)?;
 
     Ok(StaleReport {
-        index_is_stale: graph_pending || !deleted.is_empty() || !changed_files.is_empty(),
+        index_is_stale: !rebuild_required.is_empty()
+            || !deleted.is_empty()
+            || !changed_files.is_empty(),
         deleted_files: deleted,
         changed_files,
+        rebuild_required,
     })
 }

@@ -11,7 +11,7 @@ use cort::context::{
     DEFAULT_BUDGET, NEIGHBORS_PER_SEED,
 };
 use cort::db::{ensure_schema, get_meta, open_db, project_id_for, set_meta};
-use cort::incremental::incremental_index;
+use cort::incremental::{incremental_index, RebuildPolicy};
 use cort::indexer::full_index;
 use cort::pack::{extractor_version, pack_files, sgconfig};
 use cort::render::{render, Format};
@@ -984,7 +984,7 @@ fn rust_yml_change_moves_the_pack_hash_and_old_index_requires_full_rebuild() {
         "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
     )
     .unwrap();
-    let result = incremental_index(&mut db, &bin, &root).unwrap();
+    let result = incremental_index(&mut db, &bin, &root, RebuildPolicy::Allow).unwrap();
     assert_eq!(result.mode, "full");
     let stored = get_meta(&db, "extractor_version").unwrap().unwrap();
     assert_eq!(stored, extractor_version());

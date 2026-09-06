@@ -5,7 +5,7 @@
 //!   git -C root diff --name-status -M <indexed-head> HEAD
 //!   git -C root ls-files --others --exclude-standard
 
-use crate::db::{get_meta, set_meta, Db};
+use crate::db::{set_meta, Db};
 use crate::graph::rebuild_relationships;
 use crate::indexer::{
     canonicalize_root, extract_one, full_index, git_head_of, insert_chunk, now_ms,
@@ -298,36 +298,51 @@ fn from_full(full: FullIndexStats, started: Instant) -> IncrementalIndexResult {
     }
 }
 
+/// Whether this call site may spend a full re-extraction. The edit hook may not: it runs under a
+/// five-second harness budget, and a rebuild killed before commit advances nothing and is attempted
+/// again on the next edit. The decision belongs to the caller, which knows its own budget, rather
+/// than to a second copy of the policy in here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RebuildPolicy {
+    Allow,
+    Forbid,
+}
+
 /// Entry: canonicalize root, then `project_id_for` (via `full_index` / `canonicalize_root`).
 pub fn incremental_index(
     db: &mut Db,
     bin: &str,
     root: impl AsRef<Path>,
+    policy: RebuildPolicy,
 ) -> Result<IncrementalIndexResult, IndexError> {
     let started = Instant::now();
     let canon = canonicalize_root(root)?;
     let version = crate::pack::extractor_version();
-    let stored = get_meta(db, "extractor_version")?;
 
-    if let Some(stored) = stored.as_deref() {
-        if stored != version.as_str() {
-            eprintln!("extractor_version mismatch: {stored} -> {version}, full reindex required");
-            let full = full_index(db, bin, &canon.path)?;
-            return Ok(from_full(full, started));
+    // The stored-version reasons come from the one reader, so this cannot disagree with what
+    // `index_is_stale` says about the same database.
+    let reasons = crate::indexer::rebuild_reasons(db)?;
+    if !reasons.is_empty() {
+        if policy == RebuildPolicy::Forbid {
+            return Err(IndexError::FullRebuildRequired { reasons });
         }
-    }
-
-    // A pending graph means a previous run changed chunks without rebuilding the derived
-    // relationships (interrupt), or the database predates the raw-edge layer (schema upgrade).
-    // Either way only a full re-extraction can be trusted to repopulate it.
-    if get_meta(db, "graph_pending")?.as_deref() == Some("1") {
+        eprintln!("full reindex required: {}", reasons.join(", "));
         let full = full_index(db, bin, &canon.path)?;
         return Ok(from_full(full, started));
     }
 
+    // Git stays *below* the stored-version gate, exactly where the two original gates left it. The
+    // extractor and `graph_pending` checks short-circuit before any subprocess runs today
+    // (`incremental.rs:312`, `:323`); hoisting `git_candidates` above them would spend up to four
+    // untimed subprocesses out of a five-second hook budget on a refusal already decided.
     let indexed_head = crate::db::indexed_head(db, &canon.project_id)?;
     let cands = git_candidates(&canon.path, indexed_head.as_deref());
     if !cands.narrowed {
+        if policy == RebuildPolicy::Forbid {
+            return Err(IndexError::FullRebuildRequired {
+                reasons: vec!["candidates_not_narrowed".to_string()],
+            });
+        }
         let full = full_index(db, bin, &canon.path)?;
         return Ok(from_full(full, started));
     }

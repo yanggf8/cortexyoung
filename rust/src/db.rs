@@ -342,13 +342,16 @@ pub struct ProjectListRow {
     /// absent -- a database that predates the meta table, which is not the same as a current one.
     pub schema_version: Option<String>,
     /// The extractor identity the derived rows were built with -- the same key
-    /// `incremental_index` reads (`incremental.rs:310`).
+    /// `rebuild_reasons_of` compares (`indexer.rs`).
     ///
-    /// It reports, and does not predict: `incremental_index` only rebuilds on a mismatch when a
-    /// stored value *exists* (`if let Some(stored)`, `incremental.rs:312-318`), so an index whose
-    /// meta key is absent reads as drifted here and triggers no extractor rebuild there. That
-    /// divergence is on the predates-meta population, and closing it belongs to plan 2.
+    /// It once reported without predicting: `incremental_index` rebuilt on a mismatch only when a
+    /// stored value existed, so an index whose meta key was absent read as drifted here and
+    /// triggered no rebuild there. That divergence closed on 2026-09-06 -- the comparison is
+    /// unconditional now, and a missing key counts as owed on both sides.
     pub extractor_version: Option<String>,
+    /// Whether a commit changed chunks without rebuilding the derived graph. Read here so the
+    /// verdict can reach the same judgement as `index_is_stale`, which has counted it since 2026-08.
+    pub graph_pending: bool,
 }
 
 /// One entry from the cache-directory scan. `Unreadable` is a variant rather than an omission so a
@@ -419,10 +422,15 @@ pub fn list_projects() -> Vec<ProjectEntry> {
         // refresh hook writes on every edit -- come out as "built by a superseded extractor", a
         // claim about a database we never read. That is the exact falsehood this screen exists to
         // remove.
-        let versions = get_meta(&db, "SCHEMA_VERSION")
-            .and_then(|schema| get_meta(&db, "extractor_version").map(|ex| (schema, ex)));
+        let versions = get_meta(&db, "SCHEMA_VERSION").and_then(|schema| {
+            get_meta(&db, "extractor_version")
+                .and_then(|ex| get_meta(&db, "graph_pending").map(|gp| (schema, ex, gp)))
+        });
         match (row, versions) {
-            (Ok((project_id, name, path, git_head, last_indexed_at)), Ok((schema, extractor))) => {
+            (
+                Ok((project_id, name, path, git_head, last_indexed_at)),
+                Ok((schema, extractor, gp)),
+            ) => {
                 out.push(ProjectEntry::Indexed(ProjectListRow {
                     project_id,
                     name,
@@ -432,6 +440,7 @@ pub fn list_projects() -> Vec<ProjectEntry> {
                     db_path: db_path_str,
                     schema_version: schema,
                     extractor_version: extractor,
+                    graph_pending: gp.as_deref() == Some("1"),
                 }));
             }
             // Not a failure: `ensure_schema` creates this shape before anything is indexed, and a
