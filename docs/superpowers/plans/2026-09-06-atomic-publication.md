@@ -990,3 +990,22 @@ sourcing, where the constants block overwrites it — the test worked only becau
 **One finding did not reproduce.** `find` over a missing directory was said to abort under `set -e`;
 on GNU find here it exits 0. The guard is free and is in anyway, because BSD find may differ and
 `--uninstall` is precisely what runs against a half-deleted data directory.
+
+## What execution found (Tasks 1-2)
+
+**The implementer cannot write to the repo.** Grok runs under a bwrap read-only sandbox, so both
+tasks were built and verified in `/tmp/cortexyoung-taskN` clones and landed here only after review.
+That split turned out to be load-bearing rather than incidental: it forced a clean handoff (diff in,
+full verification re-run here) instead of trusting a report. Cost: every break-and-restore cycle
+runs twice, once there and once here.
+
+**Four plan inaccuracies from Task 1, all reported by the implementer rather than found in review:**
+the seam comment documented a `--source-only` flag that does not exist (the mechanism is the
+`SOURCE_ONLY` env var — fixed on landing); the placement paragraph contradicted itself about
+before/after the parser; an unused `before_body` variable; and the Step 2 grep misses one of the
+PASS lines. None blocked execution; all four are fixed in the plan or on landing.
+
+**Task 2's Step 5 confirmed the two halves are independent.** Restoring only `write_skill`'s
+truncating `cat` turns the skill assertion RED while the stamp assertion stays green — the stamp was
+already rename-based in the same change. A test that checks only one half would have missed a
+half-landed fix.
