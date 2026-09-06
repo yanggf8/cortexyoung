@@ -16,20 +16,20 @@ fn pack_guard() -> MutexGuard<'static, ()> {
 #[test]
 fn pack_files_are_enumerated_in_sorted_order_and_hash_deterministically() {
     let _g = pack_guard();
-    let files = pack_files();
+    let files = pack_files().unwrap();
     assert!(files.len() >= 5);
     let mut sorted = files.clone();
     sorted.sort();
     assert_eq!(files, sorted);
     assert!(files.iter().all(|f| f.is_absolute()));
-    let v = extractor_version();
+    let v = extractor_version().unwrap();
     assert!(
         v.len() == 64
             && v.chars()
                 .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
         "expected 64 lowercase hex, got {v}"
     );
-    assert_eq!(v, extractor_version());
+    assert_eq!(v, extractor_version().unwrap());
 }
 
 /// C1-2
@@ -37,11 +37,12 @@ fn pack_files_are_enumerated_in_sorted_order_and_hash_deterministically() {
 fn extractor_version_changes_when_any_pack_file_changes() {
     let _g = pack_guard();
     let target = pack_files()
+        .unwrap()
         .into_iter()
         .find(|f| f.ends_with("typescript.yml"))
         .expect("typescript.yml in pack");
     let before = fs::read(&target).expect("read typescript.yml");
-    let v1 = extractor_version();
+    let v1 = extractor_version().unwrap();
     struct Restore {
         path: PathBuf,
         original: Vec<u8>,
@@ -58,9 +59,9 @@ fn extractor_version_changes_when_any_pack_file_changes() {
     let mut probe = before.clone();
     probe.extend_from_slice(b"\n# probe\n");
     fs::write(&target, &probe).expect("write probe");
-    assert_ne!(extractor_version(), v1);
+    assert_ne!(extractor_version().unwrap(), v1);
     drop(restore);
-    assert_eq!(extractor_version(), v1);
+    assert_eq!(extractor_version().unwrap(), v1);
 }
 
 /// C1-3
@@ -362,12 +363,12 @@ fn cort_pack_dir_override_points_somewhere_else() {
     set_pack_env(Some(dir.to_str().unwrap()));
     assert_eq!(pack_dir(), dir);
     assert!(sgconfig().ends_with("pack/sgconfig.yml"));
-    let files = pack_files();
+    let files = pack_files().unwrap();
     assert_eq!(files.len(), 2);
     // the override pack hashes differently from the repo pack
-    let overridden = extractor_version();
+    let overridden = extractor_version().unwrap();
     set_pack_env(None);
-    assert_ne!(overridden, extractor_version());
+    assert_ne!(overridden, extractor_version().unwrap());
 }
 
 /// Env mutation that survives a panicking assertion inside the scope: the var is
@@ -495,4 +496,41 @@ fn the_pack_extracts_rust_type_chunks_and_reference_edges() {
             "{own_name} must not be a reference: {refs:?}"
         );
     }
+}
+
+/// A pack directory that will not enumerate must not produce an identity. `walk` swallowed every
+/// failure -- `read_dir` returned silently and an entry whose `file_type` failed was skipped -- so
+/// a pack that was unreadable, or half-copied by an installer mid-swap, yielded a shorter file list
+/// and a hash that looks perfectly legitimate. Stamped into an index, that identity never matches
+/// again and never explains why.
+#[test]
+fn a_pack_directory_that_will_not_enumerate_has_no_identity() {
+    let _g = pack_guard();
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("sgconfig.yml"), "ruleDirs: [rules]\n").unwrap();
+    set_pack_env(Some(dir.path().to_str().unwrap()));
+    assert!(pack_files().is_ok(), "a readable pack enumerates");
+
+    let mut perms = fs::metadata(dir.path()).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o000);
+    fs::set_permissions(dir.path(), perms.clone()).unwrap();
+    let readable = fs::read_dir(dir.path()).is_ok();
+    let files = pack_files();
+    let version = extractor_version();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o700);
+    fs::set_permissions(dir.path(), perms).unwrap();
+    set_pack_env(None);
+
+    if readable {
+        eprintln!("SKIP: this user can read a 0o000 directory");
+        return;
+    }
+    assert!(
+        files.is_err(),
+        "an unreadable pack directory is a failure, not an empty pack: {files:?}"
+    );
+    assert!(
+        version.is_err(),
+        "and no identity is computed from it: {version:?}"
+    );
 }

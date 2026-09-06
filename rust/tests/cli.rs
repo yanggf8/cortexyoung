@@ -2303,7 +2303,7 @@ fn a_foreground_incremental_still_rebuilds() {
     let db = cort::db::open_db(&db_file).unwrap();
     assert_eq!(
         cort::db::get_meta(&db, "extractor_version").unwrap(),
-        Some(cort::pack::extractor_version()),
+        Some(cort::pack::extractor_version().unwrap()),
         "the foreground path repaid the debt"
     );
 }
@@ -2345,6 +2345,43 @@ fn the_refresh_hook_refuses_an_incomplete_graph_too() {
         counts.get("rebuild_required").and_then(Value::as_i64),
         Some(1),
         "graph_incomplete is a refusal too: {counts:?}"
+    );
+}
+
+/// `status` printed `extractor_version` from the `projects` column while `rebuild_required` was
+/// derived from the `_cortex_meta` copy, so one command's output contradicted itself: the version
+/// it named was the current one, beside a reason saying the version had changed. Two readers of one
+/// fact, and nothing keeping them in step.
+#[test]
+fn status_does_not_contradict_itself_about_the_extractor() {
+    let (_p, cwd, _c, cache) = sandbox();
+    git_in_fixture(&cwd);
+    let idx = run_cort(&["index"], &cwd, &cache);
+    if idx.code != 0 {
+        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
+        return;
+    }
+    let db_file = cache.join(
+        cort::db::db_path_for(cwd.to_str().unwrap())
+            .file_name()
+            .unwrap(),
+    );
+    let db = cort::db::open_db(&db_file).unwrap();
+    cort::db::set_meta(&db, "extractor_version", "superseded").unwrap();
+    drop(db);
+
+    let r = run_cort(&["status"], &cwd, &cache);
+    let st: Value = serde_json::from_str(&r.stdout).expect("status emits json");
+    assert!(
+        st.get("rebuild_required")
+            .and_then(Value::as_array)
+            .is_some_and(|v| v.iter().any(|x| x.as_str() == Some("extractor_changed"))),
+        "the fixture drifted the extractor: {st}"
+    );
+    assert_eq!(
+        st.get("extractor_version").and_then(Value::as_str),
+        Some("superseded"),
+        "the version status names must be the one the decision was made from: {st}"
     );
 }
 

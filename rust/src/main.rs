@@ -1700,6 +1700,7 @@ fn cmd_projects(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, CortEr
                     r.extractor_version.as_deref(),
                     r.graph_pending,
                 )
+                .map_err(map_index)?
                 .is_empty();
                 // Counted whether or not the directory still exists: the index is readable and
                 // it does not match, and that is true regardless of whether anyone can act on it.

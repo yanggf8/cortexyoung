@@ -317,7 +317,7 @@ pub fn incremental_index(
 ) -> Result<IncrementalIndexResult, IndexError> {
     let started = Instant::now();
     let canon = canonicalize_root(root)?;
-    let version = crate::pack::extractor_version();
+    let version = crate::pack::extractor_version()?;
 
     // The stored-version reasons come from the one reader, so this cannot disagree with what
     // `index_is_stale` says about the same database.

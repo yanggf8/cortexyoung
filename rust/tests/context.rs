@@ -941,7 +941,7 @@ fn method_record_without_owner_is_malformed_extraction() {
 
 fn hash_pack_with_rust_yml(rust_yml: &[u8]) -> String {
     let mut h = Sha256::new();
-    for f in pack_files() {
+    for f in pack_files().unwrap() {
         if f.ends_with("rust.yml") {
             h.update(rust_yml);
         } else {
@@ -968,7 +968,7 @@ fn rust_yml_change_moves_the_pack_hash_and_old_index_requires_full_rebuild() {
     let new_hash = hash_pack_with_rust_yml(&current);
     let old_hash = hash_pack_with_rust_yml(OLD_RUST_YML.as_bytes());
     assert_ne!(new_hash, old_hash);
-    assert_eq!(new_hash, extractor_version());
+    assert_eq!(new_hash, extractor_version().unwrap());
     assert!(String::from_utf8_lossy(&current).contains("cort-rust-chunk-impl-method"));
     assert!(String::from_utf8_lossy(&current).contains("stopBy: end"));
 
@@ -987,6 +987,6 @@ fn rust_yml_change_moves_the_pack_hash_and_old_index_requires_full_rebuild() {
     let result = incremental_index(&mut db, &bin, &root, RebuildPolicy::Allow).unwrap();
     assert_eq!(result.mode, "full");
     let stored = get_meta(&db, "extractor_version").unwrap().unwrap();
-    assert_eq!(stored, extractor_version());
+    assert_eq!(stored, extractor_version().unwrap());
     let _ = dir;
 }

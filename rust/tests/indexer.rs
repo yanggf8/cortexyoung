@@ -157,7 +157,7 @@ fn a_full_index_writes_chunks_fts_rows_file_state_and_meta() {
         && h.chars()
             .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())));
 
-    let version = cort::pack::extractor_version();
+    let version = cort::pack::extractor_version().unwrap();
     assert_eq!(
         get_meta(&db, "extractor_version").unwrap().as_deref(),
         Some(version.as_str())
@@ -285,7 +285,10 @@ fn status_of_reports_the_indexed_project_without_touching_ast_grep() {
     assert_eq!(s.path, root.to_str().unwrap());
     assert_eq!(s.files, 2);
     assert_eq!(s.readings, 0);
-    assert_eq!(s.extractor_version, cort::pack::extractor_version());
+    assert_eq!(
+        s.extractor_version,
+        cort::pack::extractor_version().unwrap()
+    );
     assert_eq!(s.git_head, None, "the fixture is not a git repo");
 }
 

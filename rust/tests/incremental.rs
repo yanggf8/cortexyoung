@@ -97,7 +97,7 @@ fn an_extractor_version_mismatch_forces_a_full_rebuild() {
     assert_eq!(r.mode, "full");
     assert_eq!(
         get_meta(&db, "extractor_version").unwrap().as_deref(),
-        Some(cort::pack::extractor_version().as_str())
+        Some(cort::pack::extractor_version().unwrap().as_str())
     );
 }
 

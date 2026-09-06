@@ -37,33 +37,34 @@ pub fn sgconfig() -> PathBuf {
 }
 
 /// Recurse `pack_dir()`, keep files whose path ends with `.yml`, sort.
-pub fn pack_files() -> Vec<PathBuf> {
+///
+/// Every failure is returned. It used to swallow all of them -- `read_dir` returned silently and an
+/// entry whose `file_type` failed was skipped -- which is far worse here than a missing file
+/// normally is: the list feeds `extractor_version`, so a pack that is unreadable, or half-copied by
+/// an installer mid-swap, produced a *shorter* list and therefore a hash that looks perfectly
+/// legitimate. Stamped into an index by `full_index`, that identity never matches again and never
+/// explains itself. An absent pack is a refusal, not an empty one.
+pub fn pack_files() -> std::io::Result<Vec<PathBuf>> {
     let mut out = Vec::new();
-    walk(&pack_dir(), &mut out);
+    walk(&pack_dir(), &mut out)?;
     out.sort();
-    out
+    Ok(out)
 }
 
-fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
-    let entries = match fs::read_dir(dir) {
-        Ok(rd) => rd,
-        Err(_) => return,
-    };
-    for entry in entries.flatten() {
+fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
         let p = entry.path();
-        let ft = match entry.file_type() {
-            Ok(ft) => ft,
-            Err(_) => continue,
-        };
-        if ft.is_dir() {
-            walk(&p, out);
-        } else if ft.is_file() {
+        if entry.file_type()?.is_dir() {
+            walk(&p, out)?;
+        } else if entry.file_type()?.is_file() {
             let as_str = p.to_string_lossy();
             if as_str.ends_with(".yml") {
                 out.push(p);
             }
         }
     }
+    Ok(())
 }
 
 /// SHA-256 of each pack file's raw bytes, in `pack_files()` order, mixed with the scan engine's
@@ -75,12 +76,11 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
 /// without moving this version would make staleness lie. The engine string changes whenever the
 /// `ast-grep-*` crate entries move; the parity probe is the discipline that re-answers
 /// byte-identity when it does.
-pub fn extractor_version() -> String {
+pub fn extractor_version() -> std::io::Result<String> {
     let mut h = Sha256::new();
-    for f in pack_files() {
-        let bytes = fs::read(&f).unwrap_or_else(|e| panic!("read pack file {}: {e}", f.display()));
-        h.update(&bytes);
+    for f in pack_files()? {
+        h.update(&fs::read(&f)?);
     }
     h.update(crate::scan::SCAN_ENGINE.as_bytes());
-    format!("{:x}", h.finalize())
+    Ok(format!("{:x}", h.finalize()))
 }

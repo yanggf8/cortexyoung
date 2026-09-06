@@ -384,27 +384,31 @@ pub fn rebuild_reasons_of(
     schema_version: Option<&str>,
     extractor_version: Option<&str>,
     graph_pending: bool,
-) -> Vec<String> {
+) -> Result<Vec<String>, IndexError> {
+    // A pack this binary cannot enumerate is not a pack that matches. Returning the failure rather
+    // than hashing a shortened list is the whole point of `pack_files` being fallible: a plausible
+    // hash over half a pack would answer "current" about semantics nobody has.
+    let current = crate::pack::extractor_version()?;
     let mut reasons = Vec::new();
     if graph_pending {
         reasons.push("graph_incomplete".to_string());
     }
-    if extractor_version != Some(crate::pack::extractor_version().as_str()) {
+    if extractor_version != Some(current.as_str()) {
         reasons.push("extractor_changed".to_string());
     }
     if schema_version != Some(crate::db::SCHEMA_VERSION.to_string().as_str()) {
         reasons.push("schema_changed".to_string());
     }
-    reasons
+    Ok(reasons)
 }
 
 /// The connection-holding wrapper, for callers that have one.
 pub fn rebuild_reasons(db: &Db) -> Result<Vec<String>, IndexError> {
-    Ok(rebuild_reasons_of(
+    rebuild_reasons_of(
         get_meta(db, "SCHEMA_VERSION")?.as_deref(),
         get_meta(db, "extractor_version")?.as_deref(),
         get_meta(db, "graph_pending")?.as_deref() == Some("1"),
-    ))
+    )
 }
 
 /// Entry: canonicalize root, then `project_id_for`.
@@ -416,7 +420,7 @@ pub fn full_index(
     let started = Instant::now();
     let canon = canonicalize_root(root)?;
     let files = walk_files(&canon.path);
-    let version = crate::pack::extractor_version();
+    let version = crate::pack::extractor_version()?;
     let head = git_head_of(&canon.path);
 
     // Extraction runs outside the transaction: subprocesses must not hold a write lock.
@@ -518,19 +522,30 @@ pub fn status_of(db: &Db, root: impl AsRef<Path>) -> Result<Status, IndexError> 
     let canon = canonicalize_root(root)?;
     let proj = db
         .query_row(
-            "SELECT path, extractor_version, git_head, last_indexed_at FROM projects WHERE project_id = ?1",
+            "SELECT path, git_head, last_indexed_at FROM projects WHERE project_id = ?1",
             params![canon.project_id],
             |r| {
                 Ok((
                     r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, Option<String>>(2)?,
-                    r.get::<_, Option<i64>>(3)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, Option<i64>>(2)?,
                 ))
             },
         )
         .optional()?;
-    let Some((path, extractor_version, git_head, last_indexed_at)) = proj else {
+    // The extractor comes from `_cortex_meta`, not from the `projects` column beside the path.
+    // Both are written from one value in one transaction (`:419`, `:430`, `:436`), so they cannot
+    // disagree by accident -- but they are two readers of one fact, and until 2026-09-06 `status`
+    // printed the column while `rebuild_required` was derived from the meta copy. Anything that
+    // moved one without the other made a single command contradict itself: the current version
+    // named beside a reason saying the version had changed.
+    //
+    // The column now has no reader. Dropping it needs a schema migration, and `ensure_schema` sets
+    // `graph_pending` on every upgrade unconditionally (`db.rs:322`), so a migration that removes
+    // an unread column would charge every index on every machine a full rebuild. That belongs with
+    // plan 3, where making the flag conditional is already in scope.
+    let extractor_version = get_meta(db, "extractor_version")?.unwrap_or_default();
+    let Some((path, git_head, last_indexed_at)) = proj else {
         return Ok(Status {
             project_id: canon.project_id,
             path: canon.path_str,
