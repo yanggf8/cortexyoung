@@ -1210,7 +1210,6 @@ do_uninstall() {
 do_install() {
   echo "=== cortexyoung install (cort v$CORT_VERSION, ast-grep v$AST_GREP_VERSION) ==="
 
-  migrate_manifest_v2
   detect_platform
   resolve_bin_dir
 
@@ -1223,6 +1222,7 @@ do_install() {
     fi
     preflight_skill_at "$SCRIPT_DIR/$SKILL_SRC_REL" "$SKILL_DEST"
   fi
+  migrate_manifest_v2
 
   install_ast_grep
   install_cort

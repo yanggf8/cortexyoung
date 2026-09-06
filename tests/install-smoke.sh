@@ -952,6 +952,42 @@ for f in "$HOME/.claude/settings.json" "$CODEX_CFG" "$KIMI_CFG"; do
 done
 bash "$INSTALL_SH" > /dev/null 2>&1  # put the wiring back for any later assertion
 
+# ── 21. preflight runs before the manifest is touched ─────────────
+# The comment at install.sh:1087 promises preflight runs "before any mutation". migrate_manifest_v2
+# ran four lines above it, so an install that aborts in preflight left the manifest migrated and
+# nothing else installed -- the first step of an upgrade violating its own ordering rule.
+#
+# TMPHOME at tests/install-smoke.sh:76 is shared. A fresh mktemp -d, not a clear of the shared one,
+# so later (and earlier) blocks keep their HOME. Restore both HOME and XDG_DATA_HOME afterwards:
+# install.sh:21 reads MANIFEST_DIR from XDG_DATA_HOME, which this file exported at line 78, so
+# moving HOME alone leaves the installer writing a different tree than the assertion watches.
+echo "--- Test 21: preflight runs before the manifest is touched ---"
+_TASK4_ORIG_HOME="$HOME"
+_TASK4_ORIG_XDG="$XDG_DATA_HOME"
+_TASK4_ORIG_TMPHOME="$TMPHOME"
+TMPHOME="$(mktemp -d)"; export HOME="$TMPHOME"
+export XDG_DATA_HOME="$HOME/.local/share"
+mkdir -p "$HOME/.local/share/cortexyoung"
+printf 'xg_bin:/old/xg\nskill:/old/skill\n' > "$HOME/.local/share/cortexyoung/manifest"
+# Dest without a stamp is the unmanaged-collision shape Test 4 already uses: preflight refuses.
+# The plan's sketch called this "an unreadable skill source"; the source is the repo file, and
+# the dest is what preflight_skill_at actually collides on (install.sh:398-431).
+mkdir -p "$HOME/.claude/skills/ast-grep"
+printf 'not a skill, no frontmatter\n' > "$HOME/.claude/skills/ast-grep/SKILL.md"
+bash "$INSTALL_SH" >/tmp/smoke_preflight.log 2>&1 || true
+if ! grep -q 'UNMANAGED\|collision' /tmp/smoke_preflight.log; then
+  fail "the fixture did not abort the install (preflight adopted rather than refused)"
+elif grep -q '^manifest_version:2' "$HOME/.local/share/cortexyoung/manifest"; then
+  fail "the manifest was migrated before preflight decided whether to proceed"
+else
+  pass "preflight runs before the manifest is touched"
+fi
+rm -rf "$TMPHOME"
+TMPHOME="$_TASK4_ORIG_TMPHOME"
+export HOME="$_TASK4_ORIG_HOME"
+export XDG_DATA_HOME="$_TASK4_ORIG_XDG"
+unset _TASK4_ORIG_HOME _TASK4_ORIG_XDG _TASK4_ORIG_TMPHOME
+
 # ── summary ──────────────────────────────────────────────────────
 echo ""
 echo "=== smoke results: $PASS passed, $FAIL failed ==="
