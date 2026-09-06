@@ -313,12 +313,16 @@ record_deploy() {
 record_manifest() {
   local key="$1" val="$2"
   mkdir -p "$MANIFEST_DIR"
+  # Stage the whole next version, then swap it in with one rename. The old file is intact until the
+  # rename and complete after it; there is no instant at which it is missing this key or any other.
+  # It used to truncate the live file and append afterwards, which lost the key on any interruption
+  # between the two -- from the only record uninstall has of what exists.
+  local tmp; tmp="$(mktemp "$MANIFEST_DIR/.manifest.XXXXXX")"
   if [ -f "$MANIFEST_FILE" ]; then
-    local tmp; tmp="$(mktemp)"
     grep -v "^${key}:" "$MANIFEST_FILE" > "$tmp" 2>/dev/null || true
-    cat "$tmp" > "$MANIFEST_FILE"; rm -f "$tmp"
   fi
-  echo "${key}:${val}" >> "$MANIFEST_FILE"
+  echo "${key}:${val}" >> "$tmp"
+  mv -f "$tmp" "$MANIFEST_FILE"
 }
 
 manifest_has() {
@@ -1116,6 +1120,13 @@ do_install() {
   fi
   echo "If cort not in PATH, restart your shell or: export PATH=\"$BIN_DIR:\$PATH\""
 }
+
+# Sourcing seam: `SOURCE_ONLY=1 . install.sh` leaves every function defined and returns
+# before anything runs. Its only purpose is to let tests exercise one publication primitive
+# rather than a whole install; it carries no decision and nothing in the normal path reads it.
+if [ "${SOURCE_ONLY:-0}" = "1" ]; then
+  return 0 2>/dev/null || true
+fi
 
 # ── dispatch ───────────────────────────────────────────────────────
 case "$MODE" in

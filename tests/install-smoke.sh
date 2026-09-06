@@ -68,6 +68,9 @@ assert_skill_claimed() {
   if [ -f "$stamp" ] && [ -n "$hash" ] && grep -qF "skill_sha256:$hash" "$stamp"; then pass "$2"
   else fail "$2 (no stamp claiming $1 at $stamp)"; fi
 }
+# `stat -c` is GNU; BSD and macOS use `stat -f`, and this installer supports Darwin
+# (`install.sh:140-166`). Define the probe once, near the other assert helpers.
+inode_of() { stat -c %i "$1" 2>/dev/null || stat -f %i "$1"; }
 
 # ── isolated HOME ────────────────────────────────────────────────
 TMPHOME="$(mktemp -d)"
@@ -145,6 +148,32 @@ assert_file_exists "$HOME/.local/share/cortexyoung/manifest" "manifest created"
 assert_contains "$HOME/.local/share/cortexyoung/manifest" "manifest_version:2" "manifest version 2 recorded"
 assert_contains "$HOME/.local/share/cortexyoung/manifest" "skill_ast_grep:" "skill_ast_grep recorded"
 assert_contains "$HOME/.local/share/cortexyoung/manifest" "cort_bin:" "cort_bin recorded"
+# The manifest is the only record uninstall has of what exists, and record_manifest is called about
+# nine times per run. Truncating the live file and appending afterwards means an interruption
+# between the two loses the key. A file replaced by rename gets a new inode; a file truncated in
+# place keeps its inode, so this is the mechanism itself rather than a proxy for it.
+MANIFEST="$HOME/.local/share/cortexyoung/manifest"
+before_ino="$(inode_of "$MANIFEST")"
+before_body="$(cat "$MANIFEST")"
+# `set --` clears the caller's positional parameters: install.sh's argument parser runs on source
+# and would `exit 2` on any argument the smoke script itself was given. The MANIFEST_* assignments
+# come AFTER the source, because sourcing re-runs the constants block (install.sh:21-22) and would
+# overwrite them.
+( set --; SOURCE_ONLY=1
+  # shellcheck disable=SC1090
+  . "$INSTALL_SH"
+  MANIFEST_FILE="$MANIFEST"; MANIFEST_DIR="$(dirname "$MANIFEST")"
+  record_manifest "smoke_probe" "value" )
+after_ino="$(inode_of "$MANIFEST")"
+if [ "$before_ino" != "$after_ino" ]; then
+  pass "record_manifest replaces the manifest rather than truncating it"
+else
+  fail "record_manifest truncated the live manifest (inode unchanged: $before_ino)"
+fi
+assert_contains "$MANIFEST" "smoke_probe:value" "the probe key was recorded"
+for k in cort_bin hook_settings manifest_version; do
+  assert_contains "$MANIFEST" "$k:" "record_manifest kept $k while adding another"
+done
 # `fake_ast_grep` is a test double that cargo builds alongside cort; shipping it would be a
 # second executable in the payload that nobody owns.
 if find "$HOME/.local/share/cortexyoung/cort" -name 'fake_ast_grep' -print -quit | grep -q .; then
