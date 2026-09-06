@@ -694,7 +694,7 @@ echo "cort 0.1.0 (rust)"
 FAKEVERDICTCORT
 chmod +x "$MANAGED_CORT"
 bash "$INSTALL_SH" --check > /tmp/smoke19b.log 2>&1 || true
-assert_contains /tmp/smoke19b.log "indexes: 2 built by a superseded schema or extractor, 1 unreadable" \
+assert_contains /tmp/smoke19b.log "indexes: 2 owe a full rebuild, 1 unreadable" \
   "--check parses all four verdict fields and reports both counts"
 
 # A truncated line keeps a valid two-field prefix. Reading that as "current" is the same class of
@@ -737,7 +737,7 @@ chmod +x "$MANAGED_CORT"
 bash "$INSTALL_SH" --check > /tmp/smoke19d.log 2>&1 || true
 assert_contains /tmp/smoke19d.log "indexes: compatibility unknown (unparsable verdict)" \
   "counts that are not numbers fail closed"
-assert_not_contains /tmp/smoke19d.log "x built by a superseded" \
+assert_not_contains /tmp/smoke19d.log "x owe a full rebuild" \
   "--check must not print a non-numeric count as a measurement"
 
 cp "$TMPHOME/cort.real" "$MANAGED_CORT"

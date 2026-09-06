@@ -903,6 +903,9 @@ do_check() {
   # ok=0. Fail closed on a line we cannot parse: anything but the three known words is `unknown`.
   # Two counts, because one number cannot stand behind both words: saying "3 built by a superseded
   # extractor" when two of the three are databases we could not open is a false statement about them.
+  # And the word is "owe a full rebuild" rather than a cause: since 2026-09-06 the count also
+  # includes an index whose graph is incomplete, whose schema and extractor are perfectly current.
+  # `cort projects` carries the per-row reasons for anyone who needs the cause.
   # Fail closed means checking the whole line, not its first two fields. A truncated
   # `indexes<TAB>compatible` read as "current" is the same class of lie as the one this axis was
   # added to remove -- so the arity, both counts being numbers, and the word agreeing with those
@@ -924,7 +927,7 @@ do_check() {
     if [ "$vok" = 1 ]; then
       case "$vword" in
         compatible) echo "indexes: schema and extractor current" ;;
-        drifted)    echo "indexes: $vdrift built by a superseded schema or extractor, $vunread unreadable" ;;
+        drifted)    echo "indexes: $vdrift owe a full rebuild, $vunread unreadable" ;;
         unknown)    echo "indexes: compatibility unknown ($vunread could not be read)" ;;
       esac
     else
