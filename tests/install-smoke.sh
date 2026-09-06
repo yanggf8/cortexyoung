@@ -202,6 +202,46 @@ else
 fi
 assert_contains "$SK_DIR/$STAMP_NAME" "skill_sha256:" "the stamp still names the hash"
 rm -rf "$SK_DIR"
+# rename(2) cannot replace a non-empty directory, so swapping CORT_HOME in place is two renames
+# with a gap where $CORT_HOME/pack does not exist. A hook firing in that gap reads a missing or
+# half-copied pack, and a hash over a shortened file list looks perfectly legitimate. Renaming a
+# symlink over a symlink is atomic; that is the whole mechanism.
+CORT_HOME_PATH="$HOME/.local/share/cortexyoung/cort"
+if [ -L "$CORT_HOME_PATH" ]; then
+  pass "CORT_HOME is a symlink to a generation"
+else
+  fail "CORT_HOME is a directory, so activation cannot be one rename"
+fi
+# `readlink` exits 1 on a plain directory, which is fatal under the harness's `set -e` -- so on the
+# RED run this line would abort the suite instead of letting the assertion above be reported.
+gen1="$(readlink "$CORT_HOME_PATH" 2>/dev/null || echo "NOT-A-LINK")"
+assert_file_exists "$CORT_HOME_PATH/cort" "the active generation carries the binary"
+assert_file_exists "$CORT_HOME_PATH/pack/sgconfig.yml" "the active generation carries the pack"
+
+# A second install must leave a usable installation. `|| true` here would let "the install failed
+# before touching anything" pass every assertion below, because the first installation is still
+# valid -- so its status is asserted rather than discarded.
+if bash "$INSTALL_SH" >/tmp/smoke_reinstall.log 2>&1; then
+  pass "an identical reinstall succeeds"
+else
+  fail "the reinstall failed"; sed 's/^/    /' /tmp/smoke_reinstall.log | tail -5
+fi
+gen2="$(readlink "$CORT_HOME_PATH" 2>/dev/null || echo "NOT-A-LINK")"
+if [ "$gen1" != "NOT-A-LINK" ] && [ "$gen2" != "NOT-A-LINK" ]; then
+  pass "both generations are named"
+else
+  fail "a generation link was missing (gen1=$gen1 gen2=$gen2)"
+fi
+assert_file_exists "$CORT_HOME_PATH/cort" "the binary survived the reinstall"
+assert_file_exists "$CORT_HOME_PATH/pack/sgconfig.yml" "the pack survived the reinstall"
+# The reinstall is byte-identical, so it lands on the same generation id. That is the case an
+# earlier draft got wrong: it did `rm -rf "$gen_dir"` while the live link still pointed there, so a
+# failure between the removal and the move left the shim pointing at nothing.
+if [ "$gen1" = "$gen2" ]; then
+  pass "an identical rebuild reuses its generation rather than deleting and recreating it"
+else
+  fail "an identical rebuild changed generation (gen1=$gen1 gen2=$gen2)"
+fi
 # `fake_ast_grep` is a test double that cargo builds alongside cort; shipping it would be a
 # second executable in the payload that nobody owns.
 if find "$HOME/.local/share/cortexyoung/cort" -name 'fake_ast_grep' -print -quit | grep -q .; then

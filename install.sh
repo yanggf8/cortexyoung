@@ -246,6 +246,41 @@ skill_hash() {
   sha256sum "$1" 2>/dev/null | awk '{print $1}' || shasum -a 256 "$1" 2>/dev/null | awk '{print $1}' || echo ""
 }
 
+# payload_id: one name for a binary plus a pack. The pack is read at runtime, so a pack-only change
+# must produce a different generation even though the binary is byte-identical.
+payload_id() {
+  local bin="$1" pack="$2"
+  { skill_hash "$bin"
+    find "$pack" -name '*.yml' | sort | while IFS= read -r f; do skill_hash "$f"; done
+  } | skill_hash /dev/stdin | cut -c1-12
+}
+
+# swap_symlink: point "$2" at "$1", replacing an existing symlink rather than following it into its
+# target. Plain `mv` would move the new link *inside* the directory the old one points at --
+# measured: `mv staging gen` with `gen` present leaves `gen/staging`.
+#
+# GNU spells "replace, do not descend" as `mv -T`. BSD's `mv(1)` synopsis is
+# `mv [-f | -i | -n] [-hv] source target` and documents `-h` as exactly this, so it should work on
+# Darwin -- but **that has not been executed on a Mac**, and a reviewer asserted the opposite. So
+# this never depends on the answer: if neither flag works it falls back to `ln -sfn`, which unlinks
+# and recreates. That is a window of microseconds in which `$CORT_HOME` does not resolve, and it is
+# disclosed rather than hidden. It is still enormously better than what it replaces -- `rm -rf` of a
+# whole directory tree, a window of *seconds*, during which a hook reads a half-copied pack.
+#
+# What it must never do is `die`. A refusal here, after the caller has removed a pre-symlink
+# `$CORT_HOME`, leaves a machine with no payload at all and a rerun that fails identically.
+swap_symlink() {
+  local target="$1" link="$2" tmp
+  tmp="$(dirname "$link")/.cort-link.$$"
+  rm -f "$tmp"
+  ln -s "$target" "$tmp"
+  if mv -T "$tmp" "$link" 2>/dev/null; then return 0; fi
+  if mv -h "$tmp" "$link" 2>/dev/null; then return 0; fi
+  rm -f "$tmp"
+  # Sub-atomic, and said out loud. `ln -sfn` on a symlink replaces it without descending.
+  ln -sfn "$target" "$link"
+}
+
 # ── profile PATH block (single bounded, idempotent) ────────────────
 PROFILE_MARKER_BEGIN="# >>> cortexyoung xg >>>"
 PROFILE_MARKER_END="# <<< cortexyoung xg <<<"
@@ -754,12 +789,70 @@ install_cort() {
   ( cd "$SCRIPT_DIR/rust" && cargo build --release --locked ) || die "cargo build --release failed"
   [ -x "$crate_bin" ] || die "cort binary missing after build: $crate_bin"
 
-  rm -rf "$CORT_HOME"
-  mkdir -p "$CORT_HOME"
-  # The binary locates its ast-grep pack via CORT_PACK_DIR: ship the pack next to it.
-  cp "$crate_bin" "$CORT_HOME/cort"
-  cp -R "$SCRIPT_DIR/src/pack" "$CORT_HOME/pack"
-  chmod 755 "$CORT_HOME/cort"
+  # Stage the whole generation, validate it, then activate with one rename of the symlink. Nothing
+  # ever observes a partial CORT_HOME: the link points at the old generation until the instant it
+  # points at the new one. The generation is named by the binary's own hash, so an identical
+  # rebuild reuses it and a changed one cannot collide with it.
+  # The generation is named by the binary AND the pack, because the pack is read from the runtime
+  # directory rather than compiled in (`rust/src/pack.rs`): a pack-only change keeps the binary hash
+  # identical, and naming the generation after the binary alone would make two different payloads
+  # collide on one name.
+  local gen_id gen_dir staging
+  gen_id="$(payload_id "$crate_bin" "$SCRIPT_DIR/src/pack")"
+  case "$gen_id" in
+    [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) : ;;
+    *) die "cannot compute a payload id (need sha256sum or shasum): got '$gen_id'" ;;
+  esac
+  gen_dir="$MANIFEST_DIR/cort-$gen_id"
+  staging="$MANIFEST_DIR/.cort-staging.$$"
+
+  rm -rf "$staging"
+  mkdir -p "$staging"
+  cp "$crate_bin" "$staging/cort"
+  cp -R "$SCRIPT_DIR/src/pack" "$staging/pack"
+  chmod 755 "$staging/cort"
+
+  # Validate before activating. A generation missing part of its pack would stamp indexes with a
+  # hash over a shortened file list, which is the failure that looks most like success -- so the
+  # check is the pack's own identity, not a file count. A count passes a staged pack with one rule
+  # deleted and one substituted.
+  [ -x "$staging/cort" ] || die "staged generation has no executable: $staging/cort"
+  [ -f "$staging/pack/sgconfig.yml" ] || die "staged generation has no pack: $staging/pack"
+  local staged_id source_id
+  staged_id="$(payload_id "$staging/cort" "$staging/pack")"
+  source_id="$(payload_id "$crate_bin" "$SCRIPT_DIR/src/pack")"
+  if [ "$staged_id" != "$source_id" ]; then
+    rm -rf "$staging"
+    die "staged payload does not match its source ($staged_id != $source_id)"
+  fi
+
+  # Promote. The live generation is NEVER removed: on an identical rebuild `$gen_dir` already exists
+  # and the symlink already points at it, so deleting it to make room would leave the installed shim
+  # pointing at nothing if anything failed before the move. An existing generation with this id has
+  # the same content by construction -- that is what the id means -- so it is reused.
+  if [ -d "$gen_dir" ]; then
+    rm -rf "$staging"
+  else
+    mv "$staging" "$gen_dir"
+  fi
+
+  # Validate what is about to be ACTIVATED, not only what was staged. The reuse arm above trusts an
+  # existing `$gen_dir`, and a previous crash can have left one incomplete; and until Task 5 lands
+  # there is no lock, so two installs computing the same id can race -- the loser's
+  # `mv "$staging" "$gen_dir"` would nest rather than replace (measured: `mv staging gen` with `gen`
+  # present leaves `gen/staging`). Both land a directory here that the flip would publish.
+  if [ ! -x "$gen_dir/cort" ] || [ ! -f "$gen_dir/pack/sgconfig.yml" ]; then
+    die "generation $gen_dir is incomplete; remove it and re-run"
+  fi
+
+  # A pre-symlink installation has a real directory here and no generation to fall back to. Removing
+  # it is the one un-atomic moment, and it happens once per machine -- so it happens only after the
+  # generation it is being replaced by has been validated, and `swap_symlink` never dies, so the
+  # window cannot be left open by a refusal.
+  if [ -d "$CORT_HOME" ] && [ ! -L "$CORT_HOME" ]; then
+    rm -rf "$CORT_HOME"
+  fi
+  swap_symlink "$gen_dir" "$CORT_HOME"
 
   mkdir -p "$BIN_DIR"
   local shim="$BIN_DIR/cort"
@@ -991,9 +1084,21 @@ do_uninstall() {
     else
       info "cort binary not owned by this installer — skipping"
     fi
-    if [ -n "$CORT_HOME" ] && [ -d "$CORT_HOME" ]; then
+    if [ -L "$CORT_HOME" ] || [ -d "$CORT_HOME" ]; then
       rm -rf "$CORT_HOME"
-      info "removed $CORT_HOME"
+      # The link is gone; the generations it and its predecessors named are not. Remove only
+      # directories this installer names, inside the directory it owns -- never whatever a
+      # user-created symlink happened to point at. `.cort-staging.*` is swept too: a crashed install
+      # leaves one, the `cort-*` glob does not match it, and nothing else would ever remove it.
+      #
+      # The `-d` guard is not decoration: `--uninstall` is exactly what a user runs on a machine
+      # whose data directory is already half-gone, and a `find` over a missing path can exit
+      # non-zero and take the rest of the uninstall with it under `set -e`.
+      if [ -d "$MANIFEST_DIR" ]; then
+        find "$MANIFEST_DIR" -maxdepth 1 -type d \( -name 'cort-*' -o -name '.cort-staging.*' \) \
+          -exec rm -rf {} + || true
+      fi
+      info "removed $CORT_HOME and its generations"
     fi
 
     if [ -n "$ag_owned" ] && [ -f "$ag_owned" ]; then
@@ -1073,9 +1178,21 @@ do_uninstall() {
       rmdir "$(dirname "$AST_GREP_SKILL_DEST")" 2>/dev/null || true
     fi
     remove_path_block
-    if [ -d "$CORT_HOME" ]; then
+    if [ -L "$CORT_HOME" ] || [ -d "$CORT_HOME" ]; then
       rm -rf "$CORT_HOME"
-      info "removed $CORT_HOME (no manifest — conservative)"
+      # The link is gone; the generations it and its predecessors named are not. Remove only
+      # directories this installer names, inside the directory it owns -- never whatever a
+      # user-created symlink happened to point at. `.cort-staging.*` is swept too: a crashed install
+      # leaves one, the `cort-*` glob does not match it, and nothing else would ever remove it.
+      #
+      # The `-d` guard is not decoration: `--uninstall` is exactly what a user runs on a machine
+      # whose data directory is already half-gone, and a `find` over a missing path can exit
+      # non-zero and take the rest of the uninstall with it under `set -e`.
+      if [ -d "$MANIFEST_DIR" ]; then
+        find "$MANIFEST_DIR" -maxdepth 1 -type d \( -name 'cort-*' -o -name '.cort-staging.*' \) \
+          -exec rm -rf {} + || true
+      fi
+      info "removed $CORT_HOME and its generations"
     fi
     if command -v cort >/dev/null 2>&1; then
       info "cort still at $(command -v cort) — not owned (no manifest), leaving in place"
