@@ -1035,3 +1035,21 @@ aborting the install, it FAILs loudly rather than going green.
 sends the installer to a different tree than the assertion watches — every assertion passes and
 nothing was tested. The test saves and restores `HOME`, `XDG_DATA_HOME` and `TMPHOME` together.
 Any future isolation fixture in this file that moves only `HOME` is suspect on sight.
+
+## What execution found (Task 5)
+
+**The last task is the smallest diff and the most timing-sensitive test, and both properties held.**
+Two hunks in `install.sh` (one per mutating mode), one test block, zero Rust changes.
+
+**Break 1 went red on exactly the right line.** Removing `flock -x 9` fails only the first
+assertion — "the installer completed while another process held the lock" — which is the one with
+no threshold in it. The second half of the test (completes after release) still passes, as it
+should: without a lock there is nothing to wait for.
+
+**Break 2 is a number, not a feeling.** `./install.sh --check` while the probe holds the lock
+finishes in **0 seconds** — not "fast", but proof it never touches the lock at all.
+
+**A pre-existing `--check` failure is not ours.** The local `--check` exits 1 because the installed
+binary's `cort --version` emits JSON that the `0.1.0` string comparison rejects. Verified via
+`git stash` that the pristine tree does the same. It belongs to whoever changed the version output
+(the parallel issue-#3 workstream is the suspect), not to this plan.
