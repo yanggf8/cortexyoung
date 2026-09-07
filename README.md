@@ -92,17 +92,43 @@ and the least complete call coverage — those are not the same axis.
 
 | Language | `struct` | `context` (symbol slice) | `read`/`recall` | `impact`: relations | `impact`: call-shape coverage |
 |---|---|---|---|---|---|
-| TypeScript, TSX, JavaScript | yes | yes | yes | `calls` only | **whole** — one undifferentiated `call_expression` rule |
+| TypeScript, TSX, JavaScript | yes | yes (plus AngularJS 1.x registrations, see below) | yes | `calls` only | **whole** — one undifferentiated `call_expression` rule |
 | Python | yes | yes | yes | `calls` only | **whole** — same |
 | Rust | yes | **yes** (free functions, `impl`/trait methods as `Type::method`, `struct`/`enum`/`trait`) | **yes** | `calls` **+ `references`** | **partial** — bare, qualified `Type::method()`, module-path `crate::m::f()` via suffix + `use`, gated receiver `x.m()` |
+| Java | yes | **yes** (class/interface/enum/record, methods & constructors as `Owner::method`) | **yes** | `calls` **+ `references`** | **partial** — bare `run()`, gated receiver `x.m()` / `Foo.bar()` / `this.m()`, `new Foo()`, types bare or qualified; `super.m()` is refused and surfaces as a gap |
+| HTML | yes | no | **yes** (whole-file `unparsed` chunk, fts-searchable) | none — no rule file, by design | none; template calls surface as **coverage gap rows** instead |
 
-Rust's `references` edge covers a `struct`/`enum`/`trait` named in a type position, bare or qualified.
-It does **not** cover `const`/`static`, and generic parameters are extracted but normally resolve to
-nothing. TS/JS/Python have no equivalent: a type annotation, an `interface`, and `class A extends B`
-produce no edge in those languages today.
+Java's methods all carry owners, so the receiver gate works the way it does in Rust — but Java
+receivers rarely trace their owner's name (`customer` does not look like `CustomerRepository`), so
+expect the gate to refuse more than it does on Rust code. Every refusal is honest: it comes back as
+an `extracted_but_unresolved` coverage row naming file and line, never as a guessed edge.
 
-Every language also ships an `edge:imports` rule, but **an import never becomes a dependent** — see
-the relations section below for why.
+HTML templates are indexed on purpose without rules: an attribute value is an opaque string to
+ast-grep, so no honest edge can be cut from `ng-click="vm.save()"`. What indexing buys is the
+completeness half — every indexed file's text is scanned, so a controller method called only from a
+template appears as a named gap row instead of the file silently not existing — plus fts over the
+template body.
+
+### AngularJS (1.x)
+
+`javascript.yml` knows the three shapes 1.x code is written in:
+
+- **Registrations** — `angular.module('app').controller('UserListController', function …)` (also
+  `service`/`factory`/`directive`/`provider`/`filter`/`component`, with or without the
+  `['$scope', fn]` injection array) becomes a chunk named after the registered string, so
+  `cort context UserService` resolves. `run`/`config` name nothing and register no chunk.
+- **Assigned methods** — `vm.reload = function () {…}` and `Foo.prototype.bar = function`, the
+  controller-as style: chunked as bare-name methods (JS chunks carry no owner, so a receiver-shaped
+  call to one is refused by the gate and surfaces as a coverage gap).
+- **Object-literal methods** — `return { save: function () {…} }`, the ES5 service-body shape.
+
+Two honest gaps: a call like `UserService.query()` never resolves (JS has no `.`-scoped fallback —
+the same reason `formatter.formatToParts` stays unresolved in Rust), and a directive registered as
+`myWidget` is not matched by mentions of its template spelling `my-widget` (word-boundary scanning
+has no casing bridge). Both come back as rows, not silence.
+
+Every language except HTML also ships an `edge:imports` rule, but **an import never becomes a
+dependent** — see the relations section below for why.
 
 ## What relations the graph actually holds
 
@@ -111,9 +137,9 @@ row. The counts are this repository, indexed 2026-09-04.
 
 | Relation | Languages | Raw edges | Relationships | Produces a dependent? |
 |---|---|---:|---:|---|
-| `calls` | all five | 12,107 | 2,222 | **yes** |
-| `references` | **Rust only** | 3,327 | 492 | **yes** |
-| `imports` | all five | 416 | **0** | **no** |
+| `calls` | all six (HTML: none) | 12,107 | 2,222 | **yes** |
+| `references` | **Rust, Java** | 3,327 | 492 | **yes** |
+| `imports` | all six (HTML: none) | 416 | **0** | **no** |
 | `exports` | *none emit it* | 0 | 0 | — |
 
 Three facts a reader should not have to reconstruct from the limitations list:

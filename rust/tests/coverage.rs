@@ -866,3 +866,63 @@ fn a_dropped_type_reference_is_reported_as_an_unresolved_extraction() {
         "a named gap flips the boolean: {cov}"
     );
 }
+
+// ── Java + AngularJS templates ──────────────────────────────────────────────────────────────
+
+/// A template is not a symbol surface, but a caller can live in one: `ng-click="vm.reload()"`.
+/// Indexing .html puts the file in file_state, so the mention layer reads its text and the call
+/// becomes a named row; the file's own edgelessness is advisory (unparsed), never an unread-file
+/// blind spot.
+#[test]
+fn an_angularjs_template_call_is_a_named_gap_and_the_template_stays_advisory() {
+    let (_dir, root, db, project_id, bin) = indexed(&[
+        (
+            "app/user-list.controller.js",
+            "angular.module('app').controller('UserListController', function () {\n  var vm = this;\n  vm.reload = function () { return 1; };\n});\n",
+        ),
+        (
+            "app/views/user-list.html",
+            "<div>\n  <button ng-click=\"vm.reload()\">Refresh</button>\n</div>\n",
+        ),
+    ]);
+    let cov = coverage_of(&db, &project_id, &root, &bin, "reload");
+    let seed = &cov["seeds"][0];
+    let rows = seed["mentions_without_edge"].as_array().unwrap();
+    // The row's `cause` reads `quoted`, not `call`: the attribute's own `"` trips the quote-parity
+    // heuristic, and telling structural HTML quoting from a JS string needs more than `cause_of`
+    // can see on one line. A demotion is the safe direction -- the row still names the file and
+    // line, which is what this screen is for.
+    assert!(
+        rows.iter().any(
+            |r| r["file_path"].as_str() == Some("app/views/user-list.html")
+                && r["cause"].as_str() == Some("quoted")
+        ),
+        "the template caller must be a named row, got {cov}"
+    );
+    assert_eq!(
+        cov["blind_files"]["unindexed"], 0,
+        "a .html file the walk reached is indexed, not a blind spot"
+    );
+    assert!(
+        cov["blind_files"]["unparsed"].as_u64().unwrap_or(0) >= 1,
+        "the template lands in the advisory unparsed bucket: {cov}"
+    );
+    assert_eq!(seed["enumeration_may_be_incomplete"].as_bool(), Some(true));
+}
+
+/// Java declaration lines name their type right after `class`/`interface`/`enum`; without those
+/// keywords in the table the line falls through to `call` (the name is followed by ` {`... no --
+/// by a space, but the fallback label is the unexplained `mention`). Either way the row reads
+/// wrong to a person triaging a gap.
+#[test]
+fn java_declaration_lines_label_as_definition() {
+    assert_eq!(
+        cause_of("public class OrderService {", 14, 12),
+        "definition"
+    );
+    assert_eq!(cause_of("public interface Repo {", 18, 4), "definition");
+    // A JS `class` declaration gets the same honest label.
+    assert_eq!(cause_of("export class Widget {", 14, 6), "definition");
+    // And a genuine call is still a call -- the keywords only demote the declaration shape.
+    assert_eq!(cause_of("    repo.persist(o);", 10, 7), "receiver");
+}

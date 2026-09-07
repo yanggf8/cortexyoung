@@ -17,7 +17,7 @@
 
 use ast_grep_config::{from_yaml_string, GlobalRules, RuleConfig};
 use ast_grep_core::{matcher::MatcherExt, tree_sitter::LanguageExt, tree_sitter::StrDoc, AstGrep};
-use ast_grep_language::{JavaScript, Python, Rust, Tsx, TypeScript};
+use ast_grep_language::{Java, JavaScript, Python, Rust, Tsx, TypeScript};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -234,11 +234,18 @@ fn the_crate_matches_the_cli_on_the_real_pack_and_real_files() {
     let ts = find_files(cct, &[".ts"], 4);
     // The tsx leg always runs over the repo fixture (tests/fixtures/tsx/widget.tsx) plus any cct
     // .tsx files -- the fixture is JSX-heavy and matches all six tsx rules, so grammar parity is
-    // exercised even where the venue has no .tsx.
+    // exercised even where the venue has no .tsx. Same story for the js fixture's AngularJS
+    // registration and assigned-method rules, and for the java leg: the fixtures are repo-owned
+    // so parity never depends on an external venue.
     let mut tsx = vec![Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tsx/widget.tsx")];
     tsx.extend(find_files(cct, &[".tsx"], 2));
-    let js = find_files(cct, &[".js"], 2);
+    let mut js = vec![
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/js/user-list.controller.js")
+    ];
+    js.extend(find_files(cct, &[".js"], 2));
     let py = find_files(cct, &[".py"], 2);
+    let java =
+        [Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/java/OrderService.java")];
     let n2 = leg::<TypeScript>(
         &read("typescript.yml"),
         TypeScript,
@@ -263,10 +270,19 @@ fn the_crate_matches_the_cli_on_the_real_pack_and_real_files() {
         "python",
         &py.iter().map(|p| p.as_path()).collect::<Vec<_>>(),
     );
+    let n6 = leg::<Java>(
+        &read("java.yml"),
+        Java,
+        "java",
+        &java.iter().map(|p| p.as_path()).collect::<Vec<_>>(),
+    );
+    // HTML ships no rule file on purpose (attribute values are opaque strings to ast-grep and no
+    // honest edge can be cut from them; see the LANG_BY_EXT note in scan.rs), so there is no html
+    // leg: parity over zero rules is a tautology.
 
     assert!(
         n1 > 0,
         "the rust leg must have produced comparisons; it is the pack's main language"
     );
-    println!("total comparisons: {}", n1 + n2 + n3 + n4 + n5);
+    println!("total comparisons: {}", n1 + n2 + n3 + n4 + n5 + n6);
 }

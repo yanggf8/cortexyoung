@@ -759,3 +759,69 @@ fn a_type_sharing_a_line_with_its_method_loses_deterministically() {
         "the method survives the id collision, every time: {kinds:?}"
     );
 }
+
+// ── AngularJS 1.x ───────────────────────────────────────────────────────────────────────────
+
+const ANGULAR: &str = concat!(
+    "(function () {\n",
+    "  'use strict';\n",
+    "  angular.module('app').controller('UserListController', ['$scope', 'UserService', function ($scope, UserService) {\n",
+    "    var vm = this;\n",
+    "    vm.reload = function () { return UserService; };\n",
+    "    vm.remove = (id) => id;\n",
+    "    $scope.helpers = {\n",
+    "      format: function (u) { return u; }\n",
+    "    };\n",
+    "  }]);\n",
+    "  angular.module('app').factory('UserService', function () { return {}; });\n",
+    "  angular.module('app').run(function () {});\n",
+    "  arr.filter(function () {});\n",
+    "})();\n",
+);
+
+/// A controller registered under a string name must be a chunk with that name -- unquoted -- or
+/// `impact UserListController` has no seed and the whole AngularJS surface is dark. The provider
+/// function may sit directly in the arguments or inside the injection array; `run`/`config` name
+/// nothing and register no chunk. `filter` stays in the verb list knowing Array.prototype shares
+/// the name: its signature takes a function, never a string first, so the string+function guard
+/// holds for every real call of it.
+#[test]
+fn angularjs_registrations_and_assigned_methods_become_addressable_chunks() {
+    let (_dir, abs) = tmp_file("app/user-list.controller.js", ANGULAR);
+    let out = extract_real(&abs, "app/user-list.controller.js", ANGULAR);
+    let mut got: Vec<String> = out
+        .chunks
+        .iter()
+        .filter_map(|c| c.symbol_name.clone())
+        .collect();
+    got.sort();
+    assert_eq!(
+        got,
+        [
+            "UserListController".to_string(),
+            "UserService".to_string(),
+            "format".to_string(),
+            "reload".to_string(),
+            "remove".to_string(),
+        ],
+        "{out:?}"
+    );
+    // The string literal's quotes are the rule's problem, not the symbol's.
+    let controller = out
+        .chunks
+        .iter()
+        .find(|c| c.symbol_name.as_deref() == Some("UserListController"))
+        .expect("controller chunk");
+    assert_eq!(controller.chunk_type, "function");
+    assert_eq!(controller.start_line, 3);
+    assert_eq!(
+        controller.end_line, 10,
+        "the chunk spans the registration call"
+    );
+    let reload = out
+        .chunks
+        .iter()
+        .find(|c| c.symbol_name.as_deref() == Some("reload"))
+        .expect("assigned method chunk");
+    assert_eq!(reload.chunk_type, "method");
+}
