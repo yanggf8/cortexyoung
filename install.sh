@@ -46,12 +46,17 @@ CODEX_SKILL_DEST="${CODEX_HOME:-$HOME/.codex}/skills/ast-grep/SKILL.md"
 WITH_HOOK=1
 WITH_XGREP=0
 
-FORCE=0; WITH_RUSTUP=0; MODE="install"
+FORCE=0; WITH_RUSTUP=0; MODE="install"; GEN_ID_ARG=""
 
-for arg in "$@"; do
-  case "$arg" in
+# while+shift (not for-arg): --gen consumes the following word.
+while [ $# -gt 0 ]; do
+  case "$1" in
     --check)     MODE="check" ;;
     --uninstall) MODE="uninstall" ;;
+    --stage-only) MODE="stage" ;;
+    --activate-only) MODE="activate" ;;
+    --gen) [ $# -ge 2 ] || { echo "--gen needs a value (see --help)" >&2; exit 2; }; GEN_ID_ARG="$2"; shift ;;
+    --gen=*) GEN_ID_ARG="${1#--gen=}" ;;
     --force)     FORCE=1 ;;
     --with-rustup) WITH_RUSTUP=1 ;;
     --with-xgrep) WITH_XGREP=1 ;;
@@ -60,15 +65,28 @@ for arg in "$@"; do
 Usage: ./install.sh [OPTIONS]
   --check         Verify installation without mutating
   --uninstall     Remove managed artifacts only (reads manifest)
-  --force         On unmanaged skill collision: backup and replace
+  --force         On unmanaged skill collision: backup and replace.
+                  Also bypasses the installed-machine decline below.
   --with-rustup   If cargo missing, bootstrap rustup via https://sh.rustup.rs
   --with-xgrep    Also install xg (opt-in; default is cort + ast-grep only)
   --no-hook       Do not wire the PreToolUse hook into settings.json
+  --stage-only    Build, stage and validate one generation; print its id
+                  (cort-<12hex>) on stdout and touch nothing live. Skips the
+                  installer lock on purpose: staging is invisible work.
+  --activate-only --gen <id>
+                  Flip a staged generation live (symlink + shim + the single
+                  cort_bin manifest entry). No skills, no hooks: upgrade policy
+                  lives in cort-upgrade, not here.
   --help          Show this help
+
+With no mode flag on a machine that already has a cort_bin manifest entry,
+install.sh declines (exit 3) and changes nothing: full installs do not own
+upgrades — run cort-upgrade. --force overrides the decline.
 EOF
       exit 0 ;;
-    *) echo "Unknown option: $arg (see --help)" >&2; exit 2 ;;
+    *) echo "Unknown option: $1 (see --help)" >&2; exit 2 ;;
   esac
+  shift
 done
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -794,14 +812,21 @@ install_ast_grep() {
 }
 
 install_cort() {
+  build_cort
+  local gid
+  # stage_generation echoes exactly one line (the id); everything else it runs is silent and
+  # every failure exits through die() on stderr. Do not add info() here — use >&2.
+  gid="$(stage_generation)"
+  activate_generation "$MANIFEST_DIR/$gid"
+}
+
+# Stage one generation: copy, validate, promote. Prints `cort-<id>` on stdout and NOTHING
+# else (callers capture it); touches nothing live — no flip, no shim, no skills, no hooks, no
+# manifest writes. Takes no locks itself: staging builds into a fresh dir, so serializing
+# stagers against live installs would block for a whole build for no safety gain.
+stage_generation() {
   local crate_bin="$CRATE_BIN"
 
-  build_cort
-
-  # Stage the whole generation, validate it, then activate with one rename of the symlink. Nothing
-  # ever observes a partial CORT_HOME: the link points at the old generation until the instant it
-  # points at the new one. The generation is named by the binary's own hash, so an identical
-  # rebuild reuses it and a changed one cannot collide with it.
   # The generation is named by the binary AND the pack, because the pack is read from the runtime
   # directory rather than compiled in (`rust/src/pack.rs`): a pack-only change keeps the binary hash
   # identical, and naming the generation after the binary alone would make two different payloads
@@ -844,12 +869,21 @@ install_cort() {
   else
     mv "$staging" "$gen_dir"
   fi
+  echo "cort-$gen_id"
+}
 
-  # Validate what is about to be ACTIVATED, not only what was staged. The reuse arm above trusts an
-  # existing `$gen_dir`, and a previous crash can have left one incomplete; and until Task 5 lands
-  # there is no lock, so two installs computing the same id can race -- the loser's
-  # `mv "$staging" "$gen_dir"` would nest rather than replace (measured: `mv staging gen` with `gen`
-  # present leaves `gen/staging`). Both land a directory here that the flip would publish.
+# Flip one staged generation live: validate it, swap the symlink, write the shim, record the
+# single cort_bin manifest entry. Deliberately NOTHING else — no skills, no hooks, no ast-grep:
+# upgrade policy (keep-mine, hook shape) lives in cort-upgrade, and calling this from a full
+# install must not redeploy what do_install deploys separately below.
+activate_generation() {
+  local gen_dir="$1"
+
+  # Validate what is about to be ACTIVATED, not only what was staged. A reused `$gen_dir` is
+  # trusted by construction, but a previous crash can have left one incomplete; and two
+  # stagers computing the same id can race -- the loser's `mv "$staging" "$gen_dir"` would
+  # nest rather than replace (measured: `mv staging gen` with `gen` present leaves
+  # `gen/staging`). Both land a directory here that the flip would publish.
   if [ ! -x "$gen_dir/cort" ] || [ ! -f "$gen_dir/pack/sgconfig.yml" ]; then
     die "generation $gen_dir is incomplete; remove it and re-run"
   fi
@@ -866,15 +900,15 @@ install_cort() {
   mkdir -p "$BIN_DIR"
   local shim="$BIN_DIR/cort"
   # The template lives in Rust (`rust/src/install.rs::render_shim`); this script holds no copy of
-  # it. Queried from the just-built binary, never from the installed one — the installed cort may
-  # be the generation being replaced.
-  "$crate_bin" internal-shim --cort-home "$CORT_HOME" > "$shim.tmp" 2>/dev/null \
+  # it. Rendered by the generation's own binary — in the install path that binary is the staged
+  # copy of the just-built one, byte-identical by construction, so both callers agree.
+  "$gen_dir/cort" internal-shim --cort-home "$CORT_HOME" > "$shim.tmp" 2>/dev/null \
     || die "fresh cort binary cannot render its own shim"
   chmod 755 "$shim.tmp"
   mv "$shim.tmp" "$shim"
   record_manifest "cort_bin" "$shim"
   ( cd / && "$shim" status >/dev/null 2>&1 || true )
-  info "installed cort $CORT_VERSION (rust) -> $shim"
+  info "installed cort $CORT_VERSION (rust) -> $shim ($gen_dir)"
 }
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1256,21 +1290,39 @@ do_uninstall() {
   fi
 }
 
-do_install() {
-  echo "=== cortexyoung install (cort v$CORT_VERSION) ==="
-
-  # One installer at a time. Every artifact below is published atomically on its own, but two
-  # concurrent runs can still leave a manifest naming one generation while the symlink points at
-  # another: atomicity per file is not atomicity per install. The lock is advisory and only
-  # cooperating installers honour it, which is all of them.
-  #
-  # `--check` deliberately does not take it: a report must not be blocked by a running install, and
-  # it mutates nothing.
+# One installer at a time. Every artifact below is published atomically on its own, but two
+# concurrent runs can still leave a manifest naming one generation while the symlink points at
+# another: atomicity per file is not atomicity per install. The lock is advisory and only
+# cooperating installers honour it, which is all of them. Factored (not duplicated) because
+# --activate-only needs it too; --stage-only and --check deliberately do not take it.
+take_installer_lock() {
   mkdir -p "$MANIFEST_DIR"
   if command -v flock >/dev/null 2>&1; then
     exec 9>"$MANIFEST_DIR/.install.lock"
     flock -x 9 || die "another installer holds the lock and would not yield"
   fi
+}
+
+# --stage-only: build, stage, validate; print cort-<id> on stdout and touch nothing live.
+# Stdout carries EXACTLY the id (callers capture it); the build log goes to stderr.
+do_stage_only() {
+  build_cort >&2
+  stage_generation
+}
+
+# --activate-only --gen <id>: flip a staged generation live. Installer flock KEPT (it mutates
+# the live link + manifest); skills/hooks/ast-grep untouched by design.
+do_activate_only() {
+  [ -n "${GEN_ID_ARG:-}" ] || die "--activate-only needs --gen <id>"
+  take_installer_lock
+  resolve_bin_dir
+  activate_generation "$MANIFEST_DIR/$GEN_ID_ARG"
+}
+
+do_install() {
+  echo "=== cortexyoung install (cort v$CORT_VERSION) ==="
+
+  take_installer_lock
 
   detect_platform
   resolve_bin_dir
@@ -1326,5 +1378,16 @@ fi
 case "$MODE" in
   check)     do_check ;;
   uninstall) do_uninstall ;;
-  install)   do_install ;;
+  stage)     do_stage_only ;;
+  activate)  do_activate_only ;;
+  install)
+    # Fresh-install-only: a machine that already has a cort_bin manifest entry is owned by
+    # cort-upgrade now. Reinstalling over it would redeploy skills ahead of upgrade policy
+    # (no --keep-mine here) and skip index migration and the verdict. Decline with a distinct
+    # exit code and change nothing; --force (explicit insistence) still proceeds.
+    if [ "$FORCE" -eq 0 ] && manifest_has "cort_bin"; then
+      echo "existing installation — run cort-upgrade" >&2
+      exit 3
+    fi
+    do_install ;;
 esac

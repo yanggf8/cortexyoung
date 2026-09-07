@@ -107,7 +107,12 @@ handling inside install.sh, nor by making stage take the installer lock.
 
 - [ ] **Step 5: Verify each test can actually fail**
 
-1. Make `--stage-only` also flip the symlink. Expected: the "link unchanged" assertion RED.
+1. Make `--stage-only` touch the live link (point it at a foreign target). Expected: the
+   "link unchanged" assertion RED. (NOT "also flip to the staged gen": generations are
+   content-addressed and the suite tree never changes mid-run, so a flip lands on the
+   identical id and the link does not move — measured green against the flip break, which
+   is the break observing nothing. The property is "stage touches nothing live", so the
+   break must move the link somewhere observable.)
 2. Make `--activate-only` skip the completeness check. Expected: the bogus-id flip succeeds
    (dangling link) and the NEXT assertion (`cort --version` answers through the shim) REDs —
    the pair proves the check is what stands between a typo and a dead install. If everything

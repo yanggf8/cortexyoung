@@ -221,9 +221,11 @@ assert_file_exists "$CORT_HOME_PATH/pack/sgconfig.yml" "the active generation ca
 
 # A second install must leave a usable installation. `|| true` here would let "the install failed
 # before touching anything" pass every assertion below, because the first installation is still
-# valid -- so its status is asserted rather than discarded.
-if bash "$INSTALL_SH" >/tmp/smoke_reinstall.log 2>&1; then
-  pass "an identical reinstall succeeds"
+# valid -- so its status is asserted rather than discarded. --force: a bare rerun declines
+# since Task 0 (see the deferral block below); explicit insistence still reinstalls, and the
+# byte-identical tree must land on the same generation id.
+if bash "$INSTALL_SH" --force >/tmp/smoke_reinstall.log 2>&1; then
+  pass "a forced reinstall succeeds"
 else
   fail "the reinstall failed"; sed 's/^/    /' /tmp/smoke_reinstall.log | tail -5
 fi
@@ -250,6 +252,106 @@ if find "$HOME/.local/share/cortexyoung/cort" -name 'fake_ast_grep' -print -quit
 else
   pass "dev-only fixture stays out of the installed payload"
 fi
+# ── Task 0: stage-only / activate-only / deferral ────────────────
+echo "--- Task 0: stage-only builds without touching anything live ---"
+MANIFEST_D="$HOME/.local/share/cortexyoung"
+LINK_BEFORE="$(readlink "$CORT_HOME_PATH" 2>/dev/null || echo "NOT-A-LINK")"
+CORTBIN_BEFORE="$(grep '^cort_bin:' "$MANIFEST_D/manifest" 2>/dev/null || echo "NONE")"
+GEN="$(bash "$INSTALL_SH" --stage-only 2>/tmp/smoke_stage.log)" || {
+  fail "stage-only exits 0"; sed 's/^/    /' /tmp/smoke_stage.log | tail -5
+}
+GEN_OK=0
+if printf '%s' "$GEN" | grep -q '^cort-[0-9a-f]\{12\}$'; then
+  pass "stage-only prints a generation id ($GEN)"
+  GEN_OK=1
+else
+  fail "stage-only prints a generation id (got: $GEN)"
+fi
+if [ "$(readlink "$CORT_HOME_PATH" 2>/dev/null || echo "NOT-A-LINK")" = "$LINK_BEFORE" ]; then
+  pass "stage-only leaves the live symlink alone"
+else
+  fail "stage-only moved the live symlink"
+fi
+if [ "$(grep '^cort_bin:' "$MANIFEST_D/manifest" 2>/dev/null || echo "NONE")" = "$CORTBIN_BEFORE" ]; then
+  pass "stage-only writes no manifest row"
+else
+  fail "stage-only touched the manifest"
+fi
+if [ "$GEN_OK" -eq 1 ] && [ -x "$MANIFEST_D/$GEN/cort" ]; then
+  pass "staged generation carries the binary"
+else
+  fail "staged generation missing executable ($MANIFEST_D/$GEN/cort)"
+fi
+if [ "$GEN_OK" -eq 1 ] && [ -f "$MANIFEST_D/$GEN/pack/sgconfig.yml" ]; then
+  pass "staged generation carries the pack"
+else
+  fail "staged generation missing pack ($MANIFEST_D/$GEN/pack)"
+fi
+echo "--- Task 0: stage-only takes no installer lock ---"
+LOCKFILE="$MANIFEST_D/.install.lock"
+flock -x "$LOCKFILE" sleep 30 &
+LOCKHOLDER=$!
+if timeout 120 bash "$INSTALL_SH" --stage-only >/dev/null 2>&1; then
+  pass "stage-only completes while the installer lock is held"
+else
+  fail "stage-only blocked on the installer lock (it must skip it)"
+fi
+kill "$LOCKHOLDER" 2>/dev/null || true
+wait "$LOCKHOLDER" 2>/dev/null || true
+echo "--- Task 0: activate-only flips a validated generation ---"
+if bash "$INSTALL_SH" --activate-only --gen "$GEN" >/tmp/smoke_activate.log 2>&1; then
+  pass "activate-only exits 0 on a staged generation"
+else
+  fail "activate-only failed"; sed 's/^/    /' /tmp/smoke_activate.log | tail -5
+fi
+if [ "$GEN_OK" -eq 1 ] && [ "$(readlink "$CORT_HOME_PATH" 2>/dev/null || echo "NOT-A-LINK")" = "$MANIFEST_D/$GEN" ]; then
+  pass "activate-only flips the live symlink to the staged generation"
+else
+  fail "activate-only did not flip the link (now: $(readlink "$CORT_HOME_PATH" 2>/dev/null || echo NOT-A-LINK))"
+fi
+# The --version intercept lives in the SHIM (render_shim), not the binary: ask the shim the
+# manifest names, which resolves through the flipped link.
+SHIM_BIN="$(grep '^cort_bin:' "$MANIFEST_D/manifest" 2>/dev/null | cut -d: -f2- || echo NONE)"
+if [ -x "$SHIM_BIN" ] && "$SHIM_BIN" --version 2>/dev/null | grep -q "cort "; then
+  pass "the shim still answers through the flipped link"
+else
+  fail "cort --version dead after activate-only (shim: $SHIM_BIN)"
+fi
+if bash "$INSTALL_SH" --activate-only --gen "cort-000000000000" 2>/tmp/smoke_bogus.log; then
+  fail "activate-only accepted a bogus generation id"
+else
+  if grep -q "incomplete" /tmp/smoke_bogus.log; then
+    pass "activate-only refuses a bogus generation id naming incompleteness"
+  else
+    fail "activate-only refused without naming incompleteness"
+  fi
+fi
+if [ "$GEN_OK" -eq 1 ] && [ "$(readlink "$CORT_HOME_PATH" 2>/dev/null || echo "NOT-A-LINK")" = "$MANIFEST_D/$GEN" ]; then
+  pass "a refused activation leaves the link alone"
+else
+  fail "a refused activation moved the link"
+fi
+echo "--- Task 0: bare install on an installed machine declines ---"
+MANIFEST_SHA_BEFORE="$(sha256sum "$MANIFEST_D/manifest" 2>/dev/null | cut -d' ' -f1 || echo NONE)"
+set +e
+bash "$INSTALL_SH" >/tmp/smoke_defer.log 2>&1
+DEFER_EC=$?
+set -e
+if [ "$DEFER_EC" -eq 3 ]; then
+  pass "bare install declines with exit 3 on an installed machine"
+else
+  fail "bare install declined with exit $DEFER_EC, want 3"
+fi
+if grep -q "cort-upgrade" /tmp/smoke_defer.log; then
+  pass "the decline names cort-upgrade"
+else
+  fail "the decline does not name cort-upgrade"
+fi
+if [ "$(sha256sum "$MANIFEST_D/manifest" 2>/dev/null | cut -d' ' -f1 || echo NONE)" = "$MANIFEST_SHA_BEFORE" ]; then
+  pass "a declined install changes nothing"
+else
+  fail "a declined install rewrote the manifest"
+fi
 # profile block — installer picks one candidate; check any of them
 PROFILE_HIT=0
 for p in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile" "$HOME/.config/fish/config.fish"; do
@@ -261,6 +363,39 @@ echo "    manifest lines: $MANIFEST_LINES"
 
 # ── 2. identical rerun (idempotent) ──────────────────────────────
 echo "--- Test 2: identical rerun (idempotent) ---"
+# Post-Task-0 isolation: bare install.sh on an installed machine declines (exit 3), so
+# every test below that exercises fresh-install behavior gets its own HOME instead of
+# inheriting Test 1's machine. The fakebin mocks live on PATH globally; only per-HOME
+# dirs need recreating (mirrors the setup above). XDG_DATA_HOME must follow HOME.
+fresh_home() {
+  FRESH_HOME="$(mktemp -d)"
+  export HOME="$FRESH_HOME"
+  export XDG_DATA_HOME="$HOME/.local/share"
+  mkdir -p "$HOME/.claude/skills" "$HOME/.local/share" "$HOME/.cargo/bin"
+  # The "pre-existing xg" the uninstall tests assert on: the mock lives per-HOME, because a
+  # shared one would make one test's uninstall eat another test's binary.
+  cat > "$HOME/.cargo/bin/xg" <<'MOCKXG_FRESH'
+#!/usr/bin/env bash
+echo "xg 0.7.0"
+MOCKXG_FRESH
+  chmod +x "$HOME/.cargo/bin/xg"
+}
+fresh_home_with_install() {
+  fresh_home
+  bash "$INSTALL_SH" > /tmp/smoke_fresh.log 2>&1 || {
+    fail "fresh-home setup install failed"; sed 's/^/    /' /tmp/smoke_fresh.log | tail -5
+    return 1
+  }
+}
+# Installed files WITHOUT installer memory: the bare-install decline keys off the cort_bin
+# manifest entry, but preflight/collision/repair logic lives downstream of it and reads file
+# state alone. Tests exercising that downstream logic on an installed-looking machine remove
+# the manifest after installing. (Uninstall tests are the exception — do_uninstall reads the
+# manifest to know what is managed — and keep it.)
+fresh_home_with_files_but_no_manifest() {
+  fresh_home_with_install
+  rm -f "$HOME/.local/share/cortexyoung/manifest"
+}
 # Count marker occurrences before
 MARKER_COUNT_BEFORE=0
 for p in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
@@ -269,7 +404,12 @@ for p in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
     MARKER_COUNT_BEFORE=$((MARKER_COUNT_BEFORE + c))
   fi
 done
-bash "$INSTALL_SH" > /tmp/smoke2.log 2>&1; cat /tmp/smoke2.log | sed 's/^/    /'
+MANIFEST_SHA_T2="$(sha256sum "$HOME/.local/share/cortexyoung/manifest" 2>/dev/null | cut -d' ' -f1 || echo NONE)"
+set +e
+bash "$INSTALL_SH" > /tmp/smoke2.log 2>&1
+EC2=$?
+set -e
+if [ "$EC2" -eq 3 ]; then pass "rerun on an installed machine declines (exit 3)"; else fail "rerun declined with exit $EC2, want 3"; fi
 MARKER_COUNT_AFTER=0
 for p in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
   if [ -f "$p" ]; then
@@ -277,16 +417,12 @@ for p in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
     MARKER_COUNT_AFTER=$((MARKER_COUNT_AFTER + c))
   fi
 done
-if [ "$MARKER_COUNT_BEFORE" -eq "$MARKER_COUNT_AFTER" ]; then pass "profile block idempotent (no duplication)"; else fail "profile block idempotent ($MARKER_COUNT_BEFORE -> $MARKER_COUNT_AFTER)"; fi
-assert_skill_claimed "$HOME/.claude/skills/ast-grep/SKILL.md" "ast-grep skill still claimed after rerun"
-if grep -qF "skill up to date: $HOME/.claude/skills/ast-grep/SKILL.md" /tmp/smoke2.log; then
-  pass "rerun calls the unchanged managed skill up to date"
-else
-  fail "rerun calls the unchanged managed skill up to date"
-fi
+if [ "$MARKER_COUNT_BEFORE" -eq "$MARKER_COUNT_AFTER" ]; then pass "a declined rerun duplicates no profile block"; else fail "a declined rerun touched the profile ($MARKER_COUNT_BEFORE -> $MARKER_COUNT_AFTER)"; fi
+if [ "$(sha256sum "$HOME/.local/share/cortexyoung/manifest" 2>/dev/null | cut -d' ' -f1 || echo NONE)" = "$MANIFEST_SHA_T2" ]; then pass "a declined rerun rewrites no manifest row"; else fail "a declined rerun rewrote the manifest"; fi
 
 # ── 3. managed update (installer replaces outdated managed skill) ─
 echo "--- Test 3: a deployed skill edited in place is a collision, not a licence to overwrite ---"
+fresh_home_with_files_but_no_manifest
 printf 'the user tuned this line by hand\n' >> "$HOME/.claude/skills/ast-grep/SKILL.md"
 set +e
 bash "$INSTALL_SH" > /tmp/smoke3.log 2>&1
@@ -306,6 +442,9 @@ assert_skill_claimed "$HOME/.claude/skills/ast-grep/SKILL.md" "--force re-claims
 
 # ── 4. unmanaged collision — should refuse without --force ───────
 echo "--- Test 4: unmanaged collision refusal ---"
+# Test 3's --force restore recreated installer memory; the refusal below needs preflight to
+# run, so drop it again (files stay — same machine, continued story).
+rm -f "$HOME/.local/share/cortexyoung/manifest"
 cat > "$HOME/.claude/skills/ast-grep/SKILL.md" <<'UNMANAGED'
 ---
 name: ast-grep
@@ -331,6 +470,9 @@ assert_skill_claimed "$HOME/.claude/skills/ast-grep/SKILL.md" "--force deploy re
 
 # ── 6. unsupported OS/arch detection (inject via PATH shim) ───────
 echo "--- Test 6: unsupported arch handling ---"
+# No install here: the arch probe must fail before any manifest exists, and a bare install
+# on an installed machine declines before probing. Fresh HOME, install IS the test.
+fresh_home
 # Test that install.sh fails on unknown arch by shimming uname
 cat > "$TMPHOME/fakebin/uname" <<'FAKEUNAME'
 #!/usr/bin/env bash
@@ -351,6 +493,9 @@ export PATH="$TMPHOME/fakebin:$HOME/.cargo/bin:$ORIGINAL_PATH"
 
 # ── 7. wrong version detection via --check ────────────────────────
 echo "--- Test 7: wrong version detection ---"
+# --check compares against an installation, so this needs an installed machine first (the
+# 0.44.0 plant below would fail a fresh install at provisioning instead).
+fresh_home_with_install
 cat > "$TMPHOME/fakebin/ast-grep" <<'WRONGAG'
 #!/usr/bin/env bash
 echo "ast-grep 0.44.0"
@@ -375,6 +520,7 @@ chmod +x "$HOME/.cargo/bin/xg"
 
 # ── 8. uninstall (managed only) ───────────────────────────────────
 echo "--- Test 8: uninstall ---"
+fresh_home_with_install
 # Ensure skill is managed before uninstall
 bash "$INSTALL_SH" --force > /tmp/smoke8prep.log 2>&1; cat /tmp/smoke8prep.log | sed 's/^/    /' > /dev/null
 bash "$INSTALL_SH" --uninstall > /tmp/smoke8.log 2>&1; cat /tmp/smoke8.log | sed 's/^/    /'
@@ -399,6 +545,9 @@ fi
 
 # ── 9. SHA mismatch is fatal ─────────────────────────────────────
 echo "--- Test 9: SHA mismatch is fatal ---"
+# Fresh HOME, no install: reaching the download path IS the test, and a bare install on an
+# installed machine would decline before downloading.
+fresh_home
 # Force download path by making ast-grep report wrong version
 cat > "$TMPHOME/fakebin/ast-grep" <<'FAKEAG_WRONG'
 #!/usr/bin/env bash
@@ -461,6 +610,7 @@ rm -f "$TMPHOME/fakebin/sg"
 
 # ── 12. two-skill rollback ───────────────────────────────────────
 echo "--- Test 12: a collision on the second skill rolls back both ---"
+fresh_home_with_files_but_no_manifest
 rm -f "$HOME/.claude/skills/ast-grep/SKILL.md" "$HOME/.claude/skills/xgrep/SKILL.md"
 mkdir -p "$HOME/.claude/skills/xgrep"
 printf -- '---\nname: xgrep\n---\nuser custom, unmanaged\n' > "$HOME/.claude/skills/xgrep/SKILL.md"
@@ -550,6 +700,8 @@ else
 fi
 
 echo "--- Test 15: install rebuilds even though a release binary already exists (F-02) ---"
+# Fresh HOME, no install: the install below IS the test (it must run, not decline).
+fresh_home
 PREBUILT="$REPO_ROOT/rust/target/release/cort"
 if [ ! -x "$PREBUILT" ]; then
   pass "skipped: no prebuilt binary for the existence check to be fooled by"
@@ -571,6 +723,7 @@ else
 fi
 
 echo "--- Test 16: the same routing skill is deployed for Codex ---"
+fresh_home_with_install
 CODEX_DEST="$HOME/.codex/skills/ast-grep/SKILL.md"
 CLAUDE_DEST="$HOME/.claude/skills/ast-grep/SKILL.md"
 assert_file_exists "$CODEX_DEST" "codex skill deployed"
@@ -584,13 +737,21 @@ else
   fail "claude and codex skill copies are byte-identical"
 fi
 assert_contains "$HOME/.local/share/cortexyoung/manifest" "skill_ast_grep_codex:" "manifest records the codex skill"
-bash "$INSTALL_SH" > /tmp/smoke16.log 2>&1; cat /tmp/smoke16.log | sed 's/^/    /' > /dev/null
+# A bare rerun declines since Task 0: the stamp must still be exactly one hash afterwards,
+# and the skill still pristine — declined means untouched, which is the new idempotence.
+set +e
+bash "$INSTALL_SH" > /tmp/smoke16.log 2>&1; EC16R=$?
+set -e
+if [ "$EC16R" -eq 3 ]; then pass "rerun on an installed machine declines (exit 3)"; else fail "rerun declined with exit $EC16R, want 3"; fi
 if [ "$(grep -c '^skill_sha256:' "$(dirname "$CODEX_DEST")/$STAMP_NAME")" = "1" ]; then
-  pass "rerun did not duplicate the codex stamp hash"
+  pass "a declined rerun duplicates no codex stamp hash"
 else
-  fail "rerun did not duplicate the codex stamp hash"
+  fail "a declined rerun touched the codex stamp"
 fi
-assert_pristine_skill "$CODEX_DEST" "$REPO_ROOT/skills/ast-grep/SKILL.md" "codex skill still pristine after rerun"
+assert_pristine_skill "$CODEX_DEST" "$REPO_ROOT/skills/ast-grep/SKILL.md" "codex skill still pristine after a declined rerun"
+# The collision refusal below needs preflight to run, which the decline precedes: drop
+# installer memory (files stay) so the bare install proceeds to the collision.
+rm -f "$HOME/.local/share/cortexyoung/manifest"
 # An unmanaged file in the Codex home must be refused, and refused before anything is mutated.
 printf 'my own codex skill, do not touch\n' > "$CODEX_DEST"
 set +e
@@ -620,6 +781,7 @@ fi
 
 # ── 17. the shape the previous installer wrote must be repaired, not reported "up to date" ──
 echo "--- Test 17: the two legacy in-document marker shapes are repaired ---"
+fresh_home_with_files_but_no_manifest
 LEGACY_SKILL="$HOME/.claude/skills/ast-grep/SKILL.md"
 SRC_SKILL="$REPO_ROOT/skills/ast-grep/SKILL.md"
 
@@ -651,6 +813,9 @@ else
   fail "fixture reproduces legacy shape B"
 fi
 assert_frontmatter_keys_only_rejects "$LEGACY_SKILL" "the key-only gate rejects shape B, so it can catch it"
+# Shape A's repair above was a full install, so installer memory is back — drop it again,
+# or this bare install declines instead of repairing.
+rm -f "$HOME/.local/share/cortexyoung/manifest"
 bash "$INSTALL_SH" > /tmp/smoke17b.log 2>&1; cat /tmp/smoke17b.log | sed 's/^/    /' > /dev/null
 if grep -q "repaired skill" /tmp/smoke17b.log; then
   pass "rerun repairs legacy shape B"
@@ -687,6 +852,7 @@ else
 fi
 
 echo "--- Test 18: the deploy log dates every change of the deployed bytes ---"
+fresh_home_with_files_but_no_manifest
 DEPLOY_LOG_FILE="$XDG_DATA_HOME/cortexyoung/deploy.log"
 AG_DEST="$HOME/.claude/skills/ast-grep/SKILL.md"
 if [ -f "$DEPLOY_LOG_FILE" ]; then
@@ -715,6 +881,9 @@ AG_SRC_BACKUP="$(mktemp)"
 cp "$AG_SRC" "$AG_SRC_BACKUP"
 trap 'cp -f "$AG_SRC_BACKUP" "$AG_SRC" 2>/dev/null || true; rm -f "$AG_SRC_BACKUP"' EXIT
 printf "\nA line appended by the smoke test.\n" >> "$AG_SRC"
+# Same memory problem as shape B above: the 798 redeploy was a full install. Drop it so
+# this bare install redeploys (and logs) instead of declining.
+rm -f "$HOME/.local/share/cortexyoung/manifest"
 bash "$INSTALL_SH" > /tmp/smoke18b.log 2>&1
 cp -f "$AG_SRC_BACKUP" "$AG_SRC"
 LINES_EDITED="$(wc -l < "$DEPLOY_LOG_FILE" 2>/dev/null || echo 0)"
@@ -742,6 +911,8 @@ fi
 # provably not at fault -- a wrong pointer in the check whose whole job is to stop the hook going
 # down silently. Reproduced with a double that answers the way a pre-hook-install binary does.
 echo "--- Test 19: --check blames the binary, not settings.json ---"
+# Needs an installed machine (manifest + wired hooks); --check itself never declines.
+fresh_home_with_install
 # The double has to stand where the *managed* binary stands, not merely earlier in PATH: --check
 # asks the binary the manifest records, because that is the one `deploy_hook` wired into
 # settings.json. A stale copy on PATH is the case that must NOT be consulted, and it gets its own
@@ -918,7 +1089,7 @@ if [ "$HEALTHY" -ge 4 ]; then
 else
   fail "one rewired entry collapsed the others ($HEALTHY wired lines)"; sed 's/^/    /' /tmp/smoke19c.log
 fi
-bash "$INSTALL_SH" > /dev/null 2>&1  # put the wiring back for any later assertion
+# No wiring restore: Test 20 below brings its own HOME, so nothing later reads this one.
 rm -rf "$STALEBIN"
 
 # ── 20. all six wired entries, not just the one this file used to check ──
@@ -929,7 +1100,10 @@ rm -rf "$STALEBIN"
 # for; `--check` reading green is not the same claim, because `--check` asks the same binary that
 # wrote the entry.
 echo "--- Test 20: all six hook entries are deployed, one per harness per event ---"
-bash "$INSTALL_SH" > /tmp/smoke20.log 2>&1; sed 's/^/    /' /tmp/smoke20.log
+fresh_home_with_install
+# --force: the bare rerun declines since Task 0; explicit insistence still redeploys, and
+# idempotence (exactly one entry per file) is what this test pins either way.
+bash "$INSTALL_SH" --force > /tmp/smoke20.log 2>&1; sed 's/^/    /' /tmp/smoke20.log
 CODEX_CFG="$HOME/.codex/config.toml"
 KIMI_CFG="$HOME/.kimi-code/config.toml"
 assert_file_exists "$CODEX_CFG" "Codex config.toml written by the hook deploy"
@@ -959,7 +1133,7 @@ assert_not_contains "$KIMI_CFG" "[[hooks.PreToolUse]]" "Kimi did not get Codex's
 # search traffic; a Bash-only matcher there is silent on most of what the rule exists for.
 assert_contains "$KIMI_CFG" 'matcher = "Bash|Grep"' "Kimi's matcher covers its structured Grep tool"
 # Idempotence, per file: a redeploy converges instead of stacking a second entry.
-bash "$INSTALL_SH" > /dev/null 2>&1
+bash "$INSTALL_SH" --force > /dev/null 2>&1
 for f in "$HOME/.claude/settings.json" "$CODEX_CFG" "$KIMI_CFG"; do
   n="$(grep -c "hook-suggest --harness" "$f" 2>/dev/null || echo 0)"
   if [ "$n" = "1" ]; then pass "$(basename "$f") holds exactly one pre-event entry after a redeploy"
@@ -973,7 +1147,9 @@ for f in "$HOME/.claude/settings.json" "$CODEX_CFG" "$KIMI_CFG"; do
   assert_not_contains "$f" "hook-suggest --harness" "$(basename "$f"): pre-event unwired on uninstall"
   assert_not_contains "$f" "hook-refresh --harness" "$(basename "$f"): post-event unwired on uninstall"
 done
-bash "$INSTALL_SH" > /dev/null 2>&1  # put the wiring back for any later assertion
+# No wiring restore: Test 21 brings its own HOME and Test 22 gets a fresh one below, so
+# nothing later reads this machine. (A bare reinstall here would decline since Task 0, and
+# an unobserved `|| true` would be the false-green this file refuses to carry.)
 
 # ── 21. preflight runs before the manifest is touched ─────────────
 # The comment at install.sh:1087 promises preflight runs "before any mutation". migrate_manifest_v2
@@ -1021,6 +1197,9 @@ unset _TASK4_ORIG_HOME _TASK4_ORIG_XDG _TASK4_ORIG_TMPHOME
 # `timeout`, the kill is swallowed by `|| true` and the elapsed time passes too, having never
 # installed anything. Both are the false-green this project keeps paying for.
 echo "--- Test 22: two installers cannot interleave ---"
+# Own installed machine, but without installer memory: the installer under test must proceed
+# (not decline) once the lock releases, so the completion assertion observes the lock.
+fresh_home_with_files_but_no_manifest
 if ! command -v flock >/dev/null 2>&1; then
   echo "  SKIP: flock unavailable"
 else
