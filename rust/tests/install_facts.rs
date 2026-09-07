@@ -141,10 +141,11 @@ fn every_manifest_key_install_sh_writes_is_known() {
         if let Some(start) = code.find("deploy_skill_at ") {
             let args: Vec<&str> = code[start..].split('"').collect();
             // args[1], args[3], args[5] are the three quoted arguments; the key is the third.
-            if args.len() >= 6 && !args[5].starts_with('$') {
-                if !cort::install::MANIFEST_KEYS.contains(&args[5]) {
-                    unknown.push(args[5].to_string());
-                }
+            if args.len() >= 6
+                && !args[5].starts_with('$')
+                && !cort::install::MANIFEST_KEYS.contains(&args[5])
+            {
+                unknown.push(args[5].to_string());
             }
         }
     }
@@ -183,12 +184,12 @@ fn every_manifest_key_install_sh_reads_is_known_or_legacy() {
             } else {
                 arg.split([' ', '\t', ')', ';']).next().unwrap_or("")
             };
-            if !key.is_empty() && !key.starts_with('$') {
-                if !cort::install::MANIFEST_KEYS.contains(&key)
-                    && !cort::install::MANIFEST_LEGACY_KEYS.contains(&key)
-                {
-                    unknown.push(key.to_string());
-                }
+            if !key.is_empty()
+                && !key.starts_with('$')
+                && !cort::install::MANIFEST_KEYS.contains(&key)
+                && !cort::install::MANIFEST_LEGACY_KEYS.contains(&key)
+            {
+                unknown.push(key.to_string());
             }
             if arg.len() < 2 {
                 break;
