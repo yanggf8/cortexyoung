@@ -804,3 +804,36 @@ there.
    activation is loud (`assert_ast_grep_version`) rather than claiming nothing can go wrong. And the
    "backstop untested" claim was wrong: the smoke suite's Test 9 corrupt-download path does exercise
    `verify_sha` failing.
+
+---
+
+## What execution found (Tasks 1-3, implemented by the session owner)
+
+**The consumption test was added during implementation, not from the plan.** Codex's finding 8
+(that a renderer plus an unused verb passes everything) arrived as a review comment phrased as
+"add a consumption test"; the plan was updated to name it, but the test itself was written in the
+working tree first and the plan second. The direction is recorded because it matters for audit:
+the green suite at every commit below was produced by tests that predate their documentation.
+
+**Two deviations from the plan, both narrowing, neither widening.** The `render_emit` change reuses
+the existing `hook-install-all-lean` arm via `||` instead of adding a separate arm — the comment
+above it already describes exactly this case, and a second arm would be a second home for "raw
+output". The `for key in` words in the reader test are filtered inline rather than through a helper
+— a helper shared with nothing is abstraction without a second caller.
+
+**Break 4 was attempted twice vacuously before it ran for real.** Both attempts executed
+`bash tests/install-smoke.sh` from `rust/`, where the path does not exist; exit 127, no tests ran,
+nothing went red. The third attempt, from the repo root, produced the predicted `146 passed, 1
+failed`. A break validation that does not check the suite actually ran is the same class of
+false-green as a test that cannot fail — from here on, every break validation in this project must
+assert on the run's exit code *and* its result line.
+
+**The managed_cort scope fix.** Task 2's `do_check` addition referenced `$managed_cort`, which is
+assigned later in the function; under `set -u` the first smoke run died at Test 7. Fixed by moving
+the resolution block (comment included) to the top of `do_check`. The failure was loud and
+immediate rather than silent, which is the only reason it was cheap.
+
+**Counts moved underneath the work.** Rust tests read 456 → 457 → 467 across this plan's execution,
+all three deltas from a parallel workstream (issue #3) landing on master between runs, none from
+this diff. When a verification number moves without a code change on your side, find the commit
+before inventing an explanation — twice now the answer has been `git log`, not the code.
