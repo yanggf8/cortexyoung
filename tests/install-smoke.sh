@@ -988,6 +988,53 @@ export HOME="$_TASK4_ORIG_HOME"
 export XDG_DATA_HOME="$_TASK4_ORIG_XDG"
 unset _TASK4_ORIG_HOME _TASK4_ORIG_XDG _TASK4_ORIG_TMPHOME
 
+# ── 22. two installers cannot interleave ─────────────────────────
+# Per-file atomicity is not per-install atomicity: two installers can publish different generations
+# of different artifacts. The lock is held for the whole mutating run, so the second waits rather
+# than interleaving.
+# "Blocked while held, completes after release" has no threshold to tune. An elapsed-time
+# assertion does: a full install runs `cargo build --release --locked` (install.sh:741), so on a
+# loaded machine an UNLOCKED install can exceed any threshold and pass -- and if it exceeds the
+# `timeout`, the kill is swallowed by `|| true` and the elapsed time passes too, having never
+# installed anything. Both are the false-green this project keeps paying for.
+echo "--- Test 22: two installers cannot interleave ---"
+if ! command -v flock >/dev/null 2>&1; then
+  echo "  SKIP: flock unavailable"
+else
+  LOCK="$HOME/.local/share/cortexyoung/.install.lock"
+  ACQUIRED="$(mktemp -u)"; DONE="$(mktemp -u)"
+  ( flock -x 9; : > "$ACQUIRED"; sleep 8 ) 9>"$LOCK" &
+  holder=$!
+  for _ in $(seq 1 200); do
+    if [ -e "$ACQUIRED" ]; then break; fi
+    sleep 0.05
+  done
+  if [ ! -e "$ACQUIRED" ]; then
+    fail "the probe never acquired the lock; every assertion below would be meaningless"
+  fi
+
+  ( bash "$INSTALL_SH" >/dev/null 2>&1; echo "$?" > "$DONE" ) &
+  installer=$!
+  sleep 2
+  if [ -e "$DONE" ]; then
+    fail "the installer completed while another process held the lock"
+  else
+    pass "the installer is blocked while the lock is held"
+  fi
+  wait "$holder" 2>/dev/null || true   # releases the lock
+  for _ in $(seq 1 600); do
+    if [ -e "$DONE" ]; then break; fi
+    sleep 0.5
+  done
+  wait "$installer" 2>/dev/null || true
+  if [ "$(cat "$DONE" 2>/dev/null || echo missing)" = "0" ]; then
+    pass "and completes once the lock is released"
+  else
+    fail "the installer did not complete after release (status $(cat "$DONE" 2>/dev/null || echo missing))"
+  fi
+  rm -f "$ACQUIRED" "$DONE"
+fi
+
 # ── summary ──────────────────────────────────────────────────────
 echo ""
 echo "=== smoke results: $PASS passed, $FAIL failed ==="

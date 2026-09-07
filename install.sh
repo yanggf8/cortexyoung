@@ -1067,6 +1067,18 @@ do_check() {
 
 do_uninstall() {
   echo "=== cortexyoung --uninstall ==="
+  # One installer at a time. Every artifact below is published atomically on its own, but two
+  # concurrent runs can still leave a manifest naming one generation while the symlink points at
+  # another: atomicity per file is not atomicity per install. The lock is advisory and only
+  # cooperating installers honour it, which is all of them.
+  #
+  # `--check` deliberately does not take it: a report must not be blocked by a running install, and
+  # it mutates nothing.
+  mkdir -p "$MANIFEST_DIR"
+  if command -v flock >/dev/null 2>&1; then
+    exec 9>"$MANIFEST_DIR/.install.lock"
+    flock -x 9 || die "another installer holds the lock and would not yield"
+  fi
   remove_hook
   if [ -f "$MANIFEST_FILE" ]; then
     local cort_owned ag_owned xg_owned skill_ag skill_xg
@@ -1209,6 +1221,19 @@ do_uninstall() {
 
 do_install() {
   echo "=== cortexyoung install (cort v$CORT_VERSION, ast-grep v$AST_GREP_VERSION) ==="
+
+  # One installer at a time. Every artifact below is published atomically on its own, but two
+  # concurrent runs can still leave a manifest naming one generation while the symlink points at
+  # another: atomicity per file is not atomicity per install. The lock is advisory and only
+  # cooperating installers honour it, which is all of them.
+  #
+  # `--check` deliberately does not take it: a report must not be blocked by a running install, and
+  # it mutates nothing.
+  mkdir -p "$MANIFEST_DIR"
+  if command -v flock >/dev/null 2>&1; then
+    exec 9>"$MANIFEST_DIR/.install.lock"
+    flock -x 9 || die "another installer holds the lock and would not yield"
+  fi
 
   detect_platform
   resolve_bin_dir
