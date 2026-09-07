@@ -45,3 +45,86 @@ rule:
             all:
               - has: { field: function, kind: identifier }
               - has: { kind: arguments, has: { kind: arrow_function } }
+---
+# ── AngularJS 1.x ──
+# `app.controller('MyCtrl', function ($scope) {...})` registers a service provider under a name
+# that lives in a STRING literal, so `$NAME` arrives quoted and `chunker` unquotes it into the
+# bare symbol. Without a rule here the whole controller is invisible to the graph: an anonymous
+# function passed as an argument is no declaration, and `impact MyCtrl` had nothing to find.
+#
+# The arguments must hold BOTH a string (the registered name) and a function (the provider). This
+# is also what lets `filter` stay in the verb list beside Array.prototype.filter: the array method
+# takes a function, never a string first, so every real `arr.filter(fn)` lacks the string and
+# cannot match. `config`/`run`/`module` are deliberately absent -- they register no name a caller
+# could ask about.
+id: cort-js-chunk-registration
+language: JavaScript
+severity: hint
+message: chunk:function
+rule:
+  all:
+    - kind: call_expression
+    - has:
+        field: function
+        kind: member_expression
+        has:
+          field: property
+          # `property_identifier`, not `identifier`: this grammar names member properties its own
+          # kind, and a rule written against `identifier` matches nothing and says so by producing
+          # no chunks (the same way the Rust receiver rule's node-name note reads).
+          kind: property_identifier
+          regex: '^(controller|service|factory|directive|provider|filter|component)$'
+    # $NAME stays at neighbor depth on purpose: the registered name is the FIRST DIRECT string
+    # argument. `stopBy: end` here would let `$scope` and friends inside the injection array bind
+    # instead when the name argument is absent.
+    - has:
+        field: arguments
+        has: { kind: string, pattern: $NAME }
+    # The provider function may be a direct argument OR an element of the injection array
+    # (`['$scope', function ...]`). Relational rules descend only one level unless told otherwise,
+    # so the array case needs `stopBy: end`; probed live, a `has` that only names a kind matches
+    # nothing through the `array` node.
+    - any:
+        - has:
+            kind: function_expression
+            stopBy: end
+        - has:
+            kind: arrow_function
+            stopBy: end
+---
+# ES5 object-literal method: `return { save: function () {...} }` -- the shape AngularJS service
+# bodies are written in. Bare NAME, no owner: the JS convention, same as `chunk:method` records
+# from `method_definition`.
+id: cort-js-chunk-object-method
+language: JavaScript
+severity: hint
+message: chunk:method
+rule:
+  all:
+    - kind: pair
+    - has: { field: key, kind: property_identifier, pattern: $NAME }
+    - has:
+        field: value
+        any:
+          - { kind: function_expression }
+          - { kind: arrow_function }
+---
+# Assigned method, controller-as style: `vm.save = function () {...}`. Also `Foo.prototype.bar =
+# function`. Bare NAME again -- JS chunks carry no owner, so a receiver-shaped call to one is
+# refused by the gate and surfaces as a coverage gap instead of a guessed edge.
+id: cort-js-chunk-assigned-method
+language: JavaScript
+severity: hint
+message: chunk:method
+rule:
+  all:
+    - kind: assignment_expression
+    - has:
+        field: left
+        kind: member_expression
+        has: { field: property, kind: property_identifier, pattern: $NAME }
+    - has:
+        field: right
+        any:
+          - { kind: function_expression }
+          - { kind: arrow_function }

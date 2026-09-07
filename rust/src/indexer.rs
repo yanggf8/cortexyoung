@@ -32,7 +32,9 @@ pub const IGNORE_DIRS: &[&str] = &[
     ".cache",
 ];
 
-pub const SOURCE_EXT: &[&str] = &[".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".py", ".rs"];
+pub const SOURCE_EXT: &[&str] = &[
+    ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".py", ".rs", ".java", ".html",
+];
 
 const INSERT_CHUNK: &str =
     "INSERT INTO chunks (chunk_id, project_id, file_path, symbol_name, chunk_type,

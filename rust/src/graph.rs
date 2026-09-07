@@ -505,7 +505,12 @@ pub fn receiver_binds(head: &str, enclosing: Option<&str>, candidate: &str) -> b
     let Some(owner) = symbol_owner(candidate) else {
         return false; // rule 1
     };
-    if receiver.eq_ignore_ascii_case("self") || receiver == "Self" {
+    // `this` is Java's spelling of the same scoping fact `self` is Rust's: the receiver names the
+    // enclosing instance, and the enclosing symbol's owner is checkable rather than guessed.
+    if receiver.eq_ignore_ascii_case("self")
+        || receiver == "Self"
+        || receiver.eq_ignore_ascii_case("this")
+    {
         return symbol_owner(enclosing.unwrap_or(""))
             .is_some_and(|en| norm_name(en) == norm_name(owner));
     }

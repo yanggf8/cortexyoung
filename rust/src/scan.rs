@@ -76,6 +76,13 @@ const LANG_BY_EXT: &[(&str, &str, &str)] = &[
     ("mjs", "javascript", "JavaScript"),
     ("cjs", "javascript", "JavaScript"),
     ("py", "python", "Python"),
+    ("java", "java", "Java"),
+    // HTML is indexed but has NO rule file: a template's attribute values are opaque strings to
+    // ast-grep, so no honest edge can be cut from them (a whole-value raw target can never match
+    // the `%.name` suffix anchor the coverage gap query reads). What indexing delivers is the
+    // mention layer -- every indexed file's text is scanned -- plus fts over the whole-file
+    // `unparsed` chunk the empty record set produces.
+    ("html", "html", "Html"),
 ];
 
 fn lang_key_and_name(ext: &str) -> Option<(&'static str, &'static str)> {
@@ -155,6 +162,8 @@ impl RulePack {
                     "python",
                     compile(load_lang!(path, ast_grep_language::Python)),
                 ),
+                "java" => ("java", compile(load_lang!(path, ast_grep_language::Java))),
+                "html" => ("html", compile(load_lang!(path, ast_grep_language::Html))),
                 other => {
                     return Err(CortError::new(
                         "pack_rule_invalid",
@@ -263,6 +272,8 @@ pub fn scan_in_process(text: &str, ext: &str) -> Result<Vec<Value>, CortError> {
         "typescript" => scan_lang(text, lang_name, rules, ast_grep_language::TypeScript),
         "tsx" => scan_lang(text, lang_name, rules, ast_grep_language::Tsx),
         "javascript" => scan_lang(text, lang_name, rules, ast_grep_language::JavaScript),
+        "java" => scan_lang(text, lang_name, rules, ast_grep_language::Java),
+        "html" => scan_lang(text, lang_name, rules, ast_grep_language::Html),
         _ => scan_lang(text, lang_name, rules, ast_grep_language::Python),
     };
     records.map_err(|e| {
@@ -320,6 +331,8 @@ pub fn pattern_lang(name: &str) -> Option<&'static str> {
         "tsx" => Some("tsx"),
         "js" | "javascript" | "jsx" | "mjs" | "cjs" => Some("javascript"),
         "py" | "python" => Some("python"),
+        "java" => Some("java"),
+        "html" => Some("html"),
         _ => None,
     }
 }
@@ -332,6 +345,8 @@ const EXT_BY_LANG: &[(&str, &[&str])] = &[
     ("tsx", &["tsx"]),
     ("javascript", &["js", "jsx", "mjs", "cjs"]),
     ("python", &["py"]),
+    ("java", &["java"]),
+    ("html", &["html", "htm"]),
 ];
 
 /// Files the crate backend searches, in the CLI's walk semantics: the `ignore` crate (the walker
@@ -355,7 +370,7 @@ pub fn search_files(
         .ok_or_else(|| {
             CortError::new(
                 "unknown_lang",
-                json!({ "lang": lang, "supported": ["rust", "ts", "tsx", "js", "jsx", "py"] }),
+                json!({ "lang": lang, "supported": ["rust", "ts", "tsx", "js", "jsx", "py", "java", "html"] }),
             )
         })?;
     let mut walker = WalkBuilder::new(root);
@@ -431,6 +446,8 @@ pub fn run_pattern_in_process(
         "typescript" => match_pattern(pattern, ast_grep_language::TypeScript, lang_name, files),
         "tsx" => match_pattern(pattern, ast_grep_language::Tsx, lang_name, files),
         "javascript" => match_pattern(pattern, ast_grep_language::JavaScript, lang_name, files),
+        "java" => match_pattern(pattern, ast_grep_language::Java, lang_name, files),
+        "html" => match_pattern(pattern, ast_grep_language::Html, lang_name, files),
         _ => match_pattern(pattern, ast_grep_language::Python, lang_name, files),
     }
 }
@@ -484,7 +501,7 @@ pub fn preflight_pattern_in_process(pattern: &str, lang_name: &str) -> Result<()
     let Some(key) = pattern_lang(lang_name) else {
         return Err(CortError::new(
             "unknown_lang",
-            json!({ "lang": lang_name, "supported": ["rust", "ts", "tsx", "js", "jsx", "py"] }),
+            json!({ "lang": lang_name, "supported": ["rust", "ts", "tsx", "js", "jsx", "py", "java", "html"] }),
         ));
     };
     match key {
@@ -492,6 +509,8 @@ pub fn preflight_pattern_in_process(pattern: &str, lang_name: &str) -> Result<()
         "typescript" => preflight_check(pattern, lang_name, ast_grep_language::TypeScript),
         "tsx" => preflight_check(pattern, lang_name, ast_grep_language::Tsx),
         "javascript" => preflight_check(pattern, lang_name, ast_grep_language::JavaScript),
+        "java" => preflight_check(pattern, lang_name, ast_grep_language::Java),
+        "html" => preflight_check(pattern, lang_name, ast_grep_language::Html),
         _ => preflight_check(pattern, lang_name, ast_grep_language::Python),
     }
 }

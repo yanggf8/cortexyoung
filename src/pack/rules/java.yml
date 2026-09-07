@@ -1,0 +1,139 @@
+# Java joins the pack with the same contract as Rust: every `chunk:method` carries an $OWNER
+# (`Customer::getName`), because the receiver gate's first rule refuses an ownerless method and a
+# Java edge that could never bind would be a rule pretending to extract. class / interface / enum /
+# record become `chunk:class`, the bucket Rust's struct/enum/trait already share -- a dedicated
+# chunk_type would mean widening the CHECK on `chunks` for a label the content already shows.
+#
+# Java has no free functions, so there is no `chunk:function` rule here: a method whose $OWNER
+# cannot be captured (a body outside any type is not valid Java) simply produces no chunk rather
+# than an ownerless one.
+id: cort-java-chunk-type
+language: Java
+severity: hint
+message: chunk:class
+rule:
+  any:
+    - { kind: class_declaration, has: { field: name, pattern: $NAME } }
+    - { kind: interface_declaration, has: { field: name, pattern: $NAME } }
+    - { kind: enum_declaration, has: { field: name, pattern: $NAME } }
+    - { kind: record_declaration, has: { field: name, pattern: $NAME } }
+---
+id: cort-java-chunk-method
+language: Java
+severity: hint
+message: chunk:method
+rule:
+  kind: method_declaration
+  has: { field: name, pattern: $NAME }
+  inside:
+    stopBy: end
+    any:
+      - { kind: class_declaration, has: { field: name, pattern: $OWNER } }
+      - { kind: interface_declaration, has: { field: name, pattern: $OWNER } }
+      - { kind: enum_declaration, has: { field: name, pattern: $OWNER } }
+      - { kind: record_declaration, has: { field: name, pattern: $OWNER } }
+---
+id: cort-java-chunk-constructor
+language: Java
+severity: hint
+message: chunk:method
+rule:
+  kind: constructor_declaration
+  has: { field: name, pattern: $NAME }
+  inside:
+    stopBy: end
+    any:
+      - { kind: class_declaration, has: { field: name, pattern: $OWNER } }
+      - { kind: enum_declaration, has: { field: name, pattern: $OWNER } }
+# Call shapes, three forms, same reasoning as Rust's three: the form decides the resolution policy
+# (`graph::resolve_edge_targets`), so they may not be collapsed.
+#
+# Bare: a `method_invocation` with NO `object` field. `save()` inside a class is bare even though
+# Java scopes it to `this` -- the AMBIGUOUS-when-doubled policy bare calls already have covers it,
+# and it is the shape interface methods are called through.
+---
+id: cort-java-edge-calls
+language: Java
+severity: hint
+message: edge:calls:bare
+rule:
+  all:
+    - kind: method_invocation
+    - has: { field: name, kind: identifier, pattern: $CALLEE }
+    # `$_` is the any-node matcher: ast-grep refuses a `has` with no positive matcher of its own,
+    # so "the object field is absent" is spelled "no node matches at all" (ast-grep has no
+    # negative-field test).
+    - not: { has: { field: object, pattern: $_ } }
+---
+# Receiver: everything with an explicit object. `$CALLEE` cannot be the head the way Rust's
+# `field_expression` is -- a `method_invocation` node includes the argument list -- so the rule
+# captures `$OBJECT` + `$METHOD` and the chunker composes the same `Foo.bar` head a receiver edge
+# has always stored. `a.b.c()` arrives with the whole `a.b` path as the object; `receiver_binds`
+# takes the last segment, so the qualified shape binds like the simple one.
+#
+# `super.m()` is deliberately absent: binding it needs the superclass, which no rule can see. The
+# site surfaces as a coverage gap instead of a guessed edge.
+id: cort-java-edge-calls-receiver
+language: Java
+severity: hint
+message: edge:calls:receiver
+rule:
+  all:
+    - kind: method_invocation
+    - has: { field: name, kind: identifier, pattern: $METHOD }
+    - has:
+        field: object
+        any:
+          - { kind: identifier, pattern: $OBJECT }
+          - { kind: field_access, pattern: $OBJECT }
+          - { kind: this, pattern: $OBJECT }
+---
+# `new Foo(args)` -- instantiation as a call to the class chunk. Bare form on purpose: several
+# classes named `Foo` must land AMBIGUOUS, the same as a bare call would.
+id: cort-java-edge-calls-new
+language: Java
+severity: hint
+message: edge:calls:bare
+rule:
+  kind: object_creation_expression
+  has: { field: type, kind: type_identifier, pattern: $CALLEE }
+---
+id: cort-java-edge-imports
+language: Java
+severity: hint
+message: edge:imports
+rule: { kind: import_declaration, has: { kind: scoped_identifier, pattern: $SRC } }
+---
+# The scoped half keeps its path so the module-suffix branch of `resolve_targets` has something to
+# work with, exactly as `cort-rust-edge-references-scoped` does. Annotations are NOT captured:
+# their names are `identifier` nodes in this grammar, not `type_identifier`, so `@Override` never
+# enters the graph -- a Java file's reference edges are types its code actually names.
+id: cort-java-edge-references-scoped
+language: Java
+severity: hint
+message: edge:references:type
+rule: { kind: scoped_type_identifier, pattern: $CALLEE }
+---
+# The bare half drops each declaration's OWN name (a class does not reference itself by
+# declaring), and drops leaves already covered by the scoped rule, so one qualified type yields one
+# edge. Generic parameters (`T`, `E`) are knowingly not excluded, for the same reason Rust's rule
+# does not: ast-grep cannot do scope analysis, and `T` resolves to nothing unless the project
+# declares a real type by that name. Primitives need no rule either -- `int`, `boolean` and friends
+# are distinct node kinds (`integral_type`, `boolean_type`), so they never enter the graph.
+id: cort-java-edge-references-bare
+language: Java
+severity: hint
+message: edge:references:type
+rule:
+  kind: type_identifier
+  pattern: $CALLEE
+  not:
+    any:
+      - inside:
+          any:
+            - { kind: class_declaration }
+            - { kind: interface_declaration }
+            - { kind: enum_declaration }
+            - { kind: record_declaration }
+          field: name
+      - inside: { kind: scoped_type_identifier }

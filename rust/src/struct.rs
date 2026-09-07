@@ -111,7 +111,7 @@ pub fn run_pattern(
             let key = scan::pattern_lang(lang).ok_or_else(|| {
                 CortError::new(
                     "unknown_lang",
-                    json!({ "lang": lang, "supported": ["rust", "ts", "tsx", "js", "jsx", "py"] }),
+                    json!({ "lang": lang, "supported": ["rust", "ts", "tsx", "js", "jsx", "py", "java", "html"] }),
                 )
             })?;
             let root_path = Path::new(root);

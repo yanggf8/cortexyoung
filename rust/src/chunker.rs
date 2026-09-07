@@ -551,12 +551,12 @@ pub fn extract_file(args: ExtractFileArgs<'_>) -> Result<ExtractResult, CortErro
             let text = rec.get("text").and_then(Value::as_str).unwrap_or("");
             let chunk_type = rest.to_string();
             let language = rec.get("language").and_then(Value::as_str);
-            match compose_symbol_name(
-                &chunk_type,
-                meta_var_text(rec, "NAME"),
-                meta_var_text(rec, "OWNER"),
-                language,
-            ) {
+            // `$NAME` is usually an identifier, where unquote is identity. A quoted capture (the
+            // AngularJS registration name `'MyCtrl'`) must land as a bare symbol, and nothing that
+            // was already bare can lose characters to unquote.
+            let name = meta_var_text(rec, "NAME").map(unquote);
+            let owner = meta_var_text(rec, "OWNER").map(unquote);
+            match compose_symbol_name(&chunk_type, name.as_deref(), owner.as_deref(), language) {
                 Ok(symbol_name) => {
                     chunks.push(Chunk {
                         chunk_id: chunk_id_for(project_id, file_path, start_line),
@@ -584,7 +584,18 @@ pub fn extract_file(args: ExtractFileArgs<'_>) -> Result<ExtractResult, CortErro
                 continue;
             };
             let callee = meta_var_text(rec, "CALLEE");
-            let target = meta_var_text(rec, "SRC").or(callee);
+            // A rule that cannot present the head as one AST node (Java's `method_invocation` has
+            // no head-only child the way Rust's `field_expression` is) captures `$OBJECT` +
+            // `$METHOD` instead, and the head is composed here — same stored shape `Foo.bar` a
+            // receiver edge has always had, so `receiver_binds` and the `%.name` gap match read it
+            // unchanged.
+            let object = meta_var_text(rec, "OBJECT");
+            let composite = object
+                .zip(meta_var_text(rec, "METHOD"))
+                .map(|(o, m)| format!("{o}.{m}"));
+            let target = meta_var_text(rec, "SRC")
+                .or(callee)
+                .or(composite.as_deref());
             if let Some(target) = target {
                 // Pin the edge to the line that *names* the callee, not to the first line of the
                 // matched node: `builder\n    .foo()` names `foo` on the second line, and a call site
@@ -597,7 +608,7 @@ pub fn extract_file(args: ExtractFileArgs<'_>) -> Result<ExtractResult, CortErro
                 // Whitespace inside a call head is formatting, not identity: `tally\n  .add` and
                 // `tally.add` are the same edge, and a stored target containing a newline would
                 // never survive a LIKE match against a symbol name.
-                let text = if callee.is_some() {
+                let text = if callee.is_some() || object.is_some() {
                     compact_ws(unquote(target).as_str())
                 } else {
                     unquote(target)

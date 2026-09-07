@@ -42,7 +42,7 @@ const IGNORE_DIRS: &[&str] = &[
     ".wrangler",
 ];
 const SOURCE_EXT: &[&str] = &[
-    ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".py", ".rs", ".java", ".go",
+    ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".py", ".rs", ".java", ".go", ".html",
 ];
 
 /// `pub fn name`, `fn name`, `class Name`, `const NAME`, `interface X`, `type Y`, methods, and the

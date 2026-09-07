@@ -248,9 +248,21 @@ pub fn mentions(text: &str, name: &str) -> Vec<(usize, usize)> {
 }
 
 /// The keywords that put a *name being declared* immediately after them. `impl`/`type` included:
-/// naming a type in those positions is not a call on it either.
+/// naming a type in those positions is not a call on it either. `class`/`interface`/`enum` are
+/// Java's (and JS `class`') spellings of the same position.
 pub const DECLARATION_KEYWORDS: &[&str] = &[
-    "fn", "struct", "enum", "trait", "union", "type", "const", "static", "mod", "impl",
+    "fn",
+    "struct",
+    "enum",
+    "trait",
+    "union",
+    "type",
+    "const",
+    "static",
+    "mod",
+    "impl",
+    "class",
+    "interface",
 ];
 
 /// Why a mention produced no edge. A hint for triage, never a verdict: `receiver` is the pack's known

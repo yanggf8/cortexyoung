@@ -186,13 +186,14 @@ const NON_SOURCE_MARKERS: [&str; 12] = [
 /// Extensions and directory names that say "this is project source".
 /// `src/` and `/src` are both listed on purpose: a relative target (`rg x src/`) is the common
 /// shape in an agent session and does not carry a leading slash.
-const SOURCE_MARKERS: [&str; 12] = [
-    ".rs", ".ts", ".tsx", ".js", ".jsx", ".py", "/src", "src/", "crates/", "lib/", "app/", "./",
+const SOURCE_MARKERS: [&str; 13] = [
+    ".rs", ".ts", ".tsx", ".js", ".jsx", ".py", ".java", "/src", "src/", "crates/", "lib/", "app/",
+    "./",
 ];
 
 /// The languages that have an `edge:calls` rule pack. Anything else, `impact` cannot answer, so a
 /// suggestion there is worse than silence: it looks answerable.
-const SOURCE_EXTENSIONS: [&str; 6] = [".rs", ".ts", ".tsx", ".js", ".jsx", ".py"];
+const SOURCE_EXTENSIONS: [&str; 7] = [".rs", ".ts", ".tsx", ".js", ".jsx", ".py", ".java"];
 
 /// `-A`, `-B`, `-C` and their long forms, including the glued `-A10` / `-B2` forms and the combined
 /// short cluster `-nB2`.
