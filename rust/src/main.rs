@@ -615,9 +615,21 @@ fn hook_args(outcome: &str, harness: &str, declared: Option<&str>, model: Option
 /// 在已序列化的 hook row 上補 `decline` 標籤——NoShape 的細分原因（issue #3）。標籤是
 /// 穩定的識別子、永不攜帶 payload 內容：mining 要的是「哪條規則拒絕了它」，不是命令本身。
 fn hook_args_decline(hook_args_json: &str, decline: &str) -> String {
+    hook_args_tag(hook_args_json, "decline", decline)
+}
+
+/// 補 `kind` 標籤——這次的 hit 建議的是哪個子命令（`impact` / `context`）。與 `decline` 對稱：
+/// 一個說不出是哪條規則產生的命中，無法用來評分產生它的那條規則。
+fn hook_args_kind(hook_args_json: &str, kind: &str) -> String {
+    hook_args_tag(hook_args_json, "kind", kind)
+}
+
+/// 在已序列化的 hook row 上補一個穩定識別子。值永遠是識別子而非 payload 內容，兩個呼叫端共用
+/// 同一份解析與退場行為，免得其中一個悄悄漂走。
+fn hook_args_tag(hook_args_json: &str, key: &str, value: &str) -> String {
     let mut v: Value =
         serde_json::from_str(hook_args_json).unwrap_or_else(|_| json!({ "hook": "unknown" }));
-    v["decline"] = json!(decline);
+    v[key] = json!(value);
     v.to_string()
 }
 
@@ -1034,20 +1046,35 @@ fn cmd_hook_suggest(args: &[String], usage: &mut UsageEvent) -> Result<Emit, Cor
     // It fails toward disclosure: an unset cell is treated as behind-head, which over-warns rather
     // than silently dropping the "built on an older commit" sentence from a suggestion.
     let stale = observed.get().unwrap_or(IndexState::BehindHead) == IndexState::BehindHead;
-    usage.args_summary = harness_args(if stale { "hit_stale" } else { "hit" });
-    let context = format!(
-        "cort has an index for this project{}. `cort impact --symbol '{}' --depth 1 --coverage -f lean` \
-answers who calls it in one call, and `--coverage` lists what the enumeration could not see -- which \
-a grep cannot tell you. Use it before concluding nothing else uses this; keep the grep for anything \
-literal.",
-        if stale {
-            ", but it was built on an older commit, so it will answer `stale=true` and may miss \
-edges added since -- re-run `cort index` first if the answer has to be complete"
-        } else {
-            ""
-        },
-        hit.symbol
+    usage.args_summary = hook_args_kind(
+        &harness_args(if stale { "hit_stale" } else { "hit" }),
+        hit.kind.tag(),
     );
+    let stale_clause = if stale {
+        ", but it was built on an older commit, so it will answer `stale=true` and may miss \
+edges added since -- re-run `cort index` first if the answer has to be complete"
+    } else {
+        ""
+    };
+    // Two sentences off one shape gate. The `-A`/`-B`/`-C` arm is not a softened `impact` pitch:
+    // an agent asking for surrounding lines is not asking who calls the symbol, and answering the
+    // question it did not ask is what made that shape worth silencing in the first place.
+    let context = match hit.kind {
+        cort::hook::Suggest::Impact => format!(
+            "cort has an index for this project{stale_clause}. `cort impact --symbol '{}' --depth 1 \
+--coverage -f lean` answers who calls it in one call, and `--coverage` lists what the enumeration \
+could not see -- which a grep cannot tell you. Use it before concluding nothing else uses this; \
+keep the grep for anything literal.",
+            hit.symbol
+        ),
+        cort::hook::Suggest::Context => format!(
+            "cort has an index for this project{stale_clause}. You asked for the lines around each \
+match; `cort context '{}' -f lean` answers that from the index -- the definition and its \
+neighbours, ranked, instead of N lines either side of every textual hit. Add `--content full` to \
+read the whole body. Keep the grep if what you want is the hit list itself.",
+            hit.symbol
+        ),
+    };
     // Kimi is the one harness where a suggestion cannot arrive as a suggestion. Its `PreToolUse`
     // keeps only results whose `action` is `block` and drops every allow-shaped one before the
     // model sees it, so `additionalContext` there reaches nobody. The contract is therefore
@@ -1061,7 +1088,7 @@ edges added since -- re-run `cort index` first if the answer has to be complete"
             .and_then(Value::as_str)
             .unwrap_or_default();
         if gate_already_fired(session, &hit.symbol) {
-            usage.args_summary = harness_args("hit_yielded");
+            usage.args_summary = hook_args_kind(&harness_args("hit_yielded"), hit.kind.tag());
             return quiet();
         }
         return Ok(Emit {

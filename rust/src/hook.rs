@@ -107,9 +107,9 @@ pub fn evidence_in(
 /// from an index problem from a missing index, and a single `None` collapses all three.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SilenceReason {
-    /// Not the narrow shape where `impact` beats `rg`. The payload is a *stable identifier* for
-    /// the rule that declined -- `pattern_not_symbol`, `context_flag`, `non_source_target`,
-    /// `unindexed_extension`, `concrete_file_read`, `target_not_source` -- so the no_shape bucket
+    /// Not the narrow shape where the index beats `rg`. The payload is a *stable identifier* for
+    /// the rule that declined -- `pattern_not_symbol`, `non_source_target`, `unindexed_extension`,
+    /// `concrete_file_read`, `target_not_source` -- so the no_shape bucket
     /// (83% of hook-suggest rows over the 30d window ending 2026-09-06) becomes attributable rule
     /// by rule instead of one impenetrable number (issue #3). Identifiers, never prose: mining
     /// groups on them, so renaming one is a breaking change to the log's vocabulary.
@@ -128,13 +128,42 @@ pub enum Verdict {
     Silent(SilenceReason),
 }
 
+/// Which subcommand answers this search. The shape gate is the same for both -- one bare symbol in
+/// project source -- and only the agent's stated intent tells them apart: a plain search is asking
+/// who else names the symbol (`impact`), a `-A`/`-B`/`-C` search is asking to read around it
+/// (`context`). Suggesting `impact` to someone who asked for surrounding lines answers a question
+/// they did not ask, which is why that shape was silent until now; suggesting nothing answers
+/// nothing, which is what the 2026-09-01 probe was read as endorsing and never showed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Suggest {
+    /// Who calls it -- `cort impact --symbol`.
+    Impact,
+    /// What is around it -- `cort context`.
+    Context,
+}
+
+impl Suggest {
+    /// The identifier this kind is logged under. Lives beside the enum for the same reason the
+    /// decline tags do: mining groups on these strings, so renaming one is a breaking change to
+    /// the log's vocabulary and must not be reachable from a call site that cannot see that.
+    pub fn tag(self) -> &'static str {
+        match self {
+            Suggest::Impact => "impact",
+            Suggest::Context => "context",
+        }
+    }
+}
+
 /// What the rule concluded about one command.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HookHit {
-    /// The symbol to hand to `cort impact --symbol`.
+    /// The symbol to hand to `cort impact --symbol` or `cort context`.
     pub symbol: String,
     /// Why it fired, for the report; a hit nobody can explain is not evidence.
     pub reason: &'static str,
+    /// Which subcommand the suggestion names. Recorded in `usage.db` beside the outcome, because a
+    /// hit that cannot say which rule produced it cannot be scored against the rule that did.
+    pub kind: Suggest,
 }
 
 /// Paths whose contents are not project source. A search into any of them is orientation over
@@ -178,6 +207,22 @@ fn is_context_flag(token: &str) -> bool {
         return false;
     }
     token.chars().skip(1).any(|c| matches!(c, 'A' | 'B' | 'C'))
+}
+
+/// Does this context flag carry its line count in the *next* token rather than glued to itself?
+///
+/// Only ever asked of a token `is_context_flag` already accepted, so the long arm cannot be reached
+/// by anything but `--context`, `--after-context` and `--before-context`. The distinction matters
+/// twice over: unread, the split form's value becomes the pattern (`grep -A 3 helper` parsed as a
+/// search for `3`), and the glued form has no next token to skip -- swallowing one would eat the
+/// pattern instead.
+fn context_flag_takes_value(token: &str) -> bool {
+    if token.starts_with("--") {
+        return !token.contains('=');
+    }
+    // `-A3` and the cluster `-nB2` end on the digit they carry; `-A` and `-nC` end on the flag
+    // letter and are still waiting for it.
+    matches!(token.chars().next_back(), Some('A' | 'B' | 'C'))
 }
 
 /// A redirection is shell plumbing, not a place to search. Counting `2>/dev/null` as a directory
@@ -306,12 +351,15 @@ pub fn first_segment(command: &str) -> &str {
     command
 }
 
-/// Does `cort impact` answer this search better than the search does?
+/// Does the index answer this search better than the search does?
 ///
 /// Fires only on the narrow shape it can actually beat: one bare symbol, searched in project
 /// source. Everything else -- alternations, phrases, logs, transcripts, build output -- stays with
 /// `rg`, which is what the routing skill already says and what the traffic shows the agent doing
-/// correctly hundreds of times.
+/// correctly hundreds of times. The name predates `Suggest`: since 2026-09-07 the shape it reports
+/// covers both subcommands, and callers that care which one read `hit.kind`. Kept as-is because
+/// renaming it would touch `evals` for no measurement gain -- but a count taken from it is a count
+/// of *routed* searches, not of `impact` suggestions.
 pub fn suggests_impact_shape(command: &str) -> Option<HookHit> {
     match judge(&search_from_shell(command)?, |_| Evidence::Unknown) {
         Verdict::Fire(hit) => Some(hit),
@@ -345,7 +393,7 @@ pub struct Search {
     /// that trailed the pattern, which the source/extension tests read as text.
     pub targets: Vec<String>,
     /// The agent asked for the lines around each match (`-A`/`-B`/`-C`). That is `cort context`'s
-    /// question, not `impact`'s.
+    /// question, not `impact`'s -- it selects the subcommand, it does not silence the hook.
     pub wants_context: bool,
     /// The search descends through directories rather than reading named files.
     pub recursive: bool,
@@ -375,6 +423,15 @@ pub fn search_from_shell(command: &str) -> Option<Search> {
         if t == "-e" || t == "--regexp" {
             idx += 1;
             pattern = tokens.get(idx).cloned();
+        } else if is_context_flag(t) {
+            // Checked before both arms below, and regardless of whether the pattern is already
+            // known, because a context flag is neither. Left to the `pattern.is_none()` arm the
+            // split form's `3` became the pattern; left to the target arm it became a target with
+            // no extension and no glob, which is exactly the shape the single-file gate reads as a
+            // concrete directory. Neither is a place the agent asked to search.
+            if context_flag_takes_value(t) {
+                idx += 1;
+            }
         } else if t.starts_with('-') && pattern.is_none() {
             // A flag that takes a value we must not read as the pattern.
             if t == "--glob" || t == "-g" || t == "--type" || t == "-t" {
@@ -466,14 +523,6 @@ pub fn search_from_grep_fields(
 /// `rg`, which is what the routing skill already says and what the traffic shows the agent doing
 /// correctly hundreds of times.
 pub fn judge(search: &Search, evidence: impl FnOnce(&str) -> Evidence) -> Verdict {
-    // Context intent is checked before pattern quality, deliberately: a split-form flag like
-    // `-A 3` leaves `3` as the parsed pattern (only the glued `-A3` is skipped whole), so a
-    // pattern-quality check would mislabel an agent asking for context as a symbol-extraction
-    // miss. What the agent wanted is the honest decline reason; both are silent either way.
-    if search.wants_context {
-        return Verdict::Silent(SilenceReason::NoShape("context_flag"));
-    }
-
     let Some(symbol) = symbol_of_pattern(&search.pattern) else {
         return Verdict::Silent(SilenceReason::NoShape("pattern_not_symbol"));
     };
@@ -516,8 +565,17 @@ pub fn judge(search: &Search, evidence: impl FnOnce(&str) -> Evidence) -> Verdic
     match evidence(&symbol) {
         Evidence::Neither => Verdict::Silent(SilenceReason::NoEvidence),
         Evidence::NoIndex => Verdict::Silent(SilenceReason::NoIndex),
-        Evidence::Seed | Evidence::RawOnly | Evidence::Unknown => {
-            Verdict::Fire(HookHit { symbol, reason })
-        }
+        Evidence::Seed | Evidence::RawOnly | Evidence::Unknown => Verdict::Fire(HookHit {
+            symbol,
+            reason,
+            // Every gate above is about whether the index can answer *anything* here, and neither
+            // subcommand escapes one: a `-C` search into `node_modules` is as unanswerable as a
+            // plain one. So the flag picks the subcommand and nothing else.
+            kind: if search.wants_context {
+                Suggest::Context
+            } else {
+                Suggest::Impact
+            },
+        }),
     }
 }

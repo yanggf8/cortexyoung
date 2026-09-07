@@ -5,7 +5,7 @@
 
 use cort::hook::{
     evidence_in, judge, search_from_grep_fields, search_from_shell, shell_search_decline,
-    suggests_impact_shape, Evidence, SilenceReason, Verdict,
+    suggests_impact_shape, Evidence, SilenceReason, Suggest, Verdict,
 };
 
 #[test]
@@ -98,8 +98,11 @@ fn the_three_shapes_the_first_probe_run_got_wrong() {
         suggests_impact_shape("grep name backend-rust/crates/core/Cargo.toml | head -1").is_none()
     );
 
-    // 3. Context flags mean the agent is reading the code, not enumerating its callers. Whoever
-    //    asks for 10 lines around a match wants the body, and `cort context` is that verb.
+    // 3. Context flags mean the agent is reading the code, not enumerating its callers. Both of
+    //    these are still silent, but read why before quoting them: since 2026-09-07 the flag routes
+    //    to `cort context` rather than silencing, and what stops these two is the gate underneath --
+    //    each names exactly one file, which is reading on any subcommand. The flag's own effect is
+    //    pinned by `a_context_flag_in_the_fields_routes_to_context_the_way_a_shell_flag_does`.
     assert!(suggests_impact_shape(
         r#"grep -n -B2 -A10 "getVisitorAnalytics" backend/src/services/analyticsService.ts"#
     )
@@ -292,20 +295,87 @@ fn a_bare_symbol_grep_tool_call_fires_the_same_as_its_shell_twin() {
 }
 
 /// The value on `-C` is exactly what a rendering back into a shell line had to throw away. Kimi's
-/// parser keeps it as a flag rather than re-deriving it from text.
+/// parser keeps it as a flag rather than re-deriving it from text -- and since 2026-09-07 that flag
+/// picks the subcommand rather than silencing the hook, on both surfaces alike.
 #[test]
-fn a_context_flag_in_the_fields_silences_it_the_way_a_shell_flag_does() {
+fn a_context_flag_in_the_fields_routes_to_context_the_way_a_shell_flag_does() {
     // {"-C":4,"output_mode":"content","path":"frontend/src","pattern":"updatePaymentStatus"}
     let s = search_from_grep_fields("updatePaymentStatus", Some("frontend/src"), None, true)
         .expect("parses");
-    assert!(
-        matches!(judge(&s, |_| Evidence::Unknown), Verdict::Silent(_)),
-        "a `-C` field is `cort context`'s question, not `impact`'s"
-    );
-    assert!(
-        suggests_impact_shape("rg -C 4 -e 'updatePaymentStatus' frontend/src").is_none(),
-        "and the shell twin must agree"
-    );
+    let Verdict::Fire(hit) = judge(&s, |_| Evidence::Unknown) else {
+        panic!("a `-C` field is `cort context`'s question, and context is a suggestion");
+    };
+    assert_eq!(hit.symbol, "updatePaymentStatus");
+    assert_eq!(hit.kind, Suggest::Context);
+    let twin = suggests_impact_shape("rg -C 4 -e 'updatePaymentStatus' frontend/src")
+        .expect("and the shell twin must agree");
+    assert_eq!(twin.symbol, hit.symbol);
+    assert_eq!(twin.kind, Suggest::Context, "two parsers, one verdict");
+}
+
+/// The same shape without the flag is the other subcommand. Pinned together with the test above
+/// because the pair is the whole claim: one gate, two questions, and the flag is the only thing
+/// that tells them apart.
+#[test]
+fn the_same_search_without_a_context_flag_is_an_impact_suggestion() {
+    let hit = suggests_impact_shape("rg -e 'updatePaymentStatus' frontend/src")
+        .expect("a bare symbol in source still fires");
+    assert_eq!(hit.kind, Suggest::Impact);
+}
+
+/// `-A 3` spells its line count in the next token. Unread, that token became the pattern and the
+/// hook went looking for a symbol called `3` -- which is why the old rule had to check context
+/// intent *before* pattern quality to avoid mislabelling the decline. Reading the value is what
+/// let that ordering go away, so it is pinned at the parser rather than only through `judge`.
+#[test]
+fn a_split_form_context_flag_does_not_donate_its_line_count_to_the_pattern() {
+    for cmd in [
+        "grep -rn -A 3 'helper' src/",
+        "grep -rn -B 3 'helper' src/",
+        "grep -rn --context 3 'helper' src/",
+        "rg -nC 3 'helper' src/",
+    ] {
+        let s = search_from_shell(cmd).unwrap_or_else(|| panic!("parses: {cmd}"));
+        assert_eq!(s.pattern, "helper", "{cmd}");
+        assert!(s.wants_context, "{cmd}");
+        assert_eq!(s.targets, vec!["src/".to_string()], "{cmd}");
+    }
+}
+
+/// The glued forms carry the count on the flag itself, so there is no next token to skip --
+/// swallowing one anyway would have eaten the pattern.
+#[test]
+fn a_glued_context_flag_keeps_the_token_after_it() {
+    for cmd in [
+        "grep -rn -A3 'helper' src/",
+        "grep -rn -nB2 'helper' src/",
+        "grep -rn --context=3 'helper' src/",
+    ] {
+        let s = search_from_shell(cmd).unwrap_or_else(|| panic!("parses: {cmd}"));
+        assert_eq!(s.pattern, "helper", "{cmd}");
+        assert!(s.wants_context, "{cmd}");
+        assert_eq!(s.targets, vec!["src/".to_string()], "{cmd}");
+    }
+}
+
+/// Routing to `context` is not an exemption from the shape gate. Every rejection that applies to a
+/// plain search applies to a `-C` one: the index cannot answer for a language it never parsed, or
+/// for a directory that is not this project's source, whichever subcommand is asked.
+#[test]
+fn a_context_flag_does_not_buy_a_way_past_any_other_gate() {
+    for (cmd, tag) in [
+        (r"grep -rn -A 3 'a\|b' src/", "pattern_not_symbol"),
+        ("grep -rn -A 3 'helper' node_modules/", "non_source_target"),
+        ("grep -rn -A 3 'init' src/main.zig", "unindexed_extension"),
+        ("grep -n -A 3 'helper' src/main.rs", "concrete_file_read"),
+    ] {
+        let s = search_from_shell(cmd).unwrap_or_else(|| panic!("parses: {cmd}"));
+        assert_eq!(
+            judge(&s, |_| Evidence::Seed),
+            Verdict::Silent(SilenceReason::NoShape(tag)),
+            "{cmd}"
+        );
+    }
 }
 
 #[test]
@@ -394,13 +464,18 @@ fn the_verdict_names_which_silence_it_chose() {
 /// of searches; the hook's whole budget is 5s and `git rev-parse` may take 400ms of it.
 #[test]
 fn the_evidence_lookup_is_not_consulted_when_the_shape_gate_rejects() {
-    let s = search_from_shell("grep -rn -A 3 'helper' src/").expect("parses");
+    // An alternation: rejected on pattern quality, which is the first gate and the largest
+    // decline bucket on the corpus (41 of 86 attributable declines on 2026-09-07).
+    let s = search_from_shell(r"grep -rn 'helper\|other' src/").expect("parses");
     let mut consulted = false;
     let v = judge(&s, |_| {
         consulted = true;
         Evidence::Seed
     });
-    assert_eq!(v, Verdict::Silent(SilenceReason::NoShape("context_flag")));
+    assert_eq!(
+        v,
+        Verdict::Silent(SilenceReason::NoShape("pattern_not_symbol"))
+    );
     assert!(
         !consulted,
         "a shape rejection must not open a database or run git"
@@ -559,13 +634,6 @@ fn each_shape_rejection_names_the_rule_that_declined_it() {
     assert_eq!(
         judge(&s, |_| Evidence::Seed),
         Verdict::Silent(SilenceReason::NoShape("pattern_not_symbol"))
-    );
-
-    // -A means "read around the match" -- context work, never caller enumeration.
-    let s = search_from_shell("grep -rn -A 3 'helper' src/").expect("parses");
-    assert_eq!(
-        judge(&s, |_| Evidence::Seed),
-        Verdict::Silent(SilenceReason::NoShape("context_flag"))
     );
 
     // Dependencies are not the project's own call sites.
