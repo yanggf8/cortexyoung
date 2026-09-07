@@ -172,18 +172,24 @@ struct InternalShimArgs {
 
 fn cmd_internal_shim(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, CortError> {
     let a = InternalShimArgs::try_parse_from(args.iter()).map_err(clap_fail)?;
+    // Raw, not JSON: install.sh redirects this stdout straight into the executable file, and a
+    // JSON string there would ship a quoted shim. This is the hook-install-all-lean precedent
+    // (`render_emit`, `main.rs:256-271`) — a machine-read verb needs a raw-rendering branch, not a
+    // payload the shell has to parse back out. Add `Some("internal-shim-lean")` to that match with
+    // the same shape: `payload.get("lean").and_then(Value::as_str)`.
     Ok(Emit {
-        render_command: None,
-        format: Format::Json,
-        payload: json!({ "shim": cort::install::render_shim(&a.cort_home) }),
+        render_command: Some("internal-shim-lean"),
+        format: Format::Lean,
+        payload: json!({ "lean": cort::install::render_shim(&a.cort_home) }),
     })
 }
 ```
 
-Check how `Emit` is constructed for a machine-consumed command (`hook-install --status --lean`
-is the closest precedent — read it rather than inventing a shape). If `payload`/`format` here
-differ from that precedent, match the precedent: install.sh parses this output, so the parse and
-the render are one contract. Add `"internal-shim"` to `KNOWN_COMMANDS` and a usage line marked
+Check how `Emit` is constructed for a machine-consumed command (`hook-install --all --status
+--lean` is the precedent — read `render_emit` first, as above, rather than inventing a shape).
+The earlier draft of this step returned `Format::Json` with the shim inside a JSON string and told
+install.sh to redirect that into the executable — review caught that this ships a quoted shim.
+Add `"internal-shim"` to `KNOWN_COMMANDS` and a usage line marked
 `(installer-invoked: renders the $BIN_DIR/cort shim for a CORT_HOME; not a verb to type)`.
 
 In `install.sh`, replace the heredoc (`:858-868`):
@@ -215,7 +221,13 @@ Expected: PASS.
 2. Change `CORT_VERSION` in `install.sh` to a wrong value. Expected: the version test RED.
 3. Delete `"internal-shim"` from `KNOWN_COMMANDS` while keeping the dispatch arm. Expected: the
    existing `usage_documents_every_command_the_dispatcher_actually_knows` test RED — proving the
-   convention enforces itself. Restore all three.
+   convention enforces itself.
+4. Revert `install.sh` to the heredoc (keep the verb). Expected: **everything stays green** — and
+   that is the gap. Neither new test observes whether the installer actually calls the verb, so a
+   lazy implementation ships the renderer and keeps the old copy. Close it with a third test in
+   `install_facts.rs`: assert `install.sh` source contains the `internal-shim --cort-home` call
+   (via the same `include_str!`; match on the literal `internal-shim`). A test that only checks
+   the renderer proves the home exists, not that anyone lives in it. Restore all four.
 
 - [ ] **Step 6: Verify everything**
 
@@ -280,25 +292,31 @@ fn ast_grep_provenance_names_the_pinned_release_and_its_checksums() {
     assert_eq!(prov.version, "0.45.2");
     assert_eq!(prov.repo, "ast-grep/ast-grep");
     assert_eq!(prov.crate_name, "ast-grep");
-    // Every asset the installer can download carries the checksum the installer verifies.
-    // A new platform asset without a checksum must fail here, not at download time on a user's
-    // machine with `die "no checksum on record"`.
-    for asset in [
-        "app-x86_64-unknown-linux-gnu.zip",
-        "app-aarch64-unknown-linux-gnu.zip",
-        "app-x86_64-apple-darwin.zip",
-        "app-aarch64-apple-darwin.zip",
+    // Exact values, not mere presence: `checksum_for(asset).is_some()` accepts a changed checksum,
+    // an empty checksum, even a constant `Some("")` — a break that keeps every assertion green
+    // while shipping a lie. Each pair below is transcribed from install.sh's table; a single wrong
+    // character must fail.
+    for (asset, sha) in [
+        ("app-x86_64-unknown-linux-gnu.zip", "67aff72dd2994bf152fcc3a8a09cf93b13193abe59f39393095167c729af2015"),
+        ("app-aarch64-unknown-linux-gnu.zip", "TRANSCRIBE-FROM-FILE"),
+        ("app-x86_64-apple-darwin.zip", "TRANSCRIBE-FROM-FILE"),
+        ("app-aarch64-apple-darwin.zip", "TRANSCRIBE-FROM-FILE"),
     ] {
-        assert!(
-            prov.checksum_for(asset).is_some(),
-            "no checksum on record for {asset}"
+        assert_eq!(
+            prov.checksum_for(asset),
+            Some(sha),
+            "wrong or missing checksum for {asset}"
         );
     }
 }
 
 /// install.sh must not name a version, a repo, or a checksum. It queries all three from the
 /// just-built binary. Grep is the enforcement: these strings may appear in install.sh only inside
-/// comments.
+/// comments. The needle list covers every literal the old code held — the version, the repo, and
+/// all four hashes — because checking one hash while three remain is a test that passes around the
+/// defect. The crate name (`ast-grep`) is deliberately absent: it is also the binary name and
+/// appears legitimately throughout the script, so banning the string is unimplementable; its home
+/// is enforced by the provenance test above, not here.
 #[test]
 fn install_sh_names_no_ast_grep_version_repo_or_checksum() {
     let installer = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../install.sh"));
@@ -308,6 +326,9 @@ fn install_sh_names_no_ast_grep_version_repo_or_checksum() {
             "0.45.2",
             "ast-grep/ast-grep",
             "67aff72dd2994bf152fcc3a8a09cf93b13193abe59f39393095167c729af2015",
+            "TRANSCRIBE-HASH-2",
+            "TRANSCRIBE-HASH-3",
+            "TRANSCRIBE-HASH-4",
         ] {
             assert!(
                 !code.contains(needle),
@@ -371,9 +392,11 @@ are placeholders by design — the test only needs one real exhibit, the impleme
 four real ones. Read `install.sh:52-60` and transcribe byte-for-byte; the new test fails on any
 transcription error only if an asset name mismatches, so verify each hash by eye against the file.
 
-Move `AST_GREP_PINNED` from `rust/src/ast_grep.rs:13` into this module and update its three uses
-(`ast_grep.rs:128`, `:140`, `:211`) to `crate::install::AST_GREP_PINNED`. Delete the old constant —
-two names for one pin is the defect wearing a new coat.
+Move `AST_GREP_PINNED` from `rust/src/ast_grep.rs:13` into this module and update its four
+uses (`ast_grep.rs:128`, `:140`, `:211`, `:214`) to `crate::install::AST_GREP_PINNED` — not three;
+review caught the error payload at `:214`. `rust/tests/ast_grep.rs:5` also imports the constant from
+its old home; update that import and add both files to every `git add` and commit list in this task
+that touches them. Delete the old constant — two names for one pin is the defect wearing a new coat.
 
 Add the verb in `rust/src/main.rs` following Task 1 exactly (`KNOWN_COMMANDS`, usage line,
 dispatch arm). Its payload carries version, repo, crate name and the asset table in the same shape
@@ -384,10 +407,13 @@ In `install.sh`:
 
 1. Delete `AST_GREP_VERSION`, `AST_GREP_REPO`, `AST_GREP_CRATE` (`:12-14`) and the whole
    `sha256_for_ast_grep_asset` function (`:52-60`).
-2. Reorder `do_install`: build cort **before** provisioning ast-grep. Concretely, move the
-   `install_ast_grep` call (`:1252`) to after `install_cort` (`:1253`). Everything `install_cort`
-   needs — cargo, the source tree — exists before ast-grep is provisioned, and nothing
-   `install_ast_grep` needs comes from the installed system.
+2. Hoist the build, not the activation. The earlier draft moved the whole `install_cort` call after
+   `install_ast_grep` — but that function also flips the symlink, writes the shim and smokes it, so a
+   subsequent provisioning failure would leave the new generation activated with an old or missing
+   parser. Instead extract the three build lines into `build_cort()` and call it before
+   `install_ast_grep`, keeping the existing call inside `install_cort` (the second run is cargo's
+   documented no-op — the comment at `:784-786` already says an up-to-date tree costs a fraction of
+   a second). Everything `install_cort` needs still precedes it; only the compiler invocation moves.
 3. Inside `install_ast_grep`, replace every use of the deleted variables with values queried once
    from the just-built binary at the top of the function:
    ```bash
@@ -401,6 +427,23 @@ In `install.sh`:
 4. Fix the `do_install` banner (`:1223`), which prints both versions before either is known. Print
    it after the build, from queried values, or drop the versions from it. Do not leave it reading
    deleted variables — under `set -u` that aborts the install.
+5. Fix `do_check`, which this task would otherwise break: it expands `$AST_GREP_VERSION` at
+   `:898`/`:901` but never runs `do_install`, so no queried value can supply it. Query the
+   *installed* binary instead — `$managed_cort internal-ast-grep`, the same `unknown_command`
+   fallback pattern `check_all_hooks` already uses at `:517`: if the installed cort predates the
+   verb, print that the pin cannot be verified rather than comparing against a string that no
+   longer exists. Deleting the variable without touching `do_check` aborts every `--check` under
+   `set -u`.
+6. The parse of the verb output must fail closed: the smoke suite's fake cort answers every unknown
+   command with exit 0 and a generic string, so "exit 0" alone proves nothing. If the output does
+   not parse as the expected shape, print the cannot-verify line — never compare the installed
+   version against an empty pin, which would report MISMATCH on a correct install.
+
+Be honest in the commit message about what the reorder buys: a doomed cargo build now fails before
+the network download and before activation — not "before any mutation", because manifest migration
+still precedes both. And a provisioning failure after activation leaves the new cort running against
+an old or missing ast-grep; that is loud, not silent (`assert_ast_grep_version` fails closed at
+runtime), but it is a real window and the message must not claim otherwise.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -409,11 +452,11 @@ Expected: PASS.
 
 - [ ] **Step 5: Verify each test can actually fail**
 
-1. Change one checksum character in the Rust table. Expected: RED — but note *which* test goes
-   red. If only the provenance test fails and the no-copy test stays green, the implementation is
-   self-consistent and wrong (bash holds nothing, Rust holds a lie). Say so in the report: the
-   pair only detects drift *between* homes, not a lie both agree on. The backstop for a wrong
-   checksum is `verify_sha` failing on a real download, which no test here exercises.
+1. Change one checksum character in the Rust table. Expected: RED on the provenance test —
+   which now asserts exact values, so any single-character change fails. (An earlier draft asserted
+   only `is_some()`, under which this break stayed green while shipping a lie; the honest limit that
+   remains is a synchronized lie — Rust and test changed together — whose backstop is the smoke
+   suite's Test 9 corrupt-download path plus `verify_sha` on a real download.)
 2. Re-add `AST_GREP_VERSION="0.45.2"` to `install.sh` outside a comment. Expected: the no-copy
    test RED.
 3. Swap the `do_install` order back (ast-grep before cort). Expected: the no-copy test still
@@ -432,7 +475,7 @@ already-present path — read those blocks before concluding green means exercis
 - [ ] **Step 7: Commit**
 
 ```bash
-git add rust/src/install.rs rust/src/ast_grep.rs rust/src/main.rs rust/tests/install_facts.rs install.sh
+git add rust/src/install.rs rust/src/ast_grep.rs rust/src/main.rs rust/tests/install_facts.rs rust/tests/ast_grep.rs install.sh
 git commit -m "feat(install): ast-grep provenance lives in Rust
 
 The version, the repo, the crate name and the checksum table lived in bash
@@ -441,8 +484,10 @@ maintenance. All four now live in install.rs, exposed as cort
 internal-ast-grep, and install.sh queries the just-built binary.
 
 do_install builds cort before provisioning ast-grep, so the provenance is
-always read from a binary that exists. That order also fails before mutating:
-previously a doomed cargo build ran after the ast-grep download. A Rust test
+always read from a binary that exists. The build step is hoisted, not the whole install: activation
+still follows provisioning, and a provisioning failure after activation leaves the new cort running
+against an old or missing parser — loud, not silent, because assert_ast_grep_version fails closed,
+but stated here rather than hidden. A Rust test
 asserts install.sh names no version, repo or checksum outside comments."
 ```
 
@@ -451,7 +496,7 @@ asserts install.sh names no version, repo or checksum outside comments."
 ### Task 3: the manifest key-set lives in Rust
 
 **Files:**
-- Modify: `rust/src/install.rs`, `rust/src/main.rs`, `install.sh`
+- Modify: `rust/src/install.rs`, `rust/src/main.rs`, `install.sh` (the `--check` advisory), `tests/install-smoke.sh` (one test for it)
 - Test: `rust/tests/install_facts.rs`
 
 **Interfaces:**
@@ -472,27 +517,45 @@ Append to `rust/tests/install_facts.rs`:
 
 ```rust
 /// install.sh must name a key to write it, so key literals cannot leave the script. What can leave
-/// is the authority over which keys may exist: this set. The test parses every `record_manifest
-/// "key"` literal out of install.sh and asserts membership here. A fresh install that grows a key
-/// this set does not know fails here -- not in uninstall, not in upgrade, where it would surface
-/// as a leaked artifact.
+/// is the authority over which keys may exist: this set. The test parses every write site out of
+/// install.sh and asserts membership here. A fresh install that grows a key this set does not know
+/// fails here -- not in uninstall, not in upgrade, where it would surface as a leaked artifact.
+///
+/// There are two write shapes, and the test covers both, because covering one is how the other
+/// hides: `record_manifest "literal"` writes directly, while `deploy_skill_at src dest "literal"`
+/// flows its third argument into the generic `record_manifest "$key"` call
+/// (`install.sh:456-457`, `:497`). A test that parses only the first shape observes nothing about
+/// the skill keys and passes while they drift.
 #[test]
 fn every_manifest_key_install_sh_writes_is_known() {
     let installer = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../install.sh"));
     let mut unknown = Vec::new();
     for line in installer.lines() {
         let code = line.split('#').next().unwrap_or("");
+        // Shape 1: record_manifest "literal" — skip "$..." (dynamic; covered below via its source).
         let mut rest = code;
         while let Some(start) = rest.find("record_manifest \"") {
             rest = &rest[start + "record_manifest \"".len()..];
             if let Some(end) = rest.find('"') {
                 let key = &rest[..end];
-                if !cort::install::MANIFEST_KEYS.contains(&key) {
+                if !key.starts_with('$')
+                    && !cort::install::MANIFEST_KEYS.contains(&key)
+                {
                     unknown.push(key.to_string());
                 }
                 rest = &rest[end + 1..];
             } else {
                 break;
+            }
+        }
+        // Shape 2: deploy_skill_at src dest "literal" — the literal becomes "$key" downstream.
+        if let Some(start) = code.find("deploy_skill_at ") {
+            let args: Vec<&str> = code[start..].split('"').collect();
+            // args[1], args[3], args[5] are the three quoted arguments; the key is the third.
+            if args.len() >= 6 && !args[5].starts_with('$') {
+                if !cort::install::MANIFEST_KEYS.contains(&args[5]) {
+                    unknown.push(args[5].to_string());
+                }
             }
         }
     }
@@ -502,22 +565,53 @@ fn every_manifest_key_install_sh_writes_is_known() {
     );
 }
 
-/// The same for every key it reads. Legacy keys (renamed by migrate_manifest_v2, never written by
-/// a fresh install) belong to MANIFEST_LEGACY_KEYS, not the main set.
+/// The same for every key it reads. Reads come in three shapes: `manifest_get name` as a bare
+/// word, `manifest_get "name"` quoted, and `manifest_get "$key"` where the key is a loop variable.
+/// The bare and quoted forms are checked directly; the variable form is covered by checking the
+/// loop that feeds it — `for key in hook_settings hook_settings_codex hook_settings_kimi`
+/// (`install.sh:644`) — whose every word must be known. A whitespace-split test observes none of
+/// this: every real call nests inside `$(...)`, so the token after a split is `cort_bin="$(manifest_get`,
+/// never the key. Legacy keys (seen only via `manifest_get`, never written by a fresh install)
+/// belong to MANIFEST_LEGACY_KEYS, not the main set.
 #[test]
 fn every_manifest_key_install_sh_reads_is_known_or_legacy() {
     let installer = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../install.sh"));
     let mut unknown = Vec::new();
     for line in installer.lines() {
         let code = line.split('#').next().unwrap_or("");
-        // `manifest_get <name>` takes a bare word: manifest_get cort_bin, manifest_get skill, ...
-        for token in code.split_whitespace() {
-            // handled below: only inspect the word following manifest_get
+        // Shape 1: manifest_get name or manifest_get "name" — never manifest_get "$var".
+        let mut rest = code;
+        while let Some(start) = rest.find("manifest_get") {
+            rest = &rest[start + "manifest_get".len()..];
+            let arg = rest.trim_start_matches([' ', '\t']);
+            let key = if let Some(q) = arg.strip_prefix('"') {
+                q.split('"').next().unwrap_or("")
+            } else {
+                arg.split([' ', '\t', ')', ';'])
+                    .next()
+                    .unwrap_or("")
+            };
+            if !key.is_empty() && !key.starts_with('$') {
+                if !cort::install::MANIFEST_KEYS.contains(&key)
+                    && !cort::install::MANIFEST_LEGACY_KEYS.contains(&key)
+                {
+                    unknown.push(key.to_string());
+                }
+            }
+            rest = arg;
+            if rest.len() < 2 {
+                break;
+            }
+            rest = &rest[1..];
         }
-        let words: Vec<&str> = code.split_whitespace().collect();
-        for pair in words.windows(2) {
-            if pair[0] == "manifest_get" {
-                let key = pair[1].trim_matches('"');
+        // Shape 2: the loop feeding manifest_get "$key" — every word after `in` is a key.
+        if let Some(in_pos) = code.find("for key in ") {
+            for word in code[in_pos + "for key in ".len()..]
+                .split([' ', '\t', ';'])
+                .map(str::trim)
+                .filter(|w| !w.is_empty() && !w.starts_with('$') && *w != "do" && *w != "{" && *w != "")
+            {
+                let key = word.trim_matches(';');
                 if !cort::install::MANIFEST_KEYS.contains(&key)
                     && !cort::install::MANIFEST_LEGACY_KEYS.contains(&key)
                 {
@@ -573,17 +667,24 @@ pub const MANIFEST_LEGACY_KEYS: &[&str] = &["xg_bin", "skill"];
 ```
 
 **Derive this list; do not trust it.** Run the writers/readers enumeration yourself
-(`grep -oE 'record_manifest "[a-z_]+"' install.sh | sort -u` and the `manifest_get` form) and
-diff it against the list above. The readers include `skill`, `skill_ast_grep`,
-`skill_ast_grep_codex`, `xg_bin` — names with **no** `record_manifest` writer, which is exactly
-why legacy needs its own set: they arrive via `migrate_manifest_v2`, not via a fresh install.
-If your enumeration finds a key in either direction that is not in one of the two lists, the list
-is wrong and the test is what catches it — report the key rather than silently extending the
-list, so the addition gets a second pair of eyes.
+(`grep -oE 'record_manifest "[a-z_]+"' install.sh | sort -u` plus the `deploy_skill_at` third
+arguments, and the `manifest_get` form) and diff it against the list above. Two facts the earlier
+draft of this paragraph got wrong, corrected here: `skill_ast_grep` and `skill_ast_grep_codex` are
+**fresh-install** keys (written through `deploy_skill_at` at `install.sh:1257-1258`), **not**
+migration arrivals — migration renames only `xg_bin` and `skill` (`install.sh:380-392`), so the
+legacy set is exactly those two. If your enumeration finds a key in either direction that is not
+in one of the two lists, the list is wrong and the test is what catches it — report the key
+rather than silently extending the list, so the addition gets a second pair of eyes.
 
 Add the verb in `rust/src/main.rs` following Tasks 1-2 exactly (`KNOWN_COMMANDS`, usage line,
 dispatch arm). Its payload is the two lists in the hook-status shape — same parsing convention as
-the other two verbs, not a third.
+the other two verbs, not a third. And it gets a real caller today, not just a future one: `do_check`
+gains an advisory line reporting manifest keys the binary knows nowhere (parsed from the verb
+output; unknown keys never fail the check — they are information, and failing on them would strand
+machines whose manifests predate this release). Fall back with the `unknown_command` message when
+the installed binary predates the verb, following the pattern `check_all_hooks` already uses. Add a
+smoke assertion for that advisory line using a manifest that carries one unknown key — back it up
+first and restore it afterwards, the way the manifest tests isolate their fixtures.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -593,14 +694,16 @@ Expected: PASS.
 - [ ] **Step 5: Verify each test can actually fail**
 
 1. Add `record_manifest "smoke_probe" "value"` anywhere in `install.sh` outside a comment.
-   Expected: the writes test RED naming `smoke_probe`.
-2. Remove `"hook_settings_kimi"` from `MANIFEST_KEYS`. Expected: **both** tests RED —
-unlike what an earlier draft of this step predicted, every `hook_settings_*` key is both written
-(the `case` at `install.sh:603-605` writes all three) and read. If only one goes red, the other
-test is not observing what it claims; report that instead of restoring.
+   Expected: the writes test RED naming `smoke_probe` — through the literal arm, which is also
+   what proves the `deploy_skill_at` arm is not the only one working.
+2. Remove `"hook_settings_kimi"` from `MANIFEST_KEYS`. Expected: **both** tests RED. Every
+   `hook_settings_*` key is written (the `case` at `install.sh:603-605`) and read, so a removal
+   must fail on both sides; if only one goes red, the other test is not observing what it claims.
 3. Delete the empty `for token` loop as instructed. Expected: still green — it was dead code in
    a test, and its removal must not change the verdict. If anything goes red, the loop was load-
    bearing and the plan misunderstood it; report that instead of restoring it.
+4. Remove the `--check` advisory call (keep the verb). Expected: the new smoke test RED — proving
+   the advisory is observed, not merely printed somewhere nothing reads.
 
 - [ ] **Step 6: Verify everything**
 
@@ -609,7 +712,7 @@ Same commands as Task 1 Step 6. All exit 0.
 - [ ] **Step 7: Commit**
 
 ```bash
-git add rust/src/install.rs rust/src/main.rs rust/tests/install_facts.rs
+git add rust/src/install.rs rust/src/main.rs rust/tests/install_facts.rs install.sh tests/install-smoke.sh
 git commit -m "feat(install): the manifest key-set lives in Rust
 
 install.sh must name a key to write it, so the literals stay in the script.
@@ -618,7 +721,9 @@ a fresh install writes, MANIFEST_LEGACY_KEYS for what old manifests may hold.
 Two Rust tests parse install.sh source and assert every written key is in the
 first set and every read key is in one of the two. A fresh install that grows
 a key Rust does not know fails the build -- not uninstall, not upgrade, where
-it would surface as a leaked artifact."
+it would surface as a leaked artifact. The verb gets a caller today rather
+than waiting for 3c: --check reports manifest keys no release knows, advisory
+only, so the key-set is consumed authority rather than a list with tests."
 ```
 
 ---
@@ -637,12 +742,11 @@ key leaking through uninstall or upgrade) is caught at exactly the point where t
 The plan says this in Task 3's own Interfaces-adjacent paragraph so a reviewer meets it before the
 code, not after.
 
-**Known gap, recorded rather than hidden.** Task 2 Step 5 break 1 admits its own limit in the open:
-if Rust holds a wrong checksum, both tests stay green — the pair detects drift *between* homes, not
-a lie both agree on. The backstop is `verify_sha` failing on a real download, which no test here
-exercises because the smoke suite has no network. A wrong checksum surfaces on the first real
-install from the new tree, which is fail-closed (`die "no checksum on record"` no longer applies,
-but `verify_sha`'s mismatch path does).
+**Known gap, recorded rather than hidden.** A synchronized lie — the Rust table and the test
+needles changed together — stays green by construction; the tests detect drift *between* homes,
+not a falsehood both agree on. Two backstops, both real: the smoke suite's Test 9 corrupt-download
+path (which exercises `verify_sha` failing, though with corrupt bytes rather than a wrong table),
+and `verify_sha` on the first real download from the new tree, which is fail-closed.
 
 **Placeholders:** the Task 2 checksum table carries two deliberately marked placeholder hashes with
 an instruction to transcribe from the file — that is a transcription task with its verification
@@ -654,3 +758,49 @@ approach in place so nobody re-derives it.
 AstGrepProvenance` with `checksum_for(&self, asset: &str) -> Option<&'static str>`;
 `MANIFEST_KEYS: &[&str]`, `MANIFEST_LEGACY_KEYS: &[&str]`; three verbs named
 `internal-shim`, `internal-ast-grep`, `internal-manifest-keys`.
+
+---
+
+## What the review changed (Codex, 2026-09-07)
+
+Nine findings; all nine verified against source before accepting, seven fully, one partially, one
+refuted as stated but true underneath. The plan above already incorporates every accepted one — what
+follows is the record, so a future reader can tell which sentences exist because review put them
+there.
+
+1. **The writer test captured `$key`.** `deploy_skill_at` takes the key as `$3`
+   (`install.sh:456-457`) and writes it via the generic `record_manifest "$key"` (`:497`), so the
+   test as written failed on unchanged legitimate code — and worse, the real skill keys at
+   `:1257-1258` flow through that same variable. Fixed by covering both shapes: literals, plus
+   `deploy_skill_at` third arguments.
+2. **The reader test observed zero reads.** Every real `manifest_get` nests inside `$(...)`, so a
+   whitespace split never yields the key as a token. Fixed with a targeted parse (bare/quoted
+   argument after the command name, `$`-prefixed skipped) plus the `:644` loop words.
+3. **`do_check` would have broken under `set -u`.** It expands `$AST_GREP_VERSION` (`:898`/`:901`)
+   but never runs `do_install`. Fixed by querying the installed binary with the same
+   `unknown_command` fallback `check_all_hooks` already uses.
+4. **The constant move missed a use and a file.** `ast_grep.rs:214` is a fourth production use, and
+   `rust/tests/ast_grep.rs:5` imports the constant — neither was in the task's file lists. Both are
+   now named, including in the commit.
+5. **The shim verb had no render path.** `Format::Json` would have shipped a quoted shim; the
+   machine-read precedent (`hook-install-all-lean`, `main.rs:259-267`) is raw TSV through a
+   `render_emit` arm. The verb now follows it, and a fourth break (revert to the heredoc, watch
+   nothing go red) became a consumption test asserting `install.sh` invokes the verb.
+6. **The checksum break could not go red.** `is_some()` accepts any value, so a one-character change
+   stays green — a Step-5 prediction the plan made and its own Self-Review contradicted in the same
+   file. Fixed by asserting exact values for all four assets; the remaining synchronized-lie limit
+   is stated plainly with its two real backstops.
+7. **Partially accepted: guarded duplication.** The reviewer is right that the verb had no caller
+   and the membership tests prove less than the architecture claimed. Fixed by giving the verb a
+   real one: `--check` reports unknown manifest keys, advisory only. What is *not* accepted is the
+   demand that authority mean consumption everywhere — a writer must name what it writes, and the
+   enforced-set-plus-advisory design is stated as such rather than reworded to sound stronger.
+8. **Accepted and added: the lazy Task 1.** A renderer plus an unused verb passes every test the
+   plan had. There is now a consumption test (break 4 above).
+9. **Three false statements corrected.** The skill keys arrive via fresh install
+   (`deploy_skill_at`, `:1257-1258`), not via migration — only `xg_bin`/`skill` do, so the legacy
+   set is exactly those two. Moving `install_cort` would move activation, not just the build — so
+   the plan hoists only the three build lines, and says honestly that a provisioning failure after
+   activation is loud (`assert_ast_grep_version`) rather than claiming nothing can go wrong. And the
+   "backstop untested" claim was wrong: the smoke suite's Test 9 corrupt-download path does exercise
+   `verify_sha` failing.
