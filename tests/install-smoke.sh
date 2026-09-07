@@ -154,15 +154,16 @@ assert_contains "$HOME/.local/share/cortexyoung/manifest" "cort_bin:" "cort_bin 
 # place keeps its inode, so this is the mechanism itself rather than a proxy for it.
 MANIFEST="$HOME/.local/share/cortexyoung/manifest"
 before_ino="$(inode_of "$MANIFEST")"
-before_body="$(cat "$MANIFEST")"
 # `set --` clears the caller's positional parameters: install.sh's argument parser runs on source
 # and would `exit 2` on any argument the smoke script itself was given. The MANIFEST_* assignments
 # come AFTER the source, because sourcing re-runs the constants block (install.sh:21-22) and would
-# overwrite them.
-( set --; SOURCE_ONLY=1
+# overwrite them. All three are `export`ed, not merely assigned: shellcheck cannot see the reader
+# (record_manifest lives in install.sh), and SC2034 reads an assigned-but-locally-unread variable
+# as dead even when it is the whole point of the subshell.
+( set --; export SOURCE_ONLY=1
   # shellcheck disable=SC1090
   . "$INSTALL_SH"
-  MANIFEST_FILE="$MANIFEST"; MANIFEST_DIR="$(dirname "$MANIFEST")"
+  export MANIFEST_FILE="$MANIFEST"; export MANIFEST_DIR="$(dirname "$MANIFEST")"
   record_manifest "smoke_probe" "value" )
 after_ino="$(inode_of "$MANIFEST")"
 if [ "$before_ino" != "$after_ino" ]; then
@@ -180,13 +181,13 @@ done
 # recognises as ours. Both must be replaced, so both inodes are checked.
 SK_DIR="$(mktemp -d)"
 printf 'seed\n' > "$SK_DIR/SKILL.md"
-( set --; SOURCE_ONLY=1
+( set --; export SOURCE_ONLY=1
   # shellcheck disable=SC1090
   . "$INSTALL_SH"
   write_skill "$REPO_ROOT/skills/ast-grep/SKILL.md" "$SK_DIR/SKILL.md" )
 sk_ino="$(inode_of "$SK_DIR/SKILL.md")"
 st_ino="$(inode_of "$SK_DIR/$STAMP_NAME")"
-( set --; SOURCE_ONLY=1
+( set --; export SOURCE_ONLY=1
   # shellcheck disable=SC1090
   . "$INSTALL_SH"
   write_skill "$REPO_ROOT/skills/ast-grep/SKILL.md" "$SK_DIR/SKILL.md" )

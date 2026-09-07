@@ -2106,7 +2106,11 @@ fn drift_outranks_unreadable_and_each_count_stands_alone() {
 fn a_drifted_index_whose_directory_is_gone_is_still_counted_as_drift() {
     let (_p, _cwd, _c, cache) = sandbox();
     let gone = tempfile::tempdir().unwrap();
-    let gone_path = gone.path().to_path_buf();
+    // Canonicalize like `make_project` does: the CLI canonicalizes root before hashing it into
+    // a project id, and on macOS the temp dir arrives through a symlink (`/var` -> `/private/var`).
+    // Hashing the raw path opens a db file that was never written -- an empty file sqlite creates
+    // on open, so `set_meta` dies on `no such table` instead of testing anything.
+    let gone_path = fs::canonicalize(gone.path()).unwrap();
     std::fs::write(
         gone_path.join("a.ts"),
         "export function a() { return 1; }\n",
