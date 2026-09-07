@@ -10,7 +10,6 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
-pub const AST_GREP_PINNED: &str = "0.45.2";
 pub const SUBPROCESS_TIMEOUT_MS: u64 = 30_000;
 
 #[derive(Debug, Default, Clone)]
@@ -125,7 +124,7 @@ pub fn resolve_ast_grep_bin() -> Result<String, CortError> {
         }
         // Prefer a binary that actually matches the pin over merely the first one found; a stale
         // 0.44.x on PATH must not shadow the pinned copy sitting next to cort.
-        if found.as_deref() == Some(AST_GREP_PINNED) {
+        if found.as_deref() == Some(crate::install::AST_GREP_PINNED) {
             return Ok(candidate.clone());
         }
     }
@@ -137,7 +136,7 @@ pub fn resolve_ast_grep_bin() -> Result<String, CortError> {
             "ast_grep_version_mismatch",
             json!({
                 "found": found.unwrap_or_else(|| "unparsable".to_string()),
-                "expected": AST_GREP_PINNED,
+                "expected": crate::install::AST_GREP_PINNED,
                 "candidate": candidate,
             }),
         )),
@@ -208,10 +207,10 @@ pub fn ast_grep_version(bin: &str) -> Result<String, CortError> {
 
 pub fn assert_ast_grep_version(bin: &str) -> Result<(), CortError> {
     let found = ast_grep_version(bin)?;
-    if found != AST_GREP_PINNED {
+    if found != crate::install::AST_GREP_PINNED {
         return Err(CortError::new(
             "ast_grep_version_mismatch",
-            json!({ "found": found, "expected": AST_GREP_PINNED }),
+            json!({ "found": found, "expected": crate::install::AST_GREP_PINNED }),
         ));
     }
     Ok(())

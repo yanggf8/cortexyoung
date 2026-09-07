@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 // `hook-suggest` is here so its rows are recorded under their own name rather than `_unknown`:
 // whether the harness hook fires, and whether a fire is followed by an `impact` call, is the one
 // measurement that has a numerator. It is not a verb anyone types.
-const KNOWN_COMMANDS: [&str; 13] = [
+const KNOWN_COMMANDS: [&str; 16] = [
     "index",
     "status",
     "projects",
@@ -43,6 +43,9 @@ const KNOWN_COMMANDS: [&str; 13] = [
     "hook-suggest",
     "hook-refresh",
     "hook-install",
+    "internal-shim",
+    "internal-ast-grep",
+    "internal-manifest-keys",
 ];
 
 fn usage_value() -> Value {
@@ -62,6 +65,9 @@ fn usage_value() -> Value {
             "hook-suggest": "cort hook-suggest  (PreToolUse hook: reads the harness payload on stdin, prints a suggestion or nothing; not a verb to type)",
             "hook-refresh": "cort hook-refresh  (PostToolUse hook: brings this project's index up to the tree after an edit; silent, never creates an index; not a verb to type)",
             "hook-install": "cort hook-install [--settings <path>] [--command <cmd>] [--remove|--status]  (installer-invoked: wires hook-suggest into settings.json; not a verb to type)",
+            "internal-shim": "cort internal-shim --cort-home <dir>  (installer-invoked: renders the $BIN_DIR/cort shim for a CORT_HOME; not a verb to type)",
+            "internal-ast-grep": "cort internal-ast-grep  (installer-invoked: prints the pinned ast-grep release and its checksums as lean TSV; not a verb to type)",
+            "internal-manifest-keys": "cort internal-manifest-keys  (installer-invoked: prints known and legacy manifest keys as lean TSV; not a verb to type)",
         },
         "env": {
             "CORT_CACHE_DIR": "where indexes live (default ~/.cache/cortex-ng)",
@@ -256,7 +262,9 @@ fn finish_record(ev: &UsageEvent, status: &str, error_code: Option<&str>, bytes_
 fn render_emit(emit: &Emit) -> String {
     if emit.render_command == Some("usage") && emit.format == Format::Lean {
         usage::render_usage_lean(&emit.payload)
-    } else if emit.render_command == Some("hook-install-all-lean") {
+    } else if emit.render_command == Some("hook-install-all-lean")
+        || emit.render_command == Some("internal-shim-lean")
+    {
         // Emitted raw. Wrapping these lines in a JSON string would put the installer back where it
         // started -- reaching into a serialised object with a regex -- which is the whole thing
         // `--all --lean` exists to stop.
@@ -445,6 +453,17 @@ struct ProjectsArgs {
     disable_help_flag = true,
     disable_version_flag = true
 )]
+struct InternalShimArgs {
+    #[arg(long = "cort-home")]
+    cort_home: String,
+}
+
+#[derive(Parser, Debug)]
+#[command(
+    no_binary_name = true,
+    disable_help_flag = true,
+    disable_version_flag = true
+)]
 struct StructArgs {
     #[arg(short = 'p', long = "pattern")]
     pattern: Option<String>,
@@ -564,6 +583,9 @@ fn dispatch(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError> 
         Some("hook-suggest") => cmd_hook_suggest(&args[1..], usage),
         Some("hook-refresh") => cmd_hook_refresh(&args[1..], usage),
         Some("hook-install") => cmd_hook_install(&args[1..], usage),
+        Some("internal-shim") => cmd_internal_shim(&args[1..], usage),
+        Some("internal-ast-grep") => cmd_internal_ast_grep(usage),
+        Some("internal-manifest-keys") => cmd_internal_manifest_keys(usage),
         other => Err(CortError::new(
             "unknown_command",
             json!({
@@ -1491,6 +1513,40 @@ fn remove_from(fmt: SettingsFormat, path: &Path) -> Result<cort::settings::Outco
         SettingsFormat::KimiToml => settings_kimi::remove_hook(path).map_err(map_toml_settings_err),
         SettingsFormat::Json => settings::remove_hook(path).map_err(map_json_settings_err),
     }
+}
+
+fn cmd_internal_shim(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, CortError> {
+    let a = InternalShimArgs::try_parse_from(args.iter()).map_err(clap_fail)?;
+    Ok(Emit {
+        render_command: Some("internal-shim-lean"),
+        format: Format::Lean,
+        payload: json!({ "lean": cort::install::render_shim(&a.cort_home) }),
+    })
+}
+
+fn cmd_internal_ast_grep(_usage: &mut UsageEvent) -> Result<Emit, CortError> {
+    let prov = cort::install::ast_grep_provenance();
+    Ok(Emit {
+        render_command: Some("internal-ast-grep"),
+        format: Format::Lean,
+        payload: json!({
+            "version": prov.version,
+            "repo": prov.repo,
+            "crate": prov.crate_name,
+            "assets": prov.assets.iter().map(|(a, s)| json!([a, s])).collect::<Vec<_>>(),
+        }),
+    })
+}
+
+fn cmd_internal_manifest_keys(_usage: &mut UsageEvent) -> Result<Emit, CortError> {
+    Ok(Emit {
+        render_command: Some("internal-manifest-keys"),
+        format: Format::Lean,
+        payload: json!({
+            "known": cort::install::MANIFEST_KEYS,
+            "legacy": cort::install::MANIFEST_LEGACY_KEYS,
+        }),
+    })
 }
 
 fn cmd_hook_install(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, CortError> {

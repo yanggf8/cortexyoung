@@ -837,6 +837,28 @@ assert_contains /tmp/smoke19d.log "indexes: compatibility unknown (unparsable ve
 assert_not_contains /tmp/smoke19d.log "x owe a full rebuild" \
   "--check must not print a non-numeric count as a measurement"
 
+# The key-set verb needs a real caller today, not just a future one: --check reports manifest keys
+# no release knows, advisory only. Back the manifest up first — the unknown key is a probe, not
+# state to keep — and restore it afterwards, or every later --check in this suite would nag about
+# it.
+MANIFEST_BACKUP="$(mktemp)"
+cp "$HOME/.local/share/cortexyoung/manifest" "$MANIFEST_BACKUP"
+printf 'future_key:some-value\n' >> "$HOME/.local/share/cortexyoung/manifest"
+cat > "$MANAGED_CORT" <<'FAKEKEYSCORT'
+#!/usr/bin/env bash
+if [ "$1" = "internal-manifest-keys" ]; then
+  printf 'known\tmanifest_version\nknown\tcort_bin\n'
+  exit 0
+fi
+echo "cort 0.1.0 (rust)"
+FAKEKEYSCORT
+chmod +x "$MANAGED_CORT"
+bash "$INSTALL_SH" --check > /tmp/smoke19e.log 2>&1 || true
+assert_contains /tmp/smoke19e.log "manifest: holds keys no release knows:" \
+  "--check names manifest keys no release knows instead of silently passing them"
+cp "$MANIFEST_BACKUP" "$HOME/.local/share/cortexyoung/manifest"
+rm -f "$MANIFEST_BACKUP"
+
 cp "$TMPHOME/cort.real" "$MANAGED_CORT"
 
 # A newer cort earlier in PATH must not answer for the hook: the wired command names the managed

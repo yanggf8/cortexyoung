@@ -2,8 +2,9 @@
 
 use cort::ast_grep::{
     assert_ast_grep_version, ast_grep_candidates, ast_grep_version, exec_ast_grep,
-    resolve_ast_grep_bin, ExecOpts, AST_GREP_PINNED,
+    resolve_ast_grep_bin, ExecOpts,
 };
+use cort::install::AST_GREP_PINNED;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;

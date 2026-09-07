@@ -9,9 +9,6 @@ set -euo pipefail
 VERSION="0.7.0"
 REPO="momokun7/xgrep"
 CRATE="xgrep-search"
-AST_GREP_VERSION="0.45.2"
-AST_GREP_REPO="ast-grep/ast-grep"
-AST_GREP_CRATE="ast-grep"
 CORT_VERSION="0.1.0"
 # Ownership text, written into a stamp file NEXT TO a deployed SKILL.md. It is deliberately not
 # written into SKILL.md itself (F-19): that document is input to two third-party frontmatter
@@ -49,16 +46,6 @@ CODEX_SKILL_DEST="${CODEX_HOME:-$HOME/.codex}/skills/ast-grep/SKILL.md"
 WITH_HOOK=1
 WITH_XGREP=0
 
-sha256_for_ast_grep_asset() {
-  case "$1" in
-    app-x86_64-unknown-linux-gnu.zip)  echo "67aff72dd2994bf152fcc3a8a09cf93b13193abe59f39393095167c729af2015" ;;
-    app-aarch64-unknown-linux-gnu.zip) echo "e67ee2f5928b4d77a472114edf6e227d90fefe22fa47e7a78db187c55d206564" ;;
-    app-x86_64-apple-darwin.zip)       echo "037e5b4a9aed2ba03a2b4710e4fe3439d5d1154d1266d5e8f9f6df7452169181" ;;
-    app-aarch64-apple-darwin.zip)      echo "1fc21214234bf6f5a3f841d5b2493a4fc4b6087f69b055c9ad5f94f77c0ab76e" ;;
-    *) echo "" ;;
-  esac
-}
-
 FORCE=0; WITH_RUSTUP=0; MODE="install"
 
 for arg in "$@"; do
@@ -86,6 +73,9 @@ done
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SKILL_SRC="$SCRIPT_DIR/$SKILL_SRC_REL"
+# The fresh binary every installer-invoked verb is queried from. Defined once here so the build
+# step and the provisioning step cannot disagree about which artifact they mean.
+CRATE_BIN="$SCRIPT_DIR/rust/target/release/cort"
 
 # ── helpers ──────────────────────────────────────────────────────────
 die()  { echo "error: $*" >&2; exit 1; }
@@ -745,18 +735,43 @@ install_xg() {
   fi
 }
 
+# build_cort: compile the release binary every installer-invoked verb is queried from.
+# Called before anything that queries it. install_cort calls it again below; the second run is
+# cargo's documented no-op on an up-to-date tree (a fraction of a second), kept so install_cort
+# stays self-sufficient when read on its own.
+build_cort() {
+  # Always ask cargo to build. Cargo owns freshness: an up-to-date tree costs a fraction of a
+  # second, while "does the artifact exist?" does not — `git pull` leaves rust/target/ (ignored)
+  # in place, so an existence check would happily ship the previous build's binary.
+  command -v cargo >/dev/null 2>&1 || die "cort needs cargo (rustup) to build — rerun with --with-rustup"
+  info "building cort (cargo build --release --locked)"
+  ( cd "$SCRIPT_DIR/rust" && cargo build --release --locked ) || die "cargo build --release failed"
+  [ -x "$CRATE_BIN" ] || die "cort binary missing after build: $CRATE_BIN"
+}
+
 install_ast_grep() {
+  # Provenance comes from the just-built binary (`rust/src/install.rs`), never from a string in
+  # this script and never from the installed cort, which may be the generation being replaced.
+  local prov prov_version prov_repo prov_crate
+  prov="$("$CRATE_BIN" internal-ast-grep 2>/dev/null)" \
+    || die "fresh cort binary cannot report ast-grep provenance"
+  prov_version="$(printf '%s\n' "$prov" | awk -F'\t' '$1=="version" {print $2}')"
+  prov_repo="$(printf '%s\n' "$prov" | awk -F'\t' '$1=="repo" {print $2}')"
+  prov_crate="$(printf '%s\n' "$prov" | awk -F'\t' '$1=="crate" {print $2}')"
+  [ -n "$prov_version" ] && [ -n "$prov_repo" ] && [ -n "$prov_crate" ] \
+    || die "fresh cort binary reported unusable ast-grep provenance"
   if command -v ast-grep >/dev/null 2>&1 \
-     && [ "$(ast-grep --version | awk '{print $2}')" = "$AST_GREP_VERSION" ]; then
-    info "ast-grep $AST_GREP_VERSION already present"
+     && [ "$(ast-grep --version | awk '{print $2}')" = "$prov_version" ]; then
+    info "ast-grep $prov_version already present"
     return 0
   fi
   if command -v sg >/dev/null 2>&1 && ! sg --version 2>/dev/null | grep -q '^ast-grep '; then
     info "ignoring unrelated 'sg' on PATH (not ast-grep)"
   fi
   local asset="app-${TARGET}.zip"
-  local url="https://github.com/${AST_GREP_REPO}/releases/download/${AST_GREP_VERSION}/${asset}"
-  local expected; expected="$(sha256_for_ast_grep_asset "$asset")"
+  local url="https://github.com/${prov_repo}/releases/download/${prov_version}/${asset}"
+  local expected
+  expected="$(printf '%s\n' "$prov" | awk -F'\t' -v a="$asset" '$1=="asset" && $2==a {print $3}')"
   [ -n "$expected" ] || die "no checksum on record for $asset"
   local tmpdir; tmpdir="$(mktemp -d)"
   if download "$url" "$tmpdir/$asset"; then
@@ -768,26 +783,20 @@ install_ast_grep() {
     install -m 755 "$tmpdir/ast-grep" "$BIN_DIR/ast-grep"
     record_manifest "ast_grep_bin" "$BIN_DIR/ast-grep"
   else
-    command -v cargo >/dev/null 2>&1 || die "download failed and cargo not found; ast-grep $AST_GREP_VERSION needs Rust 1.88+"
-    cargo install "$AST_GREP_CRATE" --version "$AST_GREP_VERSION" --locked \
-      || die "cargo install ast-grep failed; ast-grep $AST_GREP_VERSION requires Rust 1.88+"
+    command -v cargo >/dev/null 2>&1 || die "download failed and cargo not found; ast-grep $prov_version needs Rust 1.88+"
+    cargo install "$prov_crate" --version "$prov_version" --locked \
+      || die "cargo install ast-grep failed; ast-grep $prov_version requires Rust 1.88+"
     record_manifest "ast_grep_bin" "$(command -v ast-grep)"
   fi
   rm -rf "$tmpdir"
-  [ "$(ast-grep --version | awk '{print $2}')" = "$AST_GREP_VERSION" ] \
+  [ "$(ast-grep --version | awk '{print $2}')" = "$prov_version" ] \
     || die "ast-grep version mismatch after install"
 }
 
 install_cort() {
-  local crate_bin="$SCRIPT_DIR/rust/target/release/cort"
+  local crate_bin="$CRATE_BIN"
 
-  # Always ask cargo to build. Cargo owns freshness: an up-to-date tree costs a fraction of a
-  # second, while "does the artifact exist?" does not — `git pull` leaves rust/target/ (ignored)
-  # in place, so an existence check would happily ship the previous build's binary.
-  command -v cargo >/dev/null 2>&1 || die "cort needs cargo (rustup) to build — rerun with --with-rustup"
-  info "building cort (cargo build --release --locked)"
-  ( cd "$SCRIPT_DIR/rust" && cargo build --release --locked ) || die "cargo build --release failed"
-  [ -x "$crate_bin" ] || die "cort binary missing after build: $crate_bin"
+  build_cort
 
   # Stage the whole generation, validate it, then activate with one rename of the symlink. Nothing
   # ever observes a partial CORT_HOME: the link points at the old generation until the instant it
@@ -856,11 +865,11 @@ install_cort() {
 
   mkdir -p "$BIN_DIR"
   local shim="$BIN_DIR/cort"
-  cat > "$shim.tmp" <<SHIM
-#!/usr/bin/env bash
-if [ "\$1" = "--version" ]; then echo "cort $CORT_VERSION (rust)"; exit 0; fi
-CORT_PACK_DIR="$CORT_HOME/pack" exec "$CORT_HOME/cort" "\$@"
-SHIM
+  # The template lives in Rust (`rust/src/install.rs::render_shim`); this script holds no copy of
+  # it. Queried from the just-built binary, never from the installed one — the installed cort may
+  # be the generation being replaced.
+  "$crate_bin" internal-shim --cort-home "$CORT_HOME" > "$shim.tmp" 2>/dev/null \
+    || die "fresh cort binary cannot render its own shim"
   chmod 755 "$shim.tmp"
   mv "$shim.tmp" "$shim"
   record_manifest "cort_bin" "$shim"
@@ -875,6 +884,18 @@ SHIM
 do_check() {
   local ok=1
   echo "=== cortexyoung --check ==="
+  # The manifest is the record of what was installed; resolve_bin_dir is the fallback before
+  # there is one. Resolved once up here (rather than where the hooks are checked) because the
+  # ast-grep pin below is also queried from this binary. An absolute path, so on a machine
+  # carrying two copies -- a newer one earlier in PATH -- the PATH copy would answer for a hook
+  # that fires the other one, and --check would print OK about a binary it never asked. That
+  # divergence is the thing this line exists to catch.
+  local managed_cort
+  managed_cort="$(manifest_get cort_bin)"
+  if [ -z "$managed_cort" ]; then
+    resolve_bin_dir
+    managed_cort="$BIN_DIR/cort"
+  fi
   # cort
   if command -v cort >/dev/null 2>&1; then
     local ver
@@ -895,11 +916,21 @@ do_check() {
     local ver
     ver="$(ast-grep --version 2>&1 | head -1)"
     echo "ast-grep: $ver ($(command -v ast-grep))"
-    if echo "$ver" | grep -qF "$AST_GREP_VERSION"; then
-      echo "  pinned version $AST_GREP_VERSION: OK"
+    # The pin lives in Rust now; --check never runs the build, so it asks the installed binary.
+    # A binary predating the verb cannot answer -- that is reported, not compared against a string
+    # that no longer exists anywhere.
+    local pin_out pin
+    if pin_out="$("$managed_cort" internal-ast-grep 2>/dev/null)" \
+      && pin="$(printf '%s\n' "$pin_out" | awk -F'\t' '$1=="version" {print $2}')" \
+      && [ -n "$pin" ]; then
+      if echo "$ver" | grep -qF "$pin"; then
+        echo "  pinned version $pin: OK"
+      else
+        echo "  pinned version $pin: MISMATCH (expected $pin)"
+        ok=0
+      fi
     else
-      echo "  pinned version $AST_GREP_VERSION: MISMATCH (expected $AST_GREP_VERSION)"
-      ok=0
+      echo "  pinned version cannot be verified (installed cort predates internal-ast-grep)"
     fi
   else
     echo "ast-grep: NOT FOUND in PATH"
@@ -928,16 +959,7 @@ do_check() {
   # Read-only: --status never writes. A skill deployed without the hook is half the routing, and
   # --check is the only place that can say so before the numbers go missing.
   # Ask the binary this installation owns, not whatever `cort` PATH resolves to. `deploy_hook` wires
-  # an absolute path, so on a machine carrying two copies -- a newer one earlier in PATH -- the PATH
-  # copy would answer for a hook that fires the other one, and --check would print OK about a binary
-  # it never asked. That divergence is the thing this line exists to catch. The manifest is the
-  # record of what was installed; resolve_bin_dir is the fallback before there is one.
-  local managed_cort
-  managed_cort="$(manifest_get cort_bin)"
-  if [ -z "$managed_cort" ]; then
-    resolve_bin_dir
-    managed_cort="$BIN_DIR/cort"
-  fi
+  # (managed_cort was resolved at the top of do_check, where the ast-grep pin also needs it.)
   if [ -x "$managed_cort" ]; then
     # One query, six answers, and the same table the deploy used -- so --check cannot disagree with
     # the installer about which files exist, which is a way this pair has been wrong before. Every
@@ -1041,6 +1063,21 @@ do_check() {
     fi
   else
     echo "indexes: compatibility unknown — installed cort predates \`cort projects --verdict\`"
+  fi
+  # Manifest keys no release knows. The authoritative set lives in Rust
+  # (`rust/src/install.rs::MANIFEST_KEYS`); an unknown key is information, never a failure --
+  # failing here would strand machines whose manifests predate this release.
+  if key_out="$("$managed_cort" internal-manifest-keys 2>/dev/null)"; then
+    local unknown_keys="" key
+    while IFS=: read -r key _; do
+      [ -n "$key" ] || continue
+      if ! printf '%s\n' "$key_out" | awk -F'\t' -v k="$key" '$2==k {found=1} END {exit !found}'; then
+        unknown_keys="$unknown_keys $key"
+      fi
+    done < <(cut -d: -f1 "$MANIFEST_FILE" 2>/dev/null | sort -u)
+    if [ -n "$unknown_keys" ]; then
+      echo "manifest: holds keys no release knows:$unknown_keys"
+    fi
   fi
     echo "manifest: $MANIFEST_FILE"
     cat "$MANIFEST_FILE" | sed 's/^/  /'
@@ -1220,7 +1257,7 @@ do_uninstall() {
 }
 
 do_install() {
-  echo "=== cortexyoung install (cort v$CORT_VERSION, ast-grep v$AST_GREP_VERSION) ==="
+  echo "=== cortexyoung install (cort v$CORT_VERSION) ==="
 
   # One installer at a time. Every artifact below is published atomically on its own, but two
   # concurrent runs can still leave a manifest naming one generation while the symlink points at
@@ -1249,6 +1286,12 @@ do_install() {
   fi
   migrate_manifest_v2
 
+  # Build before provisioning: every installer-invoked verb below is queried from this binary, so
+  # it must exist before anything asks it anything. A doomed build now fails before the network
+  # download and before activation — not before all mutation (the manifest migration above already
+  # ran), and a later provisioning failure still leaves the new generation activated, which
+  # assert_ast_grep_version reports loudly rather than silently.
+  build_cort
   install_ast_grep
   install_cort
   if [ "$WITH_XGREP" -eq 1 ]; then

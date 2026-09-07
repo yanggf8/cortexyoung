@@ -412,6 +412,39 @@ fn render_projects(payload: &Value) -> String {
     format!("indexes\t{word}\t{drifted}\t{unreadable}\n")
 }
 
+fn render_internal_manifest_keys(payload: &Value) -> String {
+    let mut lines = Vec::new();
+    for key in ["known", "legacy"] {
+        if let Some(keys) = payload.get(key).and_then(Value::as_array) {
+            for k in keys {
+                if let Some(k) = k.as_str() {
+                    lines.push(format!("{key}\t{k}"));
+                }
+            }
+        }
+    }
+    format!("{}\n", lines.join("\n"))
+}
+
+fn render_internal_ast_grep(payload: &Value) -> String {
+    let mut lines = Vec::new();
+    for key in ["version", "repo", "crate"] {
+        lines.push(format!(
+            "{}\t{}",
+            key,
+            payload.get(key).and_then(Value::as_str).unwrap_or("")
+        ));
+    }
+    if let Some(assets) = payload.get("assets").and_then(Value::as_array) {
+        for a in assets {
+            let name = a.get(0).and_then(Value::as_str).unwrap_or("");
+            let sha = a.get(1).and_then(Value::as_str).unwrap_or("");
+            lines.push(format!("asset\t{name}\t{sha}"));
+        }
+    }
+    format!("{}\n", lines.join("\n"))
+}
+
 pub fn render(command: Option<&str>, format: Format, payload: &Value) -> String {
     if format != Format::Lean {
         return pretty(payload);
@@ -423,6 +456,8 @@ pub fn render(command: Option<&str>, format: Format, payload: &Value) -> String 
         Some("read") => render_read(payload),
         Some("recall") => render_recall(payload),
         Some("projects") => render_projects(payload),
+        Some("internal-ast-grep") => render_internal_ast_grep(payload),
+        Some("internal-manifest-keys") => render_internal_manifest_keys(payload),
         _ => pretty(payload),
     }
 }

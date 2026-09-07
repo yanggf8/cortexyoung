@@ -11,6 +11,7 @@ pub mod hook;
 pub mod impact;
 pub mod incremental;
 pub mod indexer;
+pub mod install;
 pub mod pack;
 pub mod readings;
 pub mod render;
