@@ -333,6 +333,134 @@ pub fn read_reasons_readonly(db_path: &str) -> Option<Vec<String>> {
     crate::indexer::rebuild_reasons(&conn).ok()
 }
 
+// ── Task 4: index migration — eager for live directories, deferred for gone ones ──
+
+/// The eager/deferred/gone/unreadable policy of spec §4, one `Component` per project from
+/// `crate::db::list_projects`. Runs INSIDE the upgrader's held locks (Task 2), so hooks are
+/// stood down and there is no concurrent writer. Every project keeps its durable reasons —
+/// plan 2 already persists them; nothing here writes new state.
+///
+/// States: Current (rebuilt or already-current) / Drifted (deferred, or a rebuild that did
+/// not take, or a rebuild that errored) / Absent (directory gone; reasons recorded, never a
+/// failure — Task 5 maps unacked Drifted to Partial, and "gone never fails" would be a lie
+/// otherwise) / Unreadable (db would not open, or the post-rebuild re-read failed — NOT a
+/// pass, never silently Current).
+pub fn migrate_indexes(defer: bool) -> Vec<Component> {
+    let mut out = Vec::new();
+    for entry in crate::db::list_projects() {
+        match entry {
+            crate::db::ProjectEntry::Unreadable { db_path, reason } => {
+                out.push(Component {
+                    name: "index_unreadable".to_string(),
+                    state: ComponentState::Unreadable,
+                    detail: format!("{db_path}: {reason}"),
+                });
+            }
+            crate::db::ProjectEntry::Indexed(row) => {
+                let gone = !Path::new(&row.path).is_dir();
+                let name = format!("index:{}", row.path);
+                // Open WITHOUT migrating (open-project-unmigrated discipline — a structural
+                // migration inside the upgrader is Task 0/5's install.sh path, and doing it
+                // here would hide it). Read reasons through Task 1's read-only primitive.
+                let reasons = match read_reasons_readonly(&row.db_path) {
+                    Some(r) => r,
+                    None => {
+                        out.push(Component {
+                            name,
+                            state: ComponentState::Unreadable,
+                            detail: format!("{}: metadata unreadable", row.db_path),
+                        });
+                        continue;
+                    }
+                };
+                if reasons.is_empty() {
+                    out.push(Component {
+                        name,
+                        state: ComponentState::Current,
+                        detail: String::new(),
+                    });
+                    continue;
+                }
+                if gone {
+                    out.push(Component {
+                        name,
+                        state: ComponentState::Absent,
+                        detail: format!("directory gone, debt kept: {}", reasons.join(", ")),
+                    });
+                    continue;
+                }
+                if defer {
+                    out.push(Component {
+                        name,
+                        state: ComponentState::Drifted,
+                        detail: format!("deferred: {}", reasons.join(", ")),
+                    });
+                    continue;
+                }
+                // Eager: foreground rebuild through the crate's own index path — the upgrader
+                // IS a foreground actor. `row` is owned; `name` was cloned from it up front.
+                match rebuild_project(&row) {
+                    Ok(()) => {
+                        // Re-read, and a FAILED re-read is Unreadable ("re-read failed"),
+                        // NEVER Current: an unreadable-between-rebuild-and-verify db must not
+                        // read as empty reasons and a pass.
+                        match read_reasons_readonly(&row.db_path) {
+                            Some(after) if after.is_empty() => {
+                                out.push(Component {
+                                    name,
+                                    state: ComponentState::Current,
+                                    detail: String::new(),
+                                });
+                            }
+                            Some(after) => {
+                                out.push(Component {
+                                    name,
+                                    state: ComponentState::Drifted,
+                                    detail: format!("rebuild did not take: {}", after.join(", ")),
+                                });
+                            }
+                            None => {
+                                out.push(Component {
+                                    name,
+                                    state: ComponentState::Unreadable,
+                                    detail: format!(
+                                        "{}: re-read failed after rebuild",
+                                        row.db_path
+                                    ),
+                                });
+                            }
+                        }
+                    }
+                    Err(e) => out.push(Component {
+                        name,
+                        state: ComponentState::Drifted,
+                        detail: format!("rebuild failed: {e}"),
+                    }),
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The foreground rebuild for one project row: open read-write through `open_db` +
+/// `ensure_schema` (the structural migration IS part of repaying `schema_changed`), then
+/// `incremental_index` with `RebuildPolicy::Allow`. A `FullRebuildRequired` here is a BUG
+/// (foreground policy forbids nothing); it surfaces as the Err string and reads Drifted
+/// rather than panicking, same as any other failure.
+fn rebuild_project(row: &crate::db::ProjectListRow) -> Result<(), crate::indexer::IndexError> {
+    let mut db = crate::db::open_db(&row.db_path)?;
+    crate::db::ensure_schema(&db)?;
+    let bin = crate::ast_grep::resolve_ast_grep_bin()?;
+    crate::incremental::incremental_index(
+        &mut db,
+        &bin,
+        &row.path,
+        crate::incremental::RebuildPolicy::Allow,
+    )
+    .map(|_| ())
+}
+
 pub struct DiagnoseInputs<'a> {
     /// Dir holding `manifest` + `cort/` (cort_home = install_root/cort, pack = cort_home/pack).
     pub install_root: &'a Path,

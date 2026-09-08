@@ -706,3 +706,216 @@ fn a_matcher_rewrite_with_identical_command_is_drifted() {
         "detail names the shape drift: {c:?}"
     );
 }
+
+// ── Task 4: index migration — eager for live directories, deferred for gone ones ──
+//
+// Env isolation: CORT_CACHE_DIR is process-global and migrate_indexes reads it in-process,
+// so these tests serialize on a lock. Copy of rust/tests/context.rs's ENV_LOCK + with_vars
+// (cross-crate import is impossible — each integration target is its own crate — and a
+// `set_var` without the lock flakes under parallel threads).
+
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+    ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn with_vars(pairs: &[(&str, Option<&str>)], f: impl FnOnce()) {
+    let _g = env_guard();
+    let prev: Vec<(String, Option<String>)> = pairs
+        .iter()
+        .map(|(k, _)| ((*k).to_string(), std::env::var(k).ok()))
+        .collect();
+    unsafe {
+        for (k, val) in pairs {
+            match val {
+                Some(v) => std::env::set_var(k, v),
+                None => std::env::remove_var(k),
+            }
+        }
+    }
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+    unsafe {
+        for (k, old) in prev {
+            match old {
+                Some(v) => std::env::set_var(&k, v),
+                None => std::env::remove_var(&k),
+            }
+        }
+    }
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
+    }
+}
+
+/// Real indexed project in a TEMP cache dir: lib-level full_index into db_path_for(root),
+/// so list_projects (which reads CORT_CACHE_DIR) finds exactly this one project. The `cache`
+/// argument is documentation only — the function reads the dir from CORT_CACHE_DIR, set by
+/// the caller's `with_vars`.
+fn indexed_project_in(_cache: &std::path::Path) -> (tempfile::TempDir, std::path::PathBuf, String) {
+    let dir = tempfile::Builder::new()
+        .prefix("cort-upg-proj-")
+        .tempdir()
+        .unwrap();
+    let root = fs::canonicalize(dir.path()).unwrap();
+    fs::write(root.join("a.ts"), "export function aaa() { return 1; }\n").unwrap();
+    let bin = cort::ast_grep::resolve_ast_grep_bin().expect("ast-grep on PATH");
+    let db_path = cort::db::db_path_for(root.to_str().unwrap());
+    let mut db = cort::db::open_db(&db_path).unwrap();
+    cort::db::ensure_schema(&db).unwrap();
+    cort::indexer::full_index(&mut db, &bin, &root).unwrap();
+    (dir, root, db_path.to_string_lossy().into_owned())
+}
+
+/// An index whose stored extractor is superseded gets rebuilt (directory exists, no --defer),
+/// and afterwards its reasons are empty. This is the spec §4 eager default, and it is the test
+/// that proves the upgrader is the missing ACTOR for the debt plan 2 made visible.
+#[test]
+fn a_drifted_index_with_a_live_directory_is_rebuilt() {
+    let cache = tempfile::tempdir().unwrap();
+    with_vars(
+        &[("CORT_CACHE_DIR", Some(cache.path().to_str().unwrap()))],
+        || {
+            let (_dir, root, db_path) = indexed_project_in(cache.path());
+            // Supersede the extractor stamp, then prove the precondition (reasons non-empty) —
+            // without it the test passes on an index that was never drifted.
+            let db = cort::db::open_db(&db_path).unwrap();
+            cort::db::set_meta(&db, "extractor_version", "superseded").unwrap();
+            drop(db);
+            let db = cort::db::open_db(&db_path).unwrap();
+            assert!(
+                !cort::indexer::rebuild_reasons(&db).unwrap().is_empty(),
+                "precondition: drifted"
+            );
+            drop(db);
+            let comps = cort::upgrade::migrate_indexes(false);
+            let c = comps
+                .iter()
+                .find(|c| c.name == format!("index:{}", root.display()))
+                .unwrap();
+            assert!(
+                matches!(c.state, cort::upgrade::ComponentState::Current),
+                "{c:?}"
+            );
+            let db = cort::db::open_db(&db_path).unwrap();
+            assert!(
+                cort::indexer::rebuild_reasons(&db).unwrap().is_empty(),
+                "rebuilt means no debt left"
+            );
+        },
+    );
+}
+
+/// The same drift with the directory GONE must NOT attempt a rebuild — it records the debt and
+/// moves on as Absent (never Drifted: Task 5 maps unacked Drifted to Partial and "gone never
+/// fails"). Attempting would mean extraction over a missing tree.
+#[test]
+fn a_drifted_index_whose_directory_is_gone_is_marked_not_rebuilt() {
+    let cache = tempfile::tempdir().unwrap();
+    with_vars(
+        &[("CORT_CACHE_DIR", Some(cache.path().to_str().unwrap()))],
+        || {
+            let (dir, root, db_path) = indexed_project_in(cache.path());
+            let db = cort::db::open_db(&db_path).unwrap();
+            cort::db::set_meta(&db, "extractor_version", "superseded").unwrap();
+            drop(db);
+            let root_str = root.to_string_lossy().into_owned();
+            drop(dir); // the directory is gone now
+            assert!(
+                !std::path::Path::new(&root_str).exists(),
+                "precondition: gone"
+            );
+            let comps = cort::upgrade::migrate_indexes(false);
+            let c = comps
+                .iter()
+                .find(|c| c.name == format!("index:{root_str}"))
+                .unwrap();
+            assert!(
+                matches!(c.state, cort::upgrade::ComponentState::Absent),
+                "{c:?}"
+            );
+            assert!(
+                c.detail.contains("extractor"),
+                "debt recorded, not dropped: {c:?}"
+            );
+            assert!(
+                !std::path::Path::new(&root_str).exists(),
+                "no rebuild recreated the tree"
+            );
+        },
+    );
+}
+
+/// An unreadable index is reported Unreadable and is NOT a verdict failure (spec §6: unreadable
+/// never passes, but gone never fails; unreadable is reported). The verdict aggregation in
+/// Task 5 decides what it does to the exit code — here we only pin the component state.
+#[test]
+fn an_unreadable_index_is_unreadable_and_reported() {
+    let cache = tempfile::tempdir().unwrap();
+    with_vars(
+        &[("CORT_CACHE_DIR", Some(cache.path().to_str().unwrap()))],
+        || {
+            // A junk *.db in the cache dir; list_projects already reports it Unreadable (plan 1).
+            fs::write(cache.path().join("junk.db"), b"not a database").unwrap();
+            let comps = cort::upgrade::migrate_indexes(false);
+            let c = comps.iter().find(|c| c.name == "index_unreadable").unwrap();
+            assert!(
+                matches!(c.state, cort::upgrade::ComponentState::Unreadable),
+                "{c:?}"
+            );
+        },
+    );
+}
+
+/// --defer records the debt without rebuilding, even when the directory is live.
+#[test]
+fn defer_marks_without_rebuilding() {
+    let cache = tempfile::tempdir().unwrap();
+    with_vars(
+        &[("CORT_CACHE_DIR", Some(cache.path().to_str().unwrap()))],
+        || {
+            let (_dir, root, db_path) = indexed_project_in(cache.path());
+            let db = cort::db::open_db(&db_path).unwrap();
+            cort::db::set_meta(&db, "extractor_version", "superseded").unwrap();
+            drop(db);
+            let comps = cort::upgrade::migrate_indexes(true);
+            let c = comps
+                .iter()
+                .find(|c| c.name == format!("index:{}", root.display()))
+                .unwrap();
+            assert!(
+                matches!(c.state, cort::upgrade::ComponentState::Drifted),
+                "{c:?}"
+            );
+            assert!(c.detail.contains("extractor"), "{c:?}");
+            let db = cort::db::open_db(&db_path).unwrap();
+            assert!(
+                !cort::indexer::rebuild_reasons(&db).unwrap().is_empty(),
+                "deferred means debt kept"
+            );
+        },
+    );
+}
+
+/// A database that becomes unreadable BETWEEN rebuild and re-read must NOT read Current.
+/// The deterministic seam is the primitive itself: a path that was readable and is now
+/// garbage reads None, never Some(vec![]).
+#[test]
+fn a_post_rebuild_unreadable_db_is_not_empty_reasons() {
+    let cache = tempfile::tempdir().unwrap();
+    with_vars(
+        &[("CORT_CACHE_DIR", Some(cache.path().to_str().unwrap()))],
+        || {
+            let (_dir, _root, db_path) = indexed_project_in(cache.path());
+            assert!(
+                cort::upgrade::read_reasons_readonly(&db_path).is_some(),
+                "precondition: readable"
+            );
+            fs::write(&db_path, b"garbage").unwrap();
+            assert!(
+                cort::upgrade::read_reasons_readonly(&db_path).is_none(),
+                "garbage is not empty debt"
+            );
+        },
+    );
+}

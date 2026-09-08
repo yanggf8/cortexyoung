@@ -402,6 +402,11 @@ pub fn list_projects() -> Vec<ProjectEntry> {
                 continue;
             }
         };
+        // Spec §10 item 1: this scan used to run with no busy timeout, so one transient
+        // SQLITE_BUSY under a concurrent refresh-hook write reported a healthy index
+        // Unreadable. Same 5s the rest of the module waits; contention now waits instead of
+        // lying.
+        let _ = db.busy_timeout(Duration::from_secs(5));
         let row = db.query_row(
             "SELECT project_id, name, path, git_head, last_indexed_at FROM projects",
             [],
