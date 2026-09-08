@@ -21,4 +21,5 @@ pub mod settings_kimi;
 pub mod settings_toml;
 pub mod staleness;
 pub mod r#struct;
+pub mod upgrade;
 pub mod usage;

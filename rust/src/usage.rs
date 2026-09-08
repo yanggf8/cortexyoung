@@ -721,6 +721,15 @@ fn meta(conn: &Connection, key: &str) -> rusqlite::Result<Option<String>> {
     }
 }
 
+/// Stored usage-schema version, read-only. `None` = file missing, unreadable, or key absent;
+/// the CALLER maps missing-file to Absent and the rest to Unreadable (that distinction lives
+/// in diagnosis, not here). The SQL stays where the table is defined, so upgrade.rs never
+/// restates usage's layout.
+pub fn read_schema_version(path: &Path) -> Option<String> {
+    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+    meta(&conn, VERSION_KEY).ok()?
+}
+
 fn prune_best_effort(conn: &Connection, now: i64) {
     let today = utc_day(now);
     let last = meta(conn, LAST_PRUNE_KEY).ok().flatten();
