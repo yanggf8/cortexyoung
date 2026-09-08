@@ -10,9 +10,10 @@
 
 use clap::Parser;
 use cort::upgrade::{
-    acquire_upgrade_locks, check_hooks, check_skills, diagnose_for_check, first_upgrade_note,
-    load_acks, migrate_indexes, repair_skill, run_capture_with_deadline, run_status_with_deadline,
-    save_ack, verdict, Component, ComponentState, DiagnoseInputs, LockError, UpgradeExit,
+    acquire_upgrade_locks, check_hooks, check_skills, diagnose, diagnose_for_check,
+    first_upgrade_note, load_acks, migrate_indexes, repair_skill, run_capture_with_deadline,
+    run_status_with_deadline, save_ack, verdict, Component, ComponentState, DiagnoseInputs,
+    LockError, UpgradeExit,
 };
 use std::path::{Path, PathBuf};
 use std::process::exit;
@@ -151,7 +152,16 @@ fn main() {
         .unwrap_or_default();
 
     let cache = cort::db::cache_dir();
-    let mut cli_acks = args.acks.clone();
+    // --ack persists BEFORE anything is judged (spec §6: the next invocation already
+    // knows), and every path below — --check, steady state, final verdict — judges with
+    // the SAME ack set: the store plus the command line.
+    for a in &args.acks {
+        if let Err(e) = save_ack(&cache, a) {
+            fatal(&format!("cannot persist --ack {a}: {e}"));
+        }
+    }
+    let acks = load_acks(&cache);
+    let ack_names: Vec<&str> = acks.iter().map(String::as_str).collect();
 
     // ── Step 1: diagnose, unlocked. --check stops here. ─────────────
     let inputs = DiagnoseInputs {
@@ -164,14 +174,11 @@ fn main() {
     };
     let shim_ref: &Path = &shim;
     let runner = status_runner(shim_ref);
-    let mut components = diagnose_for_check(&inputs, shim_ref, &runner);
+    let components = diagnose_for_check(&inputs, shim_ref, &runner);
     if args.check {
-        if let Some(note) = first_upgrade_note(&cache) {
-            components.push(note);
-        }
-        let acks = load_acks(&cache);
-        let borrowed: Vec<&str> = acks.iter().map(String::as_str).collect();
-        let v = verdict(components, &borrowed);
+        // No first-upgrade note here: --check takes no locks, so no drain ran and there is
+        // nothing the note could honestly describe (Grok round).
+        let v = verdict(components, &ack_names);
         print_verdict(&v);
         exit(match v.exit {
             UpgradeExit::Ok => 0,
@@ -180,24 +187,14 @@ fn main() {
         });
     }
 
-    // The steady state must be cheap and touch nothing: everything Current → no locks, no
-    // install.sh, exit 0.
-    let all_current = components
-        .iter()
-        .all(|c| matches!(c.state, ComponentState::Current));
-    if all_current {
-        if let Some(note) = first_upgrade_note(&cache) {
-            components.push(note);
-        }
-        let acks = load_acks(&cache);
-        let borrowed: Vec<&str> = acks.iter().map(String::as_str).collect();
-        let v = verdict(components, &borrowed);
-        print_verdict(&v);
-        exit(match v.exit {
-            UpgradeExit::Ok => 0,
-            UpgradeExit::Partial => 1,
-            UpgradeExit::Fatal => 2,
-        });
+    // The steady state must be cheap and touch nothing: if the VERDICT is already Ok —
+    // everything current, or only states that never fail (gone, deferred-by-user, acked
+    // drift) — there is nothing to do: no locks, no install.sh, exit 0. A Current-only
+    // test here re-staged and re-locked on every --keep-mine / --ack run (Grok round).
+    let probe = verdict(components.clone(), &ack_names);
+    if matches!(probe.exit, UpgradeExit::Ok) {
+        print_verdict(&probe);
+        exit(0);
     }
 
     // ── Step 2: stage the new generation — unlocked, invisible, validated. ──
@@ -245,30 +242,16 @@ fn main() {
         fatal(&format!("activation failed: {e}"));
     }
 
-    // ── Step 5: re-verify, then rewire. Every commit boundary re-diagnoses — §5's "diagnose
-    // once and trust it" is the bug, not the discipline. ────────────
-    let mut components = diagnose_for_check(&inputs, shim_ref, &runner);
+    // ── Step 5: rewire, then re-verify ONCE. The verdict reads ONLY post-repair state —
+    // the first draft unioned the pre-repair diagnosis with the post-repair results, so
+    // three same-named Drifted snapshots rode every successful upgrade into exit 1 (Grok
+    // round). The one snapshot is the final `diagnose` below; the repair actions run
+    // BEFORE it so the states it reads are the landed ones (§5: every commit boundary
+    // re-verifies — the last boundary is the one the exit code answers for).
 
-    // Hooks: judge → repair → re-run status → re-judge, all inside check_hooks. Repair is
-    // the product's own installer verb, aimed at the same shim.
-    let shim_for_repair = shim.clone();
-    let repair = move || {
-        let _ = run_capture_with_deadline(
-            &shim_for_repair,
-            &[
-                "hook-install",
-                "--all",
-                "--command-prefix",
-                &shim_for_repair.to_string_lossy(),
-            ],
-            Duration::from_secs(60),
-        );
-    };
-    components.push(check_hooks(shim_ref, &runner, &repair));
-
-    // Skills: content-diff, repair only the managed-and-drifted, then re-check — a repair is
-    // reported as landed only after the re-check says so.
-    let mut skills = check_skills(&new_tree, &home, args.keep_mine);
+    // Skills: repair only the managed-and-drifted. The final diagnosis re-reads the files,
+    // so the re-check IS that read — a repair is reported as landed only if it shows there.
+    let skills_before = check_skills(&new_tree, &home, args.keep_mine);
     let needs_repair = |name: &str| -> Option<(PathBuf, PathBuf)> {
         let (src, dest) = match name {
             "skill_xgrep" => (
@@ -287,42 +270,48 @@ fn main() {
         };
         Some((src, dest))
     };
-    for c in skills.clone() {
+    for c in &skills_before {
         if matches!(c.state, ComponentState::Drifted) && c.detail.contains("managed") {
             if let Some((src, dest)) = needs_repair(&c.name) {
                 let _ = repair_skill(&src, &dest);
             }
         }
     }
-    if skills
-        .iter()
-        .any(|c| matches!(c.state, ComponentState::Drifted))
-    {
-        skills = check_skills(&new_tree, &home, args.keep_mine);
-    }
-    components.append(&mut skills);
 
-    // Indexes: eager for live directories, deferred for gone ones (Task 4).
-    components.append(&mut migrate_indexes(args.defer));
+    // Hooks: judge → repair → re-run status → re-judge, all inside check_hooks. Repair is
+    // the product's own installer verb, aimed at the same shim. Its re-judged result is
+    // the one hooks component the verdict sees.
+    let shim_for_repair = shim.clone();
+    let repair = move || {
+        let _ = run_capture_with_deadline(
+            &shim_for_repair,
+            &[
+                "hook-install",
+                "--all",
+                "--command-prefix",
+                &shim_for_repair.to_string_lossy(),
+            ],
+            Duration::from_secs(60),
+        );
+    };
+    let hooks = check_hooks(shim_ref, &runner, &repair);
 
+    // Indexes: eager for live directories, deferred for gone ones (Task 4). The printed
+    // index states come from the final diagnosis, which re-reads reasons after this ran —
+    // the same post-rebuild re-read migrate_indexes itself performs.
+    migrate_indexes(args.defer);
+
+    // Final re-verify: ONE post-repair snapshot is the verdict's input.
+    let mut components = diagnose(&inputs);
+    components.push(hooks);
     if let Some(note) = first_upgrade_note(&cache) {
+        // The note is appended only here — the one path that DID take the locks and run
+        // the drain it describes. --check and the steady state never print it.
         components.push(note);
     }
 
     // ── Step 6: verdict, print, release (drop _locks), then the marker. ──
-    for a in &cli_acks {
-        if let Err(e) = save_ack(&cache, a) {
-            fatal(&format!("cannot persist --ack {a}: {e}"));
-        }
-    }
-    let mut acks = load_acks(&cache);
-    for a in &cli_acks {
-        if !acks.iter().any(|n| n == a) {
-            acks.push(a.clone());
-        }
-    }
-    let borrowed: Vec<&str> = acks.iter().map(String::as_str).collect();
-    let v = verdict(components, &borrowed);
+    let v = verdict(components, &ack_names);
     print_verdict(&v);
 
     if matches!(v.exit, UpgradeExit::Ok) {
@@ -330,7 +319,6 @@ fn main() {
         // partial-drain note, and a failed upgrade must not silence it.
         let _ = cort::upgrade::write_first_upgrade_marker(&cache);
     }
-    let _ = &mut cli_acks;
     exit(match v.exit {
         UpgradeExit::Ok => 0,
         UpgradeExit::Partial => 1,

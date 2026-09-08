@@ -1098,3 +1098,44 @@ fn check_mode_completes_while_an_upgrade_holds_the_locks() {
     assert!(!comps.is_empty());
     drop(locks);
 }
+
+/// `diagnose()` (the `--check` path) applies the same gone policy as `migrate_indexes`:
+/// a drifted index whose directory no longer exists reads Absent with the debt recorded,
+/// never Drifted — spec §6's "gone never fails" has no mutating-route exception. A
+/// diagnose that classified gone as Drifted would fail `--check` on every machine that
+/// ever deleted an indexed project (Grok review round).
+#[test]
+fn a_gone_index_reads_absent_in_diagnose_too() {
+    let cache = tempfile::tempdir().unwrap();
+    with_vars(
+        &[("CORT_CACHE_DIR", Some(cache.path().to_str().unwrap()))],
+        || {
+            let (dir, root, db_path) = indexed_project_in(cache.path());
+            let db = cort::db::open_db(&db_path).unwrap();
+            cort::db::set_meta(&db, "extractor_version", "superseded").unwrap();
+            drop(db);
+            let root_str = root.to_string_lossy().into_owned();
+            drop(dir); // the directory is gone now
+                       // DiagnoseInputs need paths for the OTHER components; those components are not
+                       // what this test observes — only the per-project index entry.
+            let scratch = tempfile::tempdir().unwrap();
+            let comps = cort::upgrade::diagnose(&cort::upgrade::DiagnoseInputs {
+                install_root: scratch.path(),
+                new_pack: scratch.path(),
+                installed_ast_grep_version: cort::install::AST_GREP_PINNED,
+                new_tree: scratch.path(),
+                home: scratch.path(),
+                keep_mine: false,
+            });
+            let c = comps
+                .iter()
+                .find(|c| c.name == format!("index:{root_str}"))
+                .unwrap();
+            assert!(
+                matches!(c.state, cort::upgrade::ComponentState::Absent),
+                "gone must not fail --check either: {c:?}"
+            );
+            assert!(c.detail.contains("extractor"), "debt recorded: {c:?}");
+        },
+    );
+}

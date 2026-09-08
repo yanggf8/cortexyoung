@@ -570,11 +570,30 @@ pub fn diagnose(inputs: &DiagnoseInputs) -> Vec<Component> {
                         state: ComponentState::Current,
                         detail: String::new(),
                     }),
-                    Some(reasons) => out.push(Component {
-                        name,
-                        state: ComponentState::Drifted,
-                        detail: format!("needs: {}", reasons.join(", ")),
-                    }),
+                    Some(reasons) => {
+                        // Same gone policy as `migrate_indexes`, because `--check` reads
+                        // through THIS path and spec §6's "gone never fails" has no
+                        // mutating-route exception: a directory that no longer exists
+                        // reads Absent with its debt recorded, never Drifted — otherwise
+                        // `--check` would fail every machine that ever deleted an indexed
+                        // project (review catch, Grok round).
+                        if !Path::new(&row.path).is_dir() {
+                            out.push(Component {
+                                name,
+                                state: ComponentState::Absent,
+                                detail: format!(
+                                    "directory gone, debt kept: {}",
+                                    reasons.join(", ")
+                                ),
+                            });
+                        } else {
+                            out.push(Component {
+                                name,
+                                state: ComponentState::Drifted,
+                                detail: format!("needs: {}", reasons.join(", ")),
+                            });
+                        }
+                    }
                 }
             }
         }
