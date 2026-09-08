@@ -2492,3 +2492,89 @@ fn the_refresh_hook_does_not_migrate_the_schema() {
         "the hook records the schema debt it declined: {counts:?}"
     );
 }
+
+// ── no_index hint: the funnel's biggest hole was a total silence ──
+
+/// `no_index` used to be a total silence — the funnel's biggest hole (90-day mining: ~985
+/// searches in unindexed projects, 0 suggestions, and nobody ever learned that one `cort
+/// index` would turn this hook on for the whole project). The first shaped search in a
+/// session now says so, once per session per directory: the repair is the caller's own
+/// one-off `cort index` — this hook keeps never creating an index, and the refresh hook
+/// keeps the index current afterwards.
+#[test]
+fn a_no_index_search_hints_once_pointing_at_cort_index() {
+    let (_p, cwd, _c, cache) = sandbox(); // unindexed on purpose: no cort index run
+    let mk = |session: &str| {
+        serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": { "command": FIRING_SEARCH },
+            "session_id": session,
+            "cwd": cwd.to_str().unwrap(),
+        })
+    };
+    let run = run_hook_suggest_payload(mk("s1"), &[], &cwd, &cache);
+    assert_eq!(run.code, 0);
+    let parsed = payload(&run);
+    let ctx = parsed["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        ctx.contains("cort index"),
+        "the hint names the one-off repair: {ctx}"
+    );
+
+    // Same session, same directory: silent again — the hint said its one thing.
+    let again = run_hook_suggest_payload(mk("s1"), &[], &cwd, &cache);
+    assert!(
+        payload(&again).get("hookSpecificOutput").is_none(),
+        "the hint fires once per session per directory: {}",
+        payload(&again)
+    );
+
+    // A different session has not been told yet.
+    let other = run_hook_suggest_payload(mk("s2"), &[], &cwd, &cache);
+    assert!(
+        payload(&other).get("hookSpecificOutput").is_some(),
+        "a fresh session gets its own hint"
+    );
+}
+
+/// An indexed project never sees the hint: its searches get the real suggestion (or the
+/// correct `no_evidence` silence), and the hint text must not dilute that channel.
+#[test]
+fn an_indexed_project_never_gets_the_no_index_hint() {
+    let (_p, cwd, _c, cache) = sandbox();
+    git_in(&cwd, &["init", "-q"]);
+    git_in(&cwd, &["config", "user.email", "t@e.com"]);
+    git_in(&cwd, &["config", "user.name", "t"]);
+    git_in(&cwd, &["add", "-A"]);
+    git_in(&cwd, &["commit", "-qm", "one"]);
+    let idx = run_cort(&["index"], &cwd, &cache);
+    if idx.code != 0 {
+        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
+        return;
+    }
+    let run = run_hook_suggest_payload(
+        serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": { "command": FIRING_SEARCH },
+            "session_id": "s1",
+            "cwd": cwd.to_str().unwrap(),
+        }),
+        &[],
+        &cwd,
+        &cache,
+    );
+    let parsed = payload(&run);
+    let ctx = parsed["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        ctx.contains("cort impact --symbol"),
+        "an indexed project gets the real suggestion: {ctx}"
+    );
+    assert!(
+        !ctx.contains("No index for this project"),
+        "the hint must not fire where an index exists: {ctx}"
+    );
+}

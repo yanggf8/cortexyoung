@@ -883,6 +883,24 @@ attributable to neither side. `cort usage` rolls up counts only; the outcome spl
 `cort-evals adopt-mine`, whose cross-check refuses to compare two sides drawn from different
 populations rather than quietly reporting a ratio across them.
 
+**Two funnels, and the product number excludes the product tree.** The 90-day transcript mining
+(2026-09-08) found the funnel splits three ways and only the third layer is uptake: 9,670 hook
+runs — most correctly silent (`not_a_search_tool`: `ls`, `git`, `cargo`) — reached **13**
+`cort impact` suggestions as Claude Code injections, of which **12 were cort auditing its own
+tree**; agents ran the suggested same-symbol `impact` **2** times, one of which was a hook
+self-test. The natural-adoption count over the window is therefore **1**, and quoting any
+numerator that still contains the product tree would score changes on self-tests. That is why
+`--exclude` exists and is not a silent default: the tree being developed must be dropped
+explicitly, and the report echoes what it dropped.
+
+```bash
+cort-evals adopt-mine --exclude cortexyoung --since 2026-09-01T00:00:00Z
+```
+
+The same mining fixed the mirror mistake on the other side: `impact ok=423` in the usage log is
+**not** hook uptake either — 388 of those rows are one day's eval/probe traffic. Counts without
+their funnel layer measure nothing.
+
 **Turning it off.** `./install.sh --no-hook` skips every entry; `./install.sh --uninstall` unwires
 them all and hands each file back exactly as it was found; `./install.sh --check` prints `hook:`,
 `hook_codex:`, `hook_kimi:` for the suggestion and `refresh:`, `refresh_codex:`, `refresh_kimi:` for

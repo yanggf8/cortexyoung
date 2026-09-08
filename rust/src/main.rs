@@ -763,6 +763,12 @@ fn search_of_payload(v: &Value) -> Option<cort::hook::Search> {
 /// re-issued and allowed. State lives beside the index rather than in `usage.db` because it is a
 /// gate, not a measurement: losing it costs one extra deny, and nothing reads it afterwards.
 fn gate_already_fired(session_id: &str, symbol: &str) -> bool {
+    gate_line_seen_once(session_id, symbol)
+}
+
+/// The shared once-per-session gate: one file per session under `hook-gate/`, one line per
+/// fired thing. `line` must be newline-free (callers sanitize their payload-sourced halves).
+fn gate_line_seen_once(session_id: &str, line: &str) -> bool {
     let Some(dir) =
         cort::usage::usage_db_path().and_then(|p| p.parent().map(|d| d.join("hook-gate")))
     else {
@@ -780,17 +786,24 @@ fn gate_already_fired(session_id: &str, symbol: &str) -> bool {
     }
     let file = dir.join(safe);
     let seen = std::fs::read_to_string(&file).unwrap_or_default();
-    if seen.lines().any(|l| l == symbol) {
+    if seen.lines().any(|l| l == line) {
         return true;
     }
     if std::fs::create_dir_all(&dir).is_err() {
         return true;
     }
-    let mut line = seen;
-    line.push_str(symbol);
-    line.push('\n');
+    let mut body = seen;
+    body.push_str(line);
+    body.push('\n');
     // A failed write is the same unrememberable deny as a missing directory.
-    std::fs::write(&file, line).is_err()
+    std::fs::write(&file, body).is_err()
+}
+
+/// The `no_index` hint fires once per session per directory: the directory is the payload's
+/// own `cwd`, newline-stripped before it joins the gate file.
+fn no_index_hint_fired(session_id: &str, dir: &str) -> bool {
+    let line: String = format!("no_index:{}", dir.replace(['\n', '\r'], " "));
+    gate_line_seen_once(session_id, &line)
 }
 
 /// A `PostToolUse` hook on the edit tools, not a verb anyone types. It brings this project's index
@@ -1069,7 +1082,37 @@ fn cmd_hook_suggest(args: &[String], usage: &mut UsageEvent) -> Result<Emit, Cor
                 // it -- a missed opportunity, which `tests/cli.rs` pins as its own name. An empty
                 // index reaches here, not `no_evidence`, because `probe_index` applies the same
                 // `status.indexed` test the old gate did.
-                cort::hook::SilenceReason::NoIndex => ("no_index", None),
+                //
+                // The silence stays a silence for the suggestion itself -- there is no index to
+                // answer with -- but it no longer stays INVISIBLE. Mining 90 days of transcripts
+                // found the funnel's biggest hole exactly here: ~985 searches in unindexed
+                // projects produced 0 suggestions, and nobody ever learned that one `cort index`
+                // would turn this hook on for the whole project. So the FIRST shaped search of a
+                // session, per directory, says so -- once. The repair is the caller's own one-off
+                // `cort index`; this hook keeps never creating an index (refresh keeps what
+                // exists current), and every later search in that session is silent as before.
+                cort::hook::SilenceReason::NoIndex => {
+                    let session = v.get("session_id").and_then(Value::as_str).unwrap_or("");
+                    let dir = v.get("cwd").and_then(Value::as_str).unwrap_or("");
+                    if !session.is_empty() && !dir.is_empty() && !no_index_hint_fired(session, dir)
+                    {
+                        usage.args_summary = harness_args("no_index_hinted");
+                        return Ok(Emit {
+                            payload: json!({
+                                "hookSpecificOutput": {
+                                    "hookEventName": "PreToolUse",
+                                    "additionalContext": "No index for this project yet: one \
+                            `cort index` and searches like this get caller-set suggestions (who calls this symbol), kept \
+                            current by the edit hook afterwards. Ignore if you do not need call-site answers here.",
+                                },
+                                "suppressOutput": true,
+                            }),
+                            format: Format::Lean,
+                            render_command: Some("hook-suggest"),
+                        });
+                    }
+                    ("no_index", None)
+                }
                 // New: the rule matched, the project is genuinely indexed, and the index holds
                 // neither a seed nor a raw edge naming the symbol. A refusal, not a missed chance.
                 cort::hook::SilenceReason::NoEvidence => ("no_evidence", None),
