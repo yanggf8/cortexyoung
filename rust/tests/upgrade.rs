@@ -222,3 +222,139 @@ fn usage_schema_mismatch_is_drifted() {
         "{c:?}"
     );
 }
+
+mod locks {
+    // No `use super::*`: every name here is spelled in full or comes from std — an unused
+    // glob import trips `-D warnings` (measured: the first draft carried one).
+    use std::time::Duration;
+
+    /// A protected operation that started BEFORE the upgrader took admission must block the
+    /// drain: the activity lock is still held shared, so the upgrader's exclusive activity
+    /// attempt times out and the upgrade aborts — never kills the worker.
+    #[test]
+    fn a_worker_holding_activity_blocks_the_drain_and_the_upgrade_aborts() {
+        let cache = tempfile::tempdir().unwrap();
+        // Worker: admission(sh) -> activity(sh) -> release admission, hold activity 2.5s.
+        // The closure must own its path (spawned closures are 'static) — borrow `cache`
+        // directly and this fails to compile. The guard is held across the sleep: dropping
+        // it early would release activity and the drain would succeed, passing for nothing.
+        let worker_cache = cache.path().to_path_buf();
+        let worker = std::thread::spawn(move || {
+            let _guard = cort::upgrade::try_protected_entry(&worker_cache).unwrap();
+            std::thread::sleep(Duration::from_millis(2500));
+            "worked"
+        });
+        std::thread::sleep(Duration::from_millis(200)); // let the worker take both locks
+        let result = cort::upgrade::acquire_upgrade_locks(cache.path(), Duration::from_millis(800));
+        assert!(
+            matches!(result, Err(cort::upgrade::LockError::DrainTimeout)),
+            "a live worker must time the drain out: {result:?}"
+        );
+        assert_eq!(worker.join().unwrap(), "worked");
+    }
+
+    /// After the worker releases, the upgrader gets in. And once it holds, a NEW protected
+    /// operation must stand down at admission — that is the gate closing, the reverse-notify
+    /// of spec §3c.
+    #[test]
+    fn after_drain_the_upgrader_holds_and_new_workers_stand_down() {
+        let cache = tempfile::tempdir().unwrap();
+        let locks =
+            cort::upgrade::acquire_upgrade_locks(cache.path(), Duration::from_secs(2)).unwrap();
+        // A new worker must see admission BUSY (upgrader holds it exclusive).
+        let stood_down = cort::upgrade::try_protected_entry(cache.path()).is_err();
+        assert!(stood_down, "admission exclusive must turn new workers away");
+        drop(locks);
+        // After release, a worker gets in again.
+        assert!(cort::upgrade::try_protected_entry(cache.path()).is_ok());
+    }
+
+    /// A worker arriving MID-DRAIN stands down at admission instead of joining activity.
+    /// Without the admission acquisition in `try_protected_entry`, the newcomer takes activity
+    /// shared and every arrival extends the drain — the upgrade still aborts safely, but
+    /// liveness dies under load, and no other test observes the admission half of the worker
+    /// protocol at all. Fixture: worker A holds activity (2s); the upgrader starts a drain
+    /// (10s deadline) in a second thread; worker B arrives 200ms later and must get
+    /// AdmissionBusy, while the drain still completes once A exits.
+    #[test]
+    fn a_worker_arriving_mid_drain_stands_down_at_admission() {
+        let cache = tempfile::tempdir().unwrap();
+        let a_cache = cache.path().to_path_buf();
+        let worker_a = std::thread::spawn(move || {
+            let _guard = cort::upgrade::try_protected_entry(&a_cache).unwrap();
+            std::thread::sleep(Duration::from_millis(2000));
+        });
+        std::thread::sleep(Duration::from_millis(200)); // A holds activity
+        let d_cache = cache.path().to_path_buf();
+        let drain = std::thread::spawn(move || {
+            cort::upgrade::acquire_upgrade_locks(&d_cache, Duration::from_secs(10))
+        });
+        std::thread::sleep(Duration::from_millis(200)); // upgrader holds admission exclusive
+        let b_result = cort::upgrade::try_protected_entry(cache.path());
+        assert!(
+            matches!(b_result, Err(cort::upgrade::LockError::AdmissionBusy)),
+            "a mid-drain arrival must stand down at the gate, not join activity: {b_result:?}"
+        );
+        let locks = drain.join().unwrap().expect("drain completes once A exits");
+        drop(locks);
+        worker_a.join().unwrap();
+    }
+
+    /// Crash safety is the OS's job: if the holder's pid dies, the kernel drops the flock and
+    /// the next acquirer gets in. Fixture: fork-style — spawn a child that takes the locks and
+    /// is SIGKILLed; the parent must acquire within the timeout rather than seeing a stale
+    /// lock. (This is the test spec §7 names: not "expired lease + dead pid", which any
+    /// TTL-less impl passes — but an actual process death.)
+    #[test]
+    fn a_killed_holder_releases_the_locks() {
+        if std::env::args().any(|a| a == "lock_holder_child") {
+            return; // child re-entry: the child fn below does the holding
+        }
+        let cache = tempfile::tempdir().unwrap();
+        let cache_path = cache.path().to_path_buf();
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("lock_holder_child")
+            .env("UPGRADE_TEST_CACHE", &cache_path)
+            .spawn()
+            .expect("spawn holder child");
+        // Readiness handshake, bounded: poll for the sentinel the child writes AFTER acquiring.
+        // Killing before it holds anything would pass against code that never locks.
+        let sentinel = cache_path.join(".holder-ready");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !sentinel.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "holder child never acquired the locks"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        child.kill().unwrap();
+        child.wait().unwrap();
+        let got = cort::upgrade::acquire_upgrade_locks(&cache_path, Duration::from_secs(2));
+        assert!(
+            got.is_ok(),
+            "kernel must release flocks on process death: {got:?}"
+        );
+    }
+}
+
+/// Child side of the killed-holder test. Runs ONLY when argv contains "lock_holder_child";
+/// otherwise returns immediately. NOTE: this fn lives at the TOP level of the test crate,
+/// outside `mod locks` — `Duration` is NOT imported here, so every duration uses the full
+/// `std::time::Duration` path.
+#[test]
+fn lock_holder_child() {
+    if !std::env::args().any(|a| a == "lock_holder_child") {
+        return; // real test run: no-op
+    }
+    let cache = std::env::var("UPGRADE_TEST_CACHE").unwrap();
+    let _locks = cort::upgrade::acquire_upgrade_locks(
+        std::path::Path::new(&cache),
+        std::time::Duration::from_secs(60),
+    )
+    .unwrap();
+    // Signal AFTER acquiring: the parent must not kill us before we hold anything, or the
+    // test proves nothing (a kill before acquisition passes against code that never locks).
+    std::fs::write(std::path::Path::new(&cache).join(".holder-ready"), b"held").unwrap();
+    std::thread::sleep(std::time::Duration::from_secs(60)); // parent will kill us
+}

@@ -8,6 +8,167 @@
 use std::fs;
 use std::path::Path;
 
+// ── the two flocks: admission closes the gate, activity drains the room (spec §3b) ──
+//
+// The FFI follows the `send_sigterm` precedent (`ast_grep.rs`): a three-line extern, no new
+// crate. Imports: this file already has `fs` and `Path` — add only what locking needs.
+
+use std::fs::{File, OpenOptions};
+use std::time::{Duration, Instant};
+
+#[cfg(unix)]
+use std::os::unix::io::AsRawFd;
+
+#[cfg(unix)]
+extern "C" {
+    fn flock(fd: i32, operation: i32) -> i32;
+}
+#[cfg(unix)]
+const LOCK_SH: i32 = 1;
+#[cfg(unix)]
+const LOCK_EX: i32 = 2;
+#[cfg(unix)]
+const LOCK_NB: i32 = 4;
+// No LOCK_UN: release is close(2) via RAII drop, which always releases flock(2). An explicit
+// LOCK_UN constant with no user trips `-D warnings` and invites "unlock then keep using fd"
+// shapes. No EINTR retry either, deliberately: a spurious EINTR collapses into contention,
+// and every contention path here is the SAFE direction (a worker stands down, the upgrader
+// aborts). A retry would need errno plumbing for a case that resolves to the same branch.
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LockError {
+    AdmissionBusy,
+    DrainTimeout,
+    /// The lock file itself could not be opened (cache dir missing, unwritable, or a plain
+    /// file where the dir belongs). Distinct from AdmissionBusy on purpose: contention means
+    /// "someone is mid-upgrade", while this means "this machine's cache is broken" — and
+    /// reporting the first for the second is the wrong-diagnosis sin (`cort index` must name
+    /// the storage problem, not invent an upgrade). Workers stand down on it exactly as on
+    /// AdmissionBusy — the quiet direction is safe either way.
+    LockFileUnavailable,
+    /// Non-unix platform: flock(2) does not exist. Workers run unguarded (today's behavior);
+    /// the upgrader refuses (Fatal) rather than migrating unprotected. CI builds linux+macos
+    /// only, so this arm is documentary — but an ungated `std::os::unix` import breaks the
+    /// build for everyone else.
+    Unsupported,
+}
+
+/// Open (creating) a lock file. Returns Err instead of panicking: `hook-refresh` promises
+/// silence and exit 0 on every edit, and an unwritable cache dir must stand down, not panic.
+#[cfg(unix)]
+fn open_lock(path: &Path) -> std::io::Result<File> {
+    // truncate(false) is explicit: a lock file must never be truncated — another process may
+    // hold the flock on the same inode, and the file's bytes are irrelevant but its size is
+    // not a license to reset anything.
+    OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path)
+}
+
+#[cfg(unix)]
+fn flock_fd(file: &File, op: i32) -> bool {
+    // SAFETY: fd is a live open file description we own; flock has no other preconditions.
+    unsafe { flock(file.as_raw_fd(), op) == 0 }
+}
+
+/// Protected-operation entry: admission(sh) + activity(sh), then release admission. Returns
+/// the activity guard. Err means admission busy — the caller selects the quiet path, not this
+/// function. There is deliberately NO "run the body either way" helper: a helper that runs
+/// f() on both branches cannot select the quiet path, and the first draft's
+/// `with_protected_locks` wrapped `incremental_index` so it indexed straight through an
+/// upgrade holding exclusive locks (critical defect, caught in review).
+#[cfg(unix)]
+pub fn try_protected_entry(cache: &Path) -> Result<ActivityGuard, LockError> {
+    let adm = open_lock(&cache.join(".upgrade-admission.lock"))
+        .map_err(|_| LockError::LockFileUnavailable)?;
+    if !flock_fd(&adm, LOCK_SH | LOCK_NB) {
+        return Err(LockError::AdmissionBusy);
+    }
+    let act = match open_lock(&cache.join(".upgrade-activity.lock")) {
+        Ok(a) => a,
+        // Not a closure on purpose: the error arm must drop `adm` first, and a closure
+        // would move it (`use of moved value` — measured).
+        Err(_) => {
+            drop(adm);
+            return Err(LockError::LockFileUnavailable);
+        }
+    };
+    if !flock_fd(&act, LOCK_SH | LOCK_NB) {
+        drop(adm);
+        return Err(LockError::AdmissionBusy);
+    }
+    drop(adm); // release admission; activity carries the protection
+    Ok(ActivityGuard { _file: Some(act) })
+}
+
+/// The guard a protected operation holds across its body. `None` on non-unix: no flock(2)
+/// there, so exclusion is unavailable and workers run exactly as today — the UPGRADER still
+/// refuses (see `acquire_upgrade_locks`), so the unsafe direction stays closed everywhere.
+#[derive(Debug)]
+pub struct ActivityGuard {
+    _file: Option<File>,
+}
+
+#[cfg(not(unix))]
+pub fn try_protected_entry(_cache: &Path) -> Result<ActivityGuard, LockError> {
+    Ok(ActivityGuard { _file: None })
+}
+
+#[derive(Debug)]
+pub struct UpgradeLocks {
+    _admission: File,
+    _activity: File,
+}
+// Debug is load-bearing, not vanity: the killed-holder test asserts
+// `acquire_upgrade_locks(...).is_ok()` with `{got:?}` on failure, and without this derive
+// that assertion does not compile.
+
+#[cfg(unix)]
+pub fn acquire_upgrade_locks(
+    cache: &Path,
+    drain_timeout: Duration,
+) -> Result<UpgradeLocks, LockError> {
+    let adm = open_lock(&cache.join(".upgrade-admission.lock"))
+        .map_err(|_| LockError::LockFileUnavailable)?;
+    if !flock_fd(&adm, LOCK_EX | LOCK_NB) {
+        return Err(LockError::AdmissionBusy);
+    }
+    // Drain: wait for exclusive activity with a deadline. Every worker holding it shared
+    // must let go before this succeeds.
+    let act = match open_lock(&cache.join(".upgrade-activity.lock")) {
+        Ok(a) => a,
+        Err(_) => {
+            drop(adm);
+            return Err(LockError::LockFileUnavailable);
+        }
+    };
+    let deadline = Instant::now() + drain_timeout;
+    loop {
+        if flock_fd(&act, LOCK_EX | LOCK_NB) {
+            return Ok(UpgradeLocks {
+                _admission: adm,
+                _activity: act,
+            });
+        }
+        if Instant::now() >= deadline {
+            return Err(LockError::DrainTimeout);
+        }
+        // 50ms poll: overshoot past the deadline is bounded by one interval, documented
+        // here so nobody "fixes" it into a busy loop.
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[cfg(not(unix))]
+pub fn acquire_upgrade_locks(
+    _cache: &Path,
+    _drain_timeout: Duration,
+) -> Result<UpgradeLocks, LockError> {
+    Err(LockError::Unsupported)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ComponentState {
     Current,

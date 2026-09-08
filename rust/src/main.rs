@@ -5,7 +5,7 @@ use cort::ast_grep::{assert_ast_grep_version, resolve_ast_grep_bin};
 use cort::context::{context_command, ContextOptions, DEFAULT_BUDGET};
 use cort::coverage;
 use cort::db::{
-    db_path_for, delete_project, ensure_schema, list_projects, open_db, project_id_for,
+    cache_dir, db_path_for, delete_project, ensure_schema, list_projects, open_db, project_id_for,
     project_root_for_path, with_busy_retry, Db, ProjectEntry, SqliteErrorCode, WithBusyRetryError,
 };
 use cort::errors::CortError;
@@ -853,6 +853,17 @@ fn cmd_hook_refresh(args: &[String], usage: &mut UsageEvent) -> Result<Emit, Cor
         })
     };
 
+    // Upgrade stand-down (spec §3b). An upgrade holding admission exclusive is publishing a
+    // new generation; refreshing an index against the old pack mid-flip would stamp it with a
+    // dead extractor identity. The contract already says give up rather than wait, and an
+    // upgrade in flight is exactly "rather than wait" — so: record the cause (unattributable
+    // silences cannot be tuned, same rule as the decline tags) and go quiet. This branch sits
+    // before any pack read or database open; only the payload was read, for attribution.
+    let _guard = match cort::upgrade::try_protected_entry(&cache_dir()) {
+        Ok(g) => g,
+        Err(_) => return quiet("upgrade_stood_down", usage),
+    };
+
     // Which project to repair comes from the edited file, not from the shell's working directory.
     // The comment above says which *file* changed is `incremental_index`'s question -- true, and
     // only once the right project is open. An agent that runs `cd rust && cargo test` used to take
@@ -1011,6 +1022,18 @@ fn cmd_hook_suggest(args: &[String], usage: &mut UsageEvent) -> Result<Emit, Cor
                 },
             };
             usage.args_summary = hook_args_decline(&harness_args("no_shape"), tag);
+            return quiet();
+        }
+    };
+    // Upgrade stand-down, evidence path only (spec §3b's cost note): the shape gate turned
+    // down ~95% of searches without paying for anything, and they keep it that way — two
+    // opens is the price only a search that would actually touch the index pays. An upgrade
+    // in flight means the index is about to be repacked; stand down and say which silence
+    // this was, by the same per-cause rule as the decline tags above.
+    let _guard = match cort::upgrade::try_protected_entry(&cache_dir()) {
+        Ok(g) => g,
+        Err(_) => {
+            usage.args_summary = harness_args("upgrade_stood_down");
             return quiet();
         }
     };
@@ -1654,6 +1677,46 @@ fn cmd_index(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError>
     let a = IndexArgs::try_parse_from(args.iter()).map_err(clap_fail)?;
     let bin = pin_bin()?;
     let root = a.root.unwrap_or_else(cwd);
+    // Unlike the hooks, a foreground index WAITS (spec §3c: killing user foreground work
+    // ranks worse than deferring — "前景動作等鎖,並告知原因"). Bounded retry with the same
+    // 30s deadline the upgrader's drain uses; the two deadlines race, and whichever times
+    // out first is the one that stands down — both directions are safe. On timeout the
+    // index REFUSES (never proceeds unlocked: indexing through a migration mid-flip is the
+    // mixed-generation read this whole protocol exists to prevent) with a structured error
+    // naming why, so a human reruns instead of guessing.
+    //
+    // The cache dir is created first so the loop cannot spend 30s retrying a mere
+    // missing-directory (open_lock does not mkdir). A cache dir that STILL cannot host a
+    // lock file is not an upgrade — the storage layer names it right after, and masking
+    // that with `upgrade_in_flight` would be the wrong-diagnosis sin; so that one error
+    // proceeds without the guard (today's behavior, and the db open fails immediately).
+    let cache = cache_dir();
+    let _ = std::fs::create_dir_all(&cache);
+    // `_guard` reads as unused but is load-bearing: the activity flock releases when this
+    // binding drops, at function end. An underscore-prefixed name keeps that lifetime while
+    // telling the compiler the value is never read.
+    let _guard: Option<cort::upgrade::ActivityGuard> = {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            match cort::upgrade::try_protected_entry(&cache) {
+                Ok(g) => break Some(g),
+                Err(cort::upgrade::LockError::LockFileUnavailable) => break None,
+                Err(_) if std::time::Instant::now() >= deadline => {
+                    return Err(CortError::new(
+                        "upgrade_in_flight",
+                        json!({
+                            "message": "a cort upgrade is in progress and holds the index locks",
+                            "next": "re-run `cort index` once the upgrade finishes",
+                        }),
+                    ));
+                }
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(100)),
+            }
+        }
+    };
+    // `guard` is held from here to the end of the function: across the db open and the index
+    // work. There is no early drop — dropping it before `incremental_index` would index
+    // through an upgrade that started in the gap.
     let (canon, mut db) = open_project_tracked(&root, usage)?;
     let stats = unwrap_busy(
         with_busy_retry(|| {
