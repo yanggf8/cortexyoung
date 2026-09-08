@@ -399,7 +399,10 @@ migrate_manifest_v2() {
   [ -n "$old_skill" ] && record_manifest "skill_xgrep" "$old_skill"
   local tmp; tmp="$(mktemp)"
   grep -v '^xg_bin:' "$MANIFEST_FILE" | grep -v '^skill:' > "$tmp" || true
-  cat "$tmp" > "$MANIFEST_FILE"; rm -f "$tmp"
+  # Staged rename, same discipline as record_manifest: `cat > "$MANIFEST_FILE"` truncated the
+  # live file and copied into it, so an interruption mid-copy left a truncated manifest — from
+  # the only record uninstall has of what exists (Kimi review round).
+  mv -f "$tmp" "$MANIFEST_FILE"
   record_manifest "manifest_version" "2"
   info "migrated manifest to v2 (xg_bin -> legacy_xg_bin, skill -> skill_xgrep)"
 }

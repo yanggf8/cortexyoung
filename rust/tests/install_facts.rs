@@ -219,23 +219,39 @@ fn every_manifest_key_install_sh_reads_is_known_or_legacy() {
 }
 
 /// The only write shape is `record_manifest` — it stages the whole next manifest and swaps it
-/// in with one rename, and it is what the key-membership parser above can see. A raw
-/// `echo "key:..." >> "$MANIFEST_FILE"` bypasses both: an interrupted run leaves the key
-/// half-written, and the parser cannot enforce the key. This exact blind spot is how `profile`
-/// drifted out of MANIFEST_KEYS for its whole life (found by the Codex review round: my own
-/// deploy-round fix reverted to the echo during a bisect and every test stayed green).
+/// in with one rename, and it is what the key-membership parser above can see. The guard
+/// therefore forbids ANY redirect targeting `$MANIFEST_FILE` itself (append or truncate,
+/// echo or printf or cat — the printf shape is why "contains echo" was too narrow), while
+/// reads that redirect OUT of the file (`grep ... > "$tmp"`) and the staged `mv` are the
+/// sanctioned shapes. A raw append leaves the key half-written on interruption, and the
+/// parser cannot enforce its key; a raw truncate write can lose the whole ledger. The echo
+/// blind spot is how `profile` drifted out of MANIFEST_KEYS for its whole life (found by the
+/// Codex review round), and the truncate shape — `cat "$tmp" > "$MANIFEST_FILE"` in
+/// migrate_manifest_v2 — predates that and escaped this test's first draft (Kimi review
+/// round).
 #[test]
 fn manifest_writes_go_through_record_manifest_only() {
     let installer = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../install.sh"));
     let mut raw = Vec::new();
     for (n, line) in installer.lines().enumerate() {
         let code = line.split('#').next().unwrap_or("");
-        if code.contains(">>") && code.contains("MANIFEST_FILE") && code.contains("echo") {
-            raw.push(format!("install.sh:{}: {}", n + 1, line.trim()));
+        // A redirect whose target is the live manifest: `>` or `>>`, optional whitespace,
+        // optional quote, then `$MANIFEST_FILE`. `grep -v x "$MANIFEST_FILE" > "$tmp"` only
+        // READS the file — its redirect target is "$tmp" — so it is not matched; the staged
+        // `mv -f "$tmp" "$MANIFEST_FILE"` is no redirect at all.
+        let mut from = 0;
+        while let Some(gt) = code[from..].find('>') {
+            let after = code[from + gt + 1..].trim_start();
+            let after = after.strip_prefix('"').unwrap_or(after);
+            if after.starts_with("$MANIFEST_FILE") {
+                raw.push(format!("install.sh:{}: {}", n + 1, line.trim()));
+                break;
+            }
+            from += gt + 1;
         }
     }
     assert!(
         raw.is_empty(),
-        "install.sh appends to the manifest outside record_manifest: {raw:?}"
+        "install.sh writes the manifest outside record_manifest: {raw:?}"
     );
 }

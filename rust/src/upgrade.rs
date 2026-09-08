@@ -652,6 +652,11 @@ pub fn skill_paths(new_tree: &Path, home: &Path) -> Vec<(&'static str, PathBuf, 
 /// decision (spec: adopting it is never an upgrade's), and the decision reads the stamp on
 /// disk, never detail prose: the first draft's `contains("managed")` also matched
 /// "unmanaged" and would overwrite a user's own unstamped skill (Codex review round).
+///
+/// Deliberate consequence of reading the stamp: a DELETED skill whose stamp survives also
+/// reads Drifted ("missing (the new tree ships it)") and IS repaired — the file is
+/// re-created. A managed asset the user removed is drift, and repair rewrites the stamp in
+/// the installer's format, so ownership is preserved (Kimi review round, behavior note).
 pub fn skill_repair_target(
     comp: &Component,
     new_tree: &Path,
