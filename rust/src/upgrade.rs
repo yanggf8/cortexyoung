@@ -820,3 +820,217 @@ pub fn check_hooks(
         },
     }
 }
+
+// ── Task 5: the binary's library half — verdict, acks, marker, deadline, check path ──
+//
+// The bin sequences and prints; every decision here is a function, so the tests above hold
+// without spawning a process.
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpgradeExit {
+    Ok,
+    Partial,
+    Fatal,
+}
+
+#[derive(Debug)]
+pub struct Verdict {
+    pub components: Vec<Component>,
+    pub exit: UpgradeExit,
+}
+
+/// Spec §6, verbatim: Partial for any Drifted/Unreadable component not acked; Ok otherwise.
+/// `Absent` never counts (gone never fails — the verdict test feeds Absent by hand, and Task
+/// 4's gone-directory test proves the pipeline really emits it). `Fatal` is never derived
+/// here: it is set by the binary only, for locks-unobtainable and staging-failed, and the
+/// type system keeps that one-directional on purpose. Acked components stay in the list —
+/// they print as info lines, they just stop failing the exit.
+pub fn verdict(components: Vec<Component>, acks: &[&str]) -> Verdict {
+    let mut exit = UpgradeExit::Ok;
+    for c in &components {
+        let acked = acks.contains(&c.name.as_str());
+        if acked {
+            continue;
+        }
+        if matches!(
+            c.state,
+            ComponentState::Drifted | ComponentState::Unreadable
+        ) {
+            exit = UpgradeExit::Partial;
+        }
+    }
+    Verdict { components, exit }
+}
+
+/// Load persisted acks from `<cache>/.upgrade-acks` (one name per line). Missing file →
+/// empty. Garbage → empty (never a crash, never a pass — an unreadable memory must not
+/// silence real drift, and must not wedge the run either).
+pub fn load_acks(cache: &Path) -> Vec<String> {
+    let Ok(raw) = fs::read_to_string(cache.join(".upgrade-acks")) else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = Vec::new();
+    for line in raw.lines() {
+        let name = line.trim();
+        if !name.is_empty() && !out.iter().any(|n| n == name) {
+            out.push(name.to_string());
+        }
+    }
+    out
+}
+
+/// Persist one ack (idempotent — acking twice is not two acks). The bin `save_ack`s each
+/// `--ack <name>` BEFORE applying it, so the next invocation already knows.
+pub fn save_ack(cache: &Path, name: &str) -> std::io::Result<()> {
+    let path = cache.join(".upgrade-acks");
+    let mut names = load_acks(cache);
+    if names.iter().any(|n| n == name) {
+        return Ok(());
+    }
+    names.push(name.to_string());
+    let mut body = String::new();
+    for n in &names {
+        body.push_str(n);
+        body.push('\n');
+    }
+    fs::write(path, body)
+}
+
+/// First-upgrade note: `None` when `.upgraded_once` exists beside the lock files, else an
+/// INFO component naming the WAL-reader risk. It rides the verdict's component list so it is
+/// printed, never smuggled — and its Current state can never fail the exit. The bin writes
+/// the marker only after a FULLY successful run.
+pub fn first_upgrade_note(cache: &Path) -> Option<Component> {
+    if cache.join(".upgraded_once").exists() {
+        return None;
+    }
+    Some(Component {
+        name: "partial_drain_first_upgrade".to_string(),
+        state: ComponentState::Current,
+        detail: "first upgrade under the new locking: the 30s drain cannot prove exclusion \
+                 of workers running pre-lock cort binaries, so a reader mid-WAL-write when \
+                 the payload flipped could have been reading a database being migrated \
+                 beneath it. Future upgrades drain against lock-aware workers; this note \
+                 does not recur."
+            .to_string(),
+    })
+}
+
+pub fn write_first_upgrade_marker(cache: &Path) -> std::io::Result<()> {
+    fs::write(cache.join(".upgraded_once"), b"")
+}
+
+/// Run `<bin> <args>` capturing stdout with a deadline; SIGTERM on timeout. The one
+/// subprocess runner every upgrader invocation shares — `--check` and the mutating run
+/// alike — so a hanging child can wedge a status poll but never the upgrade.
+pub fn run_capture_with_deadline(
+    bin: &Path,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<(String, String), String> {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    use std::sync::mpsc;
+    use std::thread;
+
+    let mut child = Command::new(bin)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("{}: {e}", bin.display()))?;
+    let pid = child.id();
+    let mut stdout_pipe = child.stdout.take().expect("stdout piped");
+    let mut stderr_pipe = child.stderr.take().expect("stderr piped");
+    let out_h = thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stdout_pipe.read_to_end(&mut buf);
+        buf
+    });
+    let err_h = thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stderr_pipe.read_to_end(&mut buf);
+        buf
+    });
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let status = child.wait();
+        let _ = tx.send(status);
+    });
+
+    let drain = |out_h: thread::JoinHandle<Vec<u8>>,
+                 err_h: thread::JoinHandle<Vec<u8>>|
+     -> (String, String) {
+        let stdout = String::from_utf8_lossy(&out_h.join().unwrap_or_default()).into_owned();
+        let stderr = String::from_utf8_lossy(&err_h.join().unwrap_or_default()).into_owned();
+        (stdout, stderr)
+    };
+
+    match rx.recv_timeout(timeout) {
+        Ok(Ok(status)) => {
+            let (stdout, stderr) = drain(out_h, err_h);
+            if !status.success() {
+                return Err(format!(
+                    "{} {:?} exited {}: {}",
+                    bin.display(),
+                    args,
+                    status.code().unwrap_or(-1),
+                    stderr.trim()
+                ));
+            }
+            Ok((stdout, stderr))
+        }
+        Ok(Err(e)) => Err(format!("{}: {e}", bin.display())),
+        Err(_) => {
+            #[cfg(unix)]
+            crate::ast_grep::send_sigterm(pid);
+            let _ = rx.recv_timeout(Duration::from_secs(2));
+            let _ = drain(out_h, err_h);
+            Err(format!(
+                "{} {:?} timed out after {}ms",
+                bin.display(),
+                args,
+                timeout.as_millis()
+            ))
+        }
+    }
+}
+
+/// Run `<bin> hook-install --all --status --lean` with a deadline. `Err` on spawn failure,
+/// nonzero exit, output that is not the 6-field TSV, or timeout (the `--check` nonblocking
+/// pin).
+pub fn run_status_with_deadline(bin: &Path, timeout: Duration) -> Result<String, String> {
+    let (stdout, stderr) = run_capture_with_deadline(
+        bin,
+        &["hook-install", "--all", "--status", "--lean"],
+        timeout,
+    )?;
+    for line in stdout.lines().filter(|l| !l.trim().is_empty()) {
+        if line.split('\t').count() < 6 {
+            return Err(format!("status output unparsable: {stderr}"));
+        }
+    }
+    Ok(stdout)
+}
+
+/// The `--check` diagnosis: Task-1 `diagnose` inputs the caller already gathered, PLUS the
+/// hook judgment — with NO repair callback in the signature. `--check` cannot repair because
+/// there is nothing to call: `judge_hooks` is the pure judgment half of `check_hooks`, and
+/// the check path is `run_status_with_deadline` → `judge_hooks`. The mutating run uses
+/// `check_hooks` (judge → repair → re-judge). "Diagnose only" is a wiring fact, not prose.
+pub fn diagnose_for_check(
+    inputs: &DiagnoseInputs,
+    shim: &Path,
+    run_status: &dyn Fn() -> Result<String, String>,
+) -> Vec<Component> {
+    let mut comps = diagnose(inputs);
+    match run_status() {
+        Err(e) => comps.push(Component {
+            name: "hooks".to_string(),
+            state: ComponentState::Unreadable,
+            detail: format!("status failed: {e}"),
+        }),
+        Ok(tsv) => comps.push(judge_hooks(shim, &tsv)),
+    }
+    comps
+}

@@ -246,11 +246,22 @@ else
   fail "an identical rebuild changed generation (gen1=$gen1 gen2=$gen2)"
 fi
 # `fake_ast_grep` is a test double that cargo builds alongside cort; shipping it would be a
-# second executable in the payload that nobody owns.
-if find "$HOME/.local/share/cortexyoung/cort" -name 'fake_ast_grep' -print -quit | grep -q .; then
+# second executable in the payload that nobody owns. `cort-upgrade` is repo-local for the same
+# reason. Both are asserted DIRECTLY through the generation symlink (`test -e` follows it):
+# `find <symlink> -name ...` does NOT descend (measured: empty result on a populated tree), so
+# the old shape passed whether or not the file was there — a guard that cannot fail is not a
+# guard.
+if [ -e "$HOME/.local/share/cortexyoung/cort/fake_ast_grep" ]; then
   fail "dev-only fixture stays out of the installed payload"
 else
   pass "dev-only fixture stays out of the installed payload"
+fi
+test -x "$REPO_ROOT/rust/target/release/cort_upgrade" \
+  || fail "release build must produce cort_upgrade (smoke Step 6 builds release first)"
+if [ -e "$HOME/.local/share/cortexyoung/cort/cort_upgrade" ]; then
+  fail "cort-upgrade stays out of the installed payload"
+else
+  pass "cort-upgrade stays out of the installed payload"
 fi
 # ── Task 0: stage-only / activate-only / deferral ────────────────
 echo "--- Task 0: stage-only builds without touching anything live ---"

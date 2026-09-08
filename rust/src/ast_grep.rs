@@ -223,7 +223,7 @@ fn timeout_err(args: &[String], timeout_ms: u64) -> CortError {
     )
 }
 
-fn send_sigterm(pid: u32) {
+pub(crate) fn send_sigterm(pid: u32) {
     // JS spawnSync timeout kills with SIGTERM (then r.signal === 'SIGTERM' or ETIMEDOUT).
     #[cfg(unix)]
     {

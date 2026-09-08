@@ -919,3 +919,182 @@ fn a_post_rebuild_unreadable_db_is_not_empty_reasons() {
         },
     );
 }
+
+// ── Task 5: the binary's library half — verdict, acks, marker, deadline, check path ──
+
+fn comp(name: &str, state: cort::upgrade::ComponentState) -> cort::upgrade::Component {
+    cort::upgrade::Component {
+        name: name.to_string(),
+        state,
+        detail: "x".into(),
+    }
+}
+
+/// The exit taxonomy is the spec §6 contract. A Drifted component is Partial (1), not Ok and
+/// not Fatal — Fatal is reserved for "cannot proceed safely".
+#[test]
+fn drifted_components_are_partial_never_fatal() {
+    let comps = vec![
+        comp("shim", cort::upgrade::ComponentState::Drifted),
+        comp("skill_xgrep", cort::upgrade::ComponentState::Current),
+    ];
+    let v = cort::upgrade::verdict(comps.clone(), &[]);
+    assert!(matches!(v.exit, cort::upgrade::UpgradeExit::Partial));
+    // An acked drift becomes info: still printed (visibility), but not a failure.
+    let v = cort::upgrade::verdict(comps, &["shim"]);
+    assert!(
+        matches!(v.exit, cort::upgrade::UpgradeExit::Ok),
+        "acked drift must not fail the verdict"
+    );
+}
+
+/// A gone directory is NOT a failure (spec §6: gone never fails) even though its reasons are
+/// recorded. This test feeds Absent BY HAND — and it is a real assertion (not the vacuous one
+/// the first draft shipped) because Task 4's gone-directory test proves the pipeline really
+/// emits Absent for gone dirs; the two tests compose.
+#[test]
+fn deferred_and_gone_indexes_do_not_fail_the_verdict() {
+    let comps = vec![comp(
+        "index:/gone/project",
+        cort::upgrade::ComponentState::Absent,
+    )];
+    let v = cort::upgrade::verdict(comps, &[]);
+    assert!(matches!(v.exit, cort::upgrade::UpgradeExit::Ok));
+}
+
+/// Unreadable DOES count against the verdict (spec §6: unreadable never passes) — but as
+/// Partial, not Fatal.
+#[test]
+fn unreadable_counts_as_partial() {
+    let comps = vec![comp(
+        "index_unreadable",
+        cort::upgrade::ComponentState::Unreadable,
+    )];
+    let v = cort::upgrade::verdict(comps, &[]);
+    assert!(matches!(v.exit, cort::upgrade::UpgradeExit::Partial));
+}
+
+/// Ack persistence (spec §6: "該元件之後降為資訊列" — *afterwards*). `--ack shim` must work
+/// on the NEXT invocation too, not just the current call. The store file is
+/// `<cache>/.upgrade-acks`, one name per line — beside the lock files, never in the manifest
+/// (manifest keys belong to install.sh) and never in usage.db (different owner).
+#[test]
+fn an_ack_survives_to_the_next_invocation() {
+    let cache = tempfile::tempdir().unwrap();
+    assert!(
+        cort::upgrade::load_acks(cache.path()).is_empty(),
+        "fresh cache acks nothing"
+    );
+    cort::upgrade::save_ack(cache.path(), "shim").unwrap();
+    cort::upgrade::save_ack(cache.path(), "shim").unwrap(); // idempotent
+    let acks = cort::upgrade::load_acks(cache.path());
+    assert_eq!(acks, vec!["shim".to_string()]);
+    let comps = vec![comp("shim", cort::upgrade::ComponentState::Drifted)];
+    let borrowed: Vec<&str> = acks.iter().map(String::as_str).collect();
+    let v = cort::upgrade::verdict(comps, &borrowed);
+    assert!(
+        matches!(v.exit, cort::upgrade::UpgradeExit::Ok),
+        "a persisted ack quiets the next run"
+    );
+    // Corrupt ack store reads as EMPTY, never as a pass and never as a crash: an unreadable
+    // memory must not silence real drift.
+    fs::write(
+        cache.path().join(".upgrade-acks"),
+        b"\xff\xfe garbage \x00\n",
+    )
+    .unwrap();
+    assert!(cort::upgrade::load_acks(cache.path()).is_empty());
+}
+
+/// First-upgrade detection (Task 2's marker): no marker → the verdict gains a
+/// `partial_drain_first_upgrade` info component naming the WAL-reader risk; marker present →
+/// no such component. The drain still ran bounded either way — the marker records only that
+/// *this* upgrade cannot prove exclusion of pre-lock binaries (spec §3b option A).
+#[test]
+fn the_first_upgrade_labels_partial_drain() {
+    let cache = tempfile::tempdir().unwrap();
+    let note = cort::upgrade::first_upgrade_note(cache.path()).unwrap();
+    assert!(
+        note.detail.contains("WAL"),
+        "the risk must be named, not implied: {note:?}"
+    );
+    cort::upgrade::write_first_upgrade_marker(cache.path()).unwrap();
+    assert!(cort::upgrade::first_upgrade_note(cache.path()).is_none());
+}
+
+/// The subprocess runner has a deadline: against a binary that sleeps 30s it returns Err
+/// within 2s, not after the sleep. The plan's draft aimed this at `run_status_with_deadline`
+/// with `/bin/sleep` "ignoring its argv" — measured false: `sleep hook-install` exits 1
+/// immediately, so the old shape passed in 0.00s with no deadline in play at all (the
+/// nonzero exit produced the Err, not the timeout). The deadline lives in
+/// `run_capture_with_deadline`, so that is what gets the genuinely-hanging fixture:
+/// `/bin/sleep 30` really does hang.
+#[test]
+fn a_hanging_status_subprocess_hits_the_deadline() {
+    let start = std::time::Instant::now();
+    let r = cort::upgrade::run_capture_with_deadline(
+        std::path::Path::new("/bin/sleep"),
+        &["30"],
+        std::time::Duration::from_secs(2),
+    );
+    assert!(r.is_err(), "a 30s sleep must not survive a 2s deadline");
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(10),
+        "deadline, not patience: {:?}",
+        start.elapsed()
+    );
+}
+
+/// `--check` never repairs, even when drifted — by CONSTRUCTION: `diagnose_for_check` takes
+/// no repair callback, so there is nothing to call. What the test pins is the other half of
+/// that property: a check that cannot repair must still REPORT (a blind check is worse than
+/// none — it would print Current over drift).
+#[test]
+fn check_mode_reports_drift_it_cannot_repair() {
+    let bad =
+        "claude-code\tpre\twired\t/s\ttrusted=true\t/foreign hook-suggest --harness claude-code\n";
+    let install_root = tempfile::tempdir().unwrap();
+    let new_pack = tempfile::tempdir().unwrap();
+    let comps = cort::upgrade::diagnose_for_check(
+        &cort::upgrade::DiagnoseInputs {
+            install_root: install_root.path(),
+            new_pack: new_pack.path(),
+            installed_ast_grep_version: cort::install::AST_GREP_PINNED,
+            new_tree: install_root.path(),
+            home: install_root.path(),
+            keep_mine: false,
+        },
+        std::path::Path::new("/shim"),
+        &|| Ok(bad.to_string()),
+    );
+    assert!(comps
+        .iter()
+        .any(|c| c.name == "hooks" && matches!(c.state, cort::upgrade::ComponentState::Drifted)));
+}
+
+/// `--check` completes while an upgrade holds the locks exclusive (diagnosis takes no locks
+/// by construction). Passes trivially today — it pins the property against a future edit
+/// that adds locking to the diagnose path, which would wedge every --check behind a drain.
+#[test]
+fn check_mode_completes_while_an_upgrade_holds_the_locks() {
+    let cache = tempfile::tempdir().unwrap();
+    let locks =
+        cort::upgrade::acquire_upgrade_locks(cache.path(), std::time::Duration::from_secs(5))
+            .unwrap();
+    let install_root = tempfile::tempdir().unwrap();
+    let new_pack = tempfile::tempdir().unwrap();
+    let comps = cort::upgrade::diagnose_for_check(
+        &cort::upgrade::DiagnoseInputs {
+            install_root: install_root.path(),
+            new_pack: new_pack.path(),
+            installed_ast_grep_version: cort::install::AST_GREP_PINNED,
+            new_tree: install_root.path(),
+            home: install_root.path(),
+            keep_mine: false,
+        },
+        std::path::Path::new("/shim"),
+        &|| Ok(String::new()),
+    );
+    assert!(!comps.is_empty());
+    drop(locks);
+}
