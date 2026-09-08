@@ -788,7 +788,7 @@ fn chmod_600(path: &Path) {
     let _ = path;
 }
 
-fn cap_str(s: &str) -> String {
+pub fn cap_str(s: &str) -> String {
     if s.len() <= FIELD_CAP {
         return s.to_string();
     }

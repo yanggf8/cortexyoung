@@ -1327,3 +1327,25 @@ fn the_machine_id_never_carries_a_hostname() {
         }
     }
 }
+
+/// An unknown command's only diagnostic value IS the name the caller typed. The recorder used
+/// to write `{"v":1}` — 13 such rows in one quarter's log answer nothing about what was
+/// mistyped (found mining the usage log for self-improvement signals).
+#[test]
+fn an_unknown_command_records_the_name_it_was_rejected_for() {
+    let (_p, cwd, _c, cache) = sandbox();
+    let r = run_cort(&["frobnicate"], &cwd, &cache);
+    assert_ne!(r.code, 0, "an unknown command is an error");
+    let rows = log_rows(&cache);
+    let row = rows
+        .iter()
+        .find(|row| row["command"] == "unknown")
+        .expect("the rejected invocation is recorded");
+    let summary = row["args_summary"].as_str().unwrap();
+    assert!(
+        summary.contains("rejected") && summary.contains("frobnicate"),
+        "args_summary must name what was rejected: {summary}"
+    );
+    // Privacy holds: nothing else from the invocation leaks into the row.
+    assert_eq!(row["status"], "error");
+}

@@ -204,12 +204,9 @@ struct Emit {
 
 fn usage_from_args(args: &[String]) -> UsageEvent {
     let raw = args.first().map(String::as_str).unwrap_or("");
-    let command = if KNOWN_COMMANDS.contains(&raw) {
-        raw
-    } else {
-        "unknown"
-    };
-    UsageEvent {
+    let known = KNOWN_COMMANDS.contains(&raw);
+    let command = if known { raw } else { "unknown" };
+    let mut ev = UsageEvent {
         command: command.to_string(),
         project_id: None,
         args_summary: usage::args_summary(None, None, None, None),
@@ -219,7 +216,18 @@ fn usage_from_args(args: &[String]) -> UsageEvent {
         receipt_hit: None,
         index_stale: None,
         saved_bytes: 0,
+    };
+    if !known {
+        // An unknown command's only diagnostic value IS the name the caller typed — without
+        // it the row is `{"v":1}` and answers nothing about what was mistyped (found mining
+        // one quarter's log: 13 such rows). Capped like every other free string in the log.
+        let capped = usage::cap_str(raw);
+        ev.args_summary = format!(
+            "{{\"rejected\":{},\"v\":1}}",
+            serde_json::to_string(capped.as_str()).unwrap_or_else(|_| "\"\"".into())
+        );
     }
+    ev
 }
 
 fn fill_stale(usage: &mut UsageEvent, payload: &Value) {
@@ -1802,6 +1810,12 @@ fn cmd_status(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError
         });
     }
     let db = Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|e| cort::db::classify_sqlite(&e))?;
+    // Spec §10 item 1, third instance: this read-only open ran with no busy timeout, so a
+    // status poll under a concurrent refresh-hook write reported `storage_busy` for what is
+    // contention, not corruption — six in one quarter's log, at ~1,500 refreshes a day.
+    // Same 5s the rest of db.rs waits; contention now waits instead of lying.
+    db.busy_timeout(std::time::Duration::from_millis(5000))
         .map_err(|e| cort::db::classify_sqlite(&e))?;
     let st = status_of(&db, &canon.path).map_err(map_index)?;
     if !st.indexed {
