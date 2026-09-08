@@ -204,7 +204,13 @@ never appears in its own report.
 ./install.sh --with-rustup # bootstrap rustup if cargo is missing
 ./install.sh --with-xgrep  # opt-in: also install xg v0.7.0 (xgrep-search crate) + xgrep skill
 ./install.sh --no-hook    # skip wiring the PreToolUse hook into Claude Code / Codex settings
+./install.sh --stage-only # build + stage + validate one generation; prints its id; touches nothing live
+./install.sh --activate-only --gen <id>  # flip a staged generation live (symlink + shim + cort_bin only)
 ```
+
+On a machine that already has a `cort_bin` manifest entry, a bare `./install.sh`
+**declines** (exit 3) and changes nothing — full installs do not own upgrades.
+That path is [`cort-upgrade`](#update)'s.
 
 **What it does (default, without `--with-xgrep`):**
 
@@ -221,10 +227,43 @@ never appears in its own report.
 
 ```bash
 git pull --no-rebase
-./install.sh              # idempotent — cargo decides build freshness (0.04s when nothing changed), skips hash-equal skill, no duplicate PATH block
+cargo build --release --locked --manifest-path rust/Cargo.toml
+./rust/target/release/cort_upgrade --check   # diagnose: no locks, no writes, no repair; same exit taxonomy
+./rust/target/release/cort_upgrade           # stage -> drain -> activate -> repair -> reindex -> verdict
 ```
 
-With xgrep (opt-in):
+`cort-upgrade` is the upgrade path on any machine that already has a `cort_bin`
+manifest entry (a bare `./install.sh` declines there — see [Install](#install)).
+The binary is repo-local and never installed: it runs the new tree's code, so it
+inherently knows what the new release needs; its only question about the machine
+is "what's installed". The sequence, each boundary re-verified: **diagnose**
+unlocked — if the verdict is already Ok it stops here, touching nothing (the
+steady state must be free); **stage** the new generation (`--stage-only`:
+lock-free, invisible, validated, prints the content-addressed id); take **two
+flocks** — admission closes the gate on new workers, activity drains in-flight
+ones with a 30s deadline, hooks stand down and `cort index` refuses rather
+than race an upgrade; **activate** the payload only (no skills, no hooks —
+upgrade policy is never pre-empted by the installer); **rewire** hooks
+(judge → repair → re-run status → re-judge; a repair is reported as landed
+only after the re-check says so) and skills (only ones the installer owns —
+an unstamped divergence is `install.sh --force`'s decision, `--keep-mine`
+defers yours as `deferred-by-user`); **migrate** indexes — a drifted index
+with a live directory is rebuilt eagerly and its reasons re-read before
+Current is believed, a gone directory records its debt as `absent` and never
+fails; then the **verdict**.
+
+Exit codes: **0** everything current, **1** partial — any drifted/unreadable
+component not `--ack`ed (gone directories never fail; unreadable never
+passes), **2** fatal — locks unobtainable or staging failed, the only two
+"cannot proceed safely" states. Flags: `--check` (diagnose only),
+`--ack <name>` (accept one drifted component; persisted beside the lock
+files, so it survives to the next run), `--keep-mine`, `--defer` (record
+index debt without rebuilding). The first upgrade under the locking prints a
+one-time `partial_drain_first_upgrade` note — the 30s drain cannot prove
+exclusion of workers running pre-lock binaries — and marks itself done only
+after a fully successful run.
+
+With xgrep (opt-in), the same rule applies to `xg`:
 
 ```bash
 ./install.sh --with-xgrep # idempotent xg install + xgrep skill deploy
@@ -259,7 +298,10 @@ full index while the graph is pending, then clears the marker). An older databas
 place with `ALTER TABLE` — `CREATE TABLE IF NOT EXISTS` never adds a column to a table that already
 exists — and the added columns stay `CHECK`-constrained, so a form this build does not know cannot be
 stored. Until that rebuild runs, `impact` results come from the pre-upgrade graph (with `@-` where no
-call site was recorded) and `index_is_stale` is `true`.
+call site was recorded) and `index_is_stale` is `true`. Since the upgrader exists the actor is no
+longer "the next command that happens to touch the index": `cort-upgrade` rebuilds every drifted
+index with a live directory itself (then re-reads the rebuild reasons before believing it), records
+the debt of indexes whose directory is gone, and says so per project in its verdict.
 
 ## Uninstall
 
