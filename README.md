@@ -888,14 +888,24 @@ populations rather than quietly reporting a ratio across them.
 runs — most correctly silent (`not_a_search_tool`: `ls`, `git`, `cargo`) — reached **13**
 `cort impact` suggestions as Claude Code injections, of which **12 were cort auditing its own
 tree**; agents ran the suggested same-symbol `impact` **2** times, one of which was a hook
-self-test. The natural-adoption count over the window is therefore **1**, and quoting any
-numerator that still contains the product tree would score changes on self-tests. That is why
-`--exclude` exists and is not a silent default: the tree being developed must be dropped
-explicitly, and the report echoes what it dropped.
+self-test. That is why `--exclude` exists and is not a silent default: the tree being developed
+must be dropped explicitly, and the report echoes what it dropped. The exclude matches the
+transcript **directory name** (`-home-yanggf-a-cortexyoung`), not the repo's short name — a bare
+`cortexyoung` matches nothing and `excluded_sessions: 0` in the output is how you catch it:
 
 ```bash
-cort-evals adopt-mine --exclude cortexyoung --since 2026-09-01T00:00:00Z
+cort-evals adopt-mine --since 2026-09-01T00:00:00Z \
+  --exclude -home-yanggf-a-cortexyoung
 ```
+
+On the 2026-09-01→09-08 window that product-only verdict is **1 injection, 0 adoptions**
+(full snapshot including the excluded tree: `evals/runs/2026-09-09-adopt-baseline/`). Three
+changes landed 2026-09-09 to move it, each tied to a mined cause: the two highest-search
+unindexed projects are now indexed (`GalaxyWarHero`, `hesocial` — the `no_index` hole); the
+stale clause is one copy-pasteable chained command instead of an essay (stale suggestions were
+ignored 6/6); the copy leads with the verb condition so definition lookups can dismiss in one
+glance (5/11 ignores). The next `adopt-mine` over a later window is scored against the
+baseline, product-only.
 
 The same mining fixed the mirror mistake on the other side: `impact ok=423` in the usage log is
 **not** hook uptake either — 388 of those rows are one day's eval/probe traffic. Counts without

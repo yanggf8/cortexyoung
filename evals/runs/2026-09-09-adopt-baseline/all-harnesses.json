@@ -1,0 +1,261 @@
+{
+  "adopted_other_symbol": 1,
+  "adopted_same_symbol": 2,
+  "by_project": {
+    "-home-yanggf": {
+      "injections": 0,
+      "searches": 19,
+      "sessions": 3
+    },
+    "-home-yanggf--claude-code-router": {
+      "injections": 0,
+      "searches": 65,
+      "sessions": 18
+    },
+    "-home-yanggf-a": {
+      "injections": 0,
+      "searches": 0,
+      "sessions": 1
+    },
+    "-home-yanggf-a-claudecat": {
+      "injections": 0,
+      "searches": 25,
+      "sessions": 4
+    },
+    "-home-yanggf-a-claw-skills": {
+      "injections": 1,
+      "not_adopted": 1,
+      "searches": 32,
+      "sessions": 7
+    },
+    "-home-yanggf-a-cortexyoung": {
+      "adopted_other_symbol": 1,
+      "adopted_same_symbol": 2,
+      "injections": 12,
+      "not_adopted": 9,
+      "searches": 429,
+      "sessions": 17
+    },
+    "-home-yanggf-a-ft": {
+      "injections": 0,
+      "searches": 98,
+      "sessions": 5
+    },
+    "-home-yanggf-a-hesocial": {
+      "injections": 0,
+      "searches": 182,
+      "sessions": 1
+    },
+    "-home-yanggf-b-ainews": {
+      "injections": 0,
+      "searches": 12,
+      "sessions": 2
+    },
+    "-home-yanggf-b-travel-2026": {
+      "injections": 0,
+      "searches": 44,
+      "sessions": 4
+    },
+    "-home-yanggf-c": {
+      "injections": 0,
+      "searches": 0,
+      "sessions": 1
+    },
+    "-home-yanggf-c-GalaxyWarHero": {
+      "injections": 0,
+      "searches": 27,
+      "sessions": 1
+    },
+    "-home-yanggf-c-agent-portal-tpm": {
+      "injections": 0,
+      "searches": 37,
+      "sessions": 3
+    }
+  },
+  "cross_check_reading": "`injections_recorded` is `hit + hit_stale`: the injections cort itself recorded, from a file the transcript scan never reads. Compare it to `injections` ONLY when `comparable_to_injections` is true -- otherwise the two have different populations and a difference between them means nothing. When they are comparable, a shortfall means a second CORT_CACHE_DIR was in play, which is how the 09-01 baseline was lost. Two limits on the word `independent`: this report reads one cache (`--usage-db`) and cannot discover others, and a row is only written when the hook ran to completion, so a hook killed by the harness timeout is missing from both sides at once rather than from one.",
+  "excluded_projects": [],
+  "excluded_sessions": 0,
+  "files_unreadable": 0,
+  "follow_calls_window": 5,
+  "injection_rows": [
+    {
+      "at": "2026-09-01T02:34:43Z",
+      "followed_by": null,
+      "impact_later_in_session": false,
+      "paired_by": "toolUseID",
+      "project": "-home-yanggf-a-claw-skills",
+      "session": "09f995a5-3a2e-4fdb-9bfa-fe86c62dc255",
+      "symbol": "run_custom_topic",
+      "triggering_command": "grep -rn \"run_custom_topic\" /home/yanggf/a/claw-skills/crates/news/src/ | grep -v \"^.*summarize.rs.*fn run_custom_topic\"",
+      "verdict": "not_adopted"
+    },
+    {
+      "at": "2026-09-01T02:29:06Z",
+      "followed_by": "~/.cargo/bin/cort impact --symbol 'declares_callable_in' --depth 1 --coverage -f lean 2>&1 | head -8",
+      "impact_later_in_session": false,
+      "paired_by": "toolUseID",
+      "project": "-home-yanggf-a-cortexyoung",
+      "session": "212a332a-cdbe-4187-9461-45055e68c718",
+      "symbol": "declares_callable_in",
+      "triggering_command": "grep -rn \"declares_callable_in\" evals/src/",
+      "verdict": "adopted_same_symbol"
+    },
+    {
+      "at": "2026-09-01T09:32:23Z",
+      "followed_by": null,
+      "impact_later_in_session": false,
+      "paired_by": "toolUseID",
+      "project": "-home-yanggf-a-cortexyoung",
+      "session": "212a332a-cdbe-4187-9461-45055e68c718",
+      "symbol": "receiver_binds",
+      "triggering_command": "grep -rn \"receiver_binds\" rust/src/graph.rs | head -2",
+      "verdict": "not_adopted"
+    },
+    {
+      "at": "2026-09-07T09:13:37Z",
+      "followed_by": null,
+      "impact_later_in_session": true,
+      "paired_by": "toolUseID",
+      "project": "-home-yanggf-a-cortexyoung",
+      "session": "231703d5-efd5-4237-830b-e78f11be89ab",
+      "symbol": "RebuildPolicy",
+      "triggering_command": "grep -rn \"RebuildPolicy\" rust/src/*.rs | grep -v \"^rust/src/main.rs\" | head -5; grep -n \"incremental::\" rust/src/main.rs | head -5; echo ---; grep -n \"matcher\\|…",
+      "verdict": "not_adopted"
+    },
+    {
+      "at": "2026-09-07T09:24:57Z",
+      "followed_by": null,
+      "impact_later_in_session": true,
+      "paired_by": "toolUseID",
+      "project": "-home-yanggf-a-cortexyoung",
+      "session": "231703d5-efd5-4237-830b-e78f11be89ab",
+      "symbol": "incremental_index",
+      "triggering_command": "grep -rn 'incremental_index' --include='*.rs' rust/ evals/ | grep -v '^.*://' | head -30; echo ===; grep -c 'incremental_index' rust/tests/incremental.rs rust/t…",
+      "verdict": "not_adopted"
+    },
+    {
+      "at": "2026-09-02T02:57:16Z",
+      "followed_by": null,
+      "impact_later_in_session": true,
+      "paired_by": "toolUseID",
+      "project": "-home-yanggf-a-cortexyoung",
+      "session": "48184eb1-fd2f-4de7-bfb4-139a43c35ba8",
+      "symbol": "canonicalize_root",
+      "triggering_command": "grep -rn \"canonicalize_root(\" rust/src/ 2>/dev/null | head -3",
+      "verdict": "not_adopted"
+    },
+    {
+      "at": "2026-09-02T02:57:33Z",
+      "followed_by": null,
+      "impact_later_in_session": true,
+      "paired_by": "toolUseID",
+      "project": "-home-yanggf-a-cortexyoung",
+      "session": "48184eb1-fd2f-4de7-bfb4-139a43c35ba8",
+      "symbol": "outcome",
+      "triggering_command": "grep -rn \"outcome\" rust/src/usage.rs | head -20 echo \"=== 誰讀 outcome ===\" grep -rn \"outcome\\|legacy_unsplit\" evals/src/*.rs | head -20",
+      "verdict": "not_adopted"
+    },
+    {
+      "at": "2026-09-02T03:03:18Z",
+      "followed_by": null,
+      "impact_later_in_session": true,
+      "paired_by": "toolUseID",
+      "project": "-home-yanggf-a-cortexyoung",
+      "session": "48184eb1-fd2f-4de7-bfb4-139a43c35ba8",
+      "symbol": "installed_command",
+      "triggering_command": "grep -rn \"installed_command\" rust/src/ | head -3",
+      "verdict": "not_adopted"
+    },
+    {
+      "at": "2026-09-02T05:40:14Z",
+      "followed_by": "cd /home/yanggf/a/dac && echo '{\"tool_input\":{\"command\":\"grep -rn \\\"handleRequest\\\" src/\"}}' | cort hook-suggest 2>&1 | head -5 echo \"=== impact 在 dac 上 ===\" co…",
+      "impact_later_in_session": false,
+      "paired_by": "toolUseID",
+      "project": "-home-yanggf-a-cortexyoung",
+      "session": "48184eb1-fd2f-4de7-bfb4-139a43c35ba8",
+      "symbol": "project_is_indexed",
+      "triggering_command": "grep -rn \"project_is_indexed\" rust/src/*.rs | head; echo \"---\"; grep -rn \"indexed\" rust/src/main.rs | sed -n '1,20p'",
+      "verdict": "adopted_other_symbol"
+    },
+    {
+      "at": "2026-09-02T05:45:33Z",
+      "followed_by": null,
+      "impact_later_in_session": false,
+      "paired_by": "toolUseID",
+      "project": "-home-yanggf-a-cortexyoung",
+      "session": "48184eb1-fd2f-4de7-bfb4-139a43c35ba8",
+      "symbol": "storage_busy",
+      "triggering_command": "grep -rn \"storage_busy\" rust/src/ rust/tests/ evals/src/ 2>/dev/null | head -20",
+      "verdict": "not_adopted"
+    },
+    {
+      "at": "2026-09-03T07:06:54Z",
+      "followed_by": "cort impact --symbol git_candidates --depth 1 --coverage -f lean 2>&1",
+      "impact_later_in_session": false,
+      "paired_by": "toolUseID",
+      "project": "-home-yanggf-a-cortexyoung",
+      "session": "9dd81600-3d18-432a-b7d5-d4c9824cab70",
+      "symbol": "git_candidates",
+      "triggering_command": "grep -rn \"git_candidates\" rust/ --include=*.rs",
+      "verdict": "adopted_same_symbol"
+    },
+    {
+      "at": "2026-09-03T08:22:10Z",
+      "followed_by": null,
+      "impact_later_in_session": true,
+      "paired_by": "toolUseID",
+      "project": "-home-yanggf-a-cortexyoung",
+      "session": "9dd81600-3d18-432a-b7d5-d4c9824cab70",
+      "symbol": "matcher",
+      "triggering_command": "grep -rn \"matcher\" rust/tests/settings.rs | head; echo \"=== toml 側有沒有對應測試 ===\"; grep -rn \"matcher\" rust/tests/settings_toml.rs | head -5",
+      "verdict": "not_adopted"
+    },
+    {
+      "at": "2026-09-03T08:33:26Z",
+      "followed_by": null,
+      "impact_later_in_session": true,
+      "paired_by": "toolUseID",
+      "project": "-home-yanggf-a-cortexyoung",
+      "session": "9dd81600-3d18-432a-b7d5-d4c9824cab70",
+      "symbol": "trusted",
+      "triggering_command": "grep -rn \"trusted\" rust/src/main.rs | head -10",
+      "verdict": "not_adopted"
+    }
+  ],
+  "injections": 13,
+  "lines_unparsed": 7,
+  "method": "adopt-mine-v1",
+  "not_adopted": 10,
+  "reading": "`injections` is how often the hook actually put the query in front of the agent, and it is the only stage that means anything on its own: `searches` is the population, and `shape_would_fire` is the offline matcher's opinion of the SHAPE half only -- since 2026-09-04 the shipped rule also asks the index whether it holds a seed or a raw edge naming the symbol, and that half cannot be replayed here because the index state at the time of each historical search is not recoverable. It is therefore an upper bound on what would ship today, and the gap against `injections` now has TWO causes that must not be added together: `no_index` is the opportunity the gate declined (index the project and the hook would help), while `no_evidence` is a correct refusal (the project is indexed and holds nothing about that symbol). Only the first is a missed chance, which will disagree with `injections` wherever a project has no index -- that difference is the opportunity the gate declined, not a bug. Adoption is reported per injection and must be adjudicated row by row: `adopted_other_symbol` is usually the agent moving on rather than taking the suggestion, and a session that was auditing the hook adopts it for reasons no user shares -- pass `--exclude` for the project cort is developed in, or the funnel is measuring its own audit. Adoption is only counted inside `follow_calls_window` calls of the intercepted one; `impact_later_in_session` marks a row where the tool was used further on, which is a fact for a reader and not an adoption. Nothing here says the enumeration that followed was correct; `verify-impact` grades an edge. The adoption test reads shell syntax, not shell semantics, and the residue is named rather than hidden: a short-circuited branch (`false && cort impact`) is counted though it never ran, and `sh -c`, `xargs`, `env`, an alias, a command substitution or a prefix redirection are missed though they did. Read `followed_by` on each row; that is what it is printed for.",
+  "records_without_timestamp": 0,
+  "searches": 970,
+  "sessions_in_window": 67,
+  "shape_would_fire": 53,
+  "since_as_given": "2026-09-01T00:00:00Z",
+  "tree_read": "<home>/.claude/projects",
+  "usage_db_cross_check": {
+    "comparable_to_injections": false,
+    "injections_recorded": 10,
+    "not_comparable_because": [
+      "1032 rows predate outcome recording (`legacy_unsplit`) and cannot be attributed to either side",
+      "549 rows predate harness recording (`unspecified`); they were written when only one harness was wired, but the row does not say so and this report will not assume it",
+      "1759 rows were written by a harness other than `claude-code` and have no counterpart in the transcripts this window read"
+    ],
+    "outcomes": {
+      "hit": 5,
+      "hit_stale": 5,
+      "legacy_unsplit": 1032,
+      "no_evidence": 8,
+      "no_index": 27,
+      "no_payload": 49,
+      "no_shape": 6545,
+      "other_harness": 1759,
+      "unspecified": 549
+    }
+  },
+  "usage_db_read": "<home>/.cache/cortex-ng/usage.db",
+  "window": {
+    "since_ms": 1788220800000,
+    "since_utc": "2026-09-01T00:00:00Z"
+  }
+}
