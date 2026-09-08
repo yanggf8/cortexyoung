@@ -613,19 +613,58 @@ const MANAGED_STAMP_NAME: &str = ".cortexyoung-managed";
 /// - ast-grep skill: `${CLAUDE_SKILL_HOME:-$HOME/.claude}/skills/ast-grep/SKILL.md`;
 /// - codex skill: `${CODEX_HOME:-$HOME/.codex}/skills/ast-grep/SKILL.md`.
 pub fn check_skills(new_tree: &Path, home: &Path, keep_mine: bool) -> Vec<Component> {
+    let specs = skill_paths(new_tree, home);
+    check_skills_at(new_tree, &specs[0].2, &specs[1].2, &specs[2].2, keep_mine)
+}
+
+/// Skill (name, source, destination) triples, resolved exactly as install.sh resolves them —
+/// the same env overrides `check_skills` reads. Repair MUST write the destination diagnosis
+/// looked at: a hard-coded default home misses the real (overridden) copy and can overwrite
+/// an unrelated file at the default path (Codex review round).
+pub fn skill_paths(new_tree: &Path, home: &Path) -> Vec<(&'static str, PathBuf, PathBuf)> {
     let claude_home = std::env::var_os("CLAUDE_SKILL_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| home.join(".claude"));
     let codex_home = std::env::var_os("CODEX_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| home.join(".codex"));
-    check_skills_at(
-        new_tree,
-        &home.join(".claude/skills/xgrep/SKILL.md"),
-        &claude_home.join("skills/ast-grep/SKILL.md"),
-        &codex_home.join("skills/ast-grep/SKILL.md"),
-        keep_mine,
-    )
+    vec![
+        (
+            "skill_xgrep",
+            new_tree.join("skills/xgrep/SKILL.md"),
+            home.join(".claude/skills/xgrep/SKILL.md"),
+        ),
+        (
+            "skill_ast_grep",
+            new_tree.join("skills/ast-grep/SKILL.md"),
+            claude_home.join("skills/ast-grep/SKILL.md"),
+        ),
+        (
+            "skill_ast_grep_codex",
+            new_tree.join("skills/ast-grep/SKILL.md"),
+            codex_home.join("skills/ast-grep/SKILL.md"),
+        ),
+    ]
+}
+
+/// The one repair target an upgrade may act on: a skill that is Drifted AND owned — the
+/// installer's stamp beside the destination. An unmanaged divergence is install.sh --force's
+/// decision (spec: adopting it is never an upgrade's), and the decision reads the stamp on
+/// disk, never detail prose: the first draft's `contains("managed")` also matched
+/// "unmanaged" and would overwrite a user's own unstamped skill (Codex review round).
+pub fn skill_repair_target(
+    comp: &Component,
+    new_tree: &Path,
+    home: &Path,
+) -> Option<(PathBuf, PathBuf)> {
+    if !matches!(comp.state, ComponentState::Drifted) {
+        return None;
+    }
+    let (_name, src, dest) = skill_paths(new_tree, home)
+        .into_iter()
+        .find(|(n, _, _)| *n == comp.name)?;
+    let managed = dest.parent()?.join(MANAGED_STAMP_NAME).exists();
+    managed.then_some((src, dest))
 }
 
 /// The testable core: all paths explicit, ZERO env dependence. Checks never write — repair

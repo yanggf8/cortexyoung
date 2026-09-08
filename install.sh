@@ -320,7 +320,11 @@ ensure_path_block() {
     echo "$PROFILE_MARKER_END"
   } >> "$profile"
   info "added PATH block to $profile"
-  echo "profile:$profile" >> "$MANIFEST_FILE"
+  # record_manifest, not a raw echo: a bare append bypasses the staged rename AND the
+  # install_facts parser, which is how `profile` drifted out of MANIFEST_KEYS and read as
+  # `keys no release knows: profile` on every upgraded machine (Codex review round caught the
+  # revert of this exact line during a bisect).
+  record_manifest "profile" "$profile"
 }
 
 remove_path_block() {

@@ -1139,3 +1139,98 @@ fn a_gone_index_reads_absent_in_diagnose_too() {
         },
     );
 }
+
+// ── Codex review round: repair targets the OWNED skill at the path diagnosis looked ──
+
+/// An unmanaged divergence is install.sh --force's decision, never an upgrade's. The first
+/// draft decided this from detail prose — `contains("managed")` also matches "unmanaged", so
+/// a user's own diverged, unstamped skill would be overwritten AND claimed by a stamp. The
+/// decision reads the stamp on disk now.
+#[test]
+fn an_unmanaged_diverged_skill_has_no_repair_target() {
+    let tree = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    fs::create_dir_all(tree.path().join("skills/ast-grep")).unwrap();
+    fs::write(tree.path().join("skills/ast-grep/SKILL.md"), "new bytes\n").unwrap();
+    let dest = home.path().join(".claude/skills/ast-grep/SKILL.md");
+    fs::create_dir_all(dest.parent().unwrap()).unwrap();
+    fs::write(&dest, "the user's own diverged skill\n").unwrap();
+    // No stamp: unmanaged.
+    let comps = cort::upgrade::check_skills_at(tree.path(), &dest, &dest, &dest, false);
+    let c = comps.iter().find(|c| c.name == "skill_ast_grep").unwrap();
+    assert!(matches!(c.state, cort::upgrade::ComponentState::Drifted));
+    assert!(
+        cort::upgrade::skill_repair_target(c, tree.path(), home.path()).is_none(),
+        "unmanaged drift is --force's decision, not an upgrade's: {c:?}"
+    );
+}
+
+/// A managed drifted skill repairs at the exact destination diagnosis read — same source,
+/// same dest.
+#[test]
+fn a_managed_diverged_skill_repairs_at_the_destination_diagnosis_read() {
+    let tree = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    fs::create_dir_all(tree.path().join("skills/xgrep")).unwrap();
+    fs::write(tree.path().join("skills/xgrep/SKILL.md"), "new bytes\n").unwrap();
+    let dest = home.path().join(".claude/skills/xgrep/SKILL.md");
+    fs::create_dir_all(dest.parent().unwrap()).unwrap();
+    fs::write(&dest, "old managed bytes\n").unwrap();
+    fs::write(dest.parent().unwrap().join(".cortexyoung-managed"), b"").unwrap();
+    let comps = cort::upgrade::check_skills_at(
+        tree.path(),
+        &home.path().join(".claude/skills/xgrep/SKILL.md"),
+        &dest,
+        &dest,
+        false,
+    );
+    let c = comps.iter().find(|c| c.name == "skill_xgrep").unwrap();
+    let (src, got_dest) = cort::upgrade::skill_repair_target(c, tree.path(), home.path())
+        .expect("managed drift IS repairable");
+    assert_eq!(src, tree.path().join("skills/xgrep/SKILL.md"));
+    assert_eq!(got_dest, dest);
+}
+
+/// Repair must write where diagnosis looked: check_skills honours CLAUDE_SKILL_HOME and
+/// CODEX_HOME; a repair hard-coding the default home would miss the real (overridden) copy —
+/// and could overwrite an unrelated file at the default path (Codex round).
+#[test]
+fn skill_repair_honours_the_skill_home_overrides() {
+    let tree = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let claude_skill_home = tempfile::tempdir().unwrap();
+    let codex_home = tempfile::tempdir().unwrap();
+    fs::create_dir_all(tree.path().join("skills/ast-grep")).unwrap();
+    fs::write(tree.path().join("skills/ast-grep/SKILL.md"), "new bytes\n").unwrap();
+    let overridden = claude_skill_home.path().join("skills/ast-grep/SKILL.md");
+    fs::create_dir_all(overridden.parent().unwrap()).unwrap();
+    fs::write(&overridden, "old managed bytes\n").unwrap();
+    fs::write(
+        overridden.parent().unwrap().join(".cortexyoung-managed"),
+        b"",
+    )
+    .unwrap();
+    with_vars(
+        &[
+            (
+                "CLAUDE_SKILL_HOME",
+                Some(claude_skill_home.path().to_str().unwrap()),
+            ),
+            ("CODEX_HOME", Some(codex_home.path().to_str().unwrap())),
+        ],
+        || {
+            let comps = cort::upgrade::check_skills(tree.path(), home.path(), false);
+            let c = comps.iter().find(|c| c.name == "skill_ast_grep").unwrap();
+            assert!(
+                matches!(c.state, cort::upgrade::ComponentState::Drifted),
+                "diagnosis reads the overridden home: {c:?}"
+            );
+            let (_src, dest) = cort::upgrade::skill_repair_target(c, tree.path(), home.path())
+                .expect("the overridden copy is managed and drifted");
+            assert_eq!(
+                dest, overridden,
+                "repair must target the overridden path diagnosis read"
+            );
+        },
+    );
+}

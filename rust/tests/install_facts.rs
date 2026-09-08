@@ -217,3 +217,25 @@ fn every_manifest_key_install_sh_reads_is_known_or_legacy() {
         "install.sh reads manifest keys Rust knows nowhere: {unknown:?}"
     );
 }
+
+/// The only write shape is `record_manifest` — it stages the whole next manifest and swaps it
+/// in with one rename, and it is what the key-membership parser above can see. A raw
+/// `echo "key:..." >> "$MANIFEST_FILE"` bypasses both: an interrupted run leaves the key
+/// half-written, and the parser cannot enforce the key. This exact blind spot is how `profile`
+/// drifted out of MANIFEST_KEYS for its whole life (found by the Codex review round: my own
+/// deploy-round fix reverted to the echo during a bisect and every test stayed green).
+#[test]
+fn manifest_writes_go_through_record_manifest_only() {
+    let installer = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../install.sh"));
+    let mut raw = Vec::new();
+    for (n, line) in installer.lines().enumerate() {
+        let code = line.split('#').next().unwrap_or("");
+        if code.contains(">>") && code.contains("MANIFEST_FILE") && code.contains("echo") {
+            raw.push(format!("install.sh:{}: {}", n + 1, line.trim()));
+        }
+    }
+    assert!(
+        raw.is_empty(),
+        "install.sh appends to the manifest outside record_manifest: {raw:?}"
+    );
+}

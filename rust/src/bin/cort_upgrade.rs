@@ -12,8 +12,8 @@ use clap::Parser;
 use cort::upgrade::{
     acquire_upgrade_locks, check_hooks, check_skills, diagnose, diagnose_for_check,
     first_upgrade_note, load_acks, migrate_indexes, repair_skill, run_capture_with_deadline,
-    run_status_with_deadline, save_ack, verdict, Component, ComponentState, DiagnoseInputs,
-    LockError, UpgradeExit,
+    run_status_with_deadline, save_ack, skill_repair_target, verdict, Component, ComponentState,
+    DiagnoseInputs, LockError, UpgradeExit,
 };
 use std::path::{Path, PathBuf};
 use std::process::exit;
@@ -270,32 +270,15 @@ fn main() {
     // BEFORE it so the states it reads are the landed ones (§5: every commit boundary
     // re-verifies — the last boundary is the one the exit code answers for).
 
-    // Skills: repair only the managed-and-drifted. The final diagnosis re-reads the files,
-    // so the re-check IS that read — a repair is reported as landed only if it shows there.
+    // Skills: repair only the managed-and-drifted, at the path diagnosis read — the
+    // ownership decision is the stamp on disk (skill_repair_target), never detail prose,
+    // and the destination honours the same skill-home overrides diagnosis does. The final
+    // diagnosis re-reads the files, so the re-check IS that read — a repair is reported as
+    // landed only if it shows there.
     let skills_before = check_skills(&new_tree, &home, args.keep_mine);
-    let needs_repair = |name: &str| -> Option<(PathBuf, PathBuf)> {
-        let (src, dest) = match name {
-            "skill_xgrep" => (
-                new_tree.join("skills/xgrep/SKILL.md"),
-                home.join(".claude/skills/xgrep/SKILL.md"),
-            ),
-            "skill_ast_grep" => (
-                new_tree.join("skills/ast-grep/SKILL.md"),
-                home.join(".claude/skills/ast-grep/SKILL.md"),
-            ),
-            "skill_ast_grep_codex" => (
-                new_tree.join("skills/ast-grep/SKILL.md"),
-                home.join(".codex/skills/ast-grep/SKILL.md"),
-            ),
-            _ => return None,
-        };
-        Some((src, dest))
-    };
     for c in &skills_before {
-        if matches!(c.state, ComponentState::Drifted) && c.detail.contains("managed") {
-            if let Some((src, dest)) = needs_repair(&c.name) {
-                let _ = repair_skill(&src, &dest);
-            }
+        if let Some((src, dest)) = skill_repair_target(c, &new_tree, &home) {
+            let _ = repair_skill(&src, &dest);
         }
     }
 
