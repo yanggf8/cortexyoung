@@ -305,3 +305,28 @@ pub fn installed_command(path: &Path, event: HookEvent) -> Option<String> {
     }
     None
 }
+
+/// Does an entry exactly in today's shape exist for `expected_command`? Kimi's entry is flat
+/// and self-contained, so this is `is_canonical` (event, matcher, command, timeout — every
+/// field `install_hook` writes) over the whole `[[hooks]]` list: a correct command with a
+/// stale matcher finds no canonical entry and reads not-in-shape.
+pub fn entry_shape_ok(path: &Path, event: HookEvent, expected_command: &str) -> bool {
+    let Ok(doc) = read_doc(path) else {
+        return false;
+    };
+    let Some(list) = doc
+        .as_table()
+        .get("hooks")
+        .and_then(Item::as_array_of_tables)
+    else {
+        return false;
+    };
+    // One predicate carries the whole check: a canonical entry is command+event+matcher+
+    // timeout, all four exactly what `install_hook` writes today. A rewritten matcher means
+    // no entry is canonical, and the answer is false — the same verdict as a missing entry.
+    let found = list
+        .iter()
+        .any(|e| is_canonical(e, expected_command, event));
+    let _ = list; // the borrow must outlive the `any` temporary (NLL quirk, measured)
+    found
+}

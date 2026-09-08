@@ -875,3 +875,62 @@ fn a_shared_groups_matcher_is_left_alone() {
         "their entry survives untouched"
     );
 }
+
+/// Codex's shape check: the matcher lives on the GROUP, which `installed_entry` never inspects —
+/// that gap shipped a wired, trusted, green-in-`--check` hook aimed at `Bash`, a tool Codex does
+/// not have (settings_toml.rs §12-13 comment). Command-equality alone cannot see the rewrite.
+#[test]
+fn a_codex_entry_with_our_command_but_a_stale_group_matcher_is_not_in_shape() {
+    let (d, path) = tmp();
+    let command = "/bin/cort hook-suggest --harness codex";
+    install_hook(&path, command, HookEvent::Suggest).unwrap();
+    assert!(cort::settings_toml::entry_shape_ok(
+        &path,
+        HookEvent::Suggest,
+        command
+    ));
+    let on_disk = std::fs::read_to_string(&path).unwrap();
+    let rewritten = on_disk.replace("matcher = \"Bash\"", "matcher = \"exec_command\"");
+    assert_ne!(on_disk, rewritten, "fixture rewrite must change the file");
+    std::fs::write(&path, rewritten).unwrap();
+    assert!(
+        !cort::settings_toml::entry_shape_ok(&path, HookEvent::Suggest, command),
+        "a matcher-only rewrite must fail the shape check"
+    );
+    assert!(!cort::settings_toml::entry_shape_ok(
+        &d.path().join("absent.toml"),
+        HookEvent::Suggest,
+        command
+    ));
+}
+
+/// Kimi's flat entry carries the event as a field; the shape check is `is_canonical` made
+/// public-shaped: event, matcher, command and timeout must all be what install_hook writes.
+#[test]
+fn a_kimi_entry_with_our_command_but_a_stale_matcher_is_not_in_shape() {
+    let (kd, _kp) = kimi_tmp();
+    let d = &kd;
+    let path = d.path().join("config.toml");
+    let command = "/bin/cort hook-refresh --harness kimi-code";
+    cort::settings_kimi::install_hook(&path, command, HookEvent::Refresh).unwrap();
+    assert!(cort::settings_kimi::entry_shape_ok(
+        &path,
+        HookEvent::Refresh,
+        command
+    ));
+    let on_disk = std::fs::read_to_string(&path).unwrap();
+    // The refresh matcher is the alternation; rewriting ONLY the alternation leaves the event
+    // and command intact — the shape check must still refuse it.
+    // The refresh matcher is the edit-tool alternation (matcher_for(Refresh)); rewriting ONLY
+    // the alternation leaves the event and command intact — the shape check must refuse it.
+    let rewritten = on_disk.replace(
+        "matcher = \"Bash|Edit|Write|MultiEdit|NotebookEdit\"",
+        "matcher = \"Bash\"",
+    );
+    assert_ne!(on_disk, rewritten, "fixture rewrite must change the file");
+    std::fs::write(&path, rewritten).unwrap();
+    assert!(
+        !cort::settings_kimi::entry_shape_ok(&path, HookEvent::Refresh, command),
+        "a matcher-only rewrite must fail the shape check"
+    );
+}

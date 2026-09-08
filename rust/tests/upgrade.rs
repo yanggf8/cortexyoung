@@ -136,6 +136,11 @@ fn diagnose_reports_a_drifted_pack_and_a_current_one() {
         install_root: &install_root,
         new_pack: new_pack.path(),
         installed_ast_grep_version: pin,
+        // No skills dir in this fixture: the skill components all read Absent, which is what
+        // the pack assertions below ignore on purpose.
+        new_tree: &_root,
+        home: &home,
+        keep_mine: false,
     });
     let pack = comps.iter().find(|c| c.name == "pack").unwrap();
     assert!(matches!(pack.state, ComponentState::Drifted), "{pack:?}");
@@ -145,6 +150,9 @@ fn diagnose_reports_a_drifted_pack_and_a_current_one() {
         install_root: &install_root,
         new_pack: new_pack.path(),
         installed_ast_grep_version: pin,
+        new_tree: &_root,
+        home: &home,
+        keep_mine: false,
     });
     let pack = comps.iter().find(|c| c.name == "pack").unwrap();
     assert!(matches!(pack.state, ComponentState::Current), "{pack:?}");
@@ -357,4 +365,344 @@ fn lock_holder_child() {
     // test proves nothing (a kill before acquisition passes against code that never locks).
     std::fs::write(std::path::Path::new(&cache).join(".holder-ready"), b"held").unwrap();
     std::thread::sleep(std::time::Duration::from_secs(60)); // parent will kill us
+}
+
+// ── Task 3: skills — content-diffed, not stamp-checked ─────────────
+
+/// Build one diverged-managed-skill fixture: the new tree says "new body", the deployed file
+/// says "old body", and the stamp beside the deployed file is VALID for the old body — the
+/// exact state the pre-3b check read as "managed, fine" (spec §2 row 4's named defect).
+fn diverged_skill_fixture() -> (
+    tempfile::TempDir,
+    tempfile::TempDir,
+    std::path::PathBuf,
+    std::path::PathBuf,
+) {
+    let new_tree = tempfile::tempdir().unwrap();
+    let skill_dir = new_tree.path().join("skills/ast-grep");
+    fs::create_dir_all(&skill_dir).unwrap();
+    fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: ast-grep\n---\nnew body\n",
+    )
+    .unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let dest = home.path().join(".claude/skills/ast-grep/SKILL.md");
+    fs::create_dir_all(dest.parent().unwrap()).unwrap();
+    let old_body = "---\nname: ast-grep\n---\nold body\n";
+    fs::write(&dest, old_body).unwrap();
+    (new_tree, home, dest, skill_dir.join("SKILL.md"))
+}
+
+/// A stamp for the old body, exactly the bytes install.sh's ensure_skill_stamp writes.
+fn stamp_for(body: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    format!(
+        "managed by cortexyoung install.sh\nskill_sha256:{:x}\n",
+        Sha256::digest(body)
+    )
+}
+
+/// A managed skill whose content diverged from the new tree is Drifted — NOT Current, which is
+/// what the old stamp-ownership check answered.
+#[test]
+fn a_diverged_managed_skill_is_drifted_even_with_a_valid_stamp() {
+    let (new_tree, home, dest, source) = diverged_skill_fixture();
+    let old_body = b"---\nname: ast-grep\n---\nold body\n";
+    fs::write(
+        dest.parent().unwrap().join(".cortexyoung-managed"),
+        stamp_for(old_body),
+    )
+    .unwrap();
+
+    // Call `_at` with explicit dests, NOT the env-reading wrapper: `set_var` inside parallel
+    // tests is unsound, and a dev machine with CLAUDE_SKILL_HOME set would redirect the
+    // wrapper elsewhere. The wrapper's env mirroring is review-verified, not test-pinned.
+    let (xg, ast, cx, _km) = {
+        let xg = home.path().join(".claude/skills/xgrep/SKILL.md");
+        let cx = home.path().join(".codex/skills/ast-grep/SKILL.md");
+        (xg, dest.clone(), cx, ())
+    };
+    let comps = cort::upgrade::check_skills_at(new_tree.path(), &xg, &ast, &cx, false);
+    let ast_c = comps.iter().find(|c| c.name == "skill_ast_grep").unwrap();
+    assert!(
+        matches!(ast_c.state, cort::upgrade::ComponentState::Drifted),
+        "{ast_c:?}"
+    );
+    assert_eq!(
+        source.to_string_lossy(),
+        new_tree
+            .path()
+            .join("skills/ast-grep/SKILL.md")
+            .to_string_lossy()
+    );
+}
+
+/// keep-mine=true turns the same divergence into DeferredByUser, and the file is untouched —
+/// "repair" must never overwrite a user's edit silently.
+#[test]
+fn keep_mine_leaves_a_diverged_skill_alone() {
+    let (new_tree, home, dest, _source) = diverged_skill_fixture();
+    let old_body = b"---\nname: ast-grep\n---\nold body\n";
+    fs::write(
+        dest.parent().unwrap().join(".cortexyoung-managed"),
+        stamp_for(old_body),
+    )
+    .unwrap();
+    let xg = home.path().join(".claude/skills/xgrep/SKILL.md");
+    let cx = home.path().join(".codex/skills/ast-grep/SKILL.md");
+    let comps = cort::upgrade::check_skills_at(new_tree.path(), &xg, &dest, &cx, true);
+    let ast_c = comps.iter().find(|c| c.name == "skill_ast_grep").unwrap();
+    assert!(
+        matches!(ast_c.state, cort::upgrade::ComponentState::DeferredByUser),
+        "{ast_c:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(&dest).unwrap(),
+        "---\nname: ast-grep\n---\nold body\n",
+        "keep-mine must not touch bytes"
+    );
+}
+
+/// keep-mine=false does NOT repair inside the check — checks never write (the `--check` mode
+/// runs diagnosis only). Repair is a separate `repair_skill` step; this test pins the sequence
+/// Task 5 runs: check (Drifted) → repair → re-check (Current, bytes == new tree).
+#[test]
+fn repair_redeploys_skill_then_recheck_says_current() {
+    let (new_tree, home, dest, source) = diverged_skill_fixture();
+    let xg = home.path().join(".claude/skills/xgrep/SKILL.md");
+    let cx = home.path().join(".codex/skills/ast-grep/SKILL.md");
+    let at = |keep_mine: bool| {
+        cort::upgrade::check_skills_at(new_tree.path(), &xg, &dest, &cx, keep_mine)
+    };
+    let ast_c = at(false)
+        .into_iter()
+        .find(|c| c.name == "skill_ast_grep")
+        .unwrap();
+    assert!(
+        matches!(ast_c.state, cort::upgrade::ComponentState::Drifted),
+        "{ast_c:?}"
+    );
+    cort::upgrade::repair_skill(&source, &dest).unwrap();
+    assert_eq!(
+        fs::read_to_string(&dest).unwrap(),
+        "---\nname: ast-grep\n---\nnew body\n",
+        "repair writes the new bytes"
+    );
+    // The re-check must read the STAMP too: an old stamp beside new bytes is cosmetic, but a
+    // repair that forgot the stamp would leave the file unmanaged — the next hand-edit would
+    // be an unmanaged collision instead of a kept-mine.
+    let stamp = fs::read_to_string(dest.parent().unwrap().join(".cortexyoung-managed")).unwrap();
+    assert!(
+        stamp.contains("skill_sha256:"),
+        "repair claims the new bytes: {stamp}"
+    );
+    let ast_c = at(false)
+        .into_iter()
+        .find(|c| c.name == "skill_ast_grep")
+        .unwrap();
+    assert!(
+        matches!(ast_c.state, cort::upgrade::ComponentState::Current),
+        "{ast_c:?}"
+    );
+}
+
+/// An absent skill source is Absent — a release may legitimately drop a skill; that is not a
+/// failure and never a repair target.
+#[test]
+fn an_absent_skill_source_is_absent_not_a_failure() {
+    let empty_tree = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let dest = home.path().join(".claude/skills/ast-grep/SKILL.md");
+    fs::create_dir_all(dest.parent().unwrap()).unwrap();
+    fs::write(&dest, "---\nname: ast-grep\n---\nsome old body\n").unwrap();
+    let xg = home.path().join(".claude/skills/xgrep/SKILL.md");
+    let cx = home.path().join(".codex/skills/ast-grep/SKILL.md");
+    let comps = cort::upgrade::check_skills_at(empty_tree.path(), &xg, &dest, &cx, false);
+    let ast_c = comps.iter().find(|c| c.name == "skill_ast_grep").unwrap();
+    assert!(
+        matches!(ast_c.state, cort::upgrade::ComponentState::Absent),
+        "{ast_c:?}"
+    );
+}
+
+// ── Task 3: hooks — expected-shape comparison, repair re-verified ──
+
+/// Six wired rows produced by the crate's OWN installers into per-dialect temp files, in the
+/// exact TSV shape `hook-install --all --status --lean` emits (harness, event, outcome,
+/// settings, detail, command). Building fixtures with anything else would test judge_hooks
+/// against a fantasy of what install_hook writes.
+fn wired_fixture(dir: &std::path::Path, shim: &std::path::Path) -> String {
+    let json_path = dir.join("settings.json");
+    let toml_path = dir.join("codex.toml");
+    let kimi_path = dir.join("kimi.toml");
+    for harness in cort::settings::HOOK_HARNESSES {
+        for event in cort::settings::EVENTS {
+            let command = format!(
+                "{} {} --harness {}",
+                shim.display(),
+                event.subcommand(),
+                harness
+            );
+            // Three dialects, three Result types — assert is_ok per arm rather than unifying.
+            let ok = match harness {
+                "claude-code" => cort::settings::install_hook(&json_path, &command, event).is_ok(),
+                "codex" => cort::settings_toml::install_hook(&toml_path, &command, event).is_ok(),
+                "kimi-code" => {
+                    cort::settings_kimi::install_hook(&kimi_path, &command, event).is_ok()
+                }
+                other => unreachable!("unknown harness fixture {other}"),
+            };
+            assert!(ok, "fixture install failed for {harness}/{event:?}");
+        }
+    }
+    let mut rows = Vec::new();
+    for harness in cort::settings::HOOK_HARNESSES {
+        for event in cort::settings::EVENTS {
+            let (settings, command) = match harness {
+                "claude-code" => (
+                    json_path.clone(),
+                    cort::settings::installed_command(&json_path, event).unwrap(),
+                ),
+                "codex" => (
+                    toml_path.clone(),
+                    cort::settings_toml::installed_command(&toml_path, event).unwrap(),
+                ),
+                _ => (
+                    kimi_path.clone(),
+                    cort::settings_kimi::installed_command(&kimi_path, event).unwrap(),
+                ),
+            };
+            rows.push(format!(
+                "{}\t{}\twired\t{}\t-\t{}",
+                harness,
+                event.flag_name(),
+                settings.display(),
+                command
+            ));
+        }
+    }
+    let mut tsv = rows.join("\n");
+    tsv.push('\n');
+    tsv
+}
+
+/// Hook repair is re-verified after repair, not assumed. `run_status` is injected (same seam
+/// style as the `repair` callback): the tests never spawn subprocesses — Task 5 passes the
+/// real `<bin> hook-install --all --status --lean` runner with its deadline; the tests pass
+/// fakes.
+#[test]
+fn hook_repair_is_followed_by_reverification() {
+    use std::cell::Cell;
+    let dir = tempfile::tempdir().unwrap();
+    let shim = dir.path().join("cort");
+    let good = wired_fixture(dir.path(), &shim);
+    let drifted_row = format!("{} hook-suggest --harness codex", shim.display());
+    let bad = good.replace(&drifted_row, "/foreign hook-suggest --harness codex");
+    assert_ne!(good, bad, "fixture must be drifted");
+    let repaired = Cell::new(false);
+    let calls = Cell::new(0);
+    let run_status = || {
+        calls.set(calls.get() + 1);
+        Ok(if repaired.get() {
+            good.clone()
+        } else {
+            bad.clone()
+        })
+    };
+    let repair = || repaired.set(true);
+    let c = cort::upgrade::check_hooks(&shim, &run_status, &repair);
+    // Current ONLY because the second status agreed; one repair; exactly two status calls.
+    assert!(
+        matches!(c.state, cort::upgrade::ComponentState::Current),
+        "{c:?}"
+    );
+    assert_eq!(calls.get(), 2);
+    assert!(repaired.get());
+}
+
+/// A repair that does not take must stay Drifted — returning Current after invoking repair
+/// WITHOUT re-running status would pass the test above while proving nothing.
+#[test]
+fn a_noop_hook_repair_stays_drifted() {
+    let dir = tempfile::tempdir().unwrap();
+    let shim = dir.path().join("cort");
+    let good = wired_fixture(dir.path(), &shim);
+    let bad = good.replace(
+        &format!("{} hook-suggest --harness codex", shim.display()),
+        "/foreign hook-suggest --harness codex",
+    );
+    let c = cort::upgrade::check_hooks(&shim, &|| Ok(bad.clone()), &|| {});
+    assert!(
+        matches!(c.state, cort::upgrade::ComponentState::Drifted),
+        "{c:?}"
+    );
+    assert!(
+        c.detail.contains("codex"),
+        "detail names the offending row: {c:?}"
+    );
+}
+
+/// Clean status never calls repair: a check that "repairs" unconditionally would redeploy on
+/// every upgrade run, churning backups and trust stamps for nothing. (The missing-row case —
+/// five rows present and matching, one target absent — is Drifted WITH repair called: the fix
+/// for an absent row is installing it. Both directions pinned, neither collapsible.)
+#[test]
+fn clean_hook_status_never_calls_repair() {
+    use std::cell::Cell;
+    let dir = tempfile::tempdir().unwrap();
+    let shim = dir.path().join("cort");
+    let good = wired_fixture(dir.path(), &shim);
+    let called = Cell::new(false);
+    let c = cort::upgrade::check_hooks(&shim, &|| Ok(good.clone()), &|| called.set(true));
+    assert!(
+        matches!(c.state, cort::upgrade::ComponentState::Current),
+        "{c:?}"
+    );
+    assert!(!called.get(), "matching status must not trigger a repair");
+}
+
+/// A missing row is Drifted, not silently ok: judging only returned rows would pass a settings
+/// file that lost an event. (Rows are complete BY CONSTRUCTION today — hook_install_all always
+/// emits all six — so this test pins the set comparison, not a case anyone has seen.)
+#[test]
+fn a_missing_hook_row_is_drifted() {
+    let dir = tempfile::tempdir().unwrap();
+    let shim = dir.path().join("cort");
+    let good = wired_fixture(dir.path(), &shim);
+    let one_row: String = good.lines().next().unwrap().to_string() + "\n";
+    let c = cort::upgrade::check_hooks(&shim, &|| Ok(one_row.clone()), &|| {});
+    assert!(
+        matches!(c.state, cort::upgrade::ComponentState::Drifted),
+        "{c:?}"
+    );
+    assert!(c.detail.contains("missing"), "{c:?}");
+}
+
+/// A correct command with an obsolete matcher still passes `--status` — the exact false-pass
+/// CLAUDE.md §12-13 records (a matcher-only rewrite left the command byte-identical). The
+/// shape check exists for this row and only this row proves it.
+#[test]
+fn a_matcher_rewrite_with_identical_command_is_drifted() {
+    let dir = tempfile::tempdir().unwrap();
+    let shim = dir.path().join("cort");
+    let good = wired_fixture(dir.path(), &shim);
+    let json_path = dir.path().join("settings.json");
+    let on_disk = fs::read_to_string(&json_path).unwrap();
+    // serde_json pretty-prints with `": "` — the closing quote keeps the rewrite off the
+    // refresh rows (`"Bash|Edit|..."` does not contain `"Bash"` with a quote after Bash).
+    let rewritten = on_disk
+        .replace(r#""matcher": "Bash""#, r#""matcher": "exec_command""#)
+        .replace(r#""matcher":"Bash""#, r#""matcher":"exec_command""#);
+    assert_ne!(on_disk, rewritten, "fixture rewrite must change the file");
+    fs::write(&json_path, rewritten).unwrap();
+    let c = cort::upgrade::judge_hooks(&shim, &good);
+    assert!(
+        matches!(c.state, cort::upgrade::ComponentState::Drifted),
+        "{c:?}"
+    );
+    assert!(
+        c.detail.contains("shape"),
+        "detail names the shape drift: {c:?}"
+    );
 }

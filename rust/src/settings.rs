@@ -119,6 +119,11 @@ pub enum HookEvent {
 
 pub const EVENTS: [HookEvent; 2] = [HookEvent::Suggest, HookEvent::Refresh];
 
+/// Every harness we wire, in `HOOK_TARGETS` order. This is the one home for the list: main.rs
+/// builds its format mapping from these indices, and `entry_shape_ok` dispatches on these
+/// names — a fourth harness is added here and both consumers move in the same commit.
+pub const HOOK_HARNESSES: [&str; 3] = ["claude-code", "codex", "kimi-code"];
+
 impl HookEvent {
     pub fn name(self) -> &'static str {
         match self {
@@ -520,4 +525,53 @@ pub fn installed_command(path: &Path, event: HookEvent) -> Option<String> {
         }
     }
     None
+}
+
+/// Does the entry carrying exactly `expected_command` still have the shape this module writes
+/// today? `--status` reports command and trust only, so a correct command with an obsolete
+/// matcher reads wired — the exact false-pass CLAUDE.md §12-13 records (a matcher-only rewrite
+/// left the command byte-identical and the hook aimed at a tool that never fires). This is the
+/// check that sees the matcher.
+fn entry_shape_ok_json(path: &Path, event: HookEvent, expected_command: &str) -> bool {
+    let Ok(root) = read_root(path) else {
+        return false;
+    };
+    let Some(list) = root
+        .get("hooks")
+        .and_then(|h| h.get(event.name()))
+        .and_then(Value::as_array)
+    else {
+        return false;
+    };
+    for group in list {
+        let Some(hooks) = group.get("hooks").and_then(Value::as_array) else {
+            continue;
+        };
+        for h in hooks {
+            if h.get("command").and_then(Value::as_str) == Some(expected_command) {
+                return group.get("matcher").and_then(Value::as_str) == Some(matcher_for(event))
+                    && h.get("type").and_then(Value::as_str) == Some("command")
+                    && h.get("timeout").and_then(Value::as_u64) == Some(TIMEOUT_SECS);
+            }
+        }
+    }
+    false
+}
+
+/// Shape verification dispatched by harness — the sibling of `HOOK_HARNESSES`, so both stay in
+/// this one home. `false` for an unknown name is fail-closed on purpose: a harness added to
+/// `HOOK_TARGETS` without wiring its shape check here reads Drifted forever, which is a visible
+/// nag, instead of silently skipping the check that caught the §12-13 rewrite.
+pub fn entry_shape_ok(
+    harness: &str,
+    path: &Path,
+    event: HookEvent,
+    expected_command: &str,
+) -> bool {
+    match harness {
+        "claude-code" => entry_shape_ok_json(path, event, expected_command),
+        "codex" => crate::settings_toml::entry_shape_ok(path, event, expected_command),
+        "kimi-code" => crate::settings_kimi::entry_shape_ok(path, event, expected_command),
+        _ => false,
+    }
 }

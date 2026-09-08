@@ -1351,9 +1351,11 @@ fn default_settings_path_for(fmt: SettingsFormat) -> Result<PathBuf, CortError> 
 /// This is the same reason `judge` is single and `hook-probe` replays it rather than
 /// reimplementing it. The parsers may be plural; the table may not.
 const HOOK_TARGETS: [(SettingsFormat, &str); 3] = [
-    (SettingsFormat::Json, "claude-code"),
-    (SettingsFormat::CodexToml, "codex"),
-    (SettingsFormat::KimiToml, "kimi-code"),
+    // The names come from `cort::settings::HOOK_HARNESSES` — the one home for the list
+    // (`entry_shape_ok` dispatches on the same indices), not a second copy here.
+    (SettingsFormat::Json, cort::settings::HOOK_HARNESSES[0]),
+    (SettingsFormat::CodexToml, cort::settings::HOOK_HARNESSES[1]),
+    (SettingsFormat::KimiToml, cort::settings::HOOK_HARNESSES[2]),
 ];
 
 /// Wire, unwire or report every entry in `HOOK_TARGETS` in one call.

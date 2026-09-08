@@ -572,3 +572,41 @@ fn a_shared_groups_matcher_is_left_alone_on_the_json_side() {
         "their entry survives untouched"
     );
 }
+
+/// Shape verification: an entry whose COMMAND is exactly ours but whose matcher was rewritten
+/// (byte-identical command — the §12-13 false-pass) must read NOT in shape, and the canonical
+/// entry must read in shape. Without this, `--status`'s command comparison is the whole truth
+/// and it cannot see the one rewrite that has already shipped broken once.
+#[test]
+fn an_entry_with_our_command_but_a_foreign_matcher_is_not_in_shape() {
+    let (d, path) = tmp();
+    let command = "/bin/cort hook-suggest --harness claude-code";
+    install_hook(&path, command, HookEvent::Suggest).unwrap();
+    assert!(cort::settings::entry_shape_ok(
+        "claude-code",
+        &path,
+        HookEvent::Suggest,
+        command
+    ));
+    // The canonical shape is what install_hook writes: matcher Bash, type command, timeout 5.
+    let on_disk = fs::read_to_string(&path).unwrap();
+    // serde_json pretty-prints with `": "`, and the closing quote keeps the needle off any
+    // `Bash|...` alternation. Both spacings covered: pretty now, compact if serialization
+    // ever changes.
+    let rewritten = on_disk
+        .replace(r#""matcher": "Bash""#, r#""matcher": "exec_command""#)
+        .replace(r#""matcher":"Bash""#, r#""matcher":"exec_command""#);
+    assert_ne!(on_disk, rewritten, "fixture rewrite must change the file");
+    fs::write(&path, rewritten).unwrap();
+    assert!(
+        !cort::settings::entry_shape_ok("claude-code", &path, HookEvent::Suggest, command),
+        "a matcher-only rewrite must fail the shape check"
+    );
+    // And a file that does not exist is never in shape (fail closed, never fail open).
+    assert!(!cort::settings::entry_shape_ok(
+        "claude-code",
+        &d.path().join("absent.json"),
+        HookEvent::Suggest,
+        command
+    ));
+}

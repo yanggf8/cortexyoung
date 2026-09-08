@@ -471,3 +471,35 @@ fn prune_empty_scaffolding(doc: &mut DocumentMut) {
         doc.as_table_mut().remove("hooks");
     }
 }
+
+/// Does the entry carrying exactly `expected_command` still have the shape this module writes
+/// today? The matcher lives on the GROUP, which `installed_entry` never inspects — that gap
+/// shipped a wired, trusted, green-in-`--check` hook aimed at `Bash`, a tool Codex does not
+/// have (see the §12-13 comment in `install_hook`). Command-equality alone cannot see it.
+pub fn entry_shape_ok(path: &Path, event: HookEvent, expected_command: &str) -> bool {
+    let Ok(doc) = read_doc(path) else {
+        return false;
+    };
+    let Some(list) = doc
+        .as_table()
+        .get("hooks")
+        .and_then(Item::as_table)
+        .and_then(|t| t.get(event.name()))
+        .and_then(Item::as_array_of_tables)
+    else {
+        return false;
+    };
+    for group in list.iter() {
+        let Some(entries) = group.get("hooks").and_then(Item::as_array_of_tables) else {
+            continue;
+        };
+        for h in entries.iter() {
+            if h.get("command").and_then(Item::as_str) == Some(expected_command) {
+                return group.get("matcher").and_then(Item::as_str) == Some(matcher_for(event))
+                    && h.get("type").and_then(Item::as_str) == Some("command")
+                    && h.get("timeout").and_then(Item::as_integer) == Some(TIMEOUT_SECS);
+            }
+        }
+    }
+    false
+}

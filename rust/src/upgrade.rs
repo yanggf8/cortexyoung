@@ -6,7 +6,7 @@
 //! — restating one is the HOOK_TARGETS sin this module exists to end.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 // ── the two flocks: admission closes the gate, activity drains the room (spec §3b) ──
 //
@@ -341,6 +341,12 @@ pub struct DiagnoseInputs<'a> {
     /// Installed ast-grep `--version` stdout, gathered by the CALLER (Task 5 owns subprocess
     /// policy incl. deadlines; this function only judges — same seam as check_version_pin).
     pub installed_ast_grep_version: &'a str,
+    /// Source tree (`skills/*/SKILL.md` live here).
+    pub new_tree: &'a Path,
+    /// Agent home — the skill-destination defaults root here exactly as install.sh resolves
+    /// them (`$HOME/.claude`, `${CLAUDE_SKILL_HOME:-...}`, `${CODEX_HOME:-...}`).
+    pub home: &'a Path,
+    pub keep_mine: bool,
 }
 
 /// Compose the Task-1 components. Task 3 extends this fn with skill/hook components; the
@@ -413,6 +419,7 @@ pub fn diagnose(inputs: &DiagnoseInputs) -> Vec<Component> {
     });
     // Indexes, read-only: empty reasons → Current; non-empty → Drifted WITH the reasons named
     // (Task 4 repays them; diagnosis only names them). Unreadable db → Unreadable.
+    out.extend(check_skills(inputs.new_tree, inputs.home, inputs.keep_mine));
     for entry in crate::db::list_projects() {
         match entry {
             crate::db::ProjectEntry::Unreadable { db_path, reason } => {
@@ -445,4 +452,243 @@ pub fn diagnose(inputs: &DiagnoseInputs) -> Vec<Component> {
         }
     }
     out
+}
+
+// ── Task 3: skills — content-diffed, not stamp-checked ─────────────
+
+const MANAGED_SIGNATURE: &str = "managed by cortexyoung install.sh";
+const MANAGED_STAMP_NAME: &str = ".cortexyoung-managed";
+
+/// Skills, resolved the way install.sh resolves them. The env-reading wrapper; tests call
+/// `check_skills_at` (all paths explicit) because mutating process env inside parallel tests
+/// is unsound. Env mirroring:
+/// - xgrep skill: `$HOME/.claude/skills/xgrep/SKILL.md`, NO override (install.sh hardcodes it);
+/// - ast-grep skill: `${CLAUDE_SKILL_HOME:-$HOME/.claude}/skills/ast-grep/SKILL.md`;
+/// - codex skill: `${CODEX_HOME:-$HOME/.codex}/skills/ast-grep/SKILL.md`.
+pub fn check_skills(new_tree: &Path, home: &Path, keep_mine: bool) -> Vec<Component> {
+    let claude_home = std::env::var_os("CLAUDE_SKILL_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".claude"));
+    let codex_home = std::env::var_os("CODEX_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".codex"));
+    check_skills_at(
+        new_tree,
+        &home.join(".claude/skills/xgrep/SKILL.md"),
+        &claude_home.join("skills/ast-grep/SKILL.md"),
+        &codex_home.join("skills/ast-grep/SKILL.md"),
+        keep_mine,
+    )
+}
+
+/// The testable core: all paths explicit, ZERO env dependence. Checks never write — repair
+/// is `repair_skill`, sequenced by the binary as check → repair → re-check, so `--check`
+/// (which runs this with no repair step at all) holds its diagnose-only promise by
+/// construction.
+pub fn check_skills_at(
+    new_tree: &Path,
+    xgrep_dest: &Path,
+    ast_grep_dest: &Path,
+    codex_dest: &Path,
+    keep_mine: bool,
+) -> Vec<Component> {
+    let source = new_tree.join("skills/xgrep/SKILL.md");
+    let ast_source = new_tree.join("skills/ast-grep/SKILL.md");
+    let specs = [
+        ("skill_xgrep", source.as_path(), xgrep_dest),
+        ("skill_ast_grep", ast_source.as_path(), ast_grep_dest),
+        ("skill_ast_grep_codex", ast_source.as_path(), codex_dest),
+    ];
+    let mut out = Vec::new();
+    for (name, src, dest) in specs {
+        let stamp_path = dest.parent().map(|p| p.join(MANAGED_STAMP_NAME));
+        let read = |p: &Path| fs::read_to_string(p);
+        let comp = if !src.exists() {
+            // A release may legitimately drop a skill; its deployed copy is a leftover, not
+            // a failure and not a repair target.
+            Component {
+                name: name.to_string(),
+                state: ComponentState::Absent,
+                detail: "no skill source in the new tree".into(),
+            }
+        } else if !dest.exists() {
+            Component {
+                name: name.to_string(),
+                state: ComponentState::Drifted,
+                detail: "missing (the new tree ships it)".into(),
+            }
+        } else {
+            match (read(src), read(dest)) {
+                (Err(_), _) | (_, Err(_)) => Component {
+                    name: name.to_string(),
+                    state: ComponentState::Unreadable,
+                    detail: "skill source or destination unreadable".into(),
+                },
+                (Ok(s), Ok(d)) if s == d => {
+                    // A stale stamp beside matching bytes is cosmetic — install.sh made stamp
+                    // writes atomic, this check does not chase cosmetics.
+                    Component {
+                        name: name.to_string(),
+                        state: ComponentState::Current,
+                        detail: String::new(),
+                    }
+                }
+                (Ok(_), Ok(_)) => {
+                    let managed = stamp_path.as_deref().is_some_and(|p| p.exists());
+                    let detail = if managed {
+                        format!(
+                            "diverged from the new tree (managed, repairable{})",
+                            if keep_mine { ", kept per user" } else { "" }
+                        )
+                    } else {
+                        "diverged from the new tree (unmanaged — adopting it is install.sh's \
+--force decision, never an upgrade's)"
+                            .to_string()
+                    };
+                    let state = if keep_mine && managed {
+                        ComponentState::DeferredByUser
+                    } else {
+                        ComponentState::Drifted
+                    };
+                    Component {
+                        name: name.to_string(),
+                        state,
+                        detail,
+                    }
+                }
+            }
+        };
+        out.push(comp);
+    }
+    out
+}
+
+/// Redeploy one skill: the new bytes, published by staged rename (a half-written skill would
+/// hash to something the stamp does not name — install.sh's `write_skill` discipline), then
+/// claimed in the stamp beside it, in the exact format install.sh's `ensure_skill_stamp`
+/// writes. The FORMAT is a contract pinned by `repair_redeploys_skill_then_recheck_says_current`,
+/// not restated as code that parses install.sh.
+pub fn repair_skill(source: &Path, dest: &Path) -> std::io::Result<()> {
+    let bytes = fs::read(source)?;
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let tmp = dest.with_file_name(format!(
+        ".{}.cort-upgrade-tmp",
+        dest.file_name().and_then(|n| n.to_str()).unwrap_or("skill")
+    ));
+    fs::write(&tmp, &bytes)?;
+    fs::rename(&tmp, dest)?;
+    use sha2::{Digest, Sha256};
+    let stamp = format!(
+        "{}\nskill_sha256:{:x}\n",
+        MANAGED_SIGNATURE,
+        Sha256::digest(&bytes)
+    );
+    let stamp_path = dest
+        .parent()
+        .ok_or_else(|| std::io::Error::other("skill dest has no parent directory"))?
+        .join(MANAGED_STAMP_NAME);
+    fs::write(stamp_path, stamp)
+}
+
+// ── Task 3: hooks — expected-shape comparison, repair re-verified ──
+
+/// Pure judgment over one `--status --lean` TSV: the expected set is
+/// `HOOK_HARNESSES × EVENTS` with per-row command EQUALITY (`{shim} {subcommand} --harness
+/// {harness}`, the subcommand from the row's OWN event — expecting hook-suggest on a Refresh
+/// row was the first draft's bug) plus per-row `entry_shape_ok` on the settings file the row
+/// names. No subprocess, no repair: `--check` runs exactly this and cannot fix anything.
+pub fn judge_hooks(shim: &Path, status_tsv: &str) -> Component {
+    let name = "hooks".to_string();
+    let rows: Vec<Vec<&str>> = status_tsv
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.split('\t').collect())
+        .collect();
+    let mut misses: Vec<String> = Vec::new();
+    for harness in crate::settings::HOOK_HARNESSES {
+        for event in crate::settings::EVENTS {
+            let expected = format!(
+                "{} {} --harness {}",
+                shim.display(),
+                event.subcommand(),
+                harness
+            );
+            let row = rows
+                .iter()
+                .find(|r| r.len() >= 6 && r[0] == harness && r[1] == event.flag_name());
+            let label = format!("{harness}/{}", event.flag_name());
+            match row {
+                None => misses.push(format!("{label}: missing")),
+                Some(r) if r[2] != "wired" => {
+                    misses.push(format!("{label}: {}", r[2]));
+                }
+                Some(r) if r[5] != expected => {
+                    misses.push(format!("{label}: wired to `{}`", r[5]));
+                }
+                Some(r) => {
+                    // The command matches; the row's settings file decides the shape. A path
+                    // of `-` (no settings recorded) or one that fails the dialect's shape
+                    // check is a miss — this is the arm that catches a matcher-only rewrite.
+                    if r[3] == "-"
+                        || !crate::settings::entry_shape_ok(
+                            harness,
+                            Path::new(r[3]),
+                            event,
+                            &expected,
+                        )
+                    {
+                        misses.push(format!("{label}: command matches but entry shape drifted"));
+                    }
+                }
+            }
+        }
+    }
+    if misses.is_empty() {
+        Component {
+            name,
+            state: ComponentState::Current,
+            detail: String::new(),
+        }
+    } else {
+        Component {
+            name,
+            state: ComponentState::Drifted,
+            detail: misses.join("; "),
+        }
+    }
+}
+
+/// The judging half plus the repair loop: judge → all-Current? return (repair NOT called) →
+/// else repair() once, re-run status, re-judge. Still wrong → Drifted with the row detail;
+/// run_status Err → Unreadable, never a pass.
+pub fn check_hooks(
+    shim: &Path,
+    run_status: &dyn Fn() -> Result<String, String>,
+    repair: &dyn Fn(),
+) -> Component {
+    let first = match run_status() {
+        Ok(t) => t,
+        Err(e) => {
+            return Component {
+                name: "hooks".to_string(),
+                state: ComponentState::Unreadable,
+                detail: format!("status failed: {e}"),
+            };
+        }
+    };
+    let judged = judge_hooks(shim, &first);
+    if matches!(judged.state, ComponentState::Current) {
+        return judged;
+    }
+    repair();
+    match run_status() {
+        Ok(second) => judge_hooks(shim, &second),
+        Err(e) => Component {
+            name: "hooks".to_string(),
+            state: ComponentState::Unreadable,
+            detail: format!("status failed after repair: {e}"),
+        },
+    }
 }
