@@ -475,6 +475,11 @@ pub struct DiagnoseInputs<'a> {
     /// them (`$HOME/.claude`, `${CLAUDE_SKILL_HOME:-...}`, `${CODEX_HOME:-...}`).
     pub home: &'a Path,
     pub keep_mine: bool,
+    /// The new tree's cort binary. Hook copy, judgement and fixes live in the binary, not
+    /// in the pack or the shim — without this component a code-only change produced a new
+    /// binary while diagnose read everything Current and the upgrade did nothing (found
+    /// deploying the P2/P4 hook copy; Kimi/Codex rounds missed it, the machine caught it).
+    pub new_binary: &'a Path,
 }
 
 /// Compose the Task-1 components. Task 3 extends this fn with skill/hook components; the
@@ -515,6 +520,38 @@ pub fn diagnose(inputs: &DiagnoseInputs) -> Vec<Component> {
         inputs.installed_ast_grep_version,
         crate::install::AST_GREP_PINNED,
     ));
+    // Binary content: the pack can be identical and the shim pristine while the CODE changed
+    // (hook copy, judgement, fixes all live in the cort binary). Hash both sides — same
+    // construction as the shim's content check, one level down.
+    out.push(
+        match (
+            fs::read(cort_home.join("cort")),
+            fs::read(inputs.new_binary),
+        ) {
+            (Ok(a), Ok(b)) if a == b => Component {
+                name: "binary".into(),
+                state: ComponentState::Current,
+                detail: String::new(),
+            },
+            (Ok(a), Ok(b)) => {
+                use sha2::{Digest, Sha256};
+                Component {
+                    name: "binary".into(),
+                    state: ComponentState::Drifted,
+                    detail: format!(
+                        "installed binary {:x}, new binary {:x}",
+                        Sha256::digest(&a),
+                        Sha256::digest(&b)
+                    ),
+                }
+            }
+            (Err(e), _) | (_, Err(e)) => Component {
+                name: "binary".into(),
+                state: ComponentState::Unreadable,
+                detail: format!("a binary could not be read: {e}"),
+            },
+        },
+    );
     // Manifest keys: every `xxx:` prefix in the live file. An unreadable manifest is its own
     // Unreadable component — the key-set cannot be diffed from bytes we could not read, and
     // empty-keys-would-read-Current is exactly the false-pass this plan keeps refusing.

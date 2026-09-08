@@ -141,6 +141,7 @@ fn diagnose_reports_a_drifted_pack_and_a_current_one() {
         new_tree: &_root,
         home: &home,
         keep_mine: false,
+        new_binary: &_root.join("nonexistent-new-binary"),
     });
     let pack = comps.iter().find(|c| c.name == "pack").unwrap();
     assert!(matches!(pack.state, ComponentState::Drifted), "{pack:?}");
@@ -153,6 +154,7 @@ fn diagnose_reports_a_drifted_pack_and_a_current_one() {
         new_tree: &_root,
         home: &home,
         keep_mine: false,
+        new_binary: &_root.join("nonexistent-new-binary"),
     });
     let pack = comps.iter().find(|c| c.name == "pack").unwrap();
     assert!(matches!(pack.state, ComponentState::Current), "{pack:?}");
@@ -1063,6 +1065,7 @@ fn check_mode_reports_drift_it_cannot_repair() {
             new_tree: install_root.path(),
             home: install_root.path(),
             keep_mine: false,
+            new_binary: &install_root.path().join("nonexistent-new-binary"),
         },
         std::path::Path::new("/shim"),
         &|| Ok(bad.to_string()),
@@ -1091,6 +1094,7 @@ fn check_mode_completes_while_an_upgrade_holds_the_locks() {
             new_tree: install_root.path(),
             home: install_root.path(),
             keep_mine: false,
+            new_binary: &install_root.path().join("nonexistent-new-binary"),
         },
         std::path::Path::new("/shim"),
         &|| Ok(String::new()),
@@ -1126,6 +1130,7 @@ fn a_gone_index_reads_absent_in_diagnose_too() {
                 new_tree: scratch.path(),
                 home: scratch.path(),
                 keep_mine: false,
+                new_binary: &scratch.path().join("nonexistent-new-binary"),
             });
             let c = comps
                 .iter()
@@ -1233,4 +1238,66 @@ fn skill_repair_honours_the_skill_home_overrides() {
             );
         },
     );
+}
+
+// ── binary content: the component that notices when the PAYLOAD CODE changed ──
+
+/// Hook copy lives in the cort binary, not in the pack or the shim. Without this component a
+/// code-only change (copy, judgement, bugfix) produced a new tree binary while diagnose read
+/// shim/pack/version all Current and exited 0 - the new copy could never reach the machine
+/// (found deploying the P2/P4 hook copy: generation did not flip, installed and tree binaries
+/// hashed differently, and the upgrade declared everything current).
+#[test]
+fn a_binary_content_drift_is_drifted_even_when_shim_and_pack_match() {
+    use cort::upgrade::{ComponentState, DiagnoseInputs};
+    let ((_r, _h, _b), _root, home, cort_home, _bin) = installed_root();
+    let install_root = home.join("cortexyoung");
+    // Pack identical both sides; only the binary bytes differ.
+    fs::write(cort_home.join("pack/r.yml"), "id: a\nlanguage: ts\n").unwrap();
+    let new_pack = tempfile::tempdir().unwrap();
+    fs::write(new_pack.path().join("r.yml"), "id: a\nlanguage: ts\n").unwrap();
+    fs::write(cort_home.join("cort"), "#!/bin/sh\nold payload\n").unwrap();
+    let new_bin = tempfile::tempdir().unwrap();
+    fs::write(new_bin.path().join("cort"), "#!/bin/sh\nnew payload\n").unwrap();
+    let comps = cort::upgrade::diagnose(&DiagnoseInputs {
+        install_root: &install_root,
+        new_pack: new_pack.path(),
+        installed_ast_grep_version: cort::install::AST_GREP_PINNED,
+        new_tree: &_root,
+        home: &home,
+        keep_mine: false,
+        new_binary: new_bin.path().join("cort").as_path(),
+    });
+    let b = comps.iter().find(|c| c.name == "binary").unwrap();
+    assert!(
+        matches!(b.state, ComponentState::Drifted),
+        "different binary bytes must be Drifted: {b:?}"
+    );
+    assert!(b.detail.contains("installed"), "{b:?}");
+}
+
+/// The mirror: identical bytes read Current, so the steady state keeps its right to do
+/// nothing.
+#[test]
+fn an_identical_binary_is_current() {
+    use cort::upgrade::{ComponentState, DiagnoseInputs};
+    let ((_r, _h, _b), _root, home, cort_home, _bin) = installed_root();
+    let install_root = home.join("cortexyoung");
+    fs::write(cort_home.join("pack/r.yml"), "id: a\nlanguage: ts\n").unwrap();
+    let new_pack = tempfile::tempdir().unwrap();
+    fs::write(new_pack.path().join("r.yml"), "id: a\nlanguage: ts\n").unwrap();
+    fs::write(cort_home.join("cort"), "#!/bin/sh\nsame payload\n").unwrap();
+    let new_bin = tempfile::tempdir().unwrap();
+    fs::write(new_bin.path().join("cort"), "#!/bin/sh\nsame payload\n").unwrap();
+    let comps = cort::upgrade::diagnose(&DiagnoseInputs {
+        install_root: &install_root,
+        new_pack: new_pack.path(),
+        installed_ast_grep_version: cort::install::AST_GREP_PINNED,
+        new_tree: &_root,
+        home: &home,
+        keep_mine: false,
+        new_binary: new_bin.path().join("cort").as_path(),
+    });
+    let b = comps.iter().find(|c| c.name == "binary").unwrap();
+    assert!(matches!(b.state, ComponentState::Current), "{b:?}");
 }

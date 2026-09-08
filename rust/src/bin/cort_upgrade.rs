@@ -140,6 +140,7 @@ fn main() {
         Err(e) => fatal(&e),
     };
     let new_pack = root.join("src/pack");
+    let new_binary = root.join("rust/target/release/cort");
     let new_tree = root.clone();
     let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
 
@@ -192,6 +193,7 @@ fn main() {
         new_tree: &new_tree,
         home: &home,
         keep_mine: args.keep_mine,
+        new_binary: &new_binary,
     };
     let shim_ref: &Path = &shim;
     let runner = status_runner(shim_ref);
