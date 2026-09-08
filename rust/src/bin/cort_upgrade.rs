@@ -40,12 +40,14 @@ struct Args {
 }
 
 /// The repo this binary was built from, derived from the executable's own location
-/// (`rust/target/<profile>/cort_upgrade` → three levels up) and verified by the two
-/// directories staging needs. A moved or stripped copy refuses rather than guessing.
+/// (`<repo>/rust/target/<profile>/cort_upgrade` → four levels up: profile, target, rust,
+/// repo) and verified by the two directories staging needs. A moved or stripped copy
+/// refuses rather than guessing — measured live: a three-level climb lands on `rust/` and
+/// this check is what refused it instead of staging from the wrong tree.
 fn repo_root() -> Result<PathBuf, String> {
     let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
     let mut cur = exe.as_path();
-    for _ in 0..3 {
+    for _ in 0..4 {
         cur = cur
             .parent()
             .ok_or_else(|| "executable has no parent chain".to_string())?;
@@ -141,14 +143,33 @@ fn main() {
     let new_tree = root.clone();
     let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
 
-    // The installed ast-grep's own --version, gathered here and only judged in diagnose —
-    // subprocess policy (deadlines) lives with the other invocations.
+    // The machine's ast-grep version, judged against the pin in diagnose. The manifest's
+    // ast_grep_bin is the installer's OWNED-asset ledger (uninstall deletes the path it
+    // names), so a machine that provisioned ast-grep before this installer ran has no key
+    // there — and recording one would hand uninstall someone else's binary. Resolve the way
+    // the product itself resolves at runtime, falling back to the ledger only when PATH has
+    // nothing (found deploying: the first draft read the ledger alone and reported a healthy
+    // pinned ast-grep as `unreadable` forever).
+    // `check_version_pin` compares pure version strings; the --version stdout is
+    // "ast-grep 0.45.2" — the caller extracts the token (install.sh's own convention,
+    // `awk '{print $2}'`; last token, so a one-token output survives too).
+    let version_of = |path: &Path| {
+        run_capture_with_deadline(path, &["--version"], Duration::from_secs(10))
+            .ok()
+            .and_then(|(out, _)| {
+                out.lines()
+                    .next()
+                    .and_then(|l| l.split_whitespace().last().map(str::to_string))
+            })
+    };
     let installed_version = manifest_value(&manifest, "ast_grep_bin")
-        .and_then(|ag| {
-            run_capture_with_deadline(Path::new(&ag), &["--version"], Duration::from_secs(10))
+        .map(PathBuf::from)
+        .or_else(|| {
+            cort::ast_grep::resolve_ast_grep_bin()
                 .ok()
-                .map(|(out, _)| out)
+                .map(PathBuf::from)
         })
+        .and_then(|ag| version_of(&ag))
         .unwrap_or_default();
 
     let cache = cort::db::cache_dir();

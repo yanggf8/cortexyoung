@@ -781,6 +781,11 @@ install_ast_grep() {
   if command -v ast-grep >/dev/null 2>&1 \
      && [ "$(ast-grep --version | awk '{print $2}')" = "$prov_version" ]; then
     info "ast-grep $prov_version already present"
+    # Deliberately NO record_manifest here: ast_grep_bin is the OWNED-asset ledger — uninstall
+    # rm's exactly the path it names. This branch's ast-grep is the machine's, not ours, and
+    # recording it would make an uninstall delete a binary we never installed (found the hard
+    # way while deploying: the recorded fake was eaten by a later uninstall's cleanup). A
+    # reader that wants the machine's ast-grep resolves it the way the product does — PATH.
     return 0
   fi
   if command -v sg >/dev/null 2>&1 && ! sg --version 2>/dev/null | grep -q '^ast-grep '; then

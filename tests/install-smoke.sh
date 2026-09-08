@@ -141,6 +141,12 @@ assert_file_not_exists "$HOME/.claude/skills/xgrep/SKILL.md" "xgrep skill not in
 # is a routing half that stays unwired, which is what the 2026-09-01 mining window measured (745
 # grep/rg triggers recorded by the harness, zero rows in usage.db, because nothing was wired).
 assert_file_exists "$HOME/.claude/settings.json" "settings.json written by the hook deploy"
+# The already-present ast-grep is the MACHINE's binary, not an installer asset: ast_grep_bin is
+# the owned-asset ledger uninstall rm's exactly the path of, so claiming a pre-provisioned
+# ast-grep here would make a later uninstall delete someone else's binary (found the hard way
+# while deploying — the recorded fake was eaten by a later uninstall's cleanup). Unclaimed is
+# the contract; the upgrader resolves the machine's ast-grep the way the product does.
+assert_not_contains "$HOME/.local/share/cortexyoung/manifest" "ast_grep_bin:" "already-present ast-grep is never claimed as an installer asset"
 assert_contains "$HOME/.claude/settings.json" "hook-suggest" "PreToolUse hook wired in the same run as the skill"
 assert_contains "$HOME/.claude/settings.json" '"matcher": "Bash"' "the hook is matched to Bash, not to every tool"
 assert_contains "$HOME/.local/share/cortexyoung/manifest" "hook_settings:" "hook_settings recorded in the manifest"
@@ -782,6 +788,11 @@ assert_skill_claimed "$CODEX_DEST" "--force on the codex home re-claims the new 
 bash "$INSTALL_SH" --uninstall > /tmp/smoke16d.log 2>&1; cat /tmp/smoke16d.log | sed 's/^/    /' > /dev/null
 if [ -f "$CODEX_DEST" ]; then fail "codex skill removed on uninstall"; else pass "codex skill removed on uninstall"; fi
 assert_file_not_exists "$(dirname "$CODEX_DEST")/$STAMP_NAME" "no orphan stamp left behind on uninstall"
+# The fake ast-grep on PATH was already present — never an installer asset. An installer that
+# claims it in the manifest makes THIS uninstall delete it (found the hard way while deploying:
+# install -> uninstall -> reinstall then died at `ast-grep version mismatch` because the fake
+# had been eaten). Surviving the uninstall is the contract.
+assert_file_exists "$TMPHOME/fakebin/ast-grep" "uninstall never deletes an ast-grep it did not install"
 # The directory itself may legitimately survive: --force in the test above left a .bak of the
 # user's own file there, and uninstall must not eat backups it did not make.
 if [ -f "$(dirname "$CODEX_DEST")/$STAMP_NAME" ]; then

@@ -61,6 +61,10 @@ impl AstGrepProvenance {
 /// that is not named below, and the test above enforces it. A key added to the script without
 /// being added here fails the build — not uninstall, not in upgrade, where it would surface as a
 /// leaked artifact.
+// `profile` is written by the PATH-block step: which rc file carries the BIN_DIR export.
+// Uninstall re-scans the candidate files rather than reading it, but the installer has always
+// written it — and until it went through `record_manifest`, this set never saw it and every
+// upgraded manifest read `keys no release knows: profile` (found deploying).
 pub const MANIFEST_KEYS: &[&str] = &[
     "manifest_version",
     "cort_bin",
@@ -72,6 +76,7 @@ pub const MANIFEST_KEYS: &[&str] = &[
     "hook_settings",
     "hook_settings_codex",
     "hook_settings_kimi",
+    "profile",
 ];
 
 /// Keys no fresh install writes but old manifests may hold, renamed by `migrate_manifest_v2`.
