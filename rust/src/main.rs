@@ -1104,20 +1104,30 @@ fn cmd_hook_suggest(args: &[String], usage: &mut UsageEvent) -> Result<Emit, Cor
         hit.kind.tag(),
     );
     let stale_clause = if stale {
-        ", but it was built on an older commit, so it will answer `stale=true` and may miss \
-edges added since -- re-run `cort index` first if the answer has to be complete"
+        // P2 (Kimi-round mining): the old clause moralised ("re-run cort index first if the
+        // answer has to be complete") and 6 of 6 stale suggestions were ignored — agents read
+        // it as "impact will be wrong, keep grepping". One copy-pasteable chained command now.
+        format!(
+            " -- the index is behind head, so chain the reindex in the same command: \
+`cort index --incremental && cort impact --symbol '{}' --depth 1 --coverage -f lean`",
+            hit.symbol
+        )
     } else {
-        ""
+        String::new()
     };
     // Two sentences off one shape gate. The `-A`/`-B`/`-C` arm is not a softened `impact` pitch:
     // an agent asking for surrounding lines is not asking who calls the symbol, and answering the
     // question it did not ask is what made that shape worth silencing in the first place.
+    //
+    // P4 (Kimi-round mining): 5 of 11 ignored suggestions were definition/implementation
+    // lookups, not caller-set questions — the copy now leads with the verb condition so an
+    // agent opening a definition can dismiss it in one glance instead of reading an essay.
     let context = match hit.kind {
         cort::hook::Suggest::Impact => format!(
-            "cort has an index for this project{stale_clause}. `cort impact --symbol '{}' --depth 1 \
---coverage -f lean` answers who calls it in one call, and `--coverage` lists what the enumeration \
-could not see -- which a grep cannot tell you. Use it before concluding nothing else uses this; \
-keep the grep for anything literal.",
+            "If you need the caller set (rename / delete / \"nothing else uses this\"), run \
+`cort impact --symbol '{}' --depth 1 --coverage -f lean`{stale_clause}. `--coverage` lists \
+what the enumeration could not see -- which a grep cannot tell you. If you are opening the \
+definition, ignore this and keep the grep.",
             hit.symbol
         ),
         cort::hook::Suggest::Context => format!(

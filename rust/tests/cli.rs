@@ -554,6 +554,16 @@ fn a_stale_index_is_disclosed_in_the_line_the_agent_reads() {
         .unwrap_or_default()
         .to_string();
     assert!(ctx.contains("cort impact --symbol 'helper'"), "got: {ctx}");
+    // P4 (Kimi-round mining): the first sentence names the verbs, so an agent opening a
+    // definition can dismiss the suggestion in one glance instead of reading an essay.
+    assert!(
+        ctx.contains("If you need the caller set"),
+        "fresh copy must lead with the verb condition: {ctx}"
+    );
+    assert!(
+        ctx.contains("If you are opening the definition, ignore this"),
+        "the dismiss clause must be present: {ctx}"
+    );
     assert!(
         !ctx.contains("older commit"),
         "a fresh index must not warn about staleness: {ctx}"
@@ -573,9 +583,17 @@ fn a_stale_index_is_disclosed_in_the_line_the_agent_reads() {
         .as_str()
         .unwrap_or_default()
         .to_string();
+    // P2 (Kimi-round mining): the stale clause used to moralise ("re-run cort index first if
+    // the answer has to be complete") - 6 of 6 stale suggestions were then ignored, agents
+    // reading it as "impact will be wrong, keep grepping". It is one copy-pasteable chained
+    // command now.
     assert!(
-        ctx.contains("older commit") && ctx.contains("stale=true"),
-        "a behind-head index must say so: {ctx}"
+        ctx.contains("cort index --incremental && cort impact --symbol 'helper'"),
+        "stale copy must hand over the chained command: {ctx}"
+    );
+    assert!(
+        !ctx.contains("has to be complete"),
+        "the essay is gone: {ctx}"
     );
     // Still a suggestion, not a refusal: a stale index resolves most seeds.
     assert!(ctx.contains("cort impact --symbol 'helper'"), "got: {ctx}");
