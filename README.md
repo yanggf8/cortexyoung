@@ -183,7 +183,10 @@ exact rendered output size (`bytes_out`), and `saved_bytes` — raw body bytes t
 pull into its context, counted on exactly two paths: a receipt cache hit (the body the receipt
 omitted) and a ranged `read` (the file bytes outside the requested range, measured against the
 file on disk — issue #4; one nonzero row in the first quarter's log was the whole column
-before this second formula landed).
+before this second formula landed). A `no_shape` silence additionally records a shape
+fingerprint — the tool name plus the payload's top-level key *names* — so the 83% of hook runs
+that decline on shape can be ordered by demand (issue #3); key names are harness vocabulary,
+never payload content.
 
 What is never recorded: file contents, `recall` queries, `struct` patterns, unresolved free-text
 `context` queries, clap/error messages, absolute home paths. The recorder is best-effort: it
@@ -274,7 +277,7 @@ With xgrep (opt-in), the same rule applies to `xg`:
 ./install.sh --with-xgrep # idempotent xg install + xgrep skill deploy
 ```
 
-## Upgrade note — index schema v3, v4 and v5
+## Upgrade note — index schema v3 through v7
 
 Schema v3 adds a `raw_edges` table: the unresolved call/import matches that the relationship graph
 is derived from. It exists because resolution spans files — re-indexing one file used to delete its
@@ -296,6 +299,19 @@ from `schema.sql` carries them in the middle — five of eight columns differ, a
 `SELECT *` copy would put `confidence` into `call_site_line`. This repo's own index was such a file;
 the upgrade was run against it and its 2,210 relationships and 12,463 raw edges came through with the
 column order afterwards identical to a fresh database.
+
+Schema v6 adds `file_state.indexed_uncommitted` (issue #5): a file that hook-refresh indexed from
+**uncommitted** content is marked, and the incremental pass keeps it in the examined set until its
+content agrees with what git vouches for — because a `git checkout`/`stash`/`reset` of such a file
+silences both narrowing diffs while the index keeps answering from content git has never seen, and
+`status` reported fresh the whole time. The DEFAULT 0 is the safe value for existing rows, so the
+migration forces no rebuild.
+
+Schema v7 adds `file_state.chunk_count` (issue #2), splitting the zero-chunks ambiguity: **0** =
+the extractor ran and the file holds nothing chunkable (a correct refusal — a two-line driver
+script), **>0** = declarations stored, **-1** = written before v7 and never rewritten (unknown,
+never pretending to be a scan result). A read-only auditor subtracts the first case from coverage
+gaps with one column.
 
 Nothing to do by hand in any of the three cases. An index written by an older cort is detected on first use,
 reported as stale, and rebuilt in full by the next `cort index --incremental` (which falls back to a
