@@ -1151,7 +1151,7 @@ fn golden_json_and_lean_snapshots() {
     "mixed": false,
     "source": "<source>"
   },
-  "note": "saved_bytes is raw body bytes omitted, not total-output savings",
+  "note": "saved_bytes is raw body bytes omitted, not total-output savings; sources: read receipt-hits and ranged reads (file bytes left out of the context) — format choices and symbol-slice counterfactuals are deliberately not counted",
   "projects": {
     "_global": {
       "bytes_out": 10,
@@ -1179,7 +1179,7 @@ fn golden_json_and_lean_snapshots() {
     const GOLDEN_LEAN: &str = "\
 # usage days=30 best_effort=true
 # machine=<id> source=<source>
-# saved_bytes is raw body bytes omitted, not total-output savings
+# saved_bytes is raw body bytes omitted, not total-output savings; sources: read receipt-hits and ranged reads (file bytes left out of the context) — format choices and symbol-slice counterfactuals are deliberately not counted
 read\tok=2 error=0 bytes_out=300 saved_bytes=50 receipt_hit_rate=0.5 stale=0/0
 status\tok=1 error=1 bytes_out=30 saved_bytes=0 receipt_hit_rate=- stale=0/0
 # projects
@@ -1348,4 +1348,73 @@ fn an_unknown_command_records_the_name_it_was_rejected_for() {
     );
     // Privacy holds: nothing else from the invocation leaks into the row.
     assert_eq!(row["status"], "error");
+}
+
+// ── issue #4: savings on paths that actually omit reads ──
+
+/// A ranged read returned a SLICE of the file; the rest of the file is bytes the caller did not
+/// pull into its context. `saved_bytes` used to ignore this — one nonzero row in a quarter's
+/// log — so the value story read as a flatline. The formula is measured, not counterfactual:
+/// file bytes on disk minus the body returned. A whole-file read saves nothing, and format
+/// choices / would-have-read-it-all stay out of the column on purpose (the NOTE's vanity
+/// warning).
+#[test]
+fn a_ranged_read_records_the_file_bytes_it_omitted() {
+    let (_p, cwd, _c, cache) = sandbox();
+    let mut body = String::new();
+    for i in 1..=200 {
+        body.push_str(&format!("export function f{i}() {{ return {i}; }}\n"));
+    }
+    fs::write(cwd.join("src/big.ts"), &body).unwrap();
+    fs::write(
+        cwd.join("src/small.ts"),
+        "export function s() { return 1; }\n",
+    )
+    .unwrap();
+    let idx = run_cort(&["index"], &cwd, &cache);
+    if idx.code != 0 {
+        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
+        return;
+    }
+
+    let r = run_cort(
+        &["read", "src/big.ts", "--start", "1", "--end", "5"],
+        &cwd,
+        &cache,
+    );
+    assert_eq!(r.code, 0, "stderr={}", r.stderr);
+    let returned = payload(&r)["content"].as_str().unwrap().len() as i64;
+    let total = fs::metadata(cwd.join("src/big.ts")).unwrap().len() as i64;
+    assert!(
+        total > returned,
+        "precondition: the read is a real subrange"
+    );
+
+    let rows = log_rows(&cache);
+    let row = rows
+        .iter()
+        .rev()
+        .find(|row| row["command"] == "read")
+        .expect("the read is recorded");
+    assert_eq!(
+        row["saved_bytes"].as_i64(),
+        Some(total - returned),
+        "the omitted file bytes are the savings: row={}",
+        row["saved_bytes"]
+    );
+
+    // A whole-file read leaves nothing behind — savings must be 0, not a vanity number.
+    let r = run_cort(&["read", "src/big.ts", "--content", "full"], &cwd, &cache);
+    assert_eq!(r.code, 0);
+    let rows = log_rows(&cache);
+    let row = rows
+        .iter()
+        .rev()
+        .find(|row| row["command"] == "read")
+        .unwrap();
+    assert_eq!(
+        row["saved_bytes"].as_i64(),
+        Some(0),
+        "whole file: nothing omitted"
+    );
 }

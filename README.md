@@ -179,8 +179,11 @@ machine; there is no network code in cort at all.
 What is recorded per invocation: command name, status (ok/error) and error code only, the
 project id, allowlisted arguments (symbol, project-relative path, line range), for reads the
 requested vs effective content mode and `source`, whether the index was evaluated as stale, the
-exact rendered output size (`bytes_out`), and `saved_bytes` — on a receipt cache hit, the number
-of raw body bytes the receipt omitted from the response.
+exact rendered output size (`bytes_out`), and `saved_bytes` — raw body bytes the caller did not
+pull into its context, counted on exactly two paths: a receipt cache hit (the body the receipt
+omitted) and a ranged `read` (the file bytes outside the requested range, measured against the
+file on disk — issue #4; one nonzero row in the first quarter's log was the whole column
+before this second formula landed).
 
 What is never recorded: file contents, `recall` queries, `struct` patterns, unresolved free-text
 `context` queries, clap/error messages, absolute home paths. The recorder is best-effort: it
@@ -190,8 +193,10 @@ output or exit code — which also means the report can only ever under-count.
 Read the report with `cort usage [days]` (1–90, default 30; retention is 90 days, pruned at
 most once per day). Two fields deserve care: `receipt_hit_rate` counts only successful
 `auto`-mode reads, so toggling `--content full/receipt` does not distort it; and `saved_bytes`
-means raw body bytes omitted from receipts — it is **not** a claim about total output, network
-or cost savings. The report itself is written to the log after it is rendered, so an invocation
+means raw body bytes omitted on the two paths above — it is **not** a claim about total output,
+network or cost savings, and format choices (lean vs json) and symbol-slice counterfactuals are
+deliberately **not** counted, because a counterfactual is where a savings number goes to
+become vanity. The report itself is written to the log after it is rendered, so an invocation
 never appears in its own report.
 
 ## Install

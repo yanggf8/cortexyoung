@@ -2211,6 +2211,25 @@ fn cmd_read(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError> 
             end_line.unwrap_or(1),
         );
         usage.saved_bytes = usage::saved_bytes_for(source, effective, omitted);
+    } else if effective == Some("full") {
+        // Issue #4, second honest formula: a ranged read returned a SLICE of the file, and the
+        // rest of the file is bytes the caller did not pull into its context. The savings are the
+        // file bytes on disk minus the body returned — measured, not counterfactual: the file is
+        // on disk and its size is not an opinion. A whole-file read saves nothing (nothing was
+        // left behind) and a receipt read is already accounted above. Format choices and "the
+        // agent might have read the whole file anyway" stay OUT on purpose — that way lies the
+        // vanity number the NOTE warns about.
+        if let (Some(rel), Some(content), Some(_)) =
+            (rel, value.get("content").and_then(Value::as_str), end_line)
+        {
+            let abs = canon.path.join(rel);
+            if let Ok(total) = std::fs::metadata(&abs).map(|m| m.len() as i64) {
+                let body = content.len() as i64;
+                if total > body {
+                    usage.saved_bytes = total - body;
+                }
+            }
+        }
     }
     Ok(Emit {
         render_command: Some("read"),

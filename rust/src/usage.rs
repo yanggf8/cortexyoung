@@ -15,7 +15,9 @@ const DAY_MS: i64 = 86_400_000;
 const PRUNE_BATCH: i64 = 500;
 const FIELD_CAP: usize = 256;
 const SCHEMA_SQL: &str = include_str!("usage_schema.sql");
-const NOTE: &str = "saved_bytes is raw body bytes omitted, not total-output savings";
+const NOTE: &str = "saved_bytes is raw body bytes omitted, not total-output savings; sources: \
+read receipt-hits and ranged reads (file bytes left out of the context) — format choices and \
+symbol-slice counterfactuals are deliberately not counted";
 const LAST_PRUNE_KEY: &str = "LAST_PRUNE_DAY";
 const VERSION_KEY: &str = "USAGE_SCHEMA_VERSION";
 const MACHINE_KEY: &str = "MACHINE_ID";
