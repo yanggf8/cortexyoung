@@ -524,9 +524,10 @@ fn a_v3_index_is_upgraded_and_its_rebuilt_graph_carries_forms_and_call_sites() {
     .unwrap();
 
     ensure_schema(&db).unwrap();
+    let expected = cort::db::SCHEMA_VERSION.to_string();
     assert_eq!(
         get_meta(&db, "SCHEMA_VERSION").unwrap().as_deref(),
-        Some("6"),
+        Some(expected.as_str()),
         "the upgrade writes the version only after every migration lands"
     );
     assert_eq!(
@@ -955,4 +956,51 @@ fn an_index_built_from_uncommitted_content_survives_a_git_revert_no_longer() {
     // And the repair is remembered as vouched-for: the next pass examines nothing again.
     let settled = incremental_index(&mut db, &bin, &root, RebuildPolicy::Allow).unwrap();
     assert_eq!(settled.files_examined, 0, "back to the ordinary narrowing");
+}
+
+// ── issue #2: "scanned, nothing to say" vs "missed by extractor" ──
+
+/// `file_state.chunk_count` splits the zero-chunks ambiguity: 0 = the extractor ran and the
+/// file holds nothing chunkable (correct refusal, e.g. a two-line driver script), >0 = real
+/// declarations, -1 = written before v7 and never rewritten (unknown — never pretending to be
+/// a scan result). A read-only auditor can then subtract the first case from the coverage gap.
+#[test]
+fn file_state_chunk_count_separates_scanned_empty_from_unknown() {
+    let (_dir, root, mut db, _id, bin) = git_project(SAMPLE);
+    // A source file the pack PARSES but that matches no declaration rule: one import, no
+    // functions, no classes — the exact shape of issue #2's five driver scripts. (Measured:
+    // an unparsable file grows one "unparsed" placeholder chunk instead, which is a different
+    // row — chunk_type='unparsed' — and a different diagnosis.)
+    fs::write(
+        root.join("src/imports_only.js"),
+        "import { something } from './somewhere.js';\n",
+    )
+    .unwrap();
+    full_index(&mut db, &bin, &root).unwrap();
+    let rows: Vec<(String, i64, i64)> = db
+        .prepare(
+            "SELECT f.file_path, f.chunk_count,
+                    (SELECT COUNT(*) FROM chunks c WHERE c.project_id = f.project_id AND c.file_path = f.file_path)
+             FROM file_state f ORDER BY f.file_path",
+        )
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert!(!rows.is_empty(), "precondition: files indexed");
+    for (path, counted, actual) in &rows {
+        assert_eq!(
+            counted, actual,
+            "chunk_count must equal the stored chunk rows for {path}"
+        );
+    }
+    let const_only = rows
+        .iter()
+        .find(|(p, _, _)| p == "src/imports_only.js")
+        .unwrap();
+    assert_eq!(
+        const_only.1, 0,
+        "a file with no declarations reads scanned-empty, not missed"
+    );
 }

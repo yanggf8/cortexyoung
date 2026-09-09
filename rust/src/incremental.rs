@@ -265,12 +265,19 @@ pub fn reindex_one_file(
     }
     replace_file_raw_edges(&tx, project_id, file_path, &result.edges)?;
     tx.execute(
-        "INSERT INTO file_state (project_id, file_path, file_content_hash, indexed_uncommitted)
-         VALUES (?1, ?2, ?3, ?4)
+        "INSERT INTO file_state (project_id, file_path, file_content_hash, indexed_uncommitted, chunk_count)
+         VALUES (?1, ?2, ?3, ?4, ?5)
          ON CONFLICT(project_id, file_path) DO UPDATE SET
            file_content_hash = excluded.file_content_hash,
-           indexed_uncommitted = excluded.indexed_uncommitted, updated_at = datetime('now')",
-        params![project_id, file_path, result.file_content_hash, uncommitted],
+           indexed_uncommitted = excluded.indexed_uncommitted,
+           chunk_count = excluded.chunk_count, updated_at = datetime('now')",
+        params![
+            project_id,
+            file_path,
+            result.file_content_hash,
+            uncommitted,
+            result.chunks.len() as i64
+        ],
     )?;
     // Relationship resolution deliberately does NOT happen here: it needs the chunks of every
     // other file (an edge's target usually lives elsewhere), so a single file can only ever

@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-pub const SCHEMA_VERSION: i64 = 6;
+pub const SCHEMA_VERSION: i64 = 7;
 
 /// Every `TEXT NOT NULL DEFAULT` column an `ALTER TABLE ADD COLUMN` has to supply, per table.
 /// Kept as one list so the upgrade path and `schema.sql` cannot drift: a column that exists in the
@@ -248,6 +248,31 @@ fn migrate_v4(db: &Db) -> Result<(), CortError> {
 ///
 /// Runs before `SCHEMA_VERSION` is written, so a failure leaves the database at its old version and
 /// the next run retries instead of trusting a half-migrated file.
+fn migrate_v7(db: &Db) -> Result<(), CortError> {
+    let exists = column_exists(db, "file_state", "chunk_count").map_err(|e| {
+        CortError::new(
+            "schema_migration_failed",
+            json!({ "table": "file_state", "column": "chunk_count", "message": e.to_string() }),
+        )
+    })?;
+    if exists {
+        return Ok(());
+    }
+    db.execute(
+        "ALTER TABLE file_state ADD COLUMN chunk_count INTEGER NOT NULL DEFAULT -1",
+        [],
+    )
+    .map_err(|e| {
+        CortError::new(
+            "schema_migration_failed",
+            json!({ "table": "file_state", "column": "chunk_count", "message": e.to_string() }),
+        )
+    })?;
+    Ok(())
+}
+
+/// Runs before `SCHEMA_VERSION` is written, so a failure leaves the database at its old version and
+/// the next run retries instead of trusting a half-migrated file.
 fn migrate_v6(db: &Db) -> Result<(), CortError> {
     let exists = column_exists(db, "file_state", "indexed_uncommitted").map_err(|e| {
         CortError::new(
@@ -345,6 +370,11 @@ pub fn ensure_schema(db: &Db) -> Result<(), CortError> {
         // DEFAULT 0 is the safe value for every existing row — the marker narrows nothing, so
         // the migration needs no rebuild and must not set `graph_pending`.
         migrate_v6(db)?;
+        // v7 adds `file_state.chunk_count` (issue #2): "scanned, nothing to say" (0) becomes
+        // distinguishable from "written before this column existed" (-1) and from real
+        // declarations (>0). Like v6, the DEFAULT hides nothing that was previously visible —
+        // it names the rows it cannot speak for — so no rebuild either.
+        migrate_v7(db)?;
         // v3 added `raw_edges`; v4 adds `call_form` and the call-site line. An older database has
         // chunks whose edges cannot be re-derived with the new columns filled in, so a rebuild would
         // silently wipe the graph. Mark it pending: `status` reports stale and the next incremental

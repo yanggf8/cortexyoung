@@ -2578,3 +2578,43 @@ fn an_indexed_project_never_gets_the_no_index_hint() {
         "the hint must not fire where an index exists: {ctx}"
     );
 }
+
+// ── issue #3: the no_shape silence carries a shape fingerprint ──
+
+/// 83% of hook runs were `no_shape` and the silence was unattributable: the decline tag says
+/// WHICH rule declined, but nothing said WHAT the payload looked like, so rule work could not
+/// be ordered by demand. Every `no_shape` row now also carries a fingerprint — the tool name
+/// plus the payload's sorted top-level keys. Field NAMES are stable vocabulary; payload
+/// content never enters the log.
+#[test]
+fn a_no_shape_row_carries_a_shape_fingerprint_without_payload_content() {
+    let (_p, cwd, _c, cache) = sandbox();
+    let run = run_hook_suggest_payload(
+        serde_json::json!({
+            "tool_name": "Read",
+            "tool_input": { "file_path": "/tmp/secret-notes.md" },
+            "cwd": cwd.to_str().unwrap(),
+            "session_id": "fp1",
+        }),
+        &[],
+        &cwd,
+        &cache,
+    );
+    assert_eq!(run.code, 0);
+    let db = rusqlite::Connection::open(cache.join("usage.db")).unwrap();
+    let summary: String = db
+        .query_row(
+            "SELECT args_summary FROM command_log WHERE command = 'hook-suggest' ORDER BY id DESC LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        summary.contains(r#""shape":"Read|"#) && summary.contains("tool_input+"),
+        "the fingerprint names the tool and the key set: {summary}"
+    );
+    assert!(
+        !summary.contains("secret"),
+        "payload content must stay out of the log: {summary}"
+    );
+}

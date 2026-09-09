@@ -495,15 +495,17 @@ pub fn full_index(
             chunk_count += 1;
         }
         tx.execute(
-            "INSERT INTO file_state (project_id, file_path, file_content_hash, indexed_uncommitted)
-             VALUES (?1, ?2, ?3, ?4) ON CONFLICT(project_id, file_path)
+            "INSERT INTO file_state (project_id, file_path, file_content_hash, indexed_uncommitted, chunk_count)
+             VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(project_id, file_path)
              DO UPDATE SET file_content_hash = excluded.file_content_hash,
-               indexed_uncommitted = excluded.indexed_uncommitted, updated_at = datetime('now')",
+               indexed_uncommitted = excluded.indexed_uncommitted,
+               chunk_count = excluded.chunk_count, updated_at = datetime('now')",
             params![
                 canon.project_id,
                 extracted_file.rel,
                 extracted_file.result.file_content_hash,
                 uncommitted.contains(&extracted_file.rel),
+                extracted_file.result.chunks.len() as i64,
             ],
         )?;
     }

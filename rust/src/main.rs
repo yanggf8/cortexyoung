@@ -648,6 +648,25 @@ fn hook_args_decline(hook_args_json: &str, decline: &str) -> String {
     hook_args_tag(hook_args_json, "decline", decline)
 }
 
+/// Issue #3 的後半：decline 說的是「哪條規則拒絕」，形狀指紋說的是「被拒絕的長什麼樣」——
+/// 90 天日誌裡 83% 的 hook run 是 `no_shape`，只有前者時這 83% 無法按需求排序規則工作。
+/// 指紋 = 工具名 + payload 的 top-level key 集合（排序後以 `+` 串接）。欄位「名」是各
+/// harness 的穩定詞彙、永不攜帶內容，prompt 不會進日誌。
+fn hook_args_shape(hook_args_json: &str, shape: &str) -> String {
+    hook_args_tag(hook_args_json, "shape", shape)
+}
+
+/// 由 payload 組形狀指紋。見 [`hook_args_shape`]。
+fn shape_fingerprint(v: &Value) -> String {
+    let tool = v.get("tool_name").and_then(Value::as_str).unwrap_or("?");
+    let mut keys: Vec<&str> = v
+        .as_object()
+        .map(|o| o.keys().map(String::as_str).collect())
+        .unwrap_or_default();
+    keys.sort_unstable();
+    format!("{tool}|{}", keys.join("+"))
+}
+
 /// 補 `kind` 標籤——這次的 hit 建議的是哪個子命令（`impact` / `context`）。與 `decline` 對稱：
 /// 一個說不出是哪條規則產生的命中，無法用來評分產生它的那條規則。
 fn hook_args_kind(hook_args_json: &str, kind: &str) -> String {
@@ -1042,7 +1061,10 @@ fn cmd_hook_suggest(args: &[String], usage: &mut UsageEvent) -> Result<Emit, Cor
                     _ => "unsupported_tool_surface",
                 },
             };
-            usage.args_summary = hook_args_decline(&harness_args("no_shape"), tag);
+            usage.args_summary = hook_args_shape(
+                &hook_args_decline(&harness_args("no_shape"), tag),
+                &shape_fingerprint(&v),
+            );
             return quiet();
         }
     };
@@ -1118,7 +1140,10 @@ fn cmd_hook_suggest(args: &[String], usage: &mut UsageEvent) -> Result<Emit, Cor
                 cort::hook::SilenceReason::NoEvidence => ("no_evidence", None),
             };
             usage.args_summary = match decline {
-                Some(tag) => hook_args_decline(&harness_args(outcome), tag),
+                Some(tag) => hook_args_shape(
+                    &hook_args_decline(&harness_args(outcome), tag),
+                    &shape_fingerprint(&v),
+                ),
                 None => harness_args(outcome),
             };
             return quiet();

@@ -37,6 +37,10 @@ CREATE TABLE IF NOT EXISTS file_state (
   file_path TEXT NOT NULL,
   file_content_hash TEXT NOT NULL,
   indexed_uncommitted INTEGER NOT NULL DEFAULT 0,
+  -- Issue #2: 0 = the extractor ran and the file holds nothing chunkable ("scanned, nothing
+  -- to say" — a correct refusal, not a miss); >0 = declarations stored; -1 = written before
+  -- v7 and never rewritten (unknown — never pretending to be a scan result).
+  chunk_count INTEGER NOT NULL DEFAULT -1,
   updated_at TEXT DEFAULT (datetime('now')),
   PRIMARY KEY (project_id, file_path)
 );

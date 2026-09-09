@@ -556,9 +556,10 @@ fn migrating_a_real_v3_database_to_v5_preserves_and_aligns_every_row() {
     db.execute_batch(V3_SHAPED_DB).unwrap();
     ensure_schema(&db).unwrap();
 
+    let expected = cort::db::SCHEMA_VERSION.to_string();
     assert_eq!(
         get_meta(&db, "SCHEMA_VERSION").unwrap().as_deref(),
-        Some("6")
+        Some(expected.as_str())
     );
     assert_eq!(
         get_meta(&db, "graph_pending").unwrap().as_deref(),
@@ -634,9 +635,10 @@ fn a_stale_v5_temporary_table_does_not_wedge_the_next_upgrade() {
         )
         .unwrap();
     assert_eq!(stale, 0, "the rebuild renames its temporary table away");
+    let expected = cort::db::SCHEMA_VERSION.to_string();
     assert_eq!(
         get_meta(&db, "SCHEMA_VERSION").unwrap().as_deref(),
-        Some("6")
+        Some(expected.as_str())
     );
 }
 
@@ -959,4 +961,49 @@ fn an_index_that_will_not_answer_is_reported_rather_than_skipped() {
             "a schema-only database is not a project: {entries:?}"
         );
     });
+}
+
+/// Issue #2, migration half: a v6 database upgrades to v7 in place and every pre-existing
+/// `file_state` row reads `chunk_count = -1` — unknown, never pretending to be a scan result.
+#[test]
+fn a_v6_database_upgrades_to_v7_with_chunk_count_defaulting_to_unknown() {
+    let db = open_db(":memory:").unwrap();
+    db.execute_batch(
+        "CREATE TABLE projects (
+           project_id TEXT PRIMARY KEY,
+           name TEXT NOT NULL,
+           path TEXT NOT NULL,
+           git_head TEXT,
+           last_indexed_at INTEGER
+         );
+         CREATE TABLE file_state (
+           project_id TEXT NOT NULL REFERENCES projects(project_id) ON DELETE CASCADE,
+           file_path TEXT NOT NULL,
+           file_content_hash TEXT NOT NULL,
+           indexed_uncommitted INTEGER NOT NULL DEFAULT 0,
+           updated_at TEXT DEFAULT (datetime('now')),
+           PRIMARY KEY (project_id, file_path)
+         );
+         INSERT INTO projects (project_id, name, path) VALUES ('p1', 'demo', '/tmp/demo');
+         INSERT INTO file_state (project_id, file_path, file_content_hash)
+           VALUES ('p1', 'src/a.ts', 'abc');
+         CREATE TABLE IF NOT EXISTS _cortex_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+         PRAGMA user_version = 6;",
+    )
+    .unwrap();
+    set_meta(&db, "SCHEMA_VERSION", "6").unwrap();
+    ensure_schema(&db).unwrap();
+    assert_eq!(
+        get_meta(&db, "SCHEMA_VERSION").unwrap().as_deref(),
+        Some("7")
+    );
+    let (count, unknown): (i64, i64) = db
+        .query_row(
+            "SELECT COUNT(*), MAX(chunk_count) FROM file_state WHERE file_path = 'src/a.ts'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(count, 1);
+    assert_eq!(unknown, -1, "pre-v7 rows read unknown, not scanned-empty");
 }
