@@ -171,9 +171,12 @@ pub struct ReindexOneResult {
 /// tree. The caller needs this to notice a file that stopped existing without git being able to say
 /// so; `file_state` carries one row per indexed file and is written in the same transaction the
 /// chunks are.
-fn indexed_files(db: &Db, project_id: &str) -> Result<Vec<String>, IndexError> {
-    let mut stmt = db.prepare("SELECT file_path FROM file_state WHERE project_id = ?1")?;
-    let rows = stmt.query_map(params![project_id], |r| r.get::<_, String>(0))?;
+fn indexed_files(db: &Db, project_id: &str) -> Result<Vec<(String, bool)>, IndexError> {
+    let mut stmt =
+        db.prepare("SELECT file_path, indexed_uncommitted FROM file_state WHERE project_id = ?1")?;
+    let rows = stmt.query_map(params![project_id], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? != 0))
+    })?;
     let mut out = Vec::new();
     for r in rows {
         out.push(r?);
@@ -208,6 +211,7 @@ pub fn reindex_one_file(
     root: impl AsRef<Path>,
     project_id: &str,
     file_path: &str,
+    uncommitted: bool,
 ) -> Result<ReindexOneResult, IndexError> {
     let abs: PathBuf = root.as_ref().join(file_path);
     if !abs.exists() {
@@ -231,6 +235,18 @@ pub fn reindex_one_file(
         )
         .optional()?;
     if prior.as_deref() == Some(result.file_content_hash.as_str()) {
+        // The index already holds this exact content. If git vouches for the file now (it is not
+        // in the uncommitted set), any "indexed while uncommitted" marker is obsolete — the
+        // content agrees with what git names at HEAD — and is cleared so the file returns to the
+        // ordinary narrowing. Skipped rows do not rewrite file_state, so this is its own UPDATE.
+        if !uncommitted {
+            db.execute(
+                "UPDATE file_state SET indexed_uncommitted = 0
+                 WHERE project_id = ?1 AND file_path = ?2 AND indexed_uncommitted != 0",
+                params![project_id, file_path],
+            )
+            .map_err(IndexError::Sqlite)?;
+        }
         return Ok(ReindexOneResult {
             chunks: 0,
             unparsed: 0,
@@ -249,10 +265,12 @@ pub fn reindex_one_file(
     }
     replace_file_raw_edges(&tx, project_id, file_path, &result.edges)?;
     tx.execute(
-        "INSERT INTO file_state (project_id, file_path, file_content_hash) VALUES (?1, ?2, ?3)
+        "INSERT INTO file_state (project_id, file_path, file_content_hash, indexed_uncommitted)
+         VALUES (?1, ?2, ?3, ?4)
          ON CONFLICT(project_id, file_path) DO UPDATE SET
-           file_content_hash = excluded.file_content_hash, updated_at = datetime('now')",
-        params![project_id, file_path, result.file_content_hash],
+           file_content_hash = excluded.file_content_hash,
+           indexed_uncommitted = excluded.indexed_uncommitted, updated_at = datetime('now')",
+        params![project_id, file_path, result.file_content_hash, uncommitted],
     )?;
     // Relationship resolution deliberately does NOT happen here: it needs the chunks of every
     // other file (an edge's target usually lives elsewhere), so a single file can only ever
@@ -377,7 +395,7 @@ pub fn incremental_index(
     // holding build output looked like the moment `walk_files` began honouring ignore files, and
     // what happens to anyone who adds an already-indexed path to `.gitignore`.
     let covered: BTreeSet<String> = walk_files(&canon.path).into_iter().collect();
-    for file_path in indexed_files(db, &canon.project_id)? {
+    for (file_path, indexed_uncommitted) in indexed_files(db, &canon.project_id)? {
         if !canon.path.join(&file_path).exists() || !covered.contains(&file_path) {
             // Gone from disk, or gone from what this screen claims to read. Both leave the index;
             // the second keeps the coverage report honest, which is where such a file belongs now
@@ -385,6 +403,17 @@ pub fn incremental_index(
             if !deleted.contains(&file_path) {
                 deleted.push(file_path);
             }
+        } else if indexed_uncommitted && !changed.contains(&file_path) {
+            // Issue #5: this file was indexed from UNCOMMITTED content (hook-refresh indexes the
+            // edit as it lands, before any commit exists), so the narrowing's invariant — "the
+            // index's content is what git says the tree was at indexed_head" — does not hold for
+            // it. If the edit was later reverted, both diffs go quiet while the index keeps
+            // content git has never seen: the old narrowing examined nothing, forever, and
+            // `status` reported fresh the whole time. Keep the file in the examined set until a
+            // pass sees its content agree with what git vouches for; `reindex_one_file` then
+            // clears the marker (git silent + content hash equal), and the file returns to the
+            // ordinary narrowing.
+            changed.push(file_path);
         } else if !cands.vouched.contains(&file_path) && !changed.contains(&file_path) {
             // Still on disk, still covered, and git will not speak for it either way -- the walk
             // sets `git_global(false)` while git's `--exclude-standard` honours the global ignore
@@ -400,7 +429,18 @@ pub fn incremental_index(
         removed += 1;
     }
     for file_path in &changed {
-        let r = reindex_one_file(db, bin, &canon.path, &canon.project_id, file_path)?;
+        // `cands.changed` is the ORIGINAL git diff set — the marker files pushed above must not
+        // count as "git says this changed", or their marker could never clear (git is precisely
+        // the side that has gone quiet about them).
+        let git_says_changed = cands.changed.contains(file_path);
+        let r = reindex_one_file(
+            db,
+            bin,
+            &canon.path,
+            &canon.project_id,
+            file_path,
+            git_says_changed,
+        )?;
         if r.removed {
             removed += 1;
         } else if r.skipped {

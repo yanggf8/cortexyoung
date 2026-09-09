@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS file_state (
   project_id TEXT NOT NULL REFERENCES projects(project_id) ON DELETE CASCADE,
   file_path TEXT NOT NULL,
   file_content_hash TEXT NOT NULL,
+  indexed_uncommitted INTEGER NOT NULL DEFAULT 0,
   updated_at TEXT DEFAULT (datetime('now')),
   PRIMARY KEY (project_id, file_path)
 );

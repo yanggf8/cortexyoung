@@ -296,7 +296,7 @@ fn a_non_git_directory_degrades_to_a_full_index() {
 #[test]
 fn remove_file_and_reindex_one_file_each_run_in_their_own_transaction() {
     let (_dir, root, mut db, project_id, bin) = git_project(SAMPLE);
-    let one = reindex_one_file(&mut db, &bin, &root, &project_id, "src/helper.ts").unwrap();
+    let one = reindex_one_file(&mut db, &bin, &root, &project_id, "src/helper.ts", false).unwrap();
     assert!(one.skipped, "unchanged content must be skipped");
     remove_file(&mut db, &project_id, "src/helper.ts").unwrap();
     let n: i64 = db
@@ -526,7 +526,7 @@ fn a_v3_index_is_upgraded_and_its_rebuilt_graph_carries_forms_and_call_sites() {
     ensure_schema(&db).unwrap();
     assert_eq!(
         get_meta(&db, "SCHEMA_VERSION").unwrap().as_deref(),
-        Some("5"),
+        Some("6"),
         "the upgrade writes the version only after every migration lands"
     );
     assert_eq!(
@@ -898,4 +898,61 @@ fn an_indexed_file_the_walk_no_longer_covers_is_removed() {
             .index_is_stale,
         "and once it is gone the index is not permanently stale any more"
     );
+}
+
+/// Issue #5: an index built from UNCOMMITTED content survives a git revert, permanently.
+/// `hook-refresh` indexes the file as edited, before any commit exists; `git checkout --` (or
+/// stash/reset) puts the tree back and both diffs go empty, so the narrowing never names the
+/// file again — `files_examined: 0` — and the index keeps answering from content git has
+/// never seen while `status` reports fresh the whole time. `file_state.file_content_hash` is
+/// the evidence that would settle it; the narrowing used to never consult it.
+///
+/// The fix marks files indexed while they were uncommitted (`file_state.indexed_uncommitted`)
+/// and keeps them in the examined set until a pass sees their content agree with what git
+/// vouches for. Reproduced from the issue's own repro before the fix: examined=0, chunks stuck
+/// at 1 (unparsed), status fresh.
+#[test]
+fn an_index_built_from_uncommitted_content_survives_a_git_revert_no_longer() {
+    let (_dir, root, mut db, _id, bin) = git_project(&[(
+        "lib.rs",
+        "pub fn alpha() -> usize { 1 }\npub fn beta() -> usize { 2 }\n",
+    )]);
+    full_index(&mut db, &bin, &root).unwrap();
+    let chunks_of = |db: &rusqlite::Connection, path: &str| -> i64 {
+        db.query_row(
+            "SELECT COUNT(*) FROM chunks WHERE file_path = ?1",
+            [path],
+            |c| c.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(
+        chunks_of(&db, "lib.rs"),
+        2,
+        "precondition: committed content"
+    );
+
+    // Edit WITHOUT committing, then let the incremental (what hook-refresh runs) index it.
+    fs::write(root.join("lib.rs"), "this is not rust.\n").unwrap();
+    let edited = incremental_index(&mut db, &bin, &root, RebuildPolicy::Allow).unwrap();
+    assert_eq!(edited.files_reindexed, 1, "the edit is reindexed");
+    assert_eq!(chunks_of(&db, "lib.rs"), 1, "now unparsed");
+
+    // Revert: the tree is back to the committed content, and git goes silent about the file.
+    git(&root, &["checkout", "--", "lib.rs"]);
+    let after = incremental_index(&mut db, &bin, &root, RebuildPolicy::Allow).unwrap();
+    assert_eq!(
+        after.files_examined, 1,
+        "the file must be examined even though git is silent about it"
+    );
+    assert_eq!(after.files_reindexed, 1, "the stale content is repaired");
+    assert_eq!(
+        chunks_of(&db, "lib.rs"),
+        2,
+        "the committed declarations are back"
+    );
+
+    // And the repair is remembered as vouched-for: the next pass examines nothing again.
+    let settled = incremental_index(&mut db, &bin, &root, RebuildPolicy::Allow).unwrap();
+    assert_eq!(settled.files_examined, 0, "back to the ordinary narrowing");
 }

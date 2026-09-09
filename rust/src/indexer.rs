@@ -424,6 +424,25 @@ pub fn full_index(
     let files = walk_files(&canon.path);
     let version = crate::pack::extractor_version()?;
     let head = git_head_of(&canon.path);
+    // Issue #5: a full index built from WORKING-TREE content has the same uncommitted invariant
+    // hole the incremental narrowing has — the first `git checkout` of an edited file would leave
+    // these rows unexamined. One diff names every file whose content git does not vouch for; a
+    // non-git directory has no HEAD to differ from, so nothing is marked there.
+    let uncommitted: std::collections::BTreeSet<String> = Command::new("git")
+        .arg("-C")
+        .arg(&canon.path)
+        .args(["diff", "--name-only", "HEAD"])
+        .output()
+        .ok()
+        .filter(|r| r.status.success())
+        .map(|r| {
+            String::from_utf8_lossy(&r.stdout)
+                .lines()
+                .filter(|l| !l.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
 
     // Extraction runs outside the transaction: subprocesses must not hold a write lock.
     let extracted = extract_all(bin, &canon.path, &canon.project_id, &files)?;
@@ -476,13 +495,15 @@ pub fn full_index(
             chunk_count += 1;
         }
         tx.execute(
-            "INSERT INTO file_state (project_id, file_path, file_content_hash)
-             VALUES (?1, ?2, ?3) ON CONFLICT(project_id, file_path)
-             DO UPDATE SET file_content_hash = excluded.file_content_hash, updated_at = datetime('now')",
+            "INSERT INTO file_state (project_id, file_path, file_content_hash, indexed_uncommitted)
+             VALUES (?1, ?2, ?3, ?4) ON CONFLICT(project_id, file_path)
+             DO UPDATE SET file_content_hash = excluded.file_content_hash,
+               indexed_uncommitted = excluded.indexed_uncommitted, updated_at = datetime('now')",
             params![
                 canon.project_id,
                 extracted_file.rel,
                 extracted_file.result.file_content_hash,
+                uncommitted.contains(&extracted_file.rel),
             ],
         )?;
     }

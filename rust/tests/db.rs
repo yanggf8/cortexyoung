@@ -558,7 +558,7 @@ fn migrating_a_real_v3_database_to_v5_preserves_and_aligns_every_row() {
 
     assert_eq!(
         get_meta(&db, "SCHEMA_VERSION").unwrap().as_deref(),
-        Some("5")
+        Some("6")
     );
     assert_eq!(
         get_meta(&db, "graph_pending").unwrap().as_deref(),
@@ -636,7 +636,7 @@ fn a_stale_v5_temporary_table_does_not_wedge_the_next_upgrade() {
     assert_eq!(stale, 0, "the rebuild renames its temporary table away");
     assert_eq!(
         get_meta(&db, "SCHEMA_VERSION").unwrap().as_deref(),
-        Some("5")
+        Some("6")
     );
 }
 

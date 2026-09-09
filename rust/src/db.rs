@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-pub const SCHEMA_VERSION: i64 = 5;
+pub const SCHEMA_VERSION: i64 = 6;
 
 /// Every `TEXT NOT NULL DEFAULT` column an `ALTER TABLE ADD COLUMN` has to supply, per table.
 /// Kept as one list so the upgrade path and `schema.sql` cannot drift: a column that exists in the
@@ -247,6 +247,31 @@ fn migrate_v4(db: &Db) -> Result<(), CortError> {
 /// table and its external-content FTS mirror never move.
 ///
 /// Runs before `SCHEMA_VERSION` is written, so a failure leaves the database at its old version and
+/// the next run retries instead of trusting a half-migrated file.
+fn migrate_v6(db: &Db) -> Result<(), CortError> {
+    let exists = column_exists(db, "file_state", "indexed_uncommitted").map_err(|e| {
+        CortError::new(
+            "schema_migration_failed",
+            json!({ "table": "file_state", "column": "indexed_uncommitted", "message": e.to_string() }),
+        )
+    })?;
+    if exists {
+        return Ok(());
+    }
+    db.execute(
+        "ALTER TABLE file_state ADD COLUMN indexed_uncommitted INTEGER NOT NULL DEFAULT 0",
+        [],
+    )
+    .map_err(|e| {
+        CortError::new(
+            "schema_migration_failed",
+            json!({ "table": "file_state", "column": "indexed_uncommitted", "message": e.to_string() }),
+        )
+    })?;
+    Ok(())
+}
+
+/// Runs before `SCHEMA_VERSION` is written, so a failure leaves the database at its old version and
 /// the next open retries. Every sqlite error is returned, never panicked on -- `hook-refresh` reaches
 /// this path on every edit and promises to be silent and exit 0.
 ///
@@ -315,6 +340,11 @@ pub fn ensure_schema(db: &Db) -> Result<(), CortError> {
     } else if upgrading {
         migrate_v4(db)?;
         migrate_v5(db)?;
+        // v6 adds `file_state.indexed_uncommitted` (issue #5): files indexed from uncommitted
+        // content are kept in the examined set until git vouches for their content again. The
+        // DEFAULT 0 is the safe value for every existing row — the marker narrows nothing, so
+        // the migration needs no rebuild and must not set `graph_pending`.
+        migrate_v6(db)?;
         // v3 added `raw_edges`; v4 adds `call_form` and the call-site line. An older database has
         // chunks whose edges cannot be re-derived with the new columns filled in, so a rebuild would
         // silently wipe the graph. Mark it pending: `status` reports stale and the next incremental
