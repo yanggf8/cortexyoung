@@ -265,11 +265,64 @@ fn has_regex_meta(pattern: &str) -> bool {
     })
 }
 
+/// Regex inline flags a leading `(?flags)` group can carry. Only these letters let one peel:
+/// `(?P<name>` and `(?'name'` open with the same two characters but introduce capture groups, and
+/// handing their contents to the identifier check would read a group as a symbol.
+const INLINE_FLAGS: &str = "imsxuUR";
+
+/// Peel the regex packaging an agent wraps around one symbol, without changing what is named.
+///
+/// The declined `pattern_not_symbol` bucket is not all text hunts: the 2026-09-10 audit of that tag
+/// found Grep-tool payloads shaped `\bfoo\b`, `"foo"`, `^foo$`, `(?i)foo` -- symbol queries in regex
+/// clothing, silenced because `has_regex_meta` reads the clothing. Each strip below removes
+/// packaging only in its natural position (a boundary at an end, an anchor facing outward, flags at
+/// the head, one matched pair of quotes) and only in an unambiguous shape, and the loop repeats
+/// until nothing peels so the combinations (`"(?i)\bfoo\b"`) come apart too. An interior `\b` is
+/// deliberately left in place: removing it would fuse the fragments beside it (`x\byz` reading as
+/// `xyz`) and mint a name the search never made, and this rule's entire value is that it does not
+/// guess. Whatever survives peeling still faces `has_regex_meta` and the identifier check unchanged
+/// -- an alternation, `.*`, a class or a space declines exactly as before.
+fn unhusk_pattern(pattern: &str) -> &str {
+    let mut p = pattern;
+    loop {
+        let before = p;
+        while let Some(rest) = p.strip_prefix("\\b") {
+            p = rest;
+        }
+        while let Some(rest) = p.strip_suffix("\\b") {
+            p = rest;
+        }
+        p = p.trim_start_matches('^').trim_end_matches('$');
+        if let Some(rest) = p.strip_prefix("(?") {
+            if let Some(close) = rest.find(')') {
+                let flags = &rest[..close];
+                if !flags.is_empty() && flags.chars().all(|c| INLINE_FLAGS.contains(c)) {
+                    p = &rest[close + 1..];
+                }
+            }
+        }
+        if p.len() >= 2 {
+            let first = p.as_bytes()[0];
+            if (first == b'\'' || first == b'"') && p.as_bytes()[p.len() - 1] == first {
+                p = &p[1..p.len() - 1];
+            }
+        }
+        // Every strip only shortens, so an equal length is a full pass with nothing peeled.
+        if p.len() == before.len() {
+            return p;
+        }
+    }
+}
+
 /// A bare identifier, or a qualified `Type::method`, with the call parenthesis optionally attached
 /// (`rate_limit(` is the exact shape a hand-rolled call-site search takes). Returns the symbol with
 /// the parenthesis stripped.
+///
+/// Regex packaging is peeled first (`unhusk_pattern`), so `\bfoo\b` and `(?i)Type::method` land
+/// here as the symbols they name; what the peel cannot reduce is judged exactly as it always was.
 fn symbol_of_pattern(pattern: &str) -> Option<String> {
-    let core = pattern.strip_suffix('(').unwrap_or(pattern);
+    let unhusked = unhusk_pattern(pattern);
+    let core = unhusked.strip_suffix('(').unwrap_or(unhusked);
     if core.is_empty() || has_regex_meta(core) {
         return None;
     }
@@ -522,7 +575,9 @@ pub fn search_from_grep_fields(
 /// Fires only on the narrow shape it can actually beat: one bare symbol, searched in project
 /// source. Everything else -- alternations, phrases, logs, transcripts, build output -- stays with
 /// `rg`, which is what the routing skill already says and what the traffic shows the agent doing
-/// correctly hundreds of times.
+/// correctly hundreds of times. The shape test peels regex packaging before reading the pattern
+/// (`unhusk_pattern`): `\bfoo\b` and its siblings are symbol queries, and the 2026-09-10 audit
+/// counted 24 of them silenced in a week -- what the peel cannot reduce still declines, unchanged.
 pub fn judge(search: &Search, evidence: impl FnOnce(&str) -> Evidence) -> Verdict {
     let Some(symbol) = symbol_of_pattern(&search.pattern) else {
         return Verdict::Silent(SilenceReason::NoShape("pattern_not_symbol"));

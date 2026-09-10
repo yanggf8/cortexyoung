@@ -269,6 +269,61 @@ mod hook_command {
 // second *parser* still reaches the one shared `judge` -- and reaches the same verdict its shell
 // twin does.
 
+/// The 2026-09-10 audit of declined `pattern_not_symbol` rows found Grep-tool payloads that were
+/// symbol queries in regex clothing -- `\bfoo\b`, `"foo"`, `^foo$`, `(?i)foo` -- silenced because
+/// the shape gate read the clothing. The peel now unwraps the packaging and re-reads what is left,
+/// and what is left here is one bare symbol every time. The combined shape pins the peel loop:
+/// quotes, flags and boundaries come off together or the audit's corpus stays half-silenced.
+#[test]
+fn a_regex_wrapped_bare_symbol_is_still_a_symbol_query() {
+    for pattern in [
+        r"\bfoo_bar\b",
+        "\"foo_bar\"",
+        "^foo_bar$",
+        "(?i)foo_bar",
+        "\"(?i)\\bfoo_bar\\b\"",
+    ] {
+        let s = search_from_grep_fields(pattern, Some("rust/src"), None, false)
+            .unwrap_or_else(|| panic!("parses: {pattern}"));
+        let Verdict::Fire(hit) = judge(&s, |_| Evidence::Seed) else {
+            panic!("{pattern} is a symbol query in regex clothing and must fire");
+        };
+        assert_eq!(hit.symbol, "foo_bar", "{pattern}");
+    }
+    // The same verdict from the shell surface, which arrives with its quotes already tokenized
+    // away: one judge, no Grep special case.
+    assert_eq!(
+        suggests_impact_shape(r"rg '\bfoo_bar\b' rust/src")
+            .unwrap()
+            .symbol,
+        "foo_bar"
+    );
+}
+
+/// Whatever the peel cannot reduce to one identifier declines exactly as before, and on the tag it
+/// always carried. The alternation survives its own boundary peel; `.*` and a space are text hunts;
+/// a real regex keeps its decline. `foo\bbaz` pins the conservative half of the peel: an interior
+/// boundary stays, because removing it would fuse the fragments into a name the search never made.
+#[test]
+fn a_pattern_the_peel_cannot_reduce_still_declines_pattern_not_symbol() {
+    for pattern in [
+        r"\bfoo_bar|other\b",
+        "foo_bar.*other",
+        "foo_bar other",
+        r"\d+",
+        r"foo_bar\(",
+        "foo\\bbaz",
+    ] {
+        let s = search_from_grep_fields(pattern, Some("rust/src"), None, false)
+            .unwrap_or_else(|| panic!("parses: {pattern}"));
+        assert_eq!(
+            judge(&s, |_| Evidence::Seed),
+            Verdict::Silent(SilenceReason::NoShape("pattern_not_symbol")),
+            "{pattern}"
+        );
+    }
+}
+
 fn grep_tool(pattern: &str, path: Option<&str>) -> Option<cort::hook::HookHit> {
     match judge(
         &search_from_grep_fields(pattern, path, None, false).expect("a non-empty pattern parses"),
