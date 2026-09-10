@@ -328,13 +328,27 @@ if [ "$GEN_OK" -eq 1 ] && [ "$(readlink "$CORT_HOME_PATH" 2>/dev/null || echo "N
 else
   fail "activate-only did not flip the link (now: $(readlink "$CORT_HOME_PATH" 2>/dev/null || echo NOT-A-LINK))"
 fi
-# The --version intercept lives in the SHIM (render_shim), not the binary: ask the shim the
-# manifest names, which resolves through the flipped link.
+# `--version` is answered by the BINARY since 2026-09-10, so it now travels the same exec path as
+# every other verb and this assertion finally means what it says. It did not before: the shim
+# intercepted --version on line 2 and returned before the exec on line 3, so this check passed with
+# the link flipped, unflipped, or dangling -- it could not fail for the reason it names.
+#
+# Proving traversal takes two answers, not one. The shim's answer must equal what the payload IN
+# THE FLIPPED GENERATION says when asked directly; a shim still resolving to the old generation, or
+# answering by itself, disagrees with that.
 SHIM_BIN="$(grep '^cort_bin:' "$MANIFEST_D/manifest" 2>/dev/null | cut -d: -f2- || echo NONE)"
-if [ -x "$SHIM_BIN" ] && "$SHIM_BIN" --version 2>/dev/null | grep -q "cort "; then
-  pass "the shim still answers through the flipped link"
+SHIM_SAYS="$("$SHIM_BIN" --version 2>/dev/null || true)"
+PAYLOAD_SAYS="$("$MANIFEST_D/$GEN/cort" --version 2>/dev/null || true)"
+if [ -x "$SHIM_BIN" ] && [ -n "$PAYLOAD_SAYS" ] && [ "$SHIM_SAYS" = "$PAYLOAD_SAYS" ]; then
+  pass "the shim answers by executing the payload behind the flipped link"
 else
-  fail "cort --version dead after activate-only (shim: $SHIM_BIN)"
+  fail "shim did not reach the flipped generation (shim=[$SHIM_SAYS] payload=[$PAYLOAD_SAYS])"
+fi
+# And the shim must not be answering on its own behalf: no --version text anywhere in it.
+if grep -q -- "--version" "$SHIM_BIN" 2>/dev/null; then
+  fail "the shim intercepts --version again — --check can no longer see a stale payload"
+else
+  pass "the shim intercepts nothing"
 fi
 if bash "$INSTALL_SH" --activate-only --gen "cort-000000000000" 2>/tmp/smoke_bogus.log; then
   fail "activate-only accepted a bogus generation id"

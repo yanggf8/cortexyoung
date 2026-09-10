@@ -829,7 +829,15 @@ do_check() {
     resolve_bin_dir
     managed_cort="$BIN_DIR/cort"
   fi
-  # cort
+  # cort. This line finally asks the payload rather than the wrapper in front of it: until
+  # 2026-09-10 the shim intercepted `--version` and echoed a string baked in at install time, so
+  # both sides of the comparison below came out of the same install run and it could not disagree
+  # with itself -- the design spec had already written it off as a check that "can never be
+  # inconsistent" (docs/superpowers/specs/2026-09-06-cort-upgrade-design.md §69, §267). The binary
+  # answers now, so a MISMATCH here names a real one: a payload that is not the version this
+  # installer believes it put there. CORT_VERSION is held to the crate version by
+  # rust/tests/install_facts.rs::install_sh_version_matches_the_crate_version, which is what keeps
+  # this from failing on a correct install instead.
   if command -v cort >/dev/null 2>&1; then
     local ver
     ver="$(cort --version 2>&1 | head -1 || true)"

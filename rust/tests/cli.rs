@@ -101,6 +101,36 @@ fn asking_a_command_for_help_explains_it_instead_of_running_it() {
     assert_eq!(fs::read_dir(&cache).unwrap().count(), 0);
 }
 
+/// The binary answers `--version` itself. Until 2026-09-10 the installer's shim intercepted it and
+/// echoed a string baked in at install time, so `install.sh --check` compared its own constant
+/// against its own writing and could not fail for the one reason worth catching -- a payload that
+/// is not the version the manifest claims.
+///
+/// Plain text, exactly `cort <crate version> (rust)`, because `--check` reads `head -1`: a JSON
+/// first line of `{` is what a stale shim produced on a live machine, and it read as a version
+/// mismatch instead of as the stale shim it was.
+#[test]
+fn the_binary_answers_for_its_own_version_in_the_shape_check_parses() {
+    let (_p, cwd, _c, cache) = sandbox();
+    for args in [vec!["--version"], vec!["-V"]] {
+        let r = run_cort(&args, &cwd, &cache);
+        assert_eq!(r.code, 0, "{} stderr={}", args.join(" "), r.stderr);
+        assert_eq!(
+            r.stdout,
+            format!("cort {} (rust)\n", env!("CARGO_PKG_VERSION")),
+            "{} must print the crate version as one plain line",
+            args.join(" ")
+        );
+        // Same promise --help makes: asking a binary its version creates nothing.
+        assert_eq!(
+            fs::read_dir(&cache).unwrap().count(),
+            0,
+            "{} must not touch the cache",
+            args.join(" ")
+        );
+    }
+}
+
 /// D-43
 #[test]
 fn every_spelling_of_help_reaches_the_same_usage_and_none_of_them_is_an_error() {

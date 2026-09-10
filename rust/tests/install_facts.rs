@@ -3,18 +3,46 @@
 
 use cort::install::render_shim;
 
-/// The shim is three lines and every one of them is load-bearing: the `--version` intercept keeps
-/// `--check` from executing the binary, and the absolute paths are resolved at exec time, which is
-/// what makes the generation flip take effect for already-installed shims.
+/// The shim is two lines and both are load-bearing: it forwards every argument, and the absolute
+/// paths are resolved at exec time, which is what makes the generation flip take effect for
+/// already-installed shims.
+///
+/// It was three lines until 2026-09-10. The third intercepted `--version` and echoed a string
+/// baked in at install time, returning before the `exec` — so the single command `--check` parses
+/// was the single command that never reached the payload.
 #[test]
 fn the_shim_has_exactly_the_shape_the_installer_ships() {
-    let version = env!("CARGO_PKG_VERSION");
     let expected = format!(
-        "#!/usr/bin/env bash\nif [ \"$1\" = \"--version\" ]; then echo \"cort {version} (rust)\"; exit 0; fi\nCORT_PACK_DIR=\"{dir}/pack\" exec \"{dir}/cort\" \"$@\"\n",
+        "#!/usr/bin/env bash\nCORT_PACK_DIR=\"{dir}/pack\" exec \"{dir}/cort\" \"$@\"\n",
         dir = "/home/someone/.local/share/cortexyoung/cort"
     );
     let shim = render_shim("/home/someone/.local/share/cortexyoung/cort");
     assert_eq!(shim, expected);
+}
+
+/// The shim must not answer for the binary again. A regression here is invisible in every other
+/// test in this file — a shim that intercepts `--version` still *works*, it just stops being able
+/// to report a stale payload, which is precisely how the last one survived unnoticed.
+#[test]
+fn the_shim_intercepts_nothing_and_forwards_every_argument() {
+    let shim = render_shim("/home/someone/.local/share/cortexyoung/cort");
+    assert!(
+        !shim.contains("--version"),
+        "the shim must forward --version to the payload, never answer it: {shim}"
+    );
+    assert!(
+        !shim.contains("exit 0"),
+        "the shim must have no early-return path at all: {shim}"
+    );
+    assert_eq!(
+        shim.lines().count(),
+        2,
+        "shebang + exec, nothing else: {shim}"
+    );
+    assert!(
+        shim.trim_end().ends_with("\"$@\""),
+        "the last thing the shim does is hand every argument to the payload: {shim}"
+    );
 }
 
 /// Everything install_ast_grep needs to decide *which* ast-grep to fetch lives here. Today the

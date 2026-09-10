@@ -66,7 +66,7 @@ crate 內部)**證明太多** —— 同一個 crate 裡的子指令有完全相
 
 | # | 元件 | 目標狀態的家 | 現在怎麼診斷 | 缺什麼 |
 |---|---|---|---|---|
-| 1 | payload(binary + pack) | 新原始碼樹 | `cort --version` | **假的**:shim 攔截 `--version` 印死字串,不執行真的 binary(`install.sh:753-757`)。這個檢查不可能不一致。 |
+| 1 | payload(binary + pack) | 新原始碼樹 | `cort --version` | ~~**假的**:shim 攔截 `--version` 印死字串,不執行真的 binary(`install.sh:753-757`)。這個檢查不可能不一致。~~ **已解決 2026-09-10**:攔截那行從 `render_shim` 移除,改由 binary 自己回答(`main.rs::wants_version`),`--check` 現在問到的是真正會執行的 payload。 |
 | 2 | shim | 待搬進 Rust(§1) | 存在性 | 內容比對 |
 | 3 | ast-grep CLI | 待收斂為 `ast_grep.rs:13` | `assert_ast_grep_version` | 版本本身有兩個家 |
 | 4 | skills(**3 個** dest) | repo 內的 SKILL.md | `skill_is_managed` | **只證明「是我們寫的」,從不跟新版原始檔比**(`install.sh:189-200`)。舊 skill 配舊 stamp 照樣過。 |
@@ -264,7 +264,7 @@ hook 的開啟路徑必須能在**不執行遷移**的前提下檢查 schema 相
 
 | 性質 | 弱 fixture(會過但性質是壞的) | 必須改成 |
 |---|---|---|
-| 逐元件診斷 | 用 `cort --version` 的差異 —— **永遠不可能紅**,因為 shim 攔截它印死字串(`install.sh:753-757`) | 兩個 payload 目錄,crate 版本相同但 **pack 差一個 byte**,加一個說謊的 shim;斷言在**判決欄位**上。skill 那格的弱 fixture 是「缺 stamp」(那是已知壞掉的檢查),必須改成**舊內容 + 有效的當前 stamp** |
+| 逐元件診斷 | ~~用 `cort --version` 的差異 —— **永遠不可能紅**,因為 shim 攔截它印死字串(`install.sh:753-757`)~~ **已解決 2026-09-10**:攔截已移除,`cort --version` 現在會紅;弱 fixture 由 `install_facts.rs::the_shim_intercepts_nothing_and_forwards_every_argument` 擋住 | 兩個 payload 目錄,crate 版本相同但 **pack 差一個 byte**,加一個說謊的 shim;斷言在**判決欄位**上。skill 那格的弱 fixture 是「缺 stamp」(那是已知壞掉的檢查),必須改成**舊內容 + 有效的當前 stamp** |
 | 原子切換 | 切換後讀一次 pack,斷言不 panic | 一條讀取執行緒跨越切換持續呼叫 `extractor_version()`,斷言**不 panic 且身分 ∈ {舊, 新}**;另加一個「pack 少一檔」的暫存世代,驗證第 3 步必須拒絕它。且必須跑**真實佈局的真實切換**,玩具 temp-dir 測試會過而正式的兩次 rename 會 panic |
 | 鎖與崩潰安全 | 過期租約 + 死 pid → 斷言有進展(**沒有任何 pid 存活檢查也會過**) | **未過期**但持有者已死(驗 OS 釋放鎖);**pid 重用**(未過期、pid 活著但屬於別的行程)必須拒絕;兩個升級程式競爭 |
 | 單一結論 | 開跑前先弄壞一個元件,斷言非零(**「診斷到任何東西就非零」也會過**) | 在**診斷之後、重新佈線之前**弄壞(驗證 §5「每個提交邊界重新驗證」),斷言失敗**並指名該元件** |

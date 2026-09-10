@@ -91,15 +91,17 @@ pub const MANIFEST_LEGACY_KEYS: &[&str] = &["xg_bin", "skill"];
 
 /// Render the `$BIN_DIR/cort` shim for the given `CORT_HOME`.
 ///
-/// Byte-identical to what the installer has always written: the `--version` intercept answers
-/// without executing the binary (which is what `--check` parses), and the absolute paths resolve
-/// at exec time rather than install time — that late binding is what makes the generation flip
-/// (`install.sh`, Task 3a) take effect for already-installed shims.
+/// Two lines, and the shim now forwards *everything*. It used to intercept `--version` and echo a
+/// string baked in at install time, returning before the `exec` — so the one command `--check`
+/// parses was the one command that never reached the payload, and it answered the same whether the
+/// generation behind it was current, stale, or missing. The design spec had already written that
+/// check off as one that "can never be inconsistent"
+/// (`docs/superpowers/specs/2026-09-06-cort-upgrade-design.md` §69, §267); `main.rs::wants_version`
+/// now answers from the binary, so the same `--check` line names the payload that would really run.
+///
+/// The absolute paths still resolve at exec time rather than install time — that late binding is
+/// what makes the generation flip (`install.sh`, Task 3a) take effect for already-installed shims,
+/// and with the intercept gone `--version` finally travels through it like every other verb.
 pub fn render_shim(cort_home: &str) -> String {
-    format!(
-        "#!/usr/bin/env bash\n\
-         if [ \"$1\" = \"--version\" ]; then echo \"cort {} (rust)\"; exit 0; fi\n\
-         CORT_PACK_DIR=\"{cort_home}/pack\" exec \"{cort_home}/cort\" \"$@\"\n",
-        env!("CARGO_PKG_VERSION"),
-    )
+    format!("#!/usr/bin/env bash\nCORT_PACK_DIR=\"{cort_home}/pack\" exec \"{cort_home}/cort\" \"$@\"\n")
 }

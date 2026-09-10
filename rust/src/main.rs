@@ -81,6 +81,23 @@ fn wants_help(args: &[String]) -> bool {
         .any(|a| a == "help" || a == "--help" || a == "-h")
 }
 
+/// `--version` is answered by the binary, and that is the whole point of it.
+///
+/// It used to be intercepted by the installer's shim, which echoed a string baked in at install
+/// time and returned *before* the `exec` line -- so it answered identically whether the payload
+/// behind it was current, stale, or absent entirely. Everything downstream inherited that:
+/// `install.sh --check` compared its own `CORT_VERSION` against a string its own run had written,
+/// and the design spec (`docs/superpowers/specs/2026-09-06-cort-upgrade-design.md` §69, §267)
+/// recorded the check as one that "can never be inconsistent". Answering from the binary makes the
+/// same comparison name the payload that would actually run.
+///
+/// Plain text, not the JSON every other command emits, and byte-identical to what the shim
+/// printed: `--check` greps `head -1` of it, and a JSON first line of `{` is exactly the failure
+/// that hid a stale shim on a live machine.
+fn wants_version(args: &[String]) -> bool {
+    args.iter().any(|a| a == "--version" || a == "-V")
+}
+
 fn map_index(err: IndexError) -> CortError {
     match err {
         IndexError::Cort(c) => c,
@@ -2311,6 +2328,12 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if wants_help(&args) {
         print!("{}", render(None, Format::Json, &usage_value()));
+        return;
+    }
+    // Before `usage_from_args`, for the reason `--help` is: asking a binary its version must not
+    // create a cache directory, a project database or a usage row.
+    if wants_version(&args) {
+        println!("cort {} (rust)", env!("CARGO_PKG_VERSION"));
         return;
     }
     let mut usage_ev = usage_from_args(&args);

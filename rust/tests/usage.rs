@@ -240,7 +240,7 @@ fn unindexed_cwd_status_creates_no_project_db() {
 
 /// §10 help/--help/-h stays zero-side-effect: no cache dir, no usage.db.
 #[test]
-fn help_creates_no_files_at_all() {
+fn help_and_version_create_no_files_at_all() {
     let (_p, cwd, _c, cache) = sandbox();
     for args in [
         vec!["--help"],
@@ -250,6 +250,10 @@ fn help_creates_no_files_at_all() {
         vec!["usage", "-h"],
         vec!["status", "-h"],
         vec!["index", "--help"],
+        // `--version` is answered by the binary (not the installer's shim) since 2026-09-10, so it
+        // reaches this dispatcher and owes the same promise the help spellings do.
+        vec!["--version"],
+        vec!["-V"],
     ] {
         let r = run_cort(&args, &cwd, &cache);
         assert_eq!(r.code, 0, "{} stderr={}", args.join(" "), r.stderr);
