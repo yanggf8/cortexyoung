@@ -189,8 +189,8 @@ fn extract_file_produces_1_indexed_lines_and_v6_shaped_chunk_ids() {
         alpha.start_line, 2,
         "ast-grep reports line 1 (0-indexed); we store 2"
     );
-    assert_eq!(alpha.chunk_id, chunk_id_for("p", "k.ts", 2));
-    assert_eq!(alpha.chunk_id, "p:k.ts:2");
+    assert_eq!(alpha.chunk_id, chunk_id_for("p", "k.ts", 2, 16));
+    assert_eq!(alpha.chunk_id, "p:k.ts:2:16");
     assert_eq!(alpha.chunk_type, "function");
     assert_eq!(alpha.chunk_source, "ast");
     assert_eq!(alpha.language.as_deref(), Some("TypeScript"));
@@ -742,21 +742,28 @@ fn a_type_reference_parses_as_its_own_form_and_rel_type() {
     );
 }
 
-/// `chunk_id` is project:file:start_line with no chunk type (`chunker::chunk_id_for`), so a type
-/// declared on the same line as one of its own methods collides. Which one survived used to depend
-/// on the order ast-grep emitted records in, i.e. on a directory listing. The loss is accepted, but
-/// it must be the same loss every time: the method is the chunk `impact` can hold a seed for, so it
-/// wins.
+/// `chunk_id` used to be project:file:start_line with no chunk type, so a type declared on the
+/// same line as one of its own methods collided, and which chunk survived depended on the order
+/// ast-grep emitted records in. The name capture's column now separates them (issue #6
+/// residual): both chunks survive every time, and the order is settled by `chunk_specificity`
+/// rather than by record emission.
 #[test]
-fn a_type_sharing_a_line_with_its_method_loses_deterministically() {
+fn a_type_sharing_a_line_with_its_method_keeps_both_chunks() {
     let source = "pub trait T { fn f(&self) {} }\n";
     let (_dir, abs) = tmp_file("t.rs", source);
     let r = extract_real(&abs, "t.rs", source);
     let kinds: Vec<&str> = r.chunks.iter().map(|c| c.chunk_type.as_str()).collect();
     assert_eq!(
         kinds,
-        ["method"],
-        "the method survives the id collision, every time: {kinds:?}"
+        ["method", "class"],
+        "method first by specificity, then the type -- both survive: {kinds:?}"
+    );
+    let [t, f] = r.chunks.as_slice() else {
+        panic!("exactly two chunks: {:?}", r.chunks);
+    };
+    assert_ne!(
+        t.chunk_id, f.chunk_id,
+        "distinct name positions, distinct ids"
     );
 }
 
@@ -883,5 +890,36 @@ fn a_chained_module_registers_each_name_at_its_own_line() {
         edge.source_symbol.as_deref(),
         Some("SecondController"),
         "edges attribute to the registration whose body they sit in"
+    );
+}
+
+/// The residual hole under issue #6: two registrations on the SAME line re-anchor to the same
+/// line, and `chunk_id_for` keys on position alone -- so the pair collided and the keep-first
+/// dedup silently dropped the second. Rare in the corpus, but the loss was as silent as the
+/// chain collapse ever was. The key must carry the name capture's column, so two names on one
+/// line are two chunks; a collision that survives that is a pack bug and must be an error, not
+/// a quiet winner.
+#[test]
+fn a_pair_of_registrations_on_one_line_keeps_both_names() {
+    let source = "app.directive('aMod', function () {}); app.directive('bMod', function () {});\n";
+    let (_dir, abs) = tmp_file("app/pair.js", source);
+    let out = extract_real(&abs, "app/pair.js", source);
+    let a = out
+        .chunks
+        .iter()
+        .find(|c| c.symbol_name.as_deref() == Some("aMod"))
+        .expect("aMod must be a chunk -- same-line collapse dropped it (issue #6 residual)");
+    let b = out
+        .chunks
+        .iter()
+        .find(|c| c.symbol_name.as_deref() == Some("bMod"))
+        .expect("bMod must be a chunk -- same-line collapse dropped it");
+    assert_eq!(
+        a.start_line, b.start_line,
+        "both registrations sit on line 1"
+    );
+    assert_ne!(
+        a.chunk_id, b.chunk_id,
+        "same line, different columns: two chunks, never a collision"
     );
 }

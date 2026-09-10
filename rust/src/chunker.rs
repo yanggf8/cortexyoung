@@ -6,9 +6,9 @@ use crate::ast_grep::{exec_ast_grep, ExecOpts};
 use crate::errors::CortError;
 use crate::pack::sgconfig;
 use crate::scan;
-use serde_json::Value;
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::HashMap;
 
 const CHUNK_TAG: &str = "chunk:";
 const EDGE_TAG: &str = "edge:";
@@ -149,15 +149,13 @@ pub struct ScanStream {
     pub total: usize,
 }
 
-/// Which chunk wins when two share a `chunk_id`. Only reachable when a type is declared on the same
-/// line as one of its own methods (`pub trait T { fn f(&self) {} }`), because `chunk_id_for` keys on
-/// the start line alone. The method wins: it is the chunk a caller-set question can hold a seed for.
-///
-/// The tie-break fires in exactly one shape. A method is nested inside its type, so
-/// `method.end_line <= type.end_line` always, and the `end_line` key already puts the method first
-/// whenever the type spans more lines -- which is every ordinary multi-line declaration. Only a type
-/// whose entire body sits on the declaration line reaches this comparison, which is why adding it
-/// cannot reorder anything else.
+/// Final ordering key for chunks at the same position. Since `chunk_id_for` began carrying the
+/// name capture's column, two chunks can only reach this tie-break when their name captures sit
+/// at the *same* line and column -- a method declared inside a type whose entire body sits on
+/// the declaration line (`pub trait T { fn f(&self) {} }`) used to be the one shape that
+/// collided there. It no longer decides a collapse winner -- same-id chunks are identical or an
+/// error -- it only keeps the extraction order independent of the order the scan happens to
+/// emit records in.
 fn chunk_specificity(chunk_type: &str) -> u8 {
     match chunk_type {
         "method" => 0,
@@ -172,13 +170,17 @@ fn chunk_specificity(chunk_type: &str) -> u8 {
 /// rows from the same pack through the same engine, and an index built before the change must
 /// read as `extractor_changed`, not silently keep the collapsed chunks. Bump the string whenever
 /// a change here alters which chunks exist or where they claim to sit.
-pub const CHUNKER_IDENTITY: &str = "chunker-position/2 (2026-09-10, issue #6): string-named registrations anchor at the name capture's own line";
+pub const CHUNKER_IDENTITY: &str = "chunker-position/3 (2026-09-10, issue #6 residual): chunk identity carries the name capture's column, so same-line registrations stay distinct";
 
-/// The chunk's identity: project, file and start line. Deliberately *not* the chunk type, because
-/// two foreign keys point at this value; a same-line collision is resolved by `chunk_specificity`
-/// rather than by widening the key.
-pub fn chunk_id_for(project_id: &str, file_path: &str, start_line: i64) -> String {
-    format!("{project_id}:{file_path}:{start_line}")
+/// The chunk's identity: project, file, and the position that names the chunk -- for a rule that
+/// captures `$NAME`, the capture's own 1-based line and 0-based column; otherwise the match's
+/// start. Deliberately *not* the chunk type, because two foreign keys point at this value. The
+/// column is issue #6's residual hole closed: two registrations written on one line re-anchor to
+/// the same line, and a line-only key collapsed them to a quiet keep-first winner. A collision
+/// that survives a full position means two rules described the same name differently -- the
+/// extractor refuses it rather than pick.
+pub fn chunk_id_for(project_id: &str, file_path: &str, start_line: i64, column: i64) -> String {
+    format!("{project_id}:{file_path}:{start_line}:{column}")
 }
 
 pub fn parse_scan_stream(stdout: &str) -> ScanStream {
@@ -247,12 +249,20 @@ pub fn meta_var_text<'a>(rec: &'a Value, name: &str) -> Option<&'a str> {
 
 /// 1-based line a capture sits on, so a call edge can be pinned to the line that names its callee.
 fn meta_var_line(rec: &Value, name: &str) -> Option<i64> {
-    meta_var(rec, name)
-        .and_then(|v| v.get("range"))
-        .and_then(|r| r.get("start"))
-        .and_then(|p| p.get("line"))
-        .and_then(json_i64)
-        .map(|n| n + 1)
+    meta_var_pos(rec, name).map(|(line, _)| line)
+}
+
+/// 1-based line and 0-based column where a capture sits. The column is what lets two chunks
+/// named on one line be two rows: it feeds `chunk_id_for` when the capture is `$NAME`.
+fn meta_var_pos(rec: &Value, name: &str) -> Option<(i64, i64)> {
+    let start = meta_var(rec, name)?.get("range")?.get("start")?.clone();
+    Some((
+        json_i64(start.get("line")?)? + 1,
+        // The column is the optional half: a record that names its line but carries no column
+        // still identifies its line, and two of those on one line land on the same id -- which
+        // the dedup below refuses loudly rather than picks a winner over.
+        json_i64(start.get("column")?).unwrap_or(0),
+    ))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -426,11 +436,17 @@ fn json_i64(v: &Value) -> Option<i64> {
 }
 
 fn line_1based(rec: &Value, which: &str) -> Option<i64> {
-    rec.get("range")
-        .and_then(|r| r.get(which))
-        .and_then(|p| p.get("line"))
-        .and_then(json_i64)
-        .map(|n| n + 1)
+    pos_1based(rec, which).map(|(line, _)| line)
+}
+
+/// 1-based line and 0-based column of the matched node's own edge (`start` or `end`).
+fn pos_1based(rec: &Value, which: &str) -> Option<(i64, i64)> {
+    let p = rec.get("range")?.get(which)?;
+    // Same optional-column rule as `meta_var_pos`: the line is required, the column defaults.
+    Some((
+        p.get("line").and_then(json_i64)? + 1,
+        p.get("column").and_then(json_i64).unwrap_or(0),
+    ))
 }
 
 /// The file's own lines `[start, end]`, 1-based inclusive: a re-anchored registration chunk's
@@ -451,7 +467,7 @@ fn unparsed_result(
     malformed: usize,
 ) -> ExtractResult {
     let chunk = Chunk {
-        chunk_id: chunk_id_for(project_id, file_path, 1),
+        chunk_id: chunk_id_for(project_id, file_path, 1, 0),
         project_id: project_id.to_string(),
         file_path: file_path.to_string(),
         symbol_name: None,
@@ -560,9 +576,10 @@ pub fn extract_file(args: ExtractFileArgs<'_>) -> Result<ExtractResult, CortErro
     let mut extra_malformed = 0usize;
     for rec in &parsed.records {
         let tag = rec.get("message").and_then(Value::as_str).unwrap_or("");
-        let Some(start_line) = line_1based(rec, "start") else {
+        let Some((match_start_line, match_start_column)) = pos_1based(rec, "start") else {
             continue;
         };
+        let start_line = match_start_line;
         let Some(end_line) = line_1based(rec, "end") else {
             continue;
         };
@@ -595,10 +612,16 @@ pub fn extract_file(args: ExtractFileArgs<'_>) -> Result<ExtractResult, CortErro
                 _ => (start_line, text.to_string()),
             };
             let content_hash = sha256_hex(content.as_bytes());
+            // Identity sits where the rule names the chunk: the `$NAME` capture's own position
+            // when the rule captures one, the match's start otherwise. For the registration rule
+            // this is the string literal's position -- the same position the re-anchor above
+            // stores -- so two registrations on one line carry two ids instead of colliding.
+            let (id_line, id_column) =
+                meta_var_pos(rec, "NAME").unwrap_or((match_start_line, match_start_column));
             match compose_symbol_name(&chunk_type, name.as_deref(), owner.as_deref(), language) {
                 Ok(symbol_name) => {
                     chunks.push(Chunk {
-                        chunk_id: chunk_id_for(project_id, file_path, start_line),
+                        chunk_id: chunk_id_for(project_id, file_path, id_line, id_column),
                         project_id: project_id.to_string(),
                         file_path: file_path.to_string(),
                         symbol_name,
@@ -663,11 +686,40 @@ pub fn extract_file(args: ExtractFileArgs<'_>) -> Result<ExtractResult, CortErro
             .then(a.end_line.cmp(&b.end_line))
             .then(chunk_specificity(&a.chunk_type).cmp(&chunk_specificity(&b.chunk_type)))
     });
-    let mut seen = HashSet::new();
+    // Two records that land on one id are either the same chunk described twice (two rules
+    // agreeing on every field) or a pack bug two rules disagreeing about the same name -- and
+    // the second one is the extractor's to refuse, not a winner to pick quietly. This is the
+    // same-line-registration hole (issue #6 residual) closed at the last gate that could have
+    // swallowed it silently.
+    let mut seen: HashMap<String, Chunk> = HashMap::new();
     let mut deduped = Vec::new();
     for c in chunks {
-        if seen.insert(c.chunk_id.clone()) {
-            deduped.push(c);
+        match seen.get(&c.chunk_id) {
+            Some(prev) if *prev == c => {}
+            Some(prev) => {
+                return Err(CortError::new(
+                    "chunk_id_collision",
+                    json!({
+                        "chunk_id": c.chunk_id,
+                        "first": {
+                            "symbol_name": prev.symbol_name,
+                            "chunk_type": prev.chunk_type,
+                            "start_line": prev.start_line,
+                            "end_line": prev.end_line,
+                        },
+                        "second": {
+                            "symbol_name": c.symbol_name,
+                            "chunk_type": c.chunk_type,
+                            "start_line": c.start_line,
+                            "end_line": c.end_line,
+                        },
+                    }),
+                ));
+            }
+            None => {
+                seen.insert(c.chunk_id.clone(), c.clone());
+                deduped.push(c);
+            }
         }
     }
 
