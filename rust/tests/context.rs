@@ -949,9 +949,11 @@ fn hash_pack_with_rust_yml(rust_yml: &[u8]) -> String {
         }
     }
     // The engine identity is part of the real `extractor_version` (pack.rs) since the scan moved
-    // in-process; this reimplementation must hash the same bytes or the equality assertion below
-    // would compare a pack-only digest against a pack+engine digest.
+    // in-process, and the chunker's positioning identity since issue #6; this reimplementation
+    // must hash the same bytes or the equality assertion below would compare a pack-only digest
+    // against a pack+engine+chunker digest.
     h.update(cort::scan::SCAN_ENGINE.as_bytes());
+    h.update(cort::chunker::CHUNKER_IDENTITY.as_bytes());
     format!("{:x}", h.finalize())
 }
 

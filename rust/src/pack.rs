@@ -68,19 +68,21 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
 }
 
 /// SHA-256 of each pack file's raw bytes, in `pack_files()` order, mixed with the scan engine's
-/// identity. 64 lowercase hex.
+/// identity and the chunker's positioning identity. 64 lowercase hex.
 ///
 /// The pack bytes alone stopped describing extraction when the scan moved in-process
 /// (2026-09-01): the same pack through the crate and through the CLI is parity-proven identical,
 /// but they are still different engines, and an engine that could flip via `CORT_SCAN_BACKEND`
 /// without moving this version would make staleness lie. The engine string changes whenever the
 /// `ast-grep-*` crate entries move; the parity probe is the discipline that re-answers
-/// byte-identity when it does.
+/// byte-identity when it does. The chunker string (issue #6) extends the same rule one level
+/// out: rows a changed chunker would have built differently must not read as current.
 pub fn extractor_version() -> std::io::Result<String> {
     let mut h = Sha256::new();
     for f in pack_files()? {
         h.update(&fs::read(&f)?);
     }
     h.update(crate::scan::SCAN_ENGINE.as_bytes());
+    h.update(crate::chunker::CHUNKER_IDENTITY.as_bytes());
     Ok(format!("{:x}", h.finalize()))
 }

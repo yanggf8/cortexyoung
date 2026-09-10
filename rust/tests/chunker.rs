@@ -825,3 +825,63 @@ fn angularjs_registrations_and_assigned_methods_become_addressable_chunks() {
         .expect("assigned method chunk");
     assert_eq!(reload.chunk_type, "method");
 }
+
+/// Issue #6: a module file written as one chained expression (`angular.module(...)` followed by
+/// chained `.filter`/`.controller` entries) is reported by ast-grep with every registration's
+/// match range starting at the chain head -- each nested call's span begins where the chain
+/// begins. Anchoring chunk identity at the match's first line pinned every registration to the
+/// module's line, and `chunk_id_for` collapsed them all to one stored chunk: on the real file
+/// that ate 62 of 63 registrations, silently. The name capture knows where its registration
+/// sits; a string-named chunk anchors there, and its content must be the entry it names, not
+/// the chain prefix.
+#[test]
+fn a_chained_module_registers_each_name_at_its_own_line() {
+    let source = concat!(
+        "angular.module('app', [])\n",
+        "    .filter('firstFilter', function () {\n",
+        "        return function (t) { return t; };\n",
+        "    })\n",
+        "    .controller('SecondController', ['$scope', function ($scope) {\n",
+        "        $scope.use = firstFilter(1);\n",
+        "    }]);\n",
+    );
+    let (_dir, abs) = tmp_file("app/chain.js", source);
+    let out = extract_real(&abs, "app/chain.js", source);
+    let first = out
+        .chunks
+        .iter()
+        .find(|c| c.symbol_name.as_deref() == Some("firstFilter"))
+        .expect("firstFilter must be a chunk -- the chain collapsed it (issue #6)");
+    let second = out
+        .chunks
+        .iter()
+        .find(|c| c.symbol_name.as_deref() == Some("SecondController"))
+        .expect("SecondController must be a chunk");
+    assert_eq!(first.start_line, 2, "anchored at its own .filter line");
+    assert_eq!(second.start_line, 5, "anchored at its own .controller line");
+    assert_ne!(first.chunk_id, second.chunk_id);
+    assert!(
+        !first.content.contains("angular.module("),
+        "content must align with the stored span, not carry the chain prefix: {:?}",
+        first.content
+    );
+    assert!(
+        first.content.contains("firstFilter") && !first.content.contains("SecondController"),
+        "content is this registration's entry: {:?}",
+        first.content
+    );
+    // A call inside the second registration attributes to the second registration, not to
+    // whichever chunk the collapse happened to leave behind. The assignment's right side is a
+    // call, not a function, so no method chunk lays claim to its line and the innermost
+    // containing chunk is the registration itself.
+    let edge = out
+        .edges
+        .iter()
+        .find(|e| e.raw_target == "firstFilter")
+        .expect("the body call is an edge");
+    assert_eq!(
+        edge.source_symbol.as_deref(),
+        Some("SecondController"),
+        "edges attribute to the registration whose body they sit in"
+    );
+}

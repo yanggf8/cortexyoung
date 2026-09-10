@@ -166,6 +166,14 @@ fn chunk_specificity(chunk_type: &str) -> u8 {
     }
 }
 
+/// Part of `pack::extractor_version`: which positioning pass built the chunks. The pack bytes and
+/// the scan engine stopped describing extraction when chunk identity began to depend on capture
+/// ranges -- a chunker that re-anchors string-named registrations (issue #6) produces different
+/// rows from the same pack through the same engine, and an index built before the change must
+/// read as `extractor_changed`, not silently keep the collapsed chunks. Bump the string whenever
+/// a change here alters which chunks exist or where they claim to sit.
+pub const CHUNKER_IDENTITY: &str = "chunker-position/2 (2026-09-10, issue #6): string-named registrations anchor at the name capture's own line";
+
 /// The chunk's identity: project, file and start line. Deliberately *not* the chunk type, because
 /// two foreign keys point at this value; a same-line collision is resolved by `chunk_specificity`
 /// rather than by widening the key.
@@ -425,6 +433,17 @@ fn line_1based(rec: &Value, which: &str) -> Option<i64> {
         .map(|n| n + 1)
 }
 
+/// The file's own lines `[start, end]`, 1-based inclusive: a re-anchored registration chunk's
+/// content is the source it claims to span, not the match text that begins at the chain head.
+fn slice_lines(source: &str, start: i64, end: i64) -> String {
+    source
+        .split('\n')
+        .skip(start.saturating_sub(1) as usize)
+        .take((end - start + 1).max(0) as usize)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn unparsed_result(
     project_id: &str,
     file_path: &str,
@@ -554,8 +573,28 @@ pub fn extract_file(args: ExtractFileArgs<'_>) -> Result<ExtractResult, CortErro
             // `$NAME` is usually an identifier, where unquote is identity. A quoted capture (the
             // AngularJS registration name `'MyCtrl'`) must land as a bare symbol, and nothing that
             // was already bare can lose characters to unquote.
-            let name = meta_var_text(rec, "NAME").map(unquote);
+            let raw_name = meta_var_text(rec, "NAME");
+            let name = raw_name.map(unquote);
             let owner = meta_var_text(rec, "OWNER").map(unquote);
+            // A quoted name means this chunk was matched through a string literal, and a string
+            // literal sits inside a call whose span -- when registrations are chained off one
+            // `angular.module(...)` -- begins at the CHAIN HEAD, not at this entry (issue #6:
+            // 62 of 63 registrations collapsed onto the module's line and `chunk_id_for` kept
+            // only the first). The capture's own line is where this registration actually sits;
+            // anchor there and slice the content to the stored span so a chunk never carries
+            // the registrations before it. Everything else keeps the match's own range: a bare
+            // identifier's line is the match's line for every rule we ship, and Java's annotated
+            // declarations must not move.
+            let quoted = raw_name
+                .map(|n| n.starts_with('\'') || n.starts_with('"'))
+                .unwrap_or(false);
+            let (start_line, content) = match raw_name.zip(meta_var_line(rec, "NAME")) {
+                Some((_, line)) if quoted && line > start_line => {
+                    (line, slice_lines(args.source, line, end_line))
+                }
+                _ => (start_line, text.to_string()),
+            };
+            let content_hash = sha256_hex(content.as_bytes());
             match compose_symbol_name(&chunk_type, name.as_deref(), owner.as_deref(), language) {
                 Ok(symbol_name) => {
                     chunks.push(Chunk {
@@ -566,8 +605,8 @@ pub fn extract_file(args: ExtractFileArgs<'_>) -> Result<ExtractResult, CortErro
                         chunk_type,
                         start_line,
                         end_line,
-                        content: text.to_string(),
-                        content_hash: sha256_hex(text.as_bytes()),
+                        content,
+                        content_hash,
                         language: language.map(str::to_string),
                         chunk_source: "ast".to_string(),
                     });
