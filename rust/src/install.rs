@@ -69,6 +69,11 @@ pub const MANIFEST_KEYS: &[&str] = &[
     "manifest_version",
     "cort_bin",
     "ast_grep_bin",
+    // No release writes these two any more -- the xgrep skill and the `xg` binary were retired on
+    // 2026-09-10 -- but they stay known, because this list is what tells an upgrade whether a
+    // manifest holds a key no release recognises. Drop them and every machine that once took
+    // `--with-xgrep` starts reading `keys no release knows`, on the very manifest entries
+    // `--uninstall` still needs to find the leftovers it must remove.
     "legacy_xg_bin",
     "skill_xgrep",
     "skill_ast_grep",

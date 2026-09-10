@@ -420,12 +420,11 @@ fn a_diverged_managed_skill_is_drifted_even_with_a_valid_stamp() {
     // Call `_at` with explicit dests, NOT the env-reading wrapper: `set_var` inside parallel
     // tests is unsound, and a dev machine with CLAUDE_SKILL_HOME set would redirect the
     // wrapper elsewhere. The wrapper's env mirroring is review-verified, not test-pinned.
-    let (xg, ast, cx, _km) = {
-        let xg = home.path().join(".claude/skills/xgrep/SKILL.md");
+    let (ast, cx, _km) = {
         let cx = home.path().join(".codex/skills/ast-grep/SKILL.md");
-        (xg, dest.clone(), cx, ())
+        (dest.clone(), cx, ())
     };
-    let comps = cort::upgrade::check_skills_at(new_tree.path(), &xg, &ast, &cx, false);
+    let comps = cort::upgrade::check_skills_at(new_tree.path(), &ast, &cx, false);
     let ast_c = comps.iter().find(|c| c.name == "skill_ast_grep").unwrap();
     assert!(
         matches!(ast_c.state, cort::upgrade::ComponentState::Drifted),
@@ -451,9 +450,8 @@ fn keep_mine_leaves_a_diverged_skill_alone() {
         stamp_for(old_body),
     )
     .unwrap();
-    let xg = home.path().join(".claude/skills/xgrep/SKILL.md");
     let cx = home.path().join(".codex/skills/ast-grep/SKILL.md");
-    let comps = cort::upgrade::check_skills_at(new_tree.path(), &xg, &dest, &cx, true);
+    let comps = cort::upgrade::check_skills_at(new_tree.path(), &dest, &cx, true);
     let ast_c = comps.iter().find(|c| c.name == "skill_ast_grep").unwrap();
     assert!(
         matches!(ast_c.state, cort::upgrade::ComponentState::DeferredByUser),
@@ -472,11 +470,9 @@ fn keep_mine_leaves_a_diverged_skill_alone() {
 #[test]
 fn repair_redeploys_skill_then_recheck_says_current() {
     let (new_tree, home, dest, source) = diverged_skill_fixture();
-    let xg = home.path().join(".claude/skills/xgrep/SKILL.md");
     let cx = home.path().join(".codex/skills/ast-grep/SKILL.md");
-    let at = |keep_mine: bool| {
-        cort::upgrade::check_skills_at(new_tree.path(), &xg, &dest, &cx, keep_mine)
-    };
+    let at =
+        |keep_mine: bool| cort::upgrade::check_skills_at(new_tree.path(), &dest, &cx, keep_mine);
     let ast_c = at(false)
         .into_iter()
         .find(|c| c.name == "skill_ast_grep")
@@ -518,9 +514,8 @@ fn an_absent_skill_source_is_absent_not_a_failure() {
     let dest = home.path().join(".claude/skills/ast-grep/SKILL.md");
     fs::create_dir_all(dest.parent().unwrap()).unwrap();
     fs::write(&dest, "---\nname: ast-grep\n---\nsome old body\n").unwrap();
-    let xg = home.path().join(".claude/skills/xgrep/SKILL.md");
     let cx = home.path().join(".codex/skills/ast-grep/SKILL.md");
-    let comps = cort::upgrade::check_skills_at(empty_tree.path(), &xg, &dest, &cx, false);
+    let comps = cort::upgrade::check_skills_at(empty_tree.path(), &dest, &cx, false);
     let ast_c = comps.iter().find(|c| c.name == "skill_ast_grep").unwrap();
     assert!(
         matches!(ast_c.state, cort::upgrade::ComponentState::Absent),
@@ -938,7 +933,7 @@ fn comp(name: &str, state: cort::upgrade::ComponentState) -> cort::upgrade::Comp
 fn drifted_components_are_partial_never_fatal() {
     let comps = vec![
         comp("shim", cort::upgrade::ComponentState::Drifted),
-        comp("skill_xgrep", cort::upgrade::ComponentState::Current),
+        comp("skill_ast_grep", cort::upgrade::ComponentState::Current),
     ];
     let v = cort::upgrade::verdict(comps.clone(), &[]);
     assert!(matches!(v.exit, cort::upgrade::UpgradeExit::Partial));
@@ -1161,7 +1156,7 @@ fn an_unmanaged_diverged_skill_has_no_repair_target() {
     fs::create_dir_all(dest.parent().unwrap()).unwrap();
     fs::write(&dest, "the user's own diverged skill\n").unwrap();
     // No stamp: unmanaged.
-    let comps = cort::upgrade::check_skills_at(tree.path(), &dest, &dest, &dest, false);
+    let comps = cort::upgrade::check_skills_at(tree.path(), &dest, &dest, false);
     let c = comps.iter().find(|c| c.name == "skill_ast_grep").unwrap();
     assert!(matches!(c.state, cort::upgrade::ComponentState::Drifted));
     assert!(
@@ -1176,23 +1171,26 @@ fn an_unmanaged_diverged_skill_has_no_repair_target() {
 fn a_managed_diverged_skill_repairs_at_the_destination_diagnosis_read() {
     let tree = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
-    fs::create_dir_all(tree.path().join("skills/xgrep")).unwrap();
-    fs::write(tree.path().join("skills/xgrep/SKILL.md"), "new bytes\n").unwrap();
-    let dest = home.path().join(".claude/skills/xgrep/SKILL.md");
+    fs::create_dir_all(tree.path().join("skills/ast-grep")).unwrap();
+    fs::write(tree.path().join("skills/ast-grep/SKILL.md"), "new bytes\n").unwrap();
+    // The destination comes from `skill_paths`, not from a literal: this test used to name the
+    // xgrep skill precisely because that one had no env override, and it was retired on
+    // 2026-09-10. Every skill left honours CLAUDE_SKILL_HOME / CODEX_HOME, so a hard-coded
+    // `home/.claude/...` here would fail on a dev machine that sets either. Asking the same
+    // function repair asks keeps the test env-agnostic and pins the stronger property anyway:
+    // repair writes where diagnosis looked, whatever the env resolved to.
+    let (_, _, dest) = cort::upgrade::skill_paths(tree.path(), home.path())
+        .into_iter()
+        .find(|(n, _, _)| *n == "skill_ast_grep")
+        .expect("ast-grep skill is in the path table");
     fs::create_dir_all(dest.parent().unwrap()).unwrap();
     fs::write(&dest, "old managed bytes\n").unwrap();
     fs::write(dest.parent().unwrap().join(".cortexyoung-managed"), b"").unwrap();
-    let comps = cort::upgrade::check_skills_at(
-        tree.path(),
-        &home.path().join(".claude/skills/xgrep/SKILL.md"),
-        &dest,
-        &dest,
-        false,
-    );
-    let c = comps.iter().find(|c| c.name == "skill_xgrep").unwrap();
+    let comps = cort::upgrade::check_skills_at(tree.path(), &dest, &dest, false);
+    let c = comps.iter().find(|c| c.name == "skill_ast_grep").unwrap();
     let (src, got_dest) = cort::upgrade::skill_repair_target(c, tree.path(), home.path())
         .expect("managed drift IS repairable");
-    assert_eq!(src, tree.path().join("skills/xgrep/SKILL.md"));
+    assert_eq!(src, tree.path().join("skills/ast-grep/SKILL.md"));
     assert_eq!(got_dest, dest);
 }
 

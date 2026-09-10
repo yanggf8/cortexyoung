@@ -646,12 +646,16 @@ const MANAGED_STAMP_NAME: &str = ".cortexyoung-managed";
 /// Skills, resolved the way install.sh resolves them. The env-reading wrapper; tests call
 /// `check_skills_at` (all paths explicit) because mutating process env inside parallel tests
 /// is unsound. Env mirroring:
-/// - xgrep skill: `$HOME/.claude/skills/xgrep/SKILL.md`, NO override (install.sh hardcodes it);
 /// - ast-grep skill: `${CLAUDE_SKILL_HOME:-$HOME/.claude}/skills/ast-grep/SKILL.md`;
 /// - codex skill: `${CODEX_HOME:-$HOME/.codex}/skills/ast-grep/SKILL.md`.
+///
+/// The retired xgrep skill is deliberately absent: an upgrade's component list is what the tree
+/// ships, and the tree stopped shipping it on 2026-09-10. A machine that still carries a deployed
+/// copy learns so from `install.sh --check`, which names it as a leftover, and `--uninstall`
+/// removes it through the `skill_xgrep` manifest key.
 pub fn check_skills(new_tree: &Path, home: &Path, keep_mine: bool) -> Vec<Component> {
     let specs = skill_paths(new_tree, home);
-    check_skills_at(new_tree, &specs[0].2, &specs[1].2, &specs[2].2, keep_mine)
+    check_skills_at(new_tree, &specs[0].2, &specs[1].2, keep_mine)
 }
 
 /// Skill (name, source, destination) triples, resolved exactly as install.sh resolves them —
@@ -666,11 +670,6 @@ pub fn skill_paths(new_tree: &Path, home: &Path) -> Vec<(&'static str, PathBuf, 
         .map(PathBuf::from)
         .unwrap_or_else(|| home.join(".codex"));
     vec![
-        (
-            "skill_xgrep",
-            new_tree.join("skills/xgrep/SKILL.md"),
-            home.join(".claude/skills/xgrep/SKILL.md"),
-        ),
         (
             "skill_ast_grep",
             new_tree.join("skills/ast-grep/SKILL.md"),
@@ -715,15 +714,12 @@ pub fn skill_repair_target(
 /// construction.
 pub fn check_skills_at(
     new_tree: &Path,
-    xgrep_dest: &Path,
     ast_grep_dest: &Path,
     codex_dest: &Path,
     keep_mine: bool,
 ) -> Vec<Component> {
-    let source = new_tree.join("skills/xgrep/SKILL.md");
     let ast_source = new_tree.join("skills/ast-grep/SKILL.md");
     let specs = [
-        ("skill_xgrep", source.as_path(), xgrep_dest),
         ("skill_ast_grep", ast_source.as_path(), ast_grep_dest),
         ("skill_ast_grep_codex", ast_source.as_path(), codex_dest),
     ];

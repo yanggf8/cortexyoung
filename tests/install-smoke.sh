@@ -79,7 +79,9 @@ export XDG_DATA_HOME="$HOME/.local/share"
 mkdir -p "$HOME/.claude/skills" "$HOME/.local/share" "$HOME/.cargo/bin"
 
 ORIGINAL_PATH="$PATH"
-# Mock xg binary (so --check / version logic works without download)
+# Mock xg binary. Nothing installs or checks xg any more (retired 2026-09-10), but the uninstall
+# tests below still assert that a machine's own `xg` is never removed -- an unowned binary this
+# installer merely knows the name of. That assertion needs a real file to point at.
 cat > "$HOME/.cargo/bin/xg" <<'MOCKXG'
 #!/usr/bin/env bash
 echo "xg 0.7.0"
@@ -127,7 +129,7 @@ export PATH="$TMPHOME/fakebin:$PATH"
 
 echo "=== install-smoke: temp HOME=$TMPHOME ==="
 
-# ── 1. first install (default is ast-grep skill, not xgrep) ───────
+# ── 1. first install (ast-grep skill only) ────────────────────────
 echo "--- Test 1: first install ---"
 bash "$INSTALL_SH" > /tmp/smoke1.log 2>&1; cat /tmp/smoke1.log | sed 's/^/    /'
 assert_file_exists "$HOME/.claude/skills/ast-grep/SKILL.md" "ast-grep skill installed"
@@ -136,7 +138,7 @@ assert_frontmatter_first "$HOME/.claude/skills/ast-grep/SKILL.md" "deployed skil
 assert_frontmatter_keys_only "$HOME/.claude/skills/ast-grep/SKILL.md" "deployed frontmatter holds only YAML keys"
 assert_pristine_skill "$HOME/.claude/skills/ast-grep/SKILL.md" "$REPO_ROOT/skills/ast-grep/SKILL.md" "deployed skill is the repo source byte for byte"
 assert_skill_claimed "$HOME/.claude/skills/ast-grep/SKILL.md" "ownership recorded in the stamp file beside the skill"
-assert_file_not_exists "$HOME/.claude/skills/xgrep/SKILL.md" "xgrep skill not installed by default"
+assert_file_not_exists "$HOME/.claude/skills/xgrep/SKILL.md" "retired xgrep skill is never deployed"
 # The hook is deployed in the same run as the skill: a routing half that has to be wired by hand
 # is a routing half that stays unwired, which is what the 2026-09-01 mining window measured (745
 # grep/rg triggers recorded by the harness, zero rows in usage.db, because nothing was wired).
@@ -626,18 +628,23 @@ assert_not_contains /tmp/smoke11.log "ast-grep: $TMPHOME/fakebin/sg" "sg is neve
 rm -f "$TMPHOME/fakebin/sg"
 
 # ── 12. two-skill rollback ───────────────────────────────────────
+# The two destinations used to be the ast-grep skill and the xgrep skill; xgrep was retired on
+# 2026-09-10, so the second destination is now the Codex copy of the same source. The property
+# under test is unchanged and is about ORDER, not about which skills they are: every destination
+# is preflighted before ANY of them is written, so a collision on the second must leave the first
+# absent. Deploy-then-check would leave a half-installed pair behind.
 echo "--- Test 12: a collision on the second skill rolls back both ---"
 fresh_home_with_files_but_no_manifest
-rm -f "$HOME/.claude/skills/ast-grep/SKILL.md" "$HOME/.claude/skills/xgrep/SKILL.md"
-mkdir -p "$HOME/.claude/skills/xgrep"
-printf -- '---\nname: xgrep\n---\nuser custom, unmanaged\n' > "$HOME/.claude/skills/xgrep/SKILL.md"
+rm -f "$HOME/.claude/skills/ast-grep/SKILL.md" "$HOME/.codex/skills/ast-grep/SKILL.md"
+mkdir -p "$HOME/.codex/skills/ast-grep"
+printf -- '---\nname: ast-grep\n---\nuser custom, unmanaged\n' > "$HOME/.codex/skills/ast-grep/SKILL.md"
 set +e
-bash "$INSTALL_SH" --with-xgrep > /tmp/smoke12.log 2>&1
+bash "$INSTALL_SH" > /tmp/smoke12.log 2>&1
 EC12=$?
 set -e
 if [ "$EC12" -ne 0 ]; then pass "two-skill preflight refuses"; else fail "two-skill preflight refuses"; fi
 assert_file_not_exists "$HOME/.claude/skills/ast-grep/SKILL.md" "first skill was not deployed before the second preflight failed"
-assert_contains "$HOME/.claude/skills/xgrep/SKILL.md" "user custom" "unmanaged file untouched"
+assert_contains "$HOME/.codex/skills/ast-grep/SKILL.md" "user custom" "unmanaged file untouched"
 
 # ── 13. uninstall v2-owned artifacts ─────────────────────────────
 echo "--- Test 13: uninstall removes only v2-owned artifacts ---"
@@ -650,6 +657,35 @@ if [ -f "$HOME/.cargo/bin/cort" ]; then fail "cort payload shim still in cargo b
 assert_file_not_exists "$HOME/.local/share/cortexyoung/cort/cort" "cort payload removed"
 assert_file_not_exists "$HOME/.claude/skills/ast-grep/$STAMP_NAME" "manifest path removes the stamp too"
 assert_file_exists "$HOME/.cargo/bin/xg" "pre-existing xg preserved"
+
+# ── 13b. a retired xgrep leftover is still removable ─────────────
+# Nothing in this installer can create one any more (the xgrep skill was retired on 2026-09-10),
+# which is exactly why this test builds one by hand. A machine that took the old --with-xgrep has
+# the file, the stamp and the manifest key; dropping the install path while leaving that machine
+# unable to get clean would be the actual regression, so the removal side is pinned even though
+# the creation side is gone. --check must name the leftover WITHOUT reporting it as missing on
+# the machines that never had one -- "NOT INSTALLED" about a retired artifact is what sent people
+# hunting for a flag that no longer exists.
+echo "--- Test 13b: uninstall removes a retired xgrep skill it once deployed ---"
+fresh_home_with_files_but_no_manifest
+bash "$INSTALL_SH" --force > /dev/null 2>&1
+LEFTOVER="$HOME/.claude/skills/xgrep/SKILL.md"
+mkdir -p "$(dirname "$LEFTOVER")"
+printf -- '---\nname: xgrep\n---\nretired body\n' > "$LEFTOVER"
+printf '%s\nskill_sha256:%s\n' "$MANAGED_SIGNATURE" \
+  "$(sha256sum "$LEFTOVER" | awk '{print $1}')" > "$(dirname "$LEFTOVER")/$STAMP_NAME"
+printf 'skill_xgrep:%s\n' "$LEFTOVER" >> "$HOME/.local/share/cortexyoung/manifest"
+bash "$INSTALL_SH" --check > /tmp/smoke13b.log 2>&1 || true
+assert_contains /tmp/smoke13b.log "RETIRED" "--check names the leftover"
+bash "$INSTALL_SH" --uninstall > /tmp/smoke13b-un.log 2>&1
+assert_file_not_exists "$LEFTOVER" "retired xgrep skill removed by uninstall"
+assert_file_not_exists "$(dirname "$LEFTOVER")/$STAMP_NAME" "its stamp goes with it"
+assert_file_exists "$HOME/.cargo/bin/xg" "removing the skill never touches the machine's own xg"
+# A machine that never took the opt-in must hear nothing at all about it.
+fresh_home_with_files_but_no_manifest
+bash "$INSTALL_SH" --force > /dev/null 2>&1
+bash "$INSTALL_SH" --check > /tmp/smoke13c.log 2>&1 || true
+assert_not_contains /tmp/smoke13c.log "xgrep" "--check is silent about xgrep on a machine that never had it"
 
 # ── 14. DB interrupt recovery ────────────────────────────────────
 echo "--- Test 14: an interrupted index leaves the previous db readable ---"

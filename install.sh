@@ -1,14 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# cortexyoung — xg installer + xgrep skill deploy + cort + ast-grep
-# Pinned: xg v0.7.0 from https://github.com/momokun7/xgrep
+# cortexyoung — cort + ast-grep installer + skill deploy
 # Pinned: ast-grep v0.45.2 from https://github.com/ast-grep/ast-grep
-# Upstream publishes NO checksums; SHA-256 below is repo-maintained (verified 2026-08-26).
-# Usage: ./install.sh [--check] [--uninstall] [--force] [--with-rustup] [--with-xgrep]
+# Upstream publishes NO checksums; SHA-256 is repo-maintained (verified 2026-08-26) and comes from
+# the cort binary's own provenance table, not from a second copy here.
+# Usage: ./install.sh [--check] [--uninstall] [--force] [--with-rustup]
 
-VERSION="0.7.0"
-REPO="momokun7/xgrep"
-CRATE="xgrep-search"
 CORT_VERSION="0.1.0"
 # Ownership text, written into a stamp file NEXT TO a deployed SKILL.md. It is deliberately not
 # written into SKILL.md itself (F-19): that document is input to two third-party frontmatter
@@ -18,8 +15,13 @@ MANAGED_SIGNATURE="managed by cortexyoung install.sh"
 MANIFEST_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/cortexyoung"
 MANIFEST_FILE="$MANIFEST_DIR/manifest"
 DEPLOY_LOG="$MANIFEST_DIR/deploy.log"
-SKILL_SRC_REL="skills/xgrep/SKILL.md"
-SKILL_DEST="$HOME/.claude/skills/xgrep/SKILL.md"
+# The xgrep skill and the `xg` binary were an opt-in extra until 2026-09-10, when 60 days of local
+# transcripts put them at 18 `xg` invocations against 54,064 shell commands -- every one of the 18 a
+# `--help`, a `status` or a feature probe from the week the skill was written, none of them a search
+# in service of a task. The install path is gone; this path is the only thing left, because a
+# machine that took the opt-in still has to be able to get clean. Uninstall reads `skill_xgrep` and
+# `legacy_xg_bin` from the manifest and falls back to this literal for a manifest that predates them.
+LEGACY_XGREP_SKILL_DEST="$HOME/.claude/skills/xgrep/SKILL.md"
 CORT_HOME="$MANIFEST_DIR/cort"
 AST_GREP_SKILL_SRC_REL="skills/ast-grep/SKILL.md"
 AST_GREP_SKILL_DEST="${CLAUDE_SKILL_HOME:-$HOME/.claude}/skills/ast-grep/SKILL.md"
@@ -44,7 +46,6 @@ CODEX_SKILL_DEST="${CODEX_HOME:-$HOME/.codex}/skills/ast-grep/SKILL.md"
 # rust/src/settings_kimi.rs (why Kimi's flat array is a third module and not a parameter), and
 # main.rs:582 (why Grok needs no entry of its own).
 WITH_HOOK=1
-WITH_XGREP=0
 
 FORCE=0; WITH_RUSTUP=0; MODE="install"; GEN_ID_ARG=""
 
@@ -59,7 +60,6 @@ while [ $# -gt 0 ]; do
     --gen=*) GEN_ID_ARG="${1#--gen=}" ;;
     --force)     FORCE=1 ;;
     --with-rustup) WITH_RUSTUP=1 ;;
-    --with-xgrep) WITH_XGREP=1 ;;
     --no-hook)   WITH_HOOK=0 ;;
     --help|-h) cat <<EOF
 Usage: ./install.sh [OPTIONS]
@@ -68,7 +68,6 @@ Usage: ./install.sh [OPTIONS]
   --force         On unmanaged skill collision: backup and replace.
                   Also bypasses the installed-machine decline below.
   --with-rustup   If cargo missing, bootstrap rustup via https://sh.rustup.rs
-  --with-xgrep    Also install xg (opt-in; default is cort + ast-grep only)
   --no-hook       Do not wire the PreToolUse hook into settings.json
   --stage-only    Build, stage and validate one generation; print its id
                   (cort-<12hex>) on stdout and touch nothing live. Skips the
@@ -90,7 +89,6 @@ EOF
 done
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-SKILL_SRC="$SCRIPT_DIR/$SKILL_SRC_REL"
 # The fresh binary every installer-invoked verb is queried from. Defined once here so the build
 # step and the provisioning step cannot disagree about which artifact they mean.
 CRATE_BIN="$SCRIPT_DIR/rust/target/release/cort"
@@ -98,17 +96,6 @@ CRATE_BIN="$SCRIPT_DIR/rust/target/release/cort"
 # ── helpers ──────────────────────────────────────────────────────────
 die()  { echo "error: $*" >&2; exit 1; }
 info() { echo "info: $*"; }
-
-# SHA-256 map — repo-maintained (upstream publishes no checksums)
-sha256_for_asset() {
-  case "$1" in
-    xg-x86_64-unknown-linux-gnu.tar.gz) echo "78fc6cb56cbd1052d2ed4fa8cf9899d240ffed7cbd9cc2879a127d2bbc1c0d6e" ;;
-    xg-aarch64-unknown-linux-gnu.tar.gz) echo "bd806e5242b4c453c32e6ebf9887b44d68ae99ebbc1a50a2a28d2996f8a9021d" ;;
-    xg-x86_64-apple-darwin.tar.gz)       echo "c18c5541b2ba3ea9aee96ee8a18674a0419b26f0eb86a7c055fb5e2a62ed79ef" ;;
-    xg-aarch64-apple-darwin.tar.gz)      echo "186fc592c96e7b674dac95cb233d92b10f4b3c0e606b155ee6badaa37c976680" ;;
-    *) echo "" ;;
-  esac
-}
 
 # Unified download helper — tries curl then wget; returns 0 on success.
 download() {
@@ -122,7 +109,8 @@ download() {
   return 1
 }
 
-# Fail-closed SHA-256 verification shared by xg and ast-grep.
+# Fail-closed SHA-256 verification. The expected digest is the caller's to supply; ast-grep's comes
+# from the cort binary's provenance table, so this script keeps no checksum of its own.
 verify_sha() {
   local file="$1" expected="$2"
   [ -n "$expected" ] || die "no checksum on record for $file"
@@ -156,17 +144,6 @@ detect_platform() {
     aarch64|arm64) ARCH="aarch64" ;;
     *) die "unsupported arch: $arch (only x86_64 and aarch64 are supported)" ;;
   esac
-  # asset name for xg
-  if [ "$OS" = "linux" ]; then
-    ASSET="xg-${ARCH}-unknown-linux-gnu.tar.gz"
-  else
-    if [ "$ARCH" = "x86_64" ]; then
-      ASSET="xg-x86_64-apple-darwin.tar.gz"
-    else
-      ASSET="xg-aarch64-apple-darwin.tar.gz"
-    fi
-  fi
-  EXPECTED_SHA="$(sha256_for_asset "$ASSET")"
   # TARGET maps directly to Rust target triple suffix
   if [ "$OS" = "linux" ]; then
     TARGET="${ARCH}-unknown-linux-gnu"
@@ -183,7 +160,6 @@ resolve_bin_dir() {
   else
     BIN_DIR="$HOME/.local/bin"
   fi
-  XG_BIN="$BIN_DIR/xg"
 }
 
 # ── skill helpers (used in preflight + deploy) ─────────────────────
@@ -463,11 +439,6 @@ remove_managed_skill_at() {
   fi
 }
 
-# legacy single-skill wrapper for backwards compat (no longer used in install path)
-preflight_skill() {
-  preflight_skill_at "$SKILL_SRC" "$SKILL_DEST"
-}
-
 deploy_skill_at() {
   local src="$1" dest="$2" key="$3"
   if [ ! -f "$src" ]; then
@@ -674,92 +645,8 @@ EOF
 }
 
 # ═══════════════════════════════════════════════════════════════════
-# install helpers: xg / ast-grep / cort
+# install helpers: ast-grep / cort
 # ═══════════════════════════════════════════════════════════════════
-install_xg() {
-  local need_install=1
-  if command -v xg >/dev/null 2>&1; then
-    local cur_ver
-    cur_ver="$(xg --version 2>&1 | head -1 || true)"
-    if echo "$cur_ver" | grep -qF "$VERSION"; then
-      local cur_bin
-      cur_bin="$(command -v xg)"
-      if [ "$cur_bin" = "$XG_BIN" ]; then
-        info "xg $VERSION already at $XG_BIN — skipping binary install"
-        need_install=0
-      else
-        info "xg $VERSION already in PATH at $cur_bin — skipping binary install"
-        need_install=0
-      fi
-    else
-      info "xg found but version mismatch: $cur_ver (want $VERSION) — will (re)install to $XG_BIN"
-    fi
-  fi
-
-  if [ "$need_install" -eq 1 ]; then
-    local installed=0
-    local tmpdir url
-    tmpdir="$(mktemp -d)"
-    # shellcheck disable=SC2064
-    trap "rm -rf \"$tmpdir\"" EXIT
-    url="https://github.com/$REPO/releases/download/v$VERSION/$ASSET"
-    info "downloading $url"
-
-    local dl_ok=0
-    local dl_dest="$tmpdir/$ASSET"
-    if download "$url" "$dl_dest"; then
-      if [ -s "$dl_dest" ]; then dl_ok=1; fi
-    fi
-
-    if [ "$dl_ok" -eq 1 ]; then
-      verify_sha "$dl_dest" "$EXPECTED_SHA"
-      mkdir -p "$BIN_DIR"
-      tar -xzf "$dl_dest" -C "$tmpdir"
-      local extracted
-      extracted="$(find "$tmpdir" -name "xg" -type f | head -1)"
-      if [ -z "$extracted" ]; then
-        die "extracted archive does not contain 'xg' binary"
-      fi
-      install -m 755 "$extracted" "$XG_BIN"
-      info "installed xg $VERSION to $XG_BIN"
-      record_manifest "legacy_xg_bin" "$XG_BIN"
-      installed=1
-    else
-      info "prebuilt download failed — trying cargo fallback"
-    fi
-    rm -rf "$tmpdir"
-    trap - EXIT
-
-    if [ "$installed" -eq 0 ]; then
-      if ! command -v cargo >/dev/null 2>&1; then
-        if [ "$WITH_RUSTUP" -eq 1 ]; then
-          info "cargo not found — bootstrapping rustup"
-          if command -v curl >/dev/null 2>&1; then
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-            # shellcheck disable=SC1091
-            [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
-          else
-            die "cargo not found and curl not available to bootstrap rustup (try --with-rustup with curl installed)"
-          fi
-        else
-          die "cargo not found — install Rust (https://rustup.rs) or re-run with --with-rustup"
-        fi
-      fi
-      info "cargo install $CRATE --version $VERSION --locked"
-      cargo install "$CRATE" --version "$VERSION" --locked
-      if [ ! -x "$XG_BIN" ] && command -v xg >/dev/null 2>&1; then
-        XG_BIN="$(command -v xg)"
-      fi
-      if command -v xg >/dev/null 2>&1; then
-        record_manifest "legacy_xg_bin" "$(command -v xg)"
-        info "installed via cargo to $(command -v xg)"
-      else
-        die "cargo install succeeded but xg not found in PATH"
-      fi
-    fi
-  fi
-}
-
 # build_cort: compile the release binary every installer-invoked verb is queried from.
 # Called before anything that queries it. install_cort calls it again below; the second run is
 # cargo's documented no-op on an up-to-date tree (a fraction of a second), kept so install_cort
@@ -982,26 +869,6 @@ do_check() {
     echo "ast-grep: NOT FOUND in PATH"
     ok=0
   fi
-  # xg optional
-  if command -v xg >/dev/null 2>&1; then
-    local ver
-    ver="$(xg --version 2>&1 | head -1)"
-    echo "xg: $ver ($(command -v xg))"
-    if echo "$ver" | grep -qF "$VERSION"; then
-      echo "  pinned version $VERSION: OK"
-    else
-      echo "  pinned version $VERSION: MISMATCH (expected $VERSION)"
-      # xg mismatch is not fatal for default install (opt-in)
-      if [ "$WITH_XGREP" -eq 1 ]; then ok=0; fi
-    fi
-  else
-    if [ "$WITH_XGREP" -eq 1 ]; then
-      echo "xg: NOT FOUND in PATH (required with --with-xgrep)"
-      ok=0
-    else
-      echo "xg: NOT FOUND in PATH (opt-in via --with-xgrep)"
-    fi
-  fi
   # Read-only: --status never writes. A skill deployed without the hook is half the routing, and
   # --check is the only place that can say so before the numbers go missing.
   # Ask the binary this installation owns, not whatever `cort` PATH resolves to. `deploy_hook` wires
@@ -1013,14 +880,15 @@ do_check() {
     # single "wired" would hide it.
     check_all_hooks "$managed_cort"
   fi
-  if [ -f "$SKILL_DEST" ]; then
-    if skill_is_managed "$SKILL_DEST"; then
-      echo "skill: $SKILL_DEST (managed)"
-    else
-      echo "skill: $SKILL_DEST (UNMANAGED — run with --force to adopt)"
-    fi
-  else
-    echo "skill: $SKILL_DEST (NOT INSTALLED)"
+  # The retired xgrep skill is reported only when a machine still carries one, and never as a thing
+  # that is missing: "NOT INSTALLED" about an artifact this installer no longer installs is the
+  # line that sent people looking for a flag that is gone. A leftover is not a failure either --
+  # `--check` says it is there and which verb removes it, and leaves ok alone.
+  local legacy_xg_skill
+  legacy_xg_skill="$(manifest_get skill_xgrep || true)"
+  legacy_xg_skill="${legacy_xg_skill:-$LEGACY_XGREP_SKILL_DEST}"
+  if [ -f "$legacy_xg_skill" ]; then
+    echo "skill_xgrep: $legacy_xg_skill (RETIRED — left over from the removed --with-xgrep option; ./install.sh --uninstall removes it)"
   fi
   if [ -f "$AST_GREP_SKILL_DEST" ]; then
     if skill_is_managed "$AST_GREP_SKILL_DEST"; then
@@ -1244,11 +1112,11 @@ do_uninstall() {
       else
         info "skill_xgrep no longer managed — skipping: $skill_xg"
       fi
-    elif [ -f "$SKILL_DEST" ] && skill_is_managed "$SKILL_DEST"; then
-      rm -f "$SKILL_DEST" "$(skill_stamp_for "$SKILL_DEST")"
-      info "removed $SKILL_DEST"
-      record_deploy "$SKILL_DEST" "absent"
-      rmdir "$(dirname "$SKILL_DEST")" 2>/dev/null || true
+    elif [ -f "$LEGACY_XGREP_SKILL_DEST" ] && skill_is_managed "$LEGACY_XGREP_SKILL_DEST"; then
+      rm -f "$LEGACY_XGREP_SKILL_DEST" "$(skill_stamp_for "$LEGACY_XGREP_SKILL_DEST")"
+      info "removed $LEGACY_XGREP_SKILL_DEST"
+      record_deploy "$LEGACY_XGREP_SKILL_DEST" "absent"
+      rmdir "$(dirname "$LEGACY_XGREP_SKILL_DEST")" 2>/dev/null || true
     else
       info "skill_xgrep not managed — skipping"
     fi
@@ -1258,13 +1126,13 @@ do_uninstall() {
     rmdir "$MANIFEST_DIR" 2>/dev/null || true
     info "uninstall complete"
   else
-    if [ -f "$SKILL_DEST" ] && skill_is_managed "$SKILL_DEST"; then
-      rm -f "$SKILL_DEST" "$(skill_stamp_for "$SKILL_DEST")"
-      info "removed $SKILL_DEST (managed)"
-      record_deploy "$SKILL_DEST" "absent"
-      rmdir "$(dirname "$SKILL_DEST")" 2>/dev/null || true
+    if [ -f "$LEGACY_XGREP_SKILL_DEST" ] && skill_is_managed "$LEGACY_XGREP_SKILL_DEST"; then
+      rm -f "$LEGACY_XGREP_SKILL_DEST" "$(skill_stamp_for "$LEGACY_XGREP_SKILL_DEST")"
+      info "removed $LEGACY_XGREP_SKILL_DEST (managed)"
+      record_deploy "$LEGACY_XGREP_SKILL_DEST" "absent"
+      rmdir "$(dirname "$LEGACY_XGREP_SKILL_DEST")" 2>/dev/null || true
     else
-      info "no manifest and skill not managed — nothing to remove for skill"
+      info "no manifest and skill_xgrep not managed — nothing to remove"
     fi
     if [ -f "$AST_GREP_SKILL_DEST" ] && skill_is_managed "$AST_GREP_SKILL_DEST"; then
       rm -f "$AST_GREP_SKILL_DEST" "$(skill_stamp_for "$AST_GREP_SKILL_DEST")"
@@ -1339,15 +1207,9 @@ do_install() {
   detect_platform
   resolve_bin_dir
 
-  # Preflight every destination (claude + codex skill, optional xgrep) before any mutation
+  # Preflight every destination (claude + codex skill) before any mutation
   preflight_skill_at "$SCRIPT_DIR/$AST_GREP_SKILL_SRC_REL" "$AST_GREP_SKILL_DEST"
   preflight_skill_at "$SCRIPT_DIR/$AST_GREP_SKILL_SRC_REL" "$CODEX_SKILL_DEST"
-  if [ "$WITH_XGREP" -eq 1 ]; then
-    if [ ! -f "$SCRIPT_DIR/$SKILL_SRC_REL" ]; then
-      die "skill source not found: $SCRIPT_DIR/$SKILL_SRC_REL (run from repo root)"
-    fi
-    preflight_skill_at "$SCRIPT_DIR/$SKILL_SRC_REL" "$SKILL_DEST"
-  fi
   migrate_manifest_v2
 
   # Build before provisioning: every installer-invoked verb below is queried from this binary, so
@@ -1358,14 +1220,8 @@ do_install() {
   build_cort
   install_ast_grep
   install_cort
-  if [ "$WITH_XGREP" -eq 1 ]; then
-    install_xg
-  fi
   deploy_skill_at "$SCRIPT_DIR/$AST_GREP_SKILL_SRC_REL" "$AST_GREP_SKILL_DEST" "skill_ast_grep"
   deploy_skill_at "$SCRIPT_DIR/$AST_GREP_SKILL_SRC_REL" "$CODEX_SKILL_DEST" "skill_ast_grep_codex"
-  if [ "$WITH_XGREP" -eq 1 ]; then
-    deploy_skill_at "$SCRIPT_DIR/$SKILL_SRC_REL" "$SKILL_DEST" "skill_xgrep"
-  fi
   deploy_hook "$BIN_DIR/cort"
   ensure_path_block
   record_manifest "manifest_version" "2"
@@ -1373,9 +1229,6 @@ do_install() {
   echo ""
   echo "Done. Verify with: cort --version && ast-grep --version && cat $AST_GREP_SKILL_DEST | head -5"
   echo "Skill also deployed for Codex: $CODEX_SKILL_DEST"
-  if [ "$WITH_XGREP" -eq 1 ]; then
-    echo "Also: xg --version && cat $SKILL_DEST | head -5"
-  fi
   echo "If cort not in PATH, restart your shell or: export PATH=\"$BIN_DIR:\$PATH\""
 }
 

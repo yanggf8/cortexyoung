@@ -136,9 +136,12 @@ fn dir_name_of(skill: &Path) -> String {
 #[test]
 fn the_skills_are_not_vacuously_present() {
     let paths = skill_paths();
+    // One skill since 2026-09-10, when the xgrep skill was retired. The guard is against a
+    // glob that silently matches nothing -- every assertion below iterates `skill_paths()`, so
+    // an empty result would let the whole file pass while checking no bytes at all.
     assert!(
-        paths.len() >= 2,
-        "expected the ast-grep and xgrep skills, found {:?}",
+        !paths.is_empty(),
+        "expected at least the ast-grep skill, found {:?}",
         paths
     );
 }

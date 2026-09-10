@@ -23,13 +23,6 @@ vendored.
 - **License:** MIT OR Unlicense
 - **Usage:** Companion tool referenced in README and `skills/ast-grep/SKILL.md`; not installed by this repo. Expected to be present on the host or embedded in Claude Code.
 
-## xgrep / xg (optional)
-
-- **Project:** https://github.com/momokun7/xgrep
-- **Crate:** `xgrep-search` v0.7.0 on crates.io (note: `xgrep` on crates.io is a different, unrelated crate)
-- **License:** MIT OR Apache-2.0 (upstream dual-licensed)
-- **Usage:** Optional `--with-xgrep` extra. Not installed by default. When requested, `xg` binary is downloaded as a pinned prebuilt `xg-<target>.tar.gz` from GitHub Releases, verified against repo-maintained SHA-256 in `install.sh`, or built via `cargo install xgrep-search --version 0.7.0 --locked`. The `skills/xgrep/SKILL.md` skill is deployed only with `--with-xgrep`. All upstream performance numbers are self-reported and not independently verified in this repo.
-
 ## Archived Cortex V6 dependencies (tag `v6-final` only)
 
 The following were dependencies of the archived `cortex` CLI (preserved at `v6-final` and no longer installed by this repo):

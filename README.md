@@ -36,7 +36,7 @@ use and reports `source:"store"` on an unchanged repeat. Each entry carries file
 `cort recall` validates them and removes entries whose source changed, so stale text is never returned as
 a remembered reading. Run `cort index` once before using either command.
 
-Routing for agents is in `skills/ast-grep/SKILL.md` — it states when to use `rg`, `ast-grep run`, `cort struct`/`context`/`impact`, and `xg`.
+Routing for agents is in `skills/ast-grep/SKILL.md` — it states when to use `rg`, `ast-grep run`, and `cort struct`/`context`/`impact`.
 
 ## Token cost
 
@@ -210,7 +210,6 @@ never appears in its own report.
 ./install.sh --uninstall  # remove managed artifacts only (reads manifest v2)
 ./install.sh --force      # on unmanaged skill collision: backup and replace
 ./install.sh --with-rustup # bootstrap rustup if cargo is missing
-./install.sh --with-xgrep  # opt-in: also install xg v0.7.0 (xgrep-search crate) + xgrep skill
 ./install.sh --no-hook    # skip wiring the PreToolUse hook into Claude Code / Codex settings
 ./install.sh --stage-only # build + stage + validate one generation; prints its id; touches nothing live
 ./install.sh --activate-only --gen <id>  # flip a staged generation live (symlink + shim + cort_bin only)
@@ -220,7 +219,7 @@ On a machine that already has a `cort_bin` manifest entry, a bare `./install.sh`
 **declines** (exit 3) and changes nothing — full installs do not own upgrades.
 That path is [`cort-upgrade`](#update)'s.
 
-**What it does (default, without `--with-xgrep`):**
+**What it does:**
 
 - Downloads pinned `ast-grep` v0.45.2 prebuilt `app-<target>.zip` for your platform (Linux x86_64/aarch64, macOS x86_64/arm64) from GitHub Releases and verifies SHA-256 (repo-maintained; upstream publishes no checksums) — fail-closed: an empty or mismatched checksum refuses to install. Falls back to `cargo install ast-grep --version 0.45.2 --locked` (requires Rust 1.88+).
 - Builds `cort` from `rust/` with `cargo build --release --locked` on **every** run and installs the binary plus its ast-grep pack (`src/pack`, located at runtime via `CORT_PACK_DIR`) to `~/.local/share/cortexyoung/cort`, shimming `~/.cargo/bin/cort` or `~/.local/bin/cort`.
@@ -270,12 +269,6 @@ index debt without rebuilding). The first upgrade under the locking prints a
 one-time `partial_drain_first_upgrade` note — the 30s drain cannot prove
 exclusion of workers running pre-lock binaries — and marks itself done only
 after a fully successful run.
-
-With xgrep (opt-in), the same rule applies to `xg`:
-
-```bash
-./install.sh --with-xgrep # idempotent xg install + xgrep skill deploy
-```
 
 ## Upgrade note — index schema v3 through v7
 
@@ -332,7 +325,7 @@ the debt of indexes whose directory is gone, and says so per project in its verd
 
 The hook is unwired *before* the binary is removed, because `cort hook-install --remove` is what owns the JSON edit. Hooks that are not ours are left alone.
 
-Pre-existing binaries and unmanaged skills are never removed. With `--with-xgrep`, the managed `xg` binary and `xgrep` skill are also removed if owned.
+Pre-existing binaries and unmanaged skills are never removed. A machine that took the retired `--with-xgrep` option still has its `xgrep` skill removed here, through the `skill_xgrep` manifest key the old installer wrote; the `xg` binary goes with it only if that manifest says this installer put it there.
 
 ## The ast-grep 0.45.2 pin — why fail-closed
 
@@ -422,7 +415,7 @@ index contents, ~15% average). The 7.7x payload advantage over the shell arm bec
 removal of the read that used to be required to check a row, which is the half of the goal sentence that
 was still open.
 
-**Corrected positioning: `cort` is an agent tool for relationships, and `rg`/`xg` stay the right tool for
+**Corrected positioning: `cort` is an agent tool for relationships, and `rg` stays the right tool for
 strings.** The claim "graph adds correctness nowhere" is withdrawn; it was only ever tested where the graph
 could not apply.
 
@@ -731,9 +724,8 @@ Any path can be inspected via `git show v6-final:<path>` without checking out th
 ## How the skill is used
 
 The `ast-grep` skill teaches agents when to use `rg` vs `ast-grep` vs `cort` — see `skills/ast-grep/SKILL.md` (also installed to `~/.claude/skills/ast-grep/`). `rg` for fresh/short/small and for finding strings, `ast-grep run` for one shape, `cort struct` for shape +
-neighbours, `cort context` for neighbourhood, `cort impact` for multi-hop blast radius, `xg` only when
-`command -v xg` succeeds and the task is repeated literal-string search. The skill states the measured
-break-even so an agent does not route a string question into a graph tool.
+neighbours, `cort context` for neighbourhood, and `cort impact` for multi-hop blast radius. The skill states the
+measured break-even so an agent does not route a string question into a graph tool.
 
 ## The PreToolUse hook — the retrospective half of the routing
 
@@ -948,7 +940,6 @@ because `wired` had been answering a question one step short of the one that mat
 
 - [`ast-grep`](https://github.com/ast-grep/ast-grep) v0.45.2 — MIT, installed from GitHub Releases `app-<target>.zip` (repo-maintained SHA-256) or `cargo install ast-grep --version 0.45.2 --locked`.
 
-- [`xgrep` (momokun7/xgrep)](https://github.com/momokun7/xgrep) — MIT/Apache-2.0, optional `--with-xgrep` extra (`xg` v0.7.0, `xgrep-search` on crates.io).
 - [`ripgrep`](https://github.com/BurntSushi/ripgrep) — MIT OR Unlicense, not installed by this repo; expected on the host.
 
 ## License
