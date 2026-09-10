@@ -1148,6 +1148,14 @@ fn golden_json_and_lean_snapshots() {
     }
   },
   "days": 30,
+  "hook_census": {
+    "hook-refresh": {
+      "_total": 0
+    },
+    "hook-suggest": {
+      "_total": 0
+    }
+  },
   "machine": {
     "db_created_on": "<db_created_on>",
     "db_created_on_source": "<db_created_on_source>",
@@ -1420,5 +1428,133 @@ fn a_ranged_read_records_the_file_bytes_it_omitted() {
         row["saved_bytes"].as_i64(),
         Some(0),
         "whole file: nothing omitted"
+    );
+}
+
+/// The census is the tool's own answer to "do the funnel numbers sum?" — the lesson of the 87-row
+/// reconciliation: a funnel assembled by hand over `args_summary` omitted two real outcomes and
+/// never saw 1,032 unparseable rows, and nothing in the tool could have caught it. The partition
+/// here is exhaustive and disjoint by construction: every row lands in exactly one bucket, the
+/// buckets sum to the fires, and a value the vocabulary does not know surfaces as `unknown/<v>`
+/// instead of being folded into a silence — "we do not know" is not "no", and neither is
+/// "something we cannot name".
+#[test]
+fn the_census_partitions_every_hook_row_exactly_once() {
+    let dir = tempfile::Builder::new()
+        .prefix("cort-census-")
+        .tempdir()
+        .unwrap();
+    let path = dir.path().join("usage.db");
+    seed_schema(&path);
+    let db = Connection::open(&path).unwrap();
+    let row = |args: &str, status: &str| {
+        db.execute(
+            "INSERT INTO command_log
+                (ts, project_id, command, args_summary, status, error_code,
+                 read_source, requested_content_mode, effective_content_mode,
+                 receipt_hit, index_stale, bytes_out, saved_bytes)
+             VALUES (?1, NULL, 'hook-suggest', ?2, ?3, NULL, NULL, NULL, NULL, NULL, NULL, 0, 0)",
+            params![NOW_MS, args, status],
+        )
+        .unwrap();
+    };
+    row(r#"{"v":3,"hook":"hit","harness":"claude-code"}"#, "ok");
+    row(
+        r#"{"v":3,"hook":"no_shape","decline":"not_a_search_tool"}"#,
+        "ok",
+    );
+    // A v3 row whose judge path wrote no decline tag: a real bucket, not an error.
+    row(r#"{"v":3,"hook":"no_shape"}"#, "ok");
+    // The 09-01 writer bug, found only because the census ran json_valid: not JSON at all.
+    row("hook", "ok");
+    row(r#"{"v":1}"#, "ok"); // a pre-outcome row: legacy, and honest about it
+    row(r#"{"v":3,"hook":"no_index"}"#, "error"); // dispatch failed; its verdict is not evidence
+    row(r#"{"v":3,"hook":"something_new"}"#, "ok"); // a future outcome must surface, not fold
+    drop(db);
+
+    let census = cort::usage::hook_census_at(&path, "hook-suggest", 0).unwrap();
+    let total: i64 = census.values().filter_map(|v| v.as_i64()).sum();
+    assert_eq!(total, 7, "the partition must sum to the fires: {census:?}");
+    assert_eq!(census.get("hit").and_then(Value::as_i64), Some(1));
+    assert_eq!(
+        census
+            .get("no_shape/not_a_search_tool")
+            .and_then(Value::as_i64),
+        Some(1)
+    );
+    assert_eq!(
+        census
+            .get("no_shape/decline_absent")
+            .and_then(Value::as_i64),
+        Some(1)
+    );
+    assert_eq!(
+        census.get("unparseable_summary").and_then(Value::as_i64),
+        Some(1)
+    );
+    assert_eq!(
+        census.get("legacy_unsplit").and_then(Value::as_i64),
+        Some(1)
+    );
+    assert_eq!(census.get("status_error").and_then(Value::as_i64), Some(1));
+    assert_eq!(
+        census.get("unknown/something_new").and_then(Value::as_i64),
+        Some(1),
+        "an unnamed outcome keeps its name instead of vanishing into a silence: {census:?}"
+    );
+}
+
+/// The report carries the census, so the next funnel analysis starts from the tool instead of from
+/// hand-rolled SQL. The field is always present, even on a report with no database behind it —
+/// a field that appears on some runs is a field consumers learn to stop checking.
+#[test]
+fn the_usage_report_carries_the_hook_census_and_the_lean_says_what_cannot_close() {
+    let dir = tempfile::Builder::new()
+        .prefix("cort-census-report-")
+        .tempdir()
+        .unwrap();
+    let path = dir.path().join("usage.db");
+    seed_schema(&path);
+    let db = Connection::open(&path).unwrap();
+    db.execute(
+        "INSERT INTO command_log
+            (ts, project_id, command, args_summary, status, error_code,
+             read_source, requested_content_mode, effective_content_mode,
+             receipt_hit, index_stale, bytes_out, saved_bytes)
+         VALUES (?1, NULL, 'hook-suggest', ?2, 'ok', NULL, NULL, NULL, NULL, NULL, NULL, 0, 0)",
+        params![
+            NOW_MS,
+            r#"{"v":3,"hook":"no_shape","decline":"not_a_search_tool"}"#
+        ],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO command_log
+            (ts, project_id, command, args_summary, status, error_code,
+             read_source, requested_content_mode, effective_content_mode,
+             receipt_hit, index_stale, bytes_out, saved_bytes)
+         VALUES (?1, NULL, 'hook-suggest', 'hook', 'ok', NULL, NULL, NULL, NULL, NULL, NULL, 0, 0)",
+        params![NOW_MS],
+    )
+    .unwrap();
+    drop(db);
+
+    let report = query_usage_at(&path, 30, NOW_MS).unwrap();
+    let census = &report["hook_census"]["hook-suggest"];
+    assert_eq!(census["_total"].as_i64(), Some(2), "{report}");
+    assert_eq!(census["no_shape/not_a_search_tool"].as_i64(), Some(1));
+    assert_eq!(census["unparseable_summary"].as_i64(), Some(1));
+
+    let lean = render_usage_lean(&report);
+    assert!(
+        lean.contains("# hook_census hook-suggest total=2 status_error=0 unparseable_summary=1"),
+        "the lean header names the canaries an eye can check: {lean}"
+    );
+
+    // And a report with no database still says the field exists.
+    let empty = query_usage_at(&dir.path().join("absent.db"), 30, NOW_MS).unwrap();
+    assert!(
+        empty.get("hook_census").is_some(),
+        "absent from some runs is absent from every run after: {empty}"
     );
 }

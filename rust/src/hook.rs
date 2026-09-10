@@ -103,6 +103,47 @@ pub fn evidence_in(
     })
 }
 
+/// The closed outcome vocabulary `hook-suggest` can record, one entry per writer path. It exists
+/// so a funnel over `usage.db` can be checked for closure without re-reading the dispatcher: a
+/// census of real rows that surfaces a value not listed here means a writer path grew without the
+/// vocabulary growing with it (the test that drives representative branches through the binary
+/// holds these against what is actually emitted). Each string's single home:
+/// - `no_payload` — the default, installed before stdin is read (`main.rs`, the payload read)
+/// - `no_shape` — the parser could not build a `Search`, or `judge` returned `NoShape`
+/// - `upgrade_stood_down` — a `Search` was built but the protected-entry guard was held
+/// - `no_index` / `no_index_hinted` / `no_evidence` / `hit` / `hit_stale` / `hit_yielded` —
+///   the `judge` verdicts, once the payload parsed
+pub const SUGGEST_OUTCOMES: [&str; 9] = [
+    "no_payload",
+    "no_shape",
+    "upgrade_stood_down",
+    "no_index",
+    "no_index_hinted",
+    "no_evidence",
+    "hit",
+    "hit_stale",
+    "hit_yielded",
+];
+
+/// The stable identifiers `no_shape` carries as its decline tag, split across the two paths that
+/// can produce it: the payload/parser path (`grep_fields_no_pattern`, `unsupported_tool_surface`,
+/// `not_a_search_tool`, `unparseable_command`) and the `judge` path (`pattern_not_symbol`,
+/// `non_source_target`, `unindexed_extension`, `concrete_file_read`, `target_not_source`).
+/// Identifiers, never prose, for the same reason `NoShape`'s doc gives: mining groups on them.
+/// A `no_shape` row whose summary carries no tag at all is the pre-issue-#3 shape, a deployment
+/// state rather than a ninth cause — the census names it `decline_absent` instead of guessing.
+pub const SUGGEST_DECLINES: [&str; 9] = [
+    "grep_fields_no_pattern",
+    "unsupported_tool_surface",
+    "not_a_search_tool",
+    "unparseable_command",
+    "pattern_not_symbol",
+    "non_source_target",
+    "unindexed_extension",
+    "concrete_file_read",
+    "target_not_source",
+];
+
 /// Why the hook stayed quiet. Separate variants because the mining has to tell a heuristic problem
 /// from an index problem from a missing index, and a single `None` collapses all three.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

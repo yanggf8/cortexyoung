@@ -119,6 +119,7 @@ pub fn empty_report(days: i64) -> Value {
         "best_effort": true,
         "commands": {},
         "days": days,
+        "hook_census": {},
         // No database to have been stamped, so nothing to disagree with -- but the machine is still
         // named, because a report that omits the field on some runs makes every consumer treat it
         // as optional and stop checking it.
@@ -348,10 +349,27 @@ pub fn query_usage_at(path: &Path, days: i64, now_ms: i64) -> Result<Value, Cort
             projects.insert(key, project_stats(ok, error, bytes_out, saved));
         }
     }
+    // The census wraps each partition with `_total` so a reader can check the sum without
+    // adding the buckets up -- the check a hand-assembled funnel skipped.
+    let with_total = |part: Map<String, Value>| {
+        let mut m = Map::new();
+        let total: i64 = part.values().filter_map(|v| v.as_i64()).sum();
+        m.insert("_total".into(), json!(total));
+        for (k, v) in part {
+            m.insert(k, v);
+        }
+        m
+    };
+    let suggest_census = with_total(hook_census_at(path, "hook-suggest", cutoff)?);
+    let refresh_census = with_total(hook_census_at(path, "hook-refresh", cutoff)?);
     Ok(json!({
         "best_effort": true,
         "commands": commands,
         "days": days,
+        "hook_census": {
+            "hook-suggest": suggest_census,
+            "hook-refresh": refresh_census,
+        },
         "machine": machine_block(&conn),
         "note": NOTE,
         "projects": projects,
@@ -450,14 +468,14 @@ pub fn outcomes_of_hook_at(
     Ok(out)
 }
 
-/// Which model answered, *within* a harness -- a second lens on the same rows, never a replacement
-/// for the first.
+/// Which model answered, *within* a harness -- a second lens on the same rows, never a replacement/// for the first.
 ///
 /// The harness total is the primary number and stays whole: "how often did the hook intercept on
 /// Claude Code" is a real question with a real answer, and it does not stop being one because more
 /// than one model sat behind that harness. `hook_outcomes_at` therefore ignores `model` entirely
-/// and its counts are unchanged by anything here -- a property `a_model_breakdown_never_splits_the_harness_total`
-/// pins, because the tempting mistake is to make every figure conditional on a dimension that only
+/// and its counts are unchanged by anything here -- a property
+/// `a_model_breakdown_never_splits_the_harness_total` pins, because the tempting mistake is to
+/// make every figure conditional on a dimension that only
 /// some rows carry.
 ///
 /// Three silences, kept apart because they mean different things:
@@ -513,6 +531,82 @@ pub fn hook_models_at(
     Ok(out)
 }
 
+/// The exhaustive, disjoint census of one hook's rows: every row lands in exactly one bucket and
+/// the buckets sum to the fires.
+///
+/// This exists because a funnel assembled by hand over `args_summary` could not be closed: the
+/// 2026-09-10 reconciliation found 87 rows no bucket claimed -- two real outcomes
+/// (`no_payload`, `upgrade_stood_down`) that the hand query never listed -- and 1,032 rows from
+/// one day whose summary was not JSON at all, invisible to every `LIKE` and every JSON reader
+/// because they match nothing. The partition answers by construction:
+///
+/// * `status_error` -- the dispatch failed; whatever verdict the row carries is not evidence.
+/// * `unparseable_summary` -- the summary is not JSON (the writer-bug shape). Counted, never
+///   skipped: a row that vanishes from the reader is a row every funnel silently miscounts.
+/// * `legacy_unsplit` -- valid JSON with no readable `hook`: a row from before outcomes existed.
+///   Same name `hook_outcomes_at` uses, for the same reason.
+/// * `no_shape/<decline>` -- the one outcome whose attribution lives one level down, per
+///   `crate::hook::SUGGEST_DECLINES`; `no_shape/decline_absent` is the pre-tag shape, a
+///   deployment state rather than a tenth cause.
+/// * every other `crate::hook::SUGGEST_OUTCOMES` value -- verbatim.
+/// * `unknown/<value>` -- anything else, verbatim under a prefix that makes it impossible to
+///   mistake for a known outcome. A vocabulary that grew without its constant grows here first.
+///
+/// No harness filter on purpose: the census answers "do the numbers sum", and a filtered
+/// partition is not the same question. The harness lenses live on `hook_outcomes_at`.
+pub fn hook_census_at(
+    path: &Path,
+    command: &str,
+    since_ms: i64,
+) -> Result<Map<String, Value>, CortError> {
+    let mut out: Map<String, Value> = Map::new();
+    if !path.exists() {
+        return Ok(out);
+    }
+    let conn = open_query(path)?;
+    ensure_schema_readable(&conn)?;
+    let mut counts: std::collections::BTreeMap<String, i64> = std::collections::BTreeMap::new();
+    {
+        let mut stmt = conn
+            .prepare(
+                "SELECT status, args_summary FROM command_log
+                  WHERE command = ?2 AND ts >= ?1",
+            )
+            .map_err(map_query_err)?;
+        let rows = stmt
+            .query_map(params![since_ms, command], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })
+            .map_err(map_query_err)?;
+        for row in rows {
+            let (status, raw) = row.map_err(map_query_err)?;
+            let key = if status != "ok" {
+                "status_error".to_string()
+            } else if let Ok(parsed) = serde_json::from_str::<Value>(&raw) {
+                match parsed.get("hook").and_then(Value::as_str) {
+                    None => "legacy_unsplit".to_string(),
+                    Some("no_shape") => format!(
+                        "no_shape/{}",
+                        parsed
+                            .get("decline")
+                            .and_then(Value::as_str)
+                            .unwrap_or("decline_absent")
+                    ),
+                    Some(h) if crate::hook::SUGGEST_OUTCOMES.contains(&h) => h.to_string(),
+                    Some(h) => format!("unknown/{h}"),
+                }
+            } else {
+                "unparseable_summary".to_string()
+            };
+            *counts.entry(key).or_insert(0) += 1;
+        }
+    }
+    for (k, v) in counts {
+        out.insert(k, json!(v));
+    }
+    Ok(out)
+}
+
 pub fn render_usage_lean(payload: &Value) -> String {
     let days = payload.get("days").and_then(Value::as_i64).unwrap_or(0);
     let best = payload
@@ -554,6 +648,36 @@ pub fn render_usage_lean(payload: &Value) -> String {
                 rate_cell(row),
                 as_i64(row, "stale_true"),
                 as_i64(row, "stale_evaluated"),
+            ));
+        }
+    }
+    // One line per hook command that has rows: the four canaries a funnel needs before its
+    // numbers can be trusted. `total` is what the buckets must sum to, `unknown` anything the
+    // outcome vocabulary cannot name; the JSON report carries the full partition, this line only
+    // has to make an unsumming funnel visible in lean output.
+    if let Some(census) = payload.get("hook_census").and_then(Value::as_object) {
+        for (name, part) in census {
+            // A command with no rows in the window gets no line: "nothing fired" is the command
+            // total's job to say, and a permanent zero line is one more thing to skim past.
+            if part.get("_total").and_then(Value::as_i64).unwrap_or(0) == 0 {
+                continue;
+            }
+            let at = |k: &str| part.get(k).and_then(Value::as_i64).unwrap_or(0);
+            let unknown: i64 = part
+                .as_object()
+                .map(|o| {
+                    o.iter()
+                        .filter(|(k, _)| k.starts_with("unknown/"))
+                        .filter_map(|(_, v)| v.as_i64())
+                        .sum()
+                })
+                .unwrap_or(0);
+            lines.push(format!(
+                "# hook_census {name} total={} status_error={} unparseable_summary={} legacy_unsplit={} unknown={unknown}",
+                at("_total"),
+                at("status_error"),
+                at("unparseable_summary"),
+                at("legacy_unsplit"),
             ));
         }
     }

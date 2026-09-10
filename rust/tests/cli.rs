@@ -2653,3 +2653,101 @@ fn a_no_shape_row_carries_a_shape_fingerprint_without_payload_content() {
         "payload content must stay out of the log: {summary}"
     );
 }
+
+/// Codex's structural fix for a funnel that does not sum: the outcome vocabulary is a constant in
+/// the library, the census is the tool's own partition, and this test drives representative
+/// branches through the real binary and holds all three against each other. A new outcome emitted
+/// without a vocabulary entry fails here the day it lands, and the partition's sum is checked
+/// against the row count — the 87-row reconciliation is the funnel this exists to prevent.
+#[test]
+fn the_suggest_vocabulary_is_closed_and_the_census_sums_to_the_fires() {
+    let (_p, cwd, _c, cache) = sandbox();
+    let usage_db = cache.join("usage.db");
+
+    // Invalid stdin never reaches the parser: the default outcome, recorded before anything read.
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let mut child = Command::new(cort_bin())
+        .arg("hook-suggest")
+        .current_dir(&cwd)
+        .env("CORT_CACHE_DIR", &cache)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn cort hook-suggest");
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"not json at all")
+        .unwrap();
+    let r = child.wait_with_output().expect("wait");
+    // A silence still prints the empty payload; what it must not do is inject.
+    let out = String::from_utf8_lossy(&r.stdout);
+    assert_eq!(out.trim(), "{}", "no injection: the empty payload only");
+
+    // A command the rule has nothing to say about; a rule match the gate declines.
+    run_hook_suggest("cargo test --workspace", &cwd, &cache);
+    run_hook_suggest(FIRING_SEARCH, &cwd, &cache);
+
+    // And a hit, when ast-grep exists to build the index (same SKIP guard as its siblings).
+    let idx = run_cort(&["index"], &cwd, &cache);
+    let hit_expected = idx.code == 0;
+    if hit_expected {
+        run_hook_suggest(FIRING_SEARCH, &cwd, &cache);
+    }
+
+    let conn = rusqlite::Connection::open(&usage_db).expect("open usage db");
+    let fires: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM command_log WHERE command = 'hook-suggest'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(fires >= 3, "{fires}");
+
+    // Observed vocabulary against the library's constants: one new value without an entry is red.
+    let mut stmt = conn
+        .prepare("SELECT args_summary FROM command_log WHERE command = 'hook-suggest'")
+        .unwrap();
+    let rows: Vec<String> = stmt
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    for raw in &rows {
+        let parsed: Value = serde_json::from_str(raw)
+            .unwrap_or_else(|e| panic!("every row the writer makes is JSON: {e} in {raw}"));
+        let hook = parsed.get("hook").and_then(Value::as_str).unwrap();
+        assert!(
+            cort::hook::SUGGEST_OUTCOMES.contains(&hook),
+            "an unlisted outcome means the vocabulary const rotted: {hook}"
+        );
+        if let Some(decline) = parsed.get("decline").and_then(Value::as_str) {
+            assert!(
+                cort::hook::SUGGEST_DECLINES.contains(&decline),
+                "an unlisted decline means the vocabulary const rotted: {decline}"
+            );
+        }
+    }
+
+    // The partition sums to the fires, and every driven branch landed in its own named bucket.
+    let census = cort::usage::hook_census_at(&usage_db, "hook-suggest", 0).expect("read usage db");
+    let total: i64 = census.values().filter_map(|v| v.as_i64()).sum();
+    assert_eq!(total, fires, "the census must close: {census:?}");
+    assert!(census.contains_key("no_payload"), "{census:?}");
+    assert!(
+        census.contains_key("no_shape/not_a_search_tool"),
+        "{census:?}"
+    );
+    assert!(census.contains_key("no_index"), "{census:?}");
+    if hit_expected {
+        assert!(census.contains_key("hit"), "{census:?}");
+    }
+    assert!(
+        !census.keys().any(|k| k.starts_with("unknown/")),
+        "the vocabulary above must already cover what this binary emits: {census:?}"
+    );
+}
