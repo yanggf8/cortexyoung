@@ -144,6 +144,31 @@ pub const SUGGEST_DECLINES: [&str; 9] = [
     "target_not_source",
 ];
 
+/// The closed outcome vocabulary `hook-refresh` can record, one entry per writer path — the
+/// `PostToolUse` twin of [`SUGGEST_OUTCOMES`], with the same contract: a census of real rows that
+/// surfaces a value not listed here means a writer path grew without the vocabulary growing with
+/// it. Unlike the suggest funnel there is no decline layer: every refresh outcome is attributed
+/// directly, so the census buckets these verbatim. Each string's single home is `cmd_hook_refresh`
+/// (`main.rs`), in the order the function reaches them:
+/// - `upgrade_stood_down` — the protected-entry guard was held, before any pack read
+/// - `no_index` — the edited path (or the payload's `cwd`) resolves to no indexed project
+/// - `db_unavailable` — the resolved project's database would not answer
+/// - `no_ast_grep` — the pinned `ast-grep` binary could not be located
+/// - `refreshed` — `incremental_index` reindexed or removed at least one file
+/// - `already_current` — `incremental_index` ran and changed nothing
+/// - `rebuild_required` — the index demands a full rebuild under `RebuildPolicy::Forbid`
+/// - `busy_or_failed` — any other `incremental_index` failure (lock contention included)
+pub const REFRESH_OUTCOMES: [&str; 8] = [
+    "upgrade_stood_down",
+    "no_index",
+    "db_unavailable",
+    "no_ast_grep",
+    "refreshed",
+    "already_current",
+    "rebuild_required",
+    "busy_or_failed",
+];
+
 /// Why the hook stayed quiet. Separate variants because the mining has to tell a heuristic problem
 /// from an index problem from a missing index, and a single `None` collapses all three.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

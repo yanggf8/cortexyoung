@@ -2751,3 +2751,81 @@ fn the_suggest_vocabulary_is_closed_and_the_census_sums_to_the_fires() {
         "the vocabulary above must already cover what this binary emits: {census:?}"
     );
 }
+
+/// The same closure for the other hook: `hook-refresh`'s outcomes are their own constant, and the
+/// census buckets them verbatim — which is why the first real run no longer reports
+/// `unknown/already_current=3947`. Representative branches, not all eight: an unindexed project
+/// (`no_index`), a current index (`already_current`), and a real edit repaired on the hook's own
+/// back (`refreshed`). The guard branches (`db_unavailable`, `no_ast_grep`,
+/// `upgrade_stood_down`, `busy_or_failed`, `rebuild_required`) need fault injection to reach;
+/// the unit census test holds their strings against the writer's shape instead.
+#[test]
+fn the_refresh_vocabulary_is_closed_and_the_census_sums_to_the_fires() {
+    let (_p, cwd, _c, cache) = sandbox();
+    let usage_db = cache.join("usage.db");
+
+    // The index does not exist yet: the hook refuses rather than creating one.
+    let r = run_hook_refresh(&cwd, &cache);
+    assert_eq!(
+        r.code, 0,
+        "a refresh is always silent success: {}",
+        r.stderr
+    );
+    assert_eq!(r.stdout.trim(), "{}");
+
+    // With an index behind it, an edit to a current file changes nothing...
+    git_in_fixture(&cwd);
+    let idx = run_cort(&["index"], &cwd, &cache);
+    let indexed = idx.code == 0;
+    if indexed {
+        run_hook_refresh_with(&[], edit_payload(None), &cwd, &cache);
+        // ...and a real edit is repaired on the hook's own back.
+        std::fs::write(
+            cwd.join("src/helper.ts"),
+            "export function helper(n: number) { return n * 3; }\n",
+        )
+        .unwrap();
+        run_hook_refresh_with(&[], edit_payload(None), &cwd, &cache);
+    }
+
+    let conn = rusqlite::Connection::open(&usage_db).expect("open usage db");
+    let fires: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM command_log WHERE command = 'hook-refresh'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(fires >= 1, "{fires}");
+
+    let mut stmt = conn
+        .prepare("SELECT args_summary FROM command_log WHERE command = 'hook-refresh'")
+        .unwrap();
+    let rows: Vec<String> = stmt
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    for raw in &rows {
+        let parsed: Value = serde_json::from_str(raw)
+            .unwrap_or_else(|e| panic!("every row the writer makes is JSON: {e} in {raw}"));
+        let hook = parsed.get("hook").and_then(Value::as_str).unwrap();
+        assert!(
+            cort::hook::REFRESH_OUTCOMES.contains(&hook),
+            "an unlisted outcome means the vocabulary const rotted: {hook}"
+        );
+    }
+
+    let census = cort::usage::hook_census_at(&usage_db, "hook-refresh", 0).expect("read usage db");
+    let total: i64 = census.values().filter_map(|v| v.as_i64()).sum();
+    assert_eq!(total, fires, "the census must close: {census:?}");
+    assert!(census.contains_key("no_index"), "{census:?}");
+    if indexed {
+        assert!(census.contains_key("already_current"), "{census:?}");
+        assert!(census.contains_key("refreshed"), "{census:?}");
+    }
+    assert!(
+        !census.keys().any(|k| k.starts_with("unknown/")),
+        "the refresh vocabulary must already cover what this binary emits: {census:?}"
+    );
+}

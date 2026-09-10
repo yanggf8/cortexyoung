@@ -1504,6 +1504,81 @@ fn the_census_partitions_every_hook_row_exactly_once() {
     );
 }
 
+/// The refresh census speaks the refresh vocabulary, not the suggest one: `cmd_hook_refresh`
+/// attributes every outcome directly, so its rows bucket verbatim instead of piling into
+/// `unknown/` — which is what they did while the census only knew the suggest constants, and why
+/// the first real run reported `unknown/already_current=3947`. The decline layer is suggest's
+/// alone: a `no_shape` value arriving on a refresh row is not attributed one level down, it is an
+/// unnamed outcome on a hook that never writes one.
+#[test]
+fn the_refresh_census_speaks_the_refresh_vocabulary() {
+    let dir = tempfile::Builder::new()
+        .prefix("cort-census-refresh-")
+        .tempdir()
+        .unwrap();
+    let path = dir.path().join("usage.db");
+    seed_schema(&path);
+    let db = Connection::open(&path).unwrap();
+    let row = |args: &str, status: &str| {
+        db.execute(
+            "INSERT INTO command_log
+                (ts, project_id, command, args_summary, status, error_code,
+                 read_source, requested_content_mode, effective_content_mode,
+                 receipt_hit, index_stale, bytes_out, saved_bytes)
+             VALUES (?1, NULL, 'hook-refresh', ?2, ?3, NULL, NULL, NULL, NULL, NULL, NULL, 0, 0)",
+            params![NOW_MS, args, status],
+        )
+        .unwrap();
+    };
+    row(
+        r#"{"v":3,"hook":"refreshed","harness":"claude-code"}"#,
+        "ok",
+    );
+    row(
+        r#"{"v":3,"hook":"already_current","harness":"codex"}"#,
+        "ok",
+    );
+    row(r#"{"v":3,"hook":"no_index"}"#, "ok");
+    row(r#"{"v":3,"hook":"upgrade_stood_down"}"#, "ok");
+    // A suggest-shaped row on a refresh command: the decline layer must not follow the command
+    // name — `no_shape` is not a refresh outcome, so this surfaces unnamed instead of split.
+    row(
+        r#"{"v":3,"hook":"no_shape","decline":"not_a_search_tool"}"#,
+        "ok",
+    );
+    row(r#"{"v":3,"hook":"something_new"}"#, "ok"); // a future outcome must surface, not fold
+    drop(db);
+
+    let census = cort::usage::hook_census_at(&path, "hook-refresh", 0).unwrap();
+    let total: i64 = census.values().filter_map(|v| v.as_i64()).sum();
+    assert_eq!(total, 6, "the partition must sum to the fires: {census:?}");
+    for known in [
+        "refreshed",
+        "already_current",
+        "no_index",
+        "upgrade_stood_down",
+    ] {
+        assert_eq!(
+            census.get(known).and_then(Value::as_i64),
+            Some(1),
+            "a declared refresh outcome buckets verbatim, not as unknown: {census:?}"
+        );
+    }
+    assert_eq!(
+        census.get("unknown/no_shape").and_then(Value::as_i64),
+        Some(1),
+        "the decline split is suggest's contract; a refresh row stays whole and unnamed: {census:?}"
+    );
+    assert_eq!(
+        census.get("unknown/something_new").and_then(Value::as_i64),
+        Some(1)
+    );
+    assert!(
+        !census.contains_key("no_shape/not_a_search_tool"),
+        "no suggest bucket may appear under the refresh command: {census:?}"
+    );
+}
+
 /// The report carries the census, so the next funnel analysis starts from the tool instead of from
 /// hand-rolled SQL. The field is always present, even on a report with no database behind it —
 /// a field that appears on some runs is a field consumers learn to stop checking.

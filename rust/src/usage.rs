@@ -545,10 +545,13 @@ pub fn hook_models_at(
 ///   skipped: a row that vanishes from the reader is a row every funnel silently miscounts.
 /// * `legacy_unsplit` -- valid JSON with no readable `hook`: a row from before outcomes existed.
 ///   Same name `hook_outcomes_at` uses, for the same reason.
-/// * `no_shape/<decline>` -- the one outcome whose attribution lives one level down, per
-///   `crate::hook::SUGGEST_DECLINES`; `no_shape/decline_absent` is the pre-tag shape, a
-///   deployment state rather than a tenth cause.
-/// * every other `crate::hook::SUGGEST_OUTCOMES` value -- verbatim.
+/// * `no_shape/<decline>` -- suggest only: the one outcome whose attribution lives one level
+///   down, per `crate::hook::SUGGEST_DECLINES`; `no_shape/decline_absent` is the pre-tag shape, a
+///   deployment state rather than a tenth cause. A `no_shape` value on any other command is not
+///   that command's shape to attribute, so it surfaces as `unknown/no_shape` instead.
+/// * every `crate::hook::SUGGEST_OUTCOMES` (suggest) or `crate::hook::REFRESH_OUTCOMES` (refresh)
+///   value -- verbatim; the vocabulary is the writing command's own, and the decline split below
+///   is suggest's contract alone
 /// * `unknown/<value>` -- anything else, verbatim under a prefix that makes it impossible to
 ///   mistake for a known outcome. A vocabulary that grew without its constant grows here first.
 ///
@@ -559,6 +562,11 @@ pub fn hook_census_at(
     command: &str,
     since_ms: i64,
 ) -> Result<Map<String, Value>, CortError> {
+    let (known, splits_decline): (&[&str], bool) = if command == "hook-refresh" {
+        (&crate::hook::REFRESH_OUTCOMES, false)
+    } else {
+        (&crate::hook::SUGGEST_OUTCOMES, true)
+    };
     let mut out: Map<String, Value> = Map::new();
     if !path.exists() {
         return Ok(out);
@@ -585,14 +593,14 @@ pub fn hook_census_at(
             } else if let Ok(parsed) = serde_json::from_str::<Value>(&raw) {
                 match parsed.get("hook").and_then(Value::as_str) {
                     None => "legacy_unsplit".to_string(),
-                    Some("no_shape") => format!(
+                    Some("no_shape") if splits_decline => format!(
                         "no_shape/{}",
                         parsed
                             .get("decline")
                             .and_then(Value::as_str)
                             .unwrap_or("decline_absent")
                     ),
-                    Some(h) if crate::hook::SUGGEST_OUTCOMES.contains(&h) => h.to_string(),
+                    Some(h) if known.contains(&h) => h.to_string(),
                     Some(h) => format!("unknown/{h}"),
                 }
             } else {
