@@ -326,3 +326,35 @@ fn a_freshly_indexed_tree_owes_no_rebuild() {
         "an index this binary just built owes nothing: {s:?}"
     );
 }
+
+/// `candidates_narrowed` is carried raw so the read path can say what the repair hook would do.
+/// It must never feed `index_is_stale`: a non-git tree narrows nothing by construction, and a
+/// hash-fresh non-git index is fresh regardless of whether any hook could have kept it current.
+#[test]
+fn a_hash_fresh_non_git_index_is_fresh_and_reports_unnarrowed_candidates() {
+    let (_dir, root) = make_project(SAMPLE);
+    let mut db = open_db(":memory:").unwrap();
+    ensure_schema(&db).unwrap();
+    let project_id = project_id_for(root.to_str().unwrap());
+    let bin = resolve_ast_grep_bin().expect("ast-grep on PATH");
+    full_index(&mut db, &bin, &root).unwrap();
+
+    let s = compute_stale(&db, &bin, &root, &project_id).unwrap();
+    assert!(!s.index_is_stale, "every file hash matches: {s:?}");
+    assert!(
+        !s.candidates_narrowed,
+        "git cannot speak for this tree, so nothing was narrowed: {s:?}"
+    );
+    assert!(s.rebuild_required.is_empty(), "{s:?}");
+}
+
+/// The git twin: the same clean tree under git reports the narrowing the probe actually had,
+/// which is what lets the read path tell "the hook will take this" from "only a foreground
+/// rebuild fixes this" without running git a second time.
+#[test]
+fn a_fresh_git_index_reports_narrowed_candidates() {
+    let (_dir, root, db, project_id, bin) = setup(SAMPLE);
+    let s = compute_stale(&db, &bin, &root, &project_id).unwrap();
+    assert!(!s.index_is_stale);
+    assert!(s.candidates_narrowed, "{s:?}");
+}

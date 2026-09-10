@@ -71,12 +71,13 @@ fn arr<'a>(v: &'a Value, key: &str) -> &'a [Value] {
 pub fn render_impact(payload: &Value) -> String {
     let seeds = arr(payload, "seeds");
     let mut lines = vec![format!(
-        "# impact {} depth={} seeds={} dependents={} stale={}",
+        "# impact {} depth={} seeds={} dependents={} stale={} repair={}",
         as_str(payload, "symbol"),
         js_display(payload, "depth"),
         seeds.len(),
         js_display(payload, "dependent_count"),
         js_display(payload, "index_is_stale"),
+        as_str(payload, "repair"),
     )];
     for s in seeds {
         lines.push(format!(

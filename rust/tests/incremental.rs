@@ -1004,3 +1004,42 @@ fn file_state_chunk_count_separates_scanned_empty_from_unknown() {
         "a file with no declarations reads scanned-empty, not missed"
     );
 }
+
+/// The read path's `repair` classification must be the same decision the Forbid gates enforce,
+/// or the token describes a hook that does not ship. Pinned here against both refusal arms in
+/// their cheapest fixture: a superseded extractor (the first gate, refused before any git
+/// subprocess runs) and a tree git cannot narrow (the second). `rebuild_reasons_of` carries the
+/// same single-reader rule one level down.
+#[test]
+fn the_forbid_refusal_predicate_agrees_with_both_gates() {
+    let (_dir, root, mut db, _id, bin) = git_project(SAMPLE);
+    set_meta(&db, "extractor_version", "stale-version-hash").unwrap();
+    let reasons = match incremental_index(&mut db, &bin, &root, RebuildPolicy::Forbid) {
+        Err(cort::indexer::IndexError::FullRebuildRequired { reasons }) => reasons,
+        other => panic!("expected FullRebuildRequired, got {other:?}"),
+    };
+    assert_eq!(reasons, vec!["extractor_changed".to_string()]);
+    assert!(cort::incremental::forbid_refuses(&reasons, true));
+
+    // No git init: nothing can narrow, so the second gate refuses even with no stored debt.
+    let (dir, root) = make_project(SAMPLE);
+    let mut db = open_db(":memory:").unwrap();
+    ensure_schema(&db).unwrap();
+    let bin = resolve_ast_grep_bin().expect("ast-grep on PATH");
+    full_index(&mut db, &bin, &root).unwrap();
+    let reasons = match incremental_index(&mut db, &bin, &root, RebuildPolicy::Forbid) {
+        Err(cort::indexer::IndexError::FullRebuildRequired { reasons }) => reasons,
+        other => panic!("expected FullRebuildRequired, got {other:?}"),
+    };
+    assert_eq!(reasons, vec!["candidates_not_narrowed".to_string()]);
+    assert!(cort::incremental::forbid_refuses(&[], false));
+    assert!(
+        !cort::incremental::forbid_refuses(&[], true),
+        "a narrowed tree with no stored debt is exactly what the hook accepts"
+    );
+    assert!(cort::incremental::forbid_refuses(
+        &["anything".into()],
+        false
+    ));
+    drop(dir);
+}

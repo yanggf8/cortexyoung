@@ -203,6 +203,20 @@ pub fn impact_command(
     }
 
     let stale = compute_stale(db, bin, root, project_id).map_err(map_index)?;
+    // What the edit hook's repair attempt would do about this staleness, in the hook's own
+    // outcome vocabulary: `none` (nothing owed), `refreshable` (an incremental is accepted; the
+    // PostToolUse hook heals it on the next edit), `rebuild_required` (the hook refuses; only a
+    // foreground `cort index` fixes this). Classification, not history: busy, an upgrade
+    // stand-down and the other transient give-ups are not named here -- `forbid_refuses`
+    // classifies the refusal the hook would reach, and its doc says so.
+    let repair = if !stale.index_is_stale {
+        "none"
+    } else if crate::incremental::forbid_refuses(&stale.rebuild_required, stale.candidates_narrowed)
+    {
+        "rebuild_required"
+    } else {
+        "refreshable"
+    };
     // Which line inside each dependent names the thing it calls. A dependent's parents are taken as
     // "the seeds plus everything nearer the seed than it is", because the recursion records the hop
     // a chunk entered at but not which edge carried it: the claim printed is then "this dependent
@@ -258,5 +272,11 @@ pub fn impact_command(
         "dependent_count": dep_json.len(),
         "unresolved": unresolved,
         "index_is_stale": stale.index_is_stale,
+        // The facts the token was derived from, so a JSON consumer can re-derive or audit it
+        // without a second probe: the stored-index refusal reasons, and whether git could
+        // narrow the candidate set this answer was staleness-checked against.
+        "rebuild_required": stale.rebuild_required,
+        "candidates_narrowed": stale.candidates_narrowed,
+        "repair": repair,
     }))
 }

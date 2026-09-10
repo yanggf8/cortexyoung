@@ -333,6 +333,19 @@ pub enum RebuildPolicy {
     Forbid,
 }
 
+/// Whether an incremental under [`RebuildPolicy::Forbid`] refuses -- i.e. what the edit hook's
+/// repair attempt would do -- from the two facts a read-path probe already holds. This is the
+/// read-path mirror of the two ordered gates inside [`incremental_index`] (stored-version
+/// reasons first, so a refusal there never pays for a git subprocess; the narrowing arm sits
+/// below it), and the agreement test in `tests/incremental.rs` pins them together: adding a
+/// refusal cause to a gate without extending this predicate, or the reverse, is the two-copies
+/// defect `rebuild_reasons_of` exists to end. Deliberately narrow: busy, an upgrade stand-down,
+/// `no_index`, `db_unavailable` and `no_ast_grep` are transient or out of scope, and this
+/// predicate says nothing about them.
+pub fn forbid_refuses(rebuild_reasons: &[String], candidates_narrowed: bool) -> bool {
+    !rebuild_reasons.is_empty() || !candidates_narrowed
+}
+
 /// Entry: canonicalize root, then `project_id_for` (via `full_index` / `canonicalize_root`).
 pub fn incremental_index(
     db: &mut Db,

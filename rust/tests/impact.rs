@@ -58,6 +58,45 @@ fn indexed(
     (dir, root, db, project_id, bin)
 }
 
+fn git(root: &std::path::Path, args: &[&str]) {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+fn git_indexed(
+    files: &[(&str, &str)],
+) -> (
+    tempfile::TempDir,
+    PathBuf,
+    rusqlite::Connection,
+    String,
+    String,
+) {
+    let (dir, root) = make_project(files);
+    git(&root, &["init", "-q"]);
+    git(&root, &["config", "user.email", "t@e.com"]);
+    git(&root, &["config", "user.name", "t"]);
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-qm", "init"]);
+    let mut db = open_db(":memory:").unwrap();
+    ensure_schema(&db).unwrap();
+    let project_id = project_id_for(root.to_str().unwrap());
+    let bin = resolve_ast_grep_bin().expect("ast-grep on PATH");
+    full_index(&mut db, &bin, &root).unwrap();
+    (dir, root, db, project_id, bin)
+}
+
 /// D-26
 #[test]
 fn the_default_depth_is_3() {
@@ -154,9 +193,13 @@ fn unresolved_references_are_inlined_on_the_fly_and_nothing_is_persisted() {
 /// D-33
 #[test]
 fn the_packet_reports_index_staleness() {
+    // Non-git fixture, and `repair` must still say `none`: a fresh index has nothing to repair,
+    // which is why the token is derived from staleness first and the refusal facts second.
     let (_dir, root, db, project_id, bin) = indexed(CHAIN);
     let out = impact_command(&db, &bin, &root, &project_id, "d", DEFAULT_DEPTH).unwrap();
     assert_eq!(out["index_is_stale"], false);
+    assert_eq!(out["repair"], "none", "fresh: nothing to repair: {out}");
+    assert_eq!(out["rebuild_required"], serde_json::json!([]));
 }
 
 /// D-34
@@ -309,4 +352,56 @@ fn a_qualified_type_reference_resolves_to_the_module_it_names() {
         "exactly one dependent -- attaching to both definitions is the phantom: {deps:?}"
     );
     assert_eq!(deps[0]["symbol_name"].as_str(), Some("from_json"));
+}
+
+/// The case calibration kept surfacing as `hit_stale`: a dirty tree git can speak for is stale,
+/// but the repair hook accepts an incremental -- the next edit heals it, and a foreground
+/// `cort index --incremental` heals it now.
+#[test]
+fn a_dirty_git_tree_is_stale_but_refreshable() {
+    let (_dir, root, db, project_id, bin) = git_indexed(CHAIN);
+    fs::write(
+        root.join("src/d.ts"),
+        "export function d() { return 42; }\n",
+    )
+    .unwrap();
+    let out = impact_command(&db, &bin, &root, &project_id, "d", DEFAULT_DEPTH).unwrap();
+    assert_eq!(out["index_is_stale"], true);
+    assert_eq!(out["repair"], "refreshable", "{out}");
+    assert_eq!(out["candidates_narrowed"], true);
+    assert_eq!(out["rebuild_required"], serde_json::json!([]));
+}
+
+/// The 682 silent refusals, made visible at the answer: a refusal cause on the stored index.
+/// Editing cannot heal this one; only a foreground `cort index` can. The token reuses the
+/// hook's own outcome word so the two surfaces cannot drift apart in vocabulary.
+#[test]
+fn a_superseded_extractor_is_stale_and_rebuild_required() {
+    let (_dir, root, db, project_id, bin) = git_indexed(CHAIN);
+    cort::db::set_meta(&db, "extractor_version", "not-the-one-that-ships").unwrap();
+    let out = impact_command(&db, &bin, &root, &project_id, "d", DEFAULT_DEPTH).unwrap();
+    assert_eq!(out["index_is_stale"], true);
+    assert_eq!(out["repair"], "rebuild_required", "{out}");
+    assert!(out["rebuild_required"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|r| r.as_str() == Some("extractor_changed")));
+}
+
+/// A non-git tree narrows nothing, so once it is stale the hook refuses it for the same reason
+/// it refuses a rebuild: the candidate set cannot be narrowed honestly. Reported through the
+/// raw fact -- narrowing never becomes an input to `index_is_stale` itself.
+#[test]
+fn a_stale_non_git_tree_reports_unnarrowed_candidates_and_rebuild_required() {
+    let (_dir, root, db, project_id, bin) = indexed(CHAIN);
+    fs::write(
+        root.join("src/d.ts"),
+        "export function d() { return 42; }\n",
+    )
+    .unwrap();
+    let out = impact_command(&db, &bin, &root, &project_id, "d", DEFAULT_DEPTH).unwrap();
+    assert_eq!(out["index_is_stale"], true);
+    assert_eq!(out["candidates_narrowed"], false);
+    assert_eq!(out["repair"], "rebuild_required", "{out}");
 }

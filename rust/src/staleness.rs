@@ -24,6 +24,14 @@ pub struct StaleReport {
     /// here: it is already staleness by the changed-files route, and it says nothing about whether
     /// the index this binary is looking at was built by semantics it still uses.
     pub rebuild_required: Vec<String>,
+    /// Whether git could narrow the candidate set this probe examined (`git_candidates`' own
+    /// verdict, carried so a read path can classify what the repair hook would do without
+    /// running git a second time). Deliberately NOT an input to `index_is_stale`: a non-git
+    /// tree narrows nothing by construction, and a hash-fresh non-git index is fresh regardless
+    /// of whether any hook could have kept it current. Narrowing is a property of the working
+    /// tree and git, not of the stored index -- the same reason `candidates_not_narrowed` stays
+    /// out of `rebuild_required` above.
+    pub candidates_narrowed: bool,
 }
 
 /// `base` is always `projects.path` when a row exists, never cwd (C2-22).
@@ -113,5 +121,6 @@ pub fn compute_stale(
         deleted_files: deleted,
         changed_files,
         rebuild_required,
+        candidates_narrowed: cands.narrowed,
     })
 }

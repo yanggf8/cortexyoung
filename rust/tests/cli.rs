@@ -2435,6 +2435,11 @@ fn status_does_not_contradict_itself_about_the_extractor() {
         Some("superseded"),
         "the version status names must be the one the decision was made from: {st}"
     );
+    assert_eq!(
+        st.get("candidates_narrowed").and_then(Value::as_bool),
+        Some(true),
+        "the raw narrowing fact rides beside the reasons, in the git fixture it narrowed: {st}"
+    );
 }
 
 /// The third refusal reason has its own gate, because it is the only one not derived from stored

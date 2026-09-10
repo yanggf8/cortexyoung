@@ -1950,6 +1950,10 @@ fn cmd_status(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError
             // runs the obvious command learns that the index is stale and never learns that
             // re-indexing is what fixes it -- which is the whole point of the screen.
             "rebuild_required": stale.rebuild_required,
+            // The narrowing fact raw, never folded into `rebuild_required`: it is a property of
+            // the working tree and git, so a non-git index whose hashes all match must not read
+            // as owed a rebuild. Beside the reasons, this is what the repair hook would decide.
+            "candidates_narrowed": stale.candidates_narrowed,
         }),
     })
 }

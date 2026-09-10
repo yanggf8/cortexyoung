@@ -135,7 +135,7 @@ fn lean_impact_output_lists_every_dependent_with_its_hop_and_drops_the_stored_ch
     let out = render(Some("impact"), Format::Lean, &impact);
     assert!(
         out.lines()
-            .any(|l| l == "# impact d depth=3 seeds=1 dependents=3 stale=false"),
+            .any(|l| l == "# impact d depth=3 seeds=1 dependents=3 stale=false repair=none"),
         "{out}"
     );
     // Six columns, the last two new in schema v4: the line *inside* the dependent that names the
@@ -572,5 +572,29 @@ fn dropped_resolutions_do_not_make_the_mention_list_look_truncated() {
     assert!(
         !out.contains("truncated"),
         "nothing was cut from the mention list; counting the drops in would fake a cut: {out}"
+    );
+}
+
+/// The lean header is the line agents read, so the repair classification rides on it verbatim.
+/// The values are the hook's own outcome vocabulary: `none` (nothing to repair), `refreshable`
+/// (an incremental is accepted; the PostToolUse hook heals it on the next edit),
+/// `rebuild_required` (the hook refuses; only a foreground `cort index` fixes it). Impact's
+/// payload derives the token; render only carries it.
+#[test]
+fn the_lean_header_carries_the_repair_classification() {
+    let payload = serde_json::json!({
+        "symbol": "d",
+        "depth": 3,
+        "seeds": [],
+        "dependent_count": 0,
+        "index_is_stale": true,
+        "repair": "rebuild_required",
+    });
+    let out = render(Some("impact"), Format::Lean, &payload);
+    assert!(
+        out.lines().any(|l| {
+            l == "# impact d depth=3 seeds=0 dependents=0 stale=true repair=rebuild_required"
+        }),
+        "{out}"
     );
 }

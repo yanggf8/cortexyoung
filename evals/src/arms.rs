@@ -35,7 +35,9 @@ pub fn cort_guidance() -> String {
 {}\n\n\
 It answers relationship questions — who reaches a symbol, and in how many hops — from a\n\
 pre-built index, in one call per query. `-f lean` keeps the answer small. Its lean output\n\
-reports stale=; if that is ever true, say so in your reply.",
+reports stale= and repair=; if stale is ever true, say so in your reply. repair= says what the\n\
+automatic repair hook would do: rebuild_required means it refuses and only a foreground\n\
+`cort index --incremental` fixes the staleness.",
         cort_bin()
     )
 }
