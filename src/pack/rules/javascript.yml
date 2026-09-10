@@ -92,6 +92,28 @@ rule:
             kind: arrow_function
             stopBy: end
 ---
+# String-wired registration (issue #6): AngularJS resolves registrations by string name at
+# runtime, and the wire never spells a call -- `$uibModal.open({controller: 'C'})` and
+# `$routeProvider.when('/x', {controller: 'C'})` would otherwise be permanent quoted gaps. The
+# key whitelist is measured, not guessed: on the real corpus the string-valued shapes for
+# `filter` and `component` are vendor-bundle column definitions, so they stay out. `$CALLEE`
+# captures the string node itself, which pins the edge to the string's line -- coverage only
+# ever lets a quoted mention go covered by that exact line, never by tolerance. Known FNs kept
+# honest as gaps: `ng-controller="C"` in HTML templates and `$filter('name')` (a string argument
+# to a real call, not a pair).
+id: cort-js-edge-string-reference
+language: JavaScript
+severity: hint
+message: edge:references:type
+rule:
+  all:
+    - kind: pair
+    - has:
+        field: key
+        kind: property_identifier
+        regex: '^(controller|service|factory|directive|provider)$'
+    - has: { field: value, kind: string, pattern: $CALLEE }
+---
 # ES5 object-literal method: `return { save: function () {...} }` -- the shape AngularJS service
 # bodies are written in. Bare NAME, no owner: the JS convention, same as `chunk:method` records
 # from `method_definition`.

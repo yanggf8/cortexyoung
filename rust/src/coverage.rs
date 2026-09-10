@@ -666,13 +666,15 @@ pub fn coverage_for(
                 } else {
                     cause_of(source_line, column, name.chars().count())
                 };
-                // A quoted mention can never become an edge -- the extractor does not read strings --
-                // so it is exempt from the line tolerance. Counting it as covered because a real call
-                // happens to sit two lines away is exactly the swallowing this screen exists to avoid.
-                let covered = cause != "quoted"
-                    && edge_lines
-                        .iter()
-                        .any(|edge| (edge - line as i64).abs() <= LINE_TOLERANCE);
+                // A quoted mention can become an edge exactly one way now: the string-reference
+                // pair rule (issue #6) pins a wire to the string's own line. So quoted gets
+                // exact-line matching -- never the tolerance, which would let a real call two
+                // lines away swallow `"do not call a()"`, the swallowing this screen exists to
+                // avoid. Every other cause keeps the tolerance that absorbs AST range drift.
+                let tolerance = if cause == "quoted" { 0 } else { LINE_TOLERANCE };
+                let covered = edge_lines
+                    .iter()
+                    .any(|edge| (edge - line as i64).abs() <= tolerance);
                 if covered {
                     covered_count += 1;
                     file_covered = true;

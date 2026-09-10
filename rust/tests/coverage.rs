@@ -5,6 +5,7 @@ use cort::coverage::{attach, bare_name, cause_of, mentions};
 use cort::db::{ensure_schema, open_db, project_id_for};
 use cort::impact::impact_command;
 use cort::indexer::full_index;
+use rusqlite::params;
 use serde_json::{json, Value};
 use std::fs;
 
@@ -175,6 +176,156 @@ fn a_name_inside_a_string_is_attributed_to_quoted_and_sorted_last() {
         cov["blind_files"]["unindexed"].as_u64().unwrap() == 0,
         "{cov}"
     );
+}
+
+/// String-wired registration (issue #6 follow-up): `$uibModal.open({controller: 'C'})` spells no
+/// call the extractor can read, so the mention used to be a permanent quoted gap. The pack's
+/// string-reference pair rule now births a `references` edge ON the string's own line, and coverage
+/// lets a quoted mention go covered only by an *exact-line* edge -- the tolerance that absorbs AST
+/// range drift for calls must never swallow a string gap, or `"do not call a()"` two lines from a
+/// real call would vanish.
+#[test]
+fn a_string_wired_pair_becomes_an_edge_on_the_strings_line_and_stops_being_a_gap() {
+    let (_dir, root, db, project_id, bin) = indexed(&[
+        (
+            "src/app.js",
+            "angular.module('app').controller('custTrackCtrl', function () {});\n",
+        ),
+        (
+            "src/other.js",
+            "function open(uibModal) {\n  uibModal.open({controller: 'custTrackCtrl'});\n}\nfunction route(provider) {\n  provider.when('/x', {controller: 'custTrackCtrl'});\n}\n",
+        ),
+    ]);
+    // The wire is a real edge first: pre-resolution, pinned to the line the string sits on.
+    let mut stmt = db
+        .prepare(
+            "SELECT file_path, call_form, start_line FROM raw_edges
+              WHERE project_id = ?1 AND rel_type = 'references' AND raw_target = 'custTrackCtrl'
+              ORDER BY start_line",
+        )
+        .unwrap();
+    let wires: Vec<(String, String, i64)> = stmt
+        .query_map(params![project_id], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        wires,
+        vec![
+            ("src/other.js".into(), "type".into(), 2),
+            ("src/other.js".into(), "type".into(), 5),
+        ],
+        "one wire per pair line, form `type`, anchored on the string"
+    );
+
+    // And it resolves: `open` and `route` are dependents of the registered controller, each citing
+    // the string line an agent can read.
+    let impact = impact_command(&db, &bin, &root, &project_id, "custTrackCtrl", 3).unwrap();
+    assert_eq!(impact["dependent_count"].as_i64(), Some(2), "{impact}");
+    let mut sites: Vec<(i64, String)> = impact["dependents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| {
+            (
+                d["call_site_line"].as_i64().unwrap(),
+                d["call_form"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    sites.sort();
+    assert_eq!(
+        sites,
+        vec![(2, "type".into()), (5, "type".into())],
+        "{impact}"
+    );
+
+    // Coverage closes the loop: the pair mentions are no longer quoted gaps.
+    let cov = coverage_of(&db, &project_id, &root, &bin, "custTrackCtrl");
+    let gaps = cov["seeds"][0]["mentions_without_edge"].as_array().unwrap();
+    assert!(
+        gaps.iter().all(|g| {
+            let line = g["line"].as_i64().unwrap_or(0);
+            line != 2 && line != 5
+        }),
+        "the wire lines must not be gaps: {cov}"
+    );
+    assert_eq!(gaps.len(), 0, "no gaps at all: {cov}");
+}
+
+/// The whitelist's control arm, measured on the real corpus before it was written down: a
+/// string-valued `filter:` pair is an ag-grid column definition, not a registration wire. It must
+/// stay a quoted gap -- never an edge, and never swallowed by the tolerance a call would earn.
+#[test]
+fn a_string_valued_pair_outside_the_whitelist_stays_an_honest_gap() {
+    let (_dir, root, db, project_id, bin) = indexed(&[
+        (
+            "src/app.js",
+            "angular.module('app').filter('text', function () {});\n",
+        ),
+        ("src/grid.js", "var columnDefs = [{filter: 'text'}];\n"),
+    ]);
+    let n: i64 = db
+        .query_row(
+            "SELECT count(*) FROM raw_edges
+              WHERE project_id = ?1 AND rel_type = 'references' AND raw_target = 'text'",
+            params![project_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(n, 0, "the `filter:` pair is not a wire");
+    let cov = coverage_of(&db, &project_id, &root, &bin, "text");
+    let gaps = cov["seeds"][0]["mentions_without_edge"].as_array().unwrap();
+    assert!(
+        gaps.iter()
+            .any(|g| g["cause"] == Value::String("quoted".into())),
+        "the string mention must still surface: {cov}"
+    );
+}
+
+/// A wire onto a name two registrations claim resolves to neither: one honest AMBIGUOUS row per
+/// target at the same line, exactly like an ambiguous call -- the ambiguity is disclosed, not
+/// guessed away.
+#[test]
+fn a_wire_onto_a_duplicated_name_writes_one_honest_row_per_target() {
+    let (_dir, root, db, project_id, bin) = indexed(&[
+        (
+            "src/a.js",
+            "angular.module('a').controller('dupCtrl', function () {});\n",
+        ),
+        (
+            "src/b.js",
+            "angular.module('b').controller('dupCtrl', function () {});\n",
+        ),
+        (
+            "src/c.js",
+            "function wire(modal) { modal.open({controller: 'dupCtrl'}); }\n",
+        ),
+    ]);
+    let mut stmt = db
+        .prepare(
+            "SELECT r.call_site_line, r.confidence, r.confidence_score
+              FROM relationships r JOIN chunks c ON c.chunk_id = r.target_chunk_id
+              WHERE c.symbol_name = 'dupCtrl' AND r.rel_type = 'references'
+              ORDER BY r.target_chunk_id",
+        )
+        .unwrap();
+    let rows: Vec<(i64, String, f64)> = stmt
+        .query_map(params![], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(rows.len(), 2, "one row per same-named target: {rows:?}");
+    assert!(
+        rows.iter().all(|(line, conf, score)| {
+            *line == 1 && conf == "AMBIGUOUS" && (*score - 0.25).abs() < 1e-9
+        }),
+        "each row is honest about the split: {rows:?}"
+    );
+    let impact = impact_command(&db, &bin, &root, &project_id, "dupCtrl", 3).unwrap();
+    assert_eq!(impact["dependent_count"].as_i64(), Some(1), "{impact}");
 }
 
 #[test]
