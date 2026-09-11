@@ -78,7 +78,13 @@ const RUN_AGENTS_FLAGS: &[&str] = &[
 ];
 const VERIFY_IMPACT_FLAGS: &[&str] = &["--repo", "--depth", "--symbols"];
 const RECALL_EXP_FLAGS: &[&str] = &["--venue", "--top"];
-const HOOK_PROBE_FLAGS: &[&str] = &["--claude-dir", "--codex-dir", "--kimi-dir", "--examples"];
+const HOOK_PROBE_FLAGS: &[&str] = &[
+    "--claude-dir",
+    "--codex-dir",
+    "--kimi-dir",
+    "--examples",
+    "--decline",
+];
 const ADOPT_MINE_FLAGS: &[&str] = &[
     "--since",
     "--claude-dir",
@@ -105,7 +111,7 @@ const USAGE_VERIFY_IMPACT: &str =
 const USAGE_SUMMARIZE: &str = "usage: cort-evals summarize [--strict] rows.json [rows.json...]";
 const USAGE_DEMAND: &str = "usage: cort-evals demand [--claude-dir DIR] [--codex-dir DIR] [--exclude a,b,c] [--out FILE] [--show]";
 const USAGE_HOOK_PROBE: &str =
-    "usage: cort-evals hook-probe [--claude-dir DIR] [--codex-dir DIR] [--examples N]  (replays the routing rule over transcripts already on disk; no model calls)";
+    "usage: cort-evals hook-probe [--claude-dir DIR] [--codex-dir DIR] [--kimi-dir DIR] [--examples N] [--decline TAG]  (replays the routing rule over transcripts already on disk; --decline narrows passed_over_examples to one decline tag, the census always covers every tag; no model calls)";
 const USAGE_ADOPT_MINE: &str = "usage: cort-evals adopt-mine --since RFC3339 [--claude-dir DIR] [--usage-db FILE] [--rows N] [--follow-calls N] [--exclude proj,proj] [--out FILE]  (the docs/2026-08-31-recall-wip.md §6 funnel; reads transcripts already on disk, no model calls)";
 const USAGE_RECALL_EXP: &str =
     "usage: cort-evals recall-exp --venue DIR [--top N]  (text-side counterfactual; no cort index needed)";
@@ -692,7 +698,9 @@ fn hook_probe_main(argv: &[String]) -> Result<(), String> {
             )),
         ),
     ];
-    let report = cort_evals::hook::probe(&dirs, examples);
+    let decline = at(argv, "--decline", "");
+    let decline = (!decline.is_empty()).then_some(decline.as_str());
+    let report = cort_evals::hook::probe(&dirs, examples, decline);
     print_report(&report);
     Ok(())
 }

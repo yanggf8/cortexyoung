@@ -166,7 +166,7 @@ fn a_printed_report_names_the_machine_that_produced_it() {
 /// not replayable: the index state at the time of each historical fire is not recoverable.
 #[test]
 fn the_probe_names_its_numbers_shape_only_and_says_why() {
-    let report = probe(&[], 0);
+    let report = probe(&[], 0, None);
     assert_eq!(report["method"].as_str(), Some("hook-probe-v3"));
     for key in [
         "shape_fired",

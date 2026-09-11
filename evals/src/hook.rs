@@ -17,7 +17,9 @@
 //! failure the demand screen already documented for over-broad skill prose.
 
 use cort::hook::is_redirection;
-use cort::hook::{judge, search_from_grep_fields, search_from_shell, Evidence, Search, Verdict};
+use cort::hook::{
+    judge, search_from_grep_fields, search_from_shell, Evidence, Search, SilenceReason, Verdict,
+};
 pub use cort::hook::{suggests_impact_shape, HookHit};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -352,13 +354,26 @@ fn jsonl_files(dir: &Path, depth: usize) -> Vec<PathBuf> {
 
 /// Replay the rule over transcripts. Reports what fired, with the command each fire came from, so
 /// the precision number is adjudicated rather than asserted.
-pub fn probe(dirs: &[(&str, PathBuf)], max_examples: usize) -> Value {
+/// The stable identifier a silence carries, the same string the deployed hook would write to
+/// `usage.db` for the same payload. Adjudication groups on it, so it must be the vocabulary's own
+/// name and not this report's invention.
+fn decline_tag(reason: &SilenceReason) -> &'static str {
+    match reason {
+        SilenceReason::NoShape(tag) => tag,
+        SilenceReason::NoIndex => "no_index",
+        SilenceReason::NoEvidence => "no_evidence",
+    }
+}
+
+pub fn probe(dirs: &[(&str, PathBuf)], max_examples: usize, decline: Option<&str>) -> Value {
     let (mut shell_searches, mut structured_searches) = (0usize, 0usize);
     let (mut shape_fired_shell, mut shape_fired_structured) = (0usize, 0usize);
     let mut commands_seen = 0usize;
     let mut fires: Vec<Value> = Vec::new();
     let mut passed_over: Vec<Value> = Vec::new();
     let mut symbols: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let mut declines: std::collections::BTreeMap<&'static str, usize> =
+        std::collections::BTreeMap::new();
     let (mut confirmed, mut rejected, mut tree_missing, mut no_source) =
         (0usize, 0usize, 0usize, 0usize);
 
@@ -434,11 +449,24 @@ pub fn probe(dirs: &[(&str, PathBuf)], max_examples: usize) -> Value {
                                 }));
                             }
                         }
-                        Verdict::Silent(_) => {
-                            if passed_over.len() < max_examples {
+                        Verdict::Silent(reason) => {
+                            // The census counts the whole population; the dump follows the filter
+                            // and stays capped. They are different questions -- "what does the
+                            // rule decline" needs every row, "show me specimens" needs only enough
+                            // to read -- and one number cannot answer both.
+                            let tag = decline_tag(&reason);
+                            *declines.entry(tag).or_insert(0) += 1;
+                            if decline.is_none_or(|d| d == tag) && passed_over.len() < max_examples
+                            {
+                                // The parsed pattern, not just the raw command: adjudication reads
+                                // what the judge read, and the parser's extraction is the thing
+                                // under adjudication. Same sensitivity class as `command` -- this
+                                // is the offline report, not the deployed log.
                                 passed_over.push(json!({
                                     "session": session,
                                     "source": source,
+                                    "decline": tag,
+                                    "pattern": search.pattern,
                                     "command": truncate(&shown),
                                 }));
                             }
@@ -471,6 +499,7 @@ pub fn probe(dirs: &[(&str, PathBuf)], max_examples: usize) -> Value {
         "confirmed_seeds_in_searched_tree": confirmed,
         "distinct_symbols": symbols.len(),
         "symbols": symbols,
+        "declines": declines,
         "fires": fires,
         "passed_over_examples": passed_over,
         "index_check_reading": "This report replays the SHAPE half of the verdict only. Since \
@@ -526,5 +555,117 @@ fn truncate(s: &str) -> String {
         cleaned
     } else {
         cleaned.chars().take(160).collect::<String>() + "…"
+    }
+}
+
+#[cfg(test)]
+mod decline_probe {
+    use super::*;
+    use tempfile::tempdir;
+
+    /// One session line per shape the rule can reach, each its own file so counts stay unambiguous.
+    fn session(dir: &Path, name: &str, command: &str) {
+        let path = dir.join("proj").join(name);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            path,
+            serde_json::json!({
+                "tool_name": "Bash",
+                "tool_input": { "command": command },
+                "cwd": "/nonexistent-venue",
+            })
+            .to_string(),
+        )
+        .unwrap();
+    }
+
+    /// The adjudication this probe exists to serve needs the declines named, not lumped: the
+    /// `pattern_not_symbol` survivors of the current judge are the population whose patterns get
+    /// read by hand, and a report that folds them into one untagged `passed_over` cap of 40 cannot
+    /// produce it. The census must always be present, the example dump must follow `--decline`.
+    #[test]
+    fn the_decline_census_names_what_the_rule_declined_and_the_filter_dumps_that_tag_only() {
+        let dir = tempdir().unwrap();
+        session(
+            dir.path(),
+            "text-hunt.jsonl",
+            "rg 'connection refused after retries' src/",
+        );
+        session(
+            dir.path(),
+            "symbol.jsonl",
+            "grep -rn 'helper(' src --include=*.ts",
+        );
+        session(
+            dir.path(),
+            "log-hunt.jsonl",
+            "rg session_tick build/output.log",
+        );
+
+        // No filter: every silence is counted under its own tag and every example names its tag.
+        let report = probe(&[("claude", dir.path().to_path_buf())], 50, None);
+        let declines = report["declines"].as_object().unwrap();
+        assert_eq!(
+            declines.get("pattern_not_symbol").and_then(Value::as_u64),
+            Some(1),
+            "the text hunt is attributed: {declines:?}"
+        );
+        assert_eq!(
+            declines.get("non_source_target").and_then(Value::as_u64),
+            Some(1),
+            "the log hunt is attributed: {declines:?}"
+        );
+        let passed = report["passed_over_examples"].as_array().unwrap();
+        assert_eq!(passed.len(), 2, "{passed:?}");
+        assert!(passed.iter().all(|e| e.get("decline").is_some()));
+
+        // The filter narrows the dump to the adjudicated tag without touching the census.
+        let report = probe(
+            &[("claude", dir.path().to_path_buf())],
+            50,
+            Some("pattern_not_symbol"),
+        );
+        let passed = report["passed_over_examples"].as_array().unwrap();
+        assert_eq!(passed.len(), 1, "{passed:?}");
+        assert_eq!(
+            passed[0].get("decline").and_then(Value::as_str),
+            Some("pattern_not_symbol")
+        );
+        assert_eq!(
+            report["declines"]
+                .get("pattern_not_symbol")
+                .and_then(Value::as_u64),
+            Some(1),
+            "the census counts the whole population, not the capped dump: {report:?}"
+        );
+        assert!(report["passed_over_examples"].as_array().unwrap()[0]
+            .get("command")
+            .and_then(Value::as_str)
+            .unwrap()
+            .contains("connection refused"));
+        assert_eq!(
+            report["passed_over_examples"].as_array().unwrap()[0]
+                .get("pattern")
+                .and_then(Value::as_str),
+            Some("connection refused after retries"),
+            "the dump carries the pattern the judge read, not just the line it came from"
+        );
+
+        // A tag with no rows on this corpus dumps nothing and invents nothing.
+        let report = probe(
+            &[("claude", dir.path().to_path_buf())],
+            50,
+            Some("no_index"),
+        );
+        assert!(report["passed_over_examples"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            report["declines"]
+                .get("pattern_not_symbol")
+                .and_then(Value::as_u64),
+            Some(1)
+        );
     }
 }
