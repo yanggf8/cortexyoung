@@ -30,8 +30,10 @@ pub enum Evidence {
     Seed,
     /// No chunk, but a `raw_edges` row names it: deleted, or an external type this project uses.
     RawOnly,
-    /// Nothing in the index names it at all: a concept, a field, a domain word.
-    Neither,
+    /// Nothing in the index names it exactly. `why` records how far the lookup got before it
+    /// gave up -- a bare `no_evidence` is a dead end, and the improvement loop needs the
+    /// distance, not just the refusal.
+    Neither(NoEvidenceWhy),
     /// This project has no index, so there was nothing to ask.
     NoIndex,
     /// The lookup could not run -- a replay with no recoverable state, or a database that would not
@@ -99,8 +101,55 @@ pub fn evidence_in(
     Ok(if edge.is_some() {
         Evidence::RawOnly
     } else {
-        Evidence::Neither
+        let like = like_literal(leaf);
+        let shaped = db
+            .query_row(
+                "SELECT 1 FROM chunks
+                  WHERE project_id = ?1 AND symbol_name LIKE '%' || ?2 ESCAPE '\\' LIMIT 1",
+                rusqlite::params![project_id, like],
+                |_| Ok(()),
+            )
+            .optional()?;
+        Evidence::Neither(if shaped.is_some() {
+            NoEvidenceWhy::LeafInIndex
+        } else {
+            NoEvidenceWhy::Absent
+        })
     })
+}
+
+/// How far a `Neither` lookup got, recorded beside the symbol on the `no_evidence` row so the
+/// refusal carries its own repair path. The strings are stable identifiers -- mining groups on
+/// them, so renaming one is a breaking change to the log's vocabulary, the same contract as
+/// `NoShape`'s decline tags.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoEvidenceWhy {
+    /// The bare leaf does sit in `chunks` under a longer name: the definition was extracted and
+    /// the search just didn't name it the way the index does. A name-shape problem, not an
+    /// extraction gap.
+    LeafInIndex,
+    /// Nothing in the index names the symbol at any shape: an extraction gap to chase, or a
+    /// word that was never a definition. This is the row that feeds the offline loop -- match
+    /// the symbol against files, chunks of other projects, and the receiver-gate refusals.
+    Absent,
+}
+
+impl NoEvidenceWhy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            NoEvidenceWhy::LeafInIndex => "leaf_in_index",
+            NoEvidenceWhy::Absent => "absent",
+        }
+    }
+}
+
+/// LIKE 的萬用字元對 bare leaf 來說是普通字元(`_` 在識別字裡到處都是),逐字 escape 後配
+/// `ESCAPE '\'`,讓尾碼比對是字面比對而不是寬配 —— 寬配會把 `absent` 誤報成 `leaf_in_index`,
+/// 污染掉這個欄位唯一存在的理由。
+fn like_literal(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
 }
 
 /// The closed outcome vocabulary `hook-suggest` can record, one entry per writer path. It exists
@@ -171,7 +220,9 @@ pub const REFRESH_OUTCOMES: [&str; 8] = [
 
 /// Why the hook stayed quiet. Separate variants because the mining has to tell a heuristic problem
 /// from an index problem from a missing index, and a single `None` collapses all three.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// `NoIndex`/`NoEvidence` carry the symbol, so this is `Clone` and not `Copy` -- a reason that
+/// names its symbol is data now, not just a tag.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SilenceReason {
     /// Not the narrow shape where the index beats `rg`. The payload is a *stable identifier* for
     /// the rule that declined -- `pattern_not_symbol`, `non_source_target`, `unindexed_extension`,
@@ -180,11 +231,15 @@ pub enum SilenceReason {
     /// by rule instead of one impenetrable number (issue #3). Identifiers, never prose: mining
     /// groups on them, so renaming one is a breaking change to the log's vocabulary.
     NoShape(&'static str),
-    /// Right shape, no index for this project -- a missed opportunity, not a refusal.
-    NoIndex,
+    /// Right shape, no index for this project -- a missed opportunity, not a refusal. The symbol
+    /// rides along so the recorded row says what the missing index would have served.
+    NoIndex { symbol: String },
     /// Right shape, indexed project, and the index holds neither a seed nor a raw edge naming the
-    /// symbol. `impact` would answer `seeds=0 dependents=0` and nothing else.
-    NoEvidence,
+    /// symbol. `impact` would answer `seeds=0 dependents=0` and nothing else. The symbol and the
+    /// [`NoEvidenceWhy`] ride along because a bare `no_evidence` is a dead end: the symbol is
+    /// what the offline loop matches against files and other projects' indexes, and the `why`
+    /// splits "name-shape mismatch" from "never extracted".
+    NoEvidence { symbol: String, why: NoEvidenceWhy },
 }
 
 /// The whole routing decision for one search.
@@ -685,8 +740,13 @@ pub fn judge(search: &Search, evidence: impl FnOnce(&str) -> Evidence) -> Verdic
     // it. This ordering is the budget: the shape gate turns down about 95% of searches and none of
     // them may cost a database open or a `git rev-parse`.
     match evidence(&symbol) {
-        Evidence::Neither => Verdict::Silent(SilenceReason::NoEvidence),
-        Evidence::NoIndex => Verdict::Silent(SilenceReason::NoIndex),
+        Evidence::Neither(why) => Verdict::Silent(SilenceReason::NoEvidence {
+            symbol: symbol.clone(),
+            why,
+        }),
+        Evidence::NoIndex => Verdict::Silent(SilenceReason::NoIndex {
+            symbol: symbol.clone(),
+        }),
         Evidence::Seed | Evidence::RawOnly | Evidence::Unknown => Verdict::Fire(HookHit {
             symbol,
             reason,

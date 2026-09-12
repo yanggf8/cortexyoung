@@ -5,7 +5,7 @@
 
 use cort::hook::{
     evidence_in, judge, search_from_grep_fields, search_from_shell, shell_search_decline,
-    suggests_impact_shape, Evidence, SilenceReason, Suggest, Verdict,
+    suggests_impact_shape, Evidence, NoEvidenceWhy, SilenceReason, Suggest, Verdict,
 };
 
 #[test]
@@ -504,14 +504,14 @@ fn the_verdict_names_which_silence_it_chose() {
             "{label}: expected Fire"
         );
     }
-    assert_eq!(
-        judge(&s, |_| Evidence::Neither),
-        Verdict::Silent(SilenceReason::NoEvidence)
-    );
-    assert_eq!(
+    assert!(matches!(
+        judge(&s, |_| Evidence::Neither(cort::hook::NoEvidenceWhy::Absent)),
+        Verdict::Silent(SilenceReason::NoEvidence { .. })
+    ));
+    assert!(matches!(
         judge(&s, |_| Evidence::NoIndex),
-        Verdict::Silent(SilenceReason::NoIndex)
-    );
+        Verdict::Silent(SilenceReason::NoIndex { .. })
+    ));
 }
 
 /// The lookup must not run for a search the shape gate already rejects, and the lookup is what opens
@@ -587,7 +587,7 @@ fn evidence_reads_chunks_then_raw_edges() {
     );
     assert_eq!(
         evidence_in(&db, &project_id, "no_such_name_anywhere").unwrap(),
-        Evidence::Neither
+        Evidence::Neither(NoEvidenceWhy::Absent)
     );
 
     std::fs::remove_file(root.join("src/gone.rs")).unwrap();
@@ -668,9 +668,11 @@ fn an_import_path_is_not_evidence_that_a_symbol_exists() {
     )
     .unwrap();
 
-    assert_eq!(
-        evidence_in(&db, &project_id, "tide").unwrap(),
-        Evidence::Neither,
+    assert!(
+        matches!(
+            evidence_in(&db, &project_id, "tide").unwrap(),
+            Evidence::Neither(_)
+        ),
         "an import path names a module route, not a call site impact could enumerate"
     );
 }

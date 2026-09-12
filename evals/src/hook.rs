@@ -360,8 +360,8 @@ fn jsonl_files(dir: &Path, depth: usize) -> Vec<PathBuf> {
 fn decline_tag(reason: &SilenceReason) -> &'static str {
     match reason {
         SilenceReason::NoShape(tag) => tag,
-        SilenceReason::NoIndex => "no_index",
-        SilenceReason::NoEvidence => "no_evidence",
+        SilenceReason::NoIndex { .. } => "no_index",
+        SilenceReason::NoEvidence { .. } => "no_evidence",
     }
 }
 

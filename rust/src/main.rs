@@ -644,8 +644,16 @@ fn dispatch(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError> 
 ///
 /// Omitted rather than guessed when the payload has none, and a v1/v2 row is a row from before the
 /// field existed -- the version tells a reader which of the two silences it is looking at.
+///
+/// `v: 4` adds the per-search keys stamped beside the outcome where the probe produced them:
+/// `symbol` on `hit`/`hit_stale`/`no_index`/`no_index_hinted`/`no_evidence`, and `why` (a
+/// `NoEvidenceWhy` identifier) on `no_evidence`. A symbol name is a program identifier, not
+/// payload content -- the same class of fact as the `decline` tag and the shape fingerprint -- and
+/// it is the one key the improvement loop cannot do without: a refusal that does not name its
+/// symbol cannot be matched against files, other projects' chunks, or the gate refusals
+/// afterwards. A v3 row predates the keys and says so.
 fn hook_row(outcome: &str, harness: &str, declared: Option<&str>, model: Option<&str>) -> Value {
-    let mut v = json!({ "v": 3, "hook": outcome, "harness": harness });
+    let mut v = json!({ "v": 4, "hook": outcome, "harness": harness });
     if let Some(d) = declared {
         v["harness_declared"] = json!(d);
     }
@@ -1138,12 +1146,13 @@ fn cmd_hook_suggest(args: &[String], usage: &mut UsageEvent) -> Result<Emit, Cor
                 // session, per directory, says so -- once. The repair is the caller's own one-off
                 // `cort index`; this hook keeps never creating an index (refresh keeps what
                 // exists current), and every later search in that session is silent as before.
-                cort::hook::SilenceReason::NoIndex => {
+                cort::hook::SilenceReason::NoIndex { symbol } => {
                     let session = v.get("session_id").and_then(Value::as_str).unwrap_or("");
                     let dir = v.get("cwd").and_then(Value::as_str).unwrap_or("");
                     if !session.is_empty() && !dir.is_empty() && !no_index_hint_fired(session, dir)
                     {
-                        usage.args_summary = harness_args("no_index_hinted");
+                        usage.args_summary =
+                            hook_args_tag(&harness_args("no_index_hinted"), "symbol", &symbol);
                         return Ok(Emit {
                             payload: json!({
                                 "hookSpecificOutput": {
@@ -1158,11 +1167,23 @@ fn cmd_hook_suggest(args: &[String], usage: &mut UsageEvent) -> Result<Emit, Cor
                             render_command: Some("hook-suggest"),
                         });
                     }
-                    ("no_index", None)
+                    usage.args_summary =
+                        hook_args_tag(&harness_args("no_index"), "symbol", &symbol);
+                    return quiet();
                 }
-                // New: the rule matched, the project is genuinely indexed, and the index holds
-                // neither a seed nor a raw edge naming the symbol. A refusal, not a missed chance.
-                cort::hook::SilenceReason::NoEvidence => ("no_evidence", None),
+                // The rule matched, the project is genuinely indexed, and the index holds neither
+                // a seed nor a raw edge naming the symbol. A refusal, not a missed chance -- and
+                // no longer a dead end: the symbol is what the offline improvement loop matches
+                // the index against (files, other projects' chunks), and the `why` splits
+                // "extracted under a different name shape" from "never extracted".
+                cort::hook::SilenceReason::NoEvidence { symbol, why } => {
+                    usage.args_summary = hook_args_tag(
+                        &hook_args_tag(&harness_args("no_evidence"), "symbol", &symbol),
+                        "why",
+                        why.as_str(),
+                    );
+                    return quiet();
+                }
             };
             usage.args_summary = match decline {
                 Some(tag) => hook_args_shape(
@@ -1192,9 +1213,13 @@ fn cmd_hook_suggest(args: &[String], usage: &mut UsageEvent) -> Result<Emit, Cor
     // It fails toward disclosure: an unset cell is treated as behind-head, which over-warns rather
     // than silently dropping the "built on an older commit" sentence from a suggestion.
     let stale = observed.get().unwrap_or(IndexState::BehindHead) == IndexState::BehindHead;
-    usage.args_summary = hook_args_kind(
-        &harness_args(if stale { "hit_stale" } else { "hit" }),
-        hit.kind.tag(),
+    usage.args_summary = hook_args_tag(
+        &hook_args_kind(
+            &harness_args(if stale { "hit_stale" } else { "hit" }),
+            hit.kind.tag(),
+        ),
+        "symbol",
+        &hit.symbol,
     );
     let stale_clause = if stale {
         // P2 (Kimi-round mining): the old clause moralised ("re-run cort index first if the

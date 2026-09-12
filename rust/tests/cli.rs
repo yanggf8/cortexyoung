@@ -633,6 +633,125 @@ fn row_project_id(usage_db: &Path, outcome: &str) -> String {
     hits.into_iter().next().unwrap().unwrap_or_default()
 }
 
+/// Every hook-suggest row of the given outcome, parsed from its `args_summary`.
+fn hook_row_args(usage_db: &Path, outcome: &str) -> Vec<Value> {
+    let db = rusqlite::Connection::open(usage_db).expect("open usage.db");
+    let mut stmt = db
+        .prepare(
+            "SELECT args_summary FROM command_log
+              WHERE command = 'hook-suggest' AND args_summary LIKE ?1 ORDER BY id",
+        )
+        .expect("prepare");
+    let rows: Vec<String> = stmt
+        .query_map(
+            rusqlite::params![format!("%\"hook\":\"{outcome}\"%")],
+            |r| r.get(0),
+        )
+        .expect("query")
+        .filter_map(Result::ok)
+        .collect();
+    rows.iter()
+        .map(|a| serde_json::from_str(a).expect("args_summary parses as json"))
+        .collect()
+}
+
+/// A refusal row that says only `no_evidence` is a dead end: the improvement loop needs to know
+/// WHICH symbol the index could not name, and how far the lookup got before it gave up. `why`
+/// is the stable vocabulary for that distance: `leaf_in_index` means the bare name does sit in
+/// `chunks` under a longer, differently-shaped name (the definition was extracted; the search
+/// just didn't name it the way the index does), `absent` means nothing in the index names it at
+/// all -- an extraction gap to chase, not a tuning problem.
+#[test]
+fn a_no_evidence_row_names_the_symbol_and_how_far_the_lookup_got() {
+    // `lonely` is a definition nobody calls, so no raw edge names it either: the exact-shape
+    // seed lookup can miss while the bare leaf still sits in chunks. (`alpha` calls `helper`,
+    // NOT `lonely` -- a caller would make lonely RawOnly, and RawOnly fires by design.)
+    let (_proj, cwd) = make_project(&[
+        ("src/lonely.ts", "export function lonely(n: number) { return n * 3; }\n"),
+        ("src/helper.ts", "export function helper(n: number) { return n * 2; }\n"),
+        (
+            "src/alpha.ts",
+            "import { helper } from './helper';\nexport function alpha(a: number) { return helper(a); }\n",
+        ),
+    ]);
+    let cache_dir = tempfile::Builder::new()
+        .prefix("cort-cache-")
+        .tempdir()
+        .unwrap();
+    let cache = cache_dir.path().to_path_buf();
+    let usage_db = cache.join("usage.db");
+    let idx = run_cort(&["index"], &cwd, &cache);
+    if idx.code != 0 {
+        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
+        return;
+    }
+
+    // Neither, and the index holds nothing about any shape of the name.
+    run_hook_suggest(
+        "grep -rn 'totally_absent_sym(' src --include=*.ts",
+        &cwd,
+        &cache,
+    );
+    // Neither, but the bare leaf lives in chunks: same refusal, different repair.
+    run_hook_suggest("grep -rn 'mod::lonely(' src --include=*.ts", &cwd, &cache);
+
+    let rows = hook_row_args(&usage_db, "no_evidence");
+    assert_eq!(rows.len(), 2, "two refusals, two rows: {rows:?}");
+    let absent = rows
+        .iter()
+        .find(|r| r["symbol"] == "totally_absent_sym")
+        .unwrap_or_else(|| panic!("absent row must carry its symbol: {rows:?}"));
+    assert_eq!(absent["why"], "absent", "{absent}");
+    let qualified = rows
+        .iter()
+        .find(|r| r["symbol"] == "mod::lonely")
+        .unwrap_or_else(|| panic!("qualified row must carry its symbol: {rows:?}"));
+    assert_eq!(qualified["why"], "leaf_in_index", "{qualified}");
+}
+
+/// The rows that spoke (or almost did) must say for whom: `hit` names the symbol the suggestion
+/// was about, and `no_index_hinted` names the symbol the hint would have served -- with the
+/// symbol on the row, the refusal/hint/suggestion vocabulary joins the transcript side by
+/// symbol instead of by timestamp guesswork.
+#[test]
+fn the_hint_and_hit_rows_name_the_symbol_they_spoke_for() {
+    let (_p, cwd, _c, cache) = sandbox();
+    let usage_db = cache.join("usage.db");
+    let hint = run_hook_suggest_payload(
+        serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": { "command": FIRING_SEARCH },
+            "session_id": "sess-symbol-1",
+            "cwd": cwd.to_str().unwrap(),
+        }),
+        &[],
+        &cwd,
+        &cache,
+    );
+    assert_eq!(hint.code, 0);
+    assert!(
+        payload(&hint)["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("cort index"),
+        "precondition: the hint fired: {}",
+        hint.stdout
+    );
+    let rows = hook_row_args(&usage_db, "no_index_hinted");
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0]["symbol"], "helper", "{rows:?}");
+
+    let idx = run_cort(&["index"], &cwd, &cache);
+    if idx.code != 0 {
+        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
+        return;
+    }
+    run_hook_suggest(FIRING_SEARCH, &cwd, &cache);
+    let rows = hook_row_args(&usage_db, "hit");
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0]["symbol"], "helper", "{rows:?}");
+}
+
 fn git_in(root: &Path, args: &[&str]) {
     let out = Command::new("git")
         .arg("-C")
@@ -1521,7 +1640,8 @@ fn a_hook_row_names_the_model_that_answered_and_never_invents_one() {
         Some("glm-5.3"),
         "the model the payload named was dropped: {last}"
     );
-    assert_eq!(last.get("v").and_then(Value::as_i64), Some(3));
+    // v4: the per-search keys (`symbol`, and `why` on no_evidence) joined the row shape.
+    assert_eq!(last.get("v").and_then(Value::as_i64), Some(4));
 
     // A payload with no model gets no model. Absence is visible; a wrong name would not be.
     let bare = serde_json::json!({
