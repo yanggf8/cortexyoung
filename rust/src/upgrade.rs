@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 // crate. Imports: this file already has `fs` and `Path` — add only what locking needs.
 
 use std::fs::{File, OpenOptions};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 #[cfg(unix)]
 use std::os::unix::io::AsRawFd;
@@ -482,6 +482,36 @@ pub struct DiagnoseInputs<'a> {
     pub new_binary: &'a Path,
 }
 
+/// Newest mtime over the tree's Rust sources (`rust/src/**` plus the two manifests), or
+/// `None` when none of it can be read. A staleness check that cannot run must not invent a
+/// signal — the content comparison after it still speaks for that case.
+fn newest_rust_source_mtime(tree: &Path) -> Option<SystemTime> {
+    fn newer(acc: Option<SystemTime>, t: SystemTime) -> Option<SystemTime> {
+        Some(acc.map_or(t, |a| a.max(t)))
+    }
+    let mut newest: Option<SystemTime> = None;
+    let mut stack = vec![tree.join("rust/src")];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue; // a missing or unreadable subdir contributes nothing
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if let Ok(t) = e.metadata().and_then(|m| m.modified()) {
+                newest = newer(newest, t);
+            }
+        }
+    }
+    for f in ["rust/Cargo.toml", "rust/Cargo.lock"] {
+        if let Ok(t) = fs::metadata(tree.join(f)).and_then(|m| m.modified()) {
+            newest = newer(newest, t);
+        }
+    }
+    newest
+}
+
 /// Compose the Task-1 components. Task 3 extends this fn with skill/hook components; the
 /// per-component fns above stay the unit seams (the e2e test calls this, the break tests call
 /// those — both levels observe something the other cannot).
@@ -522,8 +552,30 @@ pub fn diagnose(inputs: &DiagnoseInputs) -> Vec<Component> {
     ));
     // Binary content: the pack can be identical and the shim pristine while the CODE changed
     // (hook copy, judgement, fixes all live in the cort binary). Hash both sides — same
-    // construction as the shim's content check, one level down.
-    out.push(
+    // construction as the shim's content check, one level down. But the content comparison
+    // only means something when the new side is a build of THIS tree: `rust/target/release/cort`
+    // is whatever ran last, so a tree that moved without a rebuild leaves the previous build
+    // sitting there — byte-identical to an install of that same previous build, and reading
+    // Current against it (found live 2026-09-12). A binary older than the sources it claims
+    // to represent is a stale build, and stale is Drifted before the bytes get a vote.
+    let new_binary_is_stale = newest_rust_source_mtime(inputs.new_tree)
+        .and_then(|src| {
+            fs::metadata(inputs.new_binary)
+                .and_then(|m| m.modified())
+                .ok()
+                .map(|bin| src > bin)
+        })
+        .unwrap_or(false);
+    out.push(if new_binary_is_stale {
+        Component {
+            name: "binary".into(),
+            state: ComponentState::Drifted,
+            detail: "new_binary is a stale build (older than the tree sources); \
+                         run `cargo build --release --locked` before upgrading — its bytes \
+                         matching the install means both are the previous build"
+                .into(),
+        }
+    } else {
         match (
             fs::read(cort_home.join("cort")),
             fs::read(inputs.new_binary),
@@ -550,8 +602,8 @@ pub fn diagnose(inputs: &DiagnoseInputs) -> Vec<Component> {
                 state: ComponentState::Unreadable,
                 detail: format!("a binary could not be read: {e}"),
             },
-        },
-    );
+        }
+    });
     // Manifest keys: every `xxx:` prefix in the live file. An unreadable manifest is its own
     // Unreadable component — the key-set cannot be diffed from bytes we could not read, and
     // empty-keys-would-read-Current is exactly the false-pass this plan keeps refusing.

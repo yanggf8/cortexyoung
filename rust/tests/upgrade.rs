@@ -1299,3 +1299,88 @@ fn an_identical_binary_is_current() {
     let b = comps.iter().find(|c| c.name == "binary").unwrap();
     assert!(matches!(b.state, ComponentState::Current), "{b:?}");
 }
+
+/// The false Current that motivated the staleness half: identical bytes prove nothing when
+/// the `new_binary` predates the sources it claims to represent — it is the previous build
+/// sitting in the target dir, and against an install OF that same previous build it hashes
+/// equal (found live 2026-09-12: diagnose ran while `rust/target/release/cort` was the
+/// installed build itself, the tree had moved, and everything read current). The content
+/// comparison only means something when the new side is newer than the sources that
+/// produced it. Fixture ordering is the only clock a test gets: sources are written after
+/// the binary, so the staleness is real.
+#[test]
+fn a_new_binary_older_than_its_sources_is_drifted_even_when_bytes_match_the_install() {
+    use cort::upgrade::{ComponentState, DiagnoseInputs};
+    let ((_r, _h, _b), _root, home, cort_home, _bin) = installed_root();
+    let install_root = home.join("cortexyoung");
+    fs::write(cort_home.join("pack/r.yml"), "id: a\nlanguage: ts\n").unwrap();
+    let new_pack = tempfile::tempdir().unwrap();
+    fs::write(new_pack.path().join("r.yml"), "id: a\nlanguage: ts\n").unwrap();
+    // Binary first, sources second: the target dir holds the previous build. The sleep is
+    // load-bearing — filesystem timestamps are coarser than two back-to-back writes, and the
+    // comparison this test exists to drive is strict (`src > bin`), so the two sides must not
+    // land in one timestamp tick.
+    let new_bin = tempfile::tempdir().unwrap();
+    fs::write(new_bin.path().join("cort"), "#!/bin/sh\nsame payload\n").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let tree = tempfile::tempdir().unwrap();
+    let src = tree.path().join("rust/src");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(tree.path().join("rust/Cargo.toml"), "[package]\n").unwrap();
+    fs::write(src.join("main.rs"), "fn main() {}\n").unwrap();
+    fs::write(cort_home.join("cort"), "#!/bin/sh\nsame payload\n").unwrap();
+    let comps = cort::upgrade::diagnose(&DiagnoseInputs {
+        install_root: &install_root,
+        new_pack: new_pack.path(),
+        installed_ast_grep_version: cort::install::AST_GREP_PINNED,
+        new_tree: tree.path(),
+        home: &home,
+        keep_mine: false,
+        new_binary: new_bin.path().join("cort").as_path(),
+    });
+    let b = comps.iter().find(|c| c.name == "binary").unwrap();
+    assert!(
+        matches!(b.state, ComponentState::Drifted),
+        "identical bytes cannot mean current when the build predates the sources: {b:?}"
+    );
+    assert!(
+        b.detail.contains("stale"),
+        "the drift must name a stale build, not masquerade as content drift: {b:?}"
+    );
+}
+
+/// The direction guard: a binary built AFTER the sources is not stale, and matching bytes
+/// still read Current — the check must fire on ordering, not on the mere existence of a
+/// `rust/src` beside the fixture.
+#[test]
+fn a_new_binary_newer_than_its_sources_still_reads_current_when_bytes_match() {
+    use cort::upgrade::{ComponentState, DiagnoseInputs};
+    let ((_r, _h, _b), _root, home, cort_home, _bin) = installed_root();
+    let install_root = home.join("cortexyoung");
+    fs::write(cort_home.join("pack/r.yml"), "id: a\nlanguage: ts\n").unwrap();
+    let new_pack = tempfile::tempdir().unwrap();
+    fs::write(new_pack.path().join("r.yml"), "id: a\nlanguage: ts\n").unwrap();
+    // Sources first, binary second: this is a build of the tree as it stands.
+    let tree = tempfile::tempdir().unwrap();
+    let src = tree.path().join("rust/src");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(tree.path().join("rust/Cargo.toml"), "[package]\n").unwrap();
+    fs::write(src.join("main.rs"), "fn main() {}\n").unwrap();
+    let new_bin = tempfile::tempdir().unwrap();
+    fs::write(new_bin.path().join("cort"), "#!/bin/sh\nsame payload\n").unwrap();
+    fs::write(cort_home.join("cort"), "#!/bin/sh\nsame payload\n").unwrap();
+    let comps = cort::upgrade::diagnose(&DiagnoseInputs {
+        install_root: &install_root,
+        new_pack: new_pack.path(),
+        installed_ast_grep_version: cort::install::AST_GREP_PINNED,
+        new_tree: tree.path(),
+        home: &home,
+        keep_mine: false,
+        new_binary: new_bin.path().join("cort").as_path(),
+    });
+    let b = comps.iter().find(|c| c.name == "binary").unwrap();
+    assert!(
+        matches!(b.state, ComponentState::Current),
+        "a fresh build with matching bytes is genuinely current: {b:?}"
+    );
+}
