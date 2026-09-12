@@ -544,6 +544,95 @@ fn the_usage_row_records_which_outcome_the_hook_reached() {
     );
 }
 
+/// Every hook-suggest outcome that paid for the index probe (`no_index_hinted`, `hit`,
+/// `no_evidence`) must write its usage row with the project it probed.
+///
+/// The live db carried 13,233 hook-suggest rows and not one named a project -- while
+/// `hook-refresh`, which runs through the same probe, names one on every row it can. The cost was
+/// concrete: "did the hinted project ever get indexed" is the adoption funnel's own follow-up, and
+/// with no project on the row it can only be answered by re-reading transcripts. The probe already
+/// holds the id, so the row carries it; and the id has to be the one a later index of the same
+/// directory takes, so a hint row joins the projects table without a second derivation.
+#[test]
+fn the_rows_that_probed_the_index_name_the_project_they_probed() {
+    let (_p, cwd, _c, cache) = sandbox();
+    let usage_db = cache.join("usage.db");
+    let expected = project_id_for(cwd.to_str().unwrap());
+
+    // No index yet: the hint fires once for this (session, dir) and its row says where.
+    let hint = run_hook_suggest_payload(
+        serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": { "command": FIRING_SEARCH },
+            "session_id": "sess-adopt-1",
+            "cwd": cwd.to_str().unwrap(),
+        }),
+        &[],
+        &cwd,
+        &cache,
+    );
+    assert_eq!(hint.code, 0, "{} {}", hint.stdout, hint.stderr);
+    assert!(
+        payload(&hint)["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("cort index"),
+        "precondition: the hint fired: {}",
+        hint.stdout
+    );
+    assert_eq!(
+        row_project_id(&usage_db, "no_index_hinted"),
+        expected,
+        "the hint must name the project it hinted at"
+    );
+
+    // Once indexed, the injection row names the same project -- and that id is the db filename,
+    // which is what makes the hint row joinable against a project that did not exist when it
+    // was written.
+    let idx = run_cort(&["index"], &cwd, &cache);
+    if idx.code != 0 {
+        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
+        return;
+    }
+    run_hook_suggest(FIRING_SEARCH, &cwd, &cache);
+    assert_eq!(row_project_id(&usage_db, "hit"), expected);
+    assert!(
+        cache.join(format!("{expected}.db")).exists(),
+        "the id on a hint row must be the id an index of the same directory takes"
+    );
+
+    // A shaped search the index holds nothing about is a refusal, and the refusal is attributable
+    // too: 10 of them in the live 3-day window with no way to say against which project.
+    run_hook_suggest(
+        "grep -rn 'zzz_absent_from_index(' src --include=*.ts",
+        &cwd,
+        &cache,
+    );
+    assert_eq!(row_project_id(&usage_db, "no_evidence"), expected);
+}
+
+/// The single hook-suggest row of the given outcome, reduced to its `project_id` (empty string
+/// when the column is NULL -- the shape this test exists to fail on).
+fn row_project_id(usage_db: &Path, outcome: &str) -> String {
+    let db = rusqlite::Connection::open(usage_db).expect("open usage.db");
+    let mut stmt = db
+        .prepare(
+            "SELECT project_id FROM command_log
+              WHERE command = 'hook-suggest' AND args_summary LIKE ?1",
+        )
+        .expect("prepare");
+    let hits: Vec<Option<String>> = stmt
+        .query_map(
+            rusqlite::params![format!("%\"hook\":\"{outcome}\"%")],
+            |r| r.get(0),
+        )
+        .expect("query")
+        .filter_map(Result::ok)
+        .collect();
+    assert_eq!(hits.len(), 1, "one {outcome} row expected, got {hits:?}");
+    hits.into_iter().next().unwrap().unwrap_or_default()
+}
+
 fn git_in(root: &Path, args: &[&str]) {
     let out = Command::new("git")
         .arg("-C")

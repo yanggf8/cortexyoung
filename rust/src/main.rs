@@ -1102,9 +1102,11 @@ fn cmd_hook_suggest(args: &[String], usage: &mut UsageEvent) -> Result<Emit, Cor
     // gate turns down about 95% of searches against a 5s budget. The `Cell` carries the freshness
     // half back out, so the fire path probes once rather than twice.
     let observed: std::cell::Cell<Option<IndexState>> = std::cell::Cell::new(None);
-    let hit = match cort::hook::judge(&search, |symbol| {
+    let probed_project: std::cell::RefCell<Option<String>> = std::cell::RefCell::new(None);
+    let verdict = cort::hook::judge(&search, |symbol| {
         let (state, db, project_id) = probe_index();
         observed.set(Some(state));
+        probed_project.borrow_mut().replace(project_id.clone());
         match db {
             None => cort::hook::Evidence::NoIndex,
             // A storage failure fires. A hook that went quiet because a disk hiccuped would be
@@ -1112,7 +1114,13 @@ fn cmd_hook_suggest(args: &[String], usage: &mut UsageEvent) -> Result<Emit, Cor
             Some(db) => cort::hook::evidence_in(&db, &project_id, symbol)
                 .unwrap_or(cort::hook::Evidence::Unknown),
         }
-    }) {
+    });
+    // Every outcome past this point paid for the probe, so the row it writes can say which
+    // project it probed -- `hit`, `no_evidence`, `no_index`, `no_index_hinted` alike. The
+    // `no_shape` exits above never ran the probe and stay unattributed by design: attributing
+    // them would have cost a canonicalize on ~95% of fires.
+    usage.project_id = probed_project.borrow().clone();
+    let hit = match verdict {
         cort::hook::Verdict::Fire(hit) => hit,
         cort::hook::Verdict::Silent(reason) => {
             let (outcome, decline) = match reason {
@@ -1327,18 +1335,24 @@ fn probe_index() -> (IndexState, Option<Connection>, String) {
     let Ok(canon) = canonicalize_root(cwd()) else {
         return (IndexState::Missing, None, String::new());
     };
+    // The project id leaves the probe even when the probe finds no index: `no_index_hinted` is
+    // exactly the row that must name a project which does not exist yet, and the id it carries is
+    // the one a later `cort index` of the same directory will take -- that is what makes a hint
+    // row joinable against the projects table without a second derivation. Only a directory that
+    // cannot be canonicalised at all has no id to give.
+    let project_id = project_id_for(&canon.path_str);
     let path = db_path_for(&canon.path_str);
     if !path.exists() {
-        return (IndexState::Missing, None, String::new());
+        return (IndexState::Missing, None, project_id);
     }
     let Ok(db) = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY) else {
-        return (IndexState::Missing, None, String::new());
+        return (IndexState::Missing, None, project_id);
     };
     let Ok(status) = status_of(&db, &canon.path) else {
-        return (IndexState::Missing, None, String::new());
+        return (IndexState::Missing, None, project_id);
     };
     if !status.indexed {
-        return (IndexState::Missing, None, String::new());
+        return (IndexState::Missing, None, project_id);
     }
     let state = match (status.git_head.as_deref(), git_head_quickly(&canon.path)) {
         // Only a definite disagreement is called stale. A tree with no git, or a head that could
@@ -1348,7 +1362,7 @@ fn probe_index() -> (IndexState, Option<Connection>, String) {
         (Some(stored), Some(now)) if stored != now => IndexState::BehindHead,
         _ => IndexState::HeadMatches,
     };
-    (state, Some(db), project_id_for(&canon.path_str))
+    (state, Some(db), project_id)
 }
 
 /// Wiring the PreToolUse hook into a Claude Code `settings.json`. `install.sh` calls this so the

@@ -29,6 +29,17 @@ use std::sync::{Arc, Mutex};
 /// anything, and the only reliable moment to attach that is where the figure is printed.
 fn print_report(value: &Value) {
     let mut v = value.clone();
+    stamp_machine(&mut v);
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&v).expect("the report is serialisable")
+    );
+}
+
+/// Insert the machine stamp every cort-evals report carries, so a figure can always say which
+/// computer produced it. `print_report` stamps what it prints; reports that reach the caller by
+/// another path (`adopt-mine`'s stdout and `--out` file) stamp themselves through this.
+fn stamp_machine(v: &mut Value) {
     if let Some(o) = v.as_object_mut() {
         o.insert(
             "machine".to_string(),
@@ -38,10 +49,6 @@ fn print_report(value: &Value) {
             }),
         );
     }
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&v).expect("the report is serialisable")
-    );
 }
 
 fn at(argv: &[String], name: &str, default: &str) -> String {
@@ -925,6 +932,10 @@ fn adopt_mine_main(argv: &[String]) -> Result<(), String> {
         );
         map.insert("since_as_given".to_string(), json!(since_raw));
     }
+    // The report's numbers get set beside other machines' numbers -- that reconciliation is the
+    // whole point of the funnel -- so it carries the same stamp `print_report` attaches, on both
+    // the stdout copy and the --out file.
+    stamp_machine(&mut report);
     let out = at(argv, "--out", "");
     if !out.is_empty() {
         std::fs::write(
@@ -1332,5 +1343,40 @@ mod batch_consumption {
         // A rows.json of its own accord with 0 cells against a claimed 2 is a discrepancy.
         assert!(b.problem().unwrap().contains("interrupted"));
         std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[cfg(test)]
+mod machine_stamp {
+    use super::*;
+
+    /// adopt-mine's report gets quoted against other machines' numbers too -- the 09-03
+    /// reconciliation burned real time on two reports that both looked local before anyone
+    /// noticed they were different computers. `print_report` stamps what it prints; the report
+    /// that reaches the caller by `adopt-mine`'s own stdout and `--out` file must carry the
+    /// same stamp, and this is the function that puts it there.
+    #[test]
+    fn stamping_a_report_names_the_machine_and_its_source() {
+        let mut report = json!({ "injections": 0 });
+        stamp_machine(&mut report);
+        assert!(
+            !report["machine"]["id"]
+                .as_str()
+                .unwrap_or_default()
+                .is_empty(),
+            "the stamp carries the machine id: {report}"
+        );
+        assert!(
+            !report["machine"]["source"]
+                .as_str()
+                .unwrap_or_default()
+                .is_empty(),
+            "the stamp says where the id came from: {report}"
+        );
+        assert_eq!(
+            report["injections"],
+            json!(0),
+            "stamping adds a key, it does not touch the report body"
+        );
     }
 }
