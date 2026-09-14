@@ -2385,6 +2385,195 @@ fn usage_census_partitions_every_fire() {
     assert_eq!(u.suggest_outcomes.get("unparsed"), Some(&2));
 }
 
+/// query-time self-heal 採樣（cortexyoung 5f6d5267）：impact/context 回答前自癒 index，
+/// heal 欄位只在「有話要說」的列上（綠路 payload 完全不加 key，heal.rs `attach_to`）。
+/// 四個必須成立的語意：①healed 按 mode 分桶、heal_ms 合計/max 正確
+/// ②deferred 按理由字串分桶 ③無 heal key 的歷史列進 legacy、不污染新桶
+/// ④`index --heal-background` 計背景重建、一般 index 列不計；NULL／非法 JSON 不 panic 不中斷。
+#[test]
+fn cort_audit_usage_samples_heal_fields() {
+    let cache = std::env::temp_dir().join(format!(
+        "claudecat-heal-{}-{}",
+        std::process::id(),
+        rand_suffix()
+    ));
+    fs::create_dir_all(&cache).unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    {
+        let conn = rusqlite::Connection::open(cache.join("usage.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE command_log (
+               ts INTEGER, command TEXT, status TEXT, args_summary,
+               index_stale INTEGER DEFAULT 0, saved_bytes INTEGER DEFAULT 0
+             );",
+        )
+        .unwrap();
+        let ins = |cmd: &str, summary: Option<&str>| {
+            conn.execute(
+                "INSERT INTO command_log (ts, command, status, args_summary) VALUES (?1, ?2, 'ok', ?3)",
+                rusqlite::params![now, cmd, summary],
+            )
+            .unwrap();
+        };
+        // healed：heal_mode 與 heal_ms 都要入帳
+        ins(
+            "impact",
+            Some(
+                r#"{"symbol":"logInfo","v":1,"self_healed":true,"heal_mode":"full","heal_ms":1500}"#,
+            ),
+        );
+        ins(
+            "context",
+            Some(r#"{"v":1,"self_healed":true,"heal_mode":"incremental","heal_ms":250}"#),
+        );
+        // deferred：self_healed=false + 理由字串
+        ins(
+            "context",
+            Some(r#"{"symbol":"x","self_healed":false,"heal_deferred":"background_spawned"}"#),
+        );
+        // 5f6d5267 之前的歷史列：沒有任何 heal key → legacy，不混進新桶
+        ins("impact", Some(r#"{"symbol":"logInfo","v":1}"#));
+        // args_summary 為 NULL：不 panic、不中斷，進自己的桶
+        ins("impact", None);
+        // 背景重建事件 vs 一般 index 列
+        ins("index", Some(r#"{"v":1,"heal":"background"}"#));
+        ins("index", Some(r#"{"v":1}"#));
+    }
+    let _env_serial = cort_env_lock();
+    let guard = EnvVarGuard(
+        "CORT_CACHE_DIR".to_string(),
+        std::env::var("CORT_CACHE_DIR").ok(),
+    );
+    std::env::set_var("CORT_CACHE_DIR", cache.to_str().unwrap());
+
+    let u = claudecat::cort::audit_usage(30).expect("usage 應有結果");
+    drop(guard);
+
+    // 分母 = impact+context 列數（4 筆有 summary + 1 筆 NULL）
+    assert_eq!(u.heal_scanned, 5);
+    assert_eq!(u.heal_self_healed, 2);
+    assert_eq!(u.heal_modes.get("full"), Some(&1));
+    assert_eq!(u.heal_modes.get("incremental"), Some(&1));
+    assert_eq!(u.heal_ms_total, 1750);
+    assert_eq!(u.heal_ms_max, 1500);
+    assert_eq!(
+        u.heal_deferred.get("background_spawned"),
+        Some(&1),
+        "deferred 按理由字串分桶"
+    );
+    assert_eq!(u.heal_legacy, 1, "無 heal key 的歷史列只進 legacy");
+    assert_eq!(
+        u.heal_background, 1,
+        "只有帶 heal:background 的 index 列計入"
+    );
+    assert_eq!(u.heal_unparseable, 1, "NULL summary 可見、不靜默丟棄");
+    // 閉合：scanned 恰分到 healed + deferred + legacy + unparseable 四個去處
+    assert_eq!(
+        u.heal_scanned,
+        u.heal_self_healed
+            + u.heal_legacy
+            + u.heal_unparseable
+            + u.heal_deferred.values().sum::<i64>(),
+        "分割閉合，沒有列在掃描路上消失"
+    );
+
+    // 報告：各桶都要出現
+    let a = claudecat::cort::CortAudit {
+        root: "/tmp/fake-root".to_string(),
+        host: "test-host".to_string(),
+        window_days: 30,
+        index: None,
+        db_exists: false,
+        usage: Some(u),
+        usage_7d: None,
+    };
+    let report = claudecat::cort_audit::render(&a);
+    assert!(report.contains("self-heal 採樣"), "報告應有 heal 採樣段");
+    assert!(report.contains("scanned=5"), "分母要出現");
+    assert!(report.contains("self_healed=2"), "healed 計數要出現");
+    assert!(
+        report.contains("full=1") && report.contains("incremental=1"),
+        "mode 分桶要出現"
+    );
+    assert!(
+        report.contains("background_spawned=1"),
+        "deferred 理由要出現"
+    );
+    assert!(
+        report.contains("合計=1750") && report.contains("max=1500"),
+        "heal_ms 合計/max 要出現"
+    );
+    assert!(report.contains("legacy=1"), "legacy 要出現");
+    assert!(report.contains("背景重建"), "background 次數要出現");
+}
+
+/// 零樣本（窗內 impact/context 全是 legacy 舊列）也要印 scanned：
+/// 「0 次自癒」與「還沒資料（legacy=N）」必須分得開，不能混成同一種沉默。
+#[test]
+fn cort_audit_heal_zero_sample_still_shows_scanned() {
+    let cache = std::env::temp_dir().join(format!(
+        "claudecat-heal-zero-{}-{}",
+        std::process::id(),
+        rand_suffix()
+    ));
+    fs::create_dir_all(&cache).unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    {
+        let conn = rusqlite::Connection::open(cache.join("usage.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE command_log (
+               ts INTEGER, command TEXT, status TEXT, args_summary,
+               index_stale INTEGER DEFAULT 0, saved_bytes INTEGER DEFAULT 0
+             );",
+        )
+        .unwrap();
+        for _ in 0..3 {
+            conn.execute(
+                "INSERT INTO command_log (ts, command, status, args_summary) \
+                 VALUES (?1, 'impact', 'ok', '{\"symbol\":\"x\",\"v\":1}')",
+                [&now],
+            )
+            .unwrap();
+        }
+    }
+    let _env_serial = cort_env_lock();
+    let guard = EnvVarGuard(
+        "CORT_CACHE_DIR".to_string(),
+        std::env::var("CORT_CACHE_DIR").ok(),
+    );
+    std::env::set_var("CORT_CACHE_DIR", cache.to_str().unwrap());
+
+    let u = claudecat::cort::audit_usage(30).expect("usage 應有結果");
+    drop(guard);
+
+    assert_eq!(u.heal_scanned, 3);
+    assert_eq!(u.heal_self_healed, 0, "舊列不是自癒，是還沒資料");
+    assert_eq!(u.heal_legacy, 3);
+
+    let a = claudecat::cort::CortAudit {
+        root: "/tmp/fake-root".to_string(),
+        host: "test-host".to_string(),
+        window_days: 30,
+        index: None,
+        db_exists: false,
+        usage: Some(u),
+        usage_7d: None,
+    };
+    let report = claudecat::cort_audit::render(&a);
+    assert!(
+        report.contains("scanned=3")
+            && report.contains("self_healed=0")
+            && report.contains("legacy=3"),
+        "零樣本仍要顯示 scanned，讓 0 次自癒與 legacy=N 分得開：\n{report}"
+    );
+}
+
 /// repair token（cortexyoung f4ad4c7d）從 `cort status` JSON 的推導，
 /// 鏡射 impact.rs：!stale→none；forbid 會拒絕（rebuild_required 非空或
 /// candidates_narrowed=false）→ rebuild_required；其餘 → refreshable。

@@ -20,6 +20,9 @@
    args_summary 是字面 `'hook'`）、`no_shape/decline_absent`（v3 前舊列）。
    census 出現 `unknown/<hook>`＝上游動了詞彙、claudecat 的常數跟丟，要回報並同步；
    任一 census 行加總 ≠ fires＝數據品質問題，按步驟 5 先查根因。
+   self-heal 採樣（5f6d5267 起，impact/context 回答前自癒 index）讀報告的
+   「self-heal 採樣」行即可、不需手工 SQL；零樣本時 `legacy=N` 表示 heal 欄位還沒
+   累積（5f6d5267 之前的舊列），與「0 次自癒」是兩回事。
 3. 台灣中文輸出（stdout 進 log 檔）：
    - deep/30d、deep/7d 趨勢（2026-09-06 基線 deep30=3、deep7=2；注意 30 天滾動窗口效應）
    - decline 排序與樣本數
@@ -47,7 +50,9 @@
      檔案／其他專案追問；v3 舊列沒有這些鍵，採樣先看 `v`。
    樣本 <10：誠實說還要等，不要硬開規則。
 5. 數據品質優先（使用者的政策：初期 bug 先修）：CORT-AUDIT.md 出現「無法判讀」/`?`、
-   FTS drift>0、fresh 翻 STALE、decline 欄整批消失（hooks 可能跑回舊 binary →
+   FTS drift>0、fresh 翻 STALE（5f6d5267 起 foreground 查詢會自癒 index，正常應自行
+   回落——持續 STALE 就是部署問題；反之 `repair=none` 從此更常見，查詢自己把 index
+   養新，不得誤讀為「沒有 staleness 發生過」）、decline 欄整批消失（hooks 可能跑回舊 binary →
    提醒先跑 `cort_upgrade --check` 診斷，再 `cort_upgrade` 修——**必須用樹內 binary**
    `/home/yanggf/a/cortexyoung/rust/target/release/cort_upgrade`：PATH 上 `~/.cargo/bin`
    那份的 `repo_root()` 從 `current_exe()` 往上找樹（找 `src/pack`/`skills`），永遠走到
@@ -59,7 +64,9 @@
    - `0`＝extractor 掃過、檔內沒有可 chunk 的宣告，是**正確的沉默**（cortexyoung#2），不必動作。
    - `>0` 卻不在 chunks＝**真缺口**，就是 cortexyoung#5 的形狀（索引停在一個從未提交、
      後來被 git 還原的版本，增量因 `git diff` 為空而永不重看）。修復只能靠**全量**
-     `cort index`；修完複查缺口數並在發現裡寫明「哪個檔、修好沒」。
+     `cort index`（5f6d5267 的 query-time self-heal 只回應 staleness、候選集仍是
+     git diff——真缺口的漂移不在其中，這條修法不變）；修完複查缺口數並在發現裡
+     寫明「哪個檔、修好沒」。
    - `-1`＝v7 之前寫入且從未重寫，**不是掃描結果**；要全量索引一次才有定論，不可當成缺口或無缺口。
    另有 v6 的 `file_state.indexed_uncommitted`：>0 表示有檔案索引自未提交內容（#5 的漂移來源），
    看到就報（工作樹有未提交編輯時是預期現象，commit 後自癒）。報告若說「無法用欄位判讀」＝
@@ -70,7 +77,7 @@
    （chain/minified 註冊不再擠成同一列），不是數據品質事件。
    **只有真缺口 >0 時**才回報 #5 的影響面（與昨日的差、修復後是否回落、是否有新檔踩進同一形狀）。
 6. `git -C /home/yanggf/a/cortexyoung fetch` 後看 `HEAD..origin/master` 有無新 commit。
-   （上次追到 `9820d9f5`，2026-09-13；對應關係見 CORT-INTEGRATION.md 同日節。）
+   （上次追到 `5f6d5267`，2026-09-14；對應關係見 CORT-INTEGRATION.md 同日節。）
 
 ## 環境
 

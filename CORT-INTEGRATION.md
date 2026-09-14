@@ -396,3 +396,40 @@ SUGGEST_OUTCOMES(9)/REFRESH_OUTCOMES(8) 與 claudecat 的複製品一致，censu
 cron 在 +0800＝UTC 01:17，UTC 日與本地日一致，歷史列都沒問題；本地 00:00–07:59 之間
 手動跑，列會掛前一天（2026-09-13 00:34 補跑的那列因此落在 09-12）。09-12 當天
 09:17/09:29 兩個排程都沒有痕跡（機器當時沒開），該列即此補測。
+
+## 跟上 cortexyoung（2026-09-14；對照 cort `5f6d5267`，1 個 commit）
+
+`9820d9f5` 之後 1 個 commit：**query-time self-heal**——`impact`/`context` 回答前先把
+index 養新（新 `rust/src/heal.rs` 的 `ensure_fresh`）。「index 是快取不是真相」：修復
+不再派工給 agent 或 hook，由最便宜的那個 actor（正在查詢的 foreground 命令）自己做。
+上游量測的動機：edit hook 7 天拒了 905 次重建、chain `cort index` 的建議 4 天只轉換
+1 次，而全量管線要 1.4–2.3s。
+
+- **heal 機制與 payload 詞彙**：綠路 payload 完全不加 key（byte-identical 契約），
+  有話要說才帶 `self_healed`(bool)、`heal_mode`（`incremental`/`full`，僅 healed 時，
+  來自 `incremental_index` 的 `stats.mode`）、`heal_ms`（僅 healed 時）、`heal_deferred`
+  （僅 deferred 時，伴隨 `self_healed:false`）。deferred 理由六種：`upgrade_in_flight`/
+  `heal_failed`/`no_cache_dir`/`background_already_running`/`spawn_failed`/
+  `background_spawned`。claudecat 側的 `HEAL_MODES`/`HEAL_DEFERRED_REASONS` 是這份
+  詞彙的複製品——會漂，採樣桶按實際字串落鍵，詞彙外照樣顯示自身字串。
+- **P2 的 reindex 建議退役**：過去「STALE → 請 agent 自己 chain `cort index`」的
+  建議鏈被查詢自癒取代。注意語意邊界：heal 的候選集仍以 git diff 為基底（v6 的
+  `indexed_uncommitted` 標記檔會被推進候選集），#5 的真缺口在 `cort status` 眼裡
+  是 fresh——「真缺口只能靠全量 `cort index` 修」這條仍然成立，退役的是 staleness
+  側的手動 reindex 建議，不是覆蓋缺口的修法。
+- **大樹 defer 到背景**：>2000 檔（`DEFAULT_HEAL_MAX_FILES`，`CORT_HEAL_MAX_FILES`
+  可覆寫）不 inline 修——foreground 立即回答、`cort index --heal-background`
+  單飛重建（子程序自己記 usage 列：`command='index'`、args_summary 帶
+  `{"v":1,"heal":"background"}`）。
+- **本機已就位**：`~/.local/share/cortexyoung/cort/cort` 17:35 換成 heal 版 binary、
+  `~/.claude/skills/ast-grep` 17:39 同步。上游 README 的 `rebuild_required` 語意
+  同步改寫：從「只有前景 `cort index` 會修」變「下一個 foreground query 自己修」——
+  audit 的 `repair=none` 從此更常見，不得誤讀為沒有 staleness 發生過。
+- **claudecat 側採樣對應**（都有測試，69 全綠）：`audit_usage` 同窗多掃
+  impact/context 的 heal 欄位——`heal_scanned`（impact+context 分母）、self_healed
+  按 mode 分桶、heal_deferred 按理由分桶（輕量 breakdown，不做窮盡分割）、
+  `heal_ms` 合計/max、`heal_background`（背景重建次數）、`heal_legacy`（無 heal key
+  的 5f6d5267 前歷史列，不混進新桶——「0 次自癒」與「還沒資料」分得開）、
+  `heal_unparseable`（NULL／非法 JSON，照 hook census 對 unparseable 的態度入自己
+  的桶）。報告在用量節新增「self-heal 採樣」兩行，零樣本也印。heal 當天 17:44
+  才上線，首日實測 scanned=495 全 legacy、0 次自癒——零樣本屬預期。

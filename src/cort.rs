@@ -493,6 +493,27 @@ pub struct UsageWindow {
     /// 省下的位元組。自 cortexyoung 3f1d3d96 起來源變寬：除了 receipt cache 命中，
     /// 還含 ranged `read` 少傳的檔案位元組——所以它不再等於「快取命中省下的量」。
     pub saved_bytes: i64,
+    /// query-time self-heal 採樣（cortexyoung 5f6d5267 起，impact/context 回答前自癒
+    /// index）：`heal_scanned` 是分母（impact+context 列數）。heal 欄位只在「有話要說」
+    /// 的列上（綠路 payload 完全不加 key，heal.rs `attach_to`），沒有任何 heal key 的
+    /// 歷史列計 `heal_legacy`——「0 次自癒」與「還沒資料」必須分得開，不得互相冒充。
+    pub heal_scanned: i64,
+    pub heal_self_healed: i64,
+    /// self_healed=true 的列按 heal_mode 分桶（詞彙見 [`HEAL_MODES`]；輕量 breakdown——
+    /// 樣體預期極小，不做窮盡分割，詞彙外的值照樣顯示自身字串）
+    pub heal_modes: BTreeMap<String, i64>,
+    /// heal_deferred 列按理由字串分桶（詞彙見 [`HEAL_DEFERRED_REASONS`]；同上不窮盡）
+    pub heal_deferred: BTreeMap<String, i64>,
+    pub heal_ms_total: i64,
+    pub heal_ms_max: i64,
+    /// 背景重建事件數：`cort index --heal-background` 的 usage 列（args_summary 帶
+    /// `"heal":"background"`，heal.rs `spawn_background_healer` 記自己的列）；
+    /// 一般 index 列（無 heal key）不計
+    pub heal_background: i64,
+    pub heal_legacy: i64,
+    /// args_summary 為 NULL 或非法 JSON 的 impact/context 列——照 hook census 對
+    /// unparseable 的既有態度：可見、入自己的桶，不 panic、不中斷掃描
+    pub heal_unparseable: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -735,6 +756,27 @@ pub const REFRESH_OUTCOMES: [&str; 8] = [
     "busy_or_failed",
 ];
 
+/// cortexyoung heal.rs 的 heal_mode 詞彙（5f6d5267）：`incremental_index` 的
+/// `stats.mode` 只有這兩個值（上游 incremental.rs:313 `"full"`、:498 `"incremental"`；
+/// heal.rs:138 以 `stats.mode == "full"` 判別）。
+/// **會漂**：上游動了詞彙，這裡要跟——採樣桶按實際字串落鍵，詞彙外的值
+/// 照樣顯示自身字串（輕量 breakdown，不做窮盡分割），不會靜默混進既有桶。
+pub const HEAL_MODES: [&str; 2] = ["incremental", "full"];
+
+/// cortexyoung heal.rs 的 heal_deferred 理由詞彙（5f6d5267）：`deferred()` 的全部
+/// `&'static str` 呼叫點——`upgrade_in_flight`(heal.rs:131)、`heal_failed`(:148)、
+/// `no_cache_dir`(:159)、`background_already_running`(:163)、`spawn_failed`(:166/:171)、
+/// `background_spawned`(:169)。
+/// **會漂**：同上——理由桶按實際字串落鍵，詞彙外照樣顯示自身字串。
+pub const HEAL_DEFERRED_REASONS: [&str; 6] = [
+    "upgrade_in_flight",
+    "heal_failed",
+    "no_cache_dir",
+    "background_already_running",
+    "spawn_failed",
+    "background_spawned",
+];
+
 /// 一列 hook command_log 落進哪個 census 桶。口徑照 cortexyoung usage.rs 的
 /// `hook_census_at`（6623113d）：status 非 ok → `status_error`；args_summary 不是
 /// 合法 JSON → `unparseable_summary`；JSON 沒有 hook 欄 → `legacy_unsplit`；
@@ -920,6 +962,75 @@ pub fn audit_usage(window_days: u32) -> Option<UsageWindow> {
     for (h, tags) in harness_declines {
         if let Some(st) = u.by_harness.get_mut(&h) {
             st.top_decline = tags.into_iter().max_by_key(|(_, c)| *c);
+        }
+    }
+    // query-time self-heal（cortexyoung 5f6d5267）：impact/context 回答前自癒 index。
+    // heal 欄位只在「有話要說」的列上（heal.rs `attach_to`：healed 帶
+    // self_healed/heal_mode/heal_ms、deferred 帶 self_healed=false/heal_deferred，
+    // 綠路完全不加 key），沒有任何 heal key 的列是 5f6d5267 之前的歷史 → legacy，
+    // 不混進新桶（否則「0 次自癒」與「還沒資料」互相冒充）。
+    // 詞彙見上面的 HEAL_MODES／HEAL_DEFERRED_REASONS 複製品——桶按實際字串落鍵，
+    // 詞彙外照樣顯示自身字串（輕量 breakdown，樣體預期極小，不做窮盡分割）。
+    if let Ok(mut stmt) = conn.prepare(
+        "SELECT args_summary FROM command_log \
+         WHERE command IN ('impact', 'context') AND ts >= ?1",
+    ) {
+        if let Ok(rows) = stmt.query_map([&since], |r| r.get::<_, Option<String>>(0)) {
+            for raw in rows.flatten() {
+                u.heal_scanned += 1;
+                let parsed = raw
+                    .as_deref()
+                    .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok());
+                // NULL／非法 JSON 照 hook census 的態度：進自己的桶，不 panic、不中斷掃描
+                let Some(v) = parsed else {
+                    u.heal_unparseable += 1;
+                    continue;
+                };
+                let has_heal_key = ["self_healed", "heal_mode", "heal_ms", "heal_deferred"]
+                    .iter()
+                    .any(|k| v.get(k).is_some());
+                if !has_heal_key {
+                    u.heal_legacy += 1;
+                } else if v.get("self_healed").and_then(|b| b.as_bool()) == Some(true) {
+                    u.heal_self_healed += 1;
+                    // healed 列契約上必帶 heal_mode/heal_ms；缺欄時可見化（mode_absent），
+                    // 不靜默丟棄——與 census 的 decline_absent 同一態度
+                    let mode = v
+                        .get("heal_mode")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("mode_absent");
+                    *u.heal_modes.entry(mode.to_string()).or_insert(0) += 1;
+                    if let Some(ms) = v.get("heal_ms").and_then(|m| m.as_i64()) {
+                        u.heal_ms_total += ms;
+                        u.heal_ms_max = u.heal_ms_max.max(ms);
+                    }
+                } else {
+                    let reason = v
+                        .get("heal_deferred")
+                        .and_then(|r| r.as_str())
+                        .unwrap_or("reason_absent");
+                    *u.heal_deferred.entry(reason.to_string()).or_insert(0) += 1;
+                }
+            }
+        }
+    }
+    // 背景重建事件（heal.rs `defer_to_background` → `cort index --heal-background`
+    // 記自己的 usage 列）：command='index'、args_summary 帶 `"heal":"background"`。
+    // 一般 index 列不計——這裡是絕對次數，不進 scanned 分母。
+    if let Ok(mut stmt) =
+        conn.prepare("SELECT args_summary FROM command_log WHERE command = 'index' AND ts >= ?1")
+    {
+        if let Ok(rows) = stmt.query_map([&since], |r| r.get::<_, Option<String>>(0)) {
+            for raw in rows.flatten() {
+                let is_background = raw
+                    .as_deref()
+                    .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+                    .and_then(|v| v.get("heal").and_then(|h| h.as_str()).map(String::from))
+                    .is_some_and(|h| h == "background");
+                if is_background {
+                    u.heal_background += 1;
+                }
+            }
         }
     }
     u.errors = conn

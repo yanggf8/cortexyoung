@@ -154,6 +154,49 @@ fn render_usage(u: &UsageWindow, s: &mut String) {
     for (k, v) in &u.by_command {
         s.push_str(&format!("| `{k}` | {v} |\n"));
     }
+    // query-time self-heal（cortexyoung 5f6d5267 起）：impact/context 回答前自癒 index。
+    // 零樣本也要印 scanned——「0 次自癒」（legacy=0）與「還沒資料」（legacy=N）是兩回事，
+    // 混在一起會把機制上線初期讀成「沒用」。
+    s.push_str(
+        "\nself-heal 採樣（impact/context 回答前自癒 index；cortexyoung 5f6d5267 起新列才帶 heal 欄）：\n",
+    );
+    let modes: Vec<String> = u
+        .heal_modes
+        .iter()
+        .map(|(m, c)| format!("{m}={c}"))
+        .collect();
+    let reasons: Vec<String> = u
+        .heal_deferred
+        .iter()
+        .map(|(r, c)| format!("{r}={c}"))
+        .collect();
+    s.push_str(&format!(
+        "- scanned={}（impact+context）：self_healed={}{}、heal_deferred={}{}、legacy={}\n",
+        u.heal_scanned,
+        u.heal_self_healed,
+        if modes.is_empty() {
+            String::new()
+        } else {
+            format!("（{}）", modes.join("、"))
+        },
+        u.heal_deferred.values().sum::<i64>(),
+        if reasons.is_empty() {
+            String::new()
+        } else {
+            format!("（{}）", reasons.join("、"))
+        },
+        u.heal_legacy,
+    ));
+    s.push_str(&format!(
+        "- heal_ms 合計={} max={}；背景重建（index --heal-background）={} 次\n",
+        u.heal_ms_total, u.heal_ms_max, u.heal_background
+    ));
+    if u.heal_unparseable > 0 {
+        s.push_str(&format!(
+            "- 另有 {} 筆 impact/context 列 args_summary 為 NULL／非法 JSON——無法判讀 heal 欄，不混進上面任一桶\n",
+            u.heal_unparseable
+        ));
+    }
     if !u.census.is_empty() {
         // census（cortexyoung 6623113d 口徑）取代舊的 suggest/refresh outcome 清單：
         // 每列恰落一桶、加總＝fires，對帳一眼可查；舊清單把 status_error、
