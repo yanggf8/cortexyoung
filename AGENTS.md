@@ -179,6 +179,18 @@ the `PostToolUse` repair hook was not merely failing to repair a pulled tree -- 
 cannot be narrowed honestly must widen to everything**, never quietly to nothing, which is what
 `narrowed: false` now means for a missing git *and* for a stored head git cannot resolve.
 
+**The index is a cache, and the query is the one who heals it.** Telling the agent to reindex was
+measured worthless twice — stale suggestions ignored 6 of 6, then a copy-pasteable chained command
+adopted once in four days — while the edit hook refused 905 rebuilds in 7 days it was forbidden to
+attempt. So since 2026-09-14 `impact`/`context` run the repair themselves (`rust/src/heal.rs`)
+before answering: milliseconds when an incremental suffices, the full 1-2s rebuild inline when it
+does not, and a single-flight background rebuilder (`flock`, kernel-released on death, never a pid
+file) for trees past `CORT_HEAL_MAX_FILES`. A foreground command a person chose to run has the
+budget a hook never will; the hooks stay read-only probes. What the payload owes the reader is
+unchanged: `self_healed`/`heal_deferred` name what the query did about staleness, and every
+disclosure field still means what it meant — they describe the answer's basis, they never assign
+the caller maintenance work.
+
 **CI's first gate is `rustfmt`, and a gate that fails is a gate that hides the ones behind it.** Both
 jobs run fmt, then clippy with warnings as errors, then `cargo test --locked --all-targets`; a
 rustfmt failure skips the rest, so the repo spent days reporting on every push while checking

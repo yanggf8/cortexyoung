@@ -2,7 +2,7 @@
 //! Plus plan §7 B-gap canonicalize-before-hash, format errors, CORT_CACHE_DIR.
 
 use cort::db::project_id_for;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::fs;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
@@ -75,6 +75,38 @@ fn payload(run: &Run) -> Value {
             run.stdout, run.stderr
         )
     })
+}
+
+fn run_cort_env(args: &[&str], cwd: &Path, cache: &Path, envs: &[(&str, &str)]) -> Run {
+    let mut cmd = Command::new(cort_bin());
+    cmd.args(args).current_dir(cwd).env("CORT_CACHE_DIR", cache);
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    let out = cmd.output().expect("spawn cort");
+    Run {
+        code: out.status.code().unwrap_or(1),
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+    }
+}
+
+/// The newest usage row for a command, with its `args_summary` parsed. The heal fields ride in
+/// that summary, so "did this query repair the cache" is readable straight out of the db the
+/// same way the census reads it -- not from a transcript.
+fn latest_command_row(usage_db: &Path, command: &str) -> Value {
+    let conn =
+        rusqlite::Connection::open_with_flags(usage_db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    let summary: String = conn
+        .query_row(
+            "SELECT args_summary FROM command_log WHERE command = ?1 ORDER BY id DESC LIMIT 1",
+            [command],
+            |r| r.get(0),
+        )
+        .unwrap();
+    serde_json::from_str(&summary)
+        .unwrap_or_else(|e| panic!("args_summary not json ({e}): {summary}"))
 }
 
 fn sandbox() -> (tempfile::TempDir, PathBuf, tempfile::TempDir, PathBuf) {
@@ -821,17 +853,13 @@ fn a_stale_index_is_disclosed_in_the_line_the_agent_reads() {
         .as_str()
         .unwrap_or_default()
         .to_string();
-    // P2 (Kimi-round mining): the stale clause used to moralise ("re-run cort index first if
-    // the answer has to be complete") - 6 of 6 stale suggestions were then ignored, agents
-    // reading it as "impact will be wrong, keep grepping". It is one copy-pasteable chained
-    // command now.
+    // Self-healing (2026-09-14): the suggested command repairs the index itself, so the
+    // suggestion assigns no maintenance work at all. The P2 chained command had replaced an
+    // essay and then measured 1 adoption in 4 days; the heal retires the clause entirely --
+    // the agent was never the right actor for the repair, and the measurements said so twice.
     assert!(
-        ctx.contains("cort index --incremental && cort impact --symbol 'helper'"),
-        "stale copy must hand over the chained command: {ctx}"
-    );
-    assert!(
-        !ctx.contains("has to be complete"),
-        "the essay is gone: {ctx}"
+        !ctx.contains("cort index"),
+        "the suggestion must not assign index maintenance: {ctx}"
     );
     // Still a suggestion, not a refusal: a stale index resolves most seeds.
     assert!(ctx.contains("cort impact --symbol 'helper'"), "got: {ctx}");
@@ -2536,6 +2564,285 @@ fn the_refresh_hook_refuses_a_full_rebuild_and_says_so() {
         Some("not-the-one-that-ships"),
         "refusing must not stamp a version it did not build"
     );
+}
+
+/// 查詢即自癒: the query that finds the index behind is itself the cheapest actor to heal it.
+///
+/// Measured before this was built (2026-09-14): the edit hook refused 905 rebuilds in 7 days
+/// while the chained-command suggestion converted 1 time in 4 days, and a full pipeline costs
+/// 1.4-2.3s on these hundred-file projects. So `impact` answers only after repairing the cache,
+/// and the payload says so. A full heal here means the extractor was superseded -- the exact
+/// debt the treadmill fixture above creates and the hook refuses.
+#[test]
+fn impact_heals_a_drifted_index_instead_of_answering_stale() {
+    let (p, cwd, _c, cache) = sandbox();
+    git_in_fixture(&cwd);
+    let idx = run_cort(&["index"], &cwd, &cache);
+    if idx.code != 0 {
+        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
+        return;
+    }
+    let db_file = cache.join(
+        cort::db::db_path_for(cwd.to_str().unwrap())
+            .file_name()
+            .unwrap(),
+    );
+    let db = cort::db::open_db(&db_file).unwrap();
+    cort::db::set_meta(&db, "extractor_version", "not-the-one-that-ships").unwrap();
+    drop(db);
+    std::fs::write(
+        p.path().join("src/helper.ts"),
+        "export function helper(n: number) { return n * 11; }\n",
+    )
+    .unwrap();
+
+    let r = run_cort(
+        &["impact", "--symbol", "helper", "--depth", "1", "-f", "json"],
+        &cwd,
+        &cache,
+    );
+    assert_eq!(r.code, 0, "{} {}", r.stdout, r.stderr);
+    let v = payload(&r);
+    assert_eq!(v["self_healed"], json!(true), "{v}");
+    assert_eq!(v["heal_mode"], json!("full"), "{v}");
+    // The answer is post-heal fresh, by construction: nothing is owed anymore, so the
+    // payload's own honesty fields say so and no maintenance instruction remains.
+    assert_eq!(v["index_is_stale"], json!(false), "{v}");
+    assert_eq!(v["repair"], json!("none"), "{v}");
+    // The measurement rides in the usage row, not in a transcript.
+    let row = latest_command_row(&cache.join("usage.db"), "impact");
+    assert_eq!(row["self_healed"], json!(true), "{row}");
+    assert_eq!(row["heal_mode"], json!("full"), "{row}");
+
+    // And the second query has nothing to heal, so it adds no keys at all: the green-path
+    // payload stays byte-identical to the pre-heal contract.
+    let r2 = run_cort(
+        &["impact", "--symbol", "helper", "-f", "json"],
+        &cwd,
+        &cache,
+    );
+    assert_eq!(r2.code, 0, "{} {}", r2.stdout, r2.stderr);
+    let v2 = payload(&r2);
+    assert!(
+        v2.get("self_healed").is_none() && v2.get("heal_mode").is_none(),
+        "a fresh index must add no heal keys: {v2}"
+    );
+}
+
+/// The common staleness -- an edited-but-uncommitted tree -- is healed by the same entry, and
+/// the answer reflects the edit the index never saw.
+#[test]
+fn impact_heals_uncommitted_edits_before_answering() {
+    let (_p, cwd, _c, cache) = sandbox();
+    git_in_fixture(&cwd);
+    let idx = run_cort(&["index"], &cwd, &cache);
+    if idx.code != 0 {
+        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
+        return;
+    }
+    std::fs::write(
+        cwd.join("src/helper.ts"),
+        "export function helper(n: number) { return n * 2; }\n\
+         export function healedFn() { return helper(1); }\n",
+    )
+    .unwrap();
+
+    // Control: with healing off, the new symbol is not in the index and no seed resolves.
+    let ctl = run_cort_env(
+        &["impact", "--symbol", "healedFn", "-f", "json"],
+        &cwd,
+        &cache,
+        &[("CORT_NO_HEAL", "1")],
+    );
+    assert_eq!(ctl.code, 0, "{} {}", ctl.stdout, ctl.stderr);
+    assert_eq!(
+        payload(&ctl)["seed_count"],
+        json!(0),
+        "the control must show the staleness the heal then fixes"
+    );
+
+    let r = run_cort(
+        &["impact", "--symbol", "healedFn", "-f", "json"],
+        &cwd,
+        &cache,
+    );
+    assert_eq!(r.code, 0, "{} {}", r.stdout, r.stderr);
+    let v = payload(&r);
+    assert_eq!(v["self_healed"], json!(true), "{v}");
+    assert_eq!(v["heal_mode"], json!("incremental"), "{v}");
+    assert!(
+        v["seed_count"].as_i64().unwrap_or(0) >= 1,
+        "the healed answer resolves the symbol the edit added: {v}"
+    );
+}
+
+/// A tree too big to heal inline must not block the answer behind a rebuild: it answers with
+/// the honest disclosure and hands the repair to a single-flight background rebuilder.
+#[test]
+fn a_repo_past_the_heal_threshold_defers_to_a_background_healer() {
+    let (p, cwd, _c, cache) = sandbox();
+    git_in_fixture(&cwd);
+    let idx = run_cort(&["index"], &cwd, &cache);
+    if idx.code != 0 {
+        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
+        return;
+    }
+    let db_file = cache.join(
+        cort::db::db_path_for(cwd.to_str().unwrap())
+            .file_name()
+            .unwrap(),
+    );
+    let db = cort::db::open_db(&db_file).unwrap();
+    cort::db::set_meta(&db, "extractor_version", "not-the-one-that-ships").unwrap();
+    drop(db);
+    std::fs::write(
+        p.path().join("src/helper.ts"),
+        "export function helper(n: number) { return n * 11; }\n",
+    )
+    .unwrap();
+
+    let r = run_cort_env(
+        &["impact", "--symbol", "helper", "-f", "json"],
+        &cwd,
+        &cache,
+        &[("CORT_HEAL_MAX_FILES", "1")],
+    );
+    assert_eq!(r.code, 0, "{} {}", r.stdout, r.stderr);
+    let v = payload(&r);
+    assert_eq!(v["self_healed"], json!(false), "{v}");
+    assert!(
+        v["heal_deferred"].is_string(),
+        "the payload names why the heal was deferred: {v}"
+    );
+
+    // The background child inherits the cache dir and finishes in well under a second on
+    // this fixture; poll rather than sleep so the test stays as fast as the work allows.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        let st = run_cort(&["status"], &cwd, &cache);
+        let status: Value = serde_json::from_str(&st.stdout).unwrap_or(Value::Null);
+        if status["rebuild_required"]
+            .as_array()
+            .is_some_and(|a| a.is_empty())
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the background healer never cleared the debt: {status}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+/// An upgrade holding the locks is not a reason to block a read: the query stands down on the
+/// heal, answers from the index it has, and says so.
+#[test]
+fn an_upgrade_in_flight_defers_the_heal_instead_of_blocking_the_answer() {
+    let (_p, cwd, _c, cache) = sandbox();
+    git_in_fixture(&cwd);
+    let idx = run_cort(&["index"], &cwd, &cache);
+    if idx.code != 0 {
+        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
+        return;
+    }
+    let db_file = cache.join(
+        cort::db::db_path_for(cwd.to_str().unwrap())
+            .file_name()
+            .unwrap(),
+    );
+    let db = cort::db::open_db(&db_file).unwrap();
+    cort::db::set_meta(&db, "extractor_version", "not-the-one-that-ships").unwrap();
+    drop(db);
+
+    let _locks = cort::upgrade::acquire_upgrade_locks(&cache, std::time::Duration::from_secs(1))
+        .expect("the test holds the upgrade locks");
+    let r = run_cort(
+        &["impact", "--symbol", "helper", "-f", "json"],
+        &cwd,
+        &cache,
+    );
+    assert_eq!(r.code, 0, "{} {}", r.stdout, r.stderr);
+    let v = payload(&r);
+    assert_eq!(v["self_healed"], json!(false), "{v}");
+    assert_eq!(
+        v["heal_deferred"],
+        json!("upgrade_in_flight"),
+        "the payload names the stand-down: {v}"
+    );
+    // Answered from the stale index, honestly: the disclosure survives the stand-down.
+    assert_eq!(v["index_is_stale"], json!(true), "{v}");
+}
+
+/// `CORT_NO_HEAL=1` is the read-only consumer's escape hatch (evals run impact in parallel
+/// threads). It must restore today's behavior exactly: no heal, no heal keys, same disclosures.
+#[test]
+fn cort_no_heal_keeps_the_old_contract() {
+    let (p, cwd, _c, cache) = sandbox();
+    git_in_fixture(&cwd);
+    let idx = run_cort(&["index"], &cwd, &cache);
+    if idx.code != 0 {
+        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
+        return;
+    }
+    let db_file = cache.join(
+        cort::db::db_path_for(cwd.to_str().unwrap())
+            .file_name()
+            .unwrap(),
+    );
+    let db = cort::db::open_db(&db_file).unwrap();
+    cort::db::set_meta(&db, "extractor_version", "not-the-one-that-ships").unwrap();
+    drop(db);
+    std::fs::write(
+        p.path().join("src/helper.ts"),
+        "export function helper(n: number) { return n * 11; }\n",
+    )
+    .unwrap();
+
+    let r = run_cort_env(
+        &["impact", "--symbol", "helper", "-f", "json"],
+        &cwd,
+        &cache,
+        &[("CORT_NO_HEAL", "1")],
+    );
+    assert_eq!(r.code, 0, "{} {}", r.stdout, r.stderr);
+    let v = payload(&r);
+    assert!(
+        v.get("self_healed").is_none() && v.get("heal_mode").is_none(),
+        "the opt-out must add no heal keys: {v}"
+    );
+    assert_eq!(v["index_is_stale"], json!(true), "{v}");
+    let st = run_cort(&["status"], &cwd, &cache);
+    let status: Value = serde_json::from_str(&st.stdout).unwrap_or(Value::Null);
+    assert!(
+        status["rebuild_required"]
+            .as_array()
+            .is_some_and(|a| !a.is_empty()),
+        "no heal happened, so the debt is still named: {status}"
+    );
+}
+
+#[test]
+fn context_heals_a_drifted_index_too() {
+    let (_p, cwd, _c, cache) = sandbox();
+    git_in_fixture(&cwd);
+    let idx = run_cort(&["index"], &cwd, &cache);
+    if idx.code != 0 {
+        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
+        return;
+    }
+    let db_file = cache.join(
+        cort::db::db_path_for(cwd.to_str().unwrap())
+            .file_name()
+            .unwrap(),
+    );
+    let db = cort::db::open_db(&db_file).unwrap();
+    cort::db::set_meta(&db, "extractor_version", "not-the-one-that-ships").unwrap();
+    drop(db);
+
+    let r = run_cort(&["context", "helper", "-f", "json"], &cwd, &cache);
+    assert_eq!(r.code, 0, "{} {}", r.stdout, r.stderr);
+    assert_eq!(payload(&r)["self_healed"], json!(true), "{}", r.stdout);
 }
 
 /// The foreground keeps its rebuild. `cort index --incremental` is a typed command a person ran on

@@ -978,7 +978,12 @@ fn privacy_sentinels_from_context_recall_struct_unknown_flag_and_clap_error_are_
         let obj = summary.as_object().unwrap();
         for key in obj.keys() {
             assert!(
-                matches!(key.as_str(), "v" | "symbol" | "path" | "start" | "end"),
+                matches!(
+                    key.as_str(),
+                    "v" | "symbol" | "path" | "start" | "end" // heal keys: mechanical facts about
+                    | "self_healed" | "heal_mode" | "heal_ms" // the repair, never user content
+                    | "heal_deferred" | "heal" | "skipped" //
+                ),
                 "non-allowlisted key {key} in {summary}"
             );
         }

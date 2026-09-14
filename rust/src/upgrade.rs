@@ -116,6 +116,32 @@ pub fn try_protected_entry(_cache: &Path) -> Result<ActivityGuard, LockError> {
     Ok(ActivityGuard { _file: None })
 }
 
+/// Take an exclusive flock on an arbitrary lock file, or report contention. The self-heal
+/// path uses this for `.heal-<project>.lock`; as with the upgrade locks the bytes are never
+/// read or written (see `open_lock`), and release is close(2) when the returned file drops —
+/// which the kernel turns into a release even when the holder is SIGKILLed.
+#[cfg(unix)]
+pub fn try_exclusive_lock(path: &Path) -> Result<File, LockError> {
+    let file = open_lock(path).map_err(|_| LockError::LockFileUnavailable)?;
+    if flock_fd(&file, LOCK_EX | LOCK_NB) {
+        Ok(file)
+    } else {
+        Err(LockError::AdmissionBusy)
+    }
+}
+
+#[cfg(not(unix))]
+pub fn try_exclusive_lock(path: &Path) -> Result<File, LockError> {
+    // No flock(2): exclusion is unavailable and callers run unguarded, exactly as the
+    // upgrade-side stub does (see `try_protected_entry`).
+    File::options()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path)
+        .map_err(|_| LockError::LockFileUnavailable)
+}
+
 #[derive(Debug)]
 pub struct UpgradeLocks {
     _admission: File,

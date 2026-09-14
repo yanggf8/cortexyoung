@@ -364,6 +364,11 @@ struct IndexArgs {
     root: Option<PathBuf>,
     #[arg(long)]
     incremental: bool,
+    /// Spawned by the self-heal path (`heal.rs`), never typed by a person: take the project's
+    /// heal lock first so two stale queries cannot rebuild twice, and mark the usage row so
+    /// the census can say a background heal happened. Exits quietly when the lock is busy.
+    #[arg(long = "heal-background")]
+    heal_background: bool,
     #[arg(short = 'f', long = "format")]
     format: Option<String>,
 }
@@ -1195,11 +1200,12 @@ fn cmd_hook_suggest(args: &[String], usage: &mut UsageEvent) -> Result<Emit, Cor
             return quiet();
         }
     };
-    // A stale index is still worth suggesting -- most seeds resolve, and `impact` discloses
-    // `stale=true` itself -- but the suggestion must not arrive claiming more than it has. Every
-    // `impact` row recorded on this machine up to 2026-09-02 ran against a stale index, and the
-    // injected line said only "cort has an index", which is the half of the sentence that flatters
-    // the tool. The outcome is recorded separately so the mining can tell the two apart.
+    // A stale index is still worth suggesting -- most seeds resolve -- and the suggestion
+    // carries no maintenance instruction at all: the `impact`/`context` command it names heals
+    // the index itself before answering (see `heal.rs`), so assigning a reindex to the agent
+    // would be assigning work that no longer exists. The P2 chained clause that once sat here
+    // measured 1 adoption in 4 days; the heal retired it. The outcome is still recorded
+    // separately (`hit_stale`) so the mining can tell the two shapes of fire apart.
     // `Fire` is only reachable from inside `match evidence(&symbol)`, so the closure ran and this is
     // `Some`. That coupling is invisible from here: the day someone adds a fast path to `judge` that
     // fires without consulting evidence, this would read `None` and silently downgrade `hit_stale`
@@ -1211,7 +1217,7 @@ fn cmd_hook_suggest(args: &[String], usage: &mut UsageEvent) -> Result<Emit, Cor
     // `None` is unreachable today, and the assert above says so in debug -- but it compiles out of
     // the release binary this hook actually ships in, so the release behaviour has to be chosen too.
     // It fails toward disclosure: an unset cell is treated as behind-head, which over-warns rather
-    // than silently dropping the "built on an older commit" sentence from a suggestion.
+    // than silently dropping the `hit_stale` outcome from a suggestion.
     let stale = observed.get().unwrap_or(IndexState::BehindHead) == IndexState::BehindHead;
     usage.args_summary = hook_args_tag(
         &hook_args_kind(
@@ -1221,18 +1227,6 @@ fn cmd_hook_suggest(args: &[String], usage: &mut UsageEvent) -> Result<Emit, Cor
         "symbol",
         &hit.symbol,
     );
-    let stale_clause = if stale {
-        // P2 (Kimi-round mining): the old clause moralised ("re-run cort index first if the
-        // answer has to be complete") and 6 of 6 stale suggestions were ignored — agents read
-        // it as "impact will be wrong, keep grepping". One copy-pasteable chained command now.
-        format!(
-            " -- the index is behind head, so chain the reindex in the same command: \
-`cort index --incremental && cort impact --symbol '{}' --depth 1 --coverage -f lean`",
-            hit.symbol
-        )
-    } else {
-        String::new()
-    };
     // Two sentences off one shape gate. The `-A`/`-B`/`-C` arm is not a softened `impact` pitch:
     // an agent asking for surrounding lines is not asking who calls the symbol, and answering the
     // question it did not ask is what made that shape worth silencing in the first place.
@@ -1243,13 +1237,13 @@ fn cmd_hook_suggest(args: &[String], usage: &mut UsageEvent) -> Result<Emit, Cor
     let context = match hit.kind {
         cort::hook::Suggest::Impact => format!(
             "If you need the caller set (rename / delete / \"nothing else uses this\"), run \
-`cort impact --symbol '{}' --depth 1 --coverage -f lean`{stale_clause}. `--coverage` lists \
+`cort impact --symbol '{}' --depth 1 --coverage -f lean`. `--coverage` lists \
 what the enumeration could not see -- which a grep cannot tell you. If you are opening the \
 definition, ignore this and keep the grep.",
             hit.symbol
         ),
         cort::hook::Suggest::Context => format!(
-            "cort has an index for this project{stale_clause}. You asked for the lines around each \
+            "cort has an index for this project. You asked for the lines around each \
 match; `cort context '{}' -f lean` answers that from the index -- the definition and its \
 neighbours, ranked, instead of N lines either side of every textual hit. Add `--content full` to \
 read the whole body. Keep the grep if what you want is the hit list itself.",
@@ -1836,6 +1830,36 @@ fn cmd_index(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError>
     // proceeds without the guard (today's behavior, and the db open fails immediately).
     let cache = cache_dir();
     let _ = std::fs::create_dir_all(&cache);
+    // The background self-healer claims the project's heal lock before anything else, so two
+    // stale queries on a big repo cannot rebuild twice: the loser of the flock exits quietly
+    // with the row that says it stood down. Held to the end of the function, like the upgrade
+    // guard below -- dropping it early would let a second healer race a half-written graph.
+    let _heal_guard: Option<std::fs::File> = if a.heal_background {
+        match canonicalize_root(&root) {
+            Ok(canon) => {
+                usage.project_id = Some(canon.project_id.clone());
+                let lock = cache.join(format!(".heal-{}.lock", canon.project_id));
+                match cort::upgrade::try_exclusive_lock(&lock) {
+                    Ok(guard) => {
+                        usage.args_summary = json!({"v": 1, "heal": "background"}).to_string();
+                        Some(guard)
+                    }
+                    Err(_) => {
+                        usage.args_summary =
+                            json!({"v": 1, "heal": "background", "skipped": "busy"}).to_string();
+                        return Ok(Emit {
+                            render_command: None,
+                            format: Format::Json,
+                            payload: json!({"heal": "background", "skipped": "busy"}),
+                        });
+                    }
+                }
+            }
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
     // `_guard` reads as unused but is load-bearing: the activity flock releases when this
     // binding drops, at function end. An underscore-prefixed name keeps that lifetime while
     // telling the compiler the value is never read.
@@ -2177,10 +2201,13 @@ fn cmd_context(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortErro
     })?;
     let format = resolve_fmt(a.format.as_deref())?;
     let bin = pin_bin()?;
-    let (canon, db) = open_project_tracked(&cwd(), usage)?;
+    let (canon, mut db) = open_project_tracked(&cwd(), usage)?;
+    // 查詢即自癒: answer from a cache that is fresh by construction, never assign a rebuild
+    // to the caller. See `heal.rs` for the measured reasons and the boundaries.
+    let heal = cort::heal::ensure_fresh(&mut db, &bin, &canon.path, &canon.project_id);
     let budget = parse_usize_flag(a.budget.as_deref(), DEFAULT_BUDGET);
     let full_content = a.content.as_deref() == Some("full");
-    let out = context_command(
+    let mut out = context_command(
         &db,
         &bin,
         &canon.path,
@@ -2192,10 +2219,12 @@ fn cmd_context(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortErro
             full_content,
         },
     )?;
+    heal.attach_to(&mut out);
     fill_stale(usage, &out);
     if out.get("resolution").and_then(Value::as_str) == Some("exact_symbol") {
         usage.args_summary = usage::args_summary(Some(&query), None, None, None);
     }
+    usage.args_summary = heal.summarize(std::mem::take(&mut usage.args_summary));
     Ok(Emit {
         render_command: Some("context"),
         format,
@@ -2213,7 +2242,10 @@ fn cmd_impact(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError
     })?;
     let format = resolve_fmt(a.format.as_deref())?;
     let bin = pin_bin()?;
-    let (canon, db) = open_project_tracked(&cwd(), usage)?;
+    let (canon, mut db) = open_project_tracked(&cwd(), usage)?;
+    // 查詢即自癒: answer from a cache that is fresh by construction, never assign a rebuild
+    // to the caller. See `heal.rs` for the measured reasons and the boundaries.
+    let heal = cort::heal::ensure_fresh(&mut db, &bin, &canon.path, &canon.project_id);
     let depth = parse_i64_flag(a.depth.as_deref(), DEFAULT_DEPTH);
     let mut out = impact_command(&db, &bin, &canon.path, &canon.project_id, &symbol, depth)?;
     // Recall is a separate question from cost, so it is opt-in: the default payload stays the small
@@ -2221,8 +2253,9 @@ fn cmd_impact(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError
     if a.coverage {
         coverage::attach(&db, &canon.project_id, Path::new(&canon.path), &mut out)?;
     }
+    heal.attach_to(&mut out);
     fill_stale(usage, &out);
-    usage.args_summary = usage::args_summary(Some(&symbol), None, None, None);
+    usage.args_summary = heal.summarize(usage::args_summary(Some(&symbol), None, None, None));
     Ok(Emit {
         render_command: Some("impact"),
         format,
