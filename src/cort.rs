@@ -732,13 +732,16 @@ fn open_usage_readonly() -> Option<Connection> {
 /// cortexyoung hook.rs 的 SUGGEST_OUTCOMES 複製品（6623113d 引入）。
 /// **會漂**：上游動了詞彙，這裡要跟——census 的 `unknown/<hook>` 桶就是為了
 /// 在跟丟時發出訊號，而不是把新值靜默混進既有桶。
-pub const SUGGEST_OUTCOMES: [&str; 9] = [
+/// 078a0c5c（2026-09-15）加了第十個 `no_evidence_hinted`：`no_evidence` 的
+/// 邊界 5 指路（chunks 內容 LIKE 出現處，per session 每符號一次、上限三）。
+pub const SUGGEST_OUTCOMES: [&str; 10] = [
     "no_payload",
     "no_shape",
     "upgrade_stood_down",
     "no_index",
     "no_index_hinted",
     "no_evidence",
+    "no_evidence_hinted",
     "hit",
     "hit_stale",
     "hit_yielded",
