@@ -834,6 +834,18 @@ fn a_stale_index_is_disclosed_in_the_line_the_agent_reads() {
         ctx.contains("If you are opening the definition, ignore this"),
         "the dismiss clause must be present: {ctx}"
     );
+    // P5 (2026-09-15, Taps mining): an agent verifying a wiring claim answered "does anything
+    // call Taps?" from a zero-result grep and moved on -- the exact hole --coverage exists to
+    // fill. The copy names both the question ("wired up") and the bad inference, so a session
+    // about to claim completeness can recognise itself in the trigger list.
+    assert!(
+        ctx.contains("wired up"),
+        "the trigger list must name the wiring question: {ctx}"
+    );
+    assert!(
+        ctx.contains("zero-result grep"),
+        "the completeness clause must reject the zero-grep inference: {ctx}"
+    );
     assert!(
         !ctx.contains("older commit"),
         "a fresh index must not warn about staleness: {ctx}"

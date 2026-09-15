@@ -1234,12 +1234,18 @@ fn cmd_hook_suggest(args: &[String], usage: &mut UsageEvent) -> Result<Emit, Cor
     // P4 (Kimi-round mining): 5 of 11 ignored suggestions were definition/implementation
     // lookups, not caller-set questions — the copy now leads with the verb condition so an
     // agent opening a definition can dismiss it in one glance instead of reading an essay.
+    //
+    // P5 (2026-09-15, Taps mining): the one field injection that was truly a miss had the agent
+    // verifying a wiring claim ("is Taps even connected?") -- a completeness question -- and it
+    // answered from a zero-result grep. The trigger list now names that question so the session
+    // can recognise itself, and the coverage clause replaces "a grep cannot tell you" with the
+    // concrete bad inference a zero-result grep invites.
     let context = match hit.kind {
         cort::hook::Suggest::Impact => format!(
-            "If you need the caller set (rename / delete / \"nothing else uses this\"), run \
-`cort impact --symbol '{}' --depth 1 --coverage -f lean`. `--coverage` lists \
-what the enumeration could not see -- which a grep cannot tell you. If you are opening the \
-definition, ignore this and keep the grep.",
+            "If you need the caller set (rename / delete / \"nothing uses this\" / \"is this \
+wired up?\"), run `cort impact --symbol '{}' --depth 1 --coverage -f lean`. `--coverage` lists \
+what the enumeration could not see, and a zero-result grep is not proof nobody calls it. If you \
+are opening the definition, ignore this and keep the grep.",
             hit.symbol
         ),
         cort::hook::Suggest::Context => format!(
