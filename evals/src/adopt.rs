@@ -310,14 +310,17 @@ struct Injection {
     tool_use_id: Option<String>,
 }
 
-struct BashCall {
+/// One tool call, in file order. Every tool_use lands here -- not only Bash -- because the
+/// adoption window means "the agent's next few actions", and an Edit between two greps is one of
+/// those actions. `command` is empty for non-shell tools, which `runs_cort_impact` reads as
+/// never executing anything.
+struct ToolCall {
     id: Option<String>,
     ts: i64,
     command: String,
 }
 
-/// Transcript files, excluding the subagent sidechains §6 excludes: a subagent's transcript is not
-/// a session anyone steered, and counting it doubles the sessions that spawned one.
+/// Every transcript file under the tree, top-level sessions and subagent sidechains alike.
 fn session_files(dir: &Path, depth: usize) -> Vec<PathBuf> {
     let mut out = Vec::new();
     if depth == 0 {
@@ -330,18 +333,57 @@ fn session_files(dir: &Path, depth: usize) -> Vec<PathBuf> {
         let path = entry.path();
         if path.is_dir() {
             out.extend(session_files(&path, depth - 1));
-        } else if path.extension().and_then(|e| e.to_str()) == Some("jsonl")
-            && !path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("")
-                .starts_with("agent-")
-        {
+        } else if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
             out.push(path);
         }
     }
     out.sort();
     out
+}
+
+/// Where a transcript belongs: its project directory, the session a person steered, and whether it
+/// is a subagent sidechain. `None` for a file that must not be counted at all.
+///
+/// Until 2026-09-15 sidechains were skipped outright, on the theory that a transcript nobody
+/// steered is nobody's session. The real tree disagreed: 7 of the 12 hook injections recorded that
+/// week were fired at a subagent's Bash calls and exist only in
+/// `<project>/<session>/subagents/agent-*.jsonl`, so the funnel undercounted the very stage it
+/// measures. A sidechain is now counted against its parent session -- the searches it ran and the
+/// injections it received are the session's -- but it never adds a second session, and it never
+/// pools its Bash calls with the parent's: an adoption is paired inside the file whose context the
+/// injection reached. `None` is left for the stray shape the old skip defended against: an
+/// `agent-*.jsonl` with no `subagents` folder above it has no parent to be attributed to, and
+/// counting it as a session would invent one.
+fn attribute(root: &Path, file: &Path) -> Option<(String, String, bool)> {
+    let name = file
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_string();
+    let in_subagents = file
+        .parent()
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str())
+        == Some("subagents");
+    let is_agent_file = name.starts_with("agent-");
+    if is_agent_file && !in_subagents {
+        return None;
+    }
+    let sidechain = is_agent_file && in_subagents;
+    let rel = file.strip_prefix(root).unwrap_or(file);
+    let comps: Vec<String> = rel
+        .iter()
+        .map(|s| s.to_string_lossy().into_owned())
+        .collect();
+    let project = comps.first().cloned().unwrap_or_else(|| "?".to_string());
+    // A top-level file is the session itself. A sidechain's session is the directory above its
+    // `subagents` folder; "subagents" itself is never a session name.
+    let session = if comps.len() > 2 {
+        comps[1].clone()
+    } else {
+        name.trim_end_matches(".jsonl").to_string()
+    };
+    Some((project, session, sidechain))
 }
 
 /// Mine the funnel from the Claude Code transcript tree. Codex is not read: it carries the skill
@@ -374,28 +416,28 @@ pub fn mine(
     let mut records_without_timestamp = 0usize;
     let mut excluded_sessions = 0usize;
     let (mut adopted_same, mut adopted_other) = (0usize, 0usize);
+    let mut sidechain_files_read = 0usize;
 
     for file in session_files(claude_dir, 6) {
-        let project = file
-            .parent()
-            .and_then(|p| p.file_name())
-            .and_then(|n| n.to_str())
-            .unwrap_or("?")
-            .to_string();
+        let Some((project, session, sidechain)) = attribute(claude_dir, &file) else {
+            continue;
+        };
         if exclude.iter().any(|e| e == &project) {
-            excluded_sessions += 1;
+            // The exclusion is per steered session; the sidechains that belong to it go with it
+            // and are not additional sessions dropped.
+            if !sidechain {
+                excluded_sessions += 1;
+            }
             continue;
         }
-        let session = file
-            .file_stem()
-            .and_then(|n| n.to_str())
-            .unwrap_or("?")
-            .to_string();
         let Ok(text) = std::fs::read_to_string(&file) else {
             files_unreadable += 1;
             continue;
         };
-        let mut calls: Vec<BashCall> = Vec::new();
+        if sidechain {
+            sidechain_files_read += 1;
+        }
+        let mut calls: Vec<ToolCall> = Vec::new();
         let mut here: Vec<Injection> = Vec::new();
         let (mut s_searches, mut s_fire) = (0usize, 0usize);
         let mut in_window = false;
@@ -430,9 +472,23 @@ pub fn mine(
                 .and_then(Value::as_array)
             {
                 for item in items {
-                    if item.get("type").and_then(Value::as_str) != Some("tool_use")
-                        || item.get("name").and_then(Value::as_str) != Some("Bash")
-                    {
+                    if item.get("type").and_then(Value::as_str) != Some("tool_use") {
+                        continue;
+                    }
+                    let name = item.get("name").and_then(Value::as_str).unwrap_or("");
+                    if name != "Bash" {
+                        // The window counts every action; only the writing tools matter enough to
+                        // keep individually, and they ride the same sequence with an empty command.
+                        if matches!(
+                            name,
+                            "Edit" | "Write" | "MultiEdit" | "NotebookEdit"
+                        ) {
+                            calls.push(ToolCall {
+                                id: item.get("id").and_then(Value::as_str).map(str::to_string),
+                                ts,
+                                command: String::new(),
+                            });
+                        }
                         continue;
                     }
                     let Some(command) = item
@@ -448,7 +504,7 @@ pub fn mine(
                             s_fire += 1;
                         }
                     }
-                    calls.push(BashCall {
+                    calls.push(ToolCall {
                         id: item.get("id").and_then(Value::as_str).map(str::to_string),
                         ts,
                         command: command.to_string(),
@@ -496,13 +552,19 @@ pub fn mine(
         if !in_window {
             continue;
         }
-        sessions += 1;
+        // The session count is the count of steered sessions: a sidechain folds into its parent
+        // rather than adding one, while its searches and injections are the parent's too.
+        if !sidechain {
+            sessions += 1;
+        }
         searches += s_searches;
         would_fire += s_fire;
         injection_count += here.len();
         {
             let entry = per_project.entry(project.clone()).or_default();
-            bump(entry, "sessions", 1);
+            if !sidechain {
+                bump(entry, "sessions", 1);
+            }
             bump(entry, "searches", s_searches as i64);
             bump(entry, "injections", here.len() as i64);
         }
@@ -566,6 +628,14 @@ pub fn mine(
                     }
                 },
             };
+            // The window is the agent's next few *actions*, so a write between greps occupies a
+            // place in it. The count is the tell the row exists to carry: the six sidechain fires
+            // of 2026-09-14 all landed in a pure read-only survey and were correctly ignored,
+            // while Taps -- the one true miss that week -- sat next to edits. The row has to say
+            // which kind of ignore it was rather than leaving both as a bare `not_adopted`.
+            let writes_in_window = (start..end)
+                .filter(|i| calls[*i].command.is_empty())
+                .count();
             bump(
                 per_project.entry(inj.project.clone()).or_default(),
                 verdict,
@@ -582,6 +652,7 @@ pub fn mine(
                     "triggering_command": trigger_at.map(|i| truncate(&calls[i].command)),
                     "followed_by": follow.map(|i| truncate(&calls[i].command)),
                     "impact_later_in_session": later,
+                    "writes_in_window": writes_in_window,
                 }));
             }
         }
@@ -649,13 +720,16 @@ pub fn mine(
         }
     });
 
+    // v2 over v1: v1 skipped subagent sidechains, and the 09-15 tree proved that skips a third of
+    // the injections -- the two methods' numbers must not be read as one series.
     json!({
-        "method": "adopt-mine-v1",
+        "method": "adopt-mine-v2",
         "window": {
             "since_ms": since_ms,
             "since_utc": format_utc(since_ms),
         },
         "sessions_in_window": sessions,
+        "sidechain_files_read": sidechain_files_read,
         "searches": searches,
         "shape_would_fire": would_fire,
         "injections": injection_count,
@@ -684,13 +758,21 @@ pub fn mine(
                     project is indexed and holds nothing about that symbol). Only the first is a \
                     missed chance, \
                     which will disagree with `injections` wherever a project has no index -- that \
-                    difference is the opportunity the gate declined, not a bug. Adoption is \
+                    difference is the opportunity the gate declined, not a bug. Subagent sidechains \
+                    (`<project>/<session>/subagents/agent-*.jsonl`) are mined as of v2 and \
+                    attributed to their parent session -- the 09-15 tree had 7 of that week's 12 \
+                    injections there -- and a sidechain's adoption is paired inside its own file, \
+                    never against the parent's calls. Adoption is \
                     reported per injection and must be adjudicated row by row: `adopted_other_symbol` \
                     is usually the agent moving on rather than taking the suggestion, and a session \
                     that was auditing the hook adopts it for reasons no user shares -- pass \
                     `--exclude` for the project cort is developed in, or the funnel is measuring \
                     its own audit. Adoption is only counted inside `follow_calls_window` calls of \
-                    the intercepted one; `impact_later_in_session` marks a row where the tool was \
+                    the intercepted one, and that window now counts every tool action, not only \
+                    Bash: `writes_in_window` says how many of them were edits, so a `not_adopted` \
+                    beside zero writes reads as a likely correct dismissal from a read-only survey \
+                    while one beside writes is the row to scrutinise. \
+                    `impact_later_in_session` marks a row where the tool was \
                     used further on, which is a fact for a reader and not an adoption. Nothing here \
                     says the enumeration that followed was correct; `verify-impact` grades an edge. \
                     The adoption test reads shell syntax, not shell semantics, and the residue is \

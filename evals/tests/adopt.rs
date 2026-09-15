@@ -40,6 +40,20 @@ fn injection(ts: &str, tool_use_id: &str, symbol: &str) -> String {
     .to_string()
 }
 
+/// An edit is the cheap tell of a working session versus a read-only survey: the row discloses
+/// whether writes sat inside the adoption window, because an ignore that followed no writes reads
+/// differently from one that sat next to edits.
+fn edit(ts: &str, id: &str) -> String {
+    json!({
+        "type": "assistant",
+        "timestamp": ts,
+        "message": { "role": "assistant", "content": [
+            { "type": "tool_use", "id": id, "name": "Edit", "input": { "file_path": "src/x.rs" } }
+        ]},
+    })
+    .to_string()
+}
+
 /// The SessionStart skill preamble: same attachment type, no `hookName`. §6 warns about it because
 /// a scan for the type alone counts it as an interception.
 fn session_start_preamble(ts: &str) -> String {
@@ -209,8 +223,11 @@ fn the_window_excludes_what_happened_before_the_hook_was_wired() {
     assert_eq!(after["injection_rows"][0]["symbol"], json!("helper"));
 }
 
+/// A stray subagent transcript sitting at the top level has no parent session to be attributed to,
+/// and counting it as a session of its own would invent one. (Real sidechains live under
+/// `<project>/<session>/subagents/` and are counted -- see the sidechain tests below.)
 #[test]
-fn a_subagent_sidechain_is_not_a_session_anyone_steered() {
+fn a_stray_agent_file_at_the_top_level_is_still_not_a_session() {
     let body = [
         bash(
             "2026-09-02T02:00:00.000Z",
@@ -227,6 +244,7 @@ fn a_subagent_sidechain_is_not_a_session_anyone_steered() {
     let r = run(dir.path(), "2026-09-02T00:00:00Z");
     assert_eq!(r["sessions_in_window"], json!(1), "{r:#}");
     assert_eq!(r["injections"], json!(1));
+    assert_eq!(r["sidechain_files_read"], json!(0));
 }
 
 #[test]
@@ -784,4 +802,193 @@ fn a_harnessless_row_is_not_credited_to_the_mined_harness() {
     assert_eq!(cc["injections_recorded"], json!(1), "{cc}");
     assert_eq!(cc["outcomes"]["unspecified"], json!(5), "{cc}");
     assert_eq!(cc["comparable_to_injections"], json!(false), "{cc}");
+}
+
+// === subagent sidechains ===
+//
+// Until 2026-09-15 the scan skipped `agent-*.jsonl` on the theory that a sidechain is not a
+// session anyone steered. The real tree disagreed: 7 of the 12 hook injections recorded that
+// week were fired at a subagent's Bash calls and landed only in
+// `<project>/<session>/subagents/agent-*.jsonl`, so the funnel undercounted the very stage it
+// exists to measure. The sidechain is counted, but attributed to the parent session, so a
+// session that spawned one is still one session.
+
+/// A subagent transcript as Claude Code lays it out.
+fn sidechain(dir: &StdPath, project: &str, session: &str, agent: &str, body: &str) {
+    let p = dir.join(project).join(session).join("subagents");
+    std::fs::create_dir_all(&p).unwrap();
+    std::fs::write(p.join(format!("{agent}.jsonl")), body).unwrap();
+}
+
+#[test]
+fn a_sidechain_injection_belongs_to_the_parent_session_and_can_be_adopted_there() {
+    let top = bash("2026-09-02T01:00:00.000Z", "toolu_top", "ls src");
+    let side = [
+        bash(
+            "2026-09-02T02:00:00.000Z",
+            "toolu_a",
+            "grep -rn 'classic(' src --include=*.rs",
+        ),
+        injection("2026-09-02T02:00:01.000Z", "toolu_a", "classic"),
+        bash(
+            "2026-09-02T02:00:30.000Z",
+            "toolu_b",
+            "cort impact --symbol classic --depth 1 --coverage -f lean",
+        ),
+    ]
+    .join("\n");
+    let dir = tree(&[("-home-u-repo", "s1", &top)]);
+    sidechain(dir.path(), "-home-u-repo", "s1", "agent-abc123", &side);
+    let r = run(dir.path(), "2026-09-02T00:00:00Z");
+
+    assert_eq!(r["sessions_in_window"], json!(1), "{r:#}");
+    assert_eq!(r["injections"], json!(1), "{r:#}");
+    assert_eq!(r["adopted_same_symbol"], json!(1));
+    assert_eq!(r["not_adopted"], json!(0));
+    let row = &r["injection_rows"][0];
+    assert_eq!(row["project"], json!("-home-u-repo"));
+    // The parent session, not `agent-abc123`: the report's rows are read against the session a
+    // person steered, and the subagent's own file is reachable from there.
+    assert_eq!(row["session"], json!("s1"));
+    assert_eq!(row["verdict"], json!("adopted_same_symbol"));
+    assert_eq!(r["sidechain_files_read"], json!(1));
+}
+
+#[test]
+fn a_sidechain_search_is_counted_but_the_session_is_not_doubled() {
+    let top = bash("2026-09-02T01:00:00.000Z", "toolu_top", "ls src");
+    let a = [
+        bash("2026-09-02T02:00:00.000Z", "t1", "grep -rn fuel src"),
+        bash("2026-09-02T02:01:00.000Z", "t2", "grep -rn move src"),
+    ]
+    .join("\n");
+    let b = bash("2026-09-02T03:00:00.000Z", "t3", "grep -rn tank src");
+    let dir = tree(&[("-home-u-repo", "s1", &top)]);
+    sidechain(dir.path(), "-home-u-repo", "s1", "agent-a", &a);
+    sidechain(dir.path(), "-home-u-repo", "s1", "agent-b", &b);
+    let r = run(dir.path(), "2026-09-02T00:00:00Z");
+
+    assert_eq!(r["sessions_in_window"], json!(1), "{r:#}");
+    assert_eq!(r["searches"], json!(3), "{r:#}");
+    assert_eq!(
+        r["by_project"]["-home-u-repo"]["sessions"],
+        json!(1),
+        "{r:#}"
+    );
+    assert_eq!(r["sidechain_files_read"], json!(2));
+}
+
+#[test]
+fn excluding_a_project_drops_its_sidechains_and_counts_one_session_not_one_per_file() {
+    let top = bash("2026-09-02T01:00:00.000Z", "toolu_top", "ls src");
+    let side = bash("2026-09-02T02:00:00.000Z", "t1", "grep -rn fuel src");
+    let dir = tree(&[("-home-u-repo", "s1", &top), ("-home-u-other", "s2", &top)]);
+    sidechain(dir.path(), "-home-u-repo", "s1", "agent-a", &side);
+    let r = mine(
+        dir.path(),
+        parse_since("2026-09-02T00:00:00Z").unwrap(),
+        None,
+        50,
+        DEFAULT_FOLLOW_CALLS,
+        &["-home-u-repo".to_string()],
+    );
+
+    assert_eq!(r["injections"], json!(0));
+    assert_eq!(r["sessions_in_window"], json!(1), "{r:#}");
+    assert_eq!(r["searches"], json!(0), "{r:#}");
+    // One excluded session -- the one a person steered -- not two files.
+    assert_eq!(r["excluded_sessions"], json!(1), "{r:#}");
+    assert_eq!(r["sidechain_files_read"], json!(0));
+}
+
+#[test]
+fn a_sidechain_adoption_is_paired_inside_the_sidechain_not_across_files() {
+    // The top-level injection finds no impact call in its own file. The sidechain's adoption sits
+    // later in the evening; were calls pooled across files, the top-level row would claim it (as
+    // `adopted_other_symbol`) and one act would score two rows.
+    let top = [
+        bash(
+            "2026-09-02T01:10:00.000Z",
+            "toolu_1",
+            "grep -rn 'alpha(' src --include=*.rs",
+        ),
+        injection("2026-09-02T01:11:00.000Z", "toolu_1", "alpha"),
+    ]
+    .join("\n");
+    let side = [
+        bash(
+            "2026-09-02T02:20:00.000Z",
+            "toolu_a",
+            "grep -rn 'beta(' src --include=*.rs",
+        ),
+        injection("2026-09-02T02:21:00.000Z", "toolu_a", "beta"),
+        bash(
+            "2026-09-02T02:22:00.000Z",
+            "toolu_c",
+            "cort impact --symbol beta --depth 1 --coverage -f lean",
+        ),
+    ]
+    .join("\n");
+    let dir = tree(&[("-home-u-repo", "s1", &top)]);
+    sidechain(dir.path(), "-home-u-repo", "s1", "agent-abc", &side);
+    let r = run(dir.path(), "2026-09-02T00:00:00Z");
+
+    assert_eq!(r["adopted_same_symbol"], json!(1), "{r:#}");
+    assert_eq!(r["adopted_other_symbol"], json!(0), "{r:#}");
+    assert_eq!(r["not_adopted"], json!(1), "{r:#}");
+    let by_verdict = |sym: &str| {
+        r["injection_rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["symbol"] == json!(sym))
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(by_verdict("beta")["verdict"], json!("adopted_same_symbol"));
+    assert_eq!(by_verdict("alpha")["verdict"], json!("not_adopted"));
+}
+
+#[test]
+fn a_write_inside_the_window_is_disclosed_on_the_row() {
+    // The Taps shape: a session mid-work ignores the suggestion and edits on. The ignore is not
+    // obviously correct the way a pure read-only survey's is, and the row has to say which kind
+    // it was instead of leaving both as a bare `not_adopted`.
+    let body = [
+        bash("2026-09-02T02:00:00.000Z", "toolu_1", "grep -rn 'helper(' src"),
+        injection("2026-09-02T02:00:01.000Z", "toolu_1", "helper"),
+        edit("2026-09-02T02:00:40.000Z", "toolu_2"),
+    ]
+    .join("\n");
+    let dir = tree(&[("-home-u-repo", "s1", &body)]);
+    let r = run(dir.path(), "2026-09-02T00:00:00Z");
+    assert_eq!(r["injection_rows"][0]["writes_in_window"], json!(1), "{r:#}");
+    assert_eq!(r["injection_rows"][0]["verdict"], json!("not_adopted"));
+}
+
+#[test]
+fn a_write_beyond_the_window_and_a_read_only_session_are_both_zero() {
+    let beyond = [
+        bash("2026-09-02T02:00:00.000Z", "toolu_1", "grep -rn 'helper(' src"),
+        injection("2026-09-02T02:00:01.000Z", "toolu_1", "helper"),
+        bash("2026-09-02T02:01:00.000Z", "t2", "grep -rn a src"),
+        bash("2026-09-02T02:02:00.000Z", "t3", "grep -rn b src"),
+        bash("2026-09-02T02:03:00.000Z", "t4", "grep -rn c src"),
+        bash("2026-09-02T02:04:00.000Z", "t5", "grep -rn d src"),
+        bash("2026-09-02T02:05:00.000Z", "t6", "grep -rn e src"),
+        edit("2026-09-02T02:06:00.000Z", "toolu_7"),
+    ]
+    .join("\n");
+    let dir = tree(&[("-home-u-repo", "s1", &beyond)]);
+    let r = run(dir.path(), "2026-09-02T00:00:00Z");
+    assert_eq!(r["injection_rows"][0]["writes_in_window"], json!(0), "{r:#}");
+
+    let readonly = [
+        bash("2026-09-02T03:00:00.000Z", "toolu_a", "grep -rn 'x(' src"),
+        injection("2026-09-02T03:00:01.000Z", "toolu_a", "x"),
+    ]
+    .join("\n");
+    let dir2 = tree(&[("-home-u-other", "s1", &readonly)]);
+    let r2 = run(dir2.path(), "2026-09-02T00:00:00Z");
+    assert_eq!(r2["injection_rows"][0]["writes_in_window"], json!(0), "{r2:#}");
 }

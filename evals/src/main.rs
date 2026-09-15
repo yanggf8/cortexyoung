@@ -119,7 +119,7 @@ const USAGE_SUMMARIZE: &str = "usage: cort-evals summarize [--strict] rows.json 
 const USAGE_DEMAND: &str = "usage: cort-evals demand [--claude-dir DIR] [--codex-dir DIR] [--exclude a,b,c] [--out FILE] [--show]";
 const USAGE_HOOK_PROBE: &str =
     "usage: cort-evals hook-probe [--claude-dir DIR] [--codex-dir DIR] [--kimi-dir DIR] [--examples N] [--decline TAG]  (replays the routing rule over transcripts already on disk; --decline narrows passed_over_examples to one decline tag, the census always covers every tag; no model calls)";
-const USAGE_ADOPT_MINE: &str = "usage: cort-evals adopt-mine --since RFC3339 [--claude-dir DIR] [--usage-db FILE] [--rows N] [--follow-calls N] [--exclude proj,proj] [--out FILE]  (the docs/2026-08-31-recall-wip.md §6 funnel; reads transcripts already on disk, no model calls)";
+const USAGE_ADOPT_MINE: &str = "usage: cort-evals adopt-mine --since RFC3339 [--claude-dir DIR] [--usage-db FILE] [--rows N] [--follow-calls N] [--exclude proj,proj] [--out FILE]  (the docs/2026-08-31-recall-wip.md §6 funnel, including subagent sidechains; reads transcripts already on disk, no model calls)";
 const USAGE_RECALL_EXP: &str =
     "usage: cort-evals recall-exp --venue DIR [--top N]  (text-side counterfactual; no cort index needed)";
 
