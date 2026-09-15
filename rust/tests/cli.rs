@@ -3363,3 +3363,191 @@ fn the_refresh_vocabulary_is_closed_and_the_census_sums_to_the_fires() {
         "the refresh vocabulary must already cover what this binary emits: {census:?}"
     );
 }
+
+// === the no_evidence pointer (boundary 5: refuse, but leave a trail) ===
+//
+// A field or variant is outside the extraction grain, so the honest answer is still "no caller
+// set" -- but 7 of the 11 rows in the 09-13..09-15 window were exactly this shape, and the name
+// they searched sits inside the bodies the index did extract. The refusal now names where, once
+// per session per symbol and at most three times per session.
+
+/// Like `run_hook_suggest`, but the payload carries a session id: the pointer gate is per-session,
+/// so the tests here hold one steady across calls.
+fn run_hook_suggest_session(command: &str, session: &str, cwd: &Path, cache: &Path) -> Run {
+    run_hook_suggest_payload(
+        serde_json::json!({
+            "session_id": session,
+            "tool_name": "Bash",
+            "tool_input": { "command": command },
+        }),
+        &[],
+        cwd,
+        cache,
+    )
+}
+
+const GRAIN_FIXTURE: &str = "\
+export class Tank {
+  fuel_left = 20;
+  ammo_left = 5;
+  shield_left = 100;
+  hull_left = 30;
+  drive() { this.fuel_left -= 1; return this.fuel_left; }
+  shoot() { this.ammo_left -= 1; }
+  block() { this.shield_left -= 5; }
+  hit() { this.hull_left -= 10; }
+}
+";
+
+fn indexed_grain_project() -> (tempfile::TempDir, PathBuf, tempfile::TempDir, PathBuf) {
+    let (proj, cwd) = make_project(&[("src/tank.ts", GRAIN_FIXTURE)]);
+    let cache_dir = tempfile::Builder::new()
+        .prefix("cort-grain-")
+        .tempdir()
+        .unwrap();
+    let cache = cache_dir.path().to_path_buf();
+    let idx = run_cort(&["index", "."], &cwd, &cache);
+    if idx.code != 0 {
+        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
+    }
+    (proj, cwd, cache_dir, cache)
+}
+
+fn hook_outcome_of(usage_db: &Path) -> String {
+    let conn =
+        rusqlite::Connection::open_with_flags(usage_db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    conn.query_row(
+        "SELECT args_summary FROM command_log WHERE command='hook-suggest' ORDER BY id DESC LIMIT 1",
+        [],
+        |r| {
+            let raw: String = r.get(0)?;
+            Ok(serde_json::from_str::<Value>(&raw)
+                .ok()
+                .and_then(|v| v.get("hook").and_then(Value::as_str).map(str::to_string))
+                .unwrap_or_else(|| "?".to_string()))
+        },
+    )
+    .unwrap()
+}
+
+fn usage_db_under(cache: &Path, _cwd: &Path) -> PathBuf {
+    // The usage database is one file per cache, not per project.
+    cache.join("usage.db")
+}
+
+#[test]
+fn an_absent_field_name_gets_a_pointer_into_the_indexed_bodies_once() {
+    let (_proj, cwd, _cd, cache) = indexed_grain_project();
+    let idx_row = run_cort(&["index", "."], &cwd, &cache);
+    if idx_row.code != 0 {
+        eprintln!(
+            "SKIP: index failed (ast-grep unavailable?): {}",
+            idx_row.stderr
+        );
+        return;
+    }
+    let usage_db = usage_db_under(&cache, &cwd);
+
+    let r = run_hook_suggest_session(
+        "grep -rn \"fuel_left\" src --include=*.ts | head -5",
+        "sess-pointer-1",
+        &cwd,
+        &cache,
+    );
+    assert_eq!(r.code, 0, "{} {}", r.stdout, r.stderr);
+    let ctx = payload(&r)["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    // The pointer names the symbol, says what it is NOT, and lands the occurrences.
+    assert!(ctx.contains("fuel_left"), "{ctx}");
+    assert!(ctx.contains("appears inside"), "must name the trail: {ctx}");
+    assert!(ctx.contains(".ts:"), "must carry file:line: {ctx}");
+    assert!(
+        ctx.contains("not a complete enumeration"),
+        "the honesty clause is the whole point of a pointer: {ctx}"
+    );
+    assert_eq!(hook_outcome_of(&usage_db), "no_evidence_hinted");
+
+    // The same symbol, second ask of the session: back to the plain refusal.
+    let again = run_hook_suggest_session(
+        "grep -rn \"fuel_left\" src --include=*.ts | wc -l",
+        "sess-pointer-1",
+        &cwd,
+        &cache,
+    );
+    assert_eq!(
+        payload(&again),
+        serde_json::json!({}),
+        "the pointer fires once per session per symbol: {}",
+        again.stdout
+    );
+    assert_eq!(hook_outcome_of(&usage_db), "no_evidence");
+}
+
+#[test]
+fn the_pointer_is_capped_three_per_session() {
+    let (_proj, cwd, _cd, cache) = indexed_grain_project();
+    let idx_row = run_cort(&["index", "."], &cwd, &cache);
+    if idx_row.code != 0 {
+        eprintln!(
+            "SKIP: index failed (ast-grep unavailable?): {}",
+            idx_row.stderr
+        );
+        return;
+    }
+
+    for symbol in ["fuel_left", "ammo_left", "shield_left"] {
+        let r = run_hook_suggest_session(
+            &format!("grep -rn \"{symbol}\" src --include=*.ts | head -3"),
+            "sess-cap-1",
+            &cwd,
+            &cache,
+        );
+        assert!(
+            payload(&r)["hookSpecificOutput"]["additionalContext"]
+                .as_str()
+                .is_some(),
+            "{symbol} should still be inside the cap: {}",
+            r.stdout
+        );
+    }
+    let fourth = run_hook_suggest_session(
+        "grep -rn \"hull_left\" src --include=*.ts | head -3",
+        "sess-cap-1",
+        &cwd,
+        &cache,
+    );
+    assert_eq!(
+        payload(&fourth),
+        serde_json::json!({}),
+        "the fourth pointer of a session is context nobody asked for: {}",
+        fourth.stdout
+    );
+}
+
+#[test]
+fn kimi_gets_no_pointer_because_its_pretooluse_drops_context() {
+    let (_proj, cwd, _cd, cache) = indexed_grain_project();
+    let idx_row = run_cort(&["index", "."], &cwd, &cache);
+    if idx_row.code != 0 {
+        eprintln!(
+            "SKIP: index failed (ast-grep unavailable?): {}",
+            idx_row.stderr
+        );
+        return;
+    }
+    let r = run_hook_suggest_payload(
+        kimi_grep("fuel_left", "src", "sess-kimi-pointer"),
+        &[],
+        &cwd,
+        &cache,
+    );
+    assert_eq!(
+        payload(&r),
+        serde_json::json!({}),
+        "Kimi keeps only block-shaped results; a context pointer there reaches nobody: {}",
+        r.stdout
+    );
+}

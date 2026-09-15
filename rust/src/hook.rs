@@ -129,6 +129,35 @@ pub fn evidence_in(
     })
 }
 
+/// Where a symbol's bare name occurs inside indexed chunk bodies -- the trail a `no_evidence`
+/// refusal can carry instead of being a dead end (the 09-13..09-15 window had 7 such rows, all
+/// fields or variants the grain does not extract, all names sitting inside bodies it did).
+///
+/// This is not a caller set and must never read like one: no edge is consulted, no completeness
+/// is claimed, and the copy that carries these lines says so. The match is a literal substring
+/// with the SQL wildcards escaped (`like_literal`), because `_` is a single-character wildcard
+/// in a LIKE pattern and identifier names are full of underscores -- `fuel_left` is not
+/// `fuelXleft`. Capped and ordered, so the same index answers the same question the same way.
+pub fn name_pointers(
+    db: &rusqlite::Connection,
+    project_id: &str,
+    symbol: &str,
+    limit: usize,
+) -> rusqlite::Result<Vec<String>> {
+    let like = format!("%{}%", like_literal(symbol));
+    let mut stmt = db.prepare(
+        "SELECT file_path || ':' || start_line || ' (' || symbol_name || ')'
+          FROM chunks
+          WHERE project_id = ?1 AND content LIKE ?2 ESCAPE '\\'
+          ORDER BY file_path, start_line
+          LIMIT ?3",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![project_id, like, limit as i64], |r| {
+        r.get(0)
+    })?;
+    rows.collect()
+}
+
 /// How far a `Neither` lookup got, recorded beside the symbol on the `no_evidence` row so the
 /// refusal carries its own repair path. The strings are stable identifiers -- mining groups on
 /// them, so renaming one is a breaking change to the log's vocabulary, the same contract as
@@ -171,15 +200,16 @@ fn like_literal(s: &str) -> String {
 /// - `no_payload` — the default, installed before stdin is read (`main.rs`, the payload read)
 /// - `no_shape` — the parser could not build a `Search`, or `judge` returned `NoShape`
 /// - `upgrade_stood_down` — a `Search` was built but the protected-entry guard was held
-/// - `no_index` / `no_index_hinted` / `no_evidence` / `hit` / `hit_stale` / `hit_yielded` —
-///   the `judge` verdicts, once the payload parsed
-pub const SUGGEST_OUTCOMES: [&str; 9] = [
+/// - `no_index` / `no_index_hinted` / `no_evidence` / `no_evidence_hinted` / `hit` / `hit_stale` /
+///   `hit_yielded` — the `judge` verdicts, once the payload parsed
+pub const SUGGEST_OUTCOMES: [&str; 10] = [
     "no_payload",
     "no_shape",
     "upgrade_stood_down",
     "no_index",
     "no_index_hinted",
     "no_evidence",
+    "no_evidence_hinted",
     "hit",
     "hit_stale",
     "hit_yielded",

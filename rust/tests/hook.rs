@@ -777,3 +777,43 @@ fn non_search_tools_are_baseline_not_unparseable() {
         "absolute paths resolve to the same tool list"
     );
 }
+
+/// The pointer a `no_evidence` refusal can carry: where the bare name occurs inside indexed
+/// bodies. Not a caller set -- no edge, no completeness claim -- and the `LIKE` pattern must
+/// never widen: `fuel_left` is a different name from `fuelXleft`, and `_` in a LIKE pattern is
+/// a single-character wildcard unless it is escaped.
+#[test]
+fn name_pointers_list_bodies_and_never_widen_an_underscore() {
+    let (_dir, _root, db, project_id, _bin) = indexed_project(&[
+        (
+            "src/tank.rs",
+            "pub struct Tank {\n    fuel_left: u8,\n}\n\nimpl Tank {\n    pub fn drive(&mut self) { self.fuel_left -= 1; }\n}\n",
+        ),
+        (
+            "src/other.rs",
+            "pub fn fuelXleft_note() -> u8 { 1 }\n",
+        ),
+    ]);
+    let pointers = cort::hook::name_pointers(&db, &project_id, "fuel_left", 5).unwrap();
+    assert!(
+        !pointers.is_empty(),
+        "the field name sits inside the struct and the method bodies"
+    );
+    assert!(
+        pointers.iter().all(|p| p.starts_with("src/tank.rs:")),
+        "every pointer is a tank.rs body: {pointers:?}"
+    );
+    assert!(
+        pointers.iter().all(|p| !p.contains("fuelXleft")),
+        "an underscore must not widen into an X: {pointers:?}"
+    );
+
+    let one = cort::hook::name_pointers(&db, &project_id, "fuel_left", 1).unwrap();
+    assert_eq!(one.len(), 1, "the cap is honoured: {one:?}");
+
+    let missing = cort::hook::name_pointers(&db, &project_id, "no_such_name", 5).unwrap();
+    assert!(
+        missing.is_empty(),
+        "no occurrences, no pointer: {missing:?}"
+    );
+}

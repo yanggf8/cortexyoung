@@ -818,27 +818,20 @@ fn gate_already_fired(session_id: &str, symbol: &str) -> bool {
 /// The shared once-per-session gate: one file per session under `hook-gate/`, one line per
 /// fired thing. `line` must be newline-free (callers sanitize their payload-sourced halves).
 fn gate_line_seen_once(session_id: &str, line: &str) -> bool {
-    let Some(dir) =
-        cort::usage::usage_db_path().and_then(|p| p.parent().map(|d| d.join("hook-gate")))
-    else {
+    let Some(file) = gate_file_for(session_id) else {
         // No cache directory means no memory of a previous fire, and a deny we cannot remember is
         // the loop this gate exists to prevent. Treat it as already fired: stay silent.
         return true;
     };
-    let safe: String = session_id
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
-        .take(128)
-        .collect();
-    if safe.is_empty() {
-        return true;
-    }
-    let file = dir.join(safe);
     let seen = std::fs::read_to_string(&file).unwrap_or_default();
     if seen.lines().any(|l| l == line) {
         return true;
     }
-    if std::fs::create_dir_all(&dir).is_err() {
+    if file
+        .parent()
+        .map(|d| std::fs::create_dir_all(d).is_err())
+        .unwrap_or(true)
+    {
         return true;
     }
     let mut body = seen;
@@ -846,6 +839,43 @@ fn gate_line_seen_once(session_id: &str, line: &str) -> bool {
     body.push('\n');
     // A failed write is the same unrememberable deny as a missing directory.
     std::fs::write(&file, body).is_err()
+}
+
+/// The per-session gate file's path, sanitized down to alphanumerics, dashes and underscores.
+/// Shared by both gates; a session that cannot produce a safe name has no memory and no gate.
+fn gate_file_for(session_id: &str) -> Option<std::path::PathBuf> {
+    let dir = cort::usage::usage_db_path().and_then(|p| p.parent().map(|d| d.join("hook-gate")))?;
+    let safe: String = session_id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .take(128)
+        .collect();
+    if safe.is_empty() {
+        return None;
+    }
+    Some(dir.join(safe))
+}
+
+/// The `no_evidence` pointer: once per session per symbol, and at most three symbols per
+/// session. The cap is what keeps a survey session's six absent fields from becoming six
+/// permanent context lines -- the 09-14 sidechain fired on six in three minutes. Three answers
+/// the question the session is actually asking; past that, it has already been told where the
+/// grain ends.
+fn no_evidence_pointer_fired(session_id: &str, symbol: &str) -> bool {
+    const SESSION_POINTER_CAP: usize = 3;
+    if let Some(file) = gate_file_for(session_id) {
+        let seen = std::fs::read_to_string(&file).unwrap_or_default();
+        if seen
+            .lines()
+            .filter(|l| l.starts_with("no_evidence_pointer:"))
+            .count()
+            >= SESSION_POINTER_CAP
+        {
+            return true;
+        }
+    }
+    let line = format!("no_evidence_pointer:{}", symbol.replace(['\n', '\r'], " "));
+    gate_line_seen_once(session_id, &line)
 }
 
 /// The `no_index` hint fires once per session per directory: the directory is the payload's
@@ -1116,6 +1146,12 @@ fn cmd_hook_suggest(args: &[String], usage: &mut UsageEvent) -> Result<Emit, Cor
     // half back out, so the fire path probes once rather than twice.
     let observed: std::cell::Cell<Option<IndexState>> = std::cell::Cell::new(None);
     let probed_project: std::cell::RefCell<Option<String>> = std::cell::RefCell::new(None);
+    // The boundary-5 trail: when the evidence comes back Absent, the same open database is asked
+    // where the name occurs inside indexed bodies, and the list rides out here -- the verdict
+    // path cannot reopen the database without paying the probe twice. A pointer query that fails
+    // leaves this `None`, and the refusal degrades to the plain silence it always was.
+    const NAME_POINTER_LIMIT: usize = 3;
+    let pointers: std::cell::RefCell<Option<Vec<String>>> = std::cell::RefCell::new(None);
     let verdict = cort::hook::judge(&search, |symbol| {
         let (state, db, project_id) = probe_index();
         observed.set(Some(state));
@@ -1124,8 +1160,21 @@ fn cmd_hook_suggest(args: &[String], usage: &mut UsageEvent) -> Result<Emit, Cor
             None => cort::hook::Evidence::NoIndex,
             // A storage failure fires. A hook that went quiet because a disk hiccuped would be
             // silently narrowing the product on a transient.
-            Some(db) => cort::hook::evidence_in(&db, &project_id, symbol)
-                .unwrap_or(cort::hook::Evidence::Unknown),
+            Some(db) => {
+                let evidence = cort::hook::evidence_in(&db, &project_id, symbol)
+                    .unwrap_or(cort::hook::Evidence::Unknown);
+                if matches!(
+                    &evidence,
+                    cort::hook::Evidence::Neither(cort::hook::NoEvidenceWhy::Absent)
+                ) {
+                    if let Ok(found) =
+                        cort::hook::name_pointers(&db, &project_id, symbol, NAME_POINTER_LIMIT)
+                    {
+                        pointers.borrow_mut().replace(found);
+                    }
+                }
+                evidence
+            }
         }
     });
     // Every outcome past this point paid for the probe, so the row it writes can say which
@@ -1182,6 +1231,49 @@ fn cmd_hook_suggest(args: &[String], usage: &mut UsageEvent) -> Result<Emit, Cor
                 // the index against (files, other projects' chunks), and the `why` splits
                 // "extracted under a different name shape" from "never extracted".
                 cort::hook::SilenceReason::NoEvidence { symbol, why } => {
+                    // The verdict keeps its meaning -- no caller set exists, and none is claimed
+                    // below -- but Absent no longer has to be a dead end: when the name occurs
+                    // inside indexed bodies, the first ask per session per symbol carries those
+                    // locations. Kimi is excluded the way every additionalContext is: its
+                    // `PreToolUse` keeps only block-shaped results, so the pointer would reach
+                    // nobody. docs/2026-09-15-field-and-variant-boundaries.md, boundary 5.
+                    if why == cort::hook::NoEvidenceWhy::Absent && harness != "kimi-code" {
+                        let session = v.get("session_id").and_then(Value::as_str).unwrap_or("");
+                        let found = pointers
+                            .borrow()
+                            .clone()
+                            .filter(|list| !list.is_empty())
+                            .filter(|_| !session.is_empty());
+                        if let Some(found) = found {
+                            if !no_evidence_pointer_fired(session, &symbol) {
+                                usage.args_summary = hook_args_tag(
+                                    &hook_args_tag(
+                                        &harness_args("no_evidence_hinted"),
+                                        "symbol",
+                                        &symbol,
+                                    ),
+                                    "why",
+                                    why.as_str(),
+                                );
+                                return Ok(Emit {
+                                    payload: json!({
+                                        "hookSpecificOutput": {
+                                            "hookEventName": "PreToolUse",
+                                            "additionalContext": format!(
+                                                "No caller-set answer for '{symbol}': it is not an \
+                                    indexed definition (fields and enum variants are outside the grain). The name appears inside: \
+                                    {}. That is where it occurs, not a complete enumeration.",
+                                                found.join("; ")
+                                            ),
+                                        },
+                                        "suppressOutput": true,
+                                    }),
+                                    format: Format::Lean,
+                                    render_command: Some("hook-suggest"),
+                                });
+                            }
+                        }
+                    }
                     usage.args_summary = hook_args_tag(
                         &hook_args_tag(&harness_args("no_evidence"), "symbol", &symbol),
                         "why",
