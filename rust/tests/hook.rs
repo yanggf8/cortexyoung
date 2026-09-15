@@ -285,7 +285,7 @@ fn a_regex_wrapped_bare_symbol_is_still_a_symbol_query() {
     ] {
         let s = search_from_grep_fields(pattern, Some("rust/src"), None, false)
             .unwrap_or_else(|| panic!("parses: {pattern}"));
-        let Verdict::Fire(hit) = judge(&s, |_| Evidence::Seed) else {
+        let Verdict::Fire(hit) = judge(&s, |_| Evidence::Seed { defined_at: None }) else {
             panic!("{pattern} is a symbol query in regex clothing and must fire");
         };
         assert_eq!(hit.symbol, "foo_bar", "{pattern}");
@@ -317,7 +317,7 @@ fn a_pattern_the_peel_cannot_reduce_still_declines_pattern_not_symbol() {
         let s = search_from_grep_fields(pattern, Some("rust/src"), None, false)
             .unwrap_or_else(|| panic!("parses: {pattern}"));
         assert_eq!(
-            judge(&s, |_| Evidence::Seed),
+            judge(&s, |_| Evidence::Seed { defined_at: None }),
             Verdict::Silent(SilenceReason::NoShape("pattern_not_symbol")),
             "{pattern}"
         );
@@ -426,7 +426,7 @@ fn a_context_flag_does_not_buy_a_way_past_any_other_gate() {
     ] {
         let s = search_from_shell(cmd).unwrap_or_else(|| panic!("parses: {cmd}"));
         assert_eq!(
-            judge(&s, |_| Evidence::Seed),
+            judge(&s, |_| Evidence::Seed { defined_at: None }),
             Verdict::Silent(SilenceReason::NoShape(tag)),
             "{cmd}"
         );
@@ -489,7 +489,10 @@ fn the_verdict_names_which_silence_it_chose() {
     let s = search_from_shell("grep -rn 'ensureSeedUserPasswords' src/").expect("parses");
 
     for (ev, label) in [
-        (Evidence::Seed, "a symbol impact can seed on"),
+        (
+            Evidence::Seed { defined_at: None },
+            "a symbol impact can seed on",
+        ),
         (
             Evidence::RawOnly,
             "a deleted symbol a surviving caller still names",
@@ -525,7 +528,7 @@ fn the_evidence_lookup_is_not_consulted_when_the_shape_gate_rejects() {
     let mut consulted = false;
     let v = judge(&s, |_| {
         consulted = true;
-        Evidence::Seed
+        Evidence::Seed { defined_at: None }
     });
     assert_eq!(
         v,
@@ -534,6 +537,27 @@ fn the_evidence_lookup_is_not_consulted_when_the_shape_gate_rejects() {
     assert!(
         !consulted,
         "a shape rejection must not open a database or run git"
+    );
+}
+
+/// The seed's location rides the verdict so the copy can disambiguate a shared name; an edge-only
+/// fire has no definition behind it and must carry none rather than inventing one.
+#[test]
+fn a_seed_rides_its_location_and_an_edge_carries_none() {
+    let s = search_from_shell(r"grep -rn 'helper(' src/").expect("parses");
+    let Verdict::Fire(hit) = judge(&s, |_| Evidence::Seed {
+        defined_at: Some("src/taps.rs:90".to_string()),
+    }) else {
+        panic!("a seed must fire");
+    };
+    assert_eq!(hit.defined_at.as_deref(), Some("src/taps.rs:90"));
+
+    let Verdict::Fire(hit) = judge(&s, |_| Evidence::RawOnly) else {
+        panic!("an edge-only fire must still fire");
+    };
+    assert_eq!(
+        hit.defined_at, None,
+        "an edge rests on a call site, not a definition"
     );
 }
 
@@ -583,7 +607,12 @@ fn evidence_reads_chunks_then_raw_edges() {
     ]);
     assert_eq!(
         evidence_in(&db, &project_id, "ensure_seed_user_passwords").unwrap(),
-        Evidence::Seed
+        // The location is the disambiguator the suggestion carries: two different things can
+        // share a name, and only the file:line lets the agent tell which one fired (the Taps
+        // fire of 2026-09-15 answered a sound variant with a resampling struct).
+        Evidence::Seed {
+            defined_at: Some("src/gone.rs:1".to_string())
+        }
     );
     assert_eq!(
         evidence_in(&db, &project_id, "no_such_name_anywhere").unwrap(),
@@ -660,7 +689,9 @@ fn an_import_path_is_not_evidence_that_a_symbol_exists() {
     // covers).
     assert_eq!(
         evidence_in(&db, &project_id, "tide").unwrap(),
-        Evidence::Seed
+        Evidence::Seed {
+            defined_at: Some("src/gone.rs:1".to_string())
+        }
     );
     db.execute(
         "DELETE FROM chunks WHERE project_id = ?1 AND symbol_name = 'tide'",
@@ -689,14 +720,14 @@ fn each_shape_rejection_names_the_rule_that_declined_it() {
         search_from_shell(r"grep -rn 'thinking\|MAX_TOKENS\|max_tokens' crates/cct2/src/llm.rs")
             .expect("parses");
     assert_eq!(
-        judge(&s, |_| Evidence::Seed),
+        judge(&s, |_| Evidence::Seed { defined_at: None }),
         Verdict::Silent(SilenceReason::NoShape("pattern_not_symbol"))
     );
 
     // Dependencies are not the project's own call sites.
     let s = search_from_shell("grep -rn 'helper' node_modules/").expect("parses");
     assert_eq!(
-        judge(&s, |_| Evidence::Seed),
+        judge(&s, |_| Evidence::Seed { defined_at: None }),
         Verdict::Silent(SilenceReason::NoShape("non_source_target"))
     );
 
@@ -704,14 +735,14 @@ fn each_shape_rejection_names_the_rule_that_declined_it() {
     // worst kind of suggestion -- it looks answerable.
     let s = search_from_shell("grep -rn 'init' src/main.zig").expect("parses");
     assert_eq!(
-        judge(&s, |_| Evidence::Seed),
+        judge(&s, |_| Evidence::Seed { defined_at: None }),
         Verdict::Silent(SilenceReason::NoShape("unindexed_extension"))
     );
 
     // One named file, no recursion: reading, not enumerating.
     let s = search_from_shell("grep -n 'helper' src/main.rs").expect("parses");
     assert_eq!(
-        judge(&s, |_| Evidence::Seed),
+        judge(&s, |_| Evidence::Seed { defined_at: None }),
         Verdict::Silent(SilenceReason::NoShape("concrete_file_read"))
     );
 }

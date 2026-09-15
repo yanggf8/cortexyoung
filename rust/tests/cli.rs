@@ -846,6 +846,12 @@ fn a_stale_index_is_disclosed_in_the_line_the_agent_reads() {
         ctx.contains("zero-result grep"),
         "the completeness clause must reject the zero-grep inference: {ctx}"
     );
+    // P6: the seed carries its location, so a fire on the wrong same-named thing (Taps, the
+    // resampling struct, answering for the sound variant) costs one glance to catch.
+    assert!(
+        ctx.contains("defined at src/"),
+        "the copy must name where the index's match is defined: {ctx}"
+    );
     assert!(
         !ctx.contains("older commit"),
         "a fresh index must not warn about staleness: {ctx}"

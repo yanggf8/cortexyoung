@@ -1240,13 +1240,23 @@ fn cmd_hook_suggest(args: &[String], usage: &mut UsageEvent) -> Result<Emit, Cor
     // answered from a zero-result grep. The trigger list now names that question so the session
     // can recognise itself, and the coverage clause replaces "a grep cannot tell you" with the
     // concrete bad inference a zero-result grep invites.
+    //
+    // P6 (2026-09-15, Taps again, the other half): the Taps fire recommended an impact on a
+    // resampling struct while the session was asking about a sound variant of the same name --
+    // seed-or-edge matches by name and cannot tell. When the seed carries a location, the copy
+    // names it, so a wrong-symbol fire costs the agent one glance instead of one misleading
+    // caller set. An edge-only fire carries no location and says nothing.
     let context = match hit.kind {
         cort::hook::Suggest::Impact => format!(
             "If you need the caller set (rename / delete / \"nothing uses this\" / \"is this \
-wired up?\"), run `cort impact --symbol '{}' --depth 1 --coverage -f lean`. `--coverage` lists \
+wired up?\"), run `cort impact --symbol '{}' --depth 1 --coverage -f lean`{}. `--coverage` lists \
 what the enumeration could not see, and a zero-result grep is not proof nobody calls it. If you \
 are opening the definition, ignore this and keep the grep.",
-            hit.symbol
+            hit.symbol,
+            hit.defined_at
+                .as_deref()
+                .map(|at| format!(" -- the index's match is defined at {at}"))
+                .unwrap_or_default()
         ),
         cort::hook::Suggest::Context => format!(
             "cort has an index for this project. You asked for the lines around each \

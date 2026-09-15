@@ -24,10 +24,13 @@
 /// therefore outlives the `chunks` row it pointed at (schema F-01), so a symbol whose definition was
 /// just deleted still has a surviving caller's raw edge naming it. Gating on `Seed` alone would
 /// silence the hook on exactly the deletion-verification search the goal sentence names.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Evidence {
-    /// A `chunks` row: `impact` can seed on it.
-    Seed,
+    /// A `chunks` row: `impact` can seed on it. `defined_at` is the seed's `file:line`, carried
+    /// so the suggestion can name where the index's match lives -- the 2026-09-15 Taps fire
+    /// recommended an impact on a resampling struct while the session was asking about a sound
+    /// variant of the same name, and only the location lets the agent catch that in one glance.
+    Seed { defined_at: Option<String> },
     /// No chunk, but a `raw_edges` row names it: deleted, or an external type this project uses.
     RawOnly,
     /// Nothing in the index names it exactly. `why` records how far the lookup got before it
@@ -85,7 +88,15 @@ pub fn evidence_in(
         )
         .optional()?;
     if seed.is_some() {
-        return Ok(Evidence::Seed);
+        let defined_at: Option<String> = db
+            .query_row(
+                "SELECT file_path || ':' || start_line FROM chunks
+                  WHERE project_id = ?1 AND symbol_name = ?2 LIMIT 1",
+                rusqlite::params![project_id, symbol],
+                |r| r.get(0),
+            )
+            .optional()?;
+        return Ok(Evidence::Seed { defined_at });
     }
     let leaf = crate::chunker::bare_name(symbol);
     let edge = db
@@ -285,6 +296,10 @@ pub struct HookHit {
     /// Which subcommand the suggestion names. Recorded in `usage.db` beside the outcome, because a
     /// hit that cannot say which rule produced it cannot be scored against the rule that did.
     pub kind: Suggest,
+    /// Where the index's matching seed is defined, as `file:line` -- the disambiguator an agent
+    /// needs when the name it searched belongs to two different things. `None` when the fire
+    /// rested on an edge alone (`RawOnly`, `Unknown`) or the location could not be read.
+    pub defined_at: Option<String>,
 }
 
 /// Paths whose contents are not project source. A search into any of them is orientation over
@@ -747,7 +762,7 @@ pub fn judge(search: &Search, evidence: impl FnOnce(&str) -> Evidence) -> Verdic
         Evidence::NoIndex => Verdict::Silent(SilenceReason::NoIndex {
             symbol: symbol.clone(),
         }),
-        Evidence::Seed | Evidence::RawOnly | Evidence::Unknown => Verdict::Fire(HookHit {
+        Evidence::RawOnly | Evidence::Unknown => Verdict::Fire(HookHit {
             symbol,
             reason,
             // Every gate above is about whether the index can answer *anything* here, and neither
@@ -758,6 +773,19 @@ pub fn judge(search: &Search, evidence: impl FnOnce(&str) -> Evidence) -> Verdic
             } else {
                 Suggest::Impact
             },
+            // An edge rests on a call site, not a definition -- there is nothing to disambiguate
+            // against, and inventing a location would be worse than omitting one.
+            defined_at: None,
+        }),
+        Evidence::Seed { defined_at } => Verdict::Fire(HookHit {
+            symbol,
+            reason,
+            kind: if search.wants_context {
+                Suggest::Context
+            } else {
+                Suggest::Impact
+            },
+            defined_at,
         }),
     }
 }
