@@ -955,21 +955,33 @@ fn a_write_inside_the_window_is_disclosed_on_the_row() {
     // obviously correct the way a pure read-only survey's is, and the row has to say which kind
     // it was instead of leaving both as a bare `not_adopted`.
     let body = [
-        bash("2026-09-02T02:00:00.000Z", "toolu_1", "grep -rn 'helper(' src"),
+        bash(
+            "2026-09-02T02:00:00.000Z",
+            "toolu_1",
+            "grep -rn 'helper(' src",
+        ),
         injection("2026-09-02T02:00:01.000Z", "toolu_1", "helper"),
         edit("2026-09-02T02:00:40.000Z", "toolu_2"),
     ]
     .join("\n");
     let dir = tree(&[("-home-u-repo", "s1", &body)]);
     let r = run(dir.path(), "2026-09-02T00:00:00Z");
-    assert_eq!(r["injection_rows"][0]["writes_in_window"], json!(1), "{r:#}");
+    assert_eq!(
+        r["injection_rows"][0]["writes_in_window"],
+        json!(1),
+        "{r:#}"
+    );
     assert_eq!(r["injection_rows"][0]["verdict"], json!("not_adopted"));
 }
 
 #[test]
 fn a_write_beyond_the_window_and_a_read_only_session_are_both_zero() {
     let beyond = [
-        bash("2026-09-02T02:00:00.000Z", "toolu_1", "grep -rn 'helper(' src"),
+        bash(
+            "2026-09-02T02:00:00.000Z",
+            "toolu_1",
+            "grep -rn 'helper(' src",
+        ),
         injection("2026-09-02T02:00:01.000Z", "toolu_1", "helper"),
         bash("2026-09-02T02:01:00.000Z", "t2", "grep -rn a src"),
         bash("2026-09-02T02:02:00.000Z", "t3", "grep -rn b src"),
@@ -981,7 +993,11 @@ fn a_write_beyond_the_window_and_a_read_only_session_are_both_zero() {
     .join("\n");
     let dir = tree(&[("-home-u-repo", "s1", &beyond)]);
     let r = run(dir.path(), "2026-09-02T00:00:00Z");
-    assert_eq!(r["injection_rows"][0]["writes_in_window"], json!(0), "{r:#}");
+    assert_eq!(
+        r["injection_rows"][0]["writes_in_window"],
+        json!(0),
+        "{r:#}"
+    );
 
     let readonly = [
         bash("2026-09-02T03:00:00.000Z", "toolu_a", "grep -rn 'x(' src"),
@@ -990,5 +1006,9 @@ fn a_write_beyond_the_window_and_a_read_only_session_are_both_zero() {
     .join("\n");
     let dir2 = tree(&[("-home-u-other", "s1", &readonly)]);
     let r2 = run(dir2.path(), "2026-09-02T00:00:00Z");
-    assert_eq!(r2["injection_rows"][0]["writes_in_window"], json!(0), "{r2:#}");
+    assert_eq!(
+        r2["injection_rows"][0]["writes_in_window"],
+        json!(0),
+        "{r2:#}"
+    );
 }

@@ -479,10 +479,7 @@ pub fn mine(
                     if name != "Bash" {
                         // The window counts every action; only the writing tools matter enough to
                         // keep individually, and they ride the same sequence with an empty command.
-                        if matches!(
-                            name,
-                            "Edit" | "Write" | "MultiEdit" | "NotebookEdit"
-                        ) {
+                        if matches!(name, "Edit" | "Write" | "MultiEdit" | "NotebookEdit") {
                             calls.push(ToolCall {
                                 id: item.get("id").and_then(Value::as_str).map(str::to_string),
                                 ts,
