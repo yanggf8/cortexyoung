@@ -1,6 +1,10 @@
 # codegraph lessons: a three-item proposal, for review
 
-Status: **proposal, not approved work.** Written 2026-09-16 after reading
+Status: item B **landed** at `d6ea1991` (2026-09-17), all five implementation-review findings
+applied; the standing census on this repo at that commit is 34 of 9,971 raw receiver edges
+attached — 9,586 zero-candidate, 185 multi-candidate, 145 ownerless, 21 binding-refused, none
+shape-refused. Items A and D remain proposals; item C is dropped by its gate (below). Originally
+written 2026-09-16 after reading
 `https://github.com/colbymchenry/codegraph` (README at `main`; 71.1k stars, MIT; Rust parsing
 kernel + SQLite WAL + FTS5 + OS-watcher sync + MCP surface). Reviewed by Codex the same day
 (`codex exec --sandbox read-only`, 156k tokens); every "corrections from review" block below is

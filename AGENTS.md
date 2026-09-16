@@ -37,7 +37,12 @@ own `reading` field say what `false` does and does not entitle anyone to conclud
 receiver gate attaches 9 of 4,833 receiver call sites at `a0269cda` and 12 of 5,843 at `dbc971f7`
 (was 12 of 5,212 at `d4637150` -- this line moves with the tree, quote it with its commit; all
 correct in every graded run; the refusals are where recall still leaks, each one a `--coverage`
-row -- `cort-evals recall-exp` re-derives the population, so quote it with its commit), and on a
+row -- `cort-evals recall-exp` re-derives the population, so quote it with its commit). Since
+2026-09-17 `cort-evals gate-audit` cuts those refusals by the gate's own reasons: on this repo at
+`d6ea1991`, 34 of 9,971 raw receiver edges attached -- 9,586 zero-candidate (the std/dependency
+frontier by construction), 185 multi-candidate, 145 ownerless, and 21 binding-refused, which is
+the type-directed-dispatch candidate population and the number that decides whether trait-dispatch
+edges are ever proposed -- and on a
 hub-dense venue like cct the boolean is still true
 for 62 of 63 sampled seeds -- which is why the instruction is *read the rows*, not *watch the flag*. A
 change that makes an answer cheaper to verify is on the main line; a feature that only makes answers
