@@ -305,6 +305,7 @@ name = "cort-evals"
 version = "0.1.0"
 dependencies = [
  "cort",
+ "rusqlite",
  "serde_json",
  "tempfile",
 ]

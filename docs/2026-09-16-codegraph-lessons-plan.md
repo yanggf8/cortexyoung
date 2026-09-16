@@ -16,7 +16,17 @@ conflicts with `recall.rs`'s stated charter, and Item C's key stream-shape assum
 unverifiable from committed evidence and is now a feasibility gate. **That gate ran the same day
 and DROPPED item C** (see the verdict inside; the machine's routed backend reports zeroed
 per-message usage, and the pre-registered rule says dropped, not approximated). Item D (run-row
-machine identity) is the one piece of C that survives. This doc states what we propose to learn,
+machine identity) is the one piece of C that survives. A second Codex pass on Item B (2026-09-17,
+against the committed doc and current HEAD) returned CHANGE — the four-class core reaffirmed, the
+trait/impl tag dropped as underivable from the index, and the sibling-module placement plus a
+`no-receiver-shape` sub-count folded into Items A and B; every new claim was re-verified against
+`src/pack/rules/rust.yml` and `rust/src/schema.sql` before being applied. A third pass reviewed
+the Item B implementation itself (2026-09-17): CHANGE — the shape precondition became a shared
+`graph.rs` primitive instead of a copied predicate, the class renamed `binding_refused` because
+shape precedes ownership in the gate's order, the index connection made truly read-only
+(`open_db` writes), and the venue reported under the spelling as passed; all five findings were
+verified against source before being applied. This doc states what we
+propose to learn,
 what we verified we already do as well or better, and what we reject. Nothing here changes
 product behavior: items A, B and D live in the `evals` crate and are measurement, presentation
 and provenance.
@@ -85,8 +95,11 @@ one measured value, never a second computation), and require a current index —
 venue HEAD and the stored index HEAD plus staleness, never labelling old indexed counts with the
 current commit.
 
-**Proposal.** Extend `cort-evals recall-exp` with `--report <path>`: alongside the stamped JSON
-on stdout, write a markdown table. Columns: venue (path spelling as passed; a copy committed to
+**Proposal.** A new `cort-evals gate-audit --venue DIR [--report out.md]` subcommand — the
+sibling the Placement paragraph calls for, and the same command Item B's classes land in, since
+population, gate re-evaluation and stamps are identical work; `recall-exp` itself is left
+untouched with its counterfactual charter intact. With `--report`, alongside the stamped JSON on
+stdout, write a markdown table. Columns: venue (path spelling as passed; a copy committed to
 the repo must use a repo-relative path), venue head (`no-git` — the existing `venue_head` helper
 *rejects* non-git venues, so this needs a tolerant variant), index head when it differs,
 receiver edges in the population, attached, refused, and — once item B lands — refused-count per
@@ -96,8 +109,8 @@ enforces that by printing the commit on every row rather than once in a header. 
 population `recall.rs` scans today stays available, labelled as the counterfactual it is.
 
 **Acceptance.**
-- `cort-evals recall-exp --venue DIR --report out.md` writes the table; omitting `--report`
-  changes nothing about stdout.
+- `cort-evals gate-audit --venue DIR --report out.md` writes the table; without `--report`, only
+  the stamped JSON on stdout; `recall-exp`'s own output is unchanged by this item.
 - Every row carries machine id + source (via `stamp_machine`), the venue head, and the index
   head whenever the index is not current.
 - The gate re-evaluation calls `rust/src/graph.rs`'s own gate — no second implementation of the
@@ -105,9 +118,11 @@ population `recall.rs` scans today stays available, labelled as the counterfactu
 - Golden snapshot test for the rendering; option whitelists updated
   (`every_recognised_option_is_listed`, `every_option_the_parser_asks_for_is_whitelisted`).
 
-**Files.** `evals/src/recall.rs`, `evals/src/main.rs` (flag plumbing, tolerant `no-git` head),
-whatever plumbing exposes `raw_edges` to the evals crate without a second SQL copy of the gate.
-Per invocation, one venue; multiple venues means multiple runs, not a merged table.
+**Files.** the same sibling module as Item B (`evals/src/gate_audit.rs`), `evals/src/main.rs`
+(flag plumbing, tolerant `no-git` head); `raw_edges` is queried over a `SQLITE_OPEN_READ_ONLY`
+connection, and the gate's decision stays in `cort::graph`'s primitives — no second SQL copy
+of the binding decision. Per invocation, one venue; multiple venues means multiple runs, not a
+merged table.
 
 ## Item B — classify the receiver-gate refusal population (measurement, not a feature)
 
@@ -129,12 +144,30 @@ The classes are the gate's own ordered refusal reasons, evaluated on indexed rec
 1. zero candidates for the name;
 2. multiple candidates;
 3. one candidate, ownerless;
-4. one owned candidate, rejected by `receiver_binds`.
+4. one candidate refused at the binding step — named `binding_refused` since the gate's order
+   (shape, then ownership, then the name match) means a shape refusal can carry an ownerless
+   candidate; `no_receiver_shape` counts those beside the class.
 
-Trait/impl status is an orthogonal tag *inside* those classes, not a primary class — the tag
-answers "is the type-directed-dispatch candidate population concentrated here" without inventing
-a second decision. Class 4 is where the type-directed question lives: the name resolved, the
-owner-bound receiver shape refused it.
+Trait/impl status is **dropped** — by the second review pass (2026-09-17), then confirmed against
+the pack: both method rules emit the same `chunk:method`
+(`cort-rust-chunk-impl-method`, `cort-rust-chunk-trait-default-method` in
+`src/pack/rules/rust.yml`), and `cort-rust-chunk-type` emits struct, enum *and trait* declarations
+alike as `chunk:class`, which the `chunks.chunk_type` CHECK enumerates flat. No bit in the index
+distinguishes a trait from a struct, so the tag has no derivation — and a field that cannot say
+how it was derived is decoration, not evidence. The type-directed *question* ("how much of class 4
+is trait dispatch?") stays answerable the way this repo answers everything: by reading class 4's
+examples, which `raw_edges` serves for free (`file_path`, `call_site_line`). If those examples
+show trait shapes dominating, a proposal to carry trait-ness in the extractor gets written with
+its own review — now with a measured reason.
+
+One sub-count keeps class 4 honest: a receiver-form edge whose `raw_target` carries neither `.`
+nor `:` is refused by `receiver_binds` on shape before any owner question exists, so it lands in
+the binding-refused class by the gate's own logic but is **not** a type-directed-dispatch
+candidate — and neither is a dotless *ownerless* candidate, which the gate also refuses on shape
+first. Reason attribution therefore calls `receiver_binds` before attributing anything, reads
+shape through the gate's shared `receiver_shape` primitive, and reports `no_receiver_shape`
+beside the class, so neither malformed rows nor ownerless ones can inflate the class the whole
+item exists to read.
 
 **Explicitly out of scope.** Attaching any new edge kind, changing `rust/src/graph.rs`, changing
 gate behavior, changing `impact`/`--coverage` output. Also out of scope: calling any class a
@@ -143,20 +176,36 @@ gate behavior, changing `impact`/`--coverage` output. Also out of scope: calling
 
 **Acceptance.**
 - The per-class breakdown partitions the indexed refused set; classes are disjoint and sum to
-  refused; the tag is reported beside, never instead of, the class.
-- `recall.rs` needs its plumbing extended for this: it retains declaration *names* only today,
-  and its receiver-call aggregation drops file attribution — examples must carry relative
-  `file:line`.
-- Fixture test on a small synthetic venue covering all four classes, including an owned-candidate
-  refusal and a trait-tagged one.
-- No product-crate changes.
+  refused; `no-receiver-shape` is reported beside class 4, never merged into it.
+- Examples carry relative `file:line` taken from `raw_edges`' own columns — no source re-reading
+  and no text-side plumbing is involved (the first draft's recall.rs plumbing bullet is obsolete:
+  the indexed population carries attribution natively).
+- Fixture test on a small synthetic venue covering all four classes, including an
+  owned-candidate refusal and a `no-receiver-shape` row.
+- No product *behavior* changes (amended by the implementation review): `graph.rs` gains exactly
+  one thing — `receiver_shape`, the precondition `receiver_binds` already applied, extracted
+  behavior-identically and made public so the census composes it instead of copying it, on the
+  same grounds `hook-probe` replays the judge. `evals` already depends on `cort`
+  (`evals/Cargo.toml`) and the gate primitives are public. There is no typed public raw-edge
+  loader, so the eval side queries `raw_edges` with its own SQL over a
+  `SQLITE_OPEN_READ_ONLY` connection (`db::open_db` creates directories, selects WAL and
+  rewrites permissions — an audit that claims to never write cannot use it), while every
+  *decision* (candidate cardinality, shape, ownership, binding) stays inside `cort::graph`'s
+  primitives. Reading rows is not a decision copy.
 
-**Files.** `evals/src/recall.rs`, tests.
+**Files.** a new sibling module in the `evals` crate (proposed: `evals/src/gate_audit.rs` behind a
+`cort-evals gate-audit --venue DIR` subcommand — the sibling placement honors `recall.rs`'s
+source-only charter exactly as Item A's does), plus `evals/src/main.rs` plumbing and tests.
+`recall.rs` is not touched.
 
 ## Item C — final context occupancy on run-agents rows — **DROPPED by its feasibility gate**
 
-> **Gate outcome, 2026-09-16, machine `046360e0bab8f003` (etc-machine-id): DROPPED, per the
-> pre-registered rule.** Two real captures (same flags as `build_args`, `claude` 2.1.273; one
+> **Gate outcome, 2026-09-16, machine `44a8a38f0b05b9a8` (etc-machine-id, via `stamp_machine`):
+> DROPPED, per the pre-registered rule.** An earlier draft of this line stamped
+> `046360e0bab8f003`, hand-derived as the sha256 of /etc/machine-id's first sixteen characters;
+> the tool hashes the whole file, and the tool's stamp is the authoritative one — replaced here
+> the day the discrepancy surfaced, so no figure in this doc carries a stamp that cannot be
+> reconciled. Two real captures (same flags as `build_args`, `claude` 2.1.273; one
 > nested in a Claude Code session, one with session env stripped), both on the machine's standing
 > routing (`ANTHROPIC_BASE_URL` router, `ANTHROPIC_MODEL=glm-5.3-*`; `settings.json` says
 > `model: opus` but env wins since the harness passes no `--model`): every assistant event

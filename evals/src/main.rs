@@ -85,6 +85,7 @@ const RUN_AGENTS_FLAGS: &[&str] = &[
 ];
 const VERIFY_IMPACT_FLAGS: &[&str] = &["--repo", "--depth", "--symbols"];
 const RECALL_EXP_FLAGS: &[&str] = &["--venue", "--top"];
+const GATE_AUDIT_FLAGS: &[&str] = &["--venue", "--examples"];
 const HOOK_PROBE_FLAGS: &[&str] = &[
     "--claude-dir",
     "--codex-dir",
@@ -111,7 +112,7 @@ const DEMAND_FLAGS: &[&str] = &[
 ];
 
 const USAGE_TOP: &str =
-    "usage: cort-evals <run-agents|verify-impact|summarize|demand|recall-exp|hook-probe|adopt-mine> [options]";
+    "usage: cort-evals <run-agents|verify-impact|summarize|demand|recall-exp|hook-probe|adopt-mine|gate-audit> [options]";
 const USAGE_RUN_AGENTS: &str = "usage: cort-evals run-agents --venue DIR [--tasks FILE] [--only ID[,ID...]] [--arms a,b] [--max-turns N] [--config-dir DIR] [--cache-dir DIR] [--jail-dir DIR] [--jail] [--out DIR] [--concurrency N] [--delay-secs N]";
 const USAGE_VERIFY_IMPACT: &str =
     "usage: cort-evals verify-impact --repo DIR --symbols A,B [--depth N]";
@@ -122,6 +123,7 @@ const USAGE_HOOK_PROBE: &str =
 const USAGE_ADOPT_MINE: &str = "usage: cort-evals adopt-mine --since RFC3339 [--claude-dir DIR] [--usage-db FILE] [--rows N] [--follow-calls N] [--exclude proj,proj] [--out FILE]  (the docs/2026-08-31-recall-wip.md §6 funnel, including subagent sidechains; reads transcripts already on disk, no model calls)";
 const USAGE_RECALL_EXP: &str =
     "usage: cort-evals recall-exp --venue DIR [--top N]  (text-side counterfactual; no cort index needed)";
+const USAGE_GATE_AUDIT: &str = "usage: cort-evals gate-audit --venue DIR [--examples N]  (index-side census of the receiver gate's refusals; needs an index, never builds one)";
 
 /// The provider gates a sampling run on a rolling window, so "run these cells after the window
 /// resets" is part of the experiment, not shell glue. Seconds rather than a wall-clock time: the
@@ -670,6 +672,22 @@ fn recall_exp_main(argv: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+fn gate_audit_main(argv: &[String]) -> Result<(), String> {
+    guard_options(argv, GATE_AUDIT_FLAGS, USAGE_GATE_AUDIT)?;
+    let venue = at(argv, "--venue", "");
+    if venue.is_empty() {
+        return Err(format!(
+            "gate-audit needs --venue DIR: the population it counts is the index's own\n{USAGE_GATE_AUDIT}"
+        ));
+    }
+    let examples: usize = at(argv, "--examples", "10")
+        .parse()
+        .map_err(|_| "--examples must be a number".to_string())?;
+    let report = cort_evals::gate_audit::report(&venue, examples)?;
+    print_report(&report);
+    Ok(())
+}
+
 fn hook_probe_main(argv: &[String]) -> Result<(), String> {
     guard_options(argv, HOOK_PROBE_FLAGS, USAGE_HOOK_PROBE)?;
     let Ok(home) = std::env::var("HOME") else {
@@ -956,6 +974,7 @@ fn main() {
         Some("summarize") => summarize_main(&argv[1..]),
         Some("demand") => demand_main(&argv[1..]),
         Some("recall-exp") => recall_exp_main(&argv[1..]),
+        Some("gate-audit") => gate_audit_main(&argv[1..]),
         Some("hook-probe") => hook_probe_main(&argv[1..]),
         Some("adopt-mine") => adopt_mine_main(&argv[1..]),
         other => {
@@ -971,6 +990,7 @@ fn main() {
                 println!("  {USAGE_DEMAND}");
                 println!("  {USAGE_HOOK_PROBE}");
                 println!("  {USAGE_RECALL_EXP}");
+                println!("  {USAGE_GATE_AUDIT}");
                 println!("  {USAGE_ADOPT_MINE}");
                 return;
             }
@@ -1220,6 +1240,7 @@ mod whitelist_coverage {
                         .chain(SUMMARIZE_FLAGS.iter())
                         .chain(DEMAND_FLAGS.iter())
                         .chain(RECALL_EXP_FLAGS.iter())
+                        .chain(GATE_AUDIT_FLAGS.iter())
                         .chain(HOOK_PROBE_FLAGS.iter())
                         .chain(ADOPT_MINE_FLAGS.iter())
                         .any(|f| *f == name.as_str());

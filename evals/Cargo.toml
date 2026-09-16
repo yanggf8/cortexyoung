@@ -12,6 +12,10 @@ serde_json = "1"
 # The matcher lives in the product crate so the measured rule and the installed rule are one rule.
 # This direction only: AGENTS.md forbids the product depending on the harness.
 cort = { path = "../rust" }
+# Same version and features as the product crate, so the two crates share one build of it.
+# gate-audit reads `raw_edges` read-only through the public `Db` (a `Connection` alias) and
+# leaves every gate decision in `cort::graph`; it never writes.
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 [dev-dependencies]
 tempfile = "3"

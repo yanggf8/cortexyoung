@@ -497,8 +497,16 @@ fn norm_name(raw: &str) -> String {
 /// `chain`). These rules attach **9, all 9 true**, refusing four that were real (`b.problem()` onto
 /// `BatchRead::problem` x3, `err.to_json()` onto `CortError::to_json`) because a one-letter variable
 /// carries no trace of its type. `--depth 3` on this repo therefore got +9 edges and +0 phantoms.
+/// The receiver separator (`t.add`, `T::add`), if the target is receiver-shaped at all. Shared
+/// with `cort-evals gate-audit`, whose census attributes the gate's refusal reasons and must
+/// read this precondition from the gate itself rather than re-derive it — the same reason
+/// `hook-probe` replays the judge instead of approximating it (a copy drifted 48%).
+pub fn receiver_shape(head: &str) -> Option<usize> {
+    head.rfind(['.', ':'])
+}
+
 pub fn receiver_binds(head: &str, enclosing: Option<&str>, candidate: &str) -> bool {
-    let Some(dot) = head.rfind(['.', ':']) else {
+    let Some(dot) = receiver_shape(head) else {
         return false; // no receiver at all: not a receiver-shaped call
     };
     let receiver = bare_name(&head[..dot]);
