@@ -45,9 +45,16 @@ claudecat scan --root /path/to/project
 
 ### 對 Claude Code 的使用建議
 
-1. 在專案根目錄執行 `claudecat update`（或讓 skill/CI 定期執行）
-2. CLAUDE.md 自動維護 `<!-- claudecat:auto:begin -->` 區塊
-3. Claude Code 啟動時自動載入，導航零成本
+1. 在專案根目錄執行 `claudecat update`（或讓 skill/CI 定期執行）——Project Map 寫到
+   **各機器的資料目錄** `${XDG_DATA_HOME:-$HOME/.local/share}/claudecat/projects/<project-id>/map.md`
+   （`CLAUDECAT_DATA_DIR` 可覆蓋），輸出印出 `map ->` 確切路徑
+2. CLAUDE.md（或其 symlink 本體 AGENTS.md）**只放手寫規則**：v2.1 首次執行會自動移除
+   舊版 `claudecat:auto` 區塊，並播下 guardrails 與「地圖位置」兩個種子（種一次、永不改寫）
+3. 要看地圖就讀 `map ->` 指到的檔；Claude Code 啟動時載入的 CLAUDE.md 保持精簡，
+   `git status` 不再被機器生成的內容弄髒
+
+> 注意：把 `CLAUDECAT_DATA_DIR` 指進專案目錄內，會讓掃描把地圖也算進專案——預設位置
+> 在 HOME 下，不受影響。
 
 ## 導航能力：全圖之外，還要有「路」
 

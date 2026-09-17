@@ -44,7 +44,7 @@ pub fn load(root: &Path, claude_content: &str) -> Vec<String> {
 /// seed：第一次 update 時附加的佔位區塊（內容可自由編輯）
 pub fn seed_block() -> String {
     format!(
-        "{GR_BEGIN}\n<!-- 技術決策 / Guardrails：每行一條，例如 `2D tilemap + Macroquad（禁 Python/3D）`、`插件一律裝在 Claude Code 內`。claudecat 只在此區不存在時建立，之後永不覆寫。 -->\n{GR_END}\n"
+        "{GR_BEGIN}\n<!-- 技術決策 / Guardrails：每行一條，例如 `2D tilemap + Macroquad（禁 Python/3D）`、`插件一律裝在 agent harness 內`。claudecat 只在此區不存在時建立，之後永不覆寫。 -->\n{GR_END}\n"
     )
 }
 

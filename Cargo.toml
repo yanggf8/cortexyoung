@@ -1,6 +1,6 @@
 [package]
 name = "claudecat"
-version = "2.0.0"
+version = "2.1.0"
 edition = "2021"
 description = "ClaudeCat V2 — 給 Claude Code 一張可信任的專案導航地圖 (pure Rust CLI)"
 license = "MIT"

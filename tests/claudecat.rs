@@ -42,17 +42,58 @@ fn claude_md_update_is_idempotent_and_atomic() {
     let dir = temp_project();
     let path = dir.join("CLAUDE.md");
     fs::write(&path, "# My Project\n\nsome content\n").unwrap();
-    let section = "## Map\n- x: 1\n";
-    let (changed, content) = claudecat::claude_md::update_section(&path, section, false).unwrap();
+    let (changed, content) = claudecat::claude_md::update_section(&path, false).unwrap();
     assert!(changed);
-    let (changed2, _) = claudecat::claude_md::update_section(&path, section, false).unwrap();
+    let (changed2, _) = claudecat::claude_md::update_section(&path, false).unwrap();
     assert!(!changed2, "second update must be a no-op");
-    assert!(content.contains("<!-- claudecat:auto:begin -->"));
+    assert!(
+        !content.contains("<!-- claudecat:auto:begin -->"),
+        "v2.1 起地圖不進 CLAUDE.md：auto 區塊不得再出現"
+    );
     assert!(content.contains("# My Project"));
+    assert!(content.contains("claudecat:guardrails:begin"));
+    assert!(content.contains("claudecat:map-pointer:begin"));
     // no temp leftovers
     assert!(fs::read_dir(dir)
         .unwrap()
         .all(|e| e.unwrap().file_name() != ".claudecat.tmp"));
+}
+
+#[test]
+fn strip_auto_block_removes_legacy_block_whole_lines() {
+    let input = "# Rules\n\nbody text\n\n`<!-- claudecat:auto:begin -->\n## Project Map\n- **Root**: `/Users/guofang.mis/a/x`\n<!-- claudecat:auto:end -->\n\n<!-- claudecat:guardrails:begin -->\n<!-- claudecat:guardrails:end -->\n";
+    let (out, removed) = claudecat::claude_md::strip_auto_block(input);
+    assert!(removed);
+    assert!(!out.contains("claudecat:auto"));
+    assert!(!out.contains('`'), "行首殘留字元（反引號）應隨整行消失");
+    assert!(!out.contains("Root"), "區塊內的機器路徑應整段消失");
+    assert!(out.contains("# Rules"));
+    assert!(out.contains("body text"));
+    assert!(out.contains("claudecat:guardrails:begin"));
+    assert!(!out.contains("\n\n\n"), "剝除後不得留下連續空行");
+    let (out2, removed2) = claudecat::claude_md::strip_auto_block(&out);
+    assert!(!removed2);
+    assert_eq!(out, out2, "剝除必須冪等");
+}
+
+#[test]
+fn strip_auto_block_truncates_when_end_marker_missing() {
+    let input = "# Head\n\nbody\n\n<!-- claudecat:auto:begin -->\n## Map\n- torn";
+    let (out, removed) = claudecat::claude_md::strip_auto_block(input);
+    assert!(removed);
+    assert_eq!(out, "# Head\n\nbody\n");
+    assert!(!out.contains("torn"));
+}
+
+#[test]
+fn strip_auto_block_noop_without_block() {
+    let input = "# Rules\n\n- only rules\n";
+    let (out, removed) = claudecat::claude_md::strip_auto_block(input);
+    assert!(!removed);
+    assert_eq!(out, input);
+    let (out2, removed2) = claudecat::claude_md::strip_auto_block("");
+    assert!(!removed2);
+    assert_eq!(out2, "");
 }
 
 /// 暫時覆寫環境變數，drop 時還原（避免污染其他並行測試）
@@ -81,11 +122,18 @@ fn temp_project() -> std::path::PathBuf {
 }
 
 fn rand_suffix() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    // 測試平行起跑時 nanos 會撞位（macOS 時鐘粒度 > 1ns），兩個 fixture 就會共用
+    // 同一個目錄、互相覆寫對方的 main.rs（症狀：auto_profile 兩個測試隨機互換著掛）。
+    // 時鐘再疊一個進程內單調序號，迴避次序高低位元，保證進程內唯一。
+    let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
-        .as_nanos() as u64
+        .as_nanos() as u64;
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+    nanos ^ seq.rotate_left(20)
 }
 
 #[test]
@@ -93,8 +141,7 @@ fn guardrails_preserved_and_seeded() {
     let dir = temp_project();
     let path = dir.join("CLAUDE.md");
     fs::write(&path, "# P\n").unwrap();
-    let section = "## Map\n";
-    let (_, content) = claudecat::claude_md::update_section(&path, section, false).unwrap();
+    let (_, content) = claudecat::claude_md::update_section(&path, false).unwrap();
     assert!(content.contains("claudecat:guardrails:begin"));
     // user adds a decision inside the guardrail block
     let edited = content.replace(
@@ -103,9 +150,86 @@ fn guardrails_preserved_and_seeded() {
     );
     fs::write(&path, &edited).unwrap();
     // second update: marker already exists -> must NOT be re-seeded/overwritten
-    let (_, content2) = claudecat::claude_md::update_section(&path, section, false).unwrap();
+    let (_, content2) = claudecat::claude_md::update_section(&path, false).unwrap();
     assert!(content2.contains("2D tilemap + Macroquad"));
     assert_eq!(content2.matches("claudecat:guardrails:begin").count(), 1);
+}
+
+#[test]
+fn map_pointer_seeded_once_and_never_rewritten() {
+    let dir = temp_project();
+    let path = dir.join("CLAUDE.md");
+    fs::write(&path, "# P\n").unwrap();
+    let (_, content) = claudecat::claude_md::update_section(&path, false).unwrap();
+    assert!(content.contains("claudecat:map-pointer:begin"));
+    // user hand-edits inside the pointer block
+    let edited = content.replace(
+        "播種一次，之後永不改寫",
+        "播種一次，之後永不改寫（手改註記）",
+    );
+    fs::write(&path, &edited).unwrap();
+    // second update: pointer already exists -> must NOT be re-seeded/overwritten
+    let (_, content2) = claudecat::claude_md::update_section(&path, false).unwrap();
+    assert!(
+        content2.contains("（手改註記）"),
+        "指標區內的使用者文字不得被覆寫"
+    );
+    assert_eq!(content2.matches("claudecat:map-pointer:begin").count(), 1);
+}
+
+#[test]
+fn data_dir_honors_env_override_and_xdg_default() {
+    let _lock = cort_env_lock();
+    let home = temp_project();
+    let xdg = home.join("xdg-data");
+    let over = home.join("override");
+    let _g1 = EnvVarGuard(
+        "CLAUDECAT_DATA_DIR".to_string(),
+        std::env::var("CLAUDECAT_DATA_DIR").ok(),
+    );
+    let _g2 = EnvVarGuard(
+        "XDG_DATA_HOME".to_string(),
+        std::env::var("XDG_DATA_HOME").ok(),
+    );
+    let _g3 = EnvVarGuard("HOME".to_string(), std::env::var("HOME").ok());
+    std::env::set_var("CLAUDECAT_DATA_DIR", &over);
+    assert_eq!(claudecat::data_dir::data_dir(), over, "覆寫優先");
+    std::env::remove_var("CLAUDECAT_DATA_DIR");
+    std::env::set_var("XDG_DATA_HOME", &xdg);
+    assert_eq!(
+        claudecat::data_dir::data_dir(),
+        xdg.join("claudecat"),
+        "XDG_DATA_HOME 次之"
+    );
+    std::env::remove_var("XDG_DATA_HOME");
+    std::env::set_var("HOME", &home);
+    assert_eq!(
+        claudecat::data_dir::data_dir(),
+        home.join(".local/share/claudecat"),
+        "預設落在 HOME 下"
+    );
+}
+
+#[test]
+fn map_path_uses_cort_project_id() {
+    let p = "/some/real/path";
+    assert_eq!(
+        claudecat::data_dir::map_path_for(p),
+        claudecat::data_dir::data_dir()
+            .join("projects")
+            .join(claudecat::cort::project_id(p))
+            .join("map.md")
+    );
+}
+
+#[test]
+fn map_file_body_wraps_section() {
+    let section = "## Project Map (auto-maintained by claudecat)\n- **Root**: `/x`\n";
+    let body = claudecat::data_dir::map_file_body(section);
+    assert!(body.starts_with("# claudecat Project Map\n"));
+    assert!(body.contains(section), "section 應原樣置入");
+    assert!(!body.contains("claudecat:auto"));
+    assert!(body.ends_with('\n'));
 }
 
 #[test]
@@ -899,16 +1023,17 @@ fn track_table_preserves_sibling_sections_in_one_file() {
 
 /// P1 回歸：CLAUDE.md 是 symlink 時（cortexyoung 慣例：CLAUDE.md -> AGENTS.md，
 /// 讓 Claude/Codex 兩個 harness 永不漂移），update 必須寫進 symlink 目標、
-/// 不得把 symlink 取代成普通檔。
+/// 不得把 symlink 取代成普通檔。v2.1 起「寫進目標」的內容是剝除舊版 auto 區塊
+/// ＋播種——帶 legacy 區塊的本體經一次 update 應變成 rules-only。
 #[test]
 fn claude_md_update_writes_through_symlink() {
     let dir = temp_project();
-    fs::write(dir.join("AGENTS.md"), "# AGENTS\n\nbody\n").unwrap();
+    let legacy = "# AGENTS\n\nbody\n\n`<!-- claudecat:auto:begin -->\n## Project Map (auto-maintained by claudecat)\n- **Root**: `/home/yanggf/a/claudecat`\n<!-- claudecat:auto:end -->\n";
+    fs::write(dir.join("AGENTS.md"), legacy).unwrap();
     std::os::unix::fs::symlink("AGENTS.md", dir.join("CLAUDE.md")).unwrap();
 
-    let section = "## Map\n- x\n".to_string();
     let path = dir.join("CLAUDE.md");
-    let (changed, _) = claudecat::claude_md::update_section(&path, &section, false).unwrap();
+    let (changed, _) = claudecat::claude_md::update_section(&path, false).unwrap();
     assert!(changed);
 
     let meta = path.symlink_metadata().unwrap();
@@ -918,9 +1043,17 @@ fn claude_md_update_writes_through_symlink() {
     );
     let agents = fs::read_to_string(dir.join("AGENTS.md")).unwrap();
     assert!(agents.contains("# AGENTS"), "原內容保留");
-    assert!(agents.contains("## Map"), "section 應寫進 symlink 目標");
+    assert!(
+        !agents.contains("claudecat:auto"),
+        "舊版 auto 區塊應經 symlink 從本體剝除"
+    );
+    assert!(!agents.contains("/home/yanggf"), "機器路徑隨區塊消失");
+    assert!(
+        agents.contains("claudecat:map-pointer:begin"),
+        "指標種子應播下"
+    );
 
-    let (changed2, _) = claudecat::claude_md::update_section(&path, &section, false).unwrap();
+    let (changed2, _) = claudecat::claude_md::update_section(&path, false).unwrap();
     assert!(!changed2, "同內容重跑應 no-op");
 }
 

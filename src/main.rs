@@ -1,6 +1,7 @@
 use claudecat::claude_md;
 use claudecat::cort;
 use claudecat::cort_audit;
+use claudecat::data_dir;
 use claudecat::doctor;
 use claudecat::explore;
 use claudecat::guardrails;
@@ -533,8 +534,23 @@ fn main() {
         } => {
             let map = analyze(&root, top_files, mf.into_profile());
             let section = outline::render_with_profile(&map, map.profile_used);
+            let real = std::fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
+            let map_path = data_dir::map_path_for(&real.to_string_lossy());
+            if !dry_run {
+                if let Err(e) =
+                    data_dir::write_atomic(&map_path, &data_dir::map_file_body(&section))
+                {
+                    eprintln!("Failed to write map {}: {e}", map_path.display());
+                    std::process::exit(1);
+                }
+            }
+            if dry_run {
+                println!("map (dry-run) -> {}", map_path.display());
+            } else {
+                println!("map -> {}", map_path.display());
+            }
             let path = claude_md::find_claude_md(&root);
-            match claude_md::update_section(&path, &section, dry_run) {
+            match claude_md::update_section(&path, dry_run) {
                 Ok((changed, _content)) => {
                     if dry_run {
                         println!(

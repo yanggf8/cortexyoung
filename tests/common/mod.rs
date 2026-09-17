@@ -4,14 +4,17 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn temp_dir() -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
     let base = std::env::temp_dir().join(format!("claudecat-test-{}", std::process::id()));
-    let d = base.join(format!(
-        "{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    // 純 nanos 會在平行測試同 tick 起跑時撞位（兩個 fixture 共用一個目錄、
+    // 互相覆寫對方的檔案），疊一個進程內單調序號保證唯一。
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed) as u128;
+    let d = base.join(format!("{nanos}{}", (seq << 20)));
     fs::create_dir_all(&d).unwrap();
     d
 }
