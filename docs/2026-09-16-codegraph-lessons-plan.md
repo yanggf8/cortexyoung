@@ -3,7 +3,13 @@
 Status: item B **landed** at `d6ea1991` (2026-09-17), all five implementation-review findings
 applied; the standing census on this repo at that commit is 34 of 9,971 raw receiver edges
 attached — 9,586 zero-candidate, 185 multi-candidate, 145 ownerless, 21 binding-refused, none
-shape-refused. Items A and D remain proposals; item C is dropped by its gate (below). Originally
+shape-refused. Item D **landed** at `ced8795f` (2026-09-17) — the stamp rides the *row*, not the
+sidecar, for the reason the section now records. Item A **landed** at `2b099e12` (2026-09-17) as
+`gate-audit --report FILE`: the first generated table (venue `.` at `ced8795f`, machine
+`2eb02d46ec5c4319/etc-machine-id`) reads population 10,030, attached 34, refused 9,996 — 9,643
+zero-candidate, 186 multi-candidate, 146 ownerless, 21 binding-refused, 0 shape-refused — same
+shape as the `d6ea1991` census, moved by tree growth, the binding-refused population holding at
+21. Item C is dropped by its gate (below). Originally
 written 2026-09-16 after reading
 `https://github.com/colbymchenry/codegraph` (README at `main`; 71.1k stars, MIT; Rust parsing
 kernel + SQLite WAL + FTS5 + OS-watcher sync + MCP surface). Reviewed by Codex the same day
@@ -62,6 +68,16 @@ only makes answers more numerous is not.**
    correction there).
 
 ## Item A — a standing, regenerable measured-coverage report
+
+**Landed at `2b099e12` (2026-09-17).** `--report FILE` writes the markdown table rendered from
+the same report Value the JSON stdout prints — one measured value, two renderings; a report-shape
+change lands as `absent` in the golden snapshot rather than as a second computation that could
+quietly disagree. Both heads print on every row (a superset of "index head when it differs"),
+`heads_agree` beside them, machine id/source stamped before rendering, the venue under the
+spelling as passed. The file is written before anything prints and storage failures are
+returned, so a full disk is the error rather than something behind JSON the caller trusted.
+`recall-exp` is untouched. No artifact is checked in yet: a committed table stays a deliberate
+act, regenerated at whatever head is being quoted.
 
 **Problem.** The receiver-gate recall numbers (9 of 4,833 receiver call sites attached at
 `a0269cda`; 12 of 5,843 at `dbc971f7`) live in CLAUDE.md and docs prose, quoted per commit, with
@@ -275,6 +291,17 @@ tolerate-absent on historical rows, outside the `--strict` gate until row versio
 `evals/tests/harness.rs`, tests.
 
 ## Item D — run-row machine identity (the one piece of C that survives the drop)
+
+**Landed at `ced8795f` (2026-09-17), per-row.** Of the plan's two spellings — sidecar
+(`run_status_json` + `BatchRead::report`) or row — the row won for one reason: `rows.json` is the
+artefact that travels (`summarize` accepts bare rows.json paths and never sees the sidecar), so
+provenance belongs on the thing that moves, where `REQUIRED_FIELDS` makes a row unwritable
+without it. `build_row` writes `machine {id, source}` from `cort::usage`'s own accessors — the
+same stamp `print_report` puts on reports — and the summary surfaces `row_machines`: one entry
+per generating machine, id-sorted, rows predating the stamp disclosed as an absent bucket last.
+The top-level stamp still names the *summarizing* machine; the two together make the 09-03
+scenario visible in the aggregate instead of reconstructible after the fact. The row-side
+statement of the choice lives where the plan asked, in the row doc (`evals/src/arms.rs`).
 
 New run rows carry `venue_head` but no machine identity (`build_row`,
 `evals/src/arms.rs`), and the summary's top-level stamp names the *summarizing* machine, not the
