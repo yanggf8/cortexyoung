@@ -6,7 +6,9 @@
 
 use cort::db;
 use cort::graph::ReceiverIndex;
-use cort_evals::gate_audit::{census, classify, report_from, EdgeRow, Verdict};
+use cort_evals::gate_audit::{
+    census, classify, markdown, report_from, write_markdown, EdgeRow, Verdict,
+};
 use rusqlite::params;
 use std::sync::Mutex;
 
@@ -239,4 +241,94 @@ fn an_unindexed_venue_is_refused_not_indexed() {
         "gate-audit created the database it refused to audit: {db_path:?}"
     );
     std::env::remove_var("CORT_CACHE_DIR");
+}
+
+/// Item A's golden input: the same fixture shape `report_from` produces, with the machine stamp
+/// the CLI applies before rendering. One measured value feeds both the JSON stdout and the
+/// markdown file; this is that value.
+fn stamped_report() -> serde_json::Value {
+    let db = db::open_db(":memory:").unwrap();
+    db::ensure_schema(&db).unwrap();
+    db.execute(
+        "INSERT INTO projects (project_id, name, path, extractor_version, git_head)
+         VALUES ('p', 't', '/t', 'test-v1', '83b66a9fa971474b0f1b0f3ef1f441e2782160ed')",
+        [],
+    )
+    .unwrap();
+    for (i, symbol) in ["Store::add", "Tally::add", "Store::refresh"]
+        .iter()
+        .enumerate()
+    {
+        db.execute(
+            "INSERT INTO chunks (chunk_id, project_id, file_path, symbol_name, chunk_type,
+             start_line, end_line, content, content_hash, chunk_source)
+             VALUES (?1, 'p', ?2, ?3, 'method', 1, 2, 'fn x() {}', 'hash', 'ast')",
+            params![format!("c{i}"), format!("src/f{i}.rs"), symbol],
+        )
+        .unwrap();
+    }
+    let edge_row = |file: &str, line: i64, target: &str| {
+        db.execute(
+            "INSERT INTO raw_edges (project_id, file_path, source_symbol, raw_target, rel_type,
+             call_form, start_line) VALUES ('p', ?1, 's', ?2, 'calls', 'receiver', ?3)",
+            params![file, target, line],
+        )
+        .unwrap();
+    };
+    edge_row("src/a.rs", 1, "store.refresh");
+    edge_row("src/a.rs", 2, "t.add");
+    edge_row("src/a.rs", 3, "x.missing");
+    let mut v = report_from(&db, "p", "/venue", "83b66a9f", 5).unwrap();
+    v["machine"] = serde_json::json!({"id": "mach-1", "source": "etc-machine-id"});
+    v
+}
+
+#[test]
+fn the_markdown_table_is_a_golden_snapshot_of_the_report() {
+    // The rendering is part of the contract: a committed artifact is diffed and quoted, so a
+    // shape change must be a visible event, not a silent one. Rendered from the measured value
+    // the JSON prints -- never a second computation.
+    let golden = "\
+# receiver-gate census
+
+method: gate-audit-v1 (index-side census of raw_edges receiver calls, classified by cort::graph's own gate primitives)
+
+reading: zero_candidates counts calls whose method name the project never declares — std, dependencies, iterator adapters; it is the static-analysis frontier, not a recall leak. binding_refused holds the type-directed-dispatch candidates; read its examples.
+
+Refusal examples per class are in the JSON report under `refused_classes`; each carries file:line and is checkable by hand. A number in this table is quotable only with its row's commit and machine.
+
+| venue | venue_head | index_head | heads_agree | population | attached | refused | zero_candidates | multiple_candidates | one_ownerless | binding_refused | no_receiver_shape | machine |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| /venue | 83b66a9f | 83b66a9fa971474b0f1b0f3ef1f441e2782160ed | yes | 3 | 1 | 2 | 1 | 1 | 0 | 0 | 0 | mach-1/etc-machine-id |
+";
+    assert_eq!(markdown(&stamped_report()), golden);
+}
+
+#[test]
+fn a_pipe_in_the_venue_stays_inside_its_cell() {
+    let mut v = stamped_report();
+    v["venue"] = serde_json::json!("/tmp/a|b");
+    let out = markdown(&v);
+    assert!(
+        out.contains("| /tmp/a\\|b |"),
+        "the pipe must be escaped, the row unbroken:\n{out}"
+    );
+}
+
+#[test]
+fn the_markdown_file_write_returns_its_failure_and_ends_with_a_newline() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("out.md");
+    write_markdown(&stamped_report(), path.to_str().unwrap()).unwrap();
+    let raw = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        raw.ends_with('\n'),
+        "a committed artifact ends with a newline"
+    );
+    assert_eq!(raw, format!("{}\n", markdown(&stamped_report())));
+
+    // Storage failures are returned, never panicked: a report a person can hold must not cost
+    // the process a backtrace when the disk says no.
+    let err = write_markdown(&stamped_report(), "/nonexistent-dir-for-tests/out.md").unwrap_err();
+    assert!(err.contains("/nonexistent-dir-for-tests/out.md"), "{err}");
 }

@@ -85,7 +85,7 @@ const RUN_AGENTS_FLAGS: &[&str] = &[
 ];
 const VERIFY_IMPACT_FLAGS: &[&str] = &["--repo", "--depth", "--symbols"];
 const RECALL_EXP_FLAGS: &[&str] = &["--venue", "--top"];
-const GATE_AUDIT_FLAGS: &[&str] = &["--venue", "--examples"];
+const GATE_AUDIT_FLAGS: &[&str] = &["--venue", "--examples", "--report"];
 const HOOK_PROBE_FLAGS: &[&str] = &[
     "--claude-dir",
     "--codex-dir",
@@ -123,7 +123,7 @@ const USAGE_HOOK_PROBE: &str =
 const USAGE_ADOPT_MINE: &str = "usage: cort-evals adopt-mine --since RFC3339 [--claude-dir DIR] [--usage-db FILE] [--rows N] [--follow-calls N] [--exclude proj,proj] [--out FILE]  (the docs/2026-08-31-recall-wip.md §6 funnel, including subagent sidechains; reads transcripts already on disk, no model calls)";
 const USAGE_RECALL_EXP: &str =
     "usage: cort-evals recall-exp --venue DIR [--top N]  (text-side counterfactual; no cort index needed)";
-const USAGE_GATE_AUDIT: &str = "usage: cort-evals gate-audit --venue DIR [--examples N]  (index-side census of the receiver gate's refusals; needs an index, never builds one)";
+const USAGE_GATE_AUDIT: &str = "usage: cort-evals gate-audit --venue DIR [--examples N] [--report FILE]  (index-side census of the receiver gate's refusals; needs an index, never builds one; --report writes the markdown table beside the stamped JSON stdout)";
 
 /// The provider gates a sampling run on a rolling window, so "run these cells after the window
 /// resets" is part of the experiment, not shell glue. Seconds rather than a wall-clock time: the
@@ -684,6 +684,16 @@ fn gate_audit_main(argv: &[String]) -> Result<(), String> {
         .parse()
         .map_err(|_| "--examples must be a number".to_string())?;
     let report = cort_evals::gate_audit::report(&venue, examples)?;
+    // One measured value, two renderings: the file is written before anything prints, so a
+    // storage failure surfaces as the error it is instead of behind a JSON the caller trusted;
+    // and the stamp is applied before rendering, so the markdown carries the same machine
+    // identity the printed JSON does.
+    let report_path = at(argv, "--report", "");
+    if !report_path.is_empty() {
+        let mut stamped = report.clone();
+        stamp_machine(&mut stamped);
+        cort_evals::gate_audit::write_markdown(&stamped, &report_path)?;
+    }
     print_report(&report);
     Ok(())
 }
@@ -1040,6 +1050,18 @@ mod option_guard {
         )
         .is_ok());
         assert!(check_flags(&v(&[]), VERIFY_IMPACT_FLAGS, USAGE_VERIFY_IMPACT).is_ok());
+    }
+
+    #[test]
+    fn the_gate_audit_report_flag_is_whitelisted() {
+        // Item A's `--report FILE`: refused here would make the flag unreachable no matter what
+        // the parser below does with it.
+        assert!(check_flags(
+            &v(&["--report", "out.md"]),
+            GATE_AUDIT_FLAGS,
+            USAGE_GATE_AUDIT
+        )
+        .is_ok());
     }
 
     #[test]

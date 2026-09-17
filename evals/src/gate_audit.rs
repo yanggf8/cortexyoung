@@ -232,6 +232,81 @@ pub fn report_from(
     }))
 }
 
+/// Markdown cells cannot hold a raw pipe: it would end the cell mid-value, and a committed
+/// artifact whose row silently broke is worse than one that refused to render.
+fn cell(raw: &str) -> String {
+    raw.replace('|', "\\|")
+}
+
+fn count_at(report: &Value, path: &[&str]) -> String {
+    let mut cur = report;
+    for key in path {
+        cur = cur.get(key).unwrap_or(&Value::Null);
+    }
+    cur.as_u64()
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| "absent".to_string())
+}
+
+/// The markdown table, rendered from the same measured value the JSON stdout prints — never a
+/// second computation (`docs/2026-09-16-codegraph-lessons-plan.md`, item A). One row per
+/// invocation, with the commit and the machine on the row, because that is exactly what makes
+/// the number quotable; every field the prose mentions is read out of the report, so a shape
+/// change lands here as `absent`, visible in the golden snapshot, rather than as a wrong number.
+pub fn markdown(report: &Value) -> String {
+    let heads_agree = report
+        .get("heads_agree")
+        .and_then(Value::as_bool)
+        .map(|b| if b { "yes" } else { "no" })
+        .unwrap_or("absent");
+    let machine = report.get("machine").unwrap_or(&Value::Null);
+    let machine = format!(
+        "{}/{}",
+        machine
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("absent"),
+        machine
+            .get("source")
+            .and_then(Value::as_str)
+            .unwrap_or("absent"),
+    );
+    let str_at = |key: &str| report.get(key).and_then(Value::as_str).unwrap_or("absent");
+    format!(
+        "# receiver-gate census\n\n\
+method: {method}\n\n\
+reading: {reading}\n\n\
+Refusal examples per class are in the JSON report under `refused_classes`; each carries file:line and is checkable by hand. A number in this table is quotable only with its row's commit and machine.\n\n\
+| venue | venue_head | index_head | heads_agree | population | attached | refused | zero_candidates | multiple_candidates | one_ownerless | binding_refused | no_receiver_shape | machine |\n\
+|---|---|---|---|---|---|---|---|---|---|---|---|---|\n\
+| {venue} | {venue_head} | {index_head} | {heads_agree} | {population} | {attached} | {refused} | {zero} | {multiple} | {ownerless} | {binding} | {no_shape} | {machine} |\n",
+        method = str_at("method"),
+        reading = str_at("reading"),
+        venue = cell(str_at("venue")),
+        venue_head = str_at("venue_head"),
+        index_head = str_at("index_head"),
+        heads_agree = heads_agree,
+        population = count_at(report, &["population"]),
+        attached = count_at(report, &["attached"]),
+        refused = count_at(report, &["refused"]),
+        zero = count_at(report, &["refused_classes", "zero_candidates", "count"]),
+        multiple = count_at(report, &["refused_classes", "multiple_candidates", "count"]),
+        ownerless = count_at(report, &["refused_classes", "one_ownerless", "count"]),
+        binding = count_at(report, &["refused_classes", "binding_refused", "count"]),
+        no_shape = count_at(
+            report,
+            &["refused_classes", "binding_refused", "no_receiver_shape"]
+        ),
+        machine = cell(&machine),
+    )
+}
+
+/// Write the markdown rendering to `--report`'s path. Storage failures are returned, never
+/// panicked on: a full disk must not turn a census into a crash.
+pub fn write_markdown(report: &Value, path: &str) -> Result<(), String> {
+    std::fs::write(path, format!("{}\n", markdown(report))).map_err(|e| format!("{path}: {e}"))
+}
+
 /// `main.rs`'s `venue_head` refuses a venue git cannot answer, which is right where the head
 /// *labels* rows that must not be ambiguous; a census wants to describe what it read either way,
 /// so this tolerant spelling names the missing git instead of failing the audit.
