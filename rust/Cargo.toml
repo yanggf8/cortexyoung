@@ -26,25 +26,25 @@ path = "src/bin/cort_upgrade.rs"
 
 [dependencies]
 # bundled SQLite already compiles SQLITE_ENABLE_FTS5 (libsqlite3-sys build.rs).
-# There is no rusqlite `fts5` cargo feature on 0.32; do not add extra crates.
-rusqlite = { version = "0.32", features = ["bundled"] }
+# There is no rusqlite `fts5` cargo feature to add; do not add extra crates.
+rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sha2 = "0.10"
+sha2 = "0.11"
 clap = { version = "4", features = ["derive"] }
 # The scan hot path runs the rule pack in-process (src/scan.rs); the CLI stays only for
 # `struct --pattern` and as CORT_SCAN_BACKEND=cli. Pinned to the same minor the installed CLI
 # carries; `cargo update` moves these together with the pin check and the parity probe.
-ast-grep-config = "0.45.2"
-ast-grep-core = "0.45.2"
-ast-grep-language = "0.45.2"
+ast-grep-config = "0.45.3"
+ast-grep-core = "0.45.3"
+ast-grep-language = "0.45.3"
 globset = "0.4"
 ignore = "0.4"
 # Codex's hook wiring lives in ~/.codex/config.toml (settings_toml.rs), not settings.json. toml_edit
 # over the plain `toml` crate because it round-trips a partial edit without reformatting or dropping
 # comments elsewhere in the file -- the same "everything else survives byte-identical" guarantee
 # settings.rs already holds for the JSON side. It is what `cargo` itself uses to edit Cargo.toml.
-toml_edit = "0.22"
+toml_edit = "0.25"
 
 [dev-dependencies]
 tempfile = "3"

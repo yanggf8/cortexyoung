@@ -954,7 +954,7 @@ fn hash_pack_with_rust_yml(rust_yml: &[u8]) -> String {
     // against a pack+engine+chunker digest.
     h.update(cort::scan::SCAN_ENGINE.as_bytes());
     h.update(cort::chunker::CHUNKER_IDENTITY.as_bytes());
-    format!("{:x}", h.finalize())
+    cort::db::hex_lower(&h.finalize())
 }
 
 /// Proposal §4 TDD-8 / deliverable 6: rust.yml change moves pack hash; old index requires full rebuild.

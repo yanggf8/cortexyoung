@@ -84,5 +84,5 @@ pub fn extractor_version() -> std::io::Result<String> {
     }
     h.update(crate::scan::SCAN_ENGINE.as_bytes());
     h.update(crate::chunker::CHUNKER_IDENTITY.as_bytes());
-    Ok(format!("{:x}", h.finalize()))
+    Ok(crate::db::hex_lower(&h.finalize()))
 }

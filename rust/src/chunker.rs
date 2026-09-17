@@ -406,11 +406,11 @@ pub fn compose_symbol_name(
 }
 
 fn hex_sha256(h: sha2::Sha256) -> String {
-    format!("{:x}", h.finalize())
+    crate::db::hex_lower(&h.finalize())
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    crate::db::hex_lower(&Sha256::digest(bytes))
 }
 
 fn unquote(text: &str) -> String {

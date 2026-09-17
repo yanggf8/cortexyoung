@@ -108,7 +108,7 @@ fn payload_identity_is_decided_by_the_binaries_extractor_not_the_version_string(
     raw.update(b"id: a\nlanguage: ts\n");
     assert_ne!(
         ha,
-        format!("{:x}", raw.finalize()),
+        cort::db::hex_lower(&raw.finalize()),
         "bytes-only hash must differ from the identity"
     );
 }
@@ -400,8 +400,8 @@ fn diverged_skill_fixture() -> (
 fn stamp_for(body: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     format!(
-        "managed by cortexyoung install.sh\nskill_sha256:{:x}\n",
-        Sha256::digest(body)
+        "managed by cortexyoung install.sh\nskill_sha256:{}\n",
+        cort::db::hex_lower(&Sha256::digest(body))
     )
 }
 

@@ -4,6 +4,13 @@
 dist/
 build/
 
+# Machine-local state, not source: the cort index, the embedding model cache, scratch logs and
+# generated performance reports. None of these belong in git; each is rebuilt on demand.
+.cortex/
+.fastembed_cache/
+logs/
+performance-reports/
+
 # Scratch directory the skill-format negative test builds and removes inside `cargo test`.
 rust/tests/.gate-probe/
 

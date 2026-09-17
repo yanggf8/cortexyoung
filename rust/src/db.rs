@@ -76,7 +76,21 @@ const SCHEMA_SQL: &str = include_str!("schema.sql");
 pub type Db = Connection;
 
 pub fn project_id_for(real_path: &str) -> String {
-    format!("{:x}", Sha256::digest(real_path.as_bytes()))
+    hex_lower(&Sha256::digest(real_path.as_bytes()))
+}
+
+/// Lowercase hex, zero-padded per byte — byte-for-byte what generic-array's `LowerHex` produced
+/// before sha2 0.11 moved digest output to hybrid-array and dropped the impl. The output must
+/// stay identical: these strings are stored (project ids, chunk hashes, pack identity, skill
+/// stamps) and compared against rows and files written by older binaries.
+pub fn hex_lower(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        out.push(HEX[(b >> 4) as usize] as char);
+        out.push(HEX[(b & 0xf) as usize] as char);
+    }
+    out
 }
 
 fn home_dir() -> PathBuf {

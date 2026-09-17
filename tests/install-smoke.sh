@@ -310,15 +310,22 @@ else
 fi
 echo "--- Task 0: stage-only takes no installer lock ---"
 LOCKFILE="$MANIFEST_D/.install.lock"
-flock -x "$LOCKFILE" sleep 30 &
-LOCKHOLDER=$!
-if timeout 120 bash "$INSTALL_SH" --stage-only >/dev/null 2>&1; then
-  pass "stage-only completes while the installer lock is held"
+# flock (util-linux) and timeout (coreutils) are Linux tools; macOS ships neither. The lock this
+# test holds is the whole point, so without the holder the assertion would observe nothing and
+# read it as a failure -- the same SKIP convention Test 22 established below.
+if ! command -v flock >/dev/null 2>&1 || ! command -v timeout >/dev/null 2>&1; then
+  echo "  SKIP: flock/timeout unavailable"
 else
-  fail "stage-only blocked on the installer lock (it must skip it)"
+  flock -x "$LOCKFILE" sleep 30 &
+  LOCKHOLDER=$!
+  if timeout 120 bash "$INSTALL_SH" --stage-only >/dev/null 2>&1; then
+    pass "stage-only completes while the installer lock is held"
+  else
+    fail "stage-only blocked on the installer lock (it must skip it)"
+  fi
+  kill "$LOCKHOLDER" 2>/dev/null || true
+  wait "$LOCKHOLDER" 2>/dev/null || true
 fi
-kill "$LOCKHOLDER" 2>/dev/null || true
-wait "$LOCKHOLDER" 2>/dev/null || true
 echo "--- Task 0: activate-only flips a validated generation ---"
 if bash "$INSTALL_SH" --activate-only --gen "$GEN" >/tmp/smoke_activate.log 2>&1; then
   pass "activate-only exits 0 on a staged generation"

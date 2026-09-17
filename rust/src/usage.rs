@@ -70,7 +70,7 @@ fn resolve_machine() -> (String, &'static str) {
     }
     // Sixteen hex characters: enough that two machines colliding is not a thing that happens, short
     // enough to sit in a report line a person reads.
-    let full = format!("{:x}", Sha256::digest(raw.as_bytes()));
+    let full = crate::db::hex_lower(&Sha256::digest(raw.as_bytes()));
     (full[..16].to_string(), source)
 }
 

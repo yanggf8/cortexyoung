@@ -225,7 +225,7 @@ pub fn pack_identity(dir: &Path) -> std::io::Result<String> {
         h.update(&fs::read(&f)?);
     }
     h.update(crate::scan::SCAN_ENGINE.as_bytes());
-    Ok(format!("{:x}", h.finalize()))
+    Ok(crate::db::hex_lower(&h.finalize()))
 }
 
 fn walk_yaml(dir: &Path) -> std::io::Result<Vec<std::path::PathBuf>> {
@@ -617,9 +617,9 @@ pub fn diagnose(inputs: &DiagnoseInputs) -> Vec<Component> {
                     name: "binary".into(),
                     state: ComponentState::Drifted,
                     detail: format!(
-                        "installed binary {:x}, new binary {:x}",
-                        Sha256::digest(&a),
-                        Sha256::digest(&b)
+                        "installed binary {}, new binary {}",
+                        crate::db::hex_lower(&Sha256::digest(&a)),
+                        crate::db::hex_lower(&Sha256::digest(&b))
                     ),
                 }
             }
@@ -883,9 +883,9 @@ pub fn repair_skill(source: &Path, dest: &Path) -> std::io::Result<()> {
     fs::rename(&tmp, dest)?;
     use sha2::{Digest, Sha256};
     let stamp = format!(
-        "{}\nskill_sha256:{:x}\n",
+        "{}\nskill_sha256:{}\n",
         MANAGED_SIGNATURE,
-        Sha256::digest(&bytes)
+        crate::db::hex_lower(&Sha256::digest(&bytes))
     );
     let stamp_path = dest
         .parent()

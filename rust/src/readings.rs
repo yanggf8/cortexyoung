@@ -432,7 +432,7 @@ fn classify_os_code(code: i32) -> ClassifiedFailure {
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    crate::db::hex_lower(&Sha256::digest(bytes))
 }
 
 fn file_meta(meta: &std::fs::Metadata) -> FileMeta {

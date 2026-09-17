@@ -15,7 +15,7 @@ cort = { path = "../rust" }
 # Same version and features as the product crate, so the two crates share one build of it.
 # gate-audit reads `raw_edges` read-only through the public `Db` (a `Connection` alias) and
 # leaves every gate decision in `cort::graph`; it never writes.
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 
 [dev-dependencies]
 tempfile = "3"
