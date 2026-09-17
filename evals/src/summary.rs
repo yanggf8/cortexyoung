@@ -30,6 +30,49 @@ fn as_number(row: &Value, key: &str) -> Option<f64> {
     }
 }
 
+/// One entry per machine behind the aggregated rows, id-sorted, with rows that predate the
+/// per-row machine stamp disclosed as an absent bucket last. The report's top-level stamp names
+/// the *summarising* machine; this names the machines that *generated* the rows, so a rows.json
+/// summarised away from its birth machine cannot pass as local data -- the 2026-09-03
+/// 417-fires reconciliation, closed at the level where it actually travels.
+fn row_machines(rows: &[Value]) -> Value {
+    let mut counts: Vec<(String, String, usize)> = Vec::new();
+    let mut absent = 0usize;
+    for row in rows {
+        match row
+            .get("machine")
+            .and_then(|m| m.get("id"))
+            .and_then(Value::as_str)
+        {
+            Some(id) => match counts.iter_mut().find(|(known, _, _)| known == id) {
+                Some(entry) => entry.2 += 1,
+                None => counts.push((
+                    id.to_string(),
+                    row["machine"]["source"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string(),
+                    1,
+                )),
+            },
+            None => absent += 1,
+        }
+    }
+    counts.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut out: Vec<Value> = counts
+        .into_iter()
+        .map(|(id, source, n)| json!({"id": id, "source": source, "rows": n}))
+        .collect();
+    if absent > 0 {
+        out.push(json!({
+            "id": "absent",
+            "source": "row predates the per-row machine stamp",
+            "rows": absent,
+        }));
+    }
+    json!(out)
+}
+
 /// Which arm `cort` is judged against. Rounds 1-3 compared against `ast-grep+Read`; the current
 /// runner only drives `rg+Read`, so a gate that could only see the old baseline reported
 /// "metric-missing" on perfectly good data. Preference order, first arm actually present wins.
@@ -141,6 +184,7 @@ pub fn summarize(rows: &[Value], strict: bool) -> Result<Value, String> {
 
     Ok(json!({
         "by_arm": by_arm,
+        "row_machines": row_machines(rows),
         "verdict": {
             "baseline_arm": baseline_arm,
             "cort_beats_ast_grep": beats,

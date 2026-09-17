@@ -73,7 +73,7 @@ pub fn guidance(arm: &str) -> Option<String> {
 
 pub const AGENT_ARMS: [&str; 2] = ["rg+Read", "cort"];
 
-pub const REQUIRED_FIELDS: [&str; 18] = [
+pub const REQUIRED_FIELDS: [&str; 19] = [
     "arm",
     "task",
     "success",
@@ -92,6 +92,7 @@ pub const REQUIRED_FIELDS: [&str; 18] = [
     "cort_calls",
     "arm_held",
     "shells_used",
+    "machine",
 ];
 
 /// Resolve a bare binary name against PATH without spawning anything: a lookup that needed `which`
@@ -316,6 +317,15 @@ pub fn build_row(
         "session_id": parsed.session_id,
         "estimator": crate::ESTIMATOR,
         "venue_head": venue_head,
+        // The machine stamp rides the row, not the run-status sidecar (the plan's alternative):
+        // rows.json is the artefact that travels -- `summarize` accepts bare rows.json paths and
+        // never sees the sidecar -- so provenance has to be on the thing that moves, and the
+        // REQUIRED_FIELDS check above makes a row unwritable without it. Historical rows simply
+        // lack the key; the summary discloses them as an absent bucket rather than guessing.
+        "machine": {
+            "id": cort::usage::machine_id(),
+            "source": cort::usage::machine_id_source(),
+        },
     });
 
     for key in [

@@ -266,6 +266,40 @@ fn build_row_carries_every_required_field_and_rejects_unmeasured_ones() {
 }
 
 #[test]
+fn a_row_names_the_machine_that_produced_it() {
+    // rows.json is the artefact that travels: it gets copied to another machine and summarised
+    // there, and the summary's own stamp names the summarising machine. A row that cannot say
+    // which machine measured it is the 2026-09-03 reconciliation problem again, one row deep --
+    // so the stamp rides the row itself, where REQUIRED_FIELDS makes it unwritable without it.
+    let parsed = parse_stream(&stream(
+        &[&format!(
+            "{} impact --symbol leaf --depth 3 -f lean",
+            "cort"
+        )],
+        &["h1\tsrc/c.ts\tmid\t2\n"],
+        "success",
+        &good_answer(),
+    ))
+    .unwrap();
+    let row = build_row("cort", &task(), &parsed, "deadbee", Some(true)).unwrap();
+    assert!(
+        REQUIRED_FIELDS.contains(&"machine"),
+        "the stamp is a required field: a row can never be written without provenance"
+    );
+    assert!(
+        !row["machine"]["id"].as_str().unwrap_or_default().is_empty(),
+        "the row carries the machine id: {row}"
+    );
+    assert!(
+        !row["machine"]["source"]
+            .as_str()
+            .unwrap_or_default()
+            .is_empty(),
+        "the row says where the id came from: {row}"
+    );
+}
+
+#[test]
 fn arm_held_flags_exactly_the_leak_the_first_live_cell_showed() {
     let leaked = vec![
         bash("grep -rn \"getLastNTradingDays\" --include=*.ts . | grep -v node_modules"),
@@ -429,6 +463,33 @@ fn summarize_never_averages_nulls_into_a_verdict() {
     assert!(
         !METRICS.contains(&"stale_reads"),
         "a metric nothing measures cannot be part of the strict gate"
+    );
+}
+
+#[test]
+fn the_summary_names_the_machines_behind_the_rows() {
+    // The aggregate is where mixed provenance becomes visible: rows generated on another machine
+    // and summarised here must not read as if this machine produced them (the top-level stamp
+    // names the summariser). Rows from before the per-row stamp are disclosed as absent, never
+    // guessed at.
+    let rows = vec![
+        json!({"arm":"cort","success":true,"total_tokens":50,"tool_return_tokens":5,"turns":2,"read_calls":0,
+               "machine":{"id":"aaa","source":"etc-machine-id"}}),
+        json!({"arm":"cort","success":true,"total_tokens":60,"tool_return_tokens":6,"turns":2,"read_calls":0,
+               "machine":{"id":"aaa","source":"etc-machine-id"}}),
+        json!({"arm":"cort","success":true,"total_tokens":70,"tool_return_tokens":7,"turns":2,"read_calls":0,
+               "machine":{"id":"bbb","source":"fallback-hostname"}}),
+        json!({"arm":"cort","success":true,"total_tokens":80,"tool_return_tokens":8,"turns":2,"read_calls":0}),
+    ];
+    let out = summarize(&rows, false).unwrap();
+    assert_eq!(
+        out["row_machines"],
+        json!([
+            {"id":"aaa","source":"etc-machine-id","rows":2},
+            {"id":"bbb","source":"fallback-hostname","rows":1},
+            {"id":"absent","source":"row predates the per-row machine stamp","rows":1},
+        ]),
+        "one entry per machine, id-sorted, the absent bucket always last"
     );
 }
 
