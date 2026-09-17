@@ -678,7 +678,7 @@ fn an_import_edge_keeps_the_matched_node_line_because_it_has_no_callee() {
 
 /// The pack side of v4 and v5: three Rust call shapes plus the type form, four forms in all. This is
 /// the only test that reads the real grammar, because `method_call_expression` does not exist in the
-/// Rust grammar ast-grep 0.45.2 ships -- a rule written against it matches nothing and looks exactly
+/// Rust grammar the pinned ast-grep ships -- a rule written against it matches nothing and looks exactly
 /// like a file with no method calls in it.
 #[test]
 fn the_rust_pack_tags_each_call_shape_with_the_form_it_is() {

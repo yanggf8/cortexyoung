@@ -61,7 +61,7 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     if args.first().map(String::as_str) == Some("--version") {
-        let version = mode.strip_prefix("version:").unwrap_or("0.45.2");
+        let version = mode.strip_prefix("version:").unwrap_or("0.45.3");
         println!("ast-grep {version}");
         return;
     }

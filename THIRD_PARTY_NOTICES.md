@@ -7,9 +7,9 @@ vendored.
 ## ast-grep
 
 - **Project:** https://github.com/ast-grep/ast-grep
-- **Version pin:** `0.45.2` (exact; never loosen — the only parser)
+- **Version pin:** `0.45.3` (exact; never loosen — the only parser)
 - **License:** MIT
-- **Usage:** Pinned, installed dependency. Prebuilt `app-<target>.zip` downloaded from GitHub Releases (`https://github.com/ast-grep/ast-grep/releases/download/0.45.2/app-<target>.zip`, where `<target>` is `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `x86_64-apple-darwin`, or `aarch64-apple-darwin`) and verified against repo-maintained SHA-256 hashes in `install.sh` (upstream publishes no checksums; fail-closed on empty or mismatched hash). Fallback: `cargo install ast-grep --version 0.45.2 --locked` (requires Rust 1.88+). Binary is `ast-grep`, never `sg` (on Linux `/usr/bin/sg` is `setgroups(1)` and is a different program).
+- **Usage:** Pinned, installed dependency. Prebuilt `app-<target>.zip` downloaded from GitHub Releases (`https://github.com/ast-grep/ast-grep/releases/download/0.45.3/app-<target>.zip`, where `<target>` is `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `x86_64-apple-darwin`, or `aarch64-apple-darwin`) and verified against repo-maintained SHA-256 hashes (upstream publishes no checksums; fail-closed on empty or mismatched hash). Fallback: `cargo install ast-grep --version 0.45.3 --locked` (requires Rust 1.88+). Binary is `ast-grep`, never `sg` (on Linux `/usr/bin/sg` is `setgroups(1)` and is a different program).
 
 ## better-sqlite3
 

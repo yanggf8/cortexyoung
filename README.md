@@ -25,7 +25,7 @@ All query/read verbs take `-f lean`: the same answer in a compact agent-oriented
 fifth of the tokens of the default JSON. Agents should pass it; see [Token cost](#token-cost)
 below.
 
-Rust (`.rs`) is indexed through the pinned `ast-grep` 0.45.2 rule pack. Top-level functions, `impl`
+Rust (`.rs`) is indexed through the pinned `ast-grep` 0.45.3 rule pack. Top-level functions, `impl`
 methods and type declarations (`struct`, `enum`, `trait`) are stored as symbol-scoped chunks, so
 `cort context <symbol> --content full -f lean` returns one function body rather than forcing an agent to
 read a large source file — and `cort impact --symbol <Type>` answers for a type the way it does for a
@@ -205,7 +205,7 @@ never appears in its own report.
 ## Install
 
 ```bash
-./install.sh              # cort v0.1.0 + ast-grep v0.45.2 + skill to ~/.claude/skills/ast-grep/
+./install.sh              # cort v0.1.0 + ast-grep v0.45.3 + skill to ~/.claude/skills/ast-grep/
 ./install.sh --check      # verify without mutating
 ./install.sh --uninstall  # remove managed artifacts only (reads manifest v2)
 ./install.sh --force      # on unmanaged skill collision: backup and replace
@@ -221,7 +221,7 @@ That path is [`cort-upgrade`](#update)'s.
 
 **What it does:**
 
-- Downloads pinned `ast-grep` v0.45.2 prebuilt `app-<target>.zip` for your platform (Linux x86_64/aarch64, macOS x86_64/arm64) from GitHub Releases and verifies SHA-256 (repo-maintained; upstream publishes no checksums) — fail-closed: an empty or mismatched checksum refuses to install. Falls back to `cargo install ast-grep --version 0.45.2 --locked` (requires Rust 1.88+).
+- Downloads pinned `ast-grep` v0.45.3 prebuilt `app-<target>.zip` for your platform (Linux x86_64/aarch64, macOS x86_64/arm64) from GitHub Releases and verifies SHA-256 (repo-maintained; upstream publishes no checksums) — fail-closed: an empty or mismatched checksum refuses to install. Falls back to `cargo install ast-grep --version 0.45.3 --locked` (requires Rust 1.88+).
 - Builds `cort` from `rust/` with `cargo build --release --locked` on **every** run and installs the binary plus its ast-grep pack (`src/pack`, located at runtime via `CORT_PACK_DIR`) to `~/.local/share/cortexyoung/cort`, shimming `~/.cargo/bin/cort` or `~/.local/bin/cort`.
 - Deploys `skills/ast-grep/SKILL.md` to **both** agent homes — `~/.claude/skills/ast-grep/SKILL.md` and `~/.codex/skills/ast-grep/SKILL.md` (honouring `CODEX_HOME`) — **byte-for-byte the repo file**. The installer writes nothing inside the document: the frontmatter block holds keys only (`name`, `description`, and nothing of ours), both loaders anchor that fence to line 1, and `rust/tests/skill_format.rs` fails the build if a source stops parsing. Ownership lives in `.cortexyoung-managed` beside the skill, which records the SHA-256 of the bytes we deployed — so a hand-edit of a deployed `SKILL.md` reads as someone else's file and is refused, not silently overwritten. Edit `skills/<name>/SKILL.md` in this repo instead; one source feeds both homes. Preflights collisions before mutating: skips if hash-equal, replaces what it owns, refuses what it does not (use `--force` to backup and replace). Uninstall removes the document and its stamp, and nothing else.
 - Wires **two** hooks into `~/.claude/settings.json`, `~/.codex/config.toml` and `~/.kimi-code/config.toml` in the **same run** as the skill (skip all of them with `--no-hook`): a `PreToolUse` hook on the search tools that suggests `cort impact`, and a `PostToolUse` hook on the edit tools that runs `cort index --incremental` so the index tracks the tree instead of waiting for somebody to notice it is behind. `cort hook-install --all` resolves all six entries from its own table (`install.sh` names no path, dialect or subcommand), and the single-entry form takes an explicit `--format` and `--event` — JSON via `rust/src/settings.rs`, Codex's nested TOML via `rust/src/settings_toml.rs`, Kimi's flat `[[hooks]]` TOML via `rust/src/settings_kimi.rs` — never `jq`: every one of them preserves the hooks you already have, rewrites our own entry when the binary moves instead of adding a second, collapses duplicates down to one, refuses outright to overwrite a settings file it could not parse, and gives an install-then-uninstall cycle back byte for byte. (The format used to be read off the file extension. Two of these three files are called `config.toml`, so each caller now names its own.) Grok reads the same `settings.json` as Claude Code and needs no entry of its own. See [the hook section](#the-pretooluse-hook--the-retrospective-half-of-the-routing) for what they do at runtime. A hook that has to be wired by hand is a hook that stays unwired — that is not a hypothesis, it is what this repo measured on its own machine three times, once per harness.
@@ -327,14 +327,14 @@ The hook is unwired *before* the binary is removed, because `cort hook-install -
 
 Pre-existing binaries and unmanaged skills are never removed. A machine that took the retired `--with-xgrep` option still has its `xgrep` skill removed here, through the `skill_xgrep` manifest key the old installer wrote; the `xg` binary goes with it only if that manifest says this installer put it there.
 
-## The ast-grep 0.45.2 pin — why fail-closed
+## The ast-grep 0.45.3 pin — why fail-closed
 
-`ast-grep` is the only parser (never add an in-process parser, never call `sg` — on Linux `/usr/bin/sg` is `setgroups(1)`). The pin is `0.45.2` exactly: the installer verifies the download's SHA-256 against repo-maintained hashes for `app-<target>.zip` before extracting. An empty expected hash is fatal (`no checksum on record`), and a mismatch is fatal (`refusing to install an unverified binary`). This is fail-closed because installing an unverified binary would silently change parse behaviour — `parse_failed` detection, pattern validation, and struct/context/impact all depend on the same parser version.
+`ast-grep` is the only parser (never add an in-process parser, never call `sg` — on Linux `/usr/bin/sg` is `setgroups(1)`). The pin is `0.45.3` exactly: the installer verifies the download's SHA-256 against repo-maintained hashes for `app-<target>.zip` before extracting. An empty expected hash is fatal (`no checksum on record`), and a mismatch is fatal (`refusing to install an unverified binary`). This is fail-closed because installing an unverified binary would silently change parse behaviour — `parse_failed` detection, pattern validation, and struct/context/impact all depend on the same parser version.
 
 Alternative install (same pin, same fail-closed version check):
 
 ```bash
-cargo install ast-grep --version 0.45.2 --locked  # requires Rust 1.88+
+cargo install ast-grep --version 0.45.3 --locked  # requires Rust 1.88+
 ```
 
 ## Eval results (2026-08-26)
@@ -938,7 +938,7 @@ because `wired` had been answering a question one step short of the one that mat
 
 ## Upstream credits
 
-- [`ast-grep`](https://github.com/ast-grep/ast-grep) v0.45.2 — MIT, installed from GitHub Releases `app-<target>.zip` (repo-maintained SHA-256) or `cargo install ast-grep --version 0.45.2 --locked`.
+- [`ast-grep`](https://github.com/ast-grep/ast-grep) v0.45.3 — MIT, installed from GitHub Releases `app-<target>.zip` (repo-maintained SHA-256) or `cargo install ast-grep --version 0.45.3 --locked`.
 
 - [`ripgrep`](https://github.com/BurntSushi/ripgrep) — MIT OR Unlicense, not installed by this repo; expected on the host.
 

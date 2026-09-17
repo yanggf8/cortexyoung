@@ -93,7 +93,7 @@ export PATH="$HOME/.cargo/bin:$PATH"
 mkdir -p "$TMPHOME/fakebin"
 cat > "$TMPHOME/fakebin/ast-grep" <<'FAKEAG'
 #!/usr/bin/env bash
-if [ "$1" = "--version" ]; then echo "ast-grep 0.45.2"; else echo "ast-grep 0.45.2"; fi
+if [ "$1" = "--version" ]; then echo "ast-grep 0.45.3"; else echo "ast-grep 0.45.3"; fi
 FAKEAG
 chmod +x "$TMPHOME/fakebin/ast-grep"
 cat > "$TMPHOME/fakebin/npm" <<'FAKENPM'
@@ -541,7 +541,7 @@ if [ "$EC7" -ne 0 ] && grep -q "MISMATCH" /tmp/smoke7.log 2>/dev/null; then pass
 # Restore correct mock
 cat > "$TMPHOME/fakebin/ast-grep" <<'MOCKAG2'
 #!/usr/bin/env bash
-echo "ast-grep 0.45.2"
+echo "ast-grep 0.45.3"
 MOCKAG2
 chmod +x "$TMPHOME/fakebin/ast-grep"
 # Also keep xg correct
@@ -607,7 +607,7 @@ assert_not_contains /tmp/smoke9.log "proceeding anyway" "no proceed-anyway path 
 # Restore correct fakes
 cat > "$TMPHOME/fakebin/ast-grep" <<'FAKEAG_RESTORED'
 #!/usr/bin/env bash
-echo "ast-grep 0.45.2"
+echo "ast-grep 0.45.3"
 FAKEAG_RESTORED
 chmod +x "$TMPHOME/fakebin/ast-grep"
 cat > "$TMPHOME/fakebin/curl" <<'FAKECURL_STUB2'
@@ -709,7 +709,7 @@ PROJ="$TMPHOME/proj"; mkdir -p "$PROJ/src"
 printf 'fn a() -> i32 { 1 }\n' > "$PROJ/src/a.rs"
 # Use the real ast-grep and the real (Rust) cort — remove fakebin from PATH here
 REAL_PATH="$ORIGINAL_PATH"
-HOST_AG_EXPECTED="0.45.2"
+HOST_AG_EXPECTED="0.45.3"
 CORT_BIN_UNDER_TEST="$REPO_ROOT/rust/target/release/cort"
 if [ ! -x "$CORT_BIN_UNDER_TEST" ]; then
   echo "  SKIP: rust/target/release/cort not built (run cargo build --release first)"

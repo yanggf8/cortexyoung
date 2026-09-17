@@ -45,13 +45,12 @@ fn the_shim_intercepts_nothing_and_forwards_every_argument() {
     );
 }
 
-/// Everything install_ast_grep needs to decide *which* ast-grep to fetch lives here. Today the
-/// version, the repo, and the checksum table live in bash while `AST_GREP_PINNED` lives in
-/// `ast_grep.rs` — two homes that are equal only by maintenance.
+/// Everything install_ast_grep needs to decide *which* ast-grep to fetch lives in the one home
+/// (`install.rs::ast_grep_provenance`) — version, repo, and checksum table together.
 #[test]
 fn ast_grep_provenance_names_the_pinned_release_and_its_checksums() {
     let prov = cort::install::ast_grep_provenance();
-    assert_eq!(prov.version, "0.45.2");
+    assert_eq!(prov.version, "0.45.3");
     assert_eq!(prov.repo, "ast-grep/ast-grep");
     assert_eq!(prov.crate_name, "ast-grep");
     // Exact values, not mere presence: `checksum_for(asset).is_some()` accepts a changed checksum,
@@ -60,19 +59,19 @@ fn ast_grep_provenance_names_the_pinned_release_and_its_checksums() {
     for (asset, sha) in [
         (
             "app-x86_64-unknown-linux-gnu.zip",
-            "67aff72dd2994bf152fcc3a8a09cf93b13193abe59f39393095167c729af2015",
+            "f8ac830881339d1edee6b2652f54798c0f4da5a827f2db38a08ee31117783ce8",
         ),
         (
             "app-aarch64-unknown-linux-gnu.zip",
-            "e67ee2f5928b4d77a472114edf6e227d90fefe22fa47e7a78db187c55d206564",
+            "b39cfbc58da4b869a88b8a4bc57bd5deb0d24541e704cf7c257da7b53ec81c8f",
         ),
         (
             "app-x86_64-apple-darwin.zip",
-            "037e5b4a9aed2ba03a2b4710e4fe3439d5d1154d1266d5e8f9f6df7452169181",
+            "b2ffd26f42810340326a9e8a084bdc3647a8795c1a3f21fc06bd7bef3c7c5b2c",
         ),
         (
             "app-aarch64-apple-darwin.zip",
-            "1fc21214234bf6f5a3f841d5b2493a4fc4b6087f69b055c9ad5f94f77c0ab76e",
+            "6d2279dea5bea2ad79c66ea93f5fe54ba926e398a8a26de76c56db68fe59eac6",
         ),
     ] {
         assert_eq!(
@@ -94,12 +93,12 @@ fn install_sh_names_no_ast_grep_version_repo_or_checksum() {
     for line in installer.lines() {
         let code = line.split('#').next().unwrap_or("");
         for needle in [
-            "0.45.2",
+            "0.45.3",
             "ast-grep/ast-grep",
-            "67aff72dd2994bf152fcc3a8a09cf93b13193abe59f39393095167c729af2015",
-            "e67ee2f5928b4d77a472114edf6e227d90fefe22fa47e7a78db187c55d206564",
-            "037e5b4a9aed2ba03a2b4710e4fe3439d5d1154d1266d5e8f9f6df7452169181",
-            "1fc21214234bf6f5a3f841d5b2493a4fc4b6087f69b055c9ad5f94f77c0ab76e",
+            "f8ac830881339d1edee6b2652f54798c0f4da5a827f2db38a08ee31117783ce8",
+            "b39cfbc58da4b869a88b8a4bc57bd5deb0d24541e704cf7c257da7b53ec81c8f",
+            "b2ffd26f42810340326a9e8a084bdc3647a8795c1a3f21fc06bd7bef3c7c5b2c",
+            "6d2279dea5bea2ad79c66ea93f5fe54ba926e398a8a26de76c56db68fe59eac6",
         ] {
             assert!(
                 !code.contains(needle),

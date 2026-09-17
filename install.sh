@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 # cortexyoung — cort + ast-grep installer + skill deploy
-# Pinned: ast-grep v0.45.2 from https://github.com/ast-grep/ast-grep
-# Upstream publishes NO checksums; SHA-256 is repo-maintained (verified 2026-08-26) and comes from
+# Pinned: ast-grep v0.45.3 from https://github.com/ast-grep/ast-grep
+# Upstream publishes NO checksums; SHA-256 is repo-maintained (verified 2026-09-17) and comes from
 # the cort binary's own provenance table, not from a second copy here.
 # Usage: ./install.sh [--check] [--uninstall] [--force] [--with-rustup]
 

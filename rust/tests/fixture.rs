@@ -29,7 +29,7 @@ fn code(out: &Output) -> i32 {
 fn version_mode_reports_the_pinned_version_by_default() {
     let out = run("", &["--version"]);
     assert_eq!(code(&out), 0);
-    assert_eq!(out.stdout, b"ast-grep 0.45.2\n");
+    assert_eq!(out.stdout, b"ast-grep 0.45.3\n");
 
     let old = run("version:0.44.9", &["--version"]);
     assert_eq!(old.stdout, b"ast-grep 0.44.9\n");
@@ -45,7 +45,7 @@ fn streams_writes_both_pipes_and_exits_nonzero() {
 
 #[test]
 fn empty_mode_is_indistinguishable_from_a_real_zero_match() {
-    // ast-grep 0.45.2 prints nothing and exits 1 for both "no matches" and "bad pattern", which is
+    // ast-grep prints nothing and exits 1 for both "no matches" and "bad pattern", which is
     // why the design requires a pre-flight instead of reading the exit code.
     let out = run("empty", &["run"]);
     assert_eq!(code(&out), 1);

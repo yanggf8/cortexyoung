@@ -1,5 +1,6 @@
 //! ast-grep subprocess bridge.
-//! Spawn only — never `sg`, never in-process. Pin is string-equal `"0.45.2"`.
+//! Spawn only — never `sg`, never in-process. Pin is string-equal, held in
+//! `crate::install::AST_GREP_PINNED` (one home; this module never restates it).
 
 use crate::errors::CortError;
 use serde_json::json;
@@ -145,7 +146,11 @@ pub fn resolve_ast_grep_bin() -> Result<String, CortError> {
             json!({
                 "candidate": "ast-grep",
                 "probed": probed,
-                "hint": "install ast-grep 0.45.2 (`./install.sh` or `cargo install ast-grep --version 0.45.2 --locked`), or point CORT_AST_GREP_BIN at it",
+                "hint": format!(
+                    "install ast-grep {} (`./install.sh` or `cargo install ast-grep --version {} --locked`), or point CORT_AST_GREP_BIN at it",
+                    crate::install::AST_GREP_PINNED,
+                    crate::install::AST_GREP_PINNED
+                ),
             }),
         )),
     }
