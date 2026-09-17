@@ -655,7 +655,24 @@ build_cort() {
   # Always ask cargo to build. Cargo owns freshness: an up-to-date tree costs a fraction of a
   # second, while "does the artifact exist?" does not — `git pull` leaves rust/target/ (ignored)
   # in place, so an existence check would happily ship the previous build's binary.
-  command -v cargo >/dev/null 2>&1 || die "cort needs cargo (rustup) to build — rerun with --with-rustup"
+  if ! command -v cargo >/dev/null 2>&1; then
+    # --with-rustup's only reader used to live in the retired xg installer; when that went
+    # (d143c4c1) the flag kept promising a bootstrap nothing performed, and a cargo-less machine
+    # died on this same die with or without it. The promise is kept here now — the one place
+    # that requires cargo and names the flag.
+    if [ "$WITH_RUSTUP" -eq 1 ]; then
+      info "cargo not found — bootstrapping rustup"
+      if command -v curl >/dev/null 2>&1; then
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+        # shellcheck disable=SC1091
+        if [ -f "$HOME/.cargo/env" ]; then . "$HOME/.cargo/env"; fi
+      else
+        die "cargo not found and curl not available to bootstrap rustup (install curl, or Rust from https://rustup.rs)"
+      fi
+    else
+      die "cargo not found — install Rust (https://rustup.rs) or re-run with --with-rustup"
+    fi
+  fi
   info "building cort (cargo build --release --locked)"
   ( cd "$SCRIPT_DIR/rust" && cargo build --release --locked ) || die "cargo build --release failed"
   [ -x "$CRATE_BIN" ] || die "cort binary missing after build: $CRATE_BIN"

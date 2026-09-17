@@ -171,7 +171,9 @@ before_ino="$(inode_of "$MANIFEST")"
 ( set --; export SOURCE_ONLY=1
   # shellcheck disable=SC1090
   . "$INSTALL_SH"
-  export MANIFEST_FILE="$MANIFEST"; export MANIFEST_DIR="$(dirname "$MANIFEST")"
+  export MANIFEST_FILE="$MANIFEST"
+  MANIFEST_DIR="$(dirname "$MANIFEST")"
+  export MANIFEST_DIR
   record_manifest "smoke_probe" "value" )
 after_ino="$(inode_of "$MANIFEST")"
 if [ "$before_ino" != "$after_ino" ]; then
