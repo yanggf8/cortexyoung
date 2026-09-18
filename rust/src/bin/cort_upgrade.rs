@@ -10,10 +10,10 @@
 
 use clap::Parser;
 use cort::upgrade::{
-    acquire_upgrade_locks, check_hooks, check_skills, diagnose, diagnose_for_check,
-    first_upgrade_note, load_acks, migrate_indexes, repair_skill, run_capture_with_deadline,
-    run_status_with_deadline, save_ack, skill_repair_target, verdict, Component, ComponentState,
-    DiagnoseInputs, LockError, UpgradeExit,
+    acquire_upgrade_locks, ast_grep_mismatch_found, check_hooks, check_skills, diagnose,
+    diagnose_for_check, first_upgrade_note, load_acks, migrate_indexes, repair_skill,
+    run_capture_with_deadline, run_status_with_deadline, save_ack, skill_repair_target, verdict,
+    Component, ComponentState, DiagnoseInputs, LockError, UpgradeExit,
 };
 use std::path::{Path, PathBuf};
 use std::process::exit;
@@ -91,6 +91,19 @@ fn state_word(s: &ComponentState) -> &'static str {
 }
 
 fn next_action(c: &Component) -> &'static str {
+    // ast_grep is the one drifted/unreadable component a rerun cannot repair: cort-upgrade
+    // judges it, install.sh provisions it — and on an installed machine that takes --force,
+    // because the bare installer declines (exit 3) to leave upgrades to this binary. The
+    // generic advice sent this machine in a circle on 2026-09-18: two reruns, ast_grep
+    // unchanged both times.
+    if c.name == "ast_grep"
+        && matches!(
+            c.state,
+            ComponentState::Drifted | ComponentState::Unreadable
+        )
+    {
+        return " (run ./install.sh --force to provision the pinned ast-grep, or --ack to accept)";
+    }
     match c.state {
         ComponentState::Current => "",
         ComponentState::Drifted => " (rerun cort-upgrade, or --ack to accept)",
@@ -163,14 +176,20 @@ fn main() {
                     .and_then(|l| l.split_whitespace().last().map(str::to_string))
             })
     };
+    let resolved = cort::ast_grep::resolve_ast_grep_bin();
+    let resolved_version = match resolved.as_ref() {
+        Ok(bin) => version_of(Path::new(bin.as_str())),
+        // The refusal is an answer too: a pin mismatch names the version the resolver's own
+        // probe read off a reachable binary, and that judges Drifted with both versions named
+        // — never Unreadable with nothing to inspect, which is what flattening the Err with
+        // `.ok()` turned it into on every ledger-less machine behind a pin bump. Missing and
+        // unparsable name no version and stay the caller's empty string.
+        Err(e) => ast_grep_mismatch_found(e),
+    };
     let installed_version = manifest_value(&manifest, "ast_grep_bin")
         .map(PathBuf::from)
-        .or_else(|| {
-            cort::ast_grep::resolve_ast_grep_bin()
-                .ok()
-                .map(PathBuf::from)
-        })
         .and_then(|ag| version_of(&ag))
+        .or(resolved_version)
         .unwrap_or_default();
 
     let cache = cort::db::cache_dir();

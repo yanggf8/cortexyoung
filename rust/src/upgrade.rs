@@ -295,6 +295,27 @@ pub fn check_version_pin(installed: &str, pinned: &str) -> Component {
     }
 }
 
+/// The version `resolve_ast_grep_bin`'s own probe read off a reachable-but-unpinned ast-grep,
+/// taken from the very error that refused it. The resolver fails closed on a pin mismatch, and
+/// that Err is the machine's answer as surely as an Ok would be: its `found` field came from
+/// running `--version` on a binary that exists. cort_upgrade used to flatten it with `.ok()`,
+/// so a machine with no `ast_grep_bin` ledger entry (ast-grep provisioned before this installer
+/// ran) read Unreadable — "no version output to read", nothing named to inspect — instead of
+/// Drifted naming both versions (found live 2026-09-18 on the 0.45.2→0.45.3 bump). Every other
+/// refusal names no version: `ast_grep_missing` means nothing was reachable, and the resolver's
+/// literal `unparsable` (or an absent field) means the probe ran but could not read — those
+/// still claim nothing, which is check_version_pin's Unreadable arm.
+pub fn ast_grep_mismatch_found(err: &crate::errors::CortError) -> Option<String> {
+    if err.code != "ast_grep_version_mismatch" {
+        return None;
+    }
+    let found = err.detail.get("found").and_then(|v| v.as_str())?;
+    if !found.starts_with(|c: char| c.is_ascii_digit()) {
+        return None;
+    }
+    Some(found.to_string())
+}
+
 /// Live manifest key set vs the tree authority. `live` is every `xxx:` key prefix present in the
 /// manifest file (the caller reads the file; this function diffs). Unknown keys are Drifted with
 /// names, never failures here — Task 5 maps states to exit codes.

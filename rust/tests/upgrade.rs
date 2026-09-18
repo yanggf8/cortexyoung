@@ -190,6 +190,59 @@ fn version_pin_comparison_is_equality_not_presence() {
     );
 }
 
+/// The refusal is an answer too: `resolve_ast_grep_bin` fails closed on a pin mismatch and its
+/// Err's `found` is a version the resolver's own probe read off a binary that exists. cort_upgrade
+/// used to drop that with `.ok()`, so a machine with no `ast_grep_bin` ledger entry — ast-grep
+/// provisioned before this installer ran, found live 2026-09-18 on the 0.45.2→0.45.3 bump — read
+/// Unreadable ("no version output to read", nothing named to inspect) instead of Drifted naming
+/// both versions. Only the mismatch arm carries a version: missing and unparsable claim nothing,
+/// which is check_version_pin's Unreadable arm above.
+#[test]
+fn a_pin_mismatch_refusal_carries_the_version_the_probe_read() {
+    let mismatch = |found: serde_json::Value| {
+        cort::errors::CortError::new(
+            "ast_grep_version_mismatch",
+            serde_json::json!({"found": found, "expected": "0.45.3", "candidate": "/bin/ast-grep"}),
+        )
+    };
+    assert_eq!(
+        cort::upgrade::ast_grep_mismatch_found(&mismatch("0.45.2".into())).as_deref(),
+        Some("0.45.2")
+    );
+    // The resolver's own "ran but could not read" word is not a version; neither is an absent
+    // field — both stay None so the verdict claims nothing it did not read.
+    assert_eq!(
+        cort::upgrade::ast_grep_mismatch_found(&mismatch("unparsable".into())),
+        None
+    );
+    assert_eq!(
+        cort::upgrade::ast_grep_mismatch_found(&mismatch(serde_json::Value::Null)),
+        None
+    );
+    // And only the mismatch code carries one: a binary that is not there names no version.
+    assert_eq!(
+        cort::upgrade::ast_grep_mismatch_found(&cort::errors::CortError::new(
+            "ast_grep_missing",
+            serde_json::json!({"candidate": "ast-grep"}),
+        )),
+        None
+    );
+    // Composition, the shape the bin owes diagnose: a refusal-with-a-version judges Drifted
+    // with both sides named — the exact verdict the ledger-less machine was owed.
+    let c = cort::upgrade::check_version_pin(
+        &cort::upgrade::ast_grep_mismatch_found(&mismatch("0.45.2".into())).unwrap_or_default(),
+        "0.45.3",
+    );
+    assert!(
+        matches!(c.state, cort::upgrade::ComponentState::Drifted),
+        "{c:?}"
+    );
+    assert!(
+        c.detail.contains("0.45.2") && c.detail.contains("0.45.3"),
+        "both sides named: {c:?}"
+    );
+}
+
 /// Manifest keys: the live manifest's key set diffed against the tree's authority
 /// (`MANIFEST_KEYS` + `MANIFEST_LEGACY_KEYS`). Unknown keys are Drifted-with-detail, never
 /// failures on their own — Task 5 decides what they do to the exit code.
