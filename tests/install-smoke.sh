@@ -3,7 +3,8 @@ set -euo pipefail
 # Offline smoke test for install.sh — mocked download/cargo, temp HOME
 # Covers: first-install, identical rerun, managed update, unmanaged-collision
 #         refusal, unsupported OS/arch, wrong version detection, profile
-#         idempotency, uninstall, SHA fail-closed, manifest v2 migration,
+#         idempotency, uninstall, SHA fail-closed, cargo-install fallback,
+#         manifest v2 migration,
 #         sg≠ast-grep, two-skill rollback, uninstall v2, DB interrupt recovery.
 # No network is used. Run: bash tests/install-smoke.sh
 
@@ -624,6 +625,62 @@ cat > "$TMPHOME/fakebin/curl" <<'FAKECURL_STUB2'
 exit 1
 FAKECURL_STUB2
 chmod +x "$TMPHOME/fakebin/curl"
+
+# ── 9b. download failure falls back to cargo install at the provenance crate ──
+echo "--- Test 9b: download failure falls back to cargo install ---"
+# The default fakes never reach the fallback branch: curl/wget exit 1 (download fails) but the
+# fake ast-grep already matches the pin, so install_ast_grep returns at "already present" and
+# the crate name, version and --locked flag the fallback would use go unasserted. Force the
+# branch the same way Test 9 forces the download branch: wrong version at the resolved path.
+# The fake cargo then stands in for a successful install — overwriting the resolved ast-grep
+# with the pinned version, which is what a real `cargo install` does to the binary.
+fresh_home
+cat > "$TMPHOME/fakebin/ast-grep" <<'FAKEAG_WRONG2'
+#!/usr/bin/env bash
+echo "ast-grep 0.44.0"
+FAKEAG_WRONG2
+chmod +x "$TMPHOME/fakebin/ast-grep"
+export FAKE_CARGO_INSTALL_LOG="$TMPHOME/cargo-install.log"
+cat > "$TMPHOME/fakebin/cargo" <<'FAKECARGO_INSTALL'
+#!/usr/bin/env bash
+echo "cargo 1.88.0"
+if [ "$1" = "install" ]; then
+  printf 'cargo %s\n' "$*" >> "${FAKE_CARGO_INSTALL_LOG:-/dev/null}"
+  printf '#!/usr/bin/env bash\necho "ast-grep 0.45.3"\n' > "$(dirname "$0")/ast-grep"
+  chmod +x "$(dirname "$0")/ast-grep"
+fi
+exit 0
+FAKECARGO_INSTALL
+chmod +x "$TMPHOME/fakebin/cargo"
+set +e
+PATH="$TMPHOME/fakebin:$PATH" bash "$INSTALL_SH" > /tmp/smoke9b.log 2>&1
+EC9B=$?
+set -e
+if [ "$EC9B" -eq 0 ]; then
+  pass "install survives when only cargo can provision ast-grep"
+else
+  fail "install survives when only cargo can provision ast-grep (exit=$EC9B)"; sed 's/^/    /' /tmp/smoke9b.log
+fi
+# The exact argv is the guard: crate name, pinned version and --locked all originate in the
+# provenance table; a pin bump or rename that breaks any one of them shows up on this line.
+assert_contains "$FAKE_CARGO_INSTALL_LOG" "cargo install ast-grep --version 0.45.3 --locked" "cargo fallback installs the provenance crate at the pinned version"
+assert_not_contains "$FAKE_CARGO_INSTALL_LOG" "ast-grep-cli" "fallback never names a crate the registry does not have"
+assert_contains "$HOME/.local/share/cortexyoung/manifest" "ast_grep_bin:" "cargo-installed ast-grep is claimed in the manifest"
+# Restore correct fakes (both the binary the fake cargo rewrote and the default cargo stub)
+cat > "$TMPHOME/fakebin/ast-grep" <<'FAKEAG_RESTORED2'
+#!/usr/bin/env bash
+echo "ast-grep 0.45.3"
+FAKEAG_RESTORED2
+chmod +x "$TMPHOME/fakebin/ast-grep"
+cat > "$TMPHOME/fakebin/cargo" <<'FAKECARGO_STUB3'
+#!/usr/bin/env bash
+echo "cargo 1.88.0"
+if [ -n "${FAKE_CARGO_LOG:-}" ] && [ "$1" = "build" ]; then
+  printf 'cargo %s\n' "$*" >> "$FAKE_CARGO_LOG"
+fi
+exit 0
+FAKECARGO_STUB3
+chmod +x "$TMPHOME/fakebin/cargo"
 
 # ── 10. manifest v1 -> v2 migration ───────────────────────────────
 echo "--- Test 10: manifest v1 -> v2 migration ---"

@@ -719,7 +719,7 @@ install_ast_grep() {
   else
     command -v cargo >/dev/null 2>&1 || die "download failed and cargo not found; ast-grep $prov_version needs Rust 1.88+"
     cargo install "$prov_crate" --version "$prov_version" --locked \
-      || die "cargo install ast-grep failed; ast-grep $prov_version requires Rust 1.88+"
+      || die "cargo install $prov_crate failed; ast-grep $prov_version requires Rust 1.88+"
     record_manifest "ast_grep_bin" "$(command -v ast-grep)"
   fi
   rm -rf "$tmpdir"
