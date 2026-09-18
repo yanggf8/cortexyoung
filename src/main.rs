@@ -6,10 +6,12 @@ use claudecat::doctor;
 use claudecat::explore;
 use claudecat::guardrails;
 use claudecat::manifest;
+use claudecat::markdown;
 use claudecat::model::{self, MapProfile};
 use claudecat::navigate;
 use claudecat::outline;
 use claudecat::symbols;
+use claudecat::usage;
 use claudecat::walk;
 
 use clap::{Parser, Subcommand, ValueEnum};
@@ -115,6 +117,15 @@ enum Commands {
         #[arg(long)]
         cort: bool,
     },
+    /// 顯示本機導航統計；不包含原始查詢內容
+    Usage {
+        /// 統計窗口（天）
+        #[arg(long, default_value_t = 30)]
+        days: u32,
+        /// JSON 輸出
+        #[arg(long)]
+        json: bool,
+    },
     /// 把 explore 指標寫進文件的「長期指標」表（原子、同日同專案更新）
     Track {
         /// 目標 markdown 檔（例如 SESSION-EVIDENCE.md）
@@ -188,6 +199,10 @@ fn now_iso() -> String {
 fn analyze(root: &PathBuf, top_files: usize, map_flag: Option<MapProfile>) -> ProjectMap {
     let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.clone());
     let mut map = walk::analyze_project(&root, top_files, map_flag);
+    map.document_headings = walk::collect_markdown_files(&root)
+        .iter()
+        .flat_map(|path| markdown::index_file(&root, path))
+        .collect();
 
     // manifest metadata + deps
     let (meta, deps) = manifest::detect_project_meta(&root);
@@ -442,15 +457,19 @@ fn main() {
         } => {
             let map = analyze(&root, top_files, Some(MapProfile::Full));
             let mut r = navigate::navigate(&map, &query);
+            let mut cort_hits = 0;
             if use_cort {
                 if let Some(hits) = cort::search_symbols(&root, &query) {
+                    cort_hits = hits.len();
                     r = navigate::navigate_with_cort(&map, &query, hits, false);
                 } else if let Some(hits) = cort::search_fts(&root, &query) {
+                    cort_hits = hits.len();
                     r = navigate::navigate_with_cort(&map, &query, hits, true);
                 } else {
                     eprintln!("cort index 無命中（或未索引）。已回退到 tree-sitter 地圖結果。");
                 }
             }
+            usage::record_navigation(&root, &query, use_cort, cort_hits, &r);
             if json {
                 match serde_json::to_string_pretty(&r) {
                     Ok(s) => println!("{s}"),
@@ -463,6 +482,33 @@ fn main() {
                 println!("{}", navigate::render(&r));
             }
         }
+        Commands::Usage { days, json } => match usage::report(days) {
+            Some(report) if json => match serde_json::to_string_pretty(&report) {
+                Ok(s) => println!("{s}"),
+                Err(e) => {
+                    eprintln!("JSON serialization failed: {e}");
+                    std::process::exit(1);
+                }
+            },
+            Some(report) => {
+                println!("navigation usage ({}d)", report.window_days);
+                println!(
+                    "events={} cort={} symbol_hits={} document_hits={} no_hits={}",
+                    report.events,
+                    report.cort_events,
+                    report.symbol_hit_events,
+                    report.document_hit_events,
+                    report.no_hit_events
+                );
+                for (path, count) in report.top_documents {
+                    println!("document={} hits={}", path, count);
+                }
+            }
+            None => {
+                eprintln!("無法讀取本機導航統計");
+                std::process::exit(1);
+            }
+        },
         Commands::Track {
             file,
             root,

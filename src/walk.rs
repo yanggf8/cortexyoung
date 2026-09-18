@@ -135,6 +135,34 @@ pub fn collect_files(root: &Path) -> (Vec<PathBuf>, Vec<String>) {
     (files, excluded)
 }
 
+pub fn collect_markdown_files(root: &Path) -> Vec<PathBuf> {
+    let mut builder = WalkBuilder::new(root);
+    builder
+        .hidden(true)
+        .git_ignore(true)
+        .git_global(true)
+        .git_exclude(true)
+        .parents(true)
+        .ignore(true)
+        .follow_links(false);
+    let mut files = Vec::new();
+    for entry in builder.build().flatten() {
+        if entry.path().components().any(|component| {
+            let name = component.as_os_str().to_string_lossy();
+            ALWAYS_EXCLUDE.iter().any(|excluded| *excluded == name)
+        }) {
+            continue;
+        }
+        if entry.file_type().map(|t| t.is_file()).unwrap_or(false)
+            && entry.path().extension().and_then(|e| e.to_str()) == Some("md")
+        {
+            files.push(entry.into_path());
+        }
+    }
+    files.sort();
+    files
+}
+
 pub fn count_loc(path: &Path) -> Option<(usize, usize)> {
     let data = std::fs::read(path).ok()?;
     if data.len() > 4 * 1024 * 1024 {

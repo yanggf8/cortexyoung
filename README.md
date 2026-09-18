@@ -33,6 +33,7 @@ claudecat explore --json         # 機器可讀指標輸出
 claudecat track SESSION-EVIDENCE.md  # 把指標寫入長期指標表（原子、同日不重複）
 claudecat navigate "<要找什麼>"      # 從一句話給出目的地符號/檔案 + cort 路線
 claudecat navigate --cort "<要找什麼>"  # 優先吃 cort 全量索引（含反向依賴）
+claudecat usage --json             # 顯示本機導航統計（不含原始查詢）
 claudecat cort-status --root <proj>   # cort 索引新鮮度 / chunks / relationships
 claudecat track METRICS.md --root /repo/a --root /repo/b   # 多 repo 一次寫入
 claudecat track METRICS.md --roots-file repos.txt          # 從檔案讀 repo 清單
@@ -67,7 +68,8 @@ Glob/Read 繞路（真實 session 59–94% 工具呼叫是搜尋類）。
 **解法：`claudecat navigate <query>`**——輸入意圖，輸出：
 1. **命中符號表**（檔案:行號 + 種類，精確命中優先）
 2. **命中檔案**
-3. **低成本路線**：先讀哪個檔案:行號 → 建議 `cort` 精確查詢
+3. **文件段落**（Markdown heading path + 起訖行號；不把文件標題當成程式符號）
+4. **低成本路線**：先讀哪個檔案:行號 → 建議 `cort` 精確查詢
    （`cort context <symbol> --content full -f lean`、`cort impact --symbol <symbol>`）
    → 沒中時擴大搜尋指令
 
@@ -80,6 +82,16 @@ claudecat navigate "auth" --json   # 機器可讀
 
 **分工**：`scan/update` = 全圖（場景）；`navigate` = 路線（導航）；
 `cortexyoung/cort` = 精準定位（到達後深挖）。三者串成「快速低本到達目的地」。
+
+Markdown 文件是 `navigate` 的獨立 sidecar：它只索引 gitignore-aware 的 `.md` heading，
+保存 heading path、起訖行號與一行預覽。文件命中只建議 `cort read`，不會產生
+`cort impact` 或改變 caller-set / coverage 的判定。frontmatter、fenced code 與
+`legacy`/`archive` 等排除目錄不會進入文件索引。
+
+`claudecat usage` 讀取本機資料目錄下的 `usage.db`，只保存導航統計：query shape、
+命中數、是否使用 `--cort`、路由類型與文件位置；原始查詢不落盤。設置
+`CLAUDECAT_NO_USAGE=1` 可停用記錄。統計是改善排序、文件範圍與 Claude Code 導航路由的
+證據，不代表使用者採用了建議；真正的 `cort` 使用仍由 `cort` 自己的 local usage.db 記錄。
 
 ### 結合 cortexyoung：直接吃 cort 的索引（2026-09-05）
 

@@ -38,6 +38,82 @@ fn symbols_skip_nested_fn_noise() {
 }
 
 #[test]
+fn navigate_returns_document_ranges_without_turning_headings_into_symbols() {
+    let map = claudecat::model::ProjectMap {
+        document_headings: vec![claudecat::model::DocumentHeading {
+            path: "README.md".into(),
+            heading_path: vec!["Documented limitations".into()],
+            start_line: 10,
+            end_line: 22,
+            preview: "coverage is a recall screen".into(),
+        }],
+        ..Default::default()
+    };
+    let result = claudecat::navigate::navigate(&map, "coverage");
+    assert!(result.symbols.is_empty());
+    assert_eq!(result.documents[0].start_line, 10);
+    assert!(result
+        .route
+        .iter()
+        .any(|line| line.contains("cort read README.md")));
+}
+
+#[test]
+fn cort_navigation_keeps_document_route_when_no_symbol_matches() {
+    let map = claudecat::model::ProjectMap {
+        root: ".".into(),
+        document_headings: vec![claudecat::model::DocumentHeading {
+            path: "README.md".into(),
+            heading_path: vec!["Completeness".into()],
+            start_line: 3,
+            end_line: 9,
+            preview: "coverage is a recall screen".into(),
+        }],
+        ..Default::default()
+    };
+    let result = claudecat::navigate::navigate_with_cort(&map, "completeness", vec![], false);
+    assert!(result.symbols.is_empty());
+    assert!(result
+        .route
+        .iter()
+        .any(|line| line.contains("cort read README.md")));
+}
+
+#[test]
+fn navigation_usage_is_local_and_does_not_store_raw_query() {
+    let _lock = cort_env_lock();
+    let data = temp_project();
+    let _env = EnvVarGuard(
+        "CLAUDECAT_DATA_DIR".into(),
+        std::env::var("CLAUDECAT_DATA_DIR").ok(),
+    );
+    std::env::set_var("CLAUDECAT_DATA_DIR", &data);
+    let map = claudecat::model::ProjectMap {
+        document_headings: vec![claudecat::model::DocumentHeading {
+            path: "README.md".into(),
+            heading_path: vec!["Coverage".into()],
+            start_line: 2,
+            end_line: 8,
+            preview: "a recall screen".into(),
+        }],
+        ..Default::default()
+    };
+    let result = claudecat::navigate::navigate(&map, "private navigation phrase");
+    claudecat::usage::record_navigation(
+        std::path::Path::new("/tmp/demo-project"),
+        "private navigation phrase",
+        true,
+        1,
+        &result,
+    );
+    let report = claudecat::usage::report(30).unwrap();
+    assert_eq!(report.events, 1);
+    assert_eq!(report.cort_events, 1);
+    let raw = std::fs::read(data.join("usage.db")).unwrap();
+    assert!(!String::from_utf8_lossy(&raw).contains("private navigation phrase"));
+}
+
+#[test]
 fn claude_md_update_is_idempotent_and_atomic() {
     let dir = temp_project();
     let path = dir.join("CLAUDE.md");

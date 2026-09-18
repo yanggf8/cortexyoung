@@ -13,6 +13,7 @@ Pure Rust CLI. Run via Bash; binary is on PATH as `claudecat`. All subcommands d
 claudecat scan                  # 掃描專案，輸出導航地圖（--format text|markdown|json，--map mini|auto|full）
 claudecat explore --json        # 量化探索成本：無地圖 vs 地圖的 token 粗估
 claudecat navigate "auth"       # 從一句話找目的地符號/檔案；--cort 優先用 cort 全量索引（需先 cort index）
+claudecat usage --json           # 查看本機導航命中統計（不含原始查詢）
 claudecat update --dry-run      # 更新 claudecat 自動區塊；--dry-run 只顯示差異
 claudecat cort-status           # cort 索引狀態：新鮮度、chunk、relationships
 claudecat doctor                # 體檢追蹤循環；--install 一鍵部署 crontab（冪等）
@@ -38,3 +39,11 @@ EOF
 - No `sync` / `login` / Turso cloud — cross-machine state is per-machine, DBs are independent (kimi denominators differ across hosts by design).
 - No MCP server — never re-register one; the CLI is the only interface.
 - No `npm install -g claudecat` — install with `cargo install --path <repo>` from the Rust checkout; `~/.local/bin/claudecat` typically symlinks to the repo's `target/release/claudecat`.
+
+## Markdown navigation sidecar
+
+`navigate` also indexes gitignore-aware Markdown headings independently from code symbols.
+When a document matches, follow the reported `cort read <file> --start N --end N` route;
+run it from the target project root. A document heading never becomes a `cort impact` symbol.
+Navigation usage is recorded locally without raw query text; set `CLAUDECAT_NO_USAGE=1` to
+disable it. Use `claudecat usage --json` to inspect whether the sidecar is helping.

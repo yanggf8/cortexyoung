@@ -17,10 +17,20 @@ pub struct NavigateHit {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct DocumentHit {
+    pub path: String,
+    pub heading_path: Vec<String>,
+    pub start_line: usize,
+    pub end_line: usize,
+    pub preview: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct NavigateResult {
     pub query: String,
     pub symbols: Vec<NavigateHit>,
     pub files: Vec<String>,
+    pub documents: Vec<DocumentHit>,
     pub route: Vec<String>,
 }
 
@@ -44,6 +54,7 @@ pub fn navigate(map: &ProjectMap, query: &str) -> NavigateResult {
     let toks = tokens(query);
     let mut symbols: Vec<NavigateHit> = Vec::new();
     let mut files_hit: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut documents = Vec::new();
 
     for f in &map.key_files {
         let path_low = f.path.to_lowercase();
@@ -66,6 +77,37 @@ pub fn navigate(map: &ProjectMap, query: &str) -> NavigateResult {
         }
     }
 
+    for heading in &map.document_headings {
+        let haystack = format!(
+            "{} {} {}",
+            heading.path,
+            heading.heading_path.join(" "),
+            heading.preview
+        )
+        .to_lowercase();
+        if toks.iter().any(|token| haystack.contains(token)) {
+            documents.push(DocumentHit {
+                path: heading.path.clone(),
+                heading_path: heading.heading_path.clone(),
+                start_line: heading.start_line,
+                end_line: heading.end_line,
+                preview: heading.preview.clone(),
+            });
+        }
+    }
+    documents.sort_by(|a, b| {
+        b.heading_path
+            .last()
+            .map(|title| toks.iter().any(|t| title.to_lowercase() == *t))
+            .cmp(
+                &a.heading_path
+                    .last()
+                    .map(|title| toks.iter().any(|t| title.to_lowercase() == *t)),
+            )
+            .then_with(|| a.path.cmp(&b.path))
+            .then_with(|| a.start_line.cmp(&b.start_line))
+    });
+
     // 排序：精確命中優先，其次種類，再行號
     symbols.sort_by(|a, b| {
         b.exact
@@ -75,7 +117,7 @@ pub fn navigate(map: &ProjectMap, query: &str) -> NavigateResult {
     });
 
     let mut route: Vec<String> = Vec::new();
-    if symbols.is_empty() && files_hit.is_empty() {
+    if symbols.is_empty() && files_hit.is_empty() && documents.is_empty() {
         route.push(format!(
             "在地圖（top-{} 大檔）沒找到「{}」——試 cort 精確查詢：`cort context \"{query}\"` 或 `cort struct -p '{}'`",
             map.key_files.len(),
@@ -101,20 +143,29 @@ pub fn navigate(map: &ProjectMap, query: &str) -> NavigateResult {
                 "改動前檢查影響：`cort impact --symbol {} --depth 1 -f lean`",
                 top.name
             ));
-        } else {
-            let f = files_hit.iter().next().unwrap();
+        } else if let Some(f) = files_hit.iter().next() {
             route.push(format!("用 cort 讀檔：`cort read {} -f lean`", f));
         }
         route.push(format!(
             "若仍不中，擴大：`cort struct -p '{}' --lang <lang>`",
             query
         ));
+        if !documents.is_empty() {
+            route.insert(
+                route.len().saturating_sub(1),
+                format!(
+                    "文件候選：`cort read {} --start {} --end {}`",
+                    documents[0].path, documents[0].start_line, documents[0].end_line
+                ),
+            );
+        }
     }
 
     NavigateResult {
         query: query.to_string(),
         symbols: symbols.into_iter().take(20).collect(),
         files: files_hit.into_iter().take(10).collect(),
+        documents: documents.into_iter().take(20).collect(),
         route,
     }
 }
@@ -124,10 +175,10 @@ pub fn render(r: &NavigateResult) -> String {
     s.push_str(&format!(
         "# claudecat navigate \"{}\" — {} 命中\n\n",
         r.query,
-        r.symbols.len()
+        r.symbols.len() + r.documents.len()
     ));
 
-    if r.symbols.is_empty() && r.files.is_empty() {
+    if r.symbols.is_empty() && r.files.is_empty() && r.documents.is_empty() {
         s.push_str("未命中。\n\n");
         for step in &r.route {
             s.push_str(&format!("- {step}\n"));
@@ -149,6 +200,18 @@ pub fn render(r: &NavigateResult) -> String {
         s.push_str("\n## 檔案\n");
         for f in &r.files {
             s.push_str(&format!("- `{f}`\n"));
+        }
+    }
+    if !r.documents.is_empty() {
+        s.push_str("\n## 文件段落\n");
+        for d in &r.documents {
+            s.push_str(&format!(
+                "- `{}`:{}-{} — {}\n",
+                d.path,
+                d.start_line,
+                d.end_line,
+                d.heading_path.join(" > ")
+            ));
         }
     }
     s.push_str("\n## 路線（低成本到目的地）\n");
@@ -197,10 +260,18 @@ pub fn navigate_with_cort(
     });
     // 依賴路線：cort 命中取第一個主要符號，查反向依賴
     if r.symbols.is_empty() {
-        r.route = vec![format!(
+        let mut route = Vec::new();
+        if let Some(document) = r.documents.first() {
+            route.push(format!(
+                "文件候選：`cort read {} --start {} --end {}`",
+                document.path, document.start_line, document.end_line
+            ));
+        }
+        route.push(format!(
             "cort 索引也沒找到「{}」——試 `cort context \"{query}\"` or `cort recall \"{query}\"`",
             query
-        )];
+        ));
+        r.route = route;
         return r;
     }
     let primary = r.symbols.first().unwrap();
@@ -222,6 +293,12 @@ pub fn navigate_with_cort(
         "先讀 {}:{}（{}：{} {}）",
         primary.file, primary.line, source_label, primary.kind, primary.name
     )];
+    if let Some(document) = r.documents.first() {
+        new_route.push(format!(
+            "文件候選：`cort read {} --start {} --end {}`",
+            document.path, document.start_line, document.end_line
+        ));
+    }
     if let Some(s) = summary {
         new_route.push(format!("內文摘要（省一次 read）：{s}"));
     }

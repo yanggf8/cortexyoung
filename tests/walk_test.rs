@@ -67,6 +67,37 @@ fn top_n_limits_key_files() {
 }
 
 #[test]
+fn markdown_headings_are_indexed_without_changing_code_stats() {
+    let dir = common::Tmp(common::temp_dir());
+    std::fs::write(
+        dir.0.join("README.md"),
+        "---\ntitle: demo\n---\n# Root\ntext\n```\n# not a heading\n```\n## Child\nmore\n# Next\n",
+    )
+    .unwrap();
+    std::fs::write(dir.0.join("main.rs"), "fn main() {}\n").unwrap();
+    std::fs::create_dir_all(dir.0.join("legacy")).unwrap();
+    std::fs::write(dir.0.join("legacy/old.md"), "# Ignored\n").unwrap();
+    let map = claudecat::walk::analyze_project(&dir.0, 10, None);
+    let headings = claudecat::walk::collect_markdown_files(&dir.0)
+        .iter()
+        .flat_map(|path| claudecat::markdown::index_file(&dir.0, path))
+        .collect::<Vec<_>>();
+    assert_eq!(map.total_files, 1);
+    assert_eq!(
+        headings
+            .iter()
+            .map(|h| h.heading_path.join(" > "))
+            .collect::<Vec<_>>(),
+        vec!["Root", "Root > Child", "Next"]
+    );
+    assert_eq!(headings[0].end_line, 10);
+    assert_eq!(headings[1].end_line, 10);
+    assert!(!headings
+        .iter()
+        .any(|heading| heading.path.contains("legacy")));
+}
+
+#[test]
 fn tree_lines_compacts_structure() {
     let t = common::Tmp(common::temp_dir());
     common::write(&t.0, "src/a.rs", "fn a(){}\n");

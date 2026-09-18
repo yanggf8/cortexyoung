@@ -7,6 +7,11 @@
 **能。** claudecat 直接唯讀 cort 的 SQLite 索引（不重造、不改寫），
 用 cort 做「精準定位層」、claudecat 做「地圖與路線層」。
 
+Markdown 文件現在是 claudecat 的另一個唯讀 sidecar：`navigate` 用 heading path 和行號
+定位 README／設計文件／評估報告，再交給 `cort read` 讀取原文。這條路不寫 cort DB、
+不產生 `impact` 邊，也不參與 coverage completeness 判定；真正的 cort 命中與使用仍由
+cort 自己的索引與 `usage.db` 記錄。
+
 ## cort 提供什麼（schema v7）
 | 表 | 內容 | claudecat 用途 |
 |---|---|---|

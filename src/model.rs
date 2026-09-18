@@ -30,6 +30,15 @@ pub struct FileInfo {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct DocumentHeading {
+    pub path: String,
+    pub heading_path: Vec<String>,
+    pub start_line: usize,
+    pub end_line: usize,
+    pub preview: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct DepGroup {
     pub ecosystem: String,
     pub deps: Vec<String>,
@@ -51,6 +60,7 @@ pub struct ProjectMap {
     pub total_loc: usize,
     pub languages: BTreeMap<String, usize>, // lang -> file count
     pub key_files: Vec<FileInfo>,
+    pub document_headings: Vec<DocumentHeading>,
     pub deps: Vec<DepGroup>,
     pub guardrails: Vec<String>,
     pub profile_used: MapProfile,
