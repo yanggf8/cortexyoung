@@ -1150,6 +1150,118 @@ fn suppress_output_is_omitted_for_codex_and_kept_for_the_others() {
     );
 }
 
+/// The same Codex 0.152.1 rejection, on the two hint payloads added AFTER the fix above: the
+/// no_index hint (ff66ee59) and the no_evidence pointer (078a0c5c) both re-attached
+/// `suppressOutput` unconditionally, and Codex reported `PreToolUse hook returned unsupported
+/// suppressOutput` — discarding the hint the payload existed to deliver. A hint that arrives
+/// broken is worse than the silence it replaced: it teaches the user the hook is broken, not
+/// that one `cort index` would turn it on.
+#[test]
+fn the_no_index_hint_omits_suppress_output_for_codex() {
+    let (_p, cwd, _c, cache) = sandbox(); // unindexed on purpose: no cort index run
+    let mk = |session: &str, transcript: &str| {
+        serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": { "command": FIRING_SEARCH },
+            "session_id": session,
+            "cwd": cwd.to_str().unwrap(),
+            "transcript_path": transcript,
+        })
+    };
+    let for_codex = run_hook_suggest_payload(
+        mk(
+            "s-codex-noidx",
+            "/home/u/.codex/sessions/2026/09/22/rollout-x.jsonl",
+        ),
+        &[],
+        &cwd,
+        &cache,
+    );
+    assert_eq!(for_codex.code, 0);
+    let v = payload(&for_codex);
+    assert!(
+        v["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("cort index"),
+        "codex still needs the hint: {}",
+        for_codex.stdout
+    );
+    assert!(
+        v.get("suppressOutput").is_none(),
+        "suppressOutput would make codex discard the hint: {}",
+        for_codex.stdout
+    );
+
+    let for_claude = run_hook_suggest_payload(
+        mk("s-claude-noidx", "/home/u/.claude/projects/x/y.jsonl"),
+        &[],
+        &cwd,
+        &cache,
+    );
+    assert_eq!(
+        payload(&for_claude)["suppressOutput"],
+        serde_json::json!(true),
+        "the others still suppress the raw JSON: {}",
+        for_claude.stdout
+    );
+}
+
+#[test]
+fn the_no_evidence_pointer_omits_suppress_output_for_codex() {
+    let (_proj, cwd, _cd, cache) = indexed_grain_project();
+    let idx = run_cort(&["index", "."], &cwd, &cache);
+    if idx.code != 0 {
+        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
+        return;
+    }
+    let mk = |session: &str, transcript: &str| {
+        serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": { "command": "grep -rn \"fuel_left\" src --include=*.ts | head -3" },
+            "session_id": session,
+            "transcript_path": transcript,
+        })
+    };
+    let for_codex = run_hook_suggest_payload(
+        mk(
+            "s-codex-noev",
+            "/home/u/.codex/sessions/2026/09/22/rollout-x.jsonl",
+        ),
+        &[],
+        &cwd,
+        &cache,
+    );
+    assert_eq!(for_codex.code, 0);
+    let v = payload(&for_codex);
+    assert!(
+        v["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("appears inside"),
+        "codex still needs the pointer: {}",
+        for_codex.stdout
+    );
+    assert!(
+        v.get("suppressOutput").is_none(),
+        "suppressOutput would make codex discard the pointer: {}",
+        for_codex.stdout
+    );
+
+    let for_claude = run_hook_suggest_payload(
+        mk("s-claude-noev", "/home/u/.claude/projects/x/y.jsonl"),
+        &[],
+        &cwd,
+        &cache,
+    );
+    assert_eq!(
+        payload(&for_claude)["suppressOutput"],
+        serde_json::json!(true),
+        "the others still suppress the raw JSON: {}",
+        for_claude.stdout
+    );
+}
+
 // --- Kimi: a structured search surface, and a contract that has to differ ----------------------
 
 /// Send a raw payload rather than a shell command, so a structured tool call can be tested the way

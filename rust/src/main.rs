@@ -1207,16 +1207,22 @@ fn cmd_hook_suggest(args: &[String], usage: &mut UsageEvent) -> Result<Emit, Cor
                     {
                         usage.args_summary =
                             hook_args_tag(&harness_args("no_index_hinted"), "symbol", &symbol);
-                        return Ok(Emit {
-                            payload: json!({
-                                "hookSpecificOutput": {
-                                    "hookEventName": "PreToolUse",
-                                    "additionalContext": "No index for this project yet: one \
+                        // The `suppressOutput` guard is the same one the Fire payload carries:
+                        // Codex rejects the whole output over the field, and a hint it discards
+                        // teaches the user the hook is broken, not that one `cort index` exists.
+                        let mut payload = json!({
+                            "hookSpecificOutput": {
+                                "hookEventName": "PreToolUse",
+                                "additionalContext": "No index for this project yet: one \
                             `cort index` and searches like this get caller-set suggestions (who calls this symbol), kept \
                             current by the edit hook afterwards. Ignore if you do not need call-site answers here.",
-                                },
-                                "suppressOutput": true,
-                            }),
+                            },
+                        });
+                        if harness != "codex" {
+                            payload["suppressOutput"] = json!(true);
+                        }
+                        return Ok(Emit {
+                            payload,
                             format: Format::Lean,
                             render_command: Some("hook-suggest"),
                         });
@@ -1255,19 +1261,24 @@ fn cmd_hook_suggest(args: &[String], usage: &mut UsageEvent) -> Result<Emit, Cor
                                     "why",
                                     why.as_str(),
                                 );
-                                return Ok(Emit {
-                                    payload: json!({
-                                        "hookSpecificOutput": {
-                                            "hookEventName": "PreToolUse",
-                                            "additionalContext": format!(
-                                                "No caller-set answer for '{symbol}': it is not an \
+                                // Same guard as the hint and the Fire payload: Codex discards the
+                                // entire output over `suppressOutput`, taking the pointer with it.
+                                let mut payload = json!({
+                                    "hookSpecificOutput": {
+                                        "hookEventName": "PreToolUse",
+                                        "additionalContext": format!(
+                                            "No caller-set answer for '{symbol}': it is not an \
                                     indexed definition (fields and enum variants are outside the grain). The name appears inside: \
                                     {}. That is where it occurs, not a complete enumeration.",
-                                                found.join("; ")
-                                            ),
-                                        },
-                                        "suppressOutput": true,
-                                    }),
+                                            found.join("; ")
+                                        ),
+                                    },
+                                });
+                                if harness != "codex" {
+                                    payload["suppressOutput"] = json!(true);
+                                }
+                                return Ok(Emit {
+                                    payload,
                                     format: Format::Lean,
                                     render_command: Some("hook-suggest"),
                                 });
