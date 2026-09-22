@@ -8,6 +8,8 @@ cort 回答「查詢時的問題」，ClaudeCat 回答「啟動時的導航」�
 ## 定位（V2，2026-09 重定位）
 
 - ❌ **不做**：「猜測式」auth/response/error pattern 偵測 + 假信心
+- ❌ **不做**：transit 壓縮——不改寫 agent 與 LLM 之間的任何位元組，
+  地圖每行（`file:symbol:line`）必須逐字可查；與壓縮層（headroom 等）互補不重疊
 - ✅ **只做**：從 manifest + AST 產出**可驗證的事實地圖**
 - 對齊 Anthropic 官方大型 codebase 策略（agentic search > RAG）：
   給 Claude 精簡地圖（≤150 行），讓它自己做有目標的探索

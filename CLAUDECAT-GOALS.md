@@ -61,6 +61,19 @@ sub-second 到數秒完成。
    只給「地圖」，讓 Claude 自己做有目標的探索（對齊 Anthropic agentic search 策略）。
 3. ❌ **不標假信心**：沒有 Unknown→100% High Confidence。
 4. ❌ **不做 RAG / embed 索引**。
+5. ❌ **不做 transit 壓縮**：不改寫 agent 與 LLM 之間流動的任何位元組。
+   地圖的每一行（`file:symbol:line`）都要能逐字回查；任何中途改寫都摧毀這個性質。
+   壓縮是傳輸層（headroom 之類）的事，與本工具互補：它降低「每次讀的成本」，
+   地圖減少「盲目讀的次數」。
+
+## 環境對照（2026-09-18）
+
+[Headroom](https://github.com/headroomlabs-ai/headroom)（transit 壓縮層，72.9k stars）wrap agent 時
+**預設捆綁 Serena**（語義導航 MCP）並帶 `--code-graph` 旗標——「導航輔助」正在被
+壓縮層當成標配出貨。這驗證了導航需求是真的，也代表分發渠道上會有捆綁競品。
+claudecat 的位子不被它吃掉的三個理由：**只做可驗證事實**（壓縮是「希望沒壞」，
+地圖是「每行可查」）、**離線零遙測單一 Rust binary**（headroom beacon 預設開）、
+**接 cort 深挖**（`navigate --cort` → `cort impact` 的 caller-set 可核對主線，無人重疊）。
 
 ## 成功度量
 

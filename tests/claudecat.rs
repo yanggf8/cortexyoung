@@ -1349,6 +1349,16 @@ fn cort_audit_track_rows_from_different_hosts_coexist() {
     );
 }
 
+/// doctor：host 探測在這台機器上要拿得到名字——macOS 沒有 /etc/hostname，
+/// 靠 `hostname` 指令退路；拿不到的機器在審計表裡永遠是 unknown 那一列。
+#[test]
+fn doctor_host_resolves_on_this_machine() {
+    let host = claudecat::doctor::resolve_host()
+        .expect("host probe returned None: neither /etc/hostname nor `hostname` answered");
+    assert!(!host.is_empty());
+    assert!(!host.contains('\n'), "trim 過的名字不該帶換行");
+}
+
 /// doctor：cron 條目的產生、偵測與幂等合併（部署一件事的純函式核心）
 #[test]
 fn doctor_track_cron_line_detection_and_merge_idempotent() {
