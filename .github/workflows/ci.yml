@@ -39,7 +39,7 @@ jobs:
       - name: toolchain versions
         run: rustc --version && cargo --version
 
-      # Installs the pinned ast-grep 0.45.2 and builds+installs cort. It has to come before the
+      # Installs the pinned ast-grep 0.45.3 and builds+installs cort. It has to come before the
       # tests: several of them resolve the real binary on purpose. This is also the end-to-end
       # check that the installer works from a clean clone.
       - name: install via installer (pinned ast-grep + cort)
