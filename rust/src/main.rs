@@ -141,7 +141,11 @@ impl std::fmt::Display for CortWrap {
 
 impl SqliteErrorCode for CortWrap {
     fn sqlite_code(&self) -> Option<&str> {
-        None
+        // `classify_sqlite` folds the raw code into the detail payload precisely so it survives
+        // classification; reading it back here is what lets `with_busy_retry` keep retrying a
+        // BUSY that crossed a `CortError` boundary. Returning `None` unconditionally made the
+        // wrappers around read/recall retry nothing -- the loop only ever saw a codeless error.
+        self.0.detail.get("sqlite_code").and_then(Value::as_str)
     }
 }
 
@@ -163,9 +167,23 @@ fn open_project_tracked(
     match canonicalize_root(root) {
         Ok(canon) => {
             usage.project_id = Some(canon.project_id.clone());
-            let db =
-                open_db(db_path_for(&canon.path_str)).map_err(|e| cort::db::classify_sqlite(&e))?;
-            ensure_schema(&db)?;
+            // `open_db` sets WAL before its own busy timeout, so the pragma itself can meet a
+            // concurrent writer and reports BUSY with nothing yet waiting it out. Retried here,
+            // raw, because `SqliteErrorCode` is already implemented for `rusqlite::Error`.
+            let db = unwrap_busy(
+                with_busy_retry(|| open_db(db_path_for(&canon.path_str))),
+                |e| cort::db::classify_sqlite(&e),
+            )?;
+            // The first statement of `ensure_schema` is the first write transaction on the open
+            // path, so it is exactly where a refresh hook's concurrent write is met. Foreground
+            // commands wait the contention out instead of reporting the store as occupied; the
+            // hook path stays as it is -- it opens unmigrated and quiet by contract. Re-running
+            // `ensure_schema` after a BUSY is safe: the batch is idempotent and a migration that
+            // lost the race rolled back, which is why it starts over rather than resumes.
+            unwrap_busy(
+                with_busy_retry(|| ensure_schema(&db).map_err(CortWrap)),
+                |w| w.0,
+            )?;
             Ok((canon, db))
         }
         Err(e) => {
@@ -2355,11 +2373,26 @@ fn cmd_impact(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError
     // to the caller. See `heal.rs` for the measured reasons and the boundaries.
     let heal = cort::heal::ensure_fresh(&mut db, &bin, &canon.path, &canon.project_id);
     let depth = parse_i64_flag(a.depth.as_deref(), DEFAULT_DEPTH);
-    let mut out = impact_command(&db, &bin, &canon.path, &canon.project_id, &symbol, depth)?;
+    // Same wrapper read/recall use: a refresh hook's write can outlive the connection's busy
+    // timeout, and `impact` alone used to surface that as `storage_busy` instead of waiting
+    // it out like its sibling readers.
+    let mut out = unwrap_busy(
+        with_busy_retry(|| {
+            impact_command(&db, &bin, &canon.path, &canon.project_id, &symbol, depth)
+                .map_err(CortWrap)
+        }),
+        |w| w.0,
+    )?;
     // Recall is a separate question from cost, so it is opt-in: the default payload stays the small
     // answer the eval priced, and `--coverage` pays for a walk of the indexed files.
     if a.coverage {
-        coverage::attach(&db, &canon.project_id, Path::new(&canon.path), &mut out)?;
+        unwrap_busy(
+            with_busy_retry(|| {
+                coverage::attach(&db, &canon.project_id, Path::new(&canon.path), &mut out)
+                    .map_err(CortWrap)
+            }),
+            |w| w.0,
+        )?;
     }
     heal.attach_to(&mut out);
     fill_stale(usage, &out);

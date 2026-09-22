@@ -528,6 +528,35 @@ fn the_hook_speaks_once_the_project_is_actually_indexed() {
     assert!(ctx.contains("cort impact --symbol 'helper'"), "got: {ctx}");
 }
 
+/// A file-exclusive lock on the project database is contention that clears, not a store that
+/// is occupied. `impact` used to report `storage_busy` one busy timeout into such a lock --
+/// from the open path's WAL pragma or first schema statement, before any retry could apply --
+/// which read to the caller as "the index database is in use, the command is unavailable".
+/// Open, schema and query each retry now; the lock below outlasts one timeout (5s) but not
+/// the retry budget, so the run must survive a BUSY round and answer once it lifts.
+#[test]
+fn impact_waits_out_an_exclusive_db_lock_instead_of_reporting_the_store_occupied() {
+    let (_p, cwd, _c, cache) = sandbox();
+    let idx = run_cort(&["index"], &cwd, &cache);
+    if idx.code != 0 {
+        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
+        return;
+    }
+    let db = cort::db::db_path_for(cwd.to_str().unwrap());
+    let db = cache.join(db.file_name().unwrap());
+    let lock = rusqlite::Connection::open(&db).unwrap();
+    lock.busy_timeout(std::time::Duration::from_millis(0)).unwrap();
+    lock.pragma_update(None, "locking_mode", "EXCLUSIVE").unwrap();
+    lock.execute_batch("BEGIN EXCLUSIVE").unwrap();
+    let holder = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(7));
+        drop(lock);
+    });
+    let r = run_cort(&["impact", "--symbol", "helper"], &cwd, &cache);
+    holder.join().unwrap();
+    assert_eq!(r.code, 0, "stdout={} stderr={}", r.stdout, r.stderr);
+}
+
 /// The usage row has to say what the hook *did*, not merely that it ran.
 ///
 /// Every PreToolUse:Bash fires `hook-suggest`, so a row per invocation counts Bash calls and
