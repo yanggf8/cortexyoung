@@ -598,7 +598,24 @@ pub fn classify_sqlite(err: &rusqlite::Error) -> CortError {
             }),
         );
     }
-    CortError::new("storage_busy", json!({ "message": message }))
+    // The raw code rides along so a later `with_busy_retry` can still recognise a BUSY that
+    // already crossed this boundary. Without it every classified error reports no code, the
+    // wrapper retries nothing, and the only thing standing between a reader and
+    // `storage_busy` is the connection's own busy timeout -- one long migration or
+    // checkpoint past it and `impact` tells the caller the store is occupied.
+    let sqlite_code = match err.sqlite_error_code() {
+        Some(ErrorCode::DatabaseBusy) => Some("SQLITE_BUSY"),
+        Some(ErrorCode::DiskFull) => Some("SQLITE_FULL"),
+        Some(ErrorCode::DatabaseCorrupt) => Some("SQLITE_CORRUPT"),
+        _ => None,
+    };
+    match sqlite_code {
+        Some(code) => CortError::new(
+            "storage_busy",
+            json!({ "message": message, "sqlite_code": code }),
+        ),
+        None => CortError::new("storage_busy", json!({ "message": message })),
+    }
 }
 
 pub trait SqliteErrorCode {
