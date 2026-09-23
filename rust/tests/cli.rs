@@ -665,8 +665,10 @@ fn impact_waits_out_an_exclusive_db_lock_instead_of_reporting_the_store_occupied
     let db = cort::db::db_path_for(cwd.to_str().unwrap());
     let db = cache.join(db.file_name().unwrap());
     let lock = rusqlite::Connection::open(&db).unwrap();
-    lock.busy_timeout(std::time::Duration::from_millis(0)).unwrap();
-    lock.pragma_update(None, "locking_mode", "EXCLUSIVE").unwrap();
+    lock.busy_timeout(std::time::Duration::from_millis(0))
+        .unwrap();
+    lock.pragma_update(None, "locking_mode", "EXCLUSIVE")
+        .unwrap();
     lock.execute_batch("BEGIN EXCLUSIVE").unwrap();
     let holder = std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_secs(7));
@@ -1947,8 +1949,10 @@ fn a_hook_row_names_the_model_that_answered_and_never_invents_one() {
         Some("glm-5.3"),
         "the model the payload named was dropped: {last}"
     );
-    // v4: the per-search keys (`symbol`, and `why` on no_evidence) joined the row shape.
-    assert_eq!(last.get("v").and_then(Value::as_i64), Some(4));
+    // v5: the per-search keys (`symbol`, and `why` on no_evidence) joined the row shape in v4;
+    // v5 adds `demand` on rows that actually fired a suggestion (8a632015). This assertion
+    // was left at 4 by that commit and the suite has been red here since.
+    assert_eq!(last.get("v").and_then(Value::as_i64), Some(5));
 
     // A payload with no model gets no model. Absence is visible; a wrong name would not be.
     let bare = serde_json::json!({
@@ -3050,6 +3054,47 @@ fn an_upgrade_in_flight_defers_the_heal_instead_of_blocking_the_answer() {
         "the payload names the stand-down: {v}"
     );
     // Answered from the stale index, honestly: the disclosure survives the stand-down.
+    assert_eq!(v["index_is_stale"], json!(true), "{v}");
+}
+
+/// The never-create boundary is a refusal to bootstrap, not a malfunction — but a husk
+/// (schema present, `file_state` empty: what a create that died mid-run leaves behind) is
+/// exactly where silence was misread. On 2026-09-24 a sandboxed create left one on
+/// travel-2026, and `repair=rebuild_required` with no heal marker was read as "the heal
+/// never fired" for every query that touched it after. The boundary now names itself; the
+/// repair lever stays an explicit `cort index`.
+#[test]
+fn an_empty_index_names_the_never_create_boundary_instead_of_staying_silent() {
+    let (_p, cwd, _c, cache) = sandbox();
+    git_in_fixture(&cwd);
+    let idx = run_cort(&["index"], &cwd, &cache);
+    if idx.code != 0 {
+        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
+        return;
+    }
+    let db_file = cache.join(
+        cort::db::db_path_for(cwd.to_str().unwrap())
+            .file_name()
+            .unwrap(),
+    );
+    let db = cort::db::open_db(&db_file).unwrap();
+    db.execute("DELETE FROM file_state", []).unwrap();
+    drop(db);
+
+    let r = run_cort(
+        &["impact", "--symbol", "helper", "-f", "json"],
+        &cwd,
+        &cache,
+    );
+    assert_eq!(r.code, 0, "{} {}", r.stdout, r.stderr);
+    let v = payload(&r);
+    assert_eq!(v["self_healed"], json!(false), "{v}");
+    assert_eq!(
+        v["heal_deferred"],
+        json!("empty_index_never_creates"),
+        "the boundary names itself: {v}"
+    );
+    // The refusal to bootstrap is not a staleness repair either: the disclosure survives.
     assert_eq!(v["index_is_stale"], json!(true), "{v}");
 }
 

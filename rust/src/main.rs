@@ -839,8 +839,7 @@ fn scrub_hook_prompt(text: &str, max_chars: usize) -> String {
         .map(|token| {
             let core = token.trim_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != '-');
             let lower = core.to_ascii_lowercase();
-            let path_start =
-                token.trim_start_matches(|c: char| matches!(c, '(' | '"' | '\'' | '[' | '{' | '<'));
+            let path_start = token.trim_start_matches(['(', '"', '\'', '[', '{', '<']);
             if core.contains("://") || path_start.starts_with('/') || path_start.starts_with("~/") {
                 token.replace(
                     core,

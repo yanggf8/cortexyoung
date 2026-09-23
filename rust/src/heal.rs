@@ -9,8 +9,10 @@
 //! blocking the answer.
 //!
 //! Two boundaries hold here as everywhere else. *Never create*: a schema-only or empty
-//! database is not healed into an index — `ensure_fresh` no-ops and the command answers (or
-//! errors) exactly as before. *Hooks never heal*: they are read-only probes inside a
+//! database is not healed into an index — `ensure_fresh` no-ops, and since 2026-09-24 it
+//! says so (`empty_index_never_creates`), because a husk left by a create that died
+//! mid-run otherwise reads as "the heal is broken" on every later query. *Hooks never
+//! heal*: they are read-only probes inside a
 //! five-second budget, and `hook-refresh` keeps `RebuildPolicy::Forbid`; the foreground query
 //! is the only caller with a budget wide enough for a full rebuild.
 
@@ -50,6 +52,9 @@ fn cache_dir() -> Option<PathBuf> {
 /// The payload keys exist only when there is something to say — a heal that repaired
 /// something, or a heal that was deferred and why. A fresh index or a disabled heal adds no
 /// keys at all, so the green-path payload stays byte-identical to the pre-heal contract.
+/// An empty index is not the green path: it names the never-create boundary it stopped at,
+/// because `repair=rebuild_required` with no marker was read as "the heal is broken" before
+/// 2026-09-24.
 #[derive(Debug, Default, PartialEq)]
 pub struct HealOutcome {
     healed: bool,
@@ -116,7 +121,11 @@ pub fn ensure_fresh(db: &mut Db, bin: &str, root: &Path, project_id: &str) -> He
         Err(_) => return HealOutcome::default(),
     };
     if indexed == 0 {
-        return HealOutcome::default();
+        // Never create still holds — but silence here is how a schema-only husk (a create
+        // that died mid-run, measured 2026-09-24 on travel-2026: a sandboxed attempt left
+        // one behind) reads as "heal never fired" on every query that touches it after.
+        // The boundary names itself; the repair lever stays an explicit `cort index`.
+        return deferred("empty_index_never_creates");
     }
     if indexed > heal_max_files() {
         return defer_to_background(root, project_id);

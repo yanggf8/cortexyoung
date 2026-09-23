@@ -194,7 +194,12 @@ file) for trees past `CORT_HEAL_MAX_FILES`. A foreground command a person chose 
 budget a hook never will; the hooks stay read-only probes. What the payload owes the reader is
 unchanged: `self_healed`/`heal_deferred` name what the query did about staleness, and every
 disclosure field still means what it meant — they describe the answer's basis, they never assign
-the caller maintenance work.
+the caller maintenance work. One arm of that contract had to learn to speak on 2026-09-24: the
+never-create boundary no-opped **silently** on an empty index, so the husk a sandboxed create left
+behind on travel-2026 answered `repair=rebuild_required` with no heal marker and two separate
+agents read that as "the heal never fired" — the index was simply never bootstrapped on that
+machine. That arm now answers `heal_deferred: "empty_index_never_creates"`; the bootstrap lever
+remains an explicit `cort index`.
 
 **CI's first gate is `rustfmt`, and a gate that fails is a gate that hides the ones behind it.** Both
 jobs run fmt, then clippy with warnings as errors, then `cargo test --locked --all-targets`; a
