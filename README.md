@@ -8,12 +8,6 @@ The repository is pure Rust: the product crate lives in [`rust/`](rust/), the de
 harness in [`evals/`](evals/), and no JavaScript, TypeScript or Python exists as executable code. Bash
 appears only in `install.sh` and `tests/install-smoke.sh`, where the platform requires a shell.
 
-The companion navigation tool **claudecat** (root crate `src/`, its own `Cargo.toml`, docs prefixed
-`CLAUDECAT-*` / `CORT-*`) was merged in from [yanggf8/claudecat](https://github.com/yanggf8/claudecat)
-on 2026-09-23 — see [`CLAUDECAT-README.md`](CLAUDECAT-README.md). It answers "where do I start"
-navigation while `cort` answers per-query questions; it reads the cort index read-only. Its live code
-is under the same pure-Rust rule; its frozen pre-Rust `legacy/` tree is the one JavaScript exception.
-
 Six shipped commands (plus `status`/`projects`/`delete` utilities):
 
 - `cort index [--incremental] [path]` — build or incrementally refresh the index (`ast-grep` + SQLite)

@@ -5,8 +5,7 @@ on:
     branches: [master, main]
   pull_request:
 
-# The repo is pure Rust: the product crate in rust/, the dev-only eval harness in evals/, and
-# the claudecat navigation crate at the root (merged in from its own repo on 2026-09-23).
+# The repo is pure Rust: the product crate in rust/ and the dev-only eval harness in evals/.
 # Nothing here installs or runs Node — the harness was ported, and `install.sh` ships only the
 # product crate plus the pinned ast-grep pack.
 #
@@ -107,28 +106,3 @@ jobs:
       - name: evals release build
         working-directory: evals
         run: cargo build --release --locked
-
-  claudecat:
-    name: claudecat (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: ensure rustfmt + clippy
-        run: rustup component add rustfmt clippy
-
-      # The claudecat crate sits at the repo root, so no working-directory is needed. Its tests
-      # are self-contained — nothing in tests/ shells out to cort or ast-grep, so unlike the
-      # product job no install step has to precede them.
-      - name: rustfmt
-        run: cargo fmt --all -- --check
-
-      - name: clippy (warnings are errors)
-        run: cargo clippy --all-targets --all-features -- -D warnings
-
-      - name: cargo test
-        run: cargo test --locked --all-targets

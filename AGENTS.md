@@ -139,7 +139,7 @@ once per symbol per session, then yield, and `no_other_harness_ever_receives_a_d
 Whether the deny actually changes what the agent does is still two runs and one uptake -- do not
 quote it as established (§16).
 
-**The repo is pure Rust. No JavaScript, TypeScript, Python or other scripting language may exist as executable code** — not as a product entry point, not as tooling, not as tests. The claudecat companion tool (root crate `src/` + `tests/`, merged in from its own repo on 2026-09-23) lives under the same rule going forward; its frozen pre-Rust `legacy/` tree is the one grandfathered exception — do not add to it. The eval harness that used to be six `.mjs` files was ported into the `evals/` crate for exactly this reason. Bash stays only where the platform requires it (`install.sh`, `tests/install-smoke.sh`); it is not a place to put logic. If a task seems to need a script, add a Rust subcommand to `evals/` or `rust/` instead.
+**The repo is pure Rust. No JavaScript, TypeScript, Python or other scripting language may exist as executable code** — not as a product entry point, not as tooling, not as tests. The eval harness that used to be six `.mjs` files was ported into the `evals/` crate for exactly this reason. Bash stays only where the platform requires it (`install.sh`, `tests/install-smoke.sh`); it is not a place to put logic. If a task seems to need a script, add a Rust subcommand to `evals/` or `rust/` instead.
 
 **No absolute paths from any developer's machine, and no Node-installed toolchain paths, anywhere in
 the repo — including test fixtures and fallbacks.** `ast-grep` is provisioned by `install.sh` from the
@@ -218,8 +218,11 @@ this machine's data folder (`~/.local/share/claudecat/projects/<project-id>/map.
 into this file — machine-generated content does not enter git; it writes nothing else here, and
 `CLAUDE.md` stays a symlink to this file.
 
-- 每日 cort-audit 分析的**發現**寫在 [CORT-AUDIT.md](CORT-AUDIT.md) 的「每日分析發現」區，
-  長期指標表在同一份檔。本檔只留規則，文件放文件。
+**claudecat lives in its own repo ([yanggf8/claudecat](https://github.com/yanggf8/claudecat)) — do
+not merge it in.** It was merged here once (`3cda23ea`, 2026-09-23) and backed out the same day:
+two copies of one tool drift on the first commit to either side, the daily audit rows split
+between two `CORT-AUDIT.md` files, and its symbols pollute this repo's cort index. Changes to
+claudecat, its skill, and the cort-audit findings go to that repo; this repo only ships `cort`.
 
 <!-- claudecat:guardrails:begin -->
 <!-- 技術決策 / Guardrails：每行一條，例如 `2D tilemap + Macroquad（禁 Python/3D）`、`插件一律裝在 Claude Code 內`。claudecat 只在此區不存在時建立，之後永不覆寫。 -->
