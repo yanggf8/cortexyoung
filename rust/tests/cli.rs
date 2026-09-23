@@ -528,6 +528,126 @@ fn the_hook_speaks_once_the_project_is_actually_indexed() {
     assert!(ctx.contains("cort impact --symbol 'helper'"), "got: {ctx}");
 }
 
+/// Demand capture must be tested through the shipped command and its persisted usage row, not
+/// just through a transcript parser. Claude Code supplies typed user messages as JSONL records;
+/// the same row must pair that prompt with the actual suggestion, and scrub paths and URLs before
+/// it reaches the local database.
+#[test]
+fn an_actual_claude_hook_suggestion_persists_a_scrubbed_user_need() {
+    let (_p, cwd, _c, cache) = sandbox();
+    let idx = run_cort(&["index"], &cwd, &cache);
+    if idx.code != 0 {
+        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
+        return;
+    }
+
+    let transcript = cwd.join(".claude/projects/session.jsonl");
+    fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+    let earlier = serde_json::json!({
+        "type": "user",
+        "promptSource": "typed",
+        "message": {"content": "stale_prior_prompt_should_not_be_captured"}
+    });
+    let latest = serde_json::json!({
+        "type": "user",
+        "promptSource": "typed",
+        "message": {"content": "Please check helper callers for need_capture_case_41 at /__fixture_private_path__/repo and https://private.invalid/token; key sk-fixturesecret with Bearer bearerfixture"}
+    });
+    fs::write(&transcript, format!("{}\n{}\n", earlier, latest)).unwrap();
+
+    let r = run_hook_suggest_full(
+        FIRING_SEARCH,
+        Some(transcript.to_str().unwrap()),
+        &[],
+        &cwd,
+        &cache,
+    );
+    assert_eq!(r.code, 0, "stdout={} stderr={}", r.stdout, r.stderr);
+    assert!(r.stdout.contains("additionalContext"), "{}", r.stdout);
+
+    let usage_db = cache.join("usage.db");
+    let row = latest_command_row(&usage_db, "hook-suggest");
+    assert_eq!(row["v"], 5);
+    assert!(matches!(row["hook"].as_str(), Some("hit" | "hit_stale")));
+    assert_eq!(row["demand"]["status"], "captured");
+    let excerpt = row["demand"]["excerpt"].as_str().unwrap();
+    assert!(excerpt.contains("need_capture_case_41"), "{excerpt}");
+    assert!(excerpt.contains("<path>"), "{excerpt}");
+    assert!(excerpt.contains("<url>"), "{excerpt}");
+    assert!(excerpt.contains("<redacted>"), "{excerpt}");
+    assert!(!excerpt.contains("__fixture_private_path__"), "{excerpt}");
+    assert!(!excerpt.contains("private.invalid"), "{excerpt}");
+    assert!(!excerpt.contains("sk-fixturesecret"), "{excerpt}");
+    assert!(!excerpt.contains("bearerfixture"), "{excerpt}");
+    assert!(
+        !excerpt.contains("stale_prior_prompt_should_not_be_captured"),
+        "{excerpt}"
+    );
+
+    // The transcript is available, but an ordinary search that the hook leaves alone must not
+    // create a demand record. This pins capture to emitted suggestions rather than hook traffic.
+    let quiet = run_hook_suggest_full(
+        "cargo test --locked",
+        Some(transcript.to_str().unwrap()),
+        &[],
+        &cwd,
+        &cache,
+    );
+    assert_eq!(
+        quiet.code, 0,
+        "stdout={} stderr={}",
+        quiet.stdout, quiet.stderr
+    );
+    let row = latest_command_row(&usage_db, "hook-suggest");
+    assert_eq!(row["hook"], "no_shape");
+    assert!(row.get("demand").is_none(), "{row}");
+}
+
+/// Codex rollouts use payload.type=message rather than Claude's top-level type=user. Keep a
+/// separate end-to-end case so support for one harness cannot masquerade as support for both.
+#[test]
+fn a_codex_hook_suggestion_persists_the_latest_user_message() {
+    let (_p, cwd, _c, cache) = sandbox();
+    let idx = run_cort(&["index"], &cwd, &cache);
+    if idx.code != 0 {
+        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
+        return;
+    }
+
+    let transcript = cwd.join(".codex/sessions/session.jsonl");
+    fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+    fs::write(
+        &transcript,
+        serde_json::json!({
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "Need call-site evidence for helper; followup_capture_codex_52"}]
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let r = run_hook_suggest_full(
+        FIRING_SEARCH,
+        Some(transcript.to_str().unwrap()),
+        &[],
+        &cwd,
+        &cache,
+    );
+    assert_eq!(r.code, 0, "stdout={} stderr={}", r.stdout, r.stderr);
+    assert!(r.stdout.contains("additionalContext"), "{}", r.stdout);
+
+    let row = latest_command_row(&cache.join("usage.db"), "hook-suggest");
+    assert_eq!(row["harness"], "codex");
+    assert_eq!(row["demand"]["status"], "captured");
+    assert!(row["demand"]["excerpt"]
+        .as_str()
+        .unwrap()
+        .contains("followup_capture_codex_52"));
+}
+
 /// A file-exclusive lock on the project database is contention that clears, not a store that
 /// is occupied. `impact` used to report `storage_busy` one busy timeout into such a lock --
 /// from the open path's WAL pragma or first schema statement, before any retry could apply --
