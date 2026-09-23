@@ -196,6 +196,10 @@ The transcript itself is never copied. If the hook cannot read a supported trans
 stores a status such as `no_transcript_path` or `transcript_unreadable`, not a guessed need. These
 excerpts stay only in the local `usage.db` and follow its 90-day retention. This is an excerpt-level
 scrubber, not a guarantee that every sensitive phrase is detected.
+Transcript readers cover Claude Code/Grok-compatible JSONL and Codex rollout JSONL. Kimi's hook
+payload has no transcript path, so its outcome can be logged but its demand is marked
+`no_transcript_path`. Integration tests exercise the real hook command and usage row for Claude
+Code and Codex, including redaction and the silent-search case; they verify capture, not uptake.
 
 What is otherwise never recorded: file contents, `recall` queries, `struct` patterns, unresolved
 free-text `context` queries, clap/error messages, absolute home paths. The recorder is best-effort:
