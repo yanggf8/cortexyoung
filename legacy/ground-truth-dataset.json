@@ -1,0 +1,164 @@
+{
+  "version": "1.0",
+  "created": "2025-08-24",
+  "description": "Ground truth dataset for Express + Passport pattern detection accuracy testing",
+  "projects": [
+    {
+      "name": "express-jwt-passport-local-mongoose-winston",
+      "path": "/tmp/ground-truth-testing/express-jwt-passport-local-mongoose-winston",
+      "description": "Express API with JWT tokens, Passport local strategy, Mongoose ORM, Winston logging",
+      "framework": "express",
+      "authLibrary": "passport",
+      "expectedPatterns": [
+        {
+          "patternType": "initialize",
+          "expectedPattern": "passport.initialize()",
+          "file": "src/app.ts",
+          "line": 124,
+          "confidence": "high",
+          "description": "Express app uses passport.initialize() middleware"
+        },
+        {
+          "patternType": "authenticate",
+          "expectedPattern": "passport.authenticate('jwt')",
+          "file": "src/app.ts",
+          "line": 133,
+          "confidence": "high",
+          "description": "JWT authentication middleware for protected routes"
+        },
+        {
+          "patternType": "strategy",
+          "expectedPattern": "passport.use(new LocalStrategy",
+          "file": "src/passport/passport.ts",
+          "line": 16,
+          "confidence": "high",
+          "description": "Local strategy configuration for username/password auth"
+        },
+        {
+          "patternType": "strategy",
+          "expectedPattern": "passport.use(new JWTStrategy",
+          "file": "src/passport/passport.ts",
+          "line": 27,
+          "confidence": "high",
+          "description": "JWT strategy configuration for token-based auth"
+        }
+      ]
+    },
+    {
+      "name": "express-passport-auth-service",
+      "path": "/tmp/ground-truth-testing/express-passport-auth-service",
+      "description": "Authentication microservice with Passport strategies",
+      "framework": "express",
+      "authLibrary": "passport",
+      "expectedPatterns": [
+        {
+          "patternType": "initialize",
+          "expectedPattern": "app.use(passport.initialize())",
+          "file": "server.js",
+          "line": 45,
+          "confidence": "high",
+          "description": "Passport initialization in main server file"
+        },
+        {
+          "patternType": "strategy",
+          "expectedPattern": "passport.use(new LocalStrategy",
+          "file": "auth/local.js",
+          "line": 8,
+          "confidence": "high",
+          "description": "Local authentication strategy"
+        }
+      ]
+    },
+    {
+      "name": "express-social-auth-passport",
+      "path": "/tmp/ground-truth-testing/express-social-auth-passport",
+      "description": "Social authentication with Google and Facebook strategies",
+      "framework": "express",
+      "authLibrary": "passport",
+      "expectedPatterns": [
+        {
+          "patternType": "strategy",
+          "expectedPattern": "passport.use(new GoogleStrategy",
+          "file": "config/passport.js",
+          "line": 12,
+          "confidence": "high",
+          "description": "Google OAuth strategy configuration"
+        },
+        {
+          "patternType": "strategy",
+          "expectedPattern": "passport.use(new FacebookStrategy",
+          "file": "config/passport.js",
+          "line": 28,
+          "confidence": "high",
+          "description": "Facebook OAuth strategy configuration"
+        },
+        {
+          "patternType": "authenticate",
+          "expectedPattern": "passport.authenticate('google')",
+          "file": "routes/auth.js",
+          "line": 15,
+          "confidence": "high",
+          "description": "Google authentication route"
+        }
+      ]
+    },
+    {
+      "name": "express-session-passport-local",
+      "path": "/tmp/ground-truth-testing/express-session-passport-local",
+      "description": "Traditional session-based authentication with Passport Local",
+      "framework": "express",
+      "authLibrary": "passport",
+      "expectedPatterns": [
+        {
+          "patternType": "initialize",
+          "expectedPattern": "passport.initialize()",
+          "file": "app.js",
+          "line": 35,
+          "confidence": "high",
+          "description": "Passport initialization"
+        },
+        {
+          "patternType": "initialize",
+          "expectedPattern": "passport.session()",
+          "file": "app.js",
+          "line": 36,
+          "confidence": "high",
+          "description": "Passport session support"
+        },
+        {
+          "patternType": "strategy",
+          "expectedPattern": "passport.use(new LocalStrategy",
+          "file": "config/passport-config.js",
+          "line": 7,
+          "confidence": "high",
+          "description": "Local strategy for session authentication"
+        }
+      ]
+    },
+    {
+      "name": "express-api-jwt-auth",
+      "path": "/tmp/ground-truth-testing/express-api-jwt-auth",
+      "description": "REST API with JWT authentication using Passport",
+      "framework": "express",
+      "authLibrary": "passport",
+      "expectedPatterns": [
+        {
+          "patternType": "strategy",
+          "expectedPattern": "passport.use(new JwtStrategy",
+          "file": "middleware/passport.js",
+          "line": 9,
+          "confidence": "high",
+          "description": "JWT strategy for API authentication"
+        },
+        {
+          "patternType": "authenticate",
+          "expectedPattern": "passport.authenticate('jwt', { session: false })",
+          "file": "routes/protected.js",
+          "line": 8,
+          "confidence": "high",
+          "description": "Stateless JWT authentication for API routes"
+        }
+      ]
+    }
+  ]
+}

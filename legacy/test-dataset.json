@@ -1,0 +1,14 @@
+{
+  "version": "1.0",
+  "created": "2025-08-24T03:11:49.007Z",
+  "projects": [
+    {
+      "name": "sample-express-passport",
+      "path": ".",
+      "description": "Sample project for testing (current ClaudeCat project)",
+      "framework": "express",
+      "authLibrary": "passport",
+      "expectedPatterns": []
+    }
+  ]
+}
