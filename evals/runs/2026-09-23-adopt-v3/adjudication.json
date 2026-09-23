@@ -1,0 +1,92 @@
+{
+  "method": "hook-demand-adjudication-v1",
+  "reviewing_scope": "adopt-mine-v3 injections from 2026-09-09 onward",
+  "reading": "Provisional single-pass labels from the linked scrubbed prompt and nearby actions. Unknown means the transcript screen stripped the prompt as pasted output or a bare directive; it is not a negative demand label.",
+  "confirmed_caller_set_needs": 0,
+  "rows": [
+    {
+      "at": "2026-09-10T07:38:13Z",
+      "project": "cortexyoung",
+      "symbol": "parse_scan_stream",
+      "label": "unknown",
+      "reason": "The prompt has no user-owned words after paste/directive stripping. A same-symbol impact appears later in the session, outside the adoption window, but its task relation is unproven."
+    },
+    {
+      "at": "2026-09-12T16:25:15Z",
+      "project": "cortexyoung",
+      "symbol": "NoEvidenceWhy",
+      "label": "self_hook_test",
+      "reason": "The linked instruction discusses improving the hook's no-evidence logging, and the triggering shell command explicitly says the hook adjudicated the prior probe. The same-symbol impact is a test, not dogfood evidence."
+    },
+    {
+      "at": "2026-09-12T19:38:13Z",
+      "project": "ft",
+      "symbol": "OceanScores",
+      "label": "not_caller_set_demand",
+      "reason": "The linked task asks for an IPIP test and a virtual persona; the symbol search is exploratory context for that task."
+    },
+    {
+      "at": "2026-09-14T08:47:19Z",
+      "project": "cortexyoung",
+      "symbol": "args_summary",
+      "label": "product_feedback_not_caller_set_demand",
+      "reason": "The instruction critiques stale-index behavior and the tool's direction. That is valuable product feedback, but it does not ask for a caller set or describe a code change that requires one."
+    },
+    {
+      "at": "2026-09-14T09:40:21Z",
+      "project": "GalaxyWarHero",
+      "symbol": "CombatResolved",
+      "label": "unknown",
+      "reason": "The linked prompt has no user-owned words after stripping. No editor action follows in the five-action window."
+    },
+    {
+      "at": "2026-09-14T09:48:12Z",
+      "project": "GalaxyWarHero",
+      "symbol": "Taps",
+      "label": "unknown_with_work_candidate",
+      "reason": "The linked prompt has no user-owned words after stripping. One editor action follows in the five-action window, so this is the clearest external row to inspect, but neither caller-set need nor causal impact is established."
+    },
+    {
+      "at": "2026-09-14T15:51:46Z",
+      "project": "GalaxyWarHero",
+      "symbol": "classic",
+      "label": "unknown",
+      "reason": "The linked prompt has no user-owned words after stripping. No editor action follows in the five-action window."
+    },
+    {
+      "at": "2026-09-14T15:51:54Z",
+      "project": "GalaxyWarHero",
+      "symbol": "NewGameSpec",
+      "label": "unknown",
+      "reason": "The linked prompt has no user-owned words after stripping. No editor action follows in the five-action window."
+    },
+    {
+      "at": "2026-09-14T15:52:38Z",
+      "project": "GalaxyWarHero",
+      "symbol": "choose_production",
+      "label": "unknown",
+      "reason": "The linked prompt has no user-owned words after stripping. No editor action follows in the five-action window."
+    },
+    {
+      "at": "2026-09-14T15:53:17Z",
+      "project": "GalaxyWarHero",
+      "symbol": "Reject",
+      "label": "unknown",
+      "reason": "The linked prompt has no user-owned words after stripping. No editor action follows in the five-action window."
+    },
+    {
+      "at": "2026-09-14T15:53:59Z",
+      "project": "GalaxyWarHero",
+      "symbol": "Reject",
+      "label": "unknown",
+      "reason": "The linked prompt has no user-owned words after stripping. No editor action follows in the five-action window."
+    },
+    {
+      "at": "2026-09-14T15:54:46Z",
+      "project": "GalaxyWarHero",
+      "symbol": "InputEvent::Move",
+      "label": "unknown",
+      "reason": "The linked prompt has no user-owned words after stripping. No editor action follows in the five-action window."
+    }
+  ]
+}

@@ -24,6 +24,7 @@ use cort::staleness::compute_stale;
 use cort::usage::{self, CommandRecord};
 use rusqlite::{params, Connection, OpenFlags};
 use serde_json::{json, Value};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 // `hook-suggest` is here so its rows are recorded under their own name rather than `_unknown`:
@@ -675,8 +676,11 @@ fn dispatch(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError> 
 /// it is the one key the improvement loop cannot do without: a refusal that does not name its
 /// symbol cannot be matched against files, other projects' chunks, or the gate refusals
 /// afterwards. A v3 row predates the keys and says so.
+///
+/// `v: 5` adds `demand` only when the hook emits a suggestion. It is a redacted, 240-character
+/// excerpt of the latest user-authored prompt, or a status explaining why no excerpt was captured.
 fn hook_row(outcome: &str, harness: &str, declared: Option<&str>, model: Option<&str>) -> Value {
-    let mut v = json!({ "v": 4, "hook": outcome, "harness": harness });
+    let mut v = json!({ "v": 5, "hook": outcome, "harness": harness });
     if let Some(d) = declared {
         v["harness_declared"] = json!(d);
     }
@@ -699,7 +703,7 @@ fn hook_args_decline(hook_args_json: &str, decline: &str) -> String {
 /// Issue #3 的後半：decline 說的是「哪條規則拒絕」，形狀指紋說的是「被拒絕的長什麼樣」——
 /// 90 天日誌裡 83% 的 hook run 是 `no_shape`，只有前者時這 83% 無法按需求排序規則工作。
 /// 指紋 = 工具名 + payload 的 top-level key 集合（排序後以 `+` 串接）。欄位「名」是各
-/// harness 的穩定詞彙、永不攜帶內容，prompt 不會進日誌。
+/// harness 的穩定詞彙、永不攜帶內容；prompt 摘錄只會另存於實際發出提示的列。
 fn hook_args_shape(hook_args_json: &str, shape: &str) -> String {
     hook_args_tag(hook_args_json, "shape", shape)
 }
@@ -727,6 +731,154 @@ fn hook_args_tag(hook_args_json: &str, key: &str, value: &str) -> String {
     let mut v: Value =
         serde_json::from_str(hook_args_json).unwrap_or_else(|_| json!({ "hook": "unknown" }));
     v[key] = json!(value);
+    v.to_string()
+}
+
+/// Keep a small, auditable excerpt of the user's need beside each suggestion that actually fires.
+/// The transcript itself is never copied: only its final user-authored prompt is read, from a
+/// bounded tail, then paths, URLs, common credentials, and the local account name are redacted.
+/// Kimi currently provides no transcript path, so its hit is explicitly marked unavailable.
+fn hook_demand(payload: &Value) -> Value {
+    const TAIL_BYTES: u64 = 2 * 1024 * 1024;
+    const MAX_CHARS: usize = 240;
+    let path = payload
+        .get("transcript_path")
+        .or_else(|| payload.get("transcriptPath"))
+        .and_then(Value::as_str);
+    let Some(path) = path else {
+        return json!({"status": "no_transcript_path"});
+    };
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return json!({"status": "transcript_unreadable"});
+    };
+    let Ok(len) = file.metadata().map(|m| m.len()) else {
+        return json!({"status": "transcript_unreadable"});
+    };
+    let start = len.saturating_sub(TAIL_BYTES);
+    if file.seek(SeekFrom::Start(start)).is_err() {
+        return json!({"status": "transcript_unreadable"});
+    }
+    let mut tail = Vec::with_capacity((len - start) as usize);
+    if file.read_to_end(&mut tail).is_err() {
+        return json!({"status": "transcript_unreadable"});
+    }
+    let tail = String::from_utf8_lossy(&tail);
+    let harness = payload
+        .get("transcript_path")
+        .or_else(|| payload.get("transcriptPath"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let codex = harness.contains("/.codex/");
+    let prompt = tail.lines().rev().find_map(|line| {
+        let event: Value = serde_json::from_str(line).ok()?;
+        if codex {
+            codex_user_prompt(&event)
+        } else {
+            claude_user_prompt(&event)
+        }
+    });
+    let Some(prompt) = prompt else {
+        return json!({"status": "no_user_prompt"});
+    };
+    let excerpt = scrub_hook_prompt(&prompt, MAX_CHARS);
+    if excerpt.is_empty() {
+        json!({"status": "empty_after_redaction"})
+    } else {
+        json!({"status": "captured", "excerpt": excerpt})
+    }
+}
+
+fn claude_user_prompt(event: &Value) -> Option<String> {
+    if event.get("type")?.as_str()? != "user"
+        || event.get("isMeta").and_then(Value::as_bool) == Some(true)
+        || event.get("isSidechain").and_then(Value::as_bool) == Some(true)
+        || !matches!(event.get("promptSource")?.as_str()?, "typed" | "queued")
+    {
+        return None;
+    }
+    event
+        .get("message")?
+        .get("content")?
+        .as_str()
+        .map(str::to_string)
+}
+
+fn codex_user_prompt(event: &Value) -> Option<String> {
+    let payload = event.get("payload")?;
+    if payload.get("type")?.as_str()? != "message" || payload.get("role")?.as_str()? != "user" {
+        return None;
+    }
+    match payload.get("content")? {
+        Value::String(text) => Some(text.clone()),
+        Value::Array(parts) => {
+            let text = parts
+                .iter()
+                .filter_map(|part| {
+                    if let Some(text) = part.as_str() {
+                        Some(text)
+                    } else {
+                        part.get("text").and_then(Value::as_str)
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            (!text.is_empty()).then_some(text)
+        }
+        _ => None,
+    }
+}
+
+fn scrub_hook_prompt(text: &str, max_chars: usize) -> String {
+    let home_user = std::env::var("HOME").ok().and_then(|home| {
+        Path::new(&home)
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+    });
+    let mut redact_next = false;
+    text.split_whitespace()
+        .map(|token| {
+            let core = token.trim_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != '-');
+            let lower = core.to_ascii_lowercase();
+            let path_start =
+                token.trim_start_matches(|c: char| matches!(c, '(' | '"' | '\'' | '[' | '{' | '<'));
+            if core.contains("://") || path_start.starts_with('/') || path_start.starts_with("~/") {
+                token.replace(
+                    core,
+                    if core.contains("://") {
+                        "<url>"
+                    } else {
+                        "<path>"
+                    },
+                )
+            } else if redact_next {
+                redact_next = false;
+                "<redacted>".to_string()
+            } else if lower == "bearer" {
+                redact_next = true;
+                token.to_string()
+            } else if lower.starts_with("sk-")
+                || lower.starts_with("ghp_")
+                || lower.starts_with("github_pat_")
+                || lower.starts_with("akia")
+                || lower.starts_with("bearer-")
+                || home_user.as_deref().is_some_and(|user| core == user)
+            {
+                token.replace(core, "<redacted>")
+            } else {
+                token.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(max_chars)
+        .collect()
+}
+
+fn hook_args_demand(hook_args_json: &str, demand: Value) -> String {
+    let mut v: Value =
+        serde_json::from_str(hook_args_json).unwrap_or_else(|_| json!({ "hook": "unknown" }));
+    v["demand"] = demand;
     v.to_string()
 }
 
@@ -1223,8 +1375,10 @@ fn cmd_hook_suggest(args: &[String], usage: &mut UsageEvent) -> Result<Emit, Cor
                     let dir = v.get("cwd").and_then(Value::as_str).unwrap_or("");
                     if !session.is_empty() && !dir.is_empty() && !no_index_hint_fired(session, dir)
                     {
-                        usage.args_summary =
-                            hook_args_tag(&harness_args("no_index_hinted"), "symbol", &symbol);
+                        usage.args_summary = hook_args_demand(
+                            &hook_args_tag(&harness_args("no_index_hinted"), "symbol", &symbol),
+                            hook_demand(&v),
+                        );
                         // The `suppressOutput` guard is the same one the Fire payload carries:
                         // Codex rejects the whole output over the field, and a hint it discards
                         // teaches the user the hook is broken, not that one `cort index` exists.
@@ -1270,14 +1424,17 @@ fn cmd_hook_suggest(args: &[String], usage: &mut UsageEvent) -> Result<Emit, Cor
                             .filter(|_| !session.is_empty());
                         if let Some(found) = found {
                             if !no_evidence_pointer_fired(session, &symbol) {
-                                usage.args_summary = hook_args_tag(
+                                usage.args_summary = hook_args_demand(
                                     &hook_args_tag(
-                                        &harness_args("no_evidence_hinted"),
-                                        "symbol",
-                                        &symbol,
+                                        &hook_args_tag(
+                                            &harness_args("no_evidence_hinted"),
+                                            "symbol",
+                                            &symbol,
+                                        ),
+                                        "why",
+                                        why.as_str(),
                                     ),
-                                    "why",
-                                    why.as_str(),
+                                    hook_demand(&v),
                                 );
                                 // Same guard as the hint and the Fire payload: Codex discards the
                                 // entire output over `suppressOutput`, taking the pointer with it.
@@ -1340,13 +1497,16 @@ fn cmd_hook_suggest(args: &[String], usage: &mut UsageEvent) -> Result<Emit, Cor
     // It fails toward disclosure: an unset cell is treated as behind-head, which over-warns rather
     // than silently dropping the `hit_stale` outcome from a suggestion.
     let stale = observed.get().unwrap_or(IndexState::BehindHead) == IndexState::BehindHead;
-    usage.args_summary = hook_args_tag(
-        &hook_args_kind(
-            &harness_args(if stale { "hit_stale" } else { "hit" }),
-            hit.kind.tag(),
+    usage.args_summary = hook_args_demand(
+        &hook_args_tag(
+            &hook_args_kind(
+                &harness_args(if stale { "hit_stale" } else { "hit" }),
+                hit.kind.tag(),
+            ),
+            "symbol",
+            &hit.symbol,
         ),
-        "symbol",
-        &hit.symbol,
+        hook_demand(&v),
     );
     // Two sentences off one shape gate. The `-A`/`-B`/`-C` arm is not a softened `impact` pitch:
     // an agent asking for surrounding lines is not asking who calls the symbol, and answering the

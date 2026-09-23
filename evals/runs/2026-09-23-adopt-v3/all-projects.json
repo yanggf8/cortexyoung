@@ -1,0 +1,376 @@
+{
+  "adopted_other_symbol": 0,
+  "adopted_same_symbol": 1,
+  "by_project": {
+    "-home-yanggf": {
+      "injections": 0,
+      "searches": 13,
+      "sessions": 21
+    },
+    "-home-yanggf--claude-code-router": {
+      "injections": 0,
+      "searches": 84,
+      "sessions": 20
+    },
+    "-home-yanggf-a-claudecat": {
+      "injections": 0,
+      "searches": 32,
+      "sessions": 9
+    },
+    "-home-yanggf-a-claw-skills": {
+      "injections": 0,
+      "searches": 19,
+      "sessions": 2
+    },
+    "-home-yanggf-a-cortexyoung": {
+      "adopted_same_symbol": 1,
+      "injections": 3,
+      "injections_followed_by_edit": 1,
+      "injections_with_only_pasted_or_bare_prompt": 1,
+      "injections_without_demand_match": 2,
+      "not_adopted": 2,
+      "searches": 193,
+      "sessions": 8
+    },
+    "-home-yanggf-a-ft": {
+      "injections": 1,
+      "injections_without_demand_match": 1,
+      "not_adopted": 1,
+      "searches": 87,
+      "sessions": 3
+    },
+    "-home-yanggf-b-ainews": {
+      "injections": 0,
+      "searches": 10,
+      "sessions": 3
+    },
+    "-home-yanggf-b-finance-engineering": {
+      "injections": 0,
+      "searches": 11,
+      "sessions": 1
+    },
+    "-home-yanggf-b-travel-2026": {
+      "injections": 0,
+      "searches": 31,
+      "sessions": 5
+    },
+    "-home-yanggf-b-typhoonway": {
+      "injections": 0,
+      "searches": 0,
+      "sessions": 1
+    },
+    "-home-yanggf-c-GalaxyWarHero": {
+      "injections": 8,
+      "injections_followed_by_edit": 1,
+      "injections_with_only_pasted_or_bare_prompt": 8,
+      "not_adopted": 8,
+      "searches": 200,
+      "sessions": 3
+    },
+    "-home-yanggf-c-agent-portal-tpm": {
+      "injections": 0,
+      "searches": 250,
+      "sessions": 10
+    },
+    "-home-yanggf-c-agent-portal-web": {
+      "injections": 0,
+      "searches": 592,
+      "sessions": 55
+    },
+    "-tmp": {
+      "injections": 0,
+      "searches": 0,
+      "sessions": 5
+    },
+    "-tmp-claude-1000--home-yanggf-c-agent-portal-tpm-e305047f-17b7-4828-9942-e7b0b1a2b8e9-scratchpad-review-r8": {
+      "injections": 0,
+      "searches": 3,
+      "sessions": 1
+    }
+  },
+  "cross_check_reading": "`injections_recorded` is `hit + hit_stale`: the injections cort itself recorded, from a file the transcript scan never reads. Compare it to `injections` ONLY when `comparable_to_injections` is true -- otherwise the two have different populations and a difference between them means nothing. When they are comparable, a shortfall means a second CORT_CACHE_DIR was in play, which is how the 09-01 baseline was lost. Two limits on the word `independent`: this report reads one cache (`--usage-db`) and cannot discover others, and a row is only written when the hook ran to completion, so a hook killed by the harness timeout is missing from both sides at once rather than from one.",
+  "demand_context": {
+    "ask_injections": 0,
+    "ask_with_editor_action_candidates": 0,
+    "injections_with_editor_action_in_window": 2,
+    "other_instruction_injections": 3,
+    "prompts_without_own_words": 9,
+    "reading": "ask/task are lexical demand signals from the nearest genuine user instruction, not adjudicated truth. A same-window editor action is a candidate that a real task followed the hook; inspect its demand_context and transcript before calling it useful or causal.",
+    "task_injections": 0,
+    "task_with_editor_action_candidates": 0,
+    "without_prompt_context": 0
+  },
+  "excluded_projects": [],
+  "excluded_sessions": 0,
+  "files_unreadable": 0,
+  "follow_calls_window": 5,
+  "injection_rows": [
+    {
+      "at": "2026-09-14T08:47:19Z",
+      "demand_context": {
+        "at": "2026-09-14T08:46:29Z",
+        "class": "other",
+        "instruction": "—impact 對 stale index 本來就照答 ,就是這樣,所以我們這個skill無用,index每次都落後,應該要考量不用index的做法,",
+        "needles": []
+      },
+      "followed_by": null,
+      "impact_later_in_session": false,
+      "paired_by": "toolUseID",
+      "potential_work_followthrough": false,
+      "project": "-home-yanggf-a-cortexyoung",
+      "session": "398dcb9f-821a-45d0-b320-a4f7b6ba7668",
+      "symbol": "args_summary",
+      "triggering_command": "grep -n \"args_summary\" <path> | head -20; echo ---; grep -rn \"killed\" <path> | hea…",
+      "verdict": "not_adopted",
+      "writes_in_window": 0
+    },
+    {
+      "at": "2026-09-10T07:38:13Z",
+      "demand_context": {
+        "at": "2026-09-10T06:41:45Z",
+        "class": "no_own_words",
+        "instruction": "",
+        "needles": []
+      },
+      "followed_by": null,
+      "impact_later_in_session": true,
+      "paired_by": "toolUseID",
+      "potential_work_followthrough": false,
+      "project": "-home-yanggf-a-cortexyoung",
+      "session": "568948a8-739c-441d-a541-b6d0ec785e20",
+      "symbol": "parse_scan_stream",
+      "triggering_command": "grep -rn \"parse_scan_stream\" <path> | head; grep -n \"fn extract_file\" -A 60 <path> | s…",
+      "verdict": "not_adopted",
+      "writes_in_window": 0
+    },
+    {
+      "at": "2026-09-12T16:25:15Z",
+      "demand_context": {
+        "at": "2026-09-12T15:45:36Z",
+        "class": "other",
+        "instruction": "不同意,若是我們能回答的密度過低就沒有機會真的省到token,要改善到可以回不是no evidence,要留更多能改善自己的log, 不能只有no evidence要留下為什麼不能找到的幫助改善證據",
+        "needles": []
+      },
+      "followed_by": "<path> impact --symbol 'NoEvidenceWhy' --depth 1 --coverage -f lean 2>&1 | head -12",
+      "impact_later_in_session": false,
+      "paired_by": "toolUseID",
+      "potential_work_followthrough": true,
+      "project": "-home-yanggf-a-cortexyoung",
+      "session": "a6d42d94-6a15-4518-adca-98bbea652e0a",
+      "symbol": "NoEvidenceWhy",
+      "triggering_command": "grep -rn \"NoEvidenceWhy\" rust/src --include=*.rs | head -5; echo \"---(hook 裁決了上面那筆)---\"; grep -rn \"zzz_demo_only_symbol(\" rust/src --include=*.rs | head -2; sle",
+      "verdict": "adopted_same_symbol",
+      "writes_in_window": 1
+    },
+    {
+      "at": "2026-09-12T19:38:13Z",
+      "demand_context": {
+        "at": "2026-09-12T19:34:23Z",
+        "class": "other",
+        "instruction": "prod 上把 IPIP 測驗做完;請bdcodex幫我們做一個virtual 人格來填",
+        "needles": []
+      },
+      "followed_by": null,
+      "impact_later_in_session": false,
+      "paired_by": "toolUseID",
+      "potential_work_followthrough": false,
+      "project": "-home-yanggf-a-ft",
+      "session": "36bc910d-f4de-47e9-baed-3bf4dd47467f",
+      "symbol": "OceanScores",
+      "triggering_command": "grep -rn 'OceanScores' <path> | head -5; echo \"=== big5 scoring fn ===\"; grep -n 'pub fn' <path>",
+      "verdict": "not_adopted",
+      "writes_in_window": 0
+    },
+    {
+      "at": "2026-09-14T09:48:12Z",
+      "demand_context": {
+        "at": "2026-09-14T09:13:36Z",
+        "class": "no_own_words",
+        "instruction": "",
+        "needles": []
+      },
+      "followed_by": null,
+      "impact_later_in_session": false,
+      "paired_by": "toolUseID",
+      "potential_work_followthrough": true,
+      "project": "-home-yanggf-c-GalaxyWarHero",
+      "session": "d057ba27-caa7-4b63-a68e-23e7b8e9c720",
+      "symbol": "Taps",
+      "triggering_command": "grep -rn \"Taps\" gwh-app/src/ ; echo \"=====\"; grep -n \"PresentEvent\" gwh-rules/src/state.rs | head; echo \"=====\"; grep -n \"Vec<PresentEvent>\" gwh-rules/src/*.rs ",
+      "verdict": "not_adopted",
+      "writes_in_window": 1
+    },
+    {
+      "at": "2026-09-14T15:51:46Z",
+      "demand_context": {
+        "at": "2026-09-14T09:13:36Z",
+        "class": "no_own_words",
+        "instruction": "",
+        "needles": []
+      },
+      "followed_by": null,
+      "impact_later_in_session": false,
+      "paired_by": "toolUseID",
+      "potential_work_followthrough": false,
+      "project": "-home-yanggf-c-GalaxyWarHero",
+      "session": "d057ba27-caa7-4b63-a68e-23e7b8e9c720",
+      "symbol": "classic",
+      "triggering_command": "grep -rn \"classic\" <path> | head -20; echo \"====\"; grep -n \"pub fn\\|100\\|60\\|width\\|height\" <path>",
+      "verdict": "not_adopted",
+      "writes_in_window": 0
+    },
+    {
+      "at": "2026-09-14T15:51:54Z",
+      "demand_context": {
+        "at": "2026-09-14T09:13:36Z",
+        "class": "no_own_words",
+        "instruction": "",
+        "needles": []
+      },
+      "followed_by": null,
+      "impact_later_in_session": false,
+      "paired_by": "toolUseID",
+      "potential_work_followthrough": false,
+      "project": "-home-yanggf-c-GalaxyWarHero",
+      "session": "d057ba27-caa7-4b63-a68e-23e7b8e9c720",
+      "symbol": "NewGameSpec",
+      "triggering_command": "grep -rn \"NewGameSpec\" <path> <path> | head -20",
+      "verdict": "not_adopted",
+      "writes_in_window": 0
+    },
+    {
+      "at": "2026-09-14T15:52:38Z",
+      "demand_context": {
+        "at": "2026-09-14T09:13:36Z",
+        "class": "no_own_words",
+        "instruction": "",
+        "needles": []
+      },
+      "followed_by": null,
+      "impact_later_in_session": false,
+      "paired_by": "toolUseID",
+      "potential_work_followthrough": false,
+      "project": "-home-yanggf-c-GalaxyWarHero",
+      "session": "d057ba27-caa7-4b63-a68e-23e7b8e9c720",
+      "symbol": "choose_production",
+      "triggering_command": "grep -rn \"choose_production\" <path> | head -5; sed -n 1,120p <path>",
+      "verdict": "not_adopted",
+      "writes_in_window": 0
+    },
+    {
+      "at": "2026-09-14T15:53:17Z",
+      "demand_context": {
+        "at": "2026-09-14T09:13:36Z",
+        "class": "no_own_words",
+        "instruction": "",
+        "needles": []
+      },
+      "followed_by": null,
+      "impact_later_in_session": false,
+      "paired_by": "toolUseID",
+      "potential_work_followthrough": false,
+      "project": "-home-yanggf-c-GalaxyWarHero",
+      "session": "d057ba27-caa7-4b63-a68e-23e7b8e9c720",
+      "symbol": "Reject",
+      "triggering_command": "grep -rn \"Reject\" <path> | head -30; echo \"----tools\"; grep -rn \"Reject\" <path> 2>/de…",
+      "verdict": "not_adopted",
+      "writes_in_window": 0
+    },
+    {
+      "at": "2026-09-14T15:53:59Z",
+      "demand_context": {
+        "at": "2026-09-14T09:13:36Z",
+        "class": "no_own_words",
+        "instruction": "",
+        "needles": []
+      },
+      "followed_by": null,
+      "impact_later_in_session": false,
+      "paired_by": "toolUseID",
+      "potential_work_followthrough": false,
+      "project": "-home-yanggf-c-GalaxyWarHero",
+      "session": "d057ba27-caa7-4b63-a68e-23e7b8e9c720",
+      "symbol": "Reject",
+      "triggering_command": "grep -rn \"Reject\" <path> --include=\"*.rs\" | grep -v \"^.*events.rs\" | grep -iv \"record_rejection\\|had_rejection\" | head -30",
+      "verdict": "not_adopted",
+      "writes_in_window": 0
+    },
+    {
+      "at": "2026-09-14T15:54:46Z",
+      "demand_context": {
+        "at": "2026-09-14T09:13:36Z",
+        "class": "no_own_words",
+        "instruction": "",
+        "needles": []
+      },
+      "followed_by": null,
+      "impact_later_in_session": false,
+      "paired_by": "toolUseID",
+      "potential_work_followthrough": false,
+      "project": "-home-yanggf-c-GalaxyWarHero",
+      "session": "d057ba27-caa7-4b63-a68e-23e7b8e9c720",
+      "symbol": "InputEvent::Move",
+      "triggering_command": "grep -rn \"InputEvent::Move\" <path> | head; echo \"----\"; grep -rn \"Interceptor\" <path>",
+      "verdict": "not_adopted",
+      "writes_in_window": 0
+    },
+    {
+      "at": "2026-09-14T09:40:21Z",
+      "demand_context": {
+        "at": "2026-09-14T09:13:36Z",
+        "class": "no_own_words",
+        "instruction": "",
+        "needles": []
+      },
+      "followed_by": null,
+      "impact_later_in_session": false,
+      "paired_by": "toolUseID",
+      "potential_work_followthrough": false,
+      "project": "-home-yanggf-c-GalaxyWarHero",
+      "session": "d057ba27-caa7-4b63-a68e-23e7b8e9c720",
+      "symbol": "CombatResolved",
+      "triggering_command": "grep -rn \"CombatResolved\" <path> --include=\"*.rs\"",
+      "verdict": "not_adopted",
+      "writes_in_window": 0
+    }
+  ],
+  "injections": 12,
+  "lines_unparsed": 6,
+  "machine": {
+    "id": "09a907a06cdea300",
+    "source": "etc-machine-id"
+  },
+  "method": "adopt-mine-v3",
+  "not_adopted": 11,
+  "reading": "`injections` is how often the hook actually put the query in front of the agent, and it is the only stage that means anything on its own: `searches` is the population, and `shape_would_fire` is the offline matcher's opinion of the SHAPE half only -- since 2026-09-04 the shipped rule also asks the index whether it holds a seed or a raw edge naming the symbol, and that half cannot be replayed here because the index state at the time of each historical search is not recoverable. It is therefore an upper bound on what would ship today, and the gap against `injections` now has TWO causes that must not be added together: `no_index` is the opportunity the gate declined (index the project and the hook would help), while `no_evidence` is a correct refusal (the project is indexed and holds nothing about that symbol). Only the first is a missed chance, which will disagree with `injections` wherever a project has no index -- that difference is the opportunity the gate declined, not a bug. Subagent sidechains (`<project>/<session>/subagents/agent-*.jsonl`) are mined as of v2 and attributed to their parent session -- the 09-15 tree had 7 of that week's 12 injections there -- and a sidechain's adoption is paired inside its own file, never against the parent's calls. Adoption is reported per injection and must be adjudicated row by row: `adopted_other_symbol` is usually the agent moving on rather than taking the suggestion, and a session that was auditing the hook adopts it for reasons no user shares -- pass `--exclude` for the project cort is developed in, or the funnel is measuring its own audit. Adoption is only counted inside `follow_calls_window` calls of the intercepted one, and that window now counts every tool action, not only Bash: `writes_in_window` says how many of them were edits, so a `not_adopted` beside zero writes reads as a likely correct dismissal from a read-only survey while one beside writes is the row to scrutinise. `impact_later_in_session` marks a row where the tool was used further on, which is a fact for a reader and not an adoption. Nothing here says the enumeration that followed was correct; `verify-impact` grades an edge. v3 joins the nearest genuine user instruction: `ask`/`task` are lexical signals from the demand screen, `other` is an instruction with no matched needle, and `no_own_words` is a pasted/bare prompt after stripping. The scrubbed excerpt is retained for each linked instruction with own words, including `other`, so missed demand vocabulary can be adjudicated. `demand_context` aggregates these signals, while the `*_with_editor_action_candidates` counts same-window editor activity for manual review. An edit may be unrelated to the suggestion; these fields are not uptake or causal impact. Run once with the product tree included for dogfood and once with it excluded for external use; compare project rows and never merge the two populations. The adoption test reads shell syntax, not shell semantics, and the residue is named rather than hidden: a short-circuited branch (`false && cort impact`) is counted though it never ran, and `sh -c`, `xargs`, `env`, an alias, a command substitution or a prefix redirection are missed though they did. Read `followed_by` on each row; that is what it is printed for.",
+  "records_without_timestamp": 0,
+  "searches": 1525,
+  "sessions_in_window": 147,
+  "shape_would_fire": 70,
+  "sidechain_files_read": 635,
+  "since_as_given": "2026-09-09T00:00:00Z",
+  "tree_read": "<home>/.claude/projects",
+  "usage_db_cross_check": {
+    "comparable_to_injections": false,
+    "injections_recorded": 12,
+    "not_comparable_because": [
+      "7 rows predate harness recording (`unspecified`); they were written when only one harness was wired, but the row does not say so and this report will not assume it",
+      "2829 rows were written by a harness other than `claude-code` and have no counterpart in the transcripts this window read"
+    ],
+    "outcomes": {
+      "hit": 12,
+      "no_evidence": 19,
+      "no_evidence_hinted": 1,
+      "no_index": 8,
+      "no_index_hinted": 29,
+      "no_shape": 16204,
+      "other_harness": 2829,
+      "unspecified": 7
+    }
+  },
+  "usage_db_read": "<home>/.cache/cortex-ng/usage.db",
+  "window": {
+    "since_ms": 1788912000000,
+    "since_utc": "2026-09-09T00:00:00Z"
+  }
+}

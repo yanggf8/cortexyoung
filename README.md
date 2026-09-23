@@ -188,10 +188,19 @@ fingerprint — the tool name plus the payload's top-level key *names* — so th
 that decline on shape can be ordered by demand (issue #3); key names are harness vocabulary,
 never payload content.
 
-What is never recorded: file contents, `recall` queries, `struct` patterns, unresolved free-text
-`context` queries, clap/error messages, absolute home paths. The recorder is best-effort: it
-never retries, never blocks beyond 25 ms, and a logging failure can never change a command's
-output or exit code — which also means the report can only ever under-count.
+The one content exception is a hook suggestion that actually reaches the agent: that row stores
+the final user-authored prompt as an excerpt (up to 240 characters), beside the hook outcome.
+Absolute paths, URLs, common credential prefixes, and the local account name are scrubbed. This
+lets us revisit what the hook caught without relying on transcripts that may later disappear.
+The transcript itself is never copied. If the hook cannot read a supported transcript, the row
+stores a status such as `no_transcript_path` or `transcript_unreadable`, not a guessed need. These
+excerpts stay only in the local `usage.db` and follow its 90-day retention. This is an excerpt-level
+scrubber, not a guarantee that every sensitive phrase is detected.
+
+What is otherwise never recorded: file contents, `recall` queries, `struct` patterns, unresolved
+free-text `context` queries, clap/error messages, absolute home paths. The recorder is best-effort:
+it never retries, never blocks beyond 25 ms for database writes, and a logging failure can never
+change a command's output or exit code — which also means the report can only ever under-count.
 
 Read the report with `cort usage [days]` (1–90, default 30; retention is 90 days, pruned at
 most once per day). Two fields deserve care: `receipt_hit_rate` counts only successful
@@ -919,6 +928,24 @@ stale clause is one copy-pasteable chained command instead of an essay (stale su
 ignored 6/6); the copy leads with the verb condition so definition lookups can dismiss in one
 glance (5/11 ignores). The next `adopt-mine` over a later window is scored against the
 baseline, product-only.
+
+**Measure caught demand and real follow-through, including dogfood.** `adopt-mine` v3 joins each
+injection to the nearest genuine user instruction in that session. `ask` / `task` reuse the
+`demand` screen's lexical classes. Each injection carries a scrubbed excerpt of its instruction
+when it has user-owned words, including `other` cases, so we can find needs the current vocabulary
+misses; `no_own_words` marks pasted or bare prompts, and matched needles appear for ask/task hits.
+It also counts editor actions in the existing five-action window. The
+`task_with_editor_action_candidates` and `ask_with_editor_action_candidates` values are the leads
+to inspect: they say a caller-set-shaped user task and an edit occurred near an injection, not that
+the hook caused or improved the edit. Same-symbol `impact` adoption remains a separate, stricter
+signal. This moves the review from a flat adoption ratio to **need → injection → impact → nearby
+work**, with the row-level evidence needed to reject false positives.
+
+Keep self-use visible. Run the report once with no `--exclude` to see every project, including
+cortexyoung, and read its `by_project` rows as dogfood. Run a second time with the cortexyoung
+transcript directory excluded to measure external use. Do not merge those populations. The prompt
+classifier is a screen, not a verdict; check the included excerpts before treating a candidate as
+a real caller-set need. Triggering commands are path-scrubbed before they enter the report.
 
 The same mining fixed the mirror mistake on the other side: `impact ok=423` in the usage log is
 **not** hook uptake either — 388 of those rows are one day's eval/probe traffic. Counts without

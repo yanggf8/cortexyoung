@@ -31,8 +31,7 @@ const MACHINE_SOURCE_KEY: &str = "MACHINE_ID_SOURCE";
 /// regenerated id would read as a second machine and reintroduce exactly the confusion this exists
 /// to remove.
 ///
-/// Hashed for the same reason `project_id` is: a hostname is a name for a person's laptop, and this
-/// file already refuses to keep query text (`privacy_sentinels_...` in `rust/tests/usage.rs`). The
+/// Hashed for the same reason `project_id` is: a hostname is a name for a person's laptop. The
 /// source is recorded beside it because the sources are not equally trustworthy -- `/etc/machine-id`
 /// is stable across renames, a hostname is not, and `unknown` means the answer is a guess and
 /// should not be leaned on.

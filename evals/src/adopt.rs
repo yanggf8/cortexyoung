@@ -9,12 +9,13 @@
 //! hook relied on a person remembering to wire it, and the mining relied on a person remembering
 //! the timezone. `parse_since` refuses an offset-less timestamp for that reason.
 //!
-//! Two things this module will not do. It does not infer adoption from a command that merely
-//! mentions `cort impact` -- a session writing the mining script is not a session using the tool --
-//! so a command counts only when a shell segment actually *executes* it. And it does not decide
-//! whether an adoption was correct: every injection is emitted as a row carrying its triggering
-//! command and whatever followed, to be adjudicated the way the demand screen's hits are.
+//! It does not infer adoption from a command that merely mentions `cort impact` -- a session
+//! writing the mining script is not a session using the tool -- so a command counts only when a
+//! shell segment actually *executes* it. V3 joins each injection to the nearest genuine user
+//! instruction and nearby editor actions. Those are demand and follow-through candidates, not
+//! causal proof; rows remain inspectable for human adjudication.
 
+use crate::demand;
 use cort::hook::{first_segment, suggests_impact_shape, tokenize};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
@@ -416,9 +417,26 @@ pub fn mine(
     let mut records_without_timestamp = 0usize;
     let mut excluded_sessions = 0usize;
     let (mut adopted_same, mut adopted_other) = (0usize, 0usize);
+    let (
+        mut injected_ask_demand,
+        mut injected_task_demand,
+        mut injected_other_demand,
+        mut injected_without_own_words,
+        mut injected_without_prompt,
+    ) = (0usize, 0usize, 0usize, 0usize, 0usize);
+    let (mut ask_work_candidates, mut task_work_candidates, mut injections_with_writes) =
+        (0usize, 0usize, 0usize);
     let mut sidechain_files_read = 0usize;
 
-    for file in session_files(claude_dir, 6) {
+    let mut files = session_files(claude_dir, 6);
+    // Read the steered session before its sidechains so the parent instruction is available when
+    // a delegated agent receives a hook suggestion. Both files share this session key.
+    files.sort_by_key(|file| {
+        attribute(claude_dir, file)
+            .map(|(project, session, sidechain)| (project, session, sidechain))
+    });
+    let mut session_demands: BTreeMap<(String, String), Vec<(i64, Value)>> = BTreeMap::new();
+    for file in files {
         let Some((project, session, sidechain)) = attribute(claude_dir, &file) else {
             continue;
         };
@@ -439,6 +457,7 @@ pub fn mine(
         }
         let mut calls: Vec<ToolCall> = Vec::new();
         let mut here: Vec<Injection> = Vec::new();
+        let mut user_demands: Vec<(i64, Value)> = Vec::new();
         let (mut s_searches, mut s_fire) = (0usize, 0usize);
         let mut in_window = false;
         for line in text.lines() {
@@ -462,6 +481,30 @@ pub fn mine(
                 }
                 continue;
             };
+            // Retain the nearest genuine user instruction for each session. The excerpt is
+            // redacted by demand::excerpt and emitted only beside a real hook injection. Read
+            // prompts before `since` too: a measured window can begin in the middle of a task.
+            if !sidechain {
+                if let Some((_, text)) = demand::claude_user_line(line) {
+                    let own = demand::own_words(&text);
+                    let (class, needles) = if own.is_empty() {
+                        ("no_own_words", Vec::new())
+                    } else {
+                        demand::classify(&own)
+                            .map(|(class, needles)| (class, needles))
+                            .unwrap_or(("other", Vec::new()))
+                    };
+                    user_demands.push((
+                        ts,
+                        json!({
+                            "at": format_utc(ts),
+                            "class": class,
+                            "needles": needles,
+                            "instruction": demand::excerpt(&own),
+                        }),
+                    ));
+                }
+            }
             if ts < since_ms {
                 continue;
             }
@@ -545,6 +588,12 @@ pub fn mine(
                     .and_then(Value::as_str)
                     .map(str::to_string),
             });
+        }
+        if !sidechain && !user_demands.is_empty() {
+            session_demands
+                .entry((project.clone(), session.clone()))
+                .or_default()
+                .extend(user_demands);
         }
         if !in_window {
             continue;
@@ -633,11 +682,60 @@ pub fn mine(
             let writes_in_window = (start..end)
                 .filter(|i| calls[*i].command.is_empty())
                 .count();
-            bump(
-                per_project.entry(inj.project.clone()).or_default(),
-                verdict,
-                1,
-            );
+            let demand_context = session_demands
+                .get(&(inj.project.clone(), inj.session.clone()))
+                .and_then(|items| {
+                    items
+                        .iter()
+                        .filter(|(ts, _)| *ts <= inj.ts)
+                        .max_by_key(|(ts, _)| *ts)
+                })
+                .map(|(_, value)| value.clone());
+            let demand_class = demand_context
+                .as_ref()
+                .and_then(|v| v.get("class"))
+                .and_then(Value::as_str)
+                .unwrap_or("no_context");
+            let project_counts = per_project.entry(inj.project.clone()).or_default();
+            match demand_class {
+                "ask" => {
+                    injected_ask_demand += 1;
+                    bump(project_counts, "injections_with_ask_demand", 1);
+                    if writes_in_window > 0 {
+                        ask_work_candidates += 1;
+                        bump(project_counts, "ask_demand_with_edit", 1);
+                    }
+                }
+                "task" => {
+                    injected_task_demand += 1;
+                    bump(project_counts, "injections_with_task_demand", 1);
+                    if writes_in_window > 0 {
+                        task_work_candidates += 1;
+                        bump(project_counts, "task_demand_with_edit", 1);
+                    }
+                }
+                "other" => {
+                    injected_other_demand += 1;
+                    bump(project_counts, "injections_without_demand_match", 1);
+                }
+                "no_own_words" => {
+                    injected_without_own_words += 1;
+                    bump(
+                        project_counts,
+                        "injections_with_only_pasted_or_bare_prompt",
+                        1,
+                    );
+                }
+                _ => {
+                    injected_without_prompt += 1;
+                    bump(project_counts, "injections_without_prompt_context", 1);
+                }
+            }
+            if writes_in_window > 0 {
+                injections_with_writes += 1;
+                bump(project_counts, "injections_followed_by_edit", 1);
+            }
+            bump(project_counts, verdict, 1);
             if rows.len() < max_rows {
                 rows.push(json!({
                     "project": inj.project,
@@ -646,10 +744,12 @@ pub fn mine(
                     "symbol": inj.symbol,
                     "verdict": verdict,
                     "paired_by": if paired_exactly { "toolUseID" } else { "nearest_earlier_call" },
-                    "triggering_command": trigger_at.map(|i| truncate(&calls[i].command)),
-                    "followed_by": follow.map(|i| truncate(&calls[i].command)),
+                    "triggering_command": trigger_at.map(|i| command_excerpt(&calls[i].command)),
+                    "followed_by": follow.map(|i| command_excerpt(&calls[i].command)),
                     "impact_later_in_session": later,
                     "writes_in_window": writes_in_window,
+                    "demand_context": demand_context,
+                    "potential_work_followthrough": writes_in_window > 0,
                 }));
             }
         }
@@ -720,7 +820,7 @@ pub fn mine(
     // v2 over v1: v1 skipped subagent sidechains, and the 09-15 tree proved that skips a third of
     // the injections -- the two methods' numbers must not be read as one series.
     json!({
-        "method": "adopt-mine-v2",
+        "method": "adopt-mine-v3",
         "window": {
             "since_ms": since_ms,
             "since_utc": format_utc(since_ms),
@@ -733,6 +833,17 @@ pub fn mine(
         "adopted_same_symbol": adopted_same,
         "adopted_other_symbol": adopted_other,
         "not_adopted": injection_count.saturating_sub(adopted_same + adopted_other),
+        "demand_context": {
+            "ask_injections": injected_ask_demand,
+            "task_injections": injected_task_demand,
+            "other_instruction_injections": injected_other_demand,
+            "prompts_without_own_words": injected_without_own_words,
+            "without_prompt_context": injected_without_prompt,
+            "injections_with_editor_action_in_window": injections_with_writes,
+            "ask_with_editor_action_candidates": ask_work_candidates,
+            "task_with_editor_action_candidates": task_work_candidates,
+            "reading": "ask/task are lexical demand signals from the nearest genuine user instruction, not adjudicated truth. A same-window editor action is a candidate that a real task followed the hook; inspect its demand_context and transcript before calling it useful or causal.",
+        },
         "usage_db_cross_check": cross_check,
         "follow_calls_window": follow_calls,
         "excluded_projects": exclude,
@@ -772,6 +883,16 @@ pub fn mine(
                     `impact_later_in_session` marks a row where the tool was \
                     used further on, which is a fact for a reader and not an adoption. Nothing here \
                     says the enumeration that followed was correct; `verify-impact` grades an edge. \
+                    v3 joins the nearest genuine user instruction: `ask`/`task` are lexical \
+                    signals from the demand screen, `other` is an instruction with no matched \
+                    needle, and `no_own_words` is a pasted/bare prompt after stripping. The scrubbed \
+                    excerpt is retained for each linked instruction with own words, including \
+                    `other`, so missed demand vocabulary can be adjudicated. `demand_context` aggregates \
+                    these signals, while the `*_with_editor_action_candidates` counts same-window \
+                    editor activity for manual review. An edit may be unrelated to the suggestion; \
+                    these fields are not uptake or causal impact. Run once with the product tree \
+                    included for dogfood and once with it excluded for external use; compare project \
+                    rows and never merge the two populations. \
                     The adoption test reads shell syntax, not shell semantics, and the residue is \
                     named rather than hidden: a short-circuited branch (`false && cort impact`) is \
                     counted though it never ran, and `sh -c`, `xargs`, `env`, an alias, a command \
@@ -801,4 +922,10 @@ fn truncate(s: &str) -> String {
     } else {
         cleaned.chars().take(160).collect::<String>() + "…"
     }
+}
+
+/// Commands accompany the demand excerpt so a reviewer can confirm why the hook fired. Keep the
+/// useful command shape while stripping machine paths before a report is saved or shared.
+fn command_excerpt(s: &str) -> String {
+    demand::excerpt(&truncate(s))
 }
