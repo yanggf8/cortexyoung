@@ -769,20 +769,80 @@ fn hook_demand(payload: &Value) -> Value {
         .and_then(Value::as_str)
         .unwrap_or_default();
     let codex = harness.contains("/.codex/");
-    let prompt = tail.lines().rev().find_map(|line| {
+    let user_prompt_of = |line: &str| -> Option<String> {
         let event: Value = serde_json::from_str(line).ok()?;
         if codex {
             codex_user_prompt(&event)
         } else {
             claude_user_prompt(&event)
         }
+    };
+    // Walk the tail newest-first. `find_map` stops at the first typed prompt, which is the one
+    // to use when the tail holds one; when it holds none, the walk has seen every line and
+    // `saw_compaction` then says honestly whether a boundary is the reason.
+    let mut saw_compaction = false;
+    let prompt = tail.lines().rev().find_map(|line| {
+        let compact = serde_json::from_str::<Value>(line)
+            .ok()
+            .and_then(|e| e.get("isCompactSummary").and_then(Value::as_bool));
+        if compact == Some(true) {
+            saw_compaction = true;
+        }
+        user_prompt_of(line)
     });
+    // Compaction washes the original typed prompt out of the bounded tail (adopt-v4 measured 8
+    // such episodes in one week): the newest history-shaped line is the continuation entry --
+    // no `promptSource`, so it is skipped -- and the user's words sit megabytes back, before the
+    // boundary. When the tail says a boundary is present, read back up to three more blocks for
+    // the last typed/queued prompt before it, and mark the capture as having crossed. A block
+    // boundary can clip one line in two, losing it on both sides; at one line per 2 MiB that is
+    // a residue, and it is named here rather than hidden.
+    let mut across = false;
+    let prompt = match prompt {
+        Some(p) => Some(p),
+        None if saw_compaction => {
+            let mut found = None;
+            let mut block_end = start;
+            for _ in 0..3 {
+                if block_end == 0 {
+                    break;
+                }
+                let block_start = block_end.saturating_sub(TAIL_BYTES);
+                if file.seek(SeekFrom::Start(block_start)).is_err() {
+                    break;
+                }
+                let mut limited = (&file).take(block_end - block_start);
+                let mut buf = Vec::with_capacity((block_end - block_start) as usize);
+                if limited.read_to_end(&mut buf).is_err() {
+                    break;
+                }
+                let block = String::from_utf8_lossy(&buf);
+                let hit = block.lines().rev().find_map(user_prompt_of);
+                block_end = block_start;
+                if let Some(p) = hit {
+                    found = Some(p);
+                    break;
+                }
+            }
+            across = found.is_some();
+            found
+        }
+        None => None,
+    };
     let Some(prompt) = prompt else {
-        return json!({"status": "no_user_prompt"});
+        // Here `saw_compaction` can only mean the read-back ran and found nothing before the
+        // boundary; without a boundary the tail's silence was always an honest one.
+        return json!({"status": if saw_compaction {
+            "no_user_prompt_before_compaction"
+        } else {
+            "no_user_prompt"
+        }});
     };
     let excerpt = scrub_hook_prompt(&prompt, MAX_CHARS);
     if excerpt.is_empty() {
         json!({"status": "empty_after_redaction"})
+    } else if across {
+        json!({"status": "captured", "excerpt": excerpt, "across_compaction": true})
     } else {
         json!({"status": "captured", "excerpt": excerpt})
     }

@@ -666,6 +666,70 @@ fn an_actual_claude_hook_suggestion_persists_a_scrubbed_user_need() {
     assert!(row.get("demand").is_none(), "{row}");
 }
 
+/// Compaction washes the original typed prompt out of the bounded tail: the newest thing shaped
+/// like history is the continuation entry (no `promptSource`, `isCompactSummary`), and the real
+/// user words sit megabytes back, before the boundary -- adopt-v4 measured 8 such episodes
+/// (F_BLRLSDate, MailSender, ...), each a `no_user_prompt` that was really a wash. The reader
+/// must cross the boundary, capture what it finds there, and say it crossed.
+#[test]
+fn a_prompt_before_a_compaction_boundary_is_still_captured() {
+    let (_p, cwd, _c, cache) = sandbox();
+    let idx = run_cort(&["index"], &cwd, &cache);
+    if idx.code != 0 {
+        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
+        return;
+    }
+    let transcript = cwd.join(".claude/projects/session.jsonl");
+    fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+    let mut body = String::new();
+    let original = serde_json::json!({
+        "type": "user",
+        "promptSource": "typed",
+        "message": {"content": "the original instruction that names helper callers"}
+    });
+    body.push_str(&original.to_string());
+    body.push('\n');
+    // Enough tool traffic to push the original past the 2 MiB tail the reader reads.
+    let filler = serde_json::json!({
+        "type": "assistant",
+        "message": {"content": [{"type": "text", "text":
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}]}
+    });
+    while body.len() < 3 * 1024 * 1024 {
+        body.push_str(&filler.to_string());
+        body.push('\n');
+    }
+    // The continuation entry, verbatim shape from a real transcript: no promptSource, so the
+    // plain reader skips it and finds nothing typed in the tail.
+    let compact = serde_json::json!({
+        "type": "user",
+        "isCompactSummary": true,
+        "message": {"content": "This session is being continued from a previous conversation \
+             that ran out of context. The summary below covers the earlier portion..."}
+    });
+    body.push_str(&compact.to_string());
+    body.push('\n');
+    fs::write(&transcript, &body).unwrap();
+
+    let r = run_hook_suggest_full(
+        FIRING_SEARCH,
+        Some(transcript.to_str().unwrap()),
+        &[],
+        &cwd,
+        &cache,
+    );
+    assert_eq!(r.code, 0, "stdout={} stderr={}", r.stdout, r.stderr);
+    let row = latest_command_row(&cache.join("usage.db"), "hook-suggest");
+    assert_eq!(
+        row["demand"]["status"], "captured",
+        "crossed or washed? {row}"
+    );
+    assert_eq!(
+        row["demand"]["excerpt"],
+        "the original instruction that names helper callers"
+    );
+    assert_eq!(row["demand"]["across_compaction"], serde_json::json!(true));
+}
 /// Codex rollouts use payload.type=message rather than Claude's top-level type=user. Keep a
 /// separate end-to-end case so support for one harness cannot masquerade as support for both.
 #[test]
