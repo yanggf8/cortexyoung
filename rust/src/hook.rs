@@ -571,6 +571,79 @@ pub fn first_segment(command: &str) -> &str {
     command
 }
 
+/// The first command segment that is itself a search, skipping leading segments that are not
+/// (`cd <dir> && grep …`, `echo ---; grep …`). Boundaries are `;` and `&&` only, never `|` and
+/// never a newline. Not `|`: the second stage of a pipeline is the agent hand-rolling
+/// DECLARATION_KEYWORDS filtering, the `first_segment` rationale, and a producer|filter pipe
+/// (`git log | grep fix`) is not a symbol search. Not a newline: a heredoc body is written, not
+/// executed, and pulling a `grep` out of one would attribute a search nobody ran. When no
+/// segment qualifies, the first segment is returned so the decline path names
+/// `not_a_search_tool` on the same text it always did. Measured motivation: ~1,605 corpus
+/// commands start with a `cd … &&` prefix and reached no verdict at all (adopt-v4, 2026-09-27).
+pub fn leading_search_command(command: &str) -> &str {
+    // Each boundary is (segment_end, separator_len): the segment ends at the separator's first
+    // byte, the next starts just past its last, so a two-byte `&&` consumes both ampersands.
+    let mut bounds: Vec<(usize, usize)> = Vec::new();
+    let mut depth_single = false;
+    let mut depth_double = false;
+    let mut prev_amp = false;
+    for (i, c) in command.char_indices() {
+        match c {
+            '\'' if !depth_double => depth_single = !depth_single,
+            '"' if !depth_single => depth_double = !depth_double,
+            ';' if !depth_single && !depth_double => {
+                bounds.push((i, 1));
+                prev_amp = false;
+            }
+            '&' if !depth_single && !depth_double => {
+                if prev_amp {
+                    bounds.push((i - 1, 2));
+                    prev_amp = false;
+                } else {
+                    prev_amp = true;
+                }
+            }
+            _ => prev_amp = false,
+        }
+    }
+    let mut start = 0;
+    for &(end, sep) in &bounds {
+        let segment = &command[start..end];
+        if segment_starts_with_search_tool(segment) {
+            return segment;
+        }
+        start = end + sep;
+    }
+    let last = &command[start..];
+    if segment_starts_with_search_tool(last) {
+        return last;
+    }
+    &command[..bounds.first().map(|&(e, _)| e).unwrap_or(command.len())]
+}
+
+/// Does this segment's leading command, past `VAR=` assignments and a literal `sudo`, name a
+/// search tool?
+fn segment_starts_with_search_tool(segment: &str) -> bool {
+    let tokens = tokenize(segment);
+    let idx = tool_index(&tokens);
+    tokens
+        .get(idx)
+        .map(|t| is_search_tool(t.rsplit('/').next().unwrap_or(t)))
+        .unwrap_or(false)
+}
+
+/// The token offset of the leading command, past `VAR=value` assignments and a `sudo` prefix --
+/// the prefixes that carry no meaning for "is this a search".
+fn tool_index(tokens: &[String]) -> usize {
+    let mut idx = 0;
+    while idx < tokens.len()
+        && ((tokens[idx].contains('=') && !tokens[idx].starts_with('-')) || tokens[idx] == "sudo")
+    {
+        idx += 1;
+    }
+    idx
+}
+
 /// Does the index answer this search better than the search does?
 ///
 /// Fires only on the narrow shape it can actually beat: one bare symbol, searched in project
@@ -622,13 +695,12 @@ pub struct Search {
 /// A search written as a shell command line -- Claude Code's and Codex's surface, and Kimi's
 /// minority one.
 pub fn search_from_shell(command: &str) -> Option<Search> {
-    let segment = first_segment(command.trim());
+    // Two layers with different jobs: `leading_search_command` picks the command segment (past
+    // `cd X &&`-style prefixes), `first_segment` then drops the pipeline's filter stages (`| head`,
+    // `| grep -v`), which are not targets.
+    let segment = first_segment(leading_search_command(command.trim()));
     let tokens = tokenize(segment);
-    let mut idx = 0;
-    // Skip leading `VAR=value` assignments and a `sudo`-style prefix.
-    while idx < tokens.len() && tokens[idx].contains('=') && !tokens[idx].starts_with('-') {
-        idx += 1;
-    }
+    let mut idx = tool_index(&tokens);
     let tool = tokens.get(idx)?.rsplit('/').next()?.to_string();
     if !is_search_tool(&tool) {
         return None;
@@ -688,12 +760,9 @@ fn is_search_tool(tool: &str) -> bool {
 /// parse is the real residual. Conflating them would score the rule against its own baseline
 /// (18 of the first 21 tagged rows on 2026-09-07 were the baseline).
 pub fn shell_search_decline(command: &str) -> &'static str {
-    let segment = first_segment(command.trim());
+    let segment = first_segment(leading_search_command(command.trim()));
     let tokens = tokenize(segment);
-    let mut idx = 0;
-    while idx < tokens.len() && tokens[idx].contains('=') && !tokens[idx].starts_with('-') {
-        idx += 1;
-    }
+    let idx = tool_index(&tokens);
     match tokens.get(idx).map(|t| t.rsplit('/').next().unwrap_or(t)) {
         Some(tool) if is_search_tool(tool) => "unparseable_command",
         _ => "not_a_search_tool",

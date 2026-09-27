@@ -82,6 +82,57 @@ fn the_shape_of_the_symbol_is_what_decides_not_the_tool() {
 }
 
 #[test]
+fn a_search_behind_a_leading_non_search_segment_still_fires() {
+    // Verbatim from the 2026-09-27 tpm session (adopt-v4 miss #9): ~1,605 commands across the
+    // transcript corpus start with `cd <dir> &&` and never reached the parser at all.
+    let hit = suggests_impact_shape(
+        r#"cd /home/yanggf/c/agent-portal-api && grep -rn "PICK" src/main/java/com/oecgroup/agentportal/ --include="*.java" | head -8"#,
+    )
+    .expect("the cd-prefixed call-site shape must fire");
+    assert_eq!(hit.symbol, "PICK");
+    // The `;` twin of the same shape.
+    assert_eq!(
+        suggests_impact_shape("cd /home/yanggf/a/ft; grep -rn 'rate_limit(' crates/")
+            .unwrap()
+            .symbol,
+        "rate_limit"
+    );
+    // The rule is "leading non-search segment", not "cd prefix".
+    assert_eq!(
+        suggests_impact_shape("cargo build && grep -rn 'rate_limit(' crates/")
+            .unwrap()
+            .symbol,
+        "rate_limit"
+    );
+    assert_eq!(
+        suggests_impact_shape("echo ---; grep -rn 'rate_limit(' crates/")
+            .unwrap()
+            .symbol,
+        "rate_limit"
+    );
+    // `&&` inside quotes is not a boundary.
+    assert_eq!(
+        suggests_impact_shape(r#"cd "a && b" && grep -rn 'rate_limit(' crates/"#)
+            .unwrap()
+            .symbol,
+        "rate_limit"
+    );
+    // Boundaries that must NOT open: `|` is the pipeline, whose stage 2 is the agent's own
+    // declaration filter (the first_segment rationale); a heredoc body is written, not run.
+    assert!(suggests_impact_shape("git log --oneline | grep fix").is_none());
+    assert!(
+        suggests_impact_shape("cat > x.sh <<'EOF'\ngrep -rn 'rate_limit(' crates/\nEOF").is_none()
+    );
+    // The skip the comment always promised: a `sudo` prefix no longer hides the search.
+    assert_eq!(
+        suggests_impact_shape("sudo rg 'rate_limit(' crates/")
+            .unwrap()
+            .symbol,
+        "rate_limit"
+    );
+}
+
+#[test]
 fn the_three_shapes_the_first_probe_run_got_wrong() {
     // 1. A language cort does not index. `~/nullclaw/src/cron.zig` matched on the `src/` marker,
     //    but there is no Zig rule pack, so `impact` has nothing to say about it. Three of the 31.

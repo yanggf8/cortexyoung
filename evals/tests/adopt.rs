@@ -383,6 +383,27 @@ fn a_leading_env_assignment_does_not_hide_a_search() {
     assert_eq!(r["shape_would_fire"], json!(1));
 }
 
+/// The adopt-v4 miss class: a search behind a `cd <dir> &&` prefix. The hook parser scans past
+/// leading non-search segments (rust `leading_search_command`), and this denominator is
+/// delegated to that parser outright, so the whole class re-enters `searches` together.
+#[test]
+fn a_search_behind_a_cd_and_chain_still_counts() {
+    let body = [bash(
+        "2026-09-27T02:00:00.000Z",
+        "toolu_1",
+        r#"cd /home/u/repo && grep -rn "helper(" src --include=*.ts | head -8"#,
+    )]
+    .join("\n");
+    let dir = tree(&[("-home-u-repo", "s1", &body)]);
+    let r = run(dir.path(), "2026-09-27T00:00:00Z");
+    assert_eq!(
+        r["searches"],
+        json!(1),
+        "the hook parses past the cd prefix, so must this: {r:#}"
+    );
+    assert_eq!(r["shape_would_fire"], json!(1));
+}
+
 /// Codex's sixth finding, the false-negative half: `;` starts a new command.
 #[test]
 fn a_command_after_a_semicolon_still_counts_as_run() {

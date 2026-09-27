@@ -16,7 +16,7 @@
 //! causal proof; rows remain inspectable for human adjudication.
 
 use crate::demand;
-use cort::hook::{first_segment, suggests_impact_shape, tokenize};
+use cort::hook::{suggests_impact_shape, tokenize};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -273,26 +273,14 @@ pub fn runs_cort_impact(command: &str) -> Option<Option<String>> {
 
 /// The denominator has to be what the *hook* evaluates, or the funnel divides by the wrong number.
 ///
-/// `suggests_impact` skips leading `VAR=value` assignments and a `sudo`-style prefix before it
-/// looks at the verb; this predicate did not, so `LC_ALL=C rg helper src` was dropped from
-/// `searches` and from `shape_would_fire` while the installed hook fired on it. Same input, two
-/// answers, and the disagreement was invisible because both numbers stayed plausible.
+/// Delegated outright to the product parser. The hand-rolled walk this replaced skipped `VAR=`
+/// prefixes only after they had already cost a wrong denominator once (`LC_ALL=C rg helper src`),
+/// and its `first_segment`-only view was how the entire `cd X && grep …` class silently vanished
+/// from `searches` (adopt-v4, 2026-09-27) -- same input, two answers, invisible because both
+/// numbers stayed plausible. A mirror that re-derives the definition drifts; one that calls the
+/// parser cannot.
 fn is_search(command: &str) -> bool {
-    let tokens = tokenize(first_segment(command.trim()));
-    let mut idx = 0;
-    while idx < tokens.len() && tokens[idx].contains('=') && !tokens[idx].starts_with('-') {
-        idx += 1;
-    }
-    if tokens.get(idx).map(String::as_str) == Some("sudo") {
-        idx += 1;
-    }
-    tokens
-        .get(idx)
-        .map(|t| {
-            let base = t.rsplit('/').next().unwrap_or(t);
-            base == "rg" || base == "grep" || base == "egrep"
-        })
-        .unwrap_or(false)
+    cort::hook::search_from_shell(command).is_some()
 }
 
 /// The symbol the injected line recommends a seed for.
@@ -431,10 +419,7 @@ pub fn mine(
     let mut files = session_files(claude_dir, 6);
     // Read the steered session before its sidechains so the parent instruction is available when
     // a delegated agent receives a hook suggestion. Both files share this session key.
-    files.sort_by_key(|file| {
-        attribute(claude_dir, file)
-            .map(|(project, session, sidechain)| (project, session, sidechain))
-    });
+    files.sort_by_key(|file| attribute(claude_dir, file));
     let mut session_demands: BTreeMap<(String, String), Vec<(i64, Value)>> = BTreeMap::new();
     for file in files {
         let Some((project, session, sidechain)) = attribute(claude_dir, &file) else {
@@ -490,9 +475,7 @@ pub fn mine(
                     let (class, needles) = if own.is_empty() {
                         ("no_own_words", Vec::new())
                     } else {
-                        demand::classify(&own)
-                            .map(|(class, needles)| (class, needles))
-                            .unwrap_or(("other", Vec::new()))
+                        demand::classify(&own).unwrap_or(("other", Vec::new()))
                     };
                     user_demands.push((
                         ts,
