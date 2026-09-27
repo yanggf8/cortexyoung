@@ -1,0 +1,102 @@
+{
+  "adopted_other_symbol": 0,
+  "adopted_same_symbol": 0,
+  "by_project": {
+    "-home-yanggf": {
+      "injections": 0,
+      "searches": 2,
+      "sessions": 5
+    },
+    "-home-yanggf--claude-code-router": {
+      "injections": 0,
+      "searches": 31,
+      "sessions": 4
+    },
+    "-home-yanggf-a-cortexyoung": {
+      "injections": 0,
+      "searches": 13,
+      "sessions": 1
+    },
+    "-home-yanggf-b-travel-2026": {
+      "injections": 0,
+      "searches": 31,
+      "sessions": 6
+    },
+    "-home-yanggf-c-GalaxyWarHero": {
+      "injections": 0,
+      "searches": 44,
+      "sessions": 4
+    },
+    "-home-yanggf-c-agent-portal-tpm": {
+      "injections": 0,
+      "searches": 34,
+      "sessions": 5
+    },
+    "-home-yanggf-c-agent-portal-web": {
+      "injections": 0,
+      "searches": 258,
+      "sessions": 31
+    },
+    "-mnt-c-Windows-System32": {
+      "injections": 0,
+      "searches": 0,
+      "sessions": 1
+    },
+    "-tmp-claude-1000--home-yanggf-c-agent-portal-tpm-e305047f-17b7-4828-9942-e7b0b1a2b8e9-scratchpad": {
+      "injections": 0,
+      "searches": 0,
+      "sessions": 1
+    }
+  },
+  "cross_check_reading": "`injections_recorded` is `hit + hit_stale`: the injections cort itself recorded, from a file the transcript scan never reads. Compare it to `injections` ONLY when `comparable_to_injections` is true -- otherwise the two have different populations and a difference between them means nothing. When they are comparable, a shortfall means a second CORT_CACHE_DIR was in play, which is how the 09-01 baseline was lost. Two limits on the word `independent`: this report reads one cache (`--usage-db`) and cannot discover others, and a row is only written when the hook ran to completion, so a hook killed by the harness timeout is missing from both sides at once rather than from one.",
+  "demand_context": {
+    "ask_injections": 0,
+    "ask_with_editor_action_candidates": 0,
+    "injections_with_editor_action_in_window": 0,
+    "other_instruction_injections": 0,
+    "prompts_without_own_words": 0,
+    "reading": "ask/task are lexical demand signals from the nearest genuine user instruction, not adjudicated truth. A same-window editor action is a candidate that a real task followed the hook; inspect its demand_context and transcript before calling it useful or causal.",
+    "task_injections": 0,
+    "task_with_editor_action_candidates": 0,
+    "without_prompt_context": 0
+  },
+  "excluded_projects": [],
+  "excluded_sessions": 0,
+  "files_unreadable": 0,
+  "follow_calls_window": 5,
+  "injection_rows": [],
+  "injections": 0,
+  "lines_unparsed": 7,
+  "machine": {
+    "id": "09a907a06cdea300",
+    "source": "etc-machine-id"
+  },
+  "method": "adopt-mine-v3",
+  "not_adopted": 0,
+  "reading": "`injections` is how often the hook actually put the query in front of the agent, and it is the only stage that means anything on its own: `searches` is the population, and `shape_would_fire` is the offline matcher's opinion of the SHAPE half only -- since 2026-09-04 the shipped rule also asks the index whether it holds a seed or a raw edge naming the symbol, and that half cannot be replayed here because the index state at the time of each historical search is not recoverable. It is therefore an upper bound on what would ship today, and the gap against `injections` now has TWO causes that must not be added together: `no_index` is the opportunity the gate declined (index the project and the hook would help), while `no_evidence` is a correct refusal (the project is indexed and holds nothing about that symbol). Only the first is a missed chance, which will disagree with `injections` wherever a project has no index -- that difference is the opportunity the gate declined, not a bug. Subagent sidechains (`<project>/<session>/subagents/agent-*.jsonl`) are mined as of v2 and attributed to their parent session -- the 09-15 tree had 7 of that week's 12 injections there -- and a sidechain's adoption is paired inside its own file, never against the parent's calls. Adoption is reported per injection and must be adjudicated row by row: `adopted_other_symbol` is usually the agent moving on rather than taking the suggestion, and a session that was auditing the hook adopts it for reasons no user shares -- pass `--exclude` for the project cort is developed in, or the funnel is measuring its own audit. Adoption is only counted inside `follow_calls_window` calls of the intercepted one, and that window now counts every tool action, not only Bash: `writes_in_window` says how many of them were edits, so a `not_adopted` beside zero writes reads as a likely correct dismissal from a read-only survey while one beside writes is the row to scrutinise. `impact_later_in_session` marks a row where the tool was used further on, which is a fact for a reader and not an adoption. Nothing here says the enumeration that followed was correct; `verify-impact` grades an edge. v3 joins the nearest genuine user instruction: `ask`/`task` are lexical signals from the demand screen, `other` is an instruction with no matched needle, and `no_own_words` is a pasted/bare prompt after stripping. The scrubbed excerpt is retained for each linked instruction with own words, including `other`, so missed demand vocabulary can be adjudicated. `demand_context` aggregates these signals, while the `*_with_editor_action_candidates` counts same-window editor activity for manual review. An edit may be unrelated to the suggestion; these fields are not uptake or causal impact. Run once with the product tree included for dogfood and once with it excluded for external use; compare project rows and never merge the two populations. The adoption test reads shell syntax, not shell semantics, and the residue is named rather than hidden: a short-circuited branch (`false && cort impact`) is counted though it never ran, and `sh -c`, `xargs`, `env`, an alias, a command substitution or a prefix redirection are missed though they did. Read `followed_by` on each row; that is what it is printed for.",
+  "records_without_timestamp": 0,
+  "searches": 413,
+  "sessions_in_window": 58,
+  "shape_would_fire": 28,
+  "sidechain_files_read": 542,
+  "since_as_given": "2026-09-23T00:00:00Z",
+  "tree_read": "<home>/.claude/projects",
+  "usage_db_cross_check": {
+    "comparable_to_injections": false,
+    "injections_recorded": 0,
+    "not_comparable_because": [
+      "297 rows were written by a harness other than `claude-code` and have no counterpart in the transcripts this window read"
+    ],
+    "outcomes": {
+      "no_index": 12,
+      "no_index_hinted": 14,
+      "no_shape": 4689,
+      "other_harness": 297
+    }
+  },
+  "usage_db_read": "<home>/.cache/cortex-ng/usage.db",
+  "window": {
+    "since_ms": 1790121600000,
+    "since_utc": "2026-09-23T00:00:00Z"
+  }
+}
