@@ -80,7 +80,8 @@ Usage: ./install.sh [OPTIONS]
 
 With no mode flag on a machine that already has a cort_bin manifest entry,
 install.sh declines (exit 3) and changes nothing: full installs do not own
-upgrades — run cort-upgrade. --force overrides the decline.
+upgrades — run this tree's rust/target/release/cort_upgrade. --force
+overrides the decline.
 EOF
       exit 0 ;;
     *) echo "Unknown option: $1 (see --help)" >&2; exit 2 ;;
@@ -1276,7 +1277,7 @@ case "$MODE" in
     # (no --keep-mine here) and skip index migration and the verdict. Decline with a distinct
     # exit code and change nothing; --force (explicit insistence) still proceeds.
     if [ "$FORCE" -eq 0 ] && manifest_has "cort_bin"; then
-      echo "existing installation — run cort-upgrade" >&2
+      echo "existing installation — run this tree's rust/target/release/cort_upgrade" >&2
       exit 3
     fi
     do_install ;;

@@ -385,10 +385,10 @@ if [ "$DEFER_EC" -eq 3 ]; then
 else
   fail "bare install declined with exit $DEFER_EC, want 3"
 fi
-if grep -q "cort-upgrade" /tmp/smoke_defer.log; then
-  pass "the decline names cort-upgrade"
+if grep -q "rust/target/release/cort_upgrade" /tmp/smoke_defer.log; then
+  pass "the decline names the tree-built cort_upgrade path"
 else
-  fail "the decline does not name cort-upgrade"
+  fail "the decline does not name the tree-built cort_upgrade path"
 fi
 if [ "$(sha256sum "$MANIFEST_D/manifest" 2>/dev/null | cut -d' ' -f1 || echo NONE)" = "$MANIFEST_SHA_BEFORE" ]; then
   pass "a declined install changes nothing"
