@@ -1242,6 +1242,15 @@ fn cmd_hook_refresh(args: &[String], usage: &mut UsageEvent) -> Result<Emit, Cor
 ///   `no_seed_resolved` would spend the agent's turn to tell it nothing, and would make the
 ///   suggestion itself untrustworthy the first time it happened.
 fn cmd_hook_suggest(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError> {
+    // 2026-09-27 direction call: measured across three windows the announcement was never once
+    // adopted in the wild (0/9 external, then a window with zero suggestions anyone acted on),
+    // and agents correlate on their own -- this hook's job is to be a demand instrument. It
+    // still judges every search, still stamps every outcome, symbol and demand excerpt into
+    // usage.db; it just no longer speaks. `CORT_SUGGEST=1` restores the announcement for the
+    // copy-locking tests and for any future re-enable that arrives with its own measured
+    // reason. The gates above the silence (no_index_hint_fired, the name-pointer cap, the Kimi
+    // yield) keep running so the recorded outcome vocabulary does not change under the mining.
+    let speaks = std::env::var("CORT_SUGGEST").is_ok_and(|v| v == "1");
     let declared = HookSuggestArgs::try_parse_from(args.iter())
         .ok()
         .and_then(|a| a.harness)
@@ -1381,6 +1390,9 @@ fn cmd_hook_suggest(args: &[String], usage: &mut UsageEvent) -> Result<Emit, Cor
                         // The `suppressOutput` guard is the same one the Fire payload carries:
                         // Codex rejects the whole output over the field, and a hint it discards
                         // teaches the user the hook is broken, not that one `cort index` exists.
+                        if !speaks {
+                            return quiet();
+                        }
                         let mut payload = json!({
                             "hookSpecificOutput": {
                                 "hookEventName": "PreToolUse",
@@ -1437,6 +1449,9 @@ fn cmd_hook_suggest(args: &[String], usage: &mut UsageEvent) -> Result<Emit, Cor
                                 );
                                 // Same guard as the hint and the Fire payload: Codex discards the
                                 // entire output over `suppressOutput`, taking the pointer with it.
+                                if !speaks {
+                                    return quiet();
+                                }
                                 let mut payload = json!({
                                     "hookSpecificOutput": {
                                         "hookEventName": "PreToolUse",
@@ -1553,6 +1568,9 @@ read the whole body. Keep the grep if what you want is the hit list itself.",
     // carrying the same sentence as the reason, and yield on every later attempt. The reason text
     // says so explicitly, because a stop the agent cannot get past is a worse failure than any
     // false positive this rule can produce.
+    if !speaks {
+        return quiet();
+    }
     if harness == "kimi-code" {
         let session = v
             .get("session_id")

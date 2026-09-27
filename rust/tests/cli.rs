@@ -466,6 +466,8 @@ fn run_hook_suggest_full(
         .args(extra)
         .current_dir(cwd)
         .env("CORT_CACHE_DIR", cache)
+        // The announcement is opt-in since 2026-09-27; the copy-locking tests run with it on.
+        .env("CORT_SUGGEST", "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -490,6 +492,67 @@ fn run_hook_suggest_full(
 
 /// A call-site search that the rule fires on, so the only variable under test is the gate.
 const FIRING_SEARCH: &str = "grep -rn 'helper(' src --include=*.ts";
+
+/// The same spawn as `run_hook_suggest_full` WITHOUT `CORT_SUGGEST=1` -- the default, muted
+/// world the 2026-09-27 direction shipped: the hook records every verdict, symbol and demand
+/// excerpt, and says nothing to the agent.
+fn run_hook_suggest_muted(command: &str, cwd: &Path, cache: &Path) -> Run {
+    use std::io::Write;
+    use std::process::Stdio;
+    let mut child = Command::new(cort_bin())
+        .arg("hook-suggest")
+        .current_dir(cwd)
+        .env("CORT_CACHE_DIR", cache)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn cort hook-suggest");
+    let payload = serde_json::json!({
+        "tool_name": "Bash",
+        "tool_input": { "command": command },
+    });
+    let body = serde_json::to_vec(&payload).unwrap();
+    child.stdin.take().unwrap().write_all(&body).unwrap();
+    let out = child.wait_with_output().expect("wait cort hook-suggest");
+    Run {
+        code: out.status.code().unwrap_or(1),
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+    }
+}
+
+/// 2026-09-27 direction call: the hook is a demand instrument first. Measured across three
+/// windows the announcement was never once adopted in the wild (0/9, then 0 suggestions at all),
+/// and the agent correlates on its own; the caller-set service cort still renders on demand is
+/// not this hook's job to advertise. By default the hook therefore RECORDS AND SPEAKS TO NO ONE
+/// -- no suggestion, no `cort index` hint, no name pointer, no Kimi deny. `CORT_SUGGEST=1`
+/// (set by the helpers above) restores the announcement for the copy-locking tests and for any
+/// future re-enable that comes with its own measured reason.
+#[test]
+fn by_default_the_hook_records_but_speaks_to_no_one() {
+    let (_p, cwd, _c, cache) = sandbox();
+    let idx = run_cort(&["index"], &cwd, &cache);
+    if idx.code != 0 {
+        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
+        return;
+    }
+    let r = run_hook_suggest_muted(FIRING_SEARCH, &cwd, &cache);
+    assert_eq!(r.code, 0, "stdout={} stderr={}", r.stdout, r.stderr);
+    assert_eq!(
+        payload(&r),
+        serde_json::json!({}),
+        "muted means no suggestion reaches the agent: {} {}",
+        r.stdout,
+        r.stderr
+    );
+    let row = latest_command_row(&cache.join("usage.db"), "hook-suggest");
+    assert_eq!(row["hook"], "hit", "the verdict is still recorded: {row}");
+    assert_eq!(
+        row["symbol"], "helper",
+        "the symbol is still recorded: {row}"
+    );
+}
 
 #[test]
 fn the_hook_stays_quiet_when_the_db_exists_but_holds_no_index() {
@@ -1430,6 +1493,8 @@ fn run_hook_suggest_payload(
         .args(extra)
         .current_dir(cwd)
         .env("CORT_CACHE_DIR", cache)
+        // The announcement is opt-in since 2026-09-27; the copy-locking tests run with it on.
+        .env("CORT_SUGGEST", "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
