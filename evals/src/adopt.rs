@@ -33,10 +33,20 @@ const INJECTION_MARKER: &str = "cort impact --symbol '";
 /// is silently wrong half the time, and the wrong one produced a full-zero funnel that read exactly
 /// like a broken hook.
 pub fn parse_since(raw: &str) -> Result<i64, String> {
+    parse_instant("--since", raw)
+}
+
+/// The window's closing edge, parsed by the same rules as `--since`: a window you cannot state on
+/// both ends is a window you cannot diff against the next one.
+pub fn parse_until(raw: &str) -> Result<i64, String> {
+    parse_instant("--until", raw)
+}
+
+fn parse_instant(flag: &str, raw: &str) -> Result<i64, String> {
     let s = raw.trim();
     let refuse = |why: &str| -> String {
         format!(
-            "--since {raw}: {why}\nit must carry an explicit UTC offset, e.g. \
+            "{flag} {raw}: {why}\nit must carry an explicit UTC offset, e.g. \
              2026-09-02T09:24:00+08:00 or 2026-09-02T01:24:00Z -- transcript timestamps are UTC \
              and a local wall-clock time without an offset silently reads as the wrong instant"
         )
@@ -389,6 +399,7 @@ pub const DEFAULT_FOLLOW_CALLS: usize = 5;
 pub fn mine(
     claude_dir: &Path,
     since_ms: i64,
+    until_ms: Option<i64>,
     usage_db: Option<&Path>,
     max_rows: usize,
     follow_calls: usize,
@@ -490,6 +501,14 @@ pub fn mine(
             }
             if ts < since_ms {
                 continue;
+            }
+            if let Some(until) = until_ms {
+                if ts > until {
+                    // Past the closing edge: skip the event, and leave `in_window` alone -- it
+                    // records that the SESSION intersects the window, which an earlier event
+                    // may already have established.
+                    continue;
+                }
             }
             in_window = true;
             if let Some(items) = v
@@ -753,7 +772,7 @@ pub fn mine(
     // raise `injections_recorded` while every guard still read green.
     const MINED_HARNESS: &str = "claude-code";
     let cross_check = usage_db.map(|path| {
-        match cort::usage::hook_outcomes_at(path, since_ms, Some(MINED_HARNESS)) {
+        match cort::usage::hook_outcomes_at(path, since_ms, until_ms, Some(MINED_HARNESS)) {
             Ok(counts) => {
                 let get = |k: &str| counts.get(k).and_then(Value::as_i64).unwrap_or(0);
                 // `hit_stale` is an injection too. Comparing against `hit` alone would make an
@@ -807,6 +826,8 @@ pub fn mine(
         "window": {
             "since_ms": since_ms,
             "since_utc": format_utc(since_ms),
+            "until_ms": until_ms,
+            "until_utc": until_ms.map(format_utc),
         },
         "sessions_in_window": sessions,
         "sidechain_files_read": sidechain_files_read,

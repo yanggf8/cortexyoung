@@ -397,9 +397,10 @@ pub fn query_usage_at(path: &Path, days: i64, now_ms: i64) -> Result<Value, Cort
 pub fn hook_outcomes_at(
     path: &Path,
     since_ms: i64,
+    until_ms: Option<i64>,
     want_harness: Option<&str>,
 ) -> Result<Map<String, Value>, CortError> {
-    outcomes_of_hook_at(path, "hook-suggest", since_ms, want_harness)
+    outcomes_of_hook_at(path, "hook-suggest", since_ms, until_ms, want_harness)
 }
 
 /// The same split for either hook event, told apart by the command that wrote the row.
@@ -413,6 +414,7 @@ pub fn outcomes_of_hook_at(
     path: &Path,
     command: &str,
     since_ms: i64,
+    until_ms: Option<i64>,
     want_harness: Option<&str>,
 ) -> Result<Map<String, Value>, CortError> {
     let mut out: Map<String, Value> = Map::new();
@@ -423,14 +425,18 @@ pub fn outcomes_of_hook_at(
     ensure_schema_readable(&conn)?;
     let mut counts: std::collections::BTreeMap<String, i64> = std::collections::BTreeMap::new();
     {
+        // `until_ms` closes the window on the reading side because the count is aggregated here:
+        // a caller filtering afterwards would be filtering a sum it can no longer split.
         let mut stmt = conn
             .prepare(
                 "SELECT args_summary FROM command_log
-                  WHERE command = ?2 AND ts >= ?1",
+                  WHERE command = ?2 AND ts >= ?1 AND (?3 IS NULL OR ts <= ?3)",
             )
             .map_err(map_query_err)?;
         let rows = stmt
-            .query_map(params![since_ms, command], |r| r.get::<_, String>(0))
+            .query_map(params![since_ms, command, until_ms], |r| {
+                r.get::<_, String>(0)
+            })
             .map_err(map_query_err)?;
         for row in rows {
             let raw = row.map_err(map_query_err)?;

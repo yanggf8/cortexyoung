@@ -95,6 +95,7 @@ const HOOK_PROBE_FLAGS: &[&str] = &[
 ];
 const ADOPT_MINE_FLAGS: &[&str] = &[
     "--since",
+    "--until",
     "--claude-dir",
     "--usage-db",
     "--rows",
@@ -112,7 +113,7 @@ const DEMAND_FLAGS: &[&str] = &[
 ];
 
 const USAGE_TOP: &str =
-    "usage: cort-evals <run-agents|verify-impact|summarize|demand|recall-exp|hook-probe|adopt-mine|gate-audit> [options]";
+    "usage: cort-evals <run-agents|verify-impact|summarize|demand|recall-exp|hook-probe|adopt-mine|gate-audit|run-diff> [options]";
 const USAGE_RUN_AGENTS: &str = "usage: cort-evals run-agents --venue DIR [--tasks FILE] [--only ID[,ID...]] [--arms a,b] [--max-turns N] [--config-dir DIR] [--cache-dir DIR] [--jail-dir DIR] [--jail] [--out DIR] [--concurrency N] [--delay-secs N]";
 const USAGE_VERIFY_IMPACT: &str =
     "usage: cort-evals verify-impact --repo DIR --symbols A,B [--depth N]";
@@ -120,7 +121,7 @@ const USAGE_SUMMARIZE: &str = "usage: cort-evals summarize [--strict] rows.json 
 const USAGE_DEMAND: &str = "usage: cort-evals demand [--claude-dir DIR] [--codex-dir DIR] [--exclude a,b,c] [--out FILE] [--show]";
 const USAGE_HOOK_PROBE: &str =
     "usage: cort-evals hook-probe [--claude-dir DIR] [--codex-dir DIR] [--kimi-dir DIR] [--examples N] [--decline TAG]  (replays the routing rule over transcripts already on disk; --decline narrows passed_over_examples to one decline tag, the census always covers every tag; no model calls)";
-const USAGE_ADOPT_MINE: &str = "usage: cort-evals adopt-mine --since RFC3339 [--claude-dir DIR] [--usage-db FILE] [--rows N] [--follow-calls N] [--exclude proj,proj] [--out FILE]  (the docs/2026-08-31-recall-wip.md §6 funnel, including subagent sidechains; reads transcripts already on disk, no model calls)";
+const USAGE_ADOPT_MINE: &str = "usage: cort-evals adopt-mine --since RFC3339 [--until RFC3339] [--claude-dir DIR] [--usage-db FILE] [--rows N] [--follow-calls N] [--exclude proj,proj] [--out FILE]  (the docs/2026-08-31-recall-wip.md §6 funnel, including subagent sidechains; reads transcripts already on disk, no model calls)";
 const USAGE_RECALL_EXP: &str =
     "usage: cort-evals recall-exp --venue DIR [--top N]  (text-side counterfactual; no cort index needed)";
 const USAGE_GATE_AUDIT: &str = "usage: cort-evals gate-audit --venue DIR [--examples N] [--report FILE]  (index-side census of the receiver gate's refusals; needs an index, never builds one; --report writes the markdown table beside the stamped JSON stdout)";
@@ -890,6 +891,21 @@ fn demand_main(argv: &[String]) -> Result<(), String> {
 /// wall-clock guess -- and a wrong window here does not fail, it reports zeros that read exactly
 /// like a hook that never fired. That is not hypothetical: it is what the first hand-run of this
 /// protocol produced on 2026-09-02.
+const USAGE_RUN_DIFF: &str = "usage: cort-evals run-diff OLD.json NEW.json  (compare two adopt-mine reports: scalar and per-project deltas, demand-context counts, and the calibre breaks -- known instants where the measuring instrument itself changed between the two windows; refuses reports from different machines)";
+
+fn run_diff_main(argv: &[String]) -> Result<(), String> {
+    if argv.len() != 2 {
+        return Err(USAGE_RUN_DIFF.to_string());
+    }
+    let read = |path: &str| -> Result<Value, String> {
+        let body = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
+        serde_json::from_str(&body).map_err(|e| format!("{path}: not an adopt-mine report: {e}"))
+    };
+    let report = cort_evals::diff::diff(&read(&argv[0])?, &read(&argv[1])?)?;
+    println!("{}", serde_json::to_string_pretty(&report).unwrap());
+    Ok(())
+}
+
 fn adopt_mine_main(argv: &[String]) -> Result<(), String> {
     guard_options(argv, ADOPT_MINE_FLAGS, USAGE_ADOPT_MINE)?;
     let home = std::env::var("HOME").unwrap_or_default();
@@ -900,6 +916,14 @@ fn adopt_mine_main(argv: &[String]) -> Result<(), String> {
         ));
     }
     let since_ms = cort_evals::adopt::parse_since(&since_raw)?;
+    // The closing edge is optional but singular in purpose: a window pinned on both ends is the
+    // only window a later `run-diff` can compare without re-deriving the boundary from memory.
+    let until_raw = at(argv, "--until", "");
+    let until_ms = if until_raw.is_empty() {
+        None
+    } else {
+        Some(cort_evals::adopt::parse_until(&until_raw)?)
+    };
     let rows: usize = at(argv, "--rows", "200")
         .parse()
         .map_err(|_| "--rows must be a number".to_string())?;
@@ -935,6 +959,7 @@ fn adopt_mine_main(argv: &[String]) -> Result<(), String> {
     let mut report = cort_evals::adopt::mine(
         dir,
         since_ms,
+        until_ms,
         usage_path.exists().then_some(usage_path),
         rows,
         follow_calls,
@@ -959,6 +984,9 @@ fn adopt_mine_main(argv: &[String]) -> Result<(), String> {
             },
         );
         map.insert("since_as_given".to_string(), json!(since_raw));
+        if !until_raw.is_empty() {
+            map.insert("until_as_given".to_string(), json!(until_raw));
+        }
     }
     // The report's numbers get set beside other machines' numbers -- that reconciliation is the
     // whole point of the funnel -- so it carries the same stamp `print_report` attaches, on both
@@ -987,6 +1015,7 @@ fn main() {
         Some("gate-audit") => gate_audit_main(&argv[1..]),
         Some("hook-probe") => hook_probe_main(&argv[1..]),
         Some("adopt-mine") => adopt_mine_main(&argv[1..]),
+        Some("run-diff") => run_diff_main(&argv[1..]),
         other => {
             // Asking how to use the tool is never an error and never a run — including at the top
             // level, which is where F-17 stopped. `wants_help` already answered true for a bare

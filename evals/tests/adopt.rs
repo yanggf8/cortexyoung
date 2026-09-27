@@ -1,6 +1,8 @@
 //! The §6 funnel, gated on the mistakes that actually happened when it was run by hand.
 
-use cort_evals::adopt::{format_utc, mine, parse_since, runs_cort_impact, DEFAULT_FOLLOW_CALLS};
+use cort_evals::adopt::{
+    format_utc, mine, parse_since, parse_until, runs_cort_impact, DEFAULT_FOLLOW_CALLS,
+};
 use serde_json::{json, Value};
 use std::path::Path as StdPath;
 use std::path::Path;
@@ -82,6 +84,7 @@ fn run(dir: &Path, since: &str) -> Value {
     mine(
         dir,
         parse_since(since).expect("fixture window parses"),
+        None,
         None,
         50,
         DEFAULT_FOLLOW_CALLS,
@@ -404,6 +407,37 @@ fn a_search_behind_a_cd_and_chain_still_counts() {
     assert_eq!(r["shape_would_fire"], json!(1));
 }
 
+/// `--until` closes the window on the transcript side: an event past the edge is not counted,
+/// and the window the report records states both ends, because a window you can only name on
+/// one end is a window the next run cannot diff against.
+#[test]
+fn until_closes_the_window_on_both_sides_of_the_report() {
+    let body = [
+        bash("2026-09-02T01:00:00.000Z", "toolu_1", "rg 'helper(' src"),
+        bash("2026-09-03T01:00:00.000Z", "toolu_2", "rg 'helper(' src"),
+    ]
+    .join("\n");
+    let dir = tree(&[("-home-u-repo", "s1", &body)]);
+    let r = mine(
+        dir.path(),
+        parse_since("2026-09-02T00:00:00Z").unwrap(),
+        Some(parse_until("2026-09-02T12:00:00Z").unwrap()),
+        None,
+        50,
+        DEFAULT_FOLLOW_CALLS,
+        &[],
+    );
+    assert_eq!(
+        r["searches"],
+        json!(1),
+        "the later event is past the edge: {r:#}"
+    );
+    assert_eq!(r["window"]["until_utc"], json!("2026-09-02T12:00:00Z"));
+    // No edge is the default: the report says null rather than inventing one.
+    let open = run(dir.path(), "2026-09-02T00:00:00Z");
+    assert_eq!(open["window"]["until_ms"], json!(null));
+}
+
 /// Codex's sixth finding, the false-negative half: `;` starts a new command.
 #[test]
 fn a_command_after_a_semicolon_still_counts_as_run() {
@@ -465,6 +499,7 @@ fn an_excluded_project_is_dropped_and_named() {
     let kept = mine(
         dir.path(),
         parse_since("2026-09-02T00:00:00Z").unwrap(),
+        None,
         None,
         50,
         DEFAULT_FOLLOW_CALLS,
@@ -587,6 +622,7 @@ fn a_filtered_funnel_refuses_to_compare_itself_to_an_unfiltered_db() {
         dir.path(),
         parse_since("2026-09-02T00:00:00Z").unwrap(),
         None,
+        None,
         50,
         DEFAULT_FOLLOW_CALLS,
         &["-home-u-audit".to_string()],
@@ -599,6 +635,7 @@ fn a_filtered_funnel_refuses_to_compare_itself_to_an_unfiltered_db() {
     let filtered = mine(
         dir.path(),
         parse_since("2026-09-02T00:00:00Z").unwrap(),
+        None,
         Some(&db),
         50,
         DEFAULT_FOLLOW_CALLS,
@@ -620,6 +657,7 @@ fn a_filtered_funnel_refuses_to_compare_itself_to_an_unfiltered_db() {
     let whole = mine(
         dir.path(),
         parse_since("2026-09-02T00:00:00Z").unwrap(),
+        None,
         Some(&db),
         50,
         DEFAULT_FOLLOW_CALLS,
@@ -650,6 +688,7 @@ fn a_stale_injection_still_counts_as_an_injection() {
     let r = mine(
         dir.path(),
         parse_since("2026-09-02T00:00:00Z").unwrap(),
+        None,
         Some(&path),
         50,
         DEFAULT_FOLLOW_CALLS,
@@ -669,6 +708,7 @@ fn legacy_rows_block_the_comparison_instead_of_skewing_it() {
     let r = mine(
         dir.path(),
         parse_since("2026-09-02T00:00:00Z").unwrap(),
+        None,
         Some(&path),
         50,
         DEFAULT_FOLLOW_CALLS,
@@ -781,6 +821,7 @@ fn another_harnesss_rows_block_the_comparison_instead_of_inflating_it() {
     let r = mine(
         dir.path(),
         parse_since("2026-09-02T00:00:00Z").unwrap(),
+        None,
         Some(&path),
         50,
         DEFAULT_FOLLOW_CALLS,
@@ -814,6 +855,7 @@ fn a_harnessless_row_is_not_credited_to_the_mined_harness() {
     let r = mine(
         dir.path(),
         parse_since("2026-09-02T00:00:00Z").unwrap(),
+        None,
         Some(&path),
         50,
         DEFAULT_FOLLOW_CALLS,
@@ -908,6 +950,7 @@ fn excluding_a_project_drops_its_sidechains_and_counts_one_session_not_one_per_f
     let r = mine(
         dir.path(),
         parse_since("2026-09-02T00:00:00Z").unwrap(),
+        None,
         None,
         50,
         DEFAULT_FOLLOW_CALLS,

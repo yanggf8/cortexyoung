@@ -757,12 +757,12 @@ fn the_usage_row_records_which_outcome_the_hook_reached() {
 
     // No index yet: the rule matches, the gate declines.
     run_hook_suggest(FIRING_SEARCH, &cwd, &cache);
-    let counts = cort::usage::hook_outcomes_at(&usage_db, 0, None).expect("read usage db");
+    let counts = cort::usage::hook_outcomes_at(&usage_db, 0, None, None).expect("read usage db");
     assert_eq!(counts.get("no_index").and_then(Value::as_i64), Some(1));
 
     // A command the rule has nothing to say about is a different silence.
     run_hook_suggest("cargo test --workspace", &cwd, &cache);
-    let counts = cort::usage::hook_outcomes_at(&usage_db, 0, None).expect("read usage db");
+    let counts = cort::usage::hook_outcomes_at(&usage_db, 0, None, None).expect("read usage db");
     assert_eq!(counts.get("no_shape").and_then(Value::as_i64), Some(1));
     assert_eq!(counts.get("no_index").and_then(Value::as_i64), Some(1));
 
@@ -772,7 +772,7 @@ fn the_usage_row_records_which_outcome_the_hook_reached() {
         return;
     }
     run_hook_suggest(FIRING_SEARCH, &cwd, &cache);
-    let counts = cort::usage::hook_outcomes_at(&usage_db, 0, None).expect("read usage db");
+    let counts = cort::usage::hook_outcomes_at(&usage_db, 0, None, None).expect("read usage db");
     assert_eq!(
         counts.get("hit").and_then(Value::as_i64),
         Some(1),
@@ -783,7 +783,8 @@ fn the_usage_row_records_which_outcome_the_hook_reached() {
 
     // The window is honoured, so a mining run cannot pick up rows from before the hook was wired.
     let future = cort::usage::now_ms() + 60_000;
-    let later = cort::usage::hook_outcomes_at(&usage_db, future, None).expect("read usage db");
+    let later =
+        cort::usage::hook_outcomes_at(&usage_db, future, None, None).expect("read usage db");
     assert!(
         later.is_empty(),
         "nothing was recorded after now: {later:?}"
@@ -1097,8 +1098,8 @@ fn a_stale_index_is_disclosed_in_the_line_the_agent_reads() {
     assert!(ctx.contains("cort impact --symbol 'helper'"), "got: {ctx}");
 
     // And the two are countable apart from the db alone.
-    let counts =
-        cort::usage::hook_outcomes_at(&cache.join("usage.db"), 0, None).expect("read usage db");
+    let counts = cort::usage::hook_outcomes_at(&cache.join("usage.db"), 0, None, None)
+        .expect("read usage db");
     assert_eq!(
         counts.get("hit").and_then(Value::as_i64),
         Some(1),
@@ -1220,7 +1221,7 @@ fn a_usage_row_records_which_harness_fired_the_hook() {
     }
     let usage_db = cache.join("usage.db");
     run_hook_suggest_with(FIRING_SEARCH, &["--harness", "claude-code"], &cwd, &cache);
-    let mine = cort::usage::hook_outcomes_at(&usage_db, 0, Some("claude-code")).unwrap();
+    let mine = cort::usage::hook_outcomes_at(&usage_db, 0, None, Some("claude-code")).unwrap();
     assert!(
         mine.get("hit").and_then(|v| v.as_i64()).unwrap_or(0)
             + mine.get("hit_stale").and_then(|v| v.as_i64()).unwrap_or(0)
@@ -1230,7 +1231,7 @@ fn a_usage_row_records_which_harness_fired_the_hook() {
 
     // A fire from somewhere else is visible, but never as this harness's injection.
     run_hook_suggest_with(FIRING_SEARCH, &["--harness", "grok"], &cwd, &cache);
-    let mine = cort::usage::hook_outcomes_at(&usage_db, 0, Some("claude-code")).unwrap();
+    let mine = cort::usage::hook_outcomes_at(&usage_db, 0, None, Some("claude-code")).unwrap();
     assert_eq!(
         mine.get("other_harness").and_then(|v| v.as_i64()),
         Some(1),
@@ -1240,7 +1241,7 @@ fn a_usage_row_records_which_harness_fired_the_hook() {
     // And a row from before the field existed is `unspecified`, not attributed to whichever
     // harness happened to be wired first.
     run_hook_suggest_with(FIRING_SEARCH, &[], &cwd, &cache);
-    let mine = cort::usage::hook_outcomes_at(&usage_db, 0, Some("claude-code")).unwrap();
+    let mine = cort::usage::hook_outcomes_at(&usage_db, 0, None, Some("claude-code")).unwrap();
     assert_eq!(
         mine.get("unspecified").and_then(|v| v.as_i64()),
         Some(1),
@@ -1248,7 +1249,7 @@ fn a_usage_row_records_which_harness_fired_the_hook() {
     );
 
     // With no filter the outcomes are reported as they are, so `cort usage` is unaffected.
-    let all = cort::usage::hook_outcomes_at(&usage_db, 0, None).unwrap();
+    let all = cort::usage::hook_outcomes_at(&usage_db, 0, None, None).unwrap();
     assert!(
         all.get("other_harness").is_none(),
         "unfiltered read split by harness: {all:?}"
@@ -1278,13 +1279,13 @@ fn the_harness_is_taken_from_the_payload_not_from_the_flag_alone() {
         &cwd,
         &cache,
     );
-    let as_claude = cort::usage::hook_outcomes_at(&usage_db, 0, Some("claude-code")).unwrap();
+    let as_claude = cort::usage::hook_outcomes_at(&usage_db, 0, None, Some("claude-code")).unwrap();
     assert_eq!(
         as_claude.get("other_harness").and_then(|v| v.as_i64()),
         Some(1),
         "a Grok fire was credited to claude-code: {as_claude:?}"
     );
-    let as_grok = cort::usage::hook_outcomes_at(&usage_db, 0, Some("grok")).unwrap();
+    let as_grok = cort::usage::hook_outcomes_at(&usage_db, 0, None, Some("grok")).unwrap();
     assert_eq!(
         as_grok.get("hit").and_then(|v| v.as_i64()).unwrap_or(0)
             + as_grok
@@ -1304,7 +1305,7 @@ fn the_harness_is_taken_from_the_payload_not_from_the_flag_alone() {
         &cwd,
         &cache,
     );
-    let as_claude = cort::usage::hook_outcomes_at(&usage_db, 0, Some("claude-code")).unwrap();
+    let as_claude = cort::usage::hook_outcomes_at(&usage_db, 0, None, Some("claude-code")).unwrap();
     assert_eq!(
         as_claude.get("hit").and_then(|v| v.as_i64()).unwrap_or(0)
             + as_claude
@@ -1887,8 +1888,10 @@ fn a_refresh_row_says_which_harness_wrote_it_and_is_never_summed_with_the_sugges
     }
     let usage_db = cache.join("usage.db");
     let refresh = |h: Option<&str>| match h {
-        Some(h) => cort::usage::outcomes_of_hook_at(&usage_db, "hook-refresh", 0, Some(h)).unwrap(),
-        None => cort::usage::outcomes_of_hook_at(&usage_db, "hook-refresh", 0, None).unwrap(),
+        Some(h) => {
+            cort::usage::outcomes_of_hook_at(&usage_db, "hook-refresh", 0, None, Some(h)).unwrap()
+        }
+        None => cort::usage::outcomes_of_hook_at(&usage_db, "hook-refresh", 0, None, None).unwrap(),
     };
 
     let r = run_hook_refresh_with(
@@ -1955,7 +1958,7 @@ fn a_refresh_row_says_which_harness_wrote_it_and_is_never_summed_with_the_sugges
     );
 
     // The two events are never summed: the suggest funnel saw none of these four rows.
-    let suggest = cort::usage::hook_outcomes_at(&usage_db, 0, None).unwrap();
+    let suggest = cort::usage::hook_outcomes_at(&usage_db, 0, None, None).unwrap();
     assert!(
         suggest.values().filter_map(Value::as_i64).sum::<i64>() == 0,
         "refresh rows leaked into the suggestion funnel: {suggest:?}"
@@ -2087,7 +2090,8 @@ fn a_model_breakdown_never_splits_the_harness_total() {
     fire(Some("glm-5.3"));
     fire(Some("glm-5.3"));
     fire(None); // the harness named no model
-    let total_before = cort::usage::hook_outcomes_at(&usage_db, 0, Some("claude-code")).unwrap();
+    let total_before =
+        cort::usage::hook_outcomes_at(&usage_db, 0, None, Some("claude-code")).unwrap();
     let fired: i64 = total_before.values().filter_map(Value::as_i64).sum();
     assert_eq!(
         fired, 4,
@@ -2113,7 +2117,8 @@ fn a_model_breakdown_never_splits_the_harness_total() {
     );
 
     // Adding the lens changed nothing about the primary number.
-    let total_after = cort::usage::hook_outcomes_at(&usage_db, 0, Some("claude-code")).unwrap();
+    let total_after =
+        cort::usage::hook_outcomes_at(&usage_db, 0, None, Some("claude-code")).unwrap();
     assert_eq!(total_before, total_after);
 
     // A different harness's rows are not in this harness's breakdown.
@@ -2251,8 +2256,8 @@ fn the_hook_is_silent_when_the_index_holds_nothing_about_the_symbol() {
     // The silence has to be attributed, not merely observed. Both silences print `{}`, so without
     // this a one-token slip wiring NoEvidence to "no_index" would leave every test green while the
     // measurement this change exists to produce never gained a row.
-    let counts =
-        cort::usage::hook_outcomes_at(&cache.join("usage.db"), 0, None).expect("read usage db");
+    let counts = cort::usage::hook_outcomes_at(&cache.join("usage.db"), 0, None, None)
+        .expect("read usage db");
     assert_eq!(
         counts.get("no_evidence").and_then(Value::as_i64),
         Some(1),
@@ -2346,7 +2351,7 @@ fn git_in_fixture(root: &Path) {
 }
 
 fn refresh_outcomes(cache: &Path) -> serde_json::Map<String, Value> {
-    cort::usage::outcomes_of_hook_at(&cache.join("usage.db"), "hook-refresh", 0, None)
+    cort::usage::outcomes_of_hook_at(&cache.join("usage.db"), "hook-refresh", 0, None, None)
         .expect("read usage db")
 }
 

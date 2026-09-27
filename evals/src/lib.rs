@@ -7,6 +7,7 @@
 pub mod adopt;
 pub mod arms;
 pub mod demand;
+pub mod diff;
 pub mod gate_audit;
 pub mod grade;
 pub mod hook;
