@@ -10,6 +10,10 @@
 //!                            [--show] [--out FILE]
 //!   cort-evals adopt-mine    --since RFC3339 [--claude-dir DIR] [--usage-db FILE]
 //!                            [--rows N] [--follow-calls N] [--exclude p,q] [--out FILE]
+//!   cort-evals cost-audit    --since UTC --until UTC [--claude-dir DIR] [--out FILE]
+//!   cort-evals cost-collect  [--day YYYY-MM-DD] [--claude-dir DIR]
+//!                            [--out-dir DIR] [--force]
+//!   cort-evals cost-trial    --file PAIRS.json
 
 use cort_evals::arms::{self, build_args, build_env, build_row, make_jail, AGENT_ARMS};
 use cort_evals::grade::{load_tasks, Task};
@@ -103,6 +107,9 @@ const ADOPT_MINE_FLAGS: &[&str] = &[
     "--exclude",
     "--out",
 ];
+const COST_AUDIT_FLAGS: &[&str] = &["--since", "--until", "--claude-dir", "--out"];
+const COST_COLLECT_FLAGS: &[&str] = &["--day", "--claude-dir", "--out-dir", "--force"];
+const COST_TRIAL_FLAGS: &[&str] = &["--file"];
 const SUMMARIZE_FLAGS: &[&str] = &["--strict"];
 const DEMAND_FLAGS: &[&str] = &[
     "--claude-dir",
@@ -113,7 +120,7 @@ const DEMAND_FLAGS: &[&str] = &[
 ];
 
 const USAGE_TOP: &str =
-    "usage: cort-evals <run-agents|verify-impact|summarize|demand|recall-exp|hook-probe|adopt-mine|gate-audit|run-diff> [options]";
+    "usage: cort-evals <run-agents|verify-impact|summarize|demand|recall-exp|hook-probe|adopt-mine|cost-audit|cost-collect|cost-trial|gate-audit|run-diff> [options]";
 const USAGE_RUN_AGENTS: &str = "usage: cort-evals run-agents --venue DIR [--tasks FILE] [--only ID[,ID...]] [--arms a,b] [--max-turns N] [--config-dir DIR] [--cache-dir DIR] [--jail-dir DIR] [--jail] [--out DIR] [--concurrency N] [--delay-secs N]";
 const USAGE_VERIFY_IMPACT: &str =
     "usage: cort-evals verify-impact --repo DIR --symbols A,B [--depth N]";
@@ -122,6 +129,9 @@ const USAGE_DEMAND: &str = "usage: cort-evals demand [--claude-dir DIR] [--codex
 const USAGE_HOOK_PROBE: &str =
     "usage: cort-evals hook-probe [--claude-dir DIR] [--codex-dir DIR] [--kimi-dir DIR] [--examples N] [--decline TAG]  (replays the routing rule over transcripts already on disk; --decline narrows passed_over_examples to one decline tag, the census always covers every tag; no model calls)";
 const USAGE_ADOPT_MINE: &str = "usage: cort-evals adopt-mine --since RFC3339 [--until RFC3339] [--claude-dir DIR] [--usage-db FILE] [--rows N] [--follow-calls N] [--exclude proj,proj] [--out FILE]  (the docs/2026-08-31-recall-wip.md §6 funnel, including subagent sidechains; reads transcripts already on disk, no model calls)";
+const USAGE_COST_AUDIT: &str = "usage: cort-evals cost-audit --since YYYY-MM-DDTHH:MM:SSZ --until YYYY-MM-DDTHH:MM:SSZ [--claude-dir DIR] [--out FILE]  (read-only Claude Code cost census; no model calls)";
+const USAGE_COST_COLLECT: &str = "usage: cort-evals cost-collect [--day YYYY-MM-DD] [--claude-dir DIR] [--out-dir DIR] [--force]  (persist daily aggregates before transcript retention deletes them; default last seven complete UTC days, skipping existing files; no model calls)";
+const USAGE_COST_TRIAL: &str = "usage: cort-evals cost-trial --file PAIRS.json  (summarize one paired, full-task hypothesis; no model calls)";
 const USAGE_RECALL_EXP: &str =
     "usage: cort-evals recall-exp --venue DIR [--top N]  (text-side counterfactual; no cort index needed)";
 const USAGE_GATE_AUDIT: &str = "usage: cort-evals gate-audit --venue DIR [--examples N] [--report FILE]  (index-side census of the receiver gate's refusals; needs an index, never builds one; --report writes the markdown table beside the stamped JSON stdout)";
@@ -1004,6 +1014,136 @@ fn adopt_mine_main(argv: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+fn cost_audit_main(argv: &[String]) -> Result<(), String> {
+    guard_options(argv, COST_AUDIT_FLAGS, USAGE_COST_AUDIT)?;
+    let since = at(argv, "--since", "");
+    let until = at(argv, "--until", "");
+    for bound in [&since, &until] {
+        if !bound.ends_with('Z') || cort_evals::adopt::parse_since(bound).is_err() {
+            return Err(USAGE_COST_AUDIT.to_string());
+        }
+    }
+    if since >= until {
+        return Err("--since must precede --until".to_string());
+    }
+    let home = std::env::var("HOME").unwrap_or_default();
+    let dir = at(argv, "--claude-dir", &format!("{home}/.claude/projects"));
+    if !Path::new(&dir).is_dir() {
+        return Err(format!("{dir} is not a directory"));
+    }
+    let mut report = cort_evals::cost_audit::audit(Path::new(&dir), &since, &until);
+    stamp_machine(&mut report);
+    let rendered = serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?;
+    let out = at(argv, "--out", "");
+    if !out.is_empty() {
+        std::fs::write(&out, format!("{rendered}\n")).map_err(|e| format!("{out}: {e}"))?;
+    }
+    println!("{rendered}");
+    Ok(())
+}
+
+fn cost_collect_day(raw: &str, now_ms: i64) -> Result<(String, String), String> {
+    const DAY_MS: i64 = 86_400_000;
+    let day = if raw.is_empty() {
+        cort_evals::adopt::format_utc(now_ms.div_euclid(DAY_MS) * DAY_MS - DAY_MS)[..10].to_string()
+    } else {
+        raw.to_string()
+    };
+    let since = format!("{day}T00:00:00Z");
+    let ms = cort_evals::adopt::parse_since(&since)
+        .map_err(|_| format!("invalid --day {day}: expected a UTC YYYY-MM-DD date"))?;
+    if day.len() != 10 || cort_evals::adopt::format_utc(ms) != since {
+        return Err(format!(
+            "invalid --day {day}: expected a UTC YYYY-MM-DD date"
+        ));
+    }
+    if ms + DAY_MS > now_ms.div_euclid(DAY_MS) * DAY_MS {
+        return Err(format!("--day {day} is not a complete UTC day yet"));
+    }
+    Ok((since, cort_evals::adopt::format_utc(ms + DAY_MS)))
+}
+
+fn cost_collect_main(argv: &[String]) -> Result<(), String> {
+    guard_options(argv, COST_COLLECT_FLAGS, USAGE_COST_COLLECT)?;
+    let home = std::env::var("HOME").map_err(|_| "HOME is unset".to_string())?;
+    let now_ms = cort::usage::now_ms();
+    let requested_day = at(argv, "--day", "");
+    let days = if requested_day.is_empty() {
+        (0..7)
+            .map(|offset| {
+                let day_ms = now_ms - offset * 86_400_000;
+                cost_collect_day("", day_ms)
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    } else {
+        vec![cost_collect_day(&requested_day, now_ms)?]
+    };
+    let claude_dir = at(argv, "--claude-dir", &format!("{home}/.claude/projects"));
+    if !Path::new(&claude_dir).is_dir() {
+        return Err(format!("{claude_dir} is not a directory"));
+    }
+    let default_dir = std::env::var("XDG_DATA_HOME")
+        .map(|dir| format!("{dir}/cort-evals/claude-cost"))
+        .unwrap_or_else(|_| format!("{home}/.local/share/cort-evals/claude-cost"));
+    let out_dir = at(argv, "--out-dir", &default_dir);
+    for (since, until) in days {
+        let day = &since[..10];
+        let out = Path::new(&out_dir).join(format!("{day}.json"));
+        if out.exists() && !has(argv, "--force") {
+            print_report(&json!({"status":"already_collected","day":day,"path":out}));
+            continue;
+        }
+        let mut report = cort_evals::cost_audit::audit(Path::new(&claude_dir), &since, &until);
+        stamp_machine(&mut report);
+        if let Some(obj) = report.as_object_mut() {
+            obj.insert(
+                "collection".to_string(),
+                json!({"scope":"one_complete_utc_day"}),
+            );
+        }
+        std::fs::create_dir_all(&out_dir).map_err(|e| format!("{out_dir}: {e}"))?;
+        let temporary = out.with_extension(format!("json.tmp.{}", std::process::id()));
+        let rendered = serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?;
+        std::fs::write(&temporary, format!("{rendered}\n"))
+            .map_err(|e| format!("{}: {e}", temporary.display()))?;
+        std::fs::rename(&temporary, &out).map_err(|e| format!("{}: {e}", out.display()))?;
+        print_report(&json!({"status":"collected","day":day,"path":out}));
+    }
+    Ok(())
+}
+
+fn cost_trial_main(argv: &[String]) -> Result<(), String> {
+    guard_options(argv, COST_TRIAL_FLAGS, USAGE_COST_TRIAL)?;
+    let file = at(argv, "--file", "");
+    if file.is_empty() {
+        return Err(USAGE_COST_TRIAL.to_string());
+    }
+    let body = std::fs::read_to_string(&file).map_err(|e| format!("{file}: {e}"))?;
+    let doc: Value = serde_json::from_str(&body).map_err(|e| format!("{file}: {e}"))?;
+    let report = cort_evals::cost_trial::summarize(&doc)?;
+    print_report(&report);
+    Ok(())
+}
+
+#[cfg(test)]
+mod cost_collection_window {
+    use super::*;
+
+    #[test]
+    fn default_is_yesterday_utc_and_today_is_refused() {
+        let now = cort_evals::adopt::parse_since("2026-10-18T12:00:00Z").unwrap();
+        assert_eq!(
+            cost_collect_day("", now).unwrap(),
+            (
+                "2026-10-17T00:00:00Z".to_string(),
+                "2026-10-18T00:00:00Z".to_string()
+            )
+        );
+        assert!(cost_collect_day("2026-10-18", now).is_err());
+        assert!(cost_collect_day("2026-02-30", now).is_err());
+    }
+}
+
 fn main() {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let result = match argv.first().map(String::as_str) {
@@ -1015,6 +1155,9 @@ fn main() {
         Some("gate-audit") => gate_audit_main(&argv[1..]),
         Some("hook-probe") => hook_probe_main(&argv[1..]),
         Some("adopt-mine") => adopt_mine_main(&argv[1..]),
+        Some("cost-audit") => cost_audit_main(&argv[1..]),
+        Some("cost-collect") => cost_collect_main(&argv[1..]),
+        Some("cost-trial") => cost_trial_main(&argv[1..]),
         Some("run-diff") => run_diff_main(&argv[1..]),
         other => {
             // Asking how to use the tool is never an error and never a run — including at the top
@@ -1031,6 +1174,9 @@ fn main() {
                 println!("  {USAGE_RECALL_EXP}");
                 println!("  {USAGE_GATE_AUDIT}");
                 println!("  {USAGE_ADOPT_MINE}");
+                println!("  {USAGE_COST_AUDIT}");
+                println!("  {USAGE_COST_COLLECT}");
+                println!("  {USAGE_COST_TRIAL}");
                 return;
             }
             eprintln!("{USAGE_TOP}\n(got {:?})", other.unwrap_or(""));
@@ -1294,6 +1440,9 @@ mod whitelist_coverage {
                         .chain(GATE_AUDIT_FLAGS.iter())
                         .chain(HOOK_PROBE_FLAGS.iter())
                         .chain(ADOPT_MINE_FLAGS.iter())
+                        .chain(COST_AUDIT_FLAGS.iter())
+                        .chain(COST_COLLECT_FLAGS.iter())
+                        .chain(COST_TRIAL_FLAGS.iter())
                         .any(|f| *f == name.as_str());
                     if !known {
                         orphans.push(format!("{name} (src/main.rs:{})", n + 1));

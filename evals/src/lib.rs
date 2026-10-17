@@ -6,6 +6,8 @@
 
 pub mod adopt;
 pub mod arms;
+pub mod cost_audit;
+pub mod cost_trial;
 pub mod demand;
 pub mod diff;
 pub mod gate_audit;

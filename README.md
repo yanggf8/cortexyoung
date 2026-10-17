@@ -71,6 +71,18 @@ and `evals/runs/2026-08-30-graph{,-sample2}/`.
 The cheapest supported case is a Rust symbol slice: `cort context <symbol> --content full
 -f lean` measures 27k → 89 tokens (`docs/2026-08-28-real-session-cost.md` §1.3).
 
+**Current Claude Code cost screen (2026-10-18).** A fresh 30-day local transcript census found
+39.03 million estimated tool-result tokens and 14.77 billion provider-reported cache-read tokens.
+The 11 most expensive transcript files by model usage carried 65.5% of summed model tokens; the
+11 largest tool-output files carried 19.4% of estimated tool-result tokens. These are different
+sets, and a transcript file can span several user instructions. This does **not** establish that
+shorter tool output, `cort`, or any other intervention lowers whole-task Claude Code cost. The
+[census and method](evals/runs/2026-10-18-claude-cost/README.md) identify long-session/context
+cost as the first mechanism to test. `cort-evals cost-collect` now saves daily local aggregates;
+[two separate paired trials](evals/cost-trials/README.md) are prepared for a bounded-context
+handoff and compact tool output. Both have zero measured pairs so far, and neither has a savings
+result.
+
 **What keeps it true over time.** Every invocation appends one local-only row to
 `usage.db` (see the `Local usage recording` section above), and every hook fire records
 the outcome it reached; `cort-evals` replays the same `judge` over real transcripts

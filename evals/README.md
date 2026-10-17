@@ -1,5 +1,16 @@
 # Agent eval harness
 
+## Claude Code token-cost work (2026-10-18)
+
+The fresh observational census is in [runs/2026-10-18-claude-cost](runs/2026-10-18-claude-cost/README.md).
+Run `cort-evals cost-audit --since <UTC timestamp> --until <UTC timestamp>` for a read-only
+window report. `cort-evals cost-collect` saves privacy-safe aggregates for the last seven complete
+UTC days, skipping days already saved; the optional user timer is in [systemd](systemd/).
+
+The separate handoff and compact-output trial protocol and empty result files are in
+[cost-trials](cost-trials/README.md). `cort-evals cost-trial --file <pairs.json>` validates and
+summarizes measured pairs. These commands do not run a Claude Code trial or establish savings.
+
 ## Protocol
 
 - Same model, same task set, one full trace per arm.

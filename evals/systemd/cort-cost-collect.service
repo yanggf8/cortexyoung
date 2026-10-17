@@ -1,0 +1,7 @@
+[Unit]
+Description=Collect recent local Claude Code token-cost aggregates
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/cort-evals cost-collect
+TimeoutStartSec=15min

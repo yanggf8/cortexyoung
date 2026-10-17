@@ -34,6 +34,16 @@
 量到最便宜的支援情境是 Rust symbol slice:`cort context <symbol> --content full -f lean`
 測得 **27k → 89 tokens**(`docs/2026-08-28-real-session-cost.md` §1.3)。
 
+**較新的 Claude Code 成本觀測(2026-10-18):** 重新統計本機 30 天 transcript，估計工具回傳
+共 3,903 萬 tokens；模型回報的 cache-read 共 147.7 億 tokens。依模型用量排序最貴的
+11 份 transcript 佔模型 token 總數的 65.5%；依工具輸出排序最大的 11 份佔工具回傳估計
+token 的 19.4%。兩組不一定是同一批檔案，一份 transcript 也可能包含多個使用者任務。
+這些數字**不能證明**縮短工具輸出、使用 `cort` 或任何方法已降低 Claude Code 的整個任務
+成本。完整方法與結果見[新普查](../evals/runs/2026-10-18-claude-cost/README.md)。
+`cort-evals cost-collect` 已開始保存每日本機彙總；[兩個分開的配對試驗](../evals/cost-trials/README.md)
+將驗證「限量交接後開新 session」與「縮短工具輸出」。目前兩組都是 0 筆配對，尚無省 token
+結果。
+
 **這份便宜怎麼長期維持:** 每次呼叫都會在本機 `usage.db` 追加一列(見英文版
 「Local usage recording」),每次 hook fire 也都記錄它達到的結果;`cort-evals` 用同一個
 `judge` 重播真實 transcript(`hook-probe`)、數「關聯走訪真的被需要幾次」(`demand`)、

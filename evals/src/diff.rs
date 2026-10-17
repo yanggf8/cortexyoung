@@ -136,11 +136,11 @@ pub fn diff(old: &Value, new: &Value) -> Result<Value, String> {
     let breaks: Vec<Value> = KNOWN_BREAKS
         .iter()
         .filter_map(|(at, why)| {
-            let where_at = if *at > old_since && old_until.map_or(true, |u| *at <= u) {
+            let where_at = if *at > old_since && old_until.is_none_or(|u| *at <= u) {
                 Some("inside_old_window")
-            } else if *at > new_since && new_until.map_or(true, |u| *at <= u) {
+            } else if *at > new_since && new_until.is_none_or(|u| *at <= u) {
                 Some("inside_new_window")
-            } else if old_until.map_or(true, |u| *at > u) && *at < new_since {
+            } else if old_until.is_none_or(|u| *at > u) && *at < new_since {
                 Some("between_windows")
             } else {
                 None

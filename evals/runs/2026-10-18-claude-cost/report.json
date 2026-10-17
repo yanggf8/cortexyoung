@@ -1,0 +1,684 @@
+{
+  "assistant_snapshots": 139623,
+  "bash_leading_commands": {
+    "awk": {
+      "estimated_result_tokens": 147826,
+      "result_bytes": 562068,
+      "results": 238
+    },
+    "bash": {
+      "estimated_result_tokens": 91419,
+      "result_bytes": 348587,
+      "results": 105
+    },
+    "cargo": {
+      "estimated_result_tokens": 55096,
+      "result_bytes": 218647,
+      "results": 344
+    },
+    "cat": {
+      "estimated_result_tokens": 1455128,
+      "result_bytes": 5463689,
+      "results": 2428
+    },
+    "claudecat": {
+      "estimated_result_tokens": 205,
+      "result_bytes": 709,
+      "results": 2
+    },
+    "cort": {
+      "estimated_result_tokens": 3450,
+      "result_bytes": 13778,
+      "results": 16
+    },
+    "cp": {
+      "estimated_result_tokens": 13944,
+      "result_bytes": 53007,
+      "results": 125
+    },
+    "curl": {
+      "estimated_result_tokens": 71569,
+      "result_bytes": 274751,
+      "results": 376
+    },
+    "docker": {
+      "estimated_result_tokens": 4791,
+      "result_bytes": 18597,
+      "results": 38
+    },
+    "echo": {
+      "estimated_result_tokens": 159238,
+      "result_bytes": 605662,
+      "results": 672
+    },
+    "find": {
+      "estimated_result_tokens": 241125,
+      "result_bytes": 952914,
+      "results": 647
+    },
+    "git": {
+      "estimated_result_tokens": 2310595,
+      "result_bytes": 8729509,
+      "results": 3592
+    },
+    "grep": {
+      "estimated_result_tokens": 4537857,
+      "result_bytes": 17359176,
+      "results": 11338
+    },
+    "head": {
+      "estimated_result_tokens": 179996,
+      "result_bytes": 654411,
+      "results": 222
+    },
+    "jq": {
+      "estimated_result_tokens": 47,
+      "result_bytes": 184,
+      "results": 3
+    },
+    "ls": {
+      "estimated_result_tokens": 570566,
+      "result_bytes": 2219598,
+      "results": 1729
+    },
+    "make": {
+      "estimated_result_tokens": 869,
+      "result_bytes": 3462,
+      "results": 13
+    },
+    "mkdir": {
+      "estimated_result_tokens": 26319,
+      "result_bytes": 102887,
+      "results": 156
+    },
+    "mv": {
+      "estimated_result_tokens": 4145,
+      "result_bytes": 15628,
+      "results": 25
+    },
+    "node": {
+      "estimated_result_tokens": 539420,
+      "result_bytes": 1975636,
+      "results": 1934
+    },
+    "npm": {
+      "estimated_result_tokens": 64138,
+      "result_bytes": 249403,
+      "results": 421
+    },
+    "other": {
+      "estimated_result_tokens": 5003543,
+      "result_bytes": 18900814,
+      "results": 14042
+    },
+    "printf": {
+      "estimated_result_tokens": 4171,
+      "result_bytes": 15148,
+      "results": 66
+    },
+    "python": {
+      "estimated_result_tokens": 825,
+      "result_bytes": 3292,
+      "results": 3
+    },
+    "python3": {
+      "estimated_result_tokens": 665979,
+      "result_bytes": 2518963,
+      "results": 3223
+    },
+    "rg": {
+      "estimated_result_tokens": 313696,
+      "result_bytes": 1210938,
+      "results": 772
+    },
+    "rm": {
+      "estimated_result_tokens": 28684,
+      "result_bytes": 108117,
+      "results": 167
+    },
+    "sed": {
+      "estimated_result_tokens": 5169725,
+      "result_bytes": 19504731,
+      "results": 6365
+    },
+    "sh": {
+      "estimated_result_tokens": 982,
+      "result_bytes": 3837,
+      "results": 19
+    },
+    "tail": {
+      "estimated_result_tokens": 349602,
+      "result_bytes": 1259703,
+      "results": 667
+    },
+    "touch": {
+      "estimated_result_tokens": 745,
+      "result_bytes": 2973,
+      "results": 3
+    },
+    "wc": {
+      "estimated_result_tokens": 172933,
+      "result_bytes": 650321,
+      "results": 344
+    },
+    "zsh": {
+      "estimated_result_tokens": 549,
+      "result_bytes": 2168,
+      "results": 9
+    }
+  },
+  "estimated_tool_result_tokens": 39033805,
+  "files_read": 1109,
+  "files_unreadable": 0,
+  "lines_unparsed": 1,
+  "machine": {
+    "id": "09a907a06cdea300",
+    "source": "etc-machine-id"
+  },
+  "messages_without_usage": 18,
+  "model_usage": {
+    "cache_creation_input_tokens": 157837590,
+    "cache_read_input_tokens": 14771942985,
+    "input_tokens": 109964039,
+    "output_tokens": 40023423
+  },
+  "reading": "Descriptive local Claude Code census. Assistant usage is deduplicated by message id within each transcript file; result payloads by tool-use id. Session-file distribution is per JSONL file, including subagent sidechains, not per user task. Tool-result tokens are an ASCII/4 + non-ASCII*1 estimate, not provider billing tokens. Model usage is provider-reported, but sums include repeated context across turns. Bash leading command is a whitelisted first word after an optional cd && wrapper, not a shell-semantic classifier; compound commands can include other work. Exact repeat Read means identical Read input after no observed Edit/Write tool in the same file; Bash writes and external changes are not detected, so it is a candidate, not proven avoidable cost. This report does not estimate savings or grade task success.",
+  "session_file_distribution": {
+    "assistant_messages": {
+      "files": 1085,
+      "p50": 22,
+      "p90": 112,
+      "p99": 265,
+      "top_one_percent_files": 11,
+      "top_one_percent_total": 22035,
+      "top_ten_percent_files": 109,
+      "top_ten_percent_total": 37535,
+      "total": 65643
+    },
+    "cache_read_tokens": {
+      "files": 1085,
+      "p50": 1245624,
+      "p90": 14241511,
+      "p99": 58644132,
+      "top_one_percent_files": 11,
+      "top_one_percent_total": 9739141623,
+      "top_ten_percent_files": 109,
+      "top_ten_percent_total": 12290319499,
+      "total": 14771942985
+    },
+    "model_tokens": {
+      "files": 1085,
+      "p50": 1348124,
+      "p90": 14601196,
+      "p99": 59543256,
+      "top_one_percent_files": 11,
+      "top_one_percent_total": 9879294298,
+      "top_ten_percent_files": 109,
+      "top_ten_percent_total": 12481400732,
+      "total": 15079768037
+    },
+    "tool_result_tokens": {
+      "files": 1085,
+      "p50": 20744,
+      "p90": 78375,
+      "p99": 143970,
+      "top_one_percent_files": 11,
+      "top_one_percent_total": 7554397,
+      "top_ten_percent_files": 109,
+      "top_ten_percent_total": 17226226,
+      "total": 39033805
+    }
+  },
+  "session_files_in_window": 1085,
+  "sidechain_files_in_window": 433,
+  "tool_results_unmatched": 2,
+  "tools": {
+    "Agent": {
+      "calls": 440,
+      "estimated_result_tokens": 124094,
+      "exact_repeat_read_bytes": 0,
+      "exact_repeat_read_estimated_tokens": 0,
+      "exact_repeat_reads": 0,
+      "result_bytes": 493506,
+      "results": 440
+    },
+    "Artifact": {
+      "calls": 14,
+      "estimated_result_tokens": 34372,
+      "exact_repeat_read_bytes": 0,
+      "exact_repeat_read_estimated_tokens": 0,
+      "exact_repeat_reads": 0,
+      "result_bytes": 135203,
+      "results": 14
+    },
+    "AskUserQuestion": {
+      "calls": 83,
+      "estimated_result_tokens": 7778,
+      "exact_repeat_read_bytes": 0,
+      "exact_repeat_read_estimated_tokens": 0,
+      "exact_repeat_reads": 0,
+      "result_bytes": 26567,
+      "results": 83
+    },
+    "Bash": {
+      "calls": 50108,
+      "estimated_result_tokens": 22189177,
+      "exact_repeat_read_bytes": 0,
+      "exact_repeat_read_estimated_tokens": 0,
+      "exact_repeat_reads": 0,
+      "result_bytes": 84003308,
+      "results": 50104
+    },
+    "CronCreate": {
+      "calls": 11,
+      "estimated_result_tokens": 530,
+      "exact_repeat_read_bytes": 0,
+      "exact_repeat_read_estimated_tokens": 0,
+      "exact_repeat_reads": 0,
+      "result_bytes": 2101,
+      "results": 11
+    },
+    "CronDelete": {
+      "calls": 1,
+      "estimated_result_tokens": 6,
+      "exact_repeat_read_bytes": 0,
+      "exact_repeat_read_estimated_tokens": 0,
+      "exact_repeat_reads": 0,
+      "result_bytes": 23,
+      "results": 1
+    },
+    "CronList": {
+      "calls": 6,
+      "estimated_result_tokens": 158,
+      "exact_repeat_read_bytes": 0,
+      "exact_repeat_read_estimated_tokens": 0,
+      "exact_repeat_reads": 0,
+      "result_bytes": 546,
+      "results": 6
+    },
+    "Edit": {
+      "calls": 7413,
+      "estimated_result_tokens": 358420,
+      "exact_repeat_read_bytes": 0,
+      "exact_repeat_read_estimated_tokens": 0,
+      "exact_repeat_reads": 0,
+      "result_bytes": 1410467,
+      "results": 7412
+    },
+    "EnterPlanMode": {
+      "calls": 2,
+      "estimated_result_tokens": 292,
+      "exact_repeat_read_bytes": 0,
+      "exact_repeat_read_estimated_tokens": 0,
+      "exact_repeat_reads": 0,
+      "result_bytes": 1162,
+      "results": 2
+    },
+    "ExitPlanMode": {
+      "calls": 2,
+      "estimated_result_tokens": 6895,
+      "exact_repeat_read_bytes": 0,
+      "exact_repeat_read_estimated_tokens": 0,
+      "exact_repeat_reads": 0,
+      "result_bytes": 24293,
+      "results": 2
+    },
+    "Glob": {
+      "calls": 4,
+      "estimated_result_tokens": 794,
+      "exact_repeat_read_bytes": 0,
+      "exact_repeat_read_estimated_tokens": 0,
+      "exact_repeat_reads": 0,
+      "result_bytes": 3168,
+      "results": 4
+    },
+    "Grep": {
+      "calls": 28,
+      "estimated_result_tokens": 13828,
+      "exact_repeat_read_bytes": 0,
+      "exact_repeat_read_estimated_tokens": 0,
+      "exact_repeat_reads": 0,
+      "result_bytes": 52330,
+      "results": 28
+    },
+    "ListAgents": {
+      "calls": 76,
+      "estimated_result_tokens": 10270,
+      "exact_repeat_read_bytes": 0,
+      "exact_repeat_read_estimated_tokens": 0,
+      "exact_repeat_reads": 0,
+      "result_bytes": 38556,
+      "results": 76
+    },
+    "Monitor": {
+      "calls": 251,
+      "estimated_result_tokens": 20218,
+      "exact_repeat_read_bytes": 0,
+      "exact_repeat_read_estimated_tokens": 0,
+      "exact_repeat_reads": 0,
+      "result_bytes": 79788,
+      "results": 251
+    },
+    "PushNotification": {
+      "calls": 5,
+      "estimated_result_tokens": 67,
+      "exact_repeat_read_bytes": 0,
+      "exact_repeat_read_estimated_tokens": 0,
+      "exact_repeat_reads": 0,
+      "result_bytes": 263,
+      "results": 5
+    },
+    "Read": {
+      "calls": 7174,
+      "estimated_result_tokens": 15698930,
+      "exact_repeat_read_bytes": 110048,
+      "exact_repeat_read_estimated_tokens": 29442,
+      "exact_repeat_reads": 65,
+      "result_bytes": 58866502,
+      "results": 7173
+    },
+    "ReadNotifications": {
+      "calls": 14,
+      "estimated_result_tokens": 84,
+      "exact_repeat_read_bytes": 0,
+      "exact_repeat_read_estimated_tokens": 0,
+      "exact_repeat_reads": 0,
+      "result_bytes": 336,
+      "results": 14
+    },
+    "ScheduleWakeup": {
+      "calls": 3,
+      "estimated_result_tokens": 33,
+      "exact_repeat_read_bytes": 0,
+      "exact_repeat_read_estimated_tokens": 0,
+      "exact_repeat_reads": 0,
+      "result_bytes": 129,
+      "results": 3
+    },
+    "SendMessage": {
+      "calls": 234,
+      "estimated_result_tokens": 19002,
+      "exact_repeat_read_bytes": 0,
+      "exact_repeat_read_estimated_tokens": 0,
+      "exact_repeat_reads": 0,
+      "result_bytes": 73221,
+      "results": 234
+    },
+    "SendUserFile": {
+      "calls": 1,
+      "estimated_result_tokens": 42,
+      "exact_repeat_read_bytes": 0,
+      "exact_repeat_read_estimated_tokens": 0,
+      "exact_repeat_reads": 0,
+      "result_bytes": 164,
+      "results": 1
+    },
+    "Skill": {
+      "calls": 167,
+      "estimated_result_tokens": 2057,
+      "exact_repeat_read_bytes": 0,
+      "exact_repeat_read_estimated_tokens": 0,
+      "exact_repeat_reads": 0,
+      "result_bytes": 8122,
+      "results": 167
+    },
+    "SubagentHandback": {
+      "calls": 384,
+      "estimated_result_tokens": 6306,
+      "exact_repeat_read_bytes": 0,
+      "exact_repeat_read_estimated_tokens": 0,
+      "exact_repeat_reads": 0,
+      "result_bytes": 24078,
+      "results": 384
+    },
+    "TaskOutput": {
+      "calls": 1,
+      "estimated_result_tokens": 12054,
+      "exact_repeat_read_bytes": 0,
+      "exact_repeat_read_estimated_tokens": 0,
+      "exact_repeat_reads": 0,
+      "result_bytes": 42868,
+      "results": 1
+    },
+    "TaskStop": {
+      "calls": 376,
+      "estimated_result_tokens": 51399,
+      "exact_repeat_read_bytes": 0,
+      "exact_repeat_read_estimated_tokens": 0,
+      "exact_repeat_reads": 0,
+      "result_bytes": 204064,
+      "results": 376
+    },
+    "ToolSearch": {
+      "calls": 84,
+      "estimated_result_tokens": 125,
+      "exact_repeat_read_bytes": 0,
+      "exact_repeat_read_estimated_tokens": 0,
+      "exact_repeat_reads": 0,
+      "result_bytes": 497,
+      "results": 84
+    },
+    "WebFetch": {
+      "calls": 217,
+      "estimated_result_tokens": 173645,
+      "exact_repeat_read_bytes": 0,
+      "exact_repeat_read_estimated_tokens": 0,
+      "exact_repeat_reads": 0,
+      "result_bytes": 657876,
+      "results": 215
+    },
+    "WebSearch": {
+      "calls": 134,
+      "estimated_result_tokens": 101102,
+      "exact_repeat_read_bytes": 0,
+      "exact_repeat_read_estimated_tokens": 0,
+      "exact_repeat_reads": 0,
+      "result_bytes": 366633,
+      "results": 134
+    },
+    "Write": {
+      "calls": 1249,
+      "estimated_result_tokens": 58685,
+      "exact_repeat_read_bytes": 0,
+      "exact_repeat_read_estimated_tokens": 0,
+      "exact_repeat_reads": 0,
+      "result_bytes": 231791,
+      "results": 1249
+    },
+    "bash": {
+      "calls": 10,
+      "estimated_result_tokens": 300,
+      "exact_repeat_read_bytes": 0,
+      "exact_repeat_read_estimated_tokens": 0,
+      "exact_repeat_reads": 0,
+      "result_bytes": 1190,
+      "results": 10
+    },
+    "mcp__claude_ai_Claude_Docs__batch": {
+      "calls": 2,
+      "estimated_result_tokens": 1070,
+      "exact_repeat_read_bytes": 0,
+      "exact_repeat_read_estimated_tokens": 0,
+      "exact_repeat_reads": 0,
+      "result_bytes": 4099,
+      "results": 2
+    },
+    "mcp__claude_ai_Claude_Docs__guide": {
+      "calls": 3,
+      "estimated_result_tokens": 21235,
+      "exact_repeat_read_bytes": 0,
+      "exact_repeat_read_estimated_tokens": 0,
+      "exact_repeat_reads": 0,
+      "result_bytes": 84379,
+      "results": 3
+    },
+    "mcp__claude_ai_Claude_Docs__read": {
+      "calls": 18,
+      "estimated_result_tokens": 12502,
+      "exact_repeat_read_bytes": 0,
+      "exact_repeat_read_estimated_tokens": 0,
+      "exact_repeat_reads": 0,
+      "result_bytes": 47298,
+      "results": 18
+    },
+    "mcp__claude_ai_Claude_Docs__update": {
+      "calls": 42,
+      "estimated_result_tokens": 6394,
+      "exact_repeat_read_bytes": 0,
+      "exact_repeat_read_estimated_tokens": 0,
+      "exact_repeat_reads": 0,
+      "result_bytes": 24789,
+      "results": 42
+    },
+    "mcp__plugin_playwright_playwright__browser_click": {
+      "calls": 20,
+      "estimated_result_tokens": 4182,
+      "exact_repeat_read_bytes": 0,
+      "exact_repeat_read_estimated_tokens": 0,
+      "exact_repeat_reads": 0,
+      "result_bytes": 16641,
+      "results": 20
+    },
+    "mcp__plugin_playwright_playwright__browser_close": {
+      "calls": 11,
+      "estimated_result_tokens": 538,
+      "exact_repeat_read_bytes": 0,
+      "exact_repeat_read_estimated_tokens": 0,
+      "exact_repeat_reads": 0,
+      "result_bytes": 2135,
+      "results": 11
+    },
+    "mcp__plugin_playwright_playwright__browser_console_messages": {
+      "calls": 7,
+      "estimated_result_tokens": 885,
+      "exact_repeat_read_bytes": 0,
+      "exact_repeat_read_estimated_tokens": 0,
+      "exact_repeat_reads": 0,
+      "result_bytes": 3527,
+      "results": 7
+    },
+    "mcp__plugin_playwright_playwright__browser_evaluate": {
+      "calls": 166,
+      "estimated_result_tokens": 59951,
+      "exact_repeat_read_bytes": 0,
+      "exact_repeat_read_estimated_tokens": 0,
+      "exact_repeat_reads": 0,
+      "result_bytes": 239121,
+      "results": 166
+    },
+    "mcp__plugin_playwright_playwright__browser_find": {
+      "calls": 9,
+      "estimated_result_tokens": 2474,
+      "exact_repeat_read_bytes": 0,
+      "exact_repeat_read_estimated_tokens": 0,
+      "exact_repeat_reads": 0,
+      "result_bytes": 9876,
+      "results": 9
+    },
+    "mcp__plugin_playwright_playwright__browser_handle_dialog": {
+      "calls": 4,
+      "estimated_result_tokens": 236,
+      "exact_repeat_read_bytes": 0,
+      "exact_repeat_read_estimated_tokens": 0,
+      "exact_repeat_reads": 0,
+      "result_bytes": 944,
+      "results": 4
+    },
+    "mcp__plugin_playwright_playwright__browser_navigate": {
+      "calls": 124,
+      "estimated_result_tokens": 13429,
+      "exact_repeat_read_bytes": 0,
+      "exact_repeat_read_estimated_tokens": 0,
+      "exact_repeat_reads": 0,
+      "result_bytes": 52898,
+      "results": 124
+    },
+    "mcp__plugin_playwright_playwright__browser_network_request": {
+      "calls": 4,
+      "estimated_result_tokens": 50,
+      "exact_repeat_read_bytes": 0,
+      "exact_repeat_read_estimated_tokens": 0,
+      "exact_repeat_reads": 0,
+      "result_bytes": 195,
+      "results": 4
+    },
+    "mcp__plugin_playwright_playwright__browser_network_requests": {
+      "calls": 11,
+      "estimated_result_tokens": 1456,
+      "exact_repeat_read_bytes": 0,
+      "exact_repeat_read_estimated_tokens": 0,
+      "exact_repeat_reads": 0,
+      "result_bytes": 5810,
+      "results": 11
+    },
+    "mcp__plugin_playwright_playwright__browser_resize": {
+      "calls": 13,
+      "estimated_result_tokens": 1295,
+      "exact_repeat_read_bytes": 0,
+      "exact_repeat_read_estimated_tokens": 0,
+      "exact_repeat_reads": 0,
+      "result_bytes": 4968,
+      "results": 13
+    },
+    "mcp__plugin_playwright_playwright__browser_run_code_unsafe": {
+      "calls": 28,
+      "estimated_result_tokens": 7267,
+      "exact_repeat_read_bytes": 0,
+      "exact_repeat_read_estimated_tokens": 0,
+      "exact_repeat_reads": 0,
+      "result_bytes": 28971,
+      "results": 28
+    },
+    "mcp__plugin_playwright_playwright__browser_snapshot": {
+      "calls": 6,
+      "estimated_result_tokens": 7634,
+      "exact_repeat_read_bytes": 0,
+      "exact_repeat_read_estimated_tokens": 0,
+      "exact_repeat_reads": 0,
+      "result_bytes": 30465,
+      "results": 6
+    },
+    "mcp__plugin_playwright_playwright__browser_tabs": {
+      "calls": 3,
+      "estimated_result_tokens": 110,
+      "exact_repeat_read_bytes": 0,
+      "exact_repeat_read_estimated_tokens": 0,
+      "exact_repeat_reads": 0,
+      "result_bytes": 433,
+      "results": 3
+    },
+    "mcp__plugin_playwright_playwright__browser_take_screenshot": {
+      "calls": 3,
+      "estimated_result_tokens": 225,
+      "exact_repeat_read_bytes": 0,
+      "exact_repeat_read_estimated_tokens": 0,
+      "exact_repeat_reads": 0,
+      "result_bytes": 897,
+      "results": 3
+    },
+    "mcp__plugin_playwright_playwright__browser_wait_for": {
+      "calls": 6,
+      "estimated_result_tokens": 2104,
+      "exact_repeat_read_bytes": 0,
+      "exact_repeat_read_estimated_tokens": 0,
+      "exact_repeat_reads": 0,
+      "result_bytes": 8001,
+      "results": 6
+    },
+    "unmatched": {
+      "calls": 0,
+      "estimated_result_tokens": 105,
+      "exact_repeat_read_bytes": 0,
+      "exact_repeat_read_estimated_tokens": 0,
+      "exact_repeat_reads": 0,
+      "result_bytes": 415,
+      "results": 2
+    }
+  },
+  "unique_assistant_messages": 65643,
+  "usage_messages": 65625,
+  "window": {
+    "since_utc": "2026-09-17T00:00:00Z",
+    "until_utc": "2026-10-17T00:00:00Z"
+  }
+}
