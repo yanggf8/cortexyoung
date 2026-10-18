@@ -83,7 +83,7 @@ cost as the first mechanism to test. `cort-evals cost-collect` now saves daily l
 handoff and compact tool output. Both have zero measured pairs so far, and neither has a savings
 result.
 
-**What keeps it true over time.** Every invocation appends one local-only row to
+**What keeps it true over time.** Every invocation appends one local row to
 `usage.db` (see the `Local usage recording` section above), and every hook fire records
 the outcome it reached; `cort-evals` replays the same `judge` over real transcripts
 (`hook-probe`), counts how often the walk is actually wanted (`demand`), and grades
@@ -182,11 +182,14 @@ For Rust, `cort context <symbol> --content full -f lean` is the supported use (t
 module paths by suffix — treat its output as candidates. For the precise caller list use `cargo check` /
 `cargo build` errors — a compiler beats a name-resolved graph here. See `docs/2026-08-28-real-session-cost.md` §1.3.
 
-## Local usage recording (opt-out by not existing: it is offline, plain SQLite)
+## Local usage recording (offline hook, separate TursoDB upload)
 
-Every cort command appends one row to a **central, local-only** SQLite database at
-`$CORT_CACHE_DIR/usage.db` (default `~/.cache/cortex-ng/usage.db`). Nothing ever leaves the
-machine; there is no network code in cort at all.
+Every cort command appends one row to a **central, local** SQLite database at
+`$CORT_CACHE_DIR/usage.db` (default `~/.cache/cortex-ng/usage.db`). `cort` contains no network
+code. The separate Rust `claudecat telemetry sync` command copies structured rows into the shared
+TursoDB for cross-machine analysis; collection and queries do not wait for it.
+Schema-v2 rows carry their own hashed `machine_id` and source. Pre-v2 rows retain
+`legacy_unknown` per-row attribution; their database-wide stamp is only a historical hint.
 
 What is recorded per invocation: command name, status (ok/error) and error code only, the
 project id, allowlisted arguments (symbol, project-relative path, line range), for reads the
@@ -206,7 +209,8 @@ Absolute paths, URLs, common credential prefixes, and the local account name are
 lets us revisit what the hook caught without relying on transcripts that may later disappear.
 The transcript itself is never copied. If the hook cannot read a supported transcript, the row
 stores a status such as `no_transcript_path` or `transcript_unreadable`, not a guessed need. These
-excerpts stay only in the local `usage.db` and follow its 90-day retention. This is an excerpt-level
+excerpts enter the local `usage.db` and can be copied to TursoDB by telemetry sync. Local rows
+follow 90-day retention; uploaded rows currently have no automatic retention. This is an excerpt-level
 scrubber, not a guarantee that every sensitive phrase is detected.
 Transcript readers cover Claude Code/Grok-compatible JSONL and Codex rollout JSONL. Kimi's hook
 payload has no transcript path, so its outcome can be logged but its demand is marked
@@ -249,7 +253,7 @@ That path is [`cort-upgrade`](#update)'s.
 - Downloads pinned `ast-grep` v0.45.3 prebuilt `app-<target>.zip` for your platform (Linux x86_64/aarch64, macOS x86_64/arm64) from GitHub Releases and verifies SHA-256 (repo-maintained; upstream publishes no checksums) — fail-closed: an empty or mismatched checksum refuses to install. Falls back to `cargo install ast-grep --version 0.45.3 --locked` (requires Rust 1.88+).
 - Builds `cort` from `rust/` with `cargo build --release --locked` on **every** run and installs the binary plus its ast-grep pack (`src/pack`, located at runtime via `CORT_PACK_DIR`) to `~/.local/share/cortexyoung/cort`, shimming `~/.cargo/bin/cort` or `~/.local/bin/cort`.
 - Deploys `skills/ast-grep/SKILL.md` to **both** agent homes — `~/.claude/skills/ast-grep/SKILL.md` and `~/.codex/skills/ast-grep/SKILL.md` (honouring `CODEX_HOME`) — **byte-for-byte the repo file**. The installer writes nothing inside the document: the frontmatter block holds keys only (`name`, `description`, and nothing of ours), both loaders anchor that fence to line 1, and `rust/tests/skill_format.rs` fails the build if a source stops parsing. Ownership lives in `.cortexyoung-managed` beside the skill, which records the SHA-256 of the bytes we deployed — so a hand-edit of a deployed `SKILL.md` reads as someone else's file and is refused, not silently overwritten. Edit `skills/<name>/SKILL.md` in this repo instead; one source feeds both homes. Preflights collisions before mutating: skips if hash-equal, replaces what it owns, refuses what it does not (use `--force` to backup and replace). Uninstall removes the document and its stamp, and nothing else.
-- Wires **two** hooks into `~/.claude/settings.json`, `~/.codex/config.toml` and `~/.kimi-code/config.toml` in the **same run** as the skill (skip all of them with `--no-hook`): a `PreToolUse` hook on the search tools that suggests `cort impact`, and a `PostToolUse` hook on the edit tools that runs `cort index --incremental` so the index tracks the tree instead of waiting for somebody to notice it is behind. `cort hook-install --all` resolves all six entries from its own table (`install.sh` names no path, dialect or subcommand), and the single-entry form takes an explicit `--format` and `--event` — JSON via `rust/src/settings.rs`, Codex's nested TOML via `rust/src/settings_toml.rs`, Kimi's flat `[[hooks]]` TOML via `rust/src/settings_kimi.rs` — never `jq`: every one of them preserves the hooks you already have, rewrites our own entry when the binary moves instead of adding a second, collapses duplicates down to one, refuses outright to overwrite a settings file it could not parse, and gives an install-then-uninstall cycle back byte for byte. (The format used to be read off the file extension. Two of these three files are called `config.toml`, so each caller now names its own.) Grok reads the same `settings.json` as Claude Code and needs no entry of its own. See [the hook section](#the-pretooluse-hook--the-retrospective-half-of-the-routing) for what they do at runtime. A hook that has to be wired by hand is a hook that stays unwired — that is not a hypothesis, it is what this repo measured on its own machine three times, once per harness.
+- Wires **two** hooks into `~/.claude/settings.json`, `~/.codex/config.toml` and `~/.kimi-code/config.toml` in the **same run** as the skill (skip all of them with `--no-hook`): a `PreToolUse` search hook that records its verdict in local `usage.db` **without speaking by default** (`CORT_SUGGEST=1` restores delivery), and a `PostToolUse` edit hook that repairs an existing index. `cort hook-install --all` resolves all six entries from its own table (`install.sh` names no path, dialect or subcommand), and the single-entry form takes an explicit `--format` and `--event` — JSON via `rust/src/settings.rs`, Codex's nested TOML via `rust/src/settings_toml.rs`, Kimi's flat `[[hooks]]` TOML via `rust/src/settings_kimi.rs` — never `jq`: every one of them preserves the hooks you already have, rewrites our own entry when the binary moves instead of adding a second, collapses duplicates down to one, refuses outright to overwrite a settings file it could not parse, and gives an install-then-uninstall cycle back byte for byte. (The format used to be read off the file extension. Two of these three files are called `config.toml`, so each caller now names its own.) Grok reads the same `settings.json` as Claude Code and needs no entry of its own. See [the hook section](#the-pretooluse-hook--the-retrospective-half-of-the-routing) for the current runtime behavior and dated delivery measurements.
 - Adds a single bounded idempotent `PATH` block to your shell profile (`.bashrc`/`.zshrc`/`.profile`) so `cort` and `ast-grep` are on `PATH`; removed on `--uninstall`.
 - Records ownership in `~/.local/share/cortexyoung/manifest` (v2 `key:value` lines) — uninstall only removes what it installed, never a pre-existing binary.
 
@@ -754,6 +758,11 @@ measured break-even so an agent does not route a string question into a graph to
 
 ## The PreToolUse hook — the retrospective half of the routing
 
+**Current behavior (`rust/src/main.rs`, since 2026-09-27):** the hook keeps running the routing
+rule and records every outcome in local `usage.db`, but it emits an empty response by default.
+No Claude Code, Codex or Kimi agent receives a `cort` suggestion or deny from it unless
+`CORT_SUGGEST=1` is set. The delivery observations below describe the earlier enabled trial.
+
 The skill above is **prospective**: it asks the model to recognise "I am about to rename this
 symbol" *before* running the search that would tell it what it is about to do. Measured over the
 sessions that carried it, that never fired — 409 searches, zero `cort` calls. The hook is the
@@ -761,16 +770,16 @@ same rule in the **retrospective** shape: given the `grep`/`rg` the agent actual
 whether `cort impact` answers it better. Nothing depends on the model remembering anything.
 
 It runs as a `PreToolUse` hook matched to `Bash` (`Bash|Grep` on Kimi, whose search surface is
-mostly its structured tool), reads the harness payload on stdin, and either prints one suggestion
-or stays silent. `cort hook-suggest` is not a verb to type.
+mostly its structured tool), reads the harness payload on stdin, records its verdict, and stays
+silent by default. `cort hook-suggest` is not a verb to type.
 
-**What it is worth when it fires.** The hook is the delivery mechanism; the number it is delivering
+**Earlier delivery rationale.** When enabled, the hook was the delivery mechanism; the number it delivered
 is the [`cort impact` cost result](#re-analysis-2026-08-28-the-gate-was-measured-on-the-wrong-case):
 992 tokens and one tool call against a baseline arm's 7,642 tokens and four, at 10/10 vs 4/10
 correct on the same tasks. Read that section's caveats along with the number — it is a floor on
 what a caller-set question is worth in this harness, not a controlled `cort` vs `rg` comparison, and
 the demand-side numbers a few paragraphs below it say plainly that this shape of question is rare in
-daily use. The hook only pays out when it fires, and it is built to stay silent otherwise.
+daily use. The later uptake measurements led to the current silent default.
 
 **Four harnesses, one rule, two surfaces.** Claude Code, Codex and Kimi each get their own wired
 entry — JSON in `~/.claude/settings.json`, nested TOML in `~/.codex/config.toml`, flat `[[hooks]]`
@@ -792,7 +801,7 @@ asserted: replayed over 4,495 real searches, the same `judge` fires on 4.71% of 
 4.36% of structured ones. Parsing is per-harness by necessity; a second copy of the *decision* would
 leave `cort-evals hook-probe`'s calibration describing something other than what ships.
 
-**Kimi is the one harness where a suggestion cannot arrive as a suggestion.** Its `PreToolUse` keeps
+**Kimi's earlier enabled behavior.** Its `PreToolUse` keeps
 only results whose `action` is `block` and discards every allow-shaped one before the model sees it
 (every other hook event drops its result outright), so `additionalContext` there reaches nobody. The
 contract is therefore deliberately different on that harness and only on it: deny once per symbol

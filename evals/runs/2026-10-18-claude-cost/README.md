@@ -17,7 +17,7 @@ spends tokens, **not** a savings estimate.
 | Session files with events in window | 1,085 (433 subagent files) |
 | Unique assistant message ids | 65,643 |
 | Unique messages with provider usage | 65,625 (18 without) |
-| Unreadable files / unparsed lines / unmatched tool results | 0 / 1 / 3 |
+| Unreadable files / unparsed lines / unmatched tool results | 0 / 1 / 2 |
 | Estimated tool-result tokens | 39,033,805 |
 | Bash tool-result tokens | 22,189,177 (56.8%) |
 | Read tool-result tokens | 15,698,930 (40.2%) |
@@ -54,4 +54,28 @@ Measure provider usage, turns, and success; include the handoff's own tokens. Se
 compact `Read`/search output on the same tasks, so the two mechanisms are not confounded.
 No task-success labels or no-assistance counterfactual are present in this census, so it cannot
 say either intervention saves tokens yet.
+
+## Independent-machine check (2026-10-18)
+
+The same command and UTC window on machine `44a8a38f0b05b9a8` (`etc-machine-id`) produced
+[second-machine-report.json](second-machine-report.json). This is a separate population, not an
+extension of the first machine's census.
+
+| Measure | First machine | Second machine |
+|---|---:|---:|
+| Transcript files in window | 1,085 | 60 |
+| Unique assistant messages | 65,643 | 4,704 |
+| Estimated tool-result tokens | 39,033,805 | 1,616,447 |
+| Bash + Read share of tool-result tokens | 97.1% | 93.3% |
+| Cache-read share of summed provider usage fields | 98.0% | 96.9% |
+| Top 1% of files' share of model / tool-result tokens | 65.5% / 19.4% | 24.3% / 26.3% |
+| Top 10% of files' share of model / tool-result tokens | 82.8% / 44.1% | 86.5% / 59.2% |
+
+The second machine supports the observation that Bash/Read dominate tool-result volume and that
+repeated context dominates summed provider usage. Its top-10% model concentration is also high,
+but its top-1% share is much lower. With only 60 files, the top-1% group is one file, versus 11 on
+the first machine; neither share identifies an avoidable task cost. The two proposed paired trials
+still have zero pairs, so this check does not establish savings. The daily collector produced a
+stamped aggregate for 2026-10-16 in a temporary directory (3 files, 80 assistant messages), but
+the timer is not installed on this machine; ongoing collection has not been verified here.
 

@@ -1232,9 +1232,8 @@ fn recorded_ts_is_utc_unix_ms() {
 /// A report says which machine its rows came from, and shouts when one file holds two.
 ///
 /// Numbers out of this database end up quoted in documents. Two machines averaged into one figure
-/// is wrong in a way that cannot be recovered once the figure is written down -- the rows carry no
-/// machine of their own, so after the fact nothing can separate them. All the report can honestly
-/// do is refuse to be quiet about it, which is why the warning is a header line and not a footnote.
+/// is wrong in a way that cannot be recovered for historical schema-v1 rows. New rows carry their
+/// own machine stamp, but the aggregate still spans the file and keeps this header warning.
 #[test]
 fn a_report_names_the_machine_and_says_when_a_db_holds_two() {
     let dir = tempfile::Builder::new()
@@ -1299,6 +1298,62 @@ fn a_report_names_the_machine_and_says_when_a_db_holds_two() {
         "writing from a second machine overwrote the stamp, hiding the mixture"
     );
     assert_eq!(after["machine"]["mixed"].as_bool(), Some(true));
+}
+
+#[test]
+fn schema_v1_rows_stay_unknown_and_new_rows_carry_their_machine() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("usage.db");
+    let db = Connection::open(&path).unwrap();
+    db.execute_batch(
+        "CREATE TABLE _usage_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+         INSERT INTO _usage_meta VALUES ('USAGE_SCHEMA_VERSION', '1');
+         CREATE TABLE command_log (
+           id INTEGER PRIMARY KEY, ts INTEGER, project_id TEXT, command TEXT NOT NULL,
+           args_summary TEXT NOT NULL, status TEXT NOT NULL, error_code TEXT,
+           read_source TEXT, requested_content_mode TEXT, effective_content_mode TEXT,
+           receipt_hit INTEGER, index_stale INTEGER, bytes_out INTEGER NOT NULL,
+           saved_bytes INTEGER NOT NULL DEFAULT 0
+         );",
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO command_log (ts, command, args_summary, status, bytes_out)
+           VALUES (?1, 'old', '{}', 'ok', 0)",
+        [NOW_MS],
+    )
+    .unwrap();
+    drop(db);
+    record_command_at(&path, &rec("new"));
+    let db = Connection::open(&path).unwrap();
+    let rows: Vec<(String, String, String)> = db
+        .prepare("SELECT command, machine_id, machine_source FROM command_log ORDER BY id")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(
+        rows[0],
+        (
+            "old".into(),
+            "legacy_unknown".into(),
+            "legacy_no_stamp".into()
+        )
+    );
+    assert_eq!(rows[1].0, "new");
+    assert_eq!(rows[1].1, cort::usage::machine_id());
+    assert_eq!(rows[1].2, cort::usage::machine_id_source());
+    assert_eq!(
+        db.query_row(
+            "SELECT value FROM _usage_meta WHERE key = 'USAGE_SCHEMA_VERSION'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap(),
+        "2"
+    );
 }
 
 /// The id is derived, so deleting the cache does not invent a second machine.

@@ -1,0 +1,371 @@
+{
+  "assistant_snapshots": 9934,
+  "bash_leading_commands": {
+    "ast-grep": {
+      "estimated_result_tokens": 231,
+      "result_bytes": 920,
+      "results": 2
+    },
+    "awk": {
+      "estimated_result_tokens": 11,
+      "result_bytes": 43,
+      "results": 1
+    },
+    "bash": {
+      "estimated_result_tokens": 97,
+      "result_bytes": 385,
+      "results": 3
+    },
+    "cargo": {
+      "estimated_result_tokens": 51274,
+      "result_bytes": 202151,
+      "results": 367
+    },
+    "cat": {
+      "estimated_result_tokens": 33059,
+      "result_bytes": 124310,
+      "results": 81
+    },
+    "claudecat": {
+      "estimated_result_tokens": 32,
+      "result_bytes": 125,
+      "results": 1
+    },
+    "cort": {
+      "estimated_result_tokens": 1159,
+      "result_bytes": 4624,
+      "results": 9
+    },
+    "cp": {
+      "estimated_result_tokens": 952,
+      "result_bytes": 3742,
+      "results": 14
+    },
+    "curl": {
+      "estimated_result_tokens": 9878,
+      "result_bytes": 37174,
+      "results": 68
+    },
+    "echo": {
+      "estimated_result_tokens": 34656,
+      "result_bytes": 123456,
+      "results": 69
+    },
+    "find": {
+      "estimated_result_tokens": 2669,
+      "result_bytes": 10409,
+      "results": 17
+    },
+    "git": {
+      "estimated_result_tokens": 62258,
+      "result_bytes": 234537,
+      "results": 226
+    },
+    "grep": {
+      "estimated_result_tokens": 170983,
+      "result_bytes": 656662,
+      "results": 550
+    },
+    "head": {
+      "estimated_result_tokens": 13296,
+      "result_bytes": 46784,
+      "results": 20
+    },
+    "ls": {
+      "estimated_result_tokens": 33046,
+      "result_bytes": 128517,
+      "results": 155
+    },
+    "make": {
+      "estimated_result_tokens": 795,
+      "result_bytes": 3143,
+      "results": 13
+    },
+    "mkdir": {
+      "estimated_result_tokens": 2024,
+      "result_bytes": 7998,
+      "results": 14
+    },
+    "node": {
+      "estimated_result_tokens": 704,
+      "result_bytes": 2794,
+      "results": 12
+    },
+    "npm": {
+      "estimated_result_tokens": 178,
+      "result_bytes": 709,
+      "results": 2
+    },
+    "other": {
+      "estimated_result_tokens": 319527,
+      "result_bytes": 1191359,
+      "results": 1204
+    },
+    "printf": {
+      "estimated_result_tokens": 296,
+      "result_bytes": 1093,
+      "results": 5
+    },
+    "python3": {
+      "estimated_result_tokens": 19839,
+      "result_bytes": 71315,
+      "results": 138
+    },
+    "rg": {
+      "estimated_result_tokens": 1992,
+      "result_bytes": 7956,
+      "results": 7
+    },
+    "rm": {
+      "estimated_result_tokens": 2011,
+      "result_bytes": 7925,
+      "results": 21
+    },
+    "sed": {
+      "estimated_result_tokens": 90489,
+      "result_bytes": 339895,
+      "results": 163
+    },
+    "tail": {
+      "estimated_result_tokens": 5212,
+      "result_bytes": 18333,
+      "results": 16
+    },
+    "wc": {
+      "estimated_result_tokens": 22105,
+      "result_bytes": 82854,
+      "results": 14
+    },
+    "zsh": {
+      "estimated_result_tokens": 72,
+      "result_bytes": 287,
+      "results": 1
+    }
+  },
+  "estimated_tool_result_tokens": 1616447,
+  "files_read": 69,
+  "files_unreadable": 0,
+  "lines_unparsed": 0,
+  "machine": {
+    "id": "44a8a38f0b05b9a8",
+    "source": "etc-machine-id"
+  },
+  "messages_without_usage": 4,
+  "model_usage": {
+    "cache_creation_input_tokens": 1406199,
+    "cache_read_input_tokens": 758454485,
+    "input_tokens": 20452666,
+    "output_tokens": 2698806
+  },
+  "reading": "Descriptive local Claude Code census. Assistant usage is deduplicated by message id within each transcript file; result payloads by tool-use id. Session-file distribution is per JSONL file, including subagent sidechains, not per user task. Tool-result tokens are an ASCII/4 + non-ASCII*1 estimate, not provider billing tokens. Model usage is provider-reported, but sums include repeated context across turns. Bash leading command is a whitelisted first word after an optional cd && wrapper, not a shell-semantic classifier; compound commands can include other work. Exact repeat Read means identical Read input after no observed Edit/Write tool in the same file; Bash writes and external changes are not detected, so it is a candidate, not proven avoidable cost. This report does not estimate savings or grade task success.",
+  "session_file_distribution": {
+    "assistant_messages": {
+      "files": 60,
+      "p50": 13,
+      "p90": 139,
+      "p99": 639,
+      "top_one_percent_files": 1,
+      "top_one_percent_total": 1473,
+      "top_ten_percent_files": 6,
+      "top_ten_percent_total": 3530,
+      "total": 4704
+    },
+    "cache_read_tokens": {
+      "files": 60,
+      "p50": 472192,
+      "p90": 18304896,
+      "p99": 171528256,
+      "top_one_percent_files": 1,
+      "top_one_percent_total": 180314432,
+      "top_ten_percent_files": 6,
+      "top_ten_percent_total": 658834941,
+      "total": 758454485
+    },
+    "model_tokens": {
+      "files": 60,
+      "p50": 529324,
+      "p90": 18721138,
+      "p99": 174442011,
+      "top_one_percent_files": 1,
+      "top_one_percent_total": 189964568,
+      "top_ten_percent_files": 6,
+      "top_ten_percent_total": 677361336,
+      "total": 783012156
+    },
+    "tool_result_tokens": {
+      "files": 60,
+      "p50": 8601,
+      "p90": 57380,
+      "p99": 124438,
+      "top_one_percent_files": 1,
+      "top_one_percent_total": 425459,
+      "top_ten_percent_files": 6,
+      "top_ten_percent_total": 957347,
+      "total": 1616447
+    }
+  },
+  "session_files_in_window": 60,
+  "sidechain_files_in_window": 8,
+  "tool_results_unmatched": 0,
+  "tools": {
+    "Agent": {
+      "calls": 9,
+      "estimated_result_tokens": 2225,
+      "exact_repeat_read_bytes": 0,
+      "exact_repeat_read_estimated_tokens": 0,
+      "exact_repeat_reads": 0,
+      "result_bytes": 8856,
+      "results": 9
+    },
+    "Artifact": {
+      "calls": 13,
+      "estimated_result_tokens": 27088,
+      "exact_repeat_read_bytes": 0,
+      "exact_repeat_read_estimated_tokens": 0,
+      "exact_repeat_reads": 0,
+      "result_bytes": 106283,
+      "results": 13
+    },
+    "AskUserQuestion": {
+      "calls": 30,
+      "estimated_result_tokens": 2681,
+      "exact_repeat_read_bytes": 0,
+      "exact_repeat_read_estimated_tokens": 0,
+      "exact_repeat_reads": 0,
+      "result_bytes": 9201,
+      "results": 30
+    },
+    "Bash": {
+      "calls": 3193,
+      "estimated_result_tokens": 878845,
+      "exact_repeat_read_bytes": 0,
+      "exact_repeat_read_estimated_tokens": 0,
+      "exact_repeat_reads": 0,
+      "result_bytes": 3309500,
+      "results": 3193
+    },
+    "Edit": {
+      "calls": 756,
+      "estimated_result_tokens": 29743,
+      "exact_repeat_read_bytes": 0,
+      "exact_repeat_read_estimated_tokens": 0,
+      "exact_repeat_reads": 0,
+      "result_bytes": 116970,
+      "results": 756
+    },
+    "EnterPlanMode": {
+      "calls": 2,
+      "estimated_result_tokens": 292,
+      "exact_repeat_read_bytes": 0,
+      "exact_repeat_read_estimated_tokens": 0,
+      "exact_repeat_reads": 0,
+      "result_bytes": 1162,
+      "results": 2
+    },
+    "ExitPlanMode": {
+      "calls": 2,
+      "estimated_result_tokens": 3615,
+      "exact_repeat_read_bytes": 0,
+      "exact_repeat_read_estimated_tokens": 0,
+      "exact_repeat_reads": 0,
+      "result_bytes": 12275,
+      "results": 2
+    },
+    "GetTask": {
+      "calls": 3,
+      "estimated_result_tokens": 535,
+      "exact_repeat_read_bytes": 0,
+      "exact_repeat_read_estimated_tokens": 0,
+      "exact_repeat_reads": 0,
+      "result_bytes": 2132,
+      "results": 3
+    },
+    "Monitor": {
+      "calls": 2,
+      "estimated_result_tokens": 156,
+      "exact_repeat_read_bytes": 0,
+      "exact_repeat_read_estimated_tokens": 0,
+      "exact_repeat_reads": 0,
+      "result_bytes": 614,
+      "results": 2
+    },
+    "Read": {
+      "calls": 614,
+      "estimated_result_tokens": 629874,
+      "exact_repeat_read_bytes": 6111,
+      "exact_repeat_read_estimated_tokens": 1712,
+      "exact_repeat_reads": 10,
+      "result_bytes": 2433989,
+      "results": 614
+    },
+    "RemoteTrigger": {
+      "calls": 1,
+      "estimated_result_tokens": 2861,
+      "exact_repeat_read_bytes": 0,
+      "exact_repeat_read_estimated_tokens": 0,
+      "exact_repeat_reads": 0,
+      "result_bytes": 9609,
+      "results": 1
+    },
+    "Skill": {
+      "calls": 6,
+      "estimated_result_tokens": 52,
+      "exact_repeat_read_bytes": 0,
+      "exact_repeat_read_estimated_tokens": 0,
+      "exact_repeat_reads": 0,
+      "result_bytes": 196,
+      "results": 6
+    },
+    "TaskStop": {
+      "calls": 4,
+      "estimated_result_tokens": 2725,
+      "exact_repeat_read_bytes": 0,
+      "exact_repeat_read_estimated_tokens": 0,
+      "exact_repeat_reads": 0,
+      "result_bytes": 9119,
+      "results": 4
+    },
+    "ToolSearch": {
+      "calls": 2,
+      "estimated_result_tokens": 0,
+      "exact_repeat_read_bytes": 0,
+      "exact_repeat_read_estimated_tokens": 0,
+      "exact_repeat_reads": 0,
+      "result_bytes": 0,
+      "results": 2
+    },
+    "WebFetch": {
+      "calls": 21,
+      "estimated_result_tokens": 5229,
+      "exact_repeat_read_bytes": 0,
+      "exact_repeat_read_estimated_tokens": 0,
+      "exact_repeat_reads": 0,
+      "result_bytes": 18428,
+      "results": 21
+    },
+    "WebSearch": {
+      "calls": 19,
+      "estimated_result_tokens": 27264,
+      "exact_repeat_read_bytes": 0,
+      "exact_repeat_read_estimated_tokens": 0,
+      "exact_repeat_reads": 0,
+      "result_bytes": 99660,
+      "results": 19
+    },
+    "Write": {
+      "calls": 83,
+      "estimated_result_tokens": 3262,
+      "exact_repeat_read_bytes": 0,
+      "exact_repeat_read_estimated_tokens": 0,
+      "exact_repeat_reads": 0,
+      "result_bytes": 12854,
+      "results": 83
+    }
+  },
+  "unique_assistant_messages": 4704,
+  "usage_messages": 4700,
+  "window": {
+    "since_utc": "2026-09-17T00:00:00Z",
+    "until_utc": "2026-10-17T00:00:00Z"
+  }
+}

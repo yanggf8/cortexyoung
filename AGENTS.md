@@ -49,10 +49,11 @@ change that makes an answer cheaper to verify is on the main line; a feature tha
 more numerous is not.
 
 **The routing rule has exactly one home: `rust/src/hook.rs`.** It is deployed as a `PreToolUse`
-hook by `install.sh` in the same run as the skill, so while working in this repo your own
-`grep`/`rg` will sometimes come back with a `cort impact` suggestion attached -- that is the
-product talking, and it is the retrospective half of the routing the skill's prose could not
-carry (409 searches in skill-bearing sessions, zero `cort` calls). Be precise about which half is
+hook by `install.sh` in the same run as the skill. Since 2026-09-27 the hook records its verdict
+in local `usage.db` but emits no suggestion by default (`CORT_SUGGEST=1` opts back into delivery).
+It measures demand; it is not a path by which ClaudeCat memory reaches an agent. The earlier
+delivery experiment followed 409 searches in skill-bearing sessions with zero `cort` calls.
+Be precise about which half is
 singular: **parsing is per-harness and plural, the verdict is singular.** Two spellings arrive in a
 *hook payload* and each gets its own constructor in `hook.rs`: a shell line (`search_from_shell` --
 Claude Code, Codex and Grok all send `tool_input.command` as a string) and Kimi's structured `Grep`
@@ -126,13 +127,15 @@ stamps `MACHINE_ID` once and never rewrites it, so a database carried to a secon
 naming its origin and the report can say `mixed`; `cort usage`'s lean header and every `cort-evals`
 report carry the id and its source. This is not hypothetical bookkeeping -- on 2026-09-03 a table of
 417 Codex fires was reconciled against this machine's 2 before anyone noticed they were different
-computers. Rows carry no machine of their own, so once two machines have written to one database
-nothing can separate them again; the report's only honest move is to refuse to be quiet about it.
+computers. Schema-v1 rows carry no machine of their own, so once two machines wrote to one old
+database those rows cannot be separated. Schema-v2 rows carry a per-row machine stamp; the
+aggregate still warns when its file's origin differs from the current machine.
 **Harness is which program ran, model is who answered, and machine is where** -- three dimensions,
 and the harness total stays whole regardless of the other two (`hook_models_at` is a second lens,
 never a split of the first).
 
-**The hook never blocks -- except on Kimi, where it can only block.** Kimi's `PreToolUse` keeps only
+**Delivery is disabled by default, including Kimi's deny.** When `CORT_SUGGEST=1` is set,
+Kimi's `PreToolUse` keeps only
 results whose `action` is `block` and discards every allow-shaped one before the model sees it, so a
 suggestion there arrives as a deny or not at all. That exception is bounded and must stay bounded:
 once per symbol per session, then yield, and `no_other_harness_ever_receives_a_deny` is a test.
@@ -158,8 +161,9 @@ Everything executable is Rust except two files bash actually requires: `install.
 special feature and never installed — `tests/install-smoke.sh` asserts the payload ships nothing
 but `cort` and the pack.
 
-**Two hook events, and the second one repairs rather than reports.** `PreToolUse` on the search
-tools suggests `cort impact`; `PostToolUse` on the edit tools runs `cort index --incremental`. The
+**Two hook events, and the second one repairs rather than reports.** `PreToolUse` on search
+tools records the would-be `cort impact` verdict without speaking by default; `PostToolUse` on
+edit tools runs `cort index --incremental`. The
 second exists because the first could only ever *say* the index was behind and that was measured at
 19 re-index runs against 2,700+ fires in 90 days -- and because `PreToolUse`'s staleness compares
 git heads, so an edited-but-uncommitted tree read as fresh while its answers were already wrong.
@@ -191,7 +195,8 @@ attempt. So since 2026-09-14 `impact`/`context` run the repair themselves (`rust
 before answering: milliseconds when an incremental suffices, the full 1-2s rebuild inline when it
 does not, and a single-flight background rebuilder (`flock`, kernel-released on death, never a pid
 file) for trees past `CORT_HEAL_MAX_FILES`. A foreground command a person chose to run has the
-budget a hook never will; the hooks stay read-only probes. What the payload owes the reader is
+budget a hook never will; the search hook stays a read-only probe and the edit hook only repairs
+an existing index. What the payload owes the reader is
 unchanged: `self_healed`/`heal_deferred` name what the query did about staleness, and every
 disclosure field still means what it meant — they describe the answer's basis, they never assign
 the caller maintenance work. One arm of that contract had to learn to speak on 2026-09-24: the
@@ -211,6 +216,22 @@ silently documenting a different one. **Storage failures are returned, never pan
 transient `SQLITE_IOERR_FSYNC` on a CI runner killed eight tests through four `.expect()` calls in
 `rust/src/db.rs`, and the same panic would break `hook-refresh`'s promise to be silent and exit 0 on
 every edit for as long as a disk misbehaved.
+
+## Shared decision memory (claudecat)
+
+For a question about a past project decision or correction, run
+`claudecat memory recall "<specific topic>" --harness codex --json` in Codex or the same
+command with `--harness claude-code` in Claude Code. This reads the shared TursoDB project
+ledger through ClaudeCat; it does not depend on cort's silent data-collection hook. Before
+using a hit, read its `source:source_line` in this checkout. `sync_status: synced` reports
+that this invocation pushed and pulled successfully, not that another machine cannot write
+afterward. `source_unchanged` checks bytes only; `source_changed`, `source_missing`, and
+`conflict` require a fresh source check or correction. An absent ledger or empty hit set is
+not evidence that no decision exists. Only record a reviewed claim from a committed source
+file, and use `--supersedes` for a correction. `claudecat memory status --json` shows the
+Git-origin project identity and any conflicting active records. This memory is queried on
+demand; the local `cort` index stays local, while `claudecat telemetry sync` copies structured
+usage events to the shared TursoDB without putting network work in a hook.
 
 ## Navigation front door (claudecat, read-only)
 

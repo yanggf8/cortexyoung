@@ -108,7 +108,7 @@ const ADOPT_MINE_FLAGS: &[&str] = &[
     "--out",
 ];
 const COST_AUDIT_FLAGS: &[&str] = &["--since", "--until", "--claude-dir", "--out"];
-const COST_COLLECT_FLAGS: &[&str] = &["--day", "--claude-dir", "--out-dir", "--force"];
+const COST_COLLECT_FLAGS: &[&str] = &["--day", "--days", "--claude-dir", "--out-dir", "--force"];
 const COST_TRIAL_FLAGS: &[&str] = &["--file"];
 const SUMMARIZE_FLAGS: &[&str] = &["--strict"];
 const DEMAND_FLAGS: &[&str] = &[
@@ -130,7 +130,7 @@ const USAGE_HOOK_PROBE: &str =
     "usage: cort-evals hook-probe [--claude-dir DIR] [--codex-dir DIR] [--kimi-dir DIR] [--examples N] [--decline TAG]  (replays the routing rule over transcripts already on disk; --decline narrows passed_over_examples to one decline tag, the census always covers every tag; no model calls)";
 const USAGE_ADOPT_MINE: &str = "usage: cort-evals adopt-mine --since RFC3339 [--until RFC3339] [--claude-dir DIR] [--usage-db FILE] [--rows N] [--follow-calls N] [--exclude proj,proj] [--out FILE]  (the docs/2026-08-31-recall-wip.md §6 funnel, including subagent sidechains; reads transcripts already on disk, no model calls)";
 const USAGE_COST_AUDIT: &str = "usage: cort-evals cost-audit --since YYYY-MM-DDTHH:MM:SSZ --until YYYY-MM-DDTHH:MM:SSZ [--claude-dir DIR] [--out FILE]  (read-only Claude Code cost census; no model calls)";
-const USAGE_COST_COLLECT: &str = "usage: cort-evals cost-collect [--day YYYY-MM-DD] [--claude-dir DIR] [--out-dir DIR] [--force]  (persist daily aggregates before transcript retention deletes them; default last seven complete UTC days, skipping existing files; no model calls)";
+const USAGE_COST_COLLECT: &str = "usage: cort-evals cost-collect [--day YYYY-MM-DD | --days 1..90] [--claude-dir DIR] [--out-dir DIR] [--force]  (persist daily aggregates before transcript retention deletes them; default last seven complete UTC days, skipping existing files; no model calls)";
 const USAGE_COST_TRIAL: &str = "usage: cort-evals cost-trial --file PAIRS.json  (summarize one paired, full-task hypothesis; no model calls)";
 const USAGE_RECALL_EXP: &str =
     "usage: cort-evals recall-exp --venue DIR [--top N]  (text-side counterfactual; no cort index needed)";
@@ -1068,8 +1068,18 @@ fn cost_collect_main(argv: &[String]) -> Result<(), String> {
     let home = std::env::var("HOME").map_err(|_| "HOME is unset".to_string())?;
     let now_ms = cort::usage::now_ms();
     let requested_day = at(argv, "--day", "");
+    let requested_days = at(argv, "--days", "7");
+    if !requested_day.is_empty() && has(argv, "--days") {
+        return Err("--day and --days cannot be combined".into());
+    }
+    let count: i64 = requested_days
+        .parse()
+        .map_err(|_| "--days must be an integer from 1 to 90".to_string())?;
+    if !(1..=90).contains(&count) {
+        return Err("--days must be an integer from 1 to 90".into());
+    }
     let days = if requested_day.is_empty() {
-        (0..7)
+        (0..count)
             .map(|offset| {
                 let day_ms = now_ms - offset * 86_400_000;
                 cost_collect_day("", day_ms)

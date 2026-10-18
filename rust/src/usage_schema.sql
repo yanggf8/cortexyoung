@@ -7,6 +7,8 @@ CREATE TABLE IF NOT EXISTS command_log (
   id INTEGER PRIMARY KEY,
   ts INTEGER NOT NULL,
   project_id TEXT,
+  machine_id TEXT NOT NULL DEFAULT 'legacy_unknown',
+  machine_source TEXT NOT NULL DEFAULT 'legacy_no_stamp',
   command TEXT NOT NULL,
   args_summary TEXT NOT NULL,
   status TEXT NOT NULL CHECK(status IN ('ok', 'error')),

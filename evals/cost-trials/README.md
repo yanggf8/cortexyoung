@@ -50,6 +50,11 @@ of aggregate Claude Code usage to `$XDG_DATA_HOME/cort-evals/claude-cost/YYYY-MM
 `~/.local/share/cort-evals/claude-cost/`). It stores no prompts, commands, source text, or
 transcript paths. Run it daily before Claude Code's transcript retention deletes the raw data.
 The included user systemd timer runs at 01:30 UTC. Its `Persistent=true` setting catches a missed
-timer firing, and the seven-day scan catches further missed dates. Use `--day YYYY-MM-DD` to
-backfill an older day and `--force` to refresh an already collected day after a late transcript
-sync. Daily aggregates are descriptive monitoring, not control-arm results.
+timer firing, and the seven-day scan catches further missed dates. Use `--days 30` for a
+backfill of up to 90 days, or `--day YYYY-MM-DD` for one older day; `--force` refreshes an
+already collected day after a late transcript
+sync. Install `cort-evals` and this user timer on each collecting machine, then run
+`claudecat telemetry sync` after collection to copy the daily reports into the shared TursoDB.
+Daily aggregates are descriptive monitoring, not control-arm results.
+Backfilled days count only transcripts still present on this machine; a zero before local
+retention is not proof that no sessions ran that day.

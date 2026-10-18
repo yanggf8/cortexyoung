@@ -7,7 +7,7 @@ use serde_json::{json, Map, Value};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-pub const USAGE_SCHEMA_VERSION: i64 = 1;
+pub const USAGE_SCHEMA_VERSION: i64 = 2;
 pub const RETENTION_DAYS: i64 = 90;
 pub const DEFAULT_USAGE_DAYS: i64 = 30;
 const RECORD_BUSY_MS: u64 = 25;
@@ -221,13 +221,15 @@ fn record_inner(path: &Path, rec: &CommandRecord) -> Result<(), ()> {
     let stale = rec.index_stale.map(i64::from);
     conn.execute(
         "INSERT INTO command_log
-            (ts, project_id, command, args_summary, status, error_code,
+            (ts, project_id, machine_id, machine_source, command, args_summary, status, error_code,
              read_source, requested_content_mode, effective_content_mode,
              receipt_hit, index_stale, bytes_out, saved_bytes)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         params![
             rec.now_ms,
             rec.project_id,
+            machine_id(),
+            machine_id_source(),
             rec.command,
             rec.args_summary,
             rec.status,
@@ -642,11 +644,11 @@ pub fn render_usage_lean(payload: &Value) -> String {
         format!("# machine={} source={}", mstr("id"), mstr("source")),
         format!("# {note}"),
     ];
-    // Loud, and in the header rather than a footnote: every number below it is an average over two
-    // machines, and that is not a caveat a reader can recover once the figure is in a document.
+    // Loud, and in the header rather than a footnote: this aggregate can span machines even
+    // though new rows carry their own stamp, and legacy rows cannot be separated after the fact.
     if mixed {
         lines.push(format!(
-            "# WARNING mixed_machines: rows here were written on more than one machine (db created on {}); no row can be attributed to either",
+            "# WARNING mixed_machines: database was created on {} and opened here; schema-v1 rows cannot be attributed individually, inspect schema-v2 row stamps before combining",
             mstr("db_created_on")
         ));
     }
@@ -782,6 +784,34 @@ fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
             Ok(())
         }
         Some(v) if v == expected => Ok(()),
+        Some("1") => {
+            let columns = [
+                ("machine_id", "ALTER TABLE command_log ADD COLUMN machine_id TEXT NOT NULL DEFAULT 'legacy_unknown'"),
+                ("machine_source", "ALTER TABLE command_log ADD COLUMN machine_source TEXT NOT NULL DEFAULT 'legacy_no_stamp'"),
+            ];
+            conn.execute_batch("BEGIN IMMEDIATE")?;
+            let migration = (|| {
+                for (name, ddl) in columns {
+                    let present = conn.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('command_log') WHERE name = ?1)",
+                        [name],
+                        |row| row.get::<_, bool>(0),
+                    )?;
+                    if !present {
+                        conn.execute(ddl, [])?;
+                    }
+                }
+                conn.execute(
+                    "UPDATE _usage_meta SET value = ?1 WHERE key = ?2",
+                    params![expected, VERSION_KEY],
+                )?;
+                conn.execute_batch("COMMIT")
+            })();
+            if migration.is_err() {
+                let _ = conn.execute_batch("ROLLBACK");
+            }
+            migration
+        }
         Some(_) => Err(rusqlite::Error::InvalidQuery),
     }
 }
@@ -815,9 +845,9 @@ fn stamp_machine(conn: &Connection) -> rusqlite::Result<()> {
 
 /// What the report says about where these rows came from.
 ///
-/// `mixed` is the field that matters and it is deliberately a claim about the *file*, not about any
-/// single row: rows carry no machine of their own, so once two machines have written to one
-/// database nothing can separate them again. All this can honestly report is that it happened.
+/// `mixed` warns that the database file's original stamp differs from the current machine.
+/// Schema-v1 rows have no per-row attribution; schema-v2 rows do. The aggregate still covers
+/// the whole file, so the warning remains necessary when interpreting old and new rows together.
 fn machine_block(conn: &Connection) -> Value {
     let stamped = meta(conn, MACHINE_KEY).ok().flatten();
     let stamped_source = meta(conn, MACHINE_SOURCE_KEY).ok().flatten();
