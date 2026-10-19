@@ -14,6 +14,13 @@ remains shared across machines. Each machine must configure the same Turso URL a
 write afterward. `CORT_MEMORY_PROJECT` can override Git origin for a project without one;
 the earlier `CLAUDECAT_MEMORY_PROJECT` spelling is accepted during migration.
 
+The shared ledger database is `harnessuse` (`turso://harnessuse-yanggf8.aws-ap-northeast-1.turso.io`,
+native TYPE Turso, shared with `telemetry_events`); mint its token with
+`turso db tokens create harnessuse`. Older credentials name `cortex-v5` on a different account;
+that database carries a code-index `chunks_fts` table the sync engine cannot open (fts5), so
+configuring against it fails before any network work — see
+`docs/2026-10-19-memory-deployment-harnessuse.md`.
+
 ## Move an existing machine
 
 The old ClaudeCat credential file can be imported without printing its token:
