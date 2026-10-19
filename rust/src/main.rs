@@ -1,6 +1,6 @@
 //! CLI dispatch with clap; `--help`/`-h`/`help` are side-effect free.
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use cort::ast_grep::{assert_ast_grep_version, resolve_ast_grep_bin};
 use cort::context::{context_command, ContextOptions, DEFAULT_BUDGET};
 use cort::coverage;
@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 // `hook-suggest` is here so its rows are recorded under their own name rather than `_unknown`:
 // whether the harness hook fires, and whether a fire is followed by an `impact` call, is the one
 // measurement that has a numerator. It is not a verb anyone types.
-const KNOWN_COMMANDS: [&str; 16] = [
+const KNOWN_COMMANDS: [&str; 17] = [
     "index",
     "status",
     "projects",
@@ -41,6 +41,7 @@ const KNOWN_COMMANDS: [&str; 16] = [
     "read",
     "recall",
     "usage",
+    "memory",
     "hook-suggest",
     "hook-refresh",
     "hook-install",
@@ -63,6 +64,7 @@ fn usage_value() -> Value {
             "read": "cort read <file> [--start <line>] [--end <line>] [-f json|lean]",
             "recall": "cort recall <query> [--limit <n>] [--content full] [-f json|lean]",
             "usage": "cort usage [days] [-f json|lean]",
+            "memory": "cort memory <configure|import-config|record|resolve|recall|status|sync|import-legacy> [options]",
             "hook-suggest": "cort hook-suggest  (PreToolUse hook: records search verdicts; silent unless CORT_SUGGEST=1; not a verb to type)",
             "hook-refresh": "cort hook-refresh  (PostToolUse hook: brings this project's index up to the tree after an edit; silent, never creates an index; not a verb to type)",
             "hook-install": "cort hook-install [--settings <path>] [--command <cmd>] [--remove|--status]  (installer-invoked: wires hook-suggest into settings.json; not a verb to type)",
@@ -610,6 +612,82 @@ struct UsageArgs {
     format: Option<String>,
 }
 
+#[derive(Parser, Debug)]
+#[command(
+    no_binary_name = true,
+    disable_help_flag = true,
+    disable_version_flag = true
+)]
+struct MemoryArgs {
+    #[command(subcommand)]
+    action: MemoryAction,
+}
+
+#[derive(Subcommand, Debug)]
+enum MemoryAction {
+    Configure {
+        #[arg(long)]
+        url: String,
+        #[arg(long, required = true)]
+        token_stdin: bool,
+    },
+    ImportConfig {
+        #[arg(long)]
+        from: PathBuf,
+    },
+    Record {
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(long)]
+        key: String,
+        #[arg(long)]
+        claim: String,
+        #[arg(long)]
+        source: PathBuf,
+        #[arg(long)]
+        line: usize,
+        #[arg(long)]
+        supersedes: Option<String>,
+    },
+    Resolve {
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(long)]
+        key: String,
+        #[arg(long)]
+        claim: String,
+        #[arg(long)]
+        source: PathBuf,
+        #[arg(long)]
+        line: usize,
+        #[arg(long, required = true)]
+        supersedes: Vec<String>,
+    },
+    Recall {
+        query: String,
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(long, default_value = "unknown", value_parser = ["unknown", "claude-code", "codex", "kimi", "grok", "other"])]
+        harness: String,
+        #[arg(long)]
+        json: bool,
+    },
+    Status {
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    Sync {
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+    },
+    ImportLegacy {
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+    },
+}
+
 fn pin_bin() -> Result<String, CortError> {
     let bin = resolve_ast_grep_bin()?;
     assert_ast_grep_version(&bin)?;
@@ -629,6 +707,7 @@ fn dispatch(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError> 
         Some("read") => cmd_read(&args[1..], usage),
         Some("recall") => cmd_recall(&args[1..], usage),
         Some("usage") => cmd_usage(&args[1..], usage),
+        Some("memory") => cmd_memory(&args[1..], usage),
         Some("hook-suggest") => cmd_hook_suggest(&args[1..], usage),
         Some("hook-refresh") => cmd_hook_refresh(&args[1..], usage),
         Some("hook-install") => cmd_hook_install(&args[1..], usage),
@@ -2764,6 +2843,92 @@ fn cmd_usage(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, CortError
         format,
         payload,
     })
+}
+
+fn cmd_memory(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError> {
+    let a = MemoryArgs::try_parse_from(args.iter()).map_err(clap_fail)?;
+    let value = match a.action {
+        MemoryAction::Configure { url, token_stdin } => {
+            if !token_stdin {
+                return Err(CortError::new(
+                    "memory_error",
+                    json!({"message":"pass --token-stdin"}),
+                ));
+            }
+            let mut token = String::new();
+            std::io::stdin()
+                .read_to_string(&mut token)
+                .map_err(|e| CortError::new("memory_error", json!({"message":e.to_string()})))?;
+            let path = cort::memory_store::configure(&url, &token).map_err(memory_error)?;
+            json!({"status":"configured","path":path})
+        }
+        MemoryAction::ImportConfig { from } => {
+            let path = cort::memory_store::import_config(&from).map_err(memory_error)?;
+            json!({"status":"configured","path":path})
+        }
+        MemoryAction::Record {
+            root,
+            key,
+            claim,
+            source,
+            line,
+            supersedes,
+        } => serde_json::to_value(
+            cort::memory_store::record(&root, &key, &claim, &source, line, supersedes.as_deref())
+                .map_err(memory_error)?,
+        )
+        .unwrap_or(Value::Null),
+        MemoryAction::Resolve {
+            root,
+            key,
+            claim,
+            source,
+            line,
+            supersedes,
+        } => serde_json::to_value(
+            cort::memory_store::resolve(&root, &key, &claim, &source, line, &supersedes)
+                .map_err(memory_error)?,
+        )
+        .unwrap_or(Value::Null),
+        MemoryAction::Recall {
+            query,
+            root,
+            harness,
+            json: _,
+        } => {
+            usage.project_id = Some(cort::memory_store::project(&root).map_err(memory_error)?);
+            usage.args_summary = json!({"v":1,"harness_declared":harness}).to_string();
+            let mut report = serde_json::to_value(
+                cort::memory_store::recall(&root, &query).map_err(memory_error)?,
+            )
+            .unwrap_or(Value::Null);
+            report["harness_declared"] = json!(harness);
+            report["machine"] = json!({
+                "id": cort::usage::machine_id(),
+                "source": cort::usage::machine_id_source(),
+            });
+            report
+        }
+        MemoryAction::Status { root, json: _ } => {
+            serde_json::to_value(cort::memory_store::status(&root).map_err(memory_error)?)
+                .unwrap_or(Value::Null)
+        }
+        MemoryAction::Sync { root } => {
+            json!({"status":cort::memory_store::sync(&root).map_err(memory_error)?})
+        }
+        MemoryAction::ImportLegacy { root } => {
+            json!({"imported":cort::memory_store::import_legacy(&root).map_err(memory_error)?})
+        }
+    };
+    Ok(Emit {
+        render_command: None,
+        format: Format::Json,
+        payload: value,
+    })
+}
+
+fn memory_error(message: String) -> CortError {
+    CortError::new("memory_error", json!({"message":message}))
 }
 
 fn peek_format(args: &[String]) -> Format {

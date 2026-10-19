@@ -2,11 +2,16 @@
 
 Instructions for any coding agent working in this repository (Codex reads `AGENTS.md`; Claude Code reads `CLAUDE.md`, which is a symlink to this file so the two can never drift).
 
-This repo builds `cort`, an offline code-intelligence CLI over `ast-grep` + SQLite.
+This repo builds `cort`: local code intelligence over `ast-grep` + SQLite, plus an explicit
+cross-machine project memory client backed by TursoDB.
 
-**The product's long-term goal is one sentence, and it is a measurement rather than a sentiment: make
-the caller-set enumeration an agent already performs — and often gets wrong — cheap, checkable edge by
-edge, and able to say whether the set is complete.** The third clause was promoted from a property of
+**The repository's long-term product goal is durable, source-checkable project memory for Claude Code
+across sessions: an agent should recover the right project fact or correction, know its scope and
+source, and detect when it was superseded.** `cort memory` now supplies an explicit reviewed
+decision ledger across machines; automatic conversation capture and unprompted recall remain open.
+The shipped code-intelligence CLI has its own measurable goal: make the caller-set enumeration an
+agent already performs — and often gets wrong — cheap, checkable edge by edge, and able to say
+whether the set is complete. The third clause was promoted from a property of
 the second to a goal in its own right on 2026-09-01, because the two are answered by different
 machinery and one of them is done: `verify-impact` grades a printed edge against its call site
 (soundness, "is this row real"), while `impact --coverage` is the only thing that speaks to
@@ -217,18 +222,25 @@ transient `SQLITE_IOERR_FSYNC` on a CI runner killed eight tests through four `.
 `rust/src/db.rs`, and the same panic would break `hook-refresh`'s promise to be silent and exit 0 on
 every edit for as long as a disk misbehaved.
 
-## Shared decision memory (claudecat)
+## Shared decision memory (cort)
+
+**Ownership correction (2026-10-19): cortexyoung owns the Claude Code continuity goal and the
+memory database client.** The 2026-10-18 recommendation confused shared database synchronization
+with ownership of memory behavior; the user intended only the former. The dependency direction
+is claudecat → cort. `cort memory` owns the reviewed claim ledger and its Turso sync replica;
+`cort read`/`recall` still stores only source-validated file readings. See `docs/memory.md` for
+configuration and `docs/2026-10-18-cross-agent-memory-baseline.md` for the correction.
 
 For a question about a past project decision or correction, run
-`claudecat memory recall "<specific topic>" --harness codex --json` in Codex or the same
+`cort memory recall "<specific topic>" --harness codex` in Codex or the same
 command with `--harness claude-code` in Claude Code. This reads the shared TursoDB project
-ledger through ClaudeCat; it does not depend on cort's silent data-collection hook. Before
+ledger through cort's own replica; it does not depend on the silent data-collection hook. Before
 using a hit, read its `source:source_line` in this checkout. `sync_status: synced` reports
 that this invocation pushed and pulled successfully, not that another machine cannot write
 afterward. `source_unchanged` checks bytes only; `source_changed`, `source_missing`, and
 `conflict` require a fresh source check or correction. An absent ledger or empty hit set is
 not evidence that no decision exists. Only record a reviewed claim from a committed source
-file, and use `--supersedes` for a correction. `claudecat memory status --json` shows the
+file, and use `--supersedes` for a correction. `cort memory status` shows the
 Git-origin project identity and any conflicting active records. This memory is queried on
 demand; the local `cort` index stays local, while `claudecat telemetry sync` copies structured
 usage events to the shared TursoDB without putting network work in a hook.
@@ -248,7 +260,9 @@ into this file — machine-generated content does not enter git; it writes nothi
 not merge it in.** It was merged here once (`3cda23ea`, 2026-09-23) and backed out the same day:
 two copies of one tool drift on the first commit to either side, the daily audit rows split
 between two `CORT-AUDIT.md` files, and its symbols pollute this repo's cort index. Changes to
-claudecat, its skill, and the cort-audit findings go to that repo; this repo only ships `cort`.
+claudecat, its skill, and the cort-audit findings go to that repo; this repo ships `cort` and
+its memory implementation. ClaudeCat may depend on `cort`; its memory implementation must not
+become a second owner of the ledger.
 
 <!-- claudecat:guardrails:begin -->
 <!-- 技術決策 / Guardrails：每行一條，例如 `2D tilemap + Macroquad（禁 Python/3D）`、`插件一律裝在 Claude Code 內`。claudecat 只在此區不存在時建立，之後永不覆寫。 -->

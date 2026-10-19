@@ -26,17 +26,40 @@ was not measured: no server, credentials, or running local LLM were available. T
 coding-agent package uses TypeScript/JavaScript hooks, and the published Hindsight server is
 not a Rust implementation. Running it here would not test an all-Rust production design.
 
-## Decision
+## Recommendation made on 2026-10-18 (corrected below)
 
-Do not add Hindsight's integration or memory service to `cort`. This repo's product remains
-the offline caller-set CLI. The separate `claudecat` repository is the place for a Rust-only
-memory experiment if we proceed. Its first contract should be narrower than automatic
+The recommendation was: do not add Hindsight's integration or memory service to `cort`;
+keep the shipped product as the offline caller-set CLI, and put any Rust-only memory experiment
+in the separate `claudecat` repository. Its first contract should be narrower than automatic
 transcript ingestion: a fact requires a scope, source, observed time, evidence pointer, and
 supersession state; a recalled claim must be checked against its authoritative source before
 being promoted to an instruction. The next paired run should test both agents on the same
 frozen facts, a superseded fact, and a pasted but false agent report, grading answers and
 source attribution separately. The current two probes do not establish that any new memory
 system improves correctness.
+
+## Ownership correction, 2026-10-19
+
+The recommendation above was wrong. It treated a shared database and synchronization path as
+though they determined which repository owns Claude Code's continuing memory. They do not.
+The user intended database centralization, not a transfer of the memory product to claudecat.
+The two probes measured what the agents could recall; they provided no evidence for assigning
+the memory feature to claudecat. **Cortexyoung is the repository that should help Claude Code
+retain and recover verified project knowledge across sessions.** Caller-set enumeration remains
+a measured capability of today's `cort`; it is not the whole long-term product goal.
+
+The boundary is functional: cortexyoung owns what is retained, how claims are scoped and
+superseded, when a claim is recalled, how its source is checked, and whether the memory actually
+improves later answers. The dependency direction is ClaudeCat → cort. The database connection,
+sync replica, and reviewed claim logic belong in cort; ClaudeCat may call cort but does not own
+a second memory database. Centralizing bytes elsewhere would not transfer these decisions.
+
+`cort memory` now supplies an explicit reviewed decision ledger with the existing Turso table
+format and a cort-owned local replica. `docs/memory.md` names the migration and verification
+steps. Do not merge the claudecat repository here or claim that `cort read`/`recall` remembers
+conversations: those commands validate stored source fragments. The new memory CLI still needs
+the paired accuracy and attribution test described above. The two baseline probes do not
+establish a benefit from the implemented path or from automatic capture.
 
 Upstream evidence:
 

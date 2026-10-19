@@ -1,6 +1,14 @@
-# cortexyoung — cort, offline code-intelligence over ast-grep + SQLite
+# cortexyoung — cort, local code intelligence and shared project memory
 
-`cort` is an offline code-intelligence CLI built on `ast-grep` (the only parser, never `sg`) and SQLite. One repo checkout, one SQLite index per project, no embeddings, no cloud DB, no servers.
+`cort` indexes code with `ast-grep` (the only parser, never `sg`) and SQLite. Code indexes, searches, and hooks remain local: one checkout, one SQLite index per project, no embeddings or server. The separate `memory` command uses an explicitly configured Turso sync replica for reviewed project facts across machines and agent harnesses.
+
+**Product direction (corrected 2026-10-19):** cortexyoung should help Claude Code carry verified
+project knowledge and corrections across sessions, with source and supersession checks. Today's
+`cort` provides code lookup, caller-set evidence, source-validated reading notes, and an explicit
+project decision ledger; it does not automatically capture conversations. `cort memory` owns the
+ledger, its sync replica, and its CLI; ClaudeCat can call `cort` as a client. The
+[baseline and ownership correction](docs/2026-10-18-cross-agent-memory-baseline.md) preserve what
+was measured and what remains to be tested. See [Project memory](docs/memory.md) for the handoff.
 
 Since 2026-09-01 the indexing scan runs the rule pack **in-process** through the `ast-grep-core`/`-config`/`-language` crates (proven byte-identical to the CLI on 1,604 match comparisons plus row-identical full indexes of two venues); the `ast-grep` CLI is still provisioned by `install.sh` and stays the engine of `struct --pattern` lookup. `CORT_SCAN_BACKEND=cli` puts the subprocess back on the indexing path; the scan engine's identity is part of `extractor_version`, so flipping it or bumping the crates forces a full re-index.
 
@@ -8,7 +16,7 @@ The repository is pure Rust: the product crate lives in [`rust/`](rust/), the de
 harness in [`evals/`](evals/), and no JavaScript, TypeScript or Python exists as executable code. Bash
 appears only in `install.sh` and `tests/install-smoke.sh`, where the platform requires a shell.
 
-Six shipped commands (plus `status`/`projects`/`delete` utilities):
+Eight shipped commands (plus `status`/`projects`/`delete` utilities):
 
 - `cort index [--incremental] [path]` — build or incrementally refresh the index (`ast-grep` + SQLite)
 - `cort struct -p '<pattern>' --lang <lang>` — structural search joined to enclosing symbols + 3 neighbours. `-g '<glob>'` narrows the search (fixed 2026-09-01: globs used to reach the CLI as literal paths and answer `No such file or directory`; they now go to `--globs`, matched relative to the search root, in both backends)
@@ -19,6 +27,7 @@ Six shipped commands (plus `status`/`projects`/`delete` utilities):
   (`bare` / `scoped` / `receiver` / `type`)
 - `cort read <file> [--start N] [--end N]` — read a file or line range and persist it as a reading note; unchanged repeats come from SQLite
 - `cort recall <query>` — FTS lookup over previously read files/fragments (default 12-line heads; pass `--content full` for stored bodies)
+- `cort memory <record|resolve|recall|status|sync|configure|import-config|import-legacy>` — reviewed project facts in a shared Turso ledger, owned by cort; see [Project memory](docs/memory.md)
 - `cort usage [days]` — local per-machine usage stats (best-effort; 1–90 days, default 30)
 
 All query/read verbs take `-f lean`: the same answer in a compact agent-oriented format, at about a
@@ -185,8 +194,9 @@ module paths by suffix — treat its output as candidates. For the precise calle
 ## Local usage recording (offline hook, separate TursoDB upload)
 
 Every cort command appends one row to a **central, local** SQLite database at
-`$CORT_CACHE_DIR/usage.db` (default `~/.cache/cortex-ng/usage.db`). `cort` contains no network
-code. The separate Rust `claudecat telemetry sync` command copies structured rows into the shared
+`$CORT_CACHE_DIR/usage.db` (default `~/.cache/cortex-ng/usage.db`). Indexing, queries, hooks,
+and usage recording contain no network work; an explicit `cort memory` command can synchronize
+reviewed facts through Turso. The separate Rust `claudecat telemetry sync` command copies structured rows into the shared
 TursoDB for cross-machine analysis; collection and queries do not wait for it.
 Schema-v2 rows carry their own hashed `machine_id` and source. Pre-v2 rows retain
 `legacy_unknown` per-row attribution; their database-wide stamp is only a historical hint.
