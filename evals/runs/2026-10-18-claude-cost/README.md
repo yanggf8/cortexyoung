@@ -12,6 +12,13 @@ The report reads the local Claude Code transcript tree, including subagent files
 prompt, source text, command, or path. This is the first current-data screen for where Claude Code
 spends tokens, **not** a savings estimate.
 
+**Boundary correction (2026-10-19):** these committed reports were generated before
+`cost-audit` parsed timestamps as instants. Its earlier string comparison excluded events with
+fractional seconds in the first second of `--since` and included such events in the first second
+of `--until`. The code and regression tests are fixed; these historical JSON files have not been
+regenerated, so the exact effect on their totals is unknown. Re-run the command above against
+the original transcript population before treating the quoted totals as exact.
+
 | Measure | Current window |
 |---|---:|
 | Session files with events in window | 1,085 (433 subagent files) |

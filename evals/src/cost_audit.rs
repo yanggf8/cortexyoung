@@ -154,7 +154,7 @@ fn result_text(content: &Value) -> String {
     }
 }
 
-fn scan_file(path: &Path, since: &str, until: &str, census: &mut Census) {
+fn scan_file(path: &Path, since_ms: i64, until_ms: i64, census: &mut Census) {
     let Ok(file) = std::fs::File::open(path) else {
         census.files_unreadable += 1;
         return;
@@ -180,9 +180,14 @@ fn scan_file(path: &Path, since: &str, until: &str, census: &mut Census) {
         let Some(ts) = v.get("timestamp").and_then(Value::as_str) else {
             continue;
         };
-        // RFC3339 UTC timestamps in Claude's transcript sort lexically. Both boundaries are
-        // required in UTC so offsets cannot make the comparison lie.
-        if ts < since || ts >= until {
+        // Transcript timestamps can include milliseconds while window boundaries often do not.
+        // Comparing their strings would exclude the first second and include the next day's first
+        // second, because '.' sorts before 'Z'.
+        let Ok(ts_ms) = crate::adopt::parse_since(ts) else {
+            census.lines_unparsed += 1;
+            continue;
+        };
+        if ts_ms < since_ms || ts_ms >= until_ms {
             continue;
         }
         in_window = true;
@@ -337,13 +342,18 @@ fn scan_file(path: &Path, since: &str, until: &str, census: &mut Census) {
 /// Count observed cost channels. Tool tokens use the same estimator for every tool; model usage
 /// is reported separately because cache reads replay old context and cannot be added to a tool
 /// result as if each byte entered the model only once.
-pub fn audit(dir: &Path, since: &str, until: &str) -> Value {
+pub fn audit(dir: &Path, since: &str, until: &str) -> Result<Value, String> {
+    let since_ms = crate::adopt::parse_since(since)?;
+    let until_ms = crate::adopt::parse_since(until)?;
+    if since_ms >= until_ms {
+        return Err("--since must precede --until".to_string());
+    }
     let mut paths = Vec::new();
     files(dir, 6, &mut paths);
     paths.sort();
     let mut c = Census::default();
     for path in paths {
-        scan_file(&path, since, until, &mut c);
+        scan_file(&path, since_ms, until_ms, &mut c);
     }
     let tools: BTreeMap<_, _> = c
         .tools
@@ -378,7 +388,7 @@ pub fn audit(dir: &Path, since: &str, until: &str) -> Value {
             )
         })
         .collect();
-    json!({
+    Ok(json!({
         "window": {"since_utc": since, "until_utc": until},
         "files_read": c.files_read,
         "files_unreadable": c.files_unreadable,
@@ -406,7 +416,7 @@ pub fn audit(dir: &Path, since: &str, until: &str) -> Value {
         "tools": tools,
         "bash_leading_commands": bash_leading_commands,
         "reading": "Descriptive local Claude Code census. Assistant usage is deduplicated by message id within each transcript file; result payloads by tool-use id. Session-file distribution is per JSONL file, including subagent sidechains, not per user task. Tool-result tokens are an ASCII/4 + non-ASCII*1 estimate, not provider billing tokens. Model usage is provider-reported, but sums include repeated context across turns. Bash leading command is a whitelisted first word after an optional cd && wrapper, not a shell-semantic classifier; compound commands can include other work. Exact repeat Read means identical Read input after no observed Edit/Write tool in the same file; Bash writes and external changes are not detected, so it is a candidate, not proven avoidable cost. This report does not estimate savings or grade task success."
-    })
+    }))
 }
 
 #[cfg(test)]

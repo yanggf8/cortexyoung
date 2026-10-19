@@ -1023,15 +1023,12 @@ fn cost_audit_main(argv: &[String]) -> Result<(), String> {
             return Err(USAGE_COST_AUDIT.to_string());
         }
     }
-    if since >= until {
-        return Err("--since must precede --until".to_string());
-    }
     let home = std::env::var("HOME").unwrap_or_default();
     let dir = at(argv, "--claude-dir", &format!("{home}/.claude/projects"));
     if !Path::new(&dir).is_dir() {
         return Err(format!("{dir} is not a directory"));
     }
-    let mut report = cort_evals::cost_audit::audit(Path::new(&dir), &since, &until);
+    let mut report = cort_evals::cost_audit::audit(Path::new(&dir), &since, &until)?;
     stamp_machine(&mut report);
     let rendered = serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?;
     let out = at(argv, "--out", "");
@@ -1103,7 +1100,7 @@ fn cost_collect_main(argv: &[String]) -> Result<(), String> {
             print_report(&json!({"status":"already_collected","day":day,"path":out}));
             continue;
         }
-        let mut report = cort_evals::cost_audit::audit(Path::new(&claude_dir), &since, &until);
+        let mut report = cort_evals::cost_audit::audit(Path::new(&claude_dir), &since, &until)?;
         stamp_machine(&mut report);
         if let Some(obj) = report.as_object_mut() {
             obj.insert(
