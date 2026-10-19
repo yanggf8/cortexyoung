@@ -69,18 +69,23 @@ The earlier `.claudecat/memory.json` ledger is an explicit import source through
 `cort memory import-legacy`. It is not the active database. `cort read` and `cort recall`
 remain source fragment tools and do not read this decision ledger.
 
-## Evidence still needed
+## Deployment evidence and the next gate
 
 On 2026-10-19, a temporary cort replica using the existing ClaudeCat Turso connection
 successfully synchronized. Cortexyoung's Git-origin project had no entries; ClaudeCat's
 Git-origin project exposed its existing two rows, with one active. The temporary config and
-replica were removed afterward. This checks remote schema and project-key compatibility on
-one machine, not a two-machine write/read round trip.
+replica were removed afterward. This checked remote schema and project-key compatibility.
+Later that day, a reviewed `memory ownership` claim was recorded from `AGENTS.md` on machine
+`2eb02d46ec5c4319`. On 2026-10-20, machine `44a8a38f0b05b9a8` imported its already-synced
+ClaudeCat credentials into cort, synchronized its fresh cort replica against `harnessuse`, and
+recalled that claim as active with `source_unchanged` and `source_line_status: same_line`. The
+cited source line was read in this checkout. This checks one write-to-other-machine-read path;
+it does not establish cross-machine correction handling or agent answer quality.
 
 The local tests cover source change, supersession, schema compatibility, project isolation,
-config migration, and query redaction. A deployment check must configure two independent
-machine replicas against the same remote table, write a reviewed correction on one, and
-verify that the other reads the active claim and its source status. Then fresh Claude Code and
-Codex sessions should be graded on the same frozen questions, including a superseded claim,
-stale source, and false pasted report. A sync succeeds or a hook fires without proving the
-later answer is correct.
+config migration, and query redaction. The remaining deployment check is to write a reviewed
+correction on one physical machine and verify that the other reads only the active claim with
+the expected source status. Fresh Claude Code and Codex sessions must then be graded on the
+same frozen questions, including a superseded claim, stale source, and false pasted report.
+A sync succeeds or a hook fires without proving the later answer is correct. The ordered
+experiment and product priorities are in `docs/2026-10-20-direction-after-collection.md`.

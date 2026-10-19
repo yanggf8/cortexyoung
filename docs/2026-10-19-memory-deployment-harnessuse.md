@@ -3,7 +3,19 @@
 Machine `2eb02d46ec5c4319` (`etc-machine-id`), repo head `3fed89ed`, cort 0.1.0 built from that
 head, Turso CLI v1.0.34. This records one machine's configure → sync → record → recall round
 trip. The two-machine write/read round trip demanded by `docs/memory.md` ("Evidence still
-needed") is still open, and nothing here closes it.
+needed") was still open at the time of this deployment.
+
+## Second-machine read, 2026-10-20
+
+Machine `44a8a38f0b05b9a8` upgraded cort and ClaudeCat, synchronized the old ClaudeCat
+replica first, imported its `harnessuse` credentials into cort, and synchronized a fresh
+cort-owned replica. `cort memory status` reported one active cortexyoung entry and no
+conflicts. `cort memory recall 'memory ownership' --harness codex` returned the entry
+recorded below, with `sync_status: synced`, `evidence_status: source_unchanged`, and
+`source_line_status: same_line`; the cited `AGENTS.md:227` context was read in that checkout.
+ClaudeCat's forwarding `memory recall` returned the same entry. This closes the single
+write-to-other-machine-read check, not the correction round trip or a paired test of agent
+answers. See `docs/memory.md` for the remaining gate.
 
 ## First failure: the code arrived, the tool did not
 
