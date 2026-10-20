@@ -275,7 +275,7 @@ That path is [`cort-upgrade`](#update)'s.
 git pull --no-rebase
 cargo build --release --locked --manifest-path rust/Cargo.toml
 ./rust/target/release/cort_upgrade --check   # diagnose: no locks, no writes, no repair; same exit taxonomy
-./rust/target/release/cort_upgrade           # stage -> drain -> activate -> repair -> reindex -> verdict
+./rust/target/release/cort_upgrade           # stage -> drain -> activate -> prune -> repair -> reindex -> verdict
 ```
 
 `cort-upgrade` is the upgrade path on any machine that already has a `cort_bin`
@@ -289,7 +289,12 @@ lock-free, invisible, validated, prints the content-addressed id); take **two
 flocks** — admission closes the gate on new workers, activity drains in-flight
 ones with a 30s deadline, hooks stand down and `cort index` refuses rather
 than race an upgrade; **activate** the payload only (no skills, no hooks —
-upgrade policy is never pre-empted by the installer); **rewire** hooks
+upgrade policy is never pre-empted by the installer); **prune** the
+generations activation superseded — the live one and the most recent
+previous survive (the previous is the rollback path), the rest are removed
+and the removals are named in the output, never fatally (housekeeping
+cannot fail an upgrade that landed; the steady state and `--check` still
+touch nothing); **rewire** hooks
 (judge → repair → re-run status → re-judge; a repair is reported as landed
 only after the re-check says so) and skills (only ones the installer owns —
 an unstamped divergence is `install.sh --force`'s decision, `--keep-mine`

@@ -1437,3 +1437,97 @@ fn a_new_binary_newer_than_its_sources_still_reads_current_when_bytes_match() {
         "a fresh build with matching bytes is genuinely current: {b:?}"
     );
 }
+
+// ── generation prune ────────────────────────────────────────────────────
+// Generations are `cort-<12 hex>` directories beside the `cort` symlink. Every upgrade
+// creates one and nothing removed the superseded ones, so the install root grew without
+// bound (measured on this machine: five dead generations, ~85MB). The prune keeps the
+// live generation and the `keep` most recent others — one previous generation is the
+// rollback path — and touches nothing that is not a generation directory.
+
+/// A fake generation directory with a chosen age. The mtime is set LAST: creating the
+/// pack subdir stamps the parent with `now`, which would silently defeat the age.
+fn generation_at(install_root: &std::path::Path, name: &str, age_secs: u64) {
+    use std::time::{Duration, SystemTime};
+    let dir = install_root.join(name);
+    fs::create_dir_all(dir.join("pack")).unwrap();
+    fs::File::open(&dir)
+        .unwrap()
+        .set_modified(SystemTime::now() - Duration::from_secs(age_secs))
+        .unwrap();
+}
+
+#[test]
+fn prune_keeps_the_live_generation_one_previous_and_removes_the_rest() {
+    let root = tempfile::tempdir().unwrap();
+    let r = root.path();
+    generation_at(r, "cort-aaaaaaaaaaaa", 300); // live
+    generation_at(r, "cort-bbbbbbbbbbbb", 100); // newest non-live
+    generation_at(r, "cort-cccccccccccc", 200);
+    generation_at(r, "cort-dddddddddddd", 400);
+    std::os::unix::fs::symlink(r.join("cort-aaaaaaaaaaaa"), r.join("cort")).unwrap();
+    // Neighbours a generation-named glob must never eat: the manifest, the deploy log,
+    // a crashed installer's staging dir, and a `cort-` name that is not a 12-hex id.
+    fs::write(r.join("manifest"), "cort_bin:x\n").unwrap();
+    fs::write(r.join("deploy.log"), "").unwrap();
+    fs::create_dir(r.join(".cort-staging.4242")).unwrap();
+    fs::create_dir(r.join("cort-shorthand")).unwrap();
+
+    let report = cort::upgrade::prune_generations(r, 1).unwrap();
+
+    assert_eq!(report.live.as_deref(), Some("cort-aaaaaaaaaaaa"));
+    assert_eq!(report.kept_previous, vec!["cort-bbbbbbbbbbbb"]);
+    assert_eq!(
+        report.removed,
+        vec!["cort-cccccccccccc", "cort-dddddddddddd"]
+    );
+    assert!(report.failed.is_empty());
+    for kept in [
+        "cort",
+        "cort-aaaaaaaaaaaa",
+        "cort-bbbbbbbbbbbb",
+        "manifest",
+        "deploy.log",
+        ".cort-staging.4242",
+        "cort-shorthand",
+    ] {
+        assert!(
+            r.join(kept).symlink_metadata().is_ok(),
+            "{kept} should survive the prune"
+        );
+    }
+    for gone in ["cort-cccccccccccc", "cort-dddddddddddd"] {
+        assert!(
+            r.join(gone).symlink_metadata().is_err(),
+            "{gone} should be removed"
+        );
+    }
+}
+
+#[test]
+fn prune_with_no_resolvable_live_link_removes_nothing() {
+    let root = tempfile::tempdir().unwrap();
+    let r = root.path();
+    generation_at(r, "cort-aaaaaaaaaaaa", 300);
+    generation_at(r, "cort-bbbbbbbbbbbb", 100);
+
+    let report = cort::upgrade::prune_generations(r, 1).unwrap();
+
+    assert_eq!(report.live, None);
+    assert!(report.removed.is_empty());
+    assert!(report.failed.is_empty());
+    assert!(r.join("cort-aaaaaaaaaaaa").is_dir());
+    assert!(r.join("cort-bbbbbbbbbbbb").is_dir());
+}
+
+#[test]
+fn a_root_without_generations_is_nothing_to_prune() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("manifest"), "cort_bin:x\n").unwrap();
+
+    let report = cort::upgrade::prune_generations(root.path(), 1).unwrap();
+
+    assert_eq!(report.live, None);
+    assert!(report.removed.is_empty());
+    assert!(root.path().join("manifest").symlink_metadata().is_ok());
+}

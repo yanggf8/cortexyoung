@@ -11,9 +11,10 @@
 use clap::Parser;
 use cort::upgrade::{
     acquire_upgrade_locks, ast_grep_mismatch_found, check_hooks, check_skills, diagnose,
-    diagnose_for_check, first_upgrade_note, load_acks, migrate_indexes, repair_skill,
-    run_capture_with_deadline, run_status_with_deadline, save_ack, skill_repair_target, verdict,
-    Component, ComponentState, DiagnoseInputs, LockError, UpgradeExit,
+    diagnose_for_check, first_upgrade_note, load_acks, migrate_indexes, prune_generations,
+    repair_skill, run_capture_with_deadline, run_status_with_deadline, save_ack,
+    skill_repair_target, verdict, Component, ComponentState, DiagnoseInputs, LockError,
+    UpgradeExit, KEEP_PREVIOUS_GENERATIONS,
 };
 use std::path::{Path, PathBuf};
 use std::process::exit;
@@ -282,6 +283,22 @@ fn main() {
     let act_args: Vec<&str> = act_owned.iter().map(String::as_str).collect();
     if let Err(e) = run_capture_with_deadline(install_bin, &act_args, Duration::from_secs(5 * 60)) {
         fatal(&format!("activation failed: {e}"));
+    }
+
+    // ── Prune the superseded generations this activation superseded. ──
+    // Full path only: the steady state's contract is "cheap, touches nothing", --check is
+    // read-only by construction, and dead generations are created by activation — so they
+    // are cleaned by the same path. Housekeeping, not a component: a prune failure is
+    // printed and never fails the run, because the upgrade has landed already.
+    match prune_generations(&install_root, KEEP_PREVIOUS_GENERATIONS) {
+        Ok(report) => println!(
+            "generations: kept live {} + [{}], removed [{}], failed [{}]",
+            report.live.as_deref().unwrap_or("-"),
+            report.kept_previous.join(", "),
+            report.removed.join(", "),
+            report.failed.join(", "),
+        ),
+        Err(e) => eprintln!("generations: prune failed, superseded generations left in place: {e}"),
     }
 
     // ── Step 5: rewire, then re-verify ONCE. The verdict reads ONLY post-repair state —

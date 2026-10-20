@@ -1229,3 +1229,90 @@ pub fn diagnose_for_check(
     }
     comps
 }
+
+// ── generation prune ─────────────────────────────────────────────────────
+// Every upgrade stages a new `cort-<12hex>` generation and nothing removed the
+// superseded ones — the live symlink moved on and the old directories stayed, so the
+// install root grew without bound (measured on the machine this shipped from: five dead
+// generations, ~85MB, each a full binary + pack). `install.sh --uninstall` sweeps them,
+// but that is the one verb a healthy machine never runs.
+
+/// How many non-live generations survive a prune. One is the rollback path: if the new
+/// generation is broken, the previous one is what "go back" means. More would grow the
+/// footprint to answer a question nothing asks, so the policy lives here, next to the
+/// code that applies it.
+pub const KEEP_PREVIOUS_GENERATIONS: usize = 1;
+
+/// What a prune did. `live` is the generation the `cort` symlink names — None when no
+/// link resolves, which is also the case where nothing is removed (see
+/// `prune_generations`).
+#[derive(Debug, Default)]
+pub struct PruneReport {
+    pub live: Option<String>,
+    pub kept_previous: Vec<String>,
+    pub removed: Vec<String>,
+    pub failed: Vec<String>,
+}
+
+/// Is this entry name a generation directory name: `cort-` plus exactly the 12 lowercase
+/// hex chars `payload_id` emits (install.sh `cut -c1-12`). The strict shape is the
+/// safety: `cort`, `.cort-staging.$$`, `cort-shorthand` and every non-generation file in
+/// the install root fail it and are never removal candidates.
+fn is_generation_name(name: &std::ffi::OsStr) -> bool {
+    let Some(id) = name.to_str().and_then(|s| s.strip_prefix("cort-")) else {
+        return false;
+    };
+    id.len() == 12 && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// Delete superseded generations from an install root, keeping the live one and the
+/// `keep` most recent others, newest first. Only directories whose name passes
+/// `is_generation_name` are candidates, and an entry whose mtime cannot be read is
+/// dropped from the candidates rather than guessed old — the failure mode of a wrong
+/// guess is deleting a generation that might have been the one worth keeping. Removals
+/// are attempted all, never aborting midway; a failed removal lands in `failed` rather
+/// than failing the call, because housekeeping must not fail an upgrade that landed.
+///
+/// An unresolvable `cort` symlink removes nothing. That symlink is the one input that
+/// decides which generation is live, and guessing (newest? any?) is exactly how a prune
+/// deletes the generation the shim is pointing at.
+pub fn prune_generations(install_root: &Path, keep: usize) -> std::io::Result<PruneReport> {
+    let mut report = PruneReport::default();
+    let Some(live) = std::fs::read_link(install_root.join("cort"))
+        .ok()
+        .and_then(|t| t.file_name().map(|n| n.to_string_lossy().into_owned()))
+    else {
+        return Ok(report);
+    };
+    report.live = Some(live.clone());
+
+    let mut candidates: Vec<(SystemTime, String)> = Vec::new();
+    for entry in std::fs::read_dir(install_root)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if !is_generation_name(&name)
+            || !entry.file_type().map(|t| t.is_dir()).unwrap_or(false)
+            || name.to_string_lossy() == live
+        {
+            continue;
+        }
+        // A directory whose age cannot be read is not a removal candidate.
+        let Ok(modified) = entry.metadata().and_then(|m| m.modified()) else {
+            continue;
+        };
+        candidates.push((modified, name.to_string_lossy().into_owned()));
+    }
+    candidates.sort_by_key(|a| std::cmp::Reverse(a.0)); // newest first
+    report.kept_previous = candidates
+        .iter()
+        .take(keep)
+        .map(|(_, n)| n.clone())
+        .collect();
+    for (_, name) in candidates.iter().skip(keep) {
+        match std::fs::remove_dir_all(install_root.join(name)) {
+            Ok(()) => report.removed.push(name.clone()),
+            Err(_) => report.failed.push(name.clone()),
+        }
+    }
+    Ok(report)
+}
