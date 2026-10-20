@@ -314,6 +314,11 @@ one-time `partial_drain_first_upgrade` note — the 30s drain cannot prove
 exclusion of workers running pre-lock binaries — and marks itself done only
 after a fully successful run.
 
+Why the installed payload is ~45M where `cort_upgrade` stays ~17M: commit
+`3fed89ed` gave `cort` the cross-machine memory sync (`turso` +
+`tokio` rt-multi-thread), and only `cort` links it — same build, same
+profile, the difference is that one dependency.
+
 ## Upgrade note — index schema v3 through v7
 
 Schema v3 adds a `raw_edges` table: the unresolved call/import matches that the relationship graph
