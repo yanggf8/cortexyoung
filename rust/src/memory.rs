@@ -5,7 +5,6 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::fs::OpenOptions;
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -177,9 +176,10 @@ fn line_hash(bytes: &[u8], line: usize) -> Option<String> {
         .map(|text| hash(text.as_bytes()))
 }
 
-/// Where the cited line stands now. A line that only moved (text inserted above it) keeps the
-/// claim's evidence intact, so it is told apart from one whose text changed: otherwise every edit
-/// above a cited line forces a reviewed supersession of a claim that is still exactly supported.
+/// Where the cited line's exact text sits now. This locates the line; it does not vouch for the
+/// claim. A line can keep its text and move into a section that reverses its meaning ("Current"
+/// to "Deprecated"), so `moved` tells the reader where to look, and the reader still judges the
+/// surrounding context before treating the claim as supported.
 fn locate_line(bytes: &[u8], line: usize, expected: &str) -> (&'static str, Option<usize>) {
     if line_hash(bytes, line).as_deref() == Some(expected) {
         return ("same_line", None);
@@ -219,66 +219,9 @@ pub(crate) fn active_entries(ledger: &MemoryLedger) -> Vec<&MemoryEntry> {
         .collect()
 }
 
-/// Record an explicit claim with a source line. The caller must review whether that line actually
-/// supports the claim; the program can only check that the line exists and detect later file edits.
-pub fn record(
-    root: &Path,
-    key: &str,
-    claim: &str,
-    source: &Path,
-    source_line: usize,
-    supersedes: Option<&str>,
-) -> Result<MemoryEntry, String> {
-    let entry = new_entry(root, key, claim, source, source_line, supersedes)?;
-    let key = entry.key.as_str();
-    // A separate lock file survives atomic replacement of memory.json. Locking the ledger inode
-    // itself would let a second writer lock the new inode and lose an update from the first.
-    let real_root = fs::canonicalize(root).map_err(|e| format!("cannot open project root: {e}"))?;
-    let lock_path =
-        crate::data_dir::project_data_dir(&real_root.to_string_lossy()).join("memory.lock");
-    if let Some(parent) = lock_path.parent() {
-        fs::create_dir_all(parent).map_err(|e| format!("cannot create memory lock dir: {e}"))?;
-    }
-    let lock = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(false)
-        .open(&lock_path)
-        .map_err(|e| format!("cannot open memory lock: {e}"))?;
-    lock.lock()
-        .map_err(|e| format!("cannot lock memory: {e}"))?;
-    let mut ledger = load(root)?;
-    let active = active_entries(&ledger);
-    if active.iter().filter(|e| e.key == key).count() > 1 {
-        return Err(
-            "conflicting active entries for this key; resolve the ledger before recording".into(),
-        );
-    }
-    match supersedes {
-        Some(id) if !active.iter().any(|e| e.id == id && e.key == key) => {
-            return Err("superseded id must be the active entry for the same key".into());
-        }
-        Some(_) => {}
-        None if active.iter().any(|e| e.key == key) => {
-            return Err("an active entry has this key; pass --supersedes with its id".into());
-        }
-        None => {}
-    }
-    ledger.entries.push(entry.clone());
-    validate(&ledger)?;
-    let body = serde_json::to_string_pretty(&ledger).map_err(|e| e.to_string())? + "\n";
-    crate::data_dir::write_atomic(&ledger_path(root), &body)
-        .map_err(|e| format!("cannot write memory ledger: {e}"))?;
-    Ok(entry)
-}
-
-pub fn recall(root: &Path, query: &str) -> Result<MemoryRecall, String> {
-    let present = ledger_path(root)
-        .try_exists()
-        .map_err(|e| format!("cannot check memory ledger: {e}"))?;
-    let ledger = load(root)?;
-    Ok(recall_ledger(root, query, &ledger, present, None))
-}
+// The JSON ledger is read-only now (`load`, for `cort memory import-legacy`). Its writer and reader
+// had no caller left once the Turso store took over, and a writer that stamps provenance fields
+// the older ClaudeCat client drops is how one id could later import with two different bodies.
 
 pub(crate) fn recall_ledger(
     root: &Path,

@@ -61,12 +61,18 @@ pass `--supersedes <active-id>`; for two or more concurrent active entries of on
 `cort memory resolve` and repeat `--supersedes` for every active id reported by `status`.
 Recall returns active hits with `source_unchanged`, `source_changed`, `source_missing`, or
 `conflict`, plus the cited line's status: `same_line`; `moved` with `source_line_now` when the
-line's exact text appears at exactly one other line (text was inserted or removed above it);
+line's exact text appears at exactly one other line (for example because text was inserted or
+removed above it; the check does not establish why);
 `moved_ambiguous` when it appears at several; `changed` when it appears nowhere. A `moved` hit
-keeps `source_changed` because the file bytes did change, but reading `source_line_now` is a
-fresh source check and needs no supersession. Read the cited line before using a hit. Each row
-written since 2026-10-20 carries `recorded_machine` and `recorded_machine_source`, the writer's
-`usage::machine_id`; older rows carry neither and their origin is unknown. An absent
+keeps `source_changed` because the file bytes did change. `moved` locates the text; it does not
+check its surroundings, so a line that moved from a "Current" section to a "Deprecated" one
+still reports `moved`. Read the line and its section at `source_line_now`; a supersession is
+unnecessary only if that context still supports the claim. Read the cited line before using a
+hit. Rows written by cort since 2026-10-20 (`63f7de3f`) carry `recorded_machine` and
+`recorded_machine_source`, the writer's `usage::machine_id` and how it was derived. It is a
+self-reported hint, not proof: `CORT_MACHINE_ID` overrides it, the fallbacks are a hostname
+hash or `unknown`, and a machine still running an older cort writes rows with neither field,
+whose origin stays unknown. An absent
 ledger and a present ledger with no match are distinct. The `--harness` label is self-reported;
 the memory rows are shared across harnesses, while cort's local usage row records the label and
 machine without the query text.

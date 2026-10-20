@@ -294,11 +294,36 @@ async fn insert(
             .ok_or("memory id conflict without an existing row")?
             .get(0)
             .map_err(|e| e.to_string())?;
-        if old != body {
+        if !same_claim(&old, &body) {
             return Err("memory id collision with different content".into());
         }
     }
     Ok(())
+}
+
+/// Whether two stored bodies describe the same claim. A client that predates the machine stamp
+/// drops it when it re-serializes a row, so the same id can legitimately arrive with and without
+/// it. Only that absence is forgiven: two stamps that are both present must agree, and everything
+/// else must match exactly.
+fn same_claim(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    const STAMP: [&str; 2] = ["recorded_machine", "recorded_machine_source"];
+    let parse = |body: &str| serde_json::from_str::<serde_json::Value>(body).ok();
+    let (Some(mut x), Some(mut y)) = (parse(a), parse(b)) else {
+        return false;
+    };
+    let (Some(x), Some(y)) = (x.as_object_mut(), y.as_object_mut()) else {
+        return false;
+    };
+    for field in STAMP {
+        match (x.remove(field), y.remove(field)) {
+            (Some(p), Some(q)) if p != q => return false,
+            _ => {}
+        }
+    }
+    x == y
 }
 
 fn with_lock<T>(
@@ -616,6 +641,25 @@ mod tests {
             let mut collision = first.clone();
             collision.claim = "tampered".into();
             assert!(insert(&conn, "project-a", &collision).await.is_err());
+            // An older client re-serializes a row without the stamp: same claim, same id, both
+            // directions.
+            let mut stamped = first.clone();
+            stamped.recorded_machine = Some("machine-a".into());
+            stamped.recorded_machine_source = Some("etc-machine-id".into());
+            insert(&conn, "project-a", &stamped).await.unwrap();
+            stamped.id = "stamped".into();
+            insert(&conn, "project-c", &stamped).await.unwrap();
+            let mut unstamped = stamped.clone();
+            unstamped.recorded_machine = None;
+            unstamped.recorded_machine_source = None;
+            insert(&conn, "project-c", &unstamped).await.unwrap();
+            // Two present stamps that disagree are two writers claiming one id: a replay or a
+            // collision, never an older client. Same claim or not, it is refused.
+            let mut restamped = stamped.clone();
+            restamped.recorded_machine = Some("machine-b".into());
+            assert!(insert(&conn, "project-c", &restamped).await.is_err());
+            restamped.claim = "tampered".into();
+            assert!(insert(&conn, "project-c", &restamped).await.is_err());
             insert(&conn, "project-a", &second).await.unwrap();
             insert(&conn, "project-b", &first).await.unwrap();
             let a = read_ledger(&conn, "project-a").await.unwrap();
