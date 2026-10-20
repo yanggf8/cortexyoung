@@ -6,7 +6,7 @@ so the decision rule cannot be fitted to the numbers afterward.
 
 ## Why a gate and not a vote
 
-Usage is near zero. On machine `2eb02d46ec5c4319` (Thinkpade15) the 30-day `cort usage` window
+Usage is near zero. On machine `2eb02d46ec5c4319` the 30-day `cort usage` window
 on 2026-10-20 held 0 `impact` and 0 `context` calls against 4,031 `hook-suggest` probes and
 4,424 `hook-refresh` runs. The 2026-10-20 direction note quotes 7 `impact` calls from an
 unstamped local window; neither figure is a task denominator.

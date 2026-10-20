@@ -603,6 +603,8 @@ mod tests {
                 recorded_at: "1".into(),
                 supersedes: None,
                 resolves: Vec::new(),
+                recorded_machine: None,
+                recorded_machine_source: None,
             };
             let mut second = first.clone();
             second.id = "second".into();

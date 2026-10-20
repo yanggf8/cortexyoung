@@ -16,7 +16,11 @@ screen. ClaudeCat remains a separate navigation and measurement tool that may ca
   5,223 edit-hook refreshes, seven `impact` calls, and 11 `memory` commands in the local
   30-day usage window. The seven-day window had no `impact` or `context` call. These usage
   totals come from one local usage database and are the same when the audit is invoked from
-  either repository; they are not per-repository counts. The memory commands include rollout
+  either repository; they are not per-repository counts. This snapshot did not record which
+  machine produced it. Re-run on machine `2eb02d46ec5c4319` the same day at
+  `06bfe3f1`, the 30-day window held 4,031 search-hook probes, 4,424 edit-hook refreshes, 0
+  `impact`, 0 `context` and 10 `memory` commands, so the two are not the same window or not
+  the same machine; neither changes the priorities below. The memory commands include rollout
   and manual checks, so they cannot establish natural adoption. The search hook is silent by
   default, and its probe count cannot be read as delivered suggestions.
 - `claudecat usage --json` reported one navigation event in its 30-day window on this

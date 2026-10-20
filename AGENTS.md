@@ -238,7 +238,10 @@ ledger through cort's own replica; it does not depend on the silent data-collect
 using a hit, read its `source:source_line` in this checkout. `sync_status: synced` reports
 that this invocation pushed and pulled successfully, not that another machine cannot write
 afterward. `source_unchanged` checks bytes only; `source_changed`, `source_missing`, and
-`conflict` require a fresh source check or correction. An absent ledger or empty hit set is
+`conflict` require a fresh source check or correction. `source_line_status: moved` means the
+cited line's exact text now sits only at `source_line_now` -- read it there; that is the fresh
+check, and a supersession is optional. `recorded_machine` names the writer, so a hit from
+another machine is distinguishable from this one's own write. An absent ledger or empty hit set is
 not evidence that no decision exists. Only record a reviewed claim from a committed source
 file, and use `--supersedes` for a correction. `cort memory status` shows the
 Git-origin project identity and any conflicting active records. This memory is queried on

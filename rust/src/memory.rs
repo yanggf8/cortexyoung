@@ -27,6 +27,13 @@ pub struct MemoryEntry {
     pub supersedes: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub resolves: Vec<String>,
+    /// The writer's `usage::machine_id`. Without it a reader cannot tell a claim another machine
+    /// wrote from one its own machine wrote, so a cross-machine read is unverifiable from the data
+    /// alone. Rows written before this field existed carry none and say nothing about their origin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recorded_machine: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recorded_machine_source: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -50,8 +57,13 @@ pub struct MemoryHit {
     pub entry: MemoryEntry,
     /// `source_unchanged` checks bytes only. It does not prove the claim follows from the source.
     pub evidence_status: String,
+    /// `same_line`, `moved` (the cited line's exact text now sits only at `source_line_now`),
+    /// `moved_ambiguous` (it sits at several lines), `changed` (it sits nowhere) or
+    /// `source_missing`. Absent for rows recorded without a line hash.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_line_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_line_now: Option<usize>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -165,6 +177,29 @@ fn line_hash(bytes: &[u8], line: usize) -> Option<String> {
         .map(|text| hash(text.as_bytes()))
 }
 
+/// Where the cited line stands now. A line that only moved (text inserted above it) keeps the
+/// claim's evidence intact, so it is told apart from one whose text changed: otherwise every edit
+/// above a cited line forces a reviewed supersession of a claim that is still exactly supported.
+fn locate_line(bytes: &[u8], line: usize, expected: &str) -> (&'static str, Option<usize>) {
+    if line_hash(bytes, line).as_deref() == Some(expected) {
+        return ("same_line", None);
+    }
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return ("changed", None);
+    };
+    let found: Vec<usize> = text
+        .lines()
+        .enumerate()
+        .filter(|(_, l)| hash(l.as_bytes()) == expected)
+        .map(|(i, _)| i + 1)
+        .collect();
+    match found.as_slice() {
+        [] => ("changed", None),
+        [only] => ("moved", Some(*only)),
+        _ => ("moved_ambiguous", None),
+    }
+}
+
 pub(crate) fn active_entries(ledger: &MemoryLedger) -> Vec<&MemoryEntry> {
     let replaced: HashSet<_> = ledger
         .entries
@@ -194,21 +229,8 @@ pub fn record(
     source_line: usize,
     supersedes: Option<&str>,
 ) -> Result<MemoryEntry, String> {
-    let key = key.trim();
-    let claim = claim.trim();
-    if key.is_empty() || claim.is_empty() {
-        return Err("key and claim must be nonempty".into());
-    }
-    let bytes = source_bytes(root, source)?;
-    let source_text = std::str::from_utf8(&bytes).map_err(|_| "source is not UTF-8")?;
-    if source_line == 0
-        || source_text
-            .lines()
-            .nth(source_line - 1)
-            .is_none_or(|line| line.trim().is_empty())
-    {
-        return Err("source line does not exist".into());
-    }
+    let entry = new_entry(root, key, claim, source, source_line, supersedes)?;
+    let key = entry.key.as_str();
     // A separate lock file survives atomic replacement of memory.json. Locking the ledger inode
     // itself would let a second writer lock the new inode and lose an update from the first.
     let real_root = fs::canonicalize(root).map_err(|e| format!("cannot open project root: {e}"))?;
@@ -242,26 +264,6 @@ pub fn record(
         }
         None => {}
     }
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|e| format!("clock error: {e}"))?
-        .as_nanos();
-    let source_name = source.to_string_lossy().to_string();
-    let source_sha256 = hash(&bytes);
-    let id =
-        hash(format!("{key}\0{claim}\0{source_name}\0{source_sha256}\0{timestamp}").as_bytes());
-    let entry = MemoryEntry {
-        id,
-        key: key.to_string(),
-        claim: claim.to_string(),
-        source: source_name,
-        source_line,
-        source_sha256,
-        source_line_sha256: line_hash(&bytes, source_line),
-        recorded_at: timestamp.to_string(),
-        supersedes: supersedes.map(str::to_string),
-        resolves: Vec::new(),
-    };
     ledger.entries.push(entry.clone());
     validate(&ledger)?;
     let body = serde_json::to_string_pretty(&ledger).map_err(|e| e.to_string())? + "\n";
@@ -298,16 +300,14 @@ pub(crate) fn recall_ledger(
             continue;
         }
         let source = source_bytes(root, Path::new(&entry.source));
-        let source_line_status = entry
-            .source_line_sha256
-            .as_ref()
-            .map(|expected| match &source {
-                Ok(bytes) if line_hash(bytes, entry.source_line).as_ref() == Some(expected) => {
-                    "same_line".to_string()
-                }
-                Ok(_) => "changed_or_moved".to_string(),
-                Err(_) => "source_missing".to_string(),
-            });
+        let (source_line_status, source_line_now) = match (&entry.source_line_sha256, &source) {
+            (None, _) => (None, None),
+            (Some(expected), Ok(bytes)) => {
+                let (status, now) = locate_line(bytes, entry.source_line, expected);
+                (Some(status.to_string()), now)
+            }
+            (Some(_), Err(_)) => (Some("source_missing".to_string()), None),
+        };
         let evidence_status = if counts[entry.key.as_str()] > 1 {
             "conflict"
         } else {
@@ -321,6 +321,7 @@ pub(crate) fn recall_ledger(
             entry: entry.clone(),
             evidence_status: evidence_status.to_string(),
             source_line_status,
+            source_line_now,
         });
     }
     hits.sort_by(|a, b| {
@@ -378,6 +379,8 @@ pub(crate) fn new_entry(
         recorded_at: timestamp.to_string(),
         supersedes: supersedes.map(str::to_string),
         resolves: Vec::new(),
+        recorded_machine: Some(crate::usage::machine_id().to_string()),
+        recorded_machine_source: Some(crate::usage::machine_id_source().to_string()),
     })
 }
 
@@ -422,5 +425,63 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].entry.id, second.id);
         assert_eq!(hits[0].evidence_status, "source_unchanged");
+    }
+
+    #[test]
+    fn a_line_that_only_moved_is_located_and_a_rewritten_line_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("README.md");
+        fs::write(&path, "# Title\nThe database is harnessuse.\n").unwrap();
+        let entry = new_entry(
+            dir.path(),
+            "memory database",
+            "harnessuse",
+            Path::new("README.md"),
+            2,
+            None,
+        )
+        .unwrap();
+        let ledger = MemoryLedger {
+            schema: SCHEMA,
+            entries: vec![entry],
+        };
+        let recall = |dir: &Path| recall_ledger(dir, "database", &ledger, true, None).hits;
+
+        fs::write(&path, "# Title\n\nIntro.\n\nThe database is harnessuse.\n").unwrap();
+        let hit = &recall(dir.path())[0];
+        assert_eq!(hit.evidence_status, "source_changed");
+        assert_eq!(hit.source_line_status.as_deref(), Some("moved"));
+        assert_eq!(hit.source_line_now, Some(5));
+
+        fs::write(
+            &path,
+            "The database is harnessuse.\n# Title\nThe database is harnessuse.\n",
+        )
+        .unwrap();
+        let hit = &recall(dir.path())[0];
+        assert_eq!(hit.source_line_status.as_deref(), Some("moved_ambiguous"));
+        assert_eq!(hit.source_line_now, None);
+
+        fs::write(&path, "# Title\nThe database is cortex-v5.\n").unwrap();
+        let hit = &recall(dir.path())[0];
+        assert_eq!(hit.source_line_status.as_deref(), Some("changed"));
+        assert_eq!(hit.source_line_now, None);
+    }
+
+    #[test]
+    fn new_rows_name_their_machine_and_old_rows_still_parse() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("d.md"), "Use A.\n").unwrap();
+        let entry = new_entry(dir.path(), "k", "A", Path::new("d.md"), 1, None).unwrap();
+        assert_eq!(
+            entry.recorded_machine.as_deref(),
+            Some(crate::usage::machine_id())
+        );
+        let mut body = serde_json::to_value(&entry).unwrap();
+        let fields = body.as_object_mut().unwrap();
+        fields.remove("recorded_machine");
+        fields.remove("recorded_machine_source");
+        let old: MemoryEntry = serde_json::from_value(body).unwrap();
+        assert_eq!(old.recorded_machine, None);
     }
 }
