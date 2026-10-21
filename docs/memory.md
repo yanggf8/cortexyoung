@@ -56,6 +56,8 @@ cort memory record --key 'deployment option' --claim 'Option B is current' \
 cort memory recall 'deployment option' --harness claude-code
 ```
 
+`cort memory --help` lists every memory verb with all of its options, rendered from the parser.
+
 `record` requires a tracked, committed source file and a nonblank cited line. For a correction,
 pass `--supersedes <active-id>`; for two or more concurrent active entries of one key, use
 `cort memory resolve` and repeat `--supersedes` for every active id reported by `status`.
