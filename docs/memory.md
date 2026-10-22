@@ -92,12 +92,22 @@ Later that day, a reviewed `memory ownership` claim was recorded from `AGENTS.md
 ClaudeCat credentials into cort, synchronized its fresh cort replica against `harnessuse`, and
 recalled that claim as active with `source_unchanged` and `source_line_status: same_line`. The
 cited source line was read in this checkout. This checks one write-to-other-machine-read path;
-it does not establish cross-machine correction handling or agent answer quality.
+it does not establish agent answer quality. On 2026-10-22, a third machine
+(`e4b1d0199c504367`) configured against `harnessuse` directly (`--token-stdin`, token minted
+by the command above) and exercised both `recorded_machine` behaviors live: recall of the
+2026-10-19 claim returned no machine fields (an older cort wrote it), and a freshly recorded
+claim carried the writer's stamp. The same machine then wrote a reviewed correction superseding
+that 2026-10-19 row — its source had gone `source_changed` — and recall returned exactly the
+active claim with `source_unchanged`, the superseded entry retained in the ledger, and no
+conflicts. This checks correction handling from the writer's side; the read half — a second
+physical machine returning only the active claim — is still outstanding.
 
 The local tests cover source change, supersession, schema compatibility, project isolation,
-config migration, and query redaction. The remaining deployment check is to write a reviewed
-correction on one physical machine and verify that the other reads only the active claim with
-the expected source status. Fresh Claude Code and Codex sessions must then be graded on the
+config migration, and query redaction. The remaining deployment check is that read half: from
+a second configured machine, recall `memory ownership` and confirm exactly one active hit — id
+`b479302767d36c88…`, written by `e4b1d0199c504367`, `source_unchanged`. A machine still
+running a pre-`63f7de3f` cort has no stamp fields to read; upgrade it first. Fresh Claude Code
+and Codex sessions must then be graded on the
 same frozen questions, including a superseded claim, stale source, and false pasted report.
 A sync succeeds or a hook fires without proving the later answer is correct. The ordered
 experiment and product priorities are in `docs/2026-10-20-direction-after-collection.md`.
