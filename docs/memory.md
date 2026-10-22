@@ -104,6 +104,15 @@ active claim with `source_unchanged`, the superseded entry retained in the ledge
 conflicts. This checks correction handling from the writer's side; the read half — a second
 physical machine returning only the active claim — is still outstanding.
 
+The same day, a replica with no local history was pulled on that same machine: an empty
+`CORT_MEMORY_DIR` holding only a freshly configured connection, synchronized against
+`harnessuse` (4 entries, 2 active, no conflicts), then asked for `memory ownership`. It returned
+exactly one hit — the active claim, `source_unchanged`, `same_line`, superseding the retained
+2026-10-19 row — field for field what the machine's long-lived replica returned. This checks
+that supersession survives a from-scratch sync. It is **not** the second-machine check: reader
+and writer are one physical machine, so it cannot show a stamp written elsewhere being read, nor
+a reader whose cort or checkout is older than the writer's.
+
 The local tests cover source change, supersession, schema compatibility, project isolation,
 config migration, and query redaction. The remaining deployment check is that read half: from
 a second configured machine, recall `memory ownership` and confirm exactly one active hit — id
