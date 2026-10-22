@@ -1,6 +1,6 @@
 //! CLI dispatch with clap; `--help`/`-h`/`help` are side-effect free.
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use cort::ast_grep::{assert_ast_grep_version, resolve_ast_grep_bin};
 use cort::context::{context_command, ContextOptions, DEFAULT_BUDGET};
 use cort::coverage;
@@ -76,6 +76,54 @@ fn usage_value() -> Value {
             "CORT_CACHE_DIR": "where indexes live (default ~/.cache/cortex-ng)",
         },
         "note": "Commands read the project at the cwd unless they take a root argument.",
+    })
+}
+
+/// The memory verbs take more options than the one line `usage_value` gives `memory`, so they get
+/// their own usage. It is rendered from `MemoryArgs` rather than written out, so a verb or option
+/// cannot be added to the parser without appearing here. clap's own `render_usage` folds every
+/// optional argument into `[OPTIONS]`, which hides exactly the options a caller is looking for.
+fn memory_usage_value() -> Value {
+    let commands: serde_json::Map<String, Value> = MemoryArgs::command()
+        .get_subcommands()
+        .map(|verb| {
+            let mut parts = vec![format!("cort memory {}", verb.get_name())];
+            for arg in verb.get_arguments() {
+                let id = arg.get_id().as_str().to_uppercase();
+                let choices: Vec<String> = arg
+                    .get_possible_values()
+                    .iter()
+                    .map(|v| v.get_name().to_string())
+                    .collect();
+                let value = if choices.is_empty() {
+                    format!("<{id}>")
+                } else {
+                    format!("<{}>", choices.join("|"))
+                };
+                let takes_value = !matches!(
+                    arg.get_action(),
+                    clap::ArgAction::SetTrue | clap::ArgAction::SetFalse | clap::ArgAction::Count
+                );
+                let text = match arg.get_long() {
+                    Some(long) if takes_value => format!("--{long} {value}"),
+                    Some(long) => format!("--{long}"),
+                    None => value,
+                };
+                let text = if matches!(arg.get_action(), clap::ArgAction::Append) {
+                    format!("{text}...")
+                } else {
+                    text
+                };
+                let required = arg.is_required_set() && arg.get_default_values().is_empty();
+                parts.push(if required { text } else { format!("[{text}]") });
+            }
+            (verb.get_name().to_string(), json!(parts.join(" ")))
+        })
+        .collect();
+    json!({
+        "usage": "cort memory <command> [options]",
+        "commands": commands,
+        "note": "Commands read the project at --root (default: the cwd).",
     })
 }
 
@@ -2957,7 +3005,12 @@ fn peek_format(args: &[String]) -> Format {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if wants_help(&args) {
-        print!("{}", render(None, Format::Json, &usage_value()));
+        let usage = if args.first().is_some_and(|a| a == "memory") {
+            memory_usage_value()
+        } else {
+            usage_value()
+        };
+        print!("{}", render(None, Format::Json, &usage));
         return;
     }
     // Before `usage_from_args`, for the reason `--help` is: asking a binary its version must not

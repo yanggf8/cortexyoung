@@ -193,6 +193,66 @@ fn every_spelling_of_help_reaches_the_same_usage_and_none_of_them_is_an_error() 
     }
 }
 
+/// `memory` has eight verbs and their options, none of which fit on the one line the top-level
+/// usage gives it, so `cort memory --help` used to answer with the whole top-level usage. The
+/// memory usage is rendered from the parser itself, so a verb or option cannot drift out of it.
+#[test]
+fn memory_help_lists_each_memory_verb_with_its_options() {
+    let (_p, cwd, _c, cache) = sandbox();
+    for args in [
+        vec!["memory", "--help"],
+        vec!["memory", "-h"],
+        vec!["memory", "help"],
+        vec!["memory", "recall", "--help"],
+    ] {
+        let r = run_cort(&args, &cwd, &cache);
+        assert_eq!(r.code, 0, "{} stderr={}", args.join(" "), r.stderr);
+        let p = payload(&r);
+        assert_eq!(
+            p["usage"],
+            "cort memory <command> [options]",
+            "{}",
+            args.join(" ")
+        );
+        let commands = p["commands"].as_object().unwrap();
+        let mut verbs: Vec<&str> = commands.keys().map(String::as_str).collect();
+        verbs.sort();
+        assert_eq!(
+            verbs,
+            [
+                "configure",
+                "import-config",
+                "import-legacy",
+                "recall",
+                "record",
+                "resolve",
+                "status",
+                "sync"
+            ]
+        );
+        for (verb, synopsis) in commands {
+            assert!(
+                synopsis
+                    .as_str()
+                    .unwrap()
+                    .starts_with(&format!("cort memory {verb}")),
+                "{verb}: {synopsis}"
+            );
+        }
+        assert!(commands["recall"].as_str().unwrap().contains("--harness"));
+        assert!(commands["resolve"]
+            .as_str()
+            .unwrap()
+            .contains("--supersedes"));
+        assert_eq!(
+            fs::read_dir(&cache).unwrap().count(),
+            0,
+            "{} must not touch the cache",
+            args.join(" ")
+        );
+    }
+}
+
 /// D-44
 #[test]
 fn usage_documents_every_command_the_dispatcher_actually_knows() {
