@@ -231,35 +231,10 @@ is claudecat → cort. `cort memory` owns the reviewed claim ledger and its Turs
 `cort read`/`recall` still stores only source-validated file readings. See `docs/memory.md` for
 configuration and `docs/2026-10-18-cross-agent-memory-baseline.md` for the correction.
 
-For a question about a past project decision or correction, run
-`cort memory recall "<specific topic>" --harness codex` in Codex or the same
-command with `--harness claude-code` in Claude Code. This reads the shared TursoDB project
-ledger through cort's own replica; it does not depend on the silent data-collection hook. Before
-using a hit, read its `source:source_line` in this checkout. `sync_status: synced` reports
-that this invocation pushed and pulled successfully, not that another machine cannot write
-afterward. `source_unchanged` checks bytes only; `source_changed`, `source_missing`, and
-`conflict` require a fresh source check or correction. `source_line_status: moved` means the
-cited line's exact text now sits only at `source_line_now`; it locates the line and does not
-vouch for the claim -- read the line *and its section* there, and skip the supersession only if
-that context still supports the claim. `recorded_machine` is the writer's self-reported
-`machine_id` (overridable by `CORT_MACHINE_ID`, hostname-derived or `unknown` as a fallback,
-absent from rows an older cort wrote): a hint about origin, not proof. An absent ledger or empty hit set is
-not evidence that no decision exists. Only record a reviewed claim from a committed source
-file, and use `--supersedes` for a correction. `cort memory status` shows the
-Git-origin project identity and any conflicting active records. This memory is queried on
-demand; the local `cort` index stays local, while `claudecat telemetry sync` copies structured
-usage events to the shared TursoDB without putting network work in a hook.
+The local `cort` index stays local, while `claudecat telemetry sync` copies structured usage
+events to the shared TursoDB without putting network work in a hook.
 
-## Navigation front door (claudecat, read-only)
-
-To locate a symbol, a file, or who calls it, run `claudecat navigate --cort "<query>"` **first**.
-It reads this repo's cort index read-only and prints a route (`file:symbol:line`), a compressed
-content summary, and the `cort impact` / `cort context` commands for the deep-dive — caller-set
-questions then start from `impact`, not from grep. Fall back to grep/ast-grep only when it
-misses. The project map is maintained by the same tool (`claudecat update`), which writes it to
-this machine's data folder (`~/.local/share/claudecat/projects/<project-id>/map.md`) and never
-into this file — machine-generated content does not enter git; it writes nothing else here, and
-`CLAUDE.md` stays a symlink to this file.
+## claudecat (separate repo)
 
 **claudecat lives in its own repo ([yanggf8/claudecat](https://github.com/yanggf8/claudecat)) — do
 not merge it in.** It was merged here once (`3cda23ea`, 2026-09-23) and backed out the same day:
@@ -272,7 +247,3 @@ become a second owner of the ledger.
 <!-- claudecat:guardrails:begin -->
 <!-- 技術決策 / Guardrails：每行一條，例如 `2D tilemap + Macroquad（禁 Python/3D）`、`插件一律裝在 Claude Code 內`。claudecat 只在此區不存在時建立，之後永不覆寫。 -->
 <!-- claudecat:guardrails:end -->
-
-<!-- claudecat:map-pointer:begin -->
-- 專案地圖（Project Map）不在本檔：`claudecat update` 會把它寫到各機器的 `~/.local/share/claudecat/<project-id>/map.md`（`CLAUDECAT_DATA_DIR` 可覆蓋），並在輸出印出 `map ->` 的確切路徑。本檔只放手寫規則，產生的地圖不進 git。本區由 claudecat 播種一次，之後永不改寫。
-<!-- claudecat:map-pointer:end -->
