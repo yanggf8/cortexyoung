@@ -1440,32 +1440,33 @@ fn a_new_binary_newer_than_its_sources_still_reads_current_when_bytes_match() {
 
 // ── generation prune ────────────────────────────────────────────────────
 // Generations are `cort-<12 hex>` directories beside the `cort` symlink. Every upgrade
-// creates one and nothing removed the superseded ones, so the install root grew without
-// bound (measured on this machine: five dead generations, ~85MB). The prune keeps the
-// live generation and the `keep` most recent others — one previous generation is the
-// rollback path — and touches nothing that is not a generation directory.
+// creates one and nothing removed the superseded ones. The prune removes what an
+// activation superseded and keeps exactly two: the live generation and the one it
+// replaced, which is the rollback path. "The one it replaced" is a fact the caller read
+// off the symlink BEFORE activating, so it is passed in -- inferring it from directory
+// mtimes was wrong whenever a generation was re-activated rather than re-created.
 
-/// A fake generation directory with a chosen age. The mtime is set LAST: creating the
-/// pack subdir stamps the parent with `now`, which would silently defeat the age.
-fn generation_at(install_root: &std::path::Path, name: &str, age_secs: u64) {
-    use std::time::{Duration, SystemTime};
-    let dir = install_root.join(name);
-    fs::create_dir_all(dir.join("pack")).unwrap();
-    fs::File::open(&dir)
-        .unwrap()
-        .set_modified(SystemTime::now() - Duration::from_secs(age_secs))
-        .unwrap();
+fn gen_dir(install_root: &std::path::Path, name: &str) {
+    fs::create_dir_all(install_root.join(name).join("pack")).unwrap();
+}
+
+fn live_link(install_root: &std::path::Path, name: &str) {
+    std::os::unix::fs::symlink(install_root.join(name), install_root.join("cort")).unwrap();
 }
 
 #[test]
-fn prune_keeps_the_live_generation_one_previous_and_removes_the_rest() {
+fn prune_keeps_the_live_generation_and_the_one_it_replaced_and_removes_the_rest() {
     let root = tempfile::tempdir().unwrap();
     let r = root.path();
-    generation_at(r, "cort-aaaaaaaaaaaa", 300); // live
-    generation_at(r, "cort-bbbbbbbbbbbb", 100); // newest non-live
-    generation_at(r, "cort-cccccccccccc", 200);
-    generation_at(r, "cort-dddddddddddd", 400);
-    std::os::unix::fs::symlink(r.join("cort-aaaaaaaaaaaa"), r.join("cort")).unwrap();
+    for g in [
+        "cort-aaaaaaaaaaaa", // live
+        "cort-bbbbbbbbbbbb", // replaced by the activation
+        "cort-cccccccccccc",
+        "cort-dddddddddddd",
+    ] {
+        gen_dir(r, g);
+    }
+    live_link(r, "cort-aaaaaaaaaaaa");
     // Neighbours a generation-named glob must never eat: the manifest, the deploy log,
     // a crashed installer's staging dir, and a `cort-` name that is not a 12-hex id.
     fs::write(r.join("manifest"), "cort_bin:x\n").unwrap();
@@ -1473,14 +1474,14 @@ fn prune_keeps_the_live_generation_one_previous_and_removes_the_rest() {
     fs::create_dir(r.join(".cort-staging.4242")).unwrap();
     fs::create_dir(r.join("cort-shorthand")).unwrap();
 
-    let report = cort::upgrade::prune_generations(r, 1).unwrap();
+    let report = cort::upgrade::prune_generations(r, Some("cort-bbbbbbbbbbbb")).unwrap();
 
+    assert_eq!(report.skipped, None);
     assert_eq!(report.live.as_deref(), Some("cort-aaaaaaaaaaaa"));
-    assert_eq!(report.kept_previous, vec!["cort-bbbbbbbbbbbb"]);
-    assert_eq!(
-        report.removed,
-        vec!["cort-cccccccccccc", "cort-dddddddddddd"]
-    );
+    assert_eq!(report.kept_previous.as_deref(), Some("cort-bbbbbbbbbbbb"));
+    let mut removed = report.removed.clone();
+    removed.sort();
+    assert_eq!(removed, vec!["cort-cccccccccccc", "cort-dddddddddddd"]);
     assert!(report.failed.is_empty());
     for kept in [
         "cort",
@@ -1504,30 +1505,176 @@ fn prune_keeps_the_live_generation_one_previous_and_removes_the_rest() {
     }
 }
 
+/// The replaced generation is the one the caller names, not the newest directory. Here the
+/// replaced one is the OLDEST on disk -- the shape a re-activated generation leaves.
 #[test]
-fn prune_with_no_resolvable_live_link_removes_nothing() {
+fn the_replaced_generation_is_the_one_named_not_the_newest_directory() {
+    use std::time::{Duration, SystemTime};
     let root = tempfile::tempdir().unwrap();
     let r = root.path();
-    generation_at(r, "cort-aaaaaaaaaaaa", 300);
-    generation_at(r, "cort-bbbbbbbbbbbb", 100);
+    for g in [
+        "cort-aaaaaaaaaaaa",
+        "cort-bbbbbbbbbbbb",
+        "cort-cccccccccccc",
+    ] {
+        gen_dir(r, g);
+    }
+    live_link(r, "cort-aaaaaaaaaaaa");
+    // mtime set last: creating the pack subdir stamps the parent with `now`.
+    fs::File::open(r.join("cort-bbbbbbbbbbbb"))
+        .unwrap()
+        .set_modified(SystemTime::now() - Duration::from_secs(900))
+        .unwrap();
 
-    let report = cort::upgrade::prune_generations(r, 1).unwrap();
+    let report = cort::upgrade::prune_generations(r, Some("cort-bbbbbbbbbbbb")).unwrap();
 
-    assert_eq!(report.live, None);
-    assert!(report.removed.is_empty());
-    assert!(report.failed.is_empty());
-    assert!(r.join("cort-aaaaaaaaaaaa").is_dir());
+    assert_eq!(report.removed, vec!["cort-cccccccccccc"]);
+    assert!(
+        r.join("cort-bbbbbbbbbbbb").is_dir(),
+        "the named one survives"
+    );
+}
+
+#[test]
+fn nothing_superseded_removes_nothing() {
+    let root = tempfile::tempdir().unwrap();
+    let r = root.path();
+    for g in ["cort-aaaaaaaaaaaa", "cort-bbbbbbbbbbbb"] {
+        gen_dir(r, g);
+    }
+    live_link(r, "cort-aaaaaaaaaaaa");
+
+    // An identical rebuild re-activates the same generation: previous == live.
+    let same = cort::upgrade::prune_generations(r, Some("cort-aaaaaaaaaaaa")).unwrap();
+    assert!(same.removed.is_empty());
+    assert!(same.skipped.is_some());
+    // No previous known (first install, or the link was unreadable before activation).
+    let unknown = cort::upgrade::prune_generations(r, None).unwrap();
+    assert!(unknown.removed.is_empty());
+    assert!(unknown.skipped.is_some());
+    // A "previous" that is not a generation on disk anchors nothing.
+    let ghost = cort::upgrade::prune_generations(r, Some("cort-eeeeeeeeeeee")).unwrap();
+    assert!(ghost.removed.is_empty());
     assert!(r.join("cort-bbbbbbbbbbbb").is_dir());
 }
 
 #[test]
-fn a_root_without_generations_is_nothing_to_prune() {
+fn a_live_link_that_is_not_an_existing_generation_removes_nothing() {
+    for case in ["dangling", "file", "wrong-shape", "outside"] {
+        let root = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let r = root.path();
+        for g in [
+            "cort-aaaaaaaaaaaa",
+            "cort-bbbbbbbbbbbb",
+            "cort-cccccccccccc",
+        ] {
+            gen_dir(r, g);
+        }
+        match case {
+            // Names a well-formed id that is not on disk.
+            "dangling" => live_link(r, "cort-ffffffffffff"),
+            // Points at a file inside a generation, e.g. `.../cort-x/cort`.
+            "file" => {
+                fs::write(r.join("cort-aaaaaaaaaaaa/cort"), "").unwrap();
+                std::os::unix::fs::symlink(r.join("cort-aaaaaaaaaaaa/cort"), r.join("cort"))
+                    .unwrap();
+            }
+            // A directory that exists but is not named like a generation.
+            "wrong-shape" => {
+                fs::create_dir(r.join("cort-shorthand")).unwrap();
+                live_link(r, "cort-shorthand");
+            }
+            // A well-formed name in a DIFFERENT directory: the same name, not our generation.
+            _ => {
+                gen_dir(elsewhere.path(), "cort-aaaaaaaaaaaa");
+                std::os::unix::fs::symlink(
+                    elsewhere.path().join("cort-aaaaaaaaaaaa"),
+                    r.join("cort"),
+                )
+                .unwrap();
+            }
+        }
+
+        let report = cort::upgrade::prune_generations(r, Some("cort-bbbbbbbbbbbb")).unwrap();
+
+        assert_eq!(report.live, None, "{case}");
+        assert!(report.removed.is_empty(), "{case}: {report:?}");
+        assert!(report.skipped.is_some(), "{case}");
+        for g in [
+            "cort-aaaaaaaaaaaa",
+            "cort-bbbbbbbbbbbb",
+            "cort-cccccccccccc",
+        ] {
+            assert!(r.join(g).is_dir(), "{case}: {g} must survive");
+        }
+    }
+}
+
+#[test]
+fn live_generation_reads_only_a_link_that_resolves_to_a_generation_here() {
     let root = tempfile::tempdir().unwrap();
-    fs::write(root.path().join("manifest"), "cort_bin:x\n").unwrap();
+    let r = root.path();
+    assert_eq!(cort::upgrade::live_generation(r), None, "no link at all");
+    gen_dir(r, "cort-aaaaaaaaaaaa");
+    live_link(r, "cort-aaaaaaaaaaaa");
+    assert_eq!(
+        cort::upgrade::live_generation(r).as_deref(),
+        Some("cort-aaaaaaaaaaaa")
+    );
+}
 
-    let report = cort::upgrade::prune_generations(root.path(), 1).unwrap();
+/// A full `install.sh` holds the installer lock for its whole stage-and-activate. A prune
+/// that ran under it could delete the generation that install is about to flip to.
+#[test]
+fn a_held_installer_lock_defers_the_prune() {
+    let root = tempfile::tempdir().unwrap();
+    let r = root.path();
+    for g in [
+        "cort-aaaaaaaaaaaa",
+        "cort-bbbbbbbbbbbb",
+        "cort-cccccccccccc",
+    ] {
+        gen_dir(r, g);
+    }
+    live_link(r, "cort-aaaaaaaaaaaa");
+    let _held = cort::upgrade::try_exclusive_lock(&r.join(".install.lock")).unwrap();
 
-    assert_eq!(report.live, None);
+    let report = cort::upgrade::prune_generations(r, Some("cort-bbbbbbbbbbbb")).unwrap();
+
     assert!(report.removed.is_empty());
-    assert!(root.path().join("manifest").symlink_metadata().is_ok());
+    assert!(report.skipped.is_some());
+    assert!(r.join("cort-cccccccccccc").is_dir());
+}
+
+/// A removal that fails says why, and what it could not remove is not reported as removed.
+#[test]
+fn a_failed_removal_names_the_cause() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let r = root.path();
+    for g in [
+        "cort-aaaaaaaaaaaa",
+        "cort-bbbbbbbbbbbb",
+        "cort-cccccccccccc",
+    ] {
+        gen_dir(r, g);
+    }
+    live_link(r, "cort-aaaaaaaaaaaa");
+    fs::write(r.join("cort-cccccccccccc/pack/rule.yml"), "x").unwrap();
+    let pack = r.join("cort-cccccccccccc/pack");
+    fs::set_permissions(&pack, fs::Permissions::from_mode(0o555)).unwrap();
+    // root ignores directory permissions; the scenario is not constructible there.
+    if fs::write(pack.join("probe"), "").is_ok() {
+        fs::set_permissions(&pack, fs::Permissions::from_mode(0o755)).unwrap();
+        return;
+    }
+
+    let report = cort::upgrade::prune_generations(r, Some("cort-bbbbbbbbbbbb")).unwrap();
+    fs::set_permissions(&pack, fs::Permissions::from_mode(0o755)).unwrap();
+
+    assert!(report.removed.is_empty(), "{report:?}");
+    assert_eq!(report.failed.len(), 1);
+    assert_eq!(report.failed[0].0, "cort-cccccccccccc");
+    assert!(!report.failed[0].1.is_empty(), "the cause is carried");
 }

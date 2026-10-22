@@ -1232,26 +1232,28 @@ pub fn diagnose_for_check(
 
 // ── generation prune ─────────────────────────────────────────────────────
 // Every upgrade stages a new `cort-<12hex>` generation and nothing removed the
-// superseded ones — the live symlink moved on and the old directories stayed, so the
+// superseded ones -- the live symlink moved on and the old directories stayed, so the
 // install root grew without bound (measured on the machine this shipped from: five dead
 // generations, ~85MB, each a full binary + pack). `install.sh --uninstall` sweeps them,
 // but that is the one verb a healthy machine never runs.
+//
+// What survives is exactly two generations: the live one and the one it replaced, which
+// is the rollback path. The replaced one is a FACT the caller read off the symlink before
+// activating, so it is passed in. An earlier draft inferred it as "the newest non-live
+// directory by mtime", which is a different set whenever a generation is re-activated
+// rather than re-created: a directory's mtime moves only when entries are added to or
+// removed from it.
 
-/// How many non-live generations survive a prune. One is the rollback path: if the new
-/// generation is broken, the previous one is what "go back" means. More would grow the
-/// footprint to answer a question nothing asks, so the policy lives here, next to the
-/// code that applies it.
-pub const KEEP_PREVIOUS_GENERATIONS: usize = 1;
-
-/// What a prune did. `live` is the generation the `cort` symlink names — None when no
-/// link resolves, which is also the case where nothing is removed (see
-/// `prune_generations`).
+/// What a prune did, or why it did nothing. `skipped` is set whenever the prune declined to
+/// remove anything, and then `removed` is empty -- a skip is never partial.
 #[derive(Debug, Default)]
 pub struct PruneReport {
     pub live: Option<String>,
-    pub kept_previous: Vec<String>,
+    pub kept_previous: Option<String>,
     pub removed: Vec<String>,
-    pub failed: Vec<String>,
+    /// `(generation, cause)`: what could not be removed and why.
+    pub failed: Vec<(String, String)>,
+    pub skipped: Option<String>,
 }
 
 /// Is this entry name a generation directory name: `cort-` plus exactly the 12 lowercase
@@ -1265,54 +1267,87 @@ fn is_generation_name(name: &std::ffi::OsStr) -> bool {
     id.len() == 12 && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
-/// Delete superseded generations from an install root, keeping the live one and the
-/// `keep` most recent others, newest first. Only directories whose name passes
-/// `is_generation_name` are candidates, and an entry whose mtime cannot be read is
-/// dropped from the candidates rather than guessed old — the failure mode of a wrong
-/// guess is deleting a generation that might have been the one worth keeping. Removals
-/// are attempted all, never aborting midway; a failed removal lands in `failed` rather
-/// than failing the call, because housekeeping must not fail an upgrade that landed.
+/// The generation the `cort` symlink in `install_root` names -- and only if that link is
+/// worth trusting: its target is a well-formed generation name, that directory exists in
+/// THIS install root, and the link resolves to exactly it. A dangling link, a link to a
+/// file inside a generation, a link to a differently-shaped directory and a link to a
+/// same-named directory somewhere else all answer None. `read_link` alone says none of
+/// this: it succeeds on a dangling link.
+pub fn live_generation(install_root: &Path) -> Option<String> {
+    let link = install_root.join("cort");
+    let target = std::fs::read_link(&link).ok()?;
+    let name = target.file_name()?.to_os_string();
+    if !is_generation_name(&name) {
+        return None;
+    }
+    let here = install_root.join(&name);
+    if !here.is_dir() {
+        return None;
+    }
+    let resolved = std::fs::canonicalize(&link).ok()?;
+    (resolved == std::fs::canonicalize(&here).ok()?).then(|| name.to_string_lossy().into_owned())
+}
+
+/// Remove every generation but the live one and `previous`, the one the last activation
+/// replaced. Declines -- removes nothing, says why in `skipped` -- unless all of these hold:
 ///
-/// An unresolvable `cort` symlink removes nothing. That symlink is the one input that
-/// decides which generation is live, and guessing (newest? any?) is exactly how a prune
-/// deletes the generation the shim is pointing at.
-pub fn prune_generations(install_root: &Path, keep: usize) -> std::io::Result<PruneReport> {
+/// * the live link resolves to a real generation here (`live_generation`);
+/// * `previous` is known, is a generation on disk, and is not the live one (an identical
+///   rebuild re-activates the same generation and supersedes nothing);
+/// * the installer lock is free. A full `install.sh` holds it across stage-and-activate, so
+///   a generation it has staged but not yet flipped to is not ours to call dead. A bare
+///   `install.sh --stage-only` takes no lock by design and is not covered; it is a manual
+///   verb run between this upgrade's own stage and activate, a window of seconds.
+///
+/// Candidates are only directories whose name passes `is_generation_name`. Every removal is
+/// attempted and none aborts the rest; a failure lands in `failed` with its cause, because
+/// housekeeping must not fail an upgrade that landed.
+pub fn prune_generations(
+    install_root: &Path,
+    previous: Option<&str>,
+) -> std::io::Result<PruneReport> {
     let mut report = PruneReport::default();
-    let Some(live) = std::fs::read_link(install_root.join("cort"))
-        .ok()
-        .and_then(|t| t.file_name().map(|n| n.to_string_lossy().into_owned()))
-    else {
+    let Some(live) = live_generation(install_root) else {
+        report.skipped = Some("no live generation resolves in the install root".to_string());
         return Ok(report);
     };
     report.live = Some(live.clone());
-
-    let mut candidates: Vec<(SystemTime, String)> = Vec::new();
+    let Some(previous) = previous else {
+        report.skipped = Some("no replaced generation recorded".to_string());
+        return Ok(report);
+    };
+    if previous == live {
+        report.skipped = Some("activation replaced nothing (same generation)".to_string());
+        return Ok(report);
+    }
+    if !is_generation_name(std::ffi::OsStr::new(previous)) || !install_root.join(previous).is_dir()
+    {
+        report.skipped = Some(format!("replaced generation {previous} is not on disk"));
+        return Ok(report);
+    }
+    let _installer_lock = match try_exclusive_lock(&install_root.join(".install.lock")) {
+        Ok(f) => f,
+        Err(e) => {
+            report.skipped = Some(format!("installer lock unavailable ({e:?})"));
+            return Ok(report);
+        }
+    };
+    report.kept_previous = Some(previous.to_string());
     for entry in std::fs::read_dir(install_root)? {
         let entry = entry?;
         let name = entry.file_name();
-        if !is_generation_name(&name)
-            || !entry.file_type().map(|t| t.is_dir()).unwrap_or(false)
-            || name.to_string_lossy() == live
-        {
+        if !is_generation_name(&name) || !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
             continue;
         }
-        // A directory whose age cannot be read is not a removal candidate.
-        let Ok(modified) = entry.metadata().and_then(|m| m.modified()) else {
+        let name = name.to_string_lossy().into_owned();
+        if name == live || name == previous {
             continue;
-        };
-        candidates.push((modified, name.to_string_lossy().into_owned()));
-    }
-    candidates.sort_by_key(|a| std::cmp::Reverse(a.0)); // newest first
-    report.kept_previous = candidates
-        .iter()
-        .take(keep)
-        .map(|(_, n)| n.clone())
-        .collect();
-    for (_, name) in candidates.iter().skip(keep) {
-        match std::fs::remove_dir_all(install_root.join(name)) {
-            Ok(()) => report.removed.push(name.clone()),
-            Err(_) => report.failed.push(name.clone()),
+        }
+        match std::fs::remove_dir_all(install_root.join(&name)) {
+            Ok(()) => report.removed.push(name),
+            Err(e) => report.failed.push((name, e.to_string())),
         }
     }
+    report.removed.sort();
     Ok(report)
 }

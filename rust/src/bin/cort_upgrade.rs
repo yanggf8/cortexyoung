@@ -11,10 +11,10 @@
 use clap::Parser;
 use cort::upgrade::{
     acquire_upgrade_locks, ast_grep_mismatch_found, check_hooks, check_skills, diagnose,
-    diagnose_for_check, first_upgrade_note, load_acks, migrate_indexes, prune_generations,
-    repair_skill, run_capture_with_deadline, run_status_with_deadline, save_ack,
+    diagnose_for_check, first_upgrade_note, live_generation, load_acks, migrate_indexes,
+    prune_generations, repair_skill, run_capture_with_deadline, run_status_with_deadline, save_ack,
     skill_repair_target, verdict, Component, ComponentState, DiagnoseInputs, LockError,
-    UpgradeExit, KEEP_PREVIOUS_GENERATIONS,
+    UpgradeExit,
 };
 use std::path::{Path, PathBuf};
 use std::process::exit;
@@ -274,6 +274,9 @@ fn main() {
 
     // ── Step 4: activate ONLY the payload — no skills, no hooks, so Task 3's policy
     // (keep-mine, hook shape) is never pre-empted by the installer. ──
+    // What is live NOW is what this activation replaces, and the symlink is the only place
+    // that says so: read it before the flip, hand it to the prune after the verdict.
+    let replaced = live_generation(&install_root);
     let act_owned = [
         install_sh.to_string_lossy().into_owned(),
         "--activate-only".to_string(),
@@ -283,22 +286,6 @@ fn main() {
     let act_args: Vec<&str> = act_owned.iter().map(String::as_str).collect();
     if let Err(e) = run_capture_with_deadline(install_bin, &act_args, Duration::from_secs(5 * 60)) {
         fatal(&format!("activation failed: {e}"));
-    }
-
-    // ── Prune the superseded generations this activation superseded. ──
-    // Full path only: the steady state's contract is "cheap, touches nothing", --check is
-    // read-only by construction, and dead generations are created by activation — so they
-    // are cleaned by the same path. Housekeeping, not a component: a prune failure is
-    // printed and never fails the run, because the upgrade has landed already.
-    match prune_generations(&install_root, KEEP_PREVIOUS_GENERATIONS) {
-        Ok(report) => println!(
-            "generations: kept live {} + [{}], removed [{}], failed [{}]",
-            report.live.as_deref().unwrap_or("-"),
-            report.kept_previous.join(", "),
-            report.removed.join(", "),
-            report.failed.join(", "),
-        ),
-        Err(e) => eprintln!("generations: prune failed, superseded generations left in place: {e}"),
     }
 
     // ── Step 5: rewire, then re-verify ONCE. The verdict reads ONLY post-repair state —
@@ -360,6 +347,31 @@ fn main() {
         // Only a FULLY successful run marks itself done — the marker gates the one-time
         // partial-drain note, and a failed upgrade must not silence it.
         let _ = cort::upgrade::write_first_upgrade_marker(&cache);
+
+        // Prune what this activation superseded, and only now: after the re-verify says the
+        // new generation is healthy. Before that, the replaced generation is the way back,
+        // and a prune that ran earlier could narrow the fallback of an upgrade that then
+        // failed. Full path only (the steady state touches nothing and --check is
+        // read-only). On stderr, so the component lines above stay the whole of stdout.
+        // Housekeeping, not a component: it never changes the exit code.
+        match prune_generations(&install_root, replaced.as_deref()) {
+            Ok(r) => {
+                if let Some(why) = &r.skipped {
+                    eprintln!("generations: nothing pruned — {why}");
+                } else {
+                    eprintln!(
+                        "generations: kept live {} + replaced {}, removed [{}]",
+                        r.live.as_deref().unwrap_or("-"),
+                        r.kept_previous.as_deref().unwrap_or("-"),
+                        r.removed.join(", "),
+                    );
+                }
+                for (name, cause) in &r.failed {
+                    eprintln!("generations: could not remove {name}: {cause}");
+                }
+            }
+            Err(e) => eprintln!("generations: prune failed, nothing removed: {e}"),
+        }
     }
     exit(match v.exit {
         UpgradeExit::Ok => 0,

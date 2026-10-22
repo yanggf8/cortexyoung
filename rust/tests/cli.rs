@@ -4051,3 +4051,33 @@ fn kimi_gets_no_pointer_because_its_pretooluse_drops_context() {
         r.stdout
     );
 }
+
+/// `help` is a help request only where a command word can be: first, or right after `memory`.
+/// Anywhere else it is a value -- `cort memory recall help` searches the ledger for the topic
+/// "help", and used to print usage instead of running.
+#[test]
+fn a_query_word_help_is_a_query_and_not_a_request_for_usage() {
+    let (_p, cwd, _c, cache) = sandbox();
+    let empty_memory = tempfile::tempdir().unwrap();
+    let mem = empty_memory.path().to_str().unwrap();
+    let r = run_cort_env(
+        &["memory", "recall", "help", "--harness", "claude-code"],
+        &cwd,
+        &cache,
+        &[("CORT_MEMORY_DIR", mem)],
+    );
+    assert!(
+        !r.stdout.contains("\"commands\""),
+        "recall of the word help printed usage: {}",
+        r.stdout
+    );
+    // It ran the recall: the sandbox project has no origin remote and the memory dir holds no
+    // connection, so the verb answers with a memory error -- and never reaches the network.
+    assert_eq!(
+        payload(&r)["error"],
+        "memory_error",
+        "stdout={:?}",
+        r.stdout
+    );
+    assert_ne!(r.code, 0);
+}

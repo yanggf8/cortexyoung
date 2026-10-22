@@ -275,7 +275,7 @@ That path is [`cort-upgrade`](#update)'s.
 git pull --no-rebase
 cargo build --release --locked --manifest-path rust/Cargo.toml
 ./rust/target/release/cort_upgrade --check   # diagnose: no locks, no writes, no repair; same exit taxonomy
-./rust/target/release/cort_upgrade           # stage -> drain -> activate -> prune -> repair -> reindex -> verdict
+./rust/target/release/cort_upgrade           # stage -> drain -> activate -> repair -> reindex -> verdict -> prune
 ```
 
 `cort-upgrade` is the upgrade path on any machine that already has a `cort_bin`
@@ -289,19 +289,25 @@ lock-free, invisible, validated, prints the content-addressed id); take **two
 flocks** — admission closes the gate on new workers, activity drains in-flight
 ones with a 30s deadline, hooks stand down and `cort index` refuses rather
 than race an upgrade; **activate** the payload only (no skills, no hooks —
-upgrade policy is never pre-empted by the installer); **prune** the
-generations activation superseded — the live one and the most recent
-previous survive (the previous is the rollback path), the rest are removed
-and the removals are named in the output, never fatally (housekeeping
-cannot fail an upgrade that landed; the steady state and `--check` still
-touch nothing); **rewire** hooks
+upgrade policy is never pre-empted by the installer); **rewire** hooks
 (judge → repair → re-run status → re-judge; a repair is reported as landed
 only after the re-check says so) and skills (only ones the installer owns —
 an unstamped divergence is `install.sh --force`'s decision, `--keep-mine`
 defers yours as `deferred-by-user`); **migrate** indexes — a drifted index
 with a live directory is rebuilt eagerly and its reasons re-read before
 Current is believed, a gone directory records its debt as `absent` and never
-fails; then the **verdict**.
+fails; then the **verdict**; and only when that verdict is Ok, **prune** the
+superseded generations. Two survive: the live one and the one this
+activation replaced, which is read off the `cort` symlink *before* the flip
+(directory mtimes cannot say it — a re-activated generation keeps its old
+one). It runs last because until the re-verify passes, the replaced
+generation is the way back. It removes nothing, and says why on stderr,
+unless the live link resolves to a real generation in this install root, the
+replaced one is known and distinct from it, and the installer lock is free.
+A bare `install.sh --stage-only` takes no lock by design and is not covered.
+A failed removal is reported with its cause and never changes the exit code
+(housekeeping cannot fail an upgrade that landed); the steady state and
+`--check` touch nothing.
 
 Exit codes: **0** everything current, **1** partial — any drifted/unreadable
 component not `--ack`ed (gone directories never fail; unreadable never

@@ -127,9 +127,14 @@ fn memory_usage_value() -> Value {
     })
 }
 
+/// `--help` and `-h` are flags and count wherever they appear. The bare word `help` is a command
+/// word, so it counts only where one can stand: first, or directly after `memory`. Anywhere else
+/// it is a value -- `cort memory recall help` searches the ledger for the topic "help".
 fn wants_help(args: &[String]) -> bool {
-    args.iter()
-        .any(|a| a == "help" || a == "--help" || a == "-h")
+    let at = |i: usize, word: &str| args.get(i).is_some_and(|a| a == word);
+    args.iter().any(|a| a == "--help" || a == "-h")
+        || at(0, "help")
+        || (at(0, "memory") && at(1, "help"))
 }
 
 /// `--version` is answered by the binary, and that is the whole point of it.
