@@ -267,3 +267,362 @@ pub fn compaction_details(projects_dir: &Path, id: &str) -> Result<Value, String
     }
     Ok(json!({"id": id, "compactions": found}))
 }
+
+// ---------------------------------------------------------------------------------------------
+// record / report
+// ---------------------------------------------------------------------------------------------
+
+const DAY_MS: i64 = 86_400_000;
+
+pub struct RecordInputs {
+    pub projects_dir: PathBuf,
+    pub marks_path: PathBuf,
+    pub machine_id: String,
+    pub host: String,
+    pub now_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecordOutcome {
+    Pushed,
+    SavedLocallyPushFailed(String),
+}
+
+/// Local writes first (host mapping, compaction rows), then the watermarks, then the network.
+/// A failed local write returns before the watermarks move, so the next run rescans; a failed
+/// push never loses data, because the rows are already in the local replica.
+pub fn record(store: &mut dyn MeasureStore, input: &RecordInputs) -> Result<RecordOutcome, String> {
+    store.upsert_machine_host(&input.machine_id, &input.host, input.now_ms)?;
+    let mut marks = Watermarks::load(&input.marks_path);
+    scan_transcripts(store, &input.projects_dir, &mut marks, &input.machine_id)?;
+    marks.save(&input.marks_path)?;
+    if let Err(e) = store.push() {
+        return Ok(RecordOutcome::SavedLocallyPushFailed(e));
+    }
+    store
+        .pull()
+        .map_err(|e| format!("pushed, but pull failed: {e}"))?;
+    Ok(RecordOutcome::Pushed)
+}
+
+/// Push then pull. `Ok` means the local replica is as current as the remote was a moment ago.
+pub fn sync(store: &mut dyn MeasureStore) -> Result<(), String> {
+    store.push().map_err(|e| format!("push failed: {e}"))?;
+    store.pull().map_err(|e| format!("pull failed: {e}"))
+}
+
+pub fn last_sync_path() -> PathBuf {
+    data_dir().join("measure-last-sync")
+}
+
+pub fn write_last_sync(ms: i64) -> Result<(), String> {
+    let path = last_sync_path();
+    write_atomic(&path, &ms.to_string())
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))
+}
+
+pub fn read_last_sync() -> Option<i64> {
+    fs::read_to_string(last_sync_path())
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// First non-empty of the kernel hostname, `/etc/hostname`, `$HOSTNAME`; else `unknown`.
+pub fn host_name() -> String {
+    let files = ["/proc/sys/kernel/hostname", "/etc/hostname"];
+    for f in files {
+        if let Ok(s) = fs::read_to_string(f) {
+            if !s.trim().is_empty() {
+                return s.trim().to_string();
+            }
+        }
+    }
+    match std::env::var("HOSTNAME") {
+        Ok(s) if !s.trim().is_empty() => s.trim().to_string(),
+        _ => "unknown".to_string(),
+    }
+}
+
+// Howard Hinnant's civil-date algorithms, so no date crate is needed.
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+fn civil_from_days(z: i64) -> (i64, i64, i64) {
+    let z = z + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+/// `YYYY-Www` for the UTC ISO week containing `ms`.
+pub fn iso_week(ms: i64) -> String {
+    let days = ms.div_euclid(DAY_MS);
+    let weekday = (days + 3).rem_euclid(7); // 0 = Monday; 1970-01-01 was a Thursday
+    let thursday = days - weekday + 3;
+    let (year, _, _) = civil_from_days(thursday);
+    let week = (thursday - days_from_civil(year, 1, 1)) / 7 + 1;
+    format!("{year}-W{week:02}")
+}
+
+/// `YYYY-MM-DD HH:MM UTC`.
+pub fn format_utc(ms: i64) -> String {
+    let days = ms.div_euclid(DAY_MS);
+    let rem = ms.rem_euclid(DAY_MS) / 60_000;
+    let (y, m, d) = civil_from_days(days);
+    format!("{y:04}-{m:02}-{d:02} {:02}:{:02} UTC", rem / 60, rem % 60)
+}
+
+pub struct ReportInputs {
+    pub days: i64,
+    pub compaction_days: i64,
+    pub now_ms: i64,
+    /// `Some(last sync text)` when this report is read from the local replica after a failed sync.
+    pub offline: Option<String>,
+}
+
+const METRICS: [&str; 4] = [
+    "rereads",
+    "repeated_commands",
+    "transcript_lookups",
+    "corrections",
+];
+
+fn deltas(r: &CompactionRow) -> [i64; 4] {
+    [
+        r.post.rereads - r.pre.rereads,
+        r.post.repeated_commands - r.pre.repeated_commands,
+        r.post.transcript_lookups - r.pre.transcript_lookups,
+        r.post.corrections - r.pre.corrections,
+    ]
+}
+
+fn median(sorted: &[i64]) -> Option<f64> {
+    let n = sorted.len();
+    match n {
+        0 => None,
+        _ if n % 2 == 1 => Some(sorted[n / 2] as f64),
+        _ => Some((sorted[n / 2 - 1] + sorted[n / 2]) as f64 / 2.0),
+    }
+}
+
+fn short(id: &str) -> String {
+    id.chars().take(8).collect()
+}
+
+fn host_section(host: &str, machine_ids: &[String], rows: &[&CompactionRow]) -> Value {
+    let compared: Vec<[i64; 4]> = rows
+        .iter()
+        .filter(|r| r.pre.tool_calls > 0)
+        .map(|r| deltas(r))
+        .collect();
+    let mut metrics = serde_json::Map::new();
+    for (i, name) in METRICS.iter().enumerate() {
+        let mut col: Vec<i64> = compared.iter().map(|d| d[i]).collect();
+        col.sort_unstable();
+        metrics.insert(
+            (*name).to_string(),
+            json!({"median": median(&col), "sum": col.iter().sum::<i64>()}),
+        );
+    }
+    let mut weeks: BTreeMap<String, (i64, i64, [i64; 4])> = BTreeMap::new();
+    for r in rows {
+        let e = weeks.entry(iso_week(r.time_ms)).or_default();
+        e.0 += 1;
+        if r.pre.tool_calls > 0 {
+            e.1 += 1;
+            for (acc, d) in e.2.iter_mut().zip(deltas(r)) {
+                *acc += d;
+            }
+        }
+    }
+    let weeks: Vec<Value> = weeks
+        .into_iter()
+        .map(|(week, (n, cmp, sums))| {
+            json!({"week": week, "compactions": n, "compared": cmp,
+                "rereads": sums[0], "repeated_commands": sums[1],
+                "transcript_lookups": sums[2], "corrections": sums[3]})
+        })
+        .collect();
+    json!({
+        "host": host,
+        "machine_ids": machine_ids,
+        "compactions": rows.len(),
+        "compared": compared.len(),
+        "no_baseline": rows.len() - compared.len(),
+        "metrics": metrics,
+        "weeks": weeks,
+    })
+}
+
+/// Reads the store as it stands; the caller decides whether to sync first and says so in
+/// `offline`. Only the compaction section exists so far.
+pub fn report(store: &mut dyn MeasureStore, input: &ReportInputs) -> Result<Value, String> {
+    let since = input.now_ms - input.compaction_days * DAY_MS;
+    let rows = store.compactions_since(since)?;
+    let hosts = store.machine_hosts()?;
+
+    // machine_id -> hosts, most recently seen first; the first one names the machine.
+    let mut by_machine: BTreeMap<String, Vec<(i64, String)>> = BTreeMap::new();
+    for h in &hosts {
+        by_machine
+            .entry(h.machine_id.clone())
+            .or_default()
+            .push((h.last_seen_ms, h.host.clone()));
+    }
+    let mut warnings = Vec::new();
+    let mut host_of: BTreeMap<String, String> = BTreeMap::new();
+    for (machine, list) in by_machine.iter_mut() {
+        list.sort_by(|a, b| b.cmp(a));
+        host_of.insert(machine.clone(), list[0].1.clone());
+        if list.len() >= 2 {
+            let names: Vec<&str> = list.iter().map(|(_, h)| h.as_str()).collect();
+            warnings.push(format!(
+                "machine {machine} has {} hosts: {} (counted under {})",
+                list.len(),
+                names.join(", "),
+                list[0].1
+            ));
+        }
+    }
+    let mut machines_of: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (machine, host) in &host_of {
+        machines_of
+            .entry(host.clone())
+            .or_default()
+            .push(machine.clone());
+    }
+    for (host, ids) in &machines_of {
+        if ids.len() >= 2 {
+            warnings.push(format!(
+                "host {host} has {} machine ids: {} (counted together)",
+                ids.len(),
+                ids.join(", ")
+            ));
+        }
+    }
+
+    let mut grouped: BTreeMap<String, Vec<&CompactionRow>> = BTreeMap::new();
+    for r in &rows {
+        let host = host_of
+            .get(&r.machine_id)
+            .cloned()
+            .unwrap_or_else(|| format!("machine {}", short(&r.machine_id)));
+        grouped.entry(host).or_default().push(r);
+    }
+    let sections: Vec<Value> = grouped
+        .iter()
+        .map(|(host, rs)| {
+            let mut ids: Vec<String> = rs.iter().map(|r| r.machine_id.clone()).collect();
+            ids.sort();
+            ids.dedup();
+            host_section(host, &ids, rs)
+        })
+        .collect();
+    Ok(json!({
+        "offline": input.offline,
+        "days": input.days,
+        "compactions": {
+            "days": input.compaction_days,
+            "total": rows.len(),
+            "hosts": sections,
+        },
+        "warnings": warnings,
+    }))
+}
+
+struct Paint(bool);
+
+impl Paint {
+    fn bold(&self, s: &str) -> String {
+        if self.0 {
+            format!("\x1b[1m{s}\x1b[0m")
+        } else {
+            s.to_string()
+        }
+    }
+    fn yellow(&self, s: &str) -> String {
+        if self.0 {
+            format!("\x1b[33m{s}\x1b[0m")
+        } else {
+            s.to_string()
+        }
+    }
+}
+
+pub fn render_report(v: &Value, color: bool) -> String {
+    let p = Paint(color);
+    let mut out = String::new();
+    if let Some(when) = v["offline"].as_str() {
+        out.push_str(&p.yellow(&format!("離線：讀本機副本，最後同步於 {when}")));
+        out.push('\n');
+    }
+    let c = &v["compactions"];
+    let days = c["days"].as_i64().unwrap_or(0);
+    out.push_str(&p.bold(&format!("壓縮（最近 {days} 天）")));
+    out.push('\n');
+    let hosts = c["hosts"].as_array().cloned().unwrap_or_default();
+    if hosts.is_empty() {
+        out.push_str("這段期間沒有壓縮\n");
+    }
+    for h in &hosts {
+        let ids: Vec<&str> = h["machine_ids"]
+            .as_array()
+            .map(|a| a.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        out.push('\n');
+        out.push_str(&p.bold(&format!(
+            "{}  ({})",
+            h["host"].as_str().unwrap_or("?"),
+            ids.join(", ")
+        )));
+        out.push('\n');
+        out.push_str(&format!(
+            "  壓縮 {} 次；可比較 {}，no baseline {}（前窗沒有工具呼叫，只列後窗、不拿來比）\n",
+            h["compactions"], h["compared"], h["no_baseline"]
+        ));
+        out.push_str("  後窗減前窗            中位數    總和\n");
+        for name in METRICS {
+            let m = &h["metrics"][name];
+            let med = m["median"]
+                .as_f64()
+                .map_or("-".to_string(), |x| format!("{x:+.1}"));
+            out.push_str(&format!(
+                "  {name:<20} {med:>8} {:>7}\n",
+                format!("{:+}", m["sum"].as_i64().unwrap_or(0))
+            ));
+        }
+        out.push_str("  每週（UTC ISO 週，總和）\n");
+        for w in h["weeks"].as_array().cloned().unwrap_or_default() {
+            let n = |k: &str| w[k].as_i64().unwrap_or(0);
+            out.push_str(&format!(
+                "  {}  壓縮 {:>3}  rereads {:+}  repeated {:+}  lookups {:+}  corrections {:+}\n",
+                w["week"].as_str().unwrap_or("?"),
+                n("compactions"),
+                n("rereads"),
+                n("repeated_commands"),
+                n("transcript_lookups"),
+                n("corrections"),
+            ));
+        }
+    }
+    for w in v["warnings"].as_array().cloned().unwrap_or_default() {
+        out.push_str(&p.yellow(&format!("警告：{}", w.as_str().unwrap_or(""))));
+        out.push('\n');
+    }
+    out
+}

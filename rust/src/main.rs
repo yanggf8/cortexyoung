@@ -2688,6 +2688,17 @@ enum MeasureAction {
     },
     /// Local detail for one transcript (session id) or one compaction (boundary uuid).
     Show { id: String },
+    /// Scan local transcripts into the store, then push and pull.
+    Record,
+    /// Cross-machine report; compaction cost first.
+    Report {
+        #[arg(long, default_value_t = 7)]
+        days: i64,
+        #[arg(long, default_value_t = 30)]
+        compaction_days: i64,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 fn cmd_measure(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, CortError> {
@@ -2711,6 +2722,71 @@ fn cmd_measure(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, CortErr
         MeasureAction::Show { id } => {
             cort::measure::compaction_details(&cort::measure::claude_projects_dir(), &id)
                 .map_err(|m| CortError::new("measure_error", json!({"message":m})))?
+        }
+        MeasureAction::Record => {
+            let input = cort::measure::RecordInputs {
+                projects_dir: cort::measure::claude_projects_dir(),
+                marks_path: cort::measure::Watermarks::default_path(),
+                machine_id: usage::machine_id().to_string(),
+                host: cort::measure::host_name(),
+                now_ms: usage::now_ms(),
+            };
+            let outcome =
+                cort::measure_store::with_turso_store(|store| cort::measure::record(store, &input))
+                    .map_err(|m| CortError::new("measure_error", json!({"message":m})))?;
+            match outcome {
+                cort::measure::RecordOutcome::Pushed => {
+                    cort::measure::write_last_sync(usage::now_ms())
+                        .map_err(|m| CortError::new("measure_error", json!({"message":m})))?;
+                    json!({"status":"recorded","pushed":true})
+                }
+                cort::measure::RecordOutcome::SavedLocallyPushFailed(m) => {
+                    return Err(CortError::new(
+                        "measure_push_failed",
+                        json!({"message": format!("saved locally, push failed: {m}")}),
+                    ));
+                }
+            }
+        }
+        MeasureAction::Report {
+            days,
+            compaction_days,
+            json: as_json,
+        } => {
+            let now_ms = usage::now_ms();
+            let value = cort::measure_store::with_turso_store(|store| {
+                let offline = match cort::measure::sync(store) {
+                    Ok(()) => {
+                        cort::measure::write_last_sync(now_ms)?;
+                        None
+                    }
+                    Err(_) => Some(
+                        cort::measure::read_last_sync()
+                            .map_or("從未同步".to_string(), cort::measure::format_utc),
+                    ),
+                };
+                cort::measure::report(
+                    store,
+                    &cort::measure::ReportInputs {
+                        days,
+                        compaction_days,
+                        now_ms,
+                        offline,
+                    },
+                )
+            })
+            .map_err(|m| CortError::new("measure_error", json!({"message":m})))?;
+            if !as_json {
+                use std::io::IsTerminal;
+                let color =
+                    std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none();
+                return Ok(Emit {
+                    render_command: Some("internal-shim-lean"),
+                    format: Format::Json,
+                    payload: json!({"lean": cort::measure::render_report(&value, color)}),
+                });
+            }
+            value
         }
     };
     Ok(Emit {
