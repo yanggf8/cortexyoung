@@ -79,32 +79,54 @@ impl TranscriptFile {
 
 /// `projects_dir/*/*.jsonl` only; `<session>/subagents/` is a directory and never matches.
 fn transcript_files(projects_dir: &Path) -> Result<Vec<TranscriptFile>, String> {
+    collect_files(projects_dir, true).map(|(files, _)| files)
+}
+
+/// Strict (`scan`): any traversal error is returned. Lenient (`show`): unreadable entries are
+/// skipped and counted, so one bad sibling cannot hide a readable transcript.
+fn collect_files(
+    projects_dir: &Path,
+    strict: bool,
+) -> Result<(Vec<TranscriptFile>, usize), String> {
     let mut out = Vec::new();
+    let mut unreadable = 0usize;
     // A missing projects dir is a confirmed absence; any other failure is not.
     let projects = match fs::read_dir(projects_dir) {
         Ok(p) => p,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((out, 0)),
         Err(e) => return Err(format!("cannot read {}: {e}", projects_dir.display())),
     };
     let io = |p: &Path, e: std::io::Error| format!("cannot read {}: {e}", p.display());
+    macro_rules! tolerate {
+        ($res:expr, $path:expr) => {
+            match $res {
+                Ok(v) => v,
+                Err(e) if strict => return Err(io($path, e)),
+                Err(_) => {
+                    unreadable += 1;
+                    continue;
+                }
+            }
+        };
+    }
     for project in projects {
-        let project = project.map_err(|e| io(projects_dir, e))?;
-        let ftype = project.file_type().map_err(|e| io(&project.path(), e))?;
+        let project = tolerate!(project, projects_dir);
+        let ftype = tolerate!(project.file_type(), &project.path());
         if !ftype.is_dir() {
             continue;
         }
-        let entries = fs::read_dir(project.path()).map_err(|e| io(&project.path(), e))?;
+        let entries = tolerate!(fs::read_dir(project.path()), &project.path());
         for entry in entries {
-            let entry = entry.map_err(|e| io(&project.path(), e))?;
+            let entry = tolerate!(entry, &project.path());
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
                 continue;
             }
-            let meta = entry.metadata().map_err(|e| io(&path, e))?;
+            let meta = tolerate!(entry.metadata(), &path);
             if !meta.is_file() {
                 continue;
             }
-            let mtime = meta.modified().map_err(|e| io(&path, e))?;
+            let mtime = tolerate!(meta.modified(), &path);
             out.push(TranscriptFile {
                 path,
                 size: meta.len(),
@@ -113,7 +135,7 @@ fn transcript_files(projects_dir: &Path) -> Result<Vec<TranscriptFile>, String> 
         }
     }
     out.sort_by(|a, b| (a.mtime, &a.path).cmp(&(b.mtime, &b.path)));
-    Ok(out)
+    Ok((out, unreadable))
 }
 
 fn read_lossy(path: &Path) -> std::io::Result<String> {
@@ -217,9 +239,11 @@ fn compaction_json(file: &Path, c: &Compaction) -> Value {
 /// (`id` = boundary uuid). Reads local files only and never opens the store.
 pub fn compaction_details(projects_dir: &Path, id: &str) -> Result<Value, String> {
     let mut found = Vec::new();
-    for file in transcript_files(projects_dir)? {
+    let (files, mut unreadable) = collect_files(projects_dir, false)?;
+    for file in files {
         let by_stem = file.path.file_stem().and_then(|s| s.to_str()) == Some(id);
         let Ok(text) = read_lossy(&file.path) else {
+            unreadable += 1;
             continue;
         };
         if !by_stem && !text.contains(id) {
@@ -237,7 +261,9 @@ pub fn compaction_details(projects_dir: &Path, id: &str) -> Result<Value, String
         }
     }
     if found.is_empty() {
-        return Err(format!("no compaction found for {id}"));
+        return Err(format!(
+            "no compaction found for {id} ({unreadable} unreadable entries skipped)"
+        ));
     }
     Ok(json!({"id": id, "compactions": found}))
 }

@@ -274,9 +274,12 @@ fn file_written_before_and_read_after_counts_as_reread_in_store() {
 fn files_within_one_millisecond_order_by_full_mtime() {
     let mut e = env();
     let c = notgit(&e);
-    // "a" sorts first by path but is the newer file by 100 microseconds.
-    let base = SystemTime::now() - Duration::from_secs(100);
-    for (name, session, off) in [("z.jsonl", "first", 0u64), ("a.jsonl", "second", 100)] {
+    // Whole-second base, so +200us and +600us share one millisecond. The earlier file's path
+    // sorts after the later file's path, so path order and mtime order disagree.
+    let base = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    let early = base + Duration::from_micros(200);
+    let late = base + Duration::from_micros(600);
+    for (name, session, t) in [("b.jsonl", "early", early), ("a.jsonl", "late", late)] {
         let path = e.projects.join("p").join(name);
         write(
             &path,
@@ -287,11 +290,16 @@ fn files_within_one_millisecond_order_by_full_mtime() {
             .write(true)
             .open(&path)
             .unwrap()
-            .set_modified(base + Duration::from_micros(off))
+            .set_modified(t)
             .unwrap();
+        let got = fs::metadata(&path).unwrap().modified().unwrap();
+        if got != t {
+            println!("SKIP: filesystem truncates mtime precision");
+            return;
+        }
     }
     scan(&mut e);
-    assert_eq!(e.store.compactions_since(0).unwrap()[0].session_id, "first");
+    assert_eq!(e.store.compactions_since(0).unwrap()[0].session_id, "early");
 }
 
 #[test]
@@ -335,4 +343,29 @@ fn missing_projects_dir_is_empty_and_keeps_watermarks() {
     let s = scan_transcripts(&mut e.store, &gone, &mut e.marks, M).unwrap();
     assert_eq!(s.files_seen, 0);
     assert_eq!(e.marks, before);
+}
+
+#[test]
+fn details_tolerate_an_unreadable_sibling_directory() {
+    use std::os::unix::fs::PermissionsExt;
+    let e = env();
+    let c = notgit(&e);
+    write(
+        &e.projects.join("p/s1.jsonl"),
+        &boundary("u1", "s1", &c),
+        10,
+    );
+    let locked = e.projects.join("locked");
+    fs::create_dir_all(&locked).unwrap();
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+    if fs::read_dir(&locked).is_ok() {
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        println!("SKIP: permissions are not enforced (running as root?)");
+        return;
+    }
+    let ok = compaction_details(&e.projects, "u1");
+    let missing = compaction_details(&e.projects, "nope");
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(ok.is_ok());
+    assert!(missing.unwrap_err().contains("1 unreadable"));
 }
