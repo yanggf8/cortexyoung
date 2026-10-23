@@ -15,29 +15,84 @@ use std::process::{Command, Stdio};
 /// Env seam: a file that replaces `crontab -l` / `crontab -`.
 pub const CRONTAB_FILE_ENV: &str = "CORT_CRONTAB_FILE";
 
-/// One line, hourly at minute 17. `command_prefix` is the installed shim path.
+/// Quote `s` for /bin/sh only when it needs it, so ordinary paths keep the documented shape.
+/// Single quotes, with an embedded single quote written as `'\''`.
+fn shell_quote(s: &str) -> String {
+    let safe = !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "_@+=:,./-".contains(c));
+    if safe {
+        s.to_string()
+    } else {
+        format!("'{}'", s.replace('\'', "'\\''"))
+    }
+}
+
+/// Split a crontab line into shell words: whitespace separates, single and double quotes group
+/// (and vanish), a backslash outside quotes escapes the next character. Enough to read back
+/// what [`shell_quote`] wrote and what a person would plausibly have typed.
+fn shell_words(line: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut cur = String::new();
+    let mut live = false;
+    let mut quote: Option<char> = None;
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        match quote {
+            Some(q) if c == q => quote = None,
+            Some(_) => cur.push(c),
+            None if c == '\'' || c == '"' => {
+                quote = Some(c);
+                live = true;
+            }
+            None if c == '\\' => {
+                if let Some(n) = chars.next() {
+                    cur.push(n);
+                    live = true;
+                }
+            }
+            None if c.is_whitespace() => {
+                if live {
+                    words.push(std::mem::take(&mut cur));
+                    live = false;
+                }
+            }
+            None => {
+                cur.push(c);
+                live = true;
+            }
+        }
+    }
+    if live {
+        words.push(cur);
+    }
+    words
+}
+
+/// One line, hourly at minute 17. `command_prefix` is the installed shim path. Both paths are
+/// shell-quoted when needed: cron hands the line to /bin/sh, and a space would split them.
 pub fn measure_cron_line(command_prefix: &str, log: &Path) -> String {
     format!(
-        "17 * * * * {command_prefix} measure record >> {} 2>&1",
-        log.display()
+        "17 * * * * {} measure record >> {} 2>&1",
+        shell_quote(command_prefix),
+        shell_quote(&log.display().to_string())
     )
 }
 
-/// True for a crontab line that runs `cort measure record`: some token whose file name is exactly
-/// `cort`, immediately followed by the tokens `measure` and `record`. Comments never match, and
-/// whatever follows (redirects, a trailing comment) is irrelevant -- this is a token test, not a
-/// suffix test, because anchoring to the end of the line is what made `hook-install --status`
-/// lie twice.
+/// True for a crontab line that runs `cort measure record`: some shell word whose file name is
+/// exactly `cort` (quoted or not), immediately followed by the words `measure` and `record`.
+/// Comments never match, and whatever follows is irrelevant -- a token test, not a suffix test,
+/// because anchoring to the end of the line is what made `hook-install --status` lie twice.
 pub fn is_measure_entry(line: &str) -> bool {
     let line = line.trim();
     if line.starts_with('#') {
         return false;
     }
-    let tokens: Vec<&str> = line.split_whitespace().collect();
-    tokens.windows(3).any(|w| {
+    let words = shell_words(line);
+    words.windows(3).any(|w| {
         w[1] == "measure"
             && w[2] == "record"
-            && Path::new(w[0]).file_name().and_then(|n| n.to_str()) == Some("cort")
+            && Path::new(&w[0]).file_name().and_then(|n| n.to_str()) == Some("cort")
     })
 }
 
@@ -62,39 +117,46 @@ pub fn merge_whole_line(existing: &str, line: &str, is_entry: fn(&str) -> bool) 
     (out, true)
 }
 
-/// The merge `install` uses: [`merge_whole_line`] (verbatim) plus the one thing it does not do --
-/// collapse byte-identical duplicates of the entry down to a single line.
+/// The merge `install` uses. Same whole-line semantics as [`merge_whole_line`] (a different
+/// variant of our entry is replaced, an identical one is left alone, none means append), plus two
+/// things that port does not do: it collapses byte-identical duplicates to one line, and it
+/// rebuilds the text from `split_inclusive('\n')` segments instead of `lines()` + join, so every
+/// line it does not own comes back byte for byte (the port loses a lone blank line and any
+/// carriage return).
+///
+/// Cron ignores an unterminated last line, so such a line never ran; appending our entry after it
+/// would silently fuse the two, so a final newline is always added. That one case does not
+/// round-trip through install then uninstall, and cannot be made to without gluing lines.
 pub fn merge_measure_entry(existing: &str, line: &str) -> (String, bool) {
-    let mut seen = false;
-    let deduped: Vec<&str> = existing
-        .lines()
-        .filter(|l| {
-            if !(is_measure_entry(l) && l.trim() == line.trim()) {
-                return true;
+    let mut out = String::with_capacity(existing.len() + line.len() + 1);
+    let mut have_current = false;
+    for seg in existing.split_inclusive('\n') {
+        let text = seg.trim_end_matches(['\n', '\r']);
+        if is_measure_entry(text) {
+            if text.trim() != line.trim() || have_current {
+                continue;
             }
-            !std::mem::replace(&mut seen, true)
-        })
-        .collect();
-    let collapsed = if deduped.len() == existing.lines().count() {
-        existing.to_string()
-    } else {
-        format!("{}\n", deduped.join("\n"))
-    };
-    let (out, changed) = merge_whole_line(&collapsed, line, is_measure_entry);
-    (out, changed || collapsed != existing)
+            have_current = true;
+        }
+        out.push_str(seg);
+    }
+    if !out.is_empty() && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    if !have_current {
+        out.push_str(line);
+        out.push('\n');
+    }
+    let changed = out != existing;
+    (out, changed)
 }
 
-/// Drop every entry `is_entry` recognises; everything else is returned untouched.
+/// Drop every entry `is_entry` recognises; every other byte is returned untouched.
 pub fn remove_entries(existing: &str, is_entry: fn(&str) -> bool) -> String {
-    if !existing.lines().any(is_entry) {
-        return existing.to_string();
-    }
-    let kept: Vec<&str> = existing.lines().filter(|l| !is_entry(l)).collect();
-    if kept.is_empty() {
-        String::new()
-    } else {
-        format!("{}\n", kept.join("\n"))
-    }
+    existing
+        .split_inclusive('\n')
+        .filter(|seg| !is_entry(seg.trim_end_matches(['\n', '\r'])))
+        .collect()
 }
 
 fn seam_file() -> Option<PathBuf> {
@@ -103,20 +165,48 @@ fn seam_file() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+/// Why the crontab could not be reached. `Absent` is the only one `--if-configured` forgives.
+#[derive(Debug)]
+pub enum CronError {
+    /// The `crontab` program is not installed (spawn failed with NotFound).
+    Absent(String),
+    Failed(String),
+}
+
+impl CronError {
+    pub fn message(&self) -> &str {
+        match self {
+            CronError::Absent(m) | CronError::Failed(m) => m,
+        }
+    }
+}
+
+fn spawn_error(e: std::io::Error) -> CronError {
+    let m = format!("cannot run crontab: {e}");
+    if e.kind() == std::io::ErrorKind::NotFound {
+        CronError::Absent(m)
+    } else {
+        CronError::Failed(m)
+    }
+}
+
 /// Current crontab text. A user with no crontab ("no crontab for <user>", exit 1) is empty, not
 /// an error; a missing seam file likewise.
-pub fn read_crontab() -> Result<String, String> {
+pub fn read_crontab() -> Result<String, CronError> {
     if let Some(file) = seam_file() {
         return match std::fs::read_to_string(&file) {
             Ok(s) => Ok(s),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
-            Err(e) => Err(format!("cannot read {}: {e}", file.display())),
+            Err(e) => Err(CronError::Failed(format!(
+                "cannot read {}: {e}",
+                file.display()
+            ))),
         };
     }
     let out = Command::new("crontab")
         .arg("-l")
         .output()
-        .map_err(|e| format!("cannot run crontab: {e}"))?;
+        .map_err(spawn_error)?;
     if out.status.success() {
         return Ok(String::from_utf8_lossy(&out.stdout).into_owned());
     }
@@ -124,14 +214,17 @@ pub fn read_crontab() -> Result<String, String> {
     if stderr.contains("no crontab") {
         return Ok(String::new());
     }
-    Err(format!("crontab -l failed: {}", stderr.trim()))
+    Err(CronError::Failed(format!(
+        "crontab -l failed: {}",
+        stderr.trim()
+    )))
 }
 
 /// Replace the crontab: always `crontab -` with the text on stdin.
-pub fn write_crontab(content: &str) -> Result<(), String> {
+pub fn write_crontab(content: &str) -> Result<(), CronError> {
     if let Some(file) = seam_file() {
         return crate::data_dir::write_atomic(&file, content)
-            .map_err(|e| format!("cannot write {}: {e}", file.display()));
+            .map_err(|e| CronError::Failed(format!("cannot write {}: {e}", file.display())));
     }
     let mut child = Command::new("crontab")
         .arg("-")
@@ -139,22 +232,22 @@ pub fn write_crontab(content: &str) -> Result<(), String> {
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| format!("cannot run crontab: {e}"))?;
+        .map_err(spawn_error)?;
     if let Some(mut stdin) = child.stdin.take() {
         stdin
             .write_all(content.as_bytes())
-            .map_err(|e| format!("cannot write to crontab: {e}"))?;
+            .map_err(|e| CronError::Failed(format!("cannot write to crontab: {e}")))?;
     }
     let out = child
         .wait_with_output()
-        .map_err(|e| format!("crontab did not finish: {e}"))?;
+        .map_err(|e| CronError::Failed(format!("crontab did not finish: {e}")))?;
     if out.status.success() {
         Ok(())
     } else {
-        Err(format!(
+        Err(CronError::Failed(format!(
             "crontab - failed: {}",
             String::from_utf8_lossy(&out.stderr).trim()
-        ))
+        )))
     }
 }
 
@@ -168,12 +261,16 @@ pub enum CronAction {
     Status { prefix: String },
 }
 
-fn skipped(message: String) -> Value {
+fn skipped(message: &str) -> Value {
     json!({"status":"skipped","message":message})
 }
 
 /// Run one action. A `"status":"skipped"` value carries a one-line `message` for the caller to
 /// print; everything else is a JSON report.
+///
+/// Under `--if-configured` only two things exit 0 without installing: measurement is not
+/// configured, or the `crontab` program does not exist. Any other failure is returned, so the
+/// caller (installer, upgrader) can print it as a warning instead of losing it.
 pub fn run(action: CronAction) -> Result<Value, String> {
     match action {
         CronAction::Install {
@@ -181,24 +278,22 @@ pub fn run(action: CronAction) -> Result<Value, String> {
             if_configured,
         } => {
             if if_configured && !crate::measure_store::is_configured() {
-                return Ok(skipped("measure: not configured; skipping cron".into()));
+                return Ok(skipped("measure: not configured; skipping cron"));
             }
             match install(&prefix) {
                 Ok(v) => Ok(v),
-                // The installer must not fail over a crontab it cannot reach; a person who asked
-                // for the entry by name (plain --install) gets the error.
-                Err(e) if if_configured => Ok(skipped(format!(
-                    "measure: crontab unavailable ({e}); skipping cron"
-                ))),
-                Err(e) => Err(e),
+                Err(CronError::Absent(_)) if if_configured => {
+                    Ok(skipped("measure: no crontab program; skipping cron"))
+                }
+                Err(e) => Err(e.message().to_string()),
             }
         }
         CronAction::Uninstall => {
-            let existing = read_crontab()?;
+            let existing = read_crontab().map_err(|e| e.message().to_string())?;
             let out = remove_entries(&existing, is_measure_entry);
             let changed = out != existing;
             if changed {
-                write_crontab(&out)?;
+                write_crontab(&out).map_err(|e| e.message().to_string())?;
             }
             Ok(json!({"status": if changed {"removed"} else {"not_present"}}))
         }
@@ -220,7 +315,7 @@ pub fn run(action: CronAction) -> Result<Value, String> {
     }
 }
 
-fn install(prefix: &str) -> Result<Value, String> {
+fn install(prefix: &str) -> Result<Value, CronError> {
     let line = measure_cron_line(prefix, &log_path());
     let existing = read_crontab()?;
     let (out, changed) = merge_measure_entry(&existing, &line);

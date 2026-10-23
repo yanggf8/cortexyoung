@@ -608,6 +608,18 @@ deploy_measure_cron() {
   fi
 }
 
+# Uninstall must take the cron entry out before the binary it runs is removed. The binary owns the
+# merge; an unconfigured machine or one without a crontab is "not_present", not an error.
+remove_measure_cron() {
+  local cort_bin out
+  cort_bin="$(manifest_get cort_bin || true)"
+  [ -n "$cort_bin" ] && [ -x "$cort_bin" ] || cort_bin="$(command -v cort 2>/dev/null || true)"
+  [ -n "$cort_bin" ] && [ -x "$cort_bin" ] || return 0
+  if ! out="$("$cort_bin" measure cron --uninstall 2>&1)"; then
+    info "measure: cron entry NOT removed — $out"
+  fi
+}
+
 remove_hook() {
   local cort_bin
   cort_bin="$(manifest_get cort_bin || true)"
@@ -1068,6 +1080,7 @@ do_uninstall() {
     exec 9>"$MANIFEST_DIR/.install.lock"
     flock -x 9 || die "another installer holds the lock and would not yield"
   fi
+  remove_measure_cron
   remove_hook
   if [ -f "$MANIFEST_FILE" ]; then
     local cort_owned ag_owned xg_owned skill_ag skill_xg

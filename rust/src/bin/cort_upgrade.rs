@@ -327,7 +327,7 @@ fn main() {
 
     // Measurement cron: same shim the hooks run, merged by the binary, and only when the
     // measurement store is configured. Best effort -- the verdict does not read it.
-    let _ = run_capture_with_deadline(
+    if let Err(e) = run_capture_with_deadline(
         &shim,
         &[
             "measure",
@@ -338,7 +338,11 @@ fn main() {
             &shim.to_string_lossy(),
         ],
         Duration::from_secs(60),
-    );
+    ) {
+        // Not fatal and not in the verdict, but never swallowed: the person reading the upgrade
+        // output must see that the hourly measurement job was not (re)installed.
+        eprintln!("warning: measure cron not installed: {e}");
+    }
 
     // Indexes: eager for live directories, deferred for gone ones (Task 4). The printed
     // index states come from the final diagnosis, which re-reads reasons after this ran —

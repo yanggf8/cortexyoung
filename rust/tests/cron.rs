@@ -251,7 +251,7 @@ fn cli_plain_install_fails_when_crontab_unwritable() {
 }
 
 #[test]
-fn cli_if_configured_warns_and_exits_zero_when_crontab_unavailable() {
+fn cli_if_configured_fails_loudly_on_a_crontab_error() {
     let (d, _f, data) = fixture();
     std::fs::write(data.join("turso-measure.json"), "{}").unwrap();
     let blocker = d.path().join("blocker");
@@ -269,8 +269,15 @@ fn cli_if_configured_warns_and_exits_zero_when_crontab_unavailable() {
             PREFIX,
         ],
     );
-    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
-    assert!(out(&o).contains("skipping cron"));
+    assert!(!o.status.success(), "a real failure must not exit 0");
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(
+        out(&o).contains("cannot read"),
+        "envelope lost: {}",
+        out(&o)
+    );
+    assert!(err.contains("cannot read"), "message lost: {err}");
+    // Status degrades to "absent" instead of failing.
     let o = cort(
         &bad,
         &data,
@@ -279,4 +286,150 @@ fn cli_if_configured_warns_and_exits_zero_when_crontab_unavailable() {
     let v: serde_json::Value = serde_json::from_str(&out(&o)).unwrap();
     assert_eq!(v["installed"], false);
     assert_eq!(v["entries"], 0);
+    assert_eq!(v["crontab_available"], false);
+}
+
+#[test]
+fn cli_if_configured_exits_zero_when_the_crontab_program_is_absent() {
+    let (d, _f, data) = fixture();
+    std::fs::write(data.join("turso-measure.json"), "{}").unwrap();
+    // No seam, and a PATH holding nothing: `crontab` cannot be spawned (NotFound), so the real
+    // crontab is unreachable by construction.
+    let empty = d.path().join("empty-path");
+    std::fs::create_dir_all(&empty).unwrap();
+    let run = |extra: &[&str]| {
+        let mut args = vec!["measure", "cron", "--command-prefix", PREFIX];
+        args.extend_from_slice(extra);
+        Command::new(PathBuf::from(env!("CARGO_BIN_EXE_cort")))
+            .args(args)
+            .env_remove(cort::cron::CRONTAB_FILE_ENV)
+            .env("PATH", &empty)
+            .env("CORT_MEMORY_DIR", &data)
+            .output()
+            .unwrap()
+    };
+    let o = run(&["--install", "--if-configured"]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert!(out(&o).contains("skipping cron"));
+    // Without --if-configured the same absence is an error.
+    assert!(!run(&["--install"]).status.success());
+    let v: serde_json::Value = serde_json::from_str(&out(&run(&["--status"]))).unwrap();
+    assert_eq!(v["installed"], false);
+    assert_eq!(v["crontab_available"], false);
+}
+
+// ── quoting ───────────────────────────────────────────────────────────────
+
+#[test]
+fn paths_with_spaces_and_quotes_are_shell_quoted() {
+    let l = measure_cron_line("/home/a b/it's/cort", Path::new("/data dir/measure.log"));
+    assert_eq!(
+        l,
+        "17 * * * * '/home/a b/it'\\''s/cort' measure record >> '/data dir/measure.log' 2>&1"
+    );
+    assert!(is_measure_entry(&l));
+    // cron runs the line through /bin/sh: the shell must see exactly the two original paths.
+    let o = Command::new("sh")
+        .arg("-c")
+        .arg("for a in '/home/a b/it'\\''s/cort' '/data dir/measure.log'; do printf '%s\\n' \"$a\"; done")
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&o.stdout),
+        "/home/a b/it's/cort\n/data dir/measure.log\n"
+    );
+}
+
+#[test]
+fn entry_test_accepts_quoted_and_unquoted_forms() {
+    assert!(is_measure_entry(
+        "17 * * * * '/a b/cort' measure record >> '/l m/x.log' 2>&1"
+    ));
+    assert!(is_measure_entry(
+        "17 * * * * \"/a b/cort\" measure record >> /l 2>&1"
+    ));
+    assert!(is_measure_entry("17 * * * * /a/cort measure record"));
+    assert!(!is_measure_entry(
+        "17 * * * * '/a b/cort-old' measure record"
+    ));
+    assert!(!is_measure_entry("17 * * * * '/a b/cort measure' record"));
+}
+
+#[test]
+fn stale_unquoted_entry_is_replaced_by_the_quoted_one() {
+    let spaced = "/home/a b/cort";
+    let l = measure_cron_line(spaced, Path::new("/data dir/measure.log"));
+    let stale = "17 * * * * /home/a b/cort measure record >> /data dir/measure.log 2>&1\n";
+    // The unquoted spelling is not even recognisable (its words are split), so it stays foreign;
+    // the previous, correctly spelled unquoted variant for a safe path is what gets replaced.
+    let safe_old = "17 * * * * /old/cort measure record >> /old/m.log 2>&1\n";
+    let (out, changed) = merge(&format!("{safe_old}{stale}"), &l);
+    assert!(changed);
+    assert!(!out.contains("/old/cort"));
+    assert_eq!(out.lines().filter(|x| *x == l).count(), 1);
+    let (again, changed) = merge(&out, &l);
+    assert!(!changed);
+    assert_eq!(again, out);
+}
+
+#[test]
+fn cli_round_trip_with_spaces_in_prefix_and_data_dir() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("crontab");
+    let data = dir.path().join("da ta");
+    std::fs::create_dir_all(&data).unwrap();
+    let prefix = format!("{}/bin dir/cort", dir.path().display());
+    std::fs::write(&file, "17 * * * * /old/cort measure record\n").unwrap();
+    let o = cort(
+        &file,
+        &data,
+        &["measure", "cron", "--install", "--command-prefix", &prefix],
+    );
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert_eq!(text.lines().count(), 1, "stale entry not replaced: {text}");
+    assert!(text.contains(&format!("'{prefix}' measure record >> '")));
+    assert!(text.contains(&format!("'{}'", data.join("measure.log").display())));
+    let o = cort(
+        &file,
+        &data,
+        &["measure", "cron", "--status", "--command-prefix", &prefix],
+    );
+    let v: serde_json::Value = serde_json::from_str(&out(&o)).unwrap();
+    assert_eq!(v["installed"], true);
+    assert_eq!(v["entries"], 1);
+}
+
+// ── byte fidelity ─────────────────────────────────────────────────────────
+
+#[test]
+fn newline_terminated_foreign_text_round_trips_byte_for_byte() {
+    for foreign in [
+        "",
+        "\n",
+        "\n\n",
+        "# top\n\nMAILTO=me@example.com\n\n0 3 * * * /bin/backup --all\n\n\n# end\n",
+        FOREIGN,
+        "  \t\n0 0 * * * x # comment with cort measure report\n",
+    ] {
+        let (installed, changed) = merge(foreign, &line());
+        assert!(changed);
+        assert!(
+            installed.starts_with(foreign),
+            "{foreign:?} -> {installed:?}"
+        );
+        assert_eq!(
+            remove_entries(&installed, is_measure_entry),
+            foreign,
+            "round trip lost bytes for {foreign:?}"
+        );
+    }
+}
+
+#[test]
+fn unterminated_last_line_gets_a_newline_before_our_entry() {
+    // Cron ignores an unterminated last line, so it never ran; the newline keeps it from being
+    // glued to our entry. This case deliberately does not round-trip.
+    let (out, _) = merge("0 3 * * * /bin/backup", &line());
+    assert_eq!(out, format!("0 3 * * * /bin/backup\n{}\n", line()));
 }

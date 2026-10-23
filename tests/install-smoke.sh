@@ -1403,6 +1403,30 @@ fi
 assert_contains "$CORT_CRONTAB_FILE" "$T23_CORT measure record" "the entry runs the installed shim"
 unset CORT_MEMORY_DIR T23_CORT
 
+# ── 24. uninstall takes the cron entry out and hands the crontab back byte for byte ──
+echo "--- Test 24: uninstall restores the foreign crontab exactly ---"
+fresh_home_with_install
+T24_ORIG="$(mktemp)"
+printf '# mine\nMAILTO=me@example.com\n\n9 17 * * * /home/u/.cargo/bin/claudecat analyze\n\n0 3 * * * /bin/backup --all\n' > "$T24_ORIG"
+cp "$T24_ORIG" "$CORT_CRONTAB_FILE"
+T24_CORT="$(grep "^cort_bin:" "$HOME/.local/share/cortexyoung/manifest" | head -n1 | cut -d: -f2-)"
+export CORT_MEMORY_DIR="$HOME/.local/share/cortexyoung/memory"
+mkdir -p "$CORT_MEMORY_DIR"
+printf '{}\n' > "$CORT_MEMORY_DIR/turso-measure.json"
+( set --; export SOURCE_ONLY=1
+  # shellcheck disable=SC1090
+  . "$INSTALL_SH"
+  deploy_measure_cron "$T24_CORT" ) >/dev/null 2>&1 || true
+assert_contains "$CORT_CRONTAB_FILE" "measure record" "the entry is installed before the uninstall"
+bash "$INSTALL_SH" --uninstall > /tmp/smoke24.log 2>&1 || true
+if cmp -s "$T24_ORIG" "$CORT_CRONTAB_FILE"; then
+  pass "uninstall leaves the crontab byte-identical to its original"
+else
+  fail "uninstall did not restore the crontab (see /tmp/smoke24.log)"
+fi
+rm -f "$T24_ORIG"
+unset CORT_MEMORY_DIR T24_CORT T24_ORIG
+
 # ── summary ──────────────────────────────────────────────────────
 echo ""
 echo "=== smoke results: $PASS passed, $FAIL failed ==="

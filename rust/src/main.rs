@@ -2766,7 +2766,12 @@ fn cmd_measure(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, CortErr
             } else {
                 return Err(fail("pass one of --install, --uninstall, --status"));
             };
-            let value = cort::cron::run(action).map_err(|m| fail(&m))?;
+            // The error envelope goes to stdout; callers that capture only stderr (the upgrader)
+            // would otherwise warn with an empty reason.
+            let value = cort::cron::run(action).map_err(|m| {
+                eprintln!("measure cron: {m}");
+                fail(&m)
+            })?;
             if value["status"] == "skipped" {
                 return Ok(Emit {
                     render_command: Some("internal-shim-lean"),
