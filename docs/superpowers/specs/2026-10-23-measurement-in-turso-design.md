@@ -1,6 +1,17 @@
 # 量測收進 cort：資料統一記在 TursoDB，要看的時候在上面分析
 
-日期：2026-10-23　狀態：設計，待實作
+日期：2026-10-23　狀態：設計，待實作（同日第二版：主角改為「壓縮後的代價」，見下一節）
+
+## 第二版：量測要找出能幫 Claude 改進的地方（使用者 2026-10-23）
+
+使用者看過 30 天用量後的方向：cort 一個月只被 Claude 實際呼叫 8 次（`impact`），為「cort 有沒有
+用」蓋一套量測不是重點。**量測要持續，但目標是找出能幫 Claude 改進的地方**；claudecat 先封存
+（GitHub repo 已於 2026-10-23 封存，本機排程留到 cort 的量測接上才停）；`cort memory` 先在兩台設好
+（NUC11i5 已於 2026-10-23 `import-config`，Thinkpade15 原本就有，兩台同專案同帳本）。
+
+使用者指出的那一刻：**壓縮之後要重查、還講錯**。這是本版的主角，下面「主角：壓縮後的代價」一節
+定義怎麼量。原本的 index 健康快照與 cort 用量保留，退為配角——後者仍是「cort 在哪裡能幫 Claude」
+的證據（hook 看得到每一次搜尋）。兩者共用同一個量測資料庫、同一個 `record` 排程、同一個 `report`。
 
 ## 為什麼
 
@@ -39,6 +50,9 @@ claudecat 的其餘功能 30 天內沒人用或已被取代（地圖、`navigate
 
 ## 目標
 
+0. **壓縮後的代價進 DB、在 report 裡看得到趨勢**：每台機器每次 Claude Code 壓縮，壓縮後重查了
+   多少、有沒有被使用者糾正，跟同一段對話壓縮前的正常水準比。日後任何改進（例如壓縮後先查
+   `cort memory`）都用這個數字前後對照，判斷有沒有用。
 1. **原始使用事件進 DB**：cort 把本機 `usage.db` 的 `command_log` 同步到共用 TursoDB 的
    `telemetry_events`（取代 `claudecat telemetry sync`），每天自動跑。
 2. **每天的快照進 DB**：每台機器每天記一次每個已建 index 專案的 **index 健康**（事件裡沒有的
@@ -70,6 +84,67 @@ claudecat 的其餘功能 30 天內沒人用或已被取代（地圖、`navigate
 
 ## 設計
 
+### 主角：壓縮後的代價
+
+**資料從哪來**：`~/.claude/projects/<project-dir>/<session>.jsonl`。壓縮點是一列
+`{"type":"system","subtype":"compact_boundary"}`，帶 `compactMetadata`（`trigger` auto/manual、
+`preTokens`、`postTokens`）、`sessionId`、`cwd`、`timestamp`、`uuid`；下一列是摘要（`isCompactSummary`）。
+2026-10-23 實查：本機 1,071 份記錄中 14 份有壓縮；審查時全機 653 份主對話記錄裡有 86 個壓縮點、
+分佈在 13 份，每個都帶 `compactMetadata`，平均一份 6.6 次。每份記錄裡只有一個 `sessionId`、等於檔名；
+`/exit` 後 resume 的同一串對話寫回同一個檔。但 fork／resume 會讓**兩份檔共用一段歷史**（實查兩對，
+分別共用 1,638 與 336 則訊息，其中一個壓縮點 uuid 同時出現在兩份）。子代理的記錄在
+`<session>/subagents/*.jsonl`，**不算**進主對話（子代理沒有被壓縮的上下文可重查）。只看 Claude
+Code；Codex／Kimi 的記錄不在本版。
+
+**每次壓縮記一列**，key `(machine_id, boundary_uuid)`——**以壓縮點 uuid 去重**，共用歷史的兩份檔只
+算一次（取先出現的那份的 `session_id`）。欄位：時間、`session_id`、`project_id`（用**壓縮點那一列的
+`cwd`**，套快照同一套正規化 origin 雜湊；`cwd` 沒有 git origin 時為 NULL，不猜）、`trigger`、
+`pre_tokens`、`post_tokens`，以及下面兩個視窗的計數。
+
+**兩個對稱的視窗**（審查後定案，我的判斷）：
+- **後窗**：壓縮點之後的前 50 個主對話 tool_use，遇到下一個壓縮點就截斷。不看整段到檔尾：一段可能
+  跑好幾個小時或幾天後才 resume，代價會被稀釋。
+- **前窗（基準）**：壓縮點之前緊鄰的 50 個 tool_use，遇到上一個壓縮點就截斷。
+- 兩窗用**同一套規則**，「已知」都是指**該窗開始之前**這份檔裡出現過的東西：
+  - `rereads`：窗內對「窗開始前已知檔案」的 Read，每個路徑只算第一次。已知檔案＝之前出現過的
+    Read／Write／Edit／MultiEdit／NotebookEdit 的 `file_path`（2026-10-23 試算的教訓：只看 Read 會漏
+    掉 Claude 自己寫出來的檔，那次真實的重讀被算成 0）。窗內第一次碰、之後又讀的不算。
+  - `repeated_commands`：窗內跟窗開始前某個 Bash 指令**逐字相同**的 Bash，每個指令只算第一次。
+  - `transcript_lookups`：輸入裡含 `.claude/projects/` 且含 `.jsonl` 的 tool_use 數（翻自己的記錄找回
+    摘要沒留下的東西，例如 2026-10-23 找子代理 ID）。比對整個輸入字串，不截斷。
+  - `human_messages`：窗內使用者親手打的訊息數（判定見下）。
+  - `corrections`：其中符合固定糾正詞表的則數。詞表寫死在程式裡並有測試（起始：`不對`、`不是`、
+    `錯了`、`講錯`、`搞錯`、`wrong`、`that's not`、`no,`），之後用抽樣結果修。
+  - `tool_calls`：窗內實際的 tool_use 數（被截斷時少於 50）。
+- 一列存**前窗與後窗各一組**計數（`pre_*`／`post_*`），report 算「後窗減前窗」，不比絕對數——正常
+  工作本來就會重讀。前窗長度為 0（壓縮點緊接著上一個）時，report 不拿它比，只列後窗。
+
+**使用者親手打的訊息**（審查後定案）：新版記錄的使用者列帶 `origin`，`origin.kind == "human"` 才算；
+`task-notification`、`peer` 等其他 kind 一律不算。沒有 `origin` 的舊列：內容是字串、不是 `isMeta`、
+不是摘要（`isCompactSummary`）、不是 tool_result、且第一個字元不是 `<`（排除 `<task-notification>`、
+`<system-reminder>`、`<command-name>` 等注入）才算。這兩條規則各有測試。
+
+**還在長的列**：後窗沒滿 50、也還沒遇到下一個壓縮點時，該列是未定；每次 `record` 發現檔案的
+`(大小, mtime)` 水位變了就重算並 upsert，**包括 resume 多天後再長的檔**——不設「24 小時結案」，因為
+視窗固定，後窗一滿或遇到下一個壓縮點，數字就不會再變。
+
+**歷史回填**：第一次 `record` 掃完本機所有現存記錄（本機最舊是 2026-09-01），之後才增量。改進要有
+「之前」的基準，而 Claude Code 可能依它的清理週期刪舊記錄（本機沒設 `cleanupPeriodDays`，用預設），
+沒先收進資料庫的歷史會消失；本機明細子命令也只在記錄還在時有用。所以這一步排在實作計畫裡、量測
+資料庫一設好就跑。
+
+**不上傳文字**：送進 Turso 的只有上面的計數與 id，不含訊息內容、指令內容、檔名（跟限制「不多不少」
+一致：本版新增的就是這些計數）。要看是哪幾則糾正、重讀了哪些檔，用一個**只讀本機**的子命令印出
+（給 session id 或壓縮點 uuid），供人工抽樣判斷詞表準不準。
+
+**report 新增一節「壓縮後的代價」**，放在最前面：每台機器、最近 N 天（預設 30，壓縮次數少）：壓縮
+次數、每次壓縮的重讀／重跑／翻記錄／糾正（中位數與總和）、與基準的差；再按週列趨勢，讓改進前後看
+得出變化。沒有壓縮的機器印「這段期間沒有壓縮」，不算異常。
+
+**本版不做的**：自動判斷「講錯」的內容是否真的錯（只數糾正）；跨 session 的遺忘（新開 session 重查
+上一個 session 知道的事）——同一個問題的另一半，等這一半有數字再說；改進本身（例如壓縮後自動查
+`cort memory` 的 hook）是另一份設計，本版只負責讓它量得出效果。
+
 ### 量測用自己的 Turso 資料庫（使用者 2026-10-23 決定）
 
 - **為什麼不共用**：Turso 的同步副本是遠端**整個資料庫**的複本。現況是 cort memory 與 claudecat
@@ -85,9 +160,9 @@ claudecat 的其餘功能 30 天內沒人用或已被取代（地圖、`navigate
   `telemetry_project_aliases`，用一個 cort 子命令原封不動複製到新資料庫（`event_id` 不變，可重跑、
   `INSERT OR IGNORE`）。`harnessuse` 裡的舊表在新資料庫驗證完之後才清——**清之前再問使用者**，
   那是對共用資料庫的破壞性動作。
-- 另外，`cort memory` 本身仍用 `harnessuse`：**NUC11i5 的 cort memory 還沒設定**（`cort memory
-  status` 回 `Turso memory is not configured`），退場步驟裡用 `cort memory import-config
-  ~/.local/share/claudecat/turso-memory.json` 補上。這跟量測無關，但同一次一起處理。
+- 另外，`cort memory` 本身仍用 `harnessuse`。NUC11i5 原本沒設定，2026-10-23 已用 `cort memory
+  import-config --from ~/.local/share/claudecat/turso-memory.json` 補上（`sync_status: synced`，與
+  Thinkpade15 同 project id、同 4 筆）。
 
 ### 原始事件：沿用 `telemetry_events`
 
@@ -254,8 +329,7 @@ Thinkpade15）第一次記錄時就會寫進對照，它們以前上傳的事件
 順序很重要：先讓 cort 接得住，才拆 claudecat。
 
 1. cort 的同步、快照、report、匯入、搬家、排程子命令完成並測過。
-2. 向 `armo` 申請量測用的新資料庫與憑證；每台機器用 cort 的量測 `configure` 寫入設定。NUC11i5 另外
-   `cort memory import-config ~/.local/share/claudecat/turso-memory.json`。
+2. 向 `armo` 申請量測用的新資料庫與憑證；每台機器用 cort 的量測 `configure` 寫入設定。
 3. 移除 claudecat 的 09:17 與 09:29 條目（先停，之後才不會有新事件沒人送）。
 4. 每台在用的機器（NUC11i5、Thinkpade15）用 `claudecat telemetry configure` 把 claudecat 指向
    **新資料庫**，跑最後一次 `claudecat telemetry sync`（審查後改）。這一步把每台本機 90 天內的事件
@@ -270,7 +344,8 @@ Thinkpade15）第一次記錄時就會寫進對照，它們以前上傳的事件
 7. 裝 cort 的排程。
 8. **隔天檢查**：遠端每台機器都有昨天的快照、事件持續增加且沒有重複，才往下走。
 9. 移除 `~/.cargo/bin/claudecat`。在這之前，回退方法就是把 claudecat 的排程裝回去。GitHub 上的
-   claudecat repo 怎麼處理（封存或保留），**退場時再問使用者**——那是對外的動作。
+   claudecat repo 已於 2026-10-23 依使用者指示封存；封存後推不上去，之後 `CORT-AUDIT.md` 的新列只在
+   本機，由步驟 6b 的匯入收進資料庫。
 9b. 問使用者後，才清掉 `harnessuse` 裡的舊 `telemetry_events` 與 alias（之後記憶副本會變小）。
 10. 文件：cortexyoung `AGENTS.md` 的「claudecat (separate repo)」一節與 `claudecat telemetry sync`
     那句改成描述 cort 自己的量測；記憶與 README 裡指向 claudecat 的地方一併改。改的時候寫明：
@@ -283,7 +358,7 @@ Thinkpade15）第一次記錄時就會寫進對照，它們以前上傳的事件
 - `usage.db` 的 schema 不為這件事改。
 - 本機 NUC11i5 記憶體緊（9.7Gi / 6 核）：驗證時 cargo 一次只跑一個。
 - 寫進 Turso 的內容：`command_log` 整列（含 `args_summary`）與健康數字，跟 claudecat 現在上傳的
-  一樣，不多不少。
+  一樣；第二版只再加壓縮列的計數與 id。不多不少：對話文字、指令內容、檔名都不上傳。
 
 ## 留給實作者
 
@@ -306,6 +381,17 @@ Thinkpade15）第一次記錄時就會寫進對照，它們以前上傳的事件
 - 排程每小時跑、每天只寫一次快照（筆電睡著也補得上）。
 - 上傳前 `--dry-run` 對帳；`preserve_order` 明確寫進 `Cargo.toml`。
 - 退場順序：先停 claudecat 排程、再最後同步、再對帳、隔天檢查後才移除 binary。
+- 第二版（壓縮後的代價）的判斷：
+  - 只看 Claude Code 主對話，子代理與 Codex／Kimi 不算。
+  - 「已知檔案」含 Read／Write／Edit 類；重跑只算逐字相同；糾正用寫死的詞表，起始詞表如上。
+  - 前後各 50 個 tool_use 的對稱視窗，一列存兩組計數，report 算後窗減前窗。
+  - 以壓縮點 uuid 去重；`project_id` 用壓縮點那列的 `cwd`。
+  - 使用者訊息：有 `origin` 看 `kind == human`，沒有的用舊列規則。
+  - 水位一變就重算，不設結案期限；第一次 `record` 回填全部現存記錄。
+  - 只上傳計數與 id，不上傳文字與檔名；明細只在本機看。
+  - report 把這一節放最前面，預設 30 天、按週列趨勢。
+  - 記錄解析放在 cort（排程跑的是 cort，`cort-evals` 不會安裝到每台）；`evals/` 現有的記錄解析
+    （`evals/src/stream.rs` 等）能不能改成共用 cort 的，留給實作者。
 - 以下是 2026-10-23 他審（實作者角度＋Codex 對照原始碼）後補的判斷：
   - `fresh` 改用 cort 自己的 staleness、拿掉 7 天門檻（依「天天誤報」反目標）。
   - 快照一天內每次排程都 upsert，判讀當天最後一次觀察。
