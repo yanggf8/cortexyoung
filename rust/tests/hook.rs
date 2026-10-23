@@ -150,10 +150,10 @@ fn the_three_shapes_the_first_probe_run_got_wrong() {
     );
 
     // 3. Context flags mean the agent is reading the code, not enumerating its callers. Both of
-    //    these are still silent, but read why before quoting them: since 2026-09-07 the flag routes
-    //    to `cort context` rather than silencing, and what stops these two is the gate underneath --
-    //    each names exactly one file, which is reading on any subcommand. The flag's own effect is
-    //    pinned by `a_context_flag_in_the_fields_routes_to_context_the_way_a_shell_flag_does`.
+    //    these are silent, but read why before quoting them: what stops these two is the gate
+    //    underneath -- each names exactly one file, which is reading whatever the flag says. The
+    //    flag's own effect (`context_lines_requested`) is pinned by
+    //    `a_context_flag_in_the_fields_declines_the_way_a_shell_flag_does`.
     assert!(suggests_impact_shape(
         r#"grep -n -B2 -A10 "getVisitorAnalytics" backend/src/services/analyticsService.ts"#
     )
@@ -401,27 +401,30 @@ fn a_bare_symbol_grep_tool_call_fires_the_same_as_its_shell_twin() {
 }
 
 /// The value on `-C` is exactly what a rendering back into a shell line had to throw away. Kimi's
-/// parser keeps it as a flag rather than re-deriving it from text -- and since 2026-09-07 that flag
-/// picks the subcommand rather than silencing the hook, on both surfaces alike.
+/// parser keeps it as a flag rather than re-deriving it from text. From 2026-09-07 that flag routed
+/// to `cort context`; since that verb's removal it declines the search, on both surfaces alike,
+/// and it must never be handed to `impact` instead -- surrounding lines are not a caller set.
 #[test]
-fn a_context_flag_in_the_fields_routes_to_context_the_way_a_shell_flag_does() {
+fn a_context_flag_in_the_fields_declines_the_way_a_shell_flag_does() {
     // {"-C":4,"output_mode":"content","path":"frontend/src","pattern":"updatePaymentStatus"}
     let s = search_from_grep_fields("updatePaymentStatus", Some("frontend/src"), None, true)
         .expect("parses");
-    let Verdict::Fire(hit) = judge(&s, |_| Evidence::Unknown) else {
-        panic!("a `-C` field is `cort context`'s question, and context is a suggestion");
-    };
-    assert_eq!(hit.symbol, "updatePaymentStatus");
-    assert_eq!(hit.kind, Suggest::Context);
-    let twin = suggests_impact_shape("rg -C 4 -e 'updatePaymentStatus' frontend/src")
-        .expect("and the shell twin must agree");
-    assert_eq!(twin.symbol, hit.symbol);
-    assert_eq!(twin.kind, Suggest::Context, "two parsers, one verdict");
+    assert_eq!(
+        judge(&s, |_| Evidence::Unknown),
+        Verdict::Silent(SilenceReason::NoShape("context_lines_requested"))
+    );
+    let twin = search_from_shell("rg -C 4 -e 'updatePaymentStatus' frontend/src")
+        .expect("the shell twin parses");
+    assert_eq!(
+        judge(&twin, |_| Evidence::Unknown),
+        Verdict::Silent(SilenceReason::NoShape("context_lines_requested")),
+        "two parsers, one verdict"
+    );
 }
 
-/// The same shape without the flag is the other subcommand. Pinned together with the test above
-/// because the pair is the whole claim: one gate, two questions, and the flag is the only thing
-/// that tells them apart.
+/// The same shape without the flag is an `impact` suggestion. Pinned together with the test above
+/// because the pair is the whole claim: one gate, and the flag is the only thing that tells them
+/// apart.
 #[test]
 fn the_same_search_without_a_context_flag_is_an_impact_suggestion() {
     let hit = suggests_impact_shape("rg -e 'updatePaymentStatus' frontend/src")
@@ -464,9 +467,9 @@ fn a_glued_context_flag_keeps_the_token_after_it() {
     }
 }
 
-/// Routing to `context` is not an exemption from the shape gate. Every rejection that applies to a
-/// plain search applies to a `-C` one: the index cannot answer for a language it never parsed, or
-/// for a directory that is not this project's source, whichever subcommand is asked.
+/// The context-flag decline is checked last, so it never masks another gate's tag. Every rejection
+/// that applies to a plain search applies to a `-C` one first: the index cannot answer for a
+/// language it never parsed, or for a directory that is not this project's source.
 #[test]
 fn a_context_flag_does_not_buy_a_way_past_any_other_gate() {
     for (cmd, tag) in [

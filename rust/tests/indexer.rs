@@ -284,7 +284,6 @@ fn status_of_reports_the_indexed_project_without_touching_ast_grep() {
     assert_eq!(s.project_id, project_id);
     assert_eq!(s.path, root.to_str().unwrap());
     assert_eq!(s.files, 2);
-    assert_eq!(s.readings, 0);
     assert_eq!(
         s.extractor_version,
         cort::pack::extractor_version().unwrap()

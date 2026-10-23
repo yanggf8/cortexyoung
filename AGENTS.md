@@ -196,7 +196,7 @@ cannot be narrowed honestly must widen to everything**, never quietly to nothing
 **The index is a cache, and the query is the one who heals it.** Telling the agent to reindex was
 measured worthless twice — stale suggestions ignored 6 of 6, then a copy-pasteable chained command
 adopted once in four days — while the edit hook refused 905 rebuilds in 7 days it was forbidden to
-attempt. So since 2026-09-14 `impact`/`context` run the repair themselves (`rust/src/heal.rs`)
+attempt. So since 2026-09-14 `impact` runs the repair itself (`rust/src/heal.rs`)
 before answering: milliseconds when an incremental suffices, the full 1-2s rebuild inline when it
 does not, and a single-flight background rebuilder (`flock`, kernel-released on death, never a pid
 file) for trees past `CORT_HEAL_MAX_FILES`. A foreground command a person chose to run has the
@@ -228,7 +228,7 @@ every edit for as long as a disk misbehaved.
 memory database client.** The 2026-10-18 recommendation confused shared database synchronization
 with ownership of memory behavior; the user intended only the former. The dependency direction
 is claudecat → cort. `cort memory` owns the reviewed claim ledger and its Turso sync replica;
-`cort read`/`recall` still stores only source-validated file readings. See `docs/memory.md` for
+the local file-reading store (`cort read`/`recall`) was removed on 2026-10-23. See `docs/memory.md` for
 configuration and `docs/2026-10-18-cross-agent-memory-baseline.md` for the correction.
 
 The local `cort` index stays local, while `claudecat telemetry sync` copies structured usage

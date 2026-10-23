@@ -4,7 +4,7 @@
 //! while the "chain `cort index` yourself" suggestion converted 1 time in 4 days, and a full
 //! pipeline costs 1.4-2.3s on this machine's hundred-file projects. So the query that finds
 //! the index behind is the cheapest actor to repair it, and no maintenance work is ever
-//! assigned to the agent again: `impact`/`context` answer only after `ensure_fresh`, and a
+//! assigned to the agent again: `impact` answers only after `ensure_fresh`, and a
 //! tree too big to heal inline defers to a single-flight background rebuilder instead of
 //! blocking the answer.
 //!

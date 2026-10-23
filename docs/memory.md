@@ -80,8 +80,8 @@ the memory rows are shared across harnesses, while cort's local usage row record
 machine without the query text.
 
 The earlier `.claudecat/memory.json` ledger is an explicit import source through
-`cort memory import-legacy`. It is not the active database. `cort read` and `cort recall`
-remain source fragment tools and do not read this decision ledger.
+`cort memory import-legacy`. It is not the active database. (The unrelated `cort read` / `cort recall`
+file-reading verbs were removed on 2026-10-23; they never read this decision ledger.)
 
 ## Deployment evidence and the next gate
 

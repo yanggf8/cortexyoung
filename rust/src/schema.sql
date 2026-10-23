@@ -115,6 +115,11 @@ CREATE TRIGGER IF NOT EXISTS chunks_fts_update AFTER UPDATE ON chunks BEGIN
     VALUES (NEW.rowid, NEW.content, NEW.symbol_name, NEW.file_path);
 END;
 
+-- reading_notes / reading_notes_fts: the store behind the retired `cort read` / `cort recall`
+-- (removed 2026-10-23, zero invocations in 30 days). Nothing reads or writes them any more. The DDL
+-- stays on purpose: dropping it needs a schema bump, `ensure_schema` sets `graph_pending` on every
+-- upgrade (a full re-index of every project on every machine), and a rolled-back binary's read-only
+-- `cort status` still counts this table -- a fresh index without it would answer schema_outdated.
 CREATE TABLE IF NOT EXISTS reading_notes (
   reading_id INTEGER PRIMARY KEY,
   project_id TEXT NOT NULL REFERENCES projects(project_id) ON DELETE CASCADE,

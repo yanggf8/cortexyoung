@@ -722,189 +722,85 @@ fn clock_going_backwards_does_not_mass_prune() {
 
 // --- bytes / receipt / stale --------------------------------------------------
 
-fn stored_body_len(cache: &Path, root: &Path, file: &str) -> i64 {
-    let db = Connection::open(project_db(cache, root)).unwrap();
-    db.query_row(
-        "SELECT LENGTH(content) FROM reading_notes WHERE file_path = ?1 LIMIT 1",
-        params![file],
-        |r| r.get(0),
-    )
-    .unwrap()
-}
-
 /// §10 bytes_out is exact UTF-8 length for json AND lean, including multi-byte chars and escaping.
+/// The multi-byte and escaping case rides on an unknown command, whose error envelope echoes the
+/// typed name -- the one remaining output that carries arbitrary caller text.
 #[test]
 fn bytes_out_is_exact_utf8_len_for_json_and_lean_including_multibyte_and_escaping() {
     let (_p, cwd, _c, cache) = sandbox();
     assert_eq!(run_cort(&["index"], &cwd, &cache).code, 0);
-    let json_r = run_cort(&["read", "src/utf8.ts"], &cwd, &cache);
+    let json_r = run_cort(&["impact", "--symbol", "helper"], &cwd, &cache);
     assert_eq!(json_r.code, 0, "stderr={}", json_r.stderr);
     let json_bytes = json_r.stdout.len() as i64;
     let lean_r = run_cort(
-        &["read", "src/utf8.ts", "--content", "full", "-f", "lean"],
+        &["impact", "--symbol", "helper", "-f", "lean"],
         &cwd,
         &cache,
     );
     assert_eq!(lean_r.code, 0, "stderr={}", lean_r.stderr);
-    assert!(
-        lean_r.stdout.contains("你好"),
-        "lean must keep multi-byte chars: {}",
-        lean_r.stdout
-    );
     let lean_bytes = lean_r.stdout.len() as i64;
-    let rows = log_rows(&cache);
-    let json_row = rows
-        .iter()
-        .find(|r| {
-            r["command"] == "read"
-                && r["effective_content_mode"] == "full"
-                && r["bytes_out"] == json_bytes
-        })
-        .or_else(|| rows.iter().find(|r| r["command"] == "read"));
-    assert!(json_row.is_some(), "missing read row: {rows:?}");
-    let read_rows: Vec<&Value> = rows.iter().filter(|r| r["command"] == "read").collect();
+    let wide = "你好\"\\";
+    let wide_r = run_cort(&[wide], &cwd, &cache);
+    assert_eq!(wide_r.code, 1, "stdout={}", wide_r.stdout);
     assert!(
-        read_rows.iter().any(|r| r["bytes_out"] == json_bytes),
-        "json bytes_out wanted {json_bytes}, rows={read_rows:?}"
+        wide_r.stdout.contains("你好"),
+        "the envelope must keep multi-byte chars: {}",
+        wide_r.stdout
+    );
+    let wide_bytes = wide_r.stdout.len() as i64;
+    let rows = log_rows(&cache);
+    let impact_rows: Vec<&Value> = rows.iter().filter(|r| r["command"] == "impact").collect();
+    assert!(
+        impact_rows.iter().any(|r| r["bytes_out"] == json_bytes),
+        "json bytes_out wanted {json_bytes}, rows={impact_rows:?}"
     );
     assert!(
-        read_rows.iter().any(|r| r["bytes_out"] == lean_bytes),
-        "lean bytes_out wanted {lean_bytes}, rows={read_rows:?}"
+        impact_rows.iter().any(|r| r["bytes_out"] == lean_bytes),
+        "lean bytes_out wanted {lean_bytes}, rows={impact_rows:?}"
     );
-}
-
-/// §10 first auto read filesystem/full -> saved_bytes=0.
-#[test]
-fn first_auto_read_filesystem_full_saved_bytes_is_zero() {
-    let (_p, cwd, _c, cache) = sandbox();
-    assert_eq!(run_cort(&["index"], &cwd, &cache).code, 0);
-    let r = run_cort(&["read", "src/helper.ts"], &cwd, &cache);
-    assert_eq!(r.code, 0, "stderr={}", r.stderr);
-    let p = payload(&r);
-    assert_eq!(p["source"], "filesystem");
-    assert_eq!(p["content_mode"], "full");
-    let rows = log_rows(&cache);
-    let row = rows.iter().find(|r| r["command"] == "read").unwrap();
-    assert_eq!(row["saved_bytes"], 0);
-    assert_eq!(row["read_source"], "filesystem");
-    assert_eq!(row["requested_content_mode"], "auto");
-    assert_eq!(row["effective_content_mode"], "full");
-    assert_eq!(row["receipt_hit"], 0);
-    assert_eq!(row["bytes_out"], r.stdout.len() as i64);
-}
-
-/// §10 second auto store/receipt -> saved_bytes == stored body byte len.
-#[test]
-fn second_auto_store_receipt_saved_bytes_equals_stored_body_byte_len() {
-    let (_p, cwd, _c, cache) = sandbox();
-    assert_eq!(run_cort(&["index"], &cwd, &cache).code, 0);
-    assert_eq!(run_cort(&["read", "src/helper.ts"], &cwd, &cache).code, 0);
-    let body_len = stored_body_len(&cache, &cwd, "src/helper.ts");
-    assert!(body_len > 0);
-    let r = run_cort(&["read", "src/helper.ts"], &cwd, &cache);
-    assert_eq!(r.code, 0, "stderr={}", r.stderr);
-    let p = payload(&r);
-    assert_eq!(p["source"], "store");
-    assert_eq!(p["content_mode"], "receipt");
-    let rows = log_rows(&cache);
-    let row = rows
-        .iter()
-        .rev()
-        .find(|r| r["command"] == "read" && r["read_source"] == "store")
-        .unwrap();
-    assert_eq!(row["saved_bytes"], body_len);
-    assert_eq!(row["effective_content_mode"], "receipt");
-    assert_eq!(row["receipt_hit"], 1);
-    assert_eq!(row["bytes_out"], r.stdout.len() as i64);
-}
-
-/// §10 store + explicit full -> saved_bytes=0.
-#[test]
-fn store_plus_explicit_full_saved_bytes_is_zero() {
-    let (_p, cwd, _c, cache) = sandbox();
-    assert_eq!(run_cort(&["index"], &cwd, &cache).code, 0);
-    assert_eq!(run_cort(&["read", "src/helper.ts"], &cwd, &cache).code, 0);
-    let r = run_cort(
-        &["read", "src/helper.ts", "--content", "full"],
-        &cwd,
-        &cache,
+    assert!(
+        rows.iter()
+            .any(|r| r["command"] == "unknown" && r["bytes_out"] == wide_bytes),
+        "multi-byte bytes_out wanted {wide_bytes}, rows={rows:?}"
     );
-    assert_eq!(r.code, 0, "stderr={}", r.stderr);
-    assert_eq!(payload(&r)["content_mode"], "full");
-    let rows = log_rows(&cache);
-    let row = rows
-        .iter()
-        .rev()
-        .find(|r| r["command"] == "read" && r["requested_content_mode"] == "full")
-        .unwrap();
-    assert_eq!(row["saved_bytes"], 0);
-    assert_eq!(row["receipt_hit"], Value::Null);
-}
-
-/// §10 explicit receipt first read -> saved_bytes=0.
-#[test]
-fn explicit_receipt_first_read_saved_bytes_is_zero() {
-    let (_p, cwd, _c, cache) = sandbox();
-    assert_eq!(run_cort(&["index"], &cwd, &cache).code, 0);
-    let r = run_cort(
-        &["read", "src/helper.ts", "--content", "receipt"],
-        &cwd,
-        &cache,
-    );
-    assert_eq!(r.code, 0, "stderr={}", r.stderr);
-    let p = payload(&r);
-    assert_eq!(p["source"], "filesystem");
-    assert_eq!(p["content_mode"], "receipt");
-    let rows = log_rows(&cache);
-    let row = rows.iter().find(|r| r["command"] == "read").unwrap();
-    assert_eq!(row["saved_bytes"], 0);
-    assert_eq!(row["receipt_hit"], Value::Null);
 }
 
 /// §10 error path: bytes_out == rendered error bytes, error_code is CortError code only.
 #[test]
 fn error_response_bytes_out_equals_rendered_error_bytes() {
     let (_p, cwd, _c, cache) = sandbox();
-    let r = run_cort(&["context"], &cwd, &cache);
+    let r = run_cort(&["impact"], &cwd, &cache);
     assert_eq!(r.code, 1);
     let p = payload(&r);
-    assert_eq!(p["error"], "missing_query");
+    assert_eq!(p["error"], "missing_symbol");
     let rows = log_rows(&cache);
-    let row = rows.iter().find(|r| r["command"] == "context").unwrap();
+    let row = rows.iter().find(|r| r["command"] == "impact").unwrap();
     assert_eq!(row["status"], "error");
-    assert_eq!(row["error_code"], "missing_query");
+    assert_eq!(row["error_code"], "missing_symbol");
     assert_eq!(row["bytes_out"], r.stdout.len() as i64);
 }
 
-/// §10 receipt rate denominator = successful auto reads only (explicit full/receipt excluded).
+/// The four verbs removed on 2026-10-23 still have rows inside the 90-day window. Those rows are
+/// history, not errors: the report keeps aggregating them under the name they were recorded with
+/// (the golden below seeds `read` rows for the same reason), and only a *new* invocation is
+/// recorded as `unknown`.
 #[test]
-fn receipt_rate_denominator_not_polluted_by_explicit_full_or_receipt() {
-    let (_p, cwd, _c, cache) = sandbox();
-    assert_eq!(run_cort(&["index"], &cwd, &cache).code, 0);
-    assert_eq!(run_cort(&["read", "src/helper.ts"], &cwd, &cache).code, 0);
-    assert_eq!(run_cort(&["read", "src/helper.ts"], &cwd, &cache).code, 0);
-    assert_eq!(
-        run_cort(
-            &["read", "src/helper.ts", "--content", "full"],
-            &cwd,
-            &cache
-        )
-        .code,
-        0
-    );
-    assert_eq!(
-        run_cort(
-            &["read", "src/helper.ts", "--content", "receipt"],
-            &cwd,
-            &cache
-        )
-        .code,
-        0
-    );
-    let r = run_cort(&["usage"], &cwd, &cache);
-    assert_eq!(r.code, 0, "stderr={}", r.stderr);
-    let p = payload(&r);
-    assert_eq!(p["commands"]["read"]["receipt_hit_rate"], 0.5);
+fn rows_of_removed_verbs_still_aggregate_under_their_own_name() {
+    let dir = tempfile::Builder::new()
+        .prefix("cort-usage-removed-")
+        .tempdir()
+        .unwrap();
+    let path = dir.path().join("usage.db");
+    seed_schema(&path);
+    let db = Connection::open(&path).unwrap();
+    for verb in ["context", "struct", "read", "recall"] {
+        insert_log(&db, NOW_MS, Some("p"), verb, "ok", 7, 0, None, None);
+    }
+    let report = query_usage_at(&path, 30, NOW_MS).unwrap();
+    for verb in ["context", "struct", "read", "recall"] {
+        assert_eq!(report["commands"][verb]["ok"], 1, "{verb}: {report}");
+    }
+    assert!(report["commands"].get("unknown").is_none(), "{report}");
 }
 
 /// §10 stale tri-state: true / false / not-evaluated(NULL) are distinct.
@@ -942,25 +838,24 @@ fn unindexed_status_does_not_count_as_stale() {
 
 // --- privacy / distribution / golden ------------------------------------------
 
-/// §10 privacy: sentinel in context query, recall query, struct pattern, unknown flag, clap error
-/// appears NOWHERE in usage.db; only allowlisted fields in args_summary; no home paths.
+/// §10 privacy: sentinel in a removed verb's arguments, an unknown flag, a clap error and an unparsed
+/// flag value appears NOWHERE in usage.db; only allowlisted fields in args_summary; no home paths.
 #[test]
-fn privacy_sentinels_from_context_recall_struct_unknown_flag_and_clap_error_are_absent_from_usage_db(
-) {
+fn privacy_sentinels_from_removed_verbs_unknown_flag_and_clap_error_are_absent_from_usage_db() {
     let (_p, cwd, _c, cache) = sandbox();
     assert_eq!(run_cort(&["index"], &cwd, &cache).code, 0);
+    // A removed verb is an unknown command now: its name is recorded as `rejected`, its arguments
+    // never are.
     let _ = run_cort(&["context", SENTINEL], &cwd, &cache);
     let _ = run_cort(&["recall", SENTINEL], &cwd, &cache);
-    let _ = run_cort(&["struct", "-p", SENTINEL, "--lang", "ts"], &cwd, &cache);
     let flag = format!("--{SENTINEL}");
-    let _ = run_cort(&["read", flag.as_str(), "src/helper.ts"], &cwd, &cache);
+    let _ = run_cort(&["impact", flag.as_str()], &cwd, &cache);
+    let _ = run_cort(&["status", flag.as_str()], &cwd, &cache);
     let _ = run_cort(
-        &["read", "src/helper.ts", "--start", SENTINEL],
+        &["impact", "--symbol", "helper", "--depth", SENTINEL],
         &cwd,
         &cache,
     );
-    let abs = cwd.join("src/helper.ts");
-    let _ = run_cort(&["read", abs.to_str().unwrap()], &cwd, &cache);
     assert!(
         !usage_files_contain(&cache, SENTINEL),
         "sentinel leaked into usage db: {:?}",
@@ -983,8 +878,16 @@ fn privacy_sentinels_from_context_recall_struct_unknown_flag_and_clap_error_are_
                     "v" | "symbol" | "path" | "start" | "end" // heal keys: mechanical facts about
                     | "self_healed" | "heal_mode" | "heal_ms" // the repair, never user content
                     | "heal_deferred" | "heal" | "skipped" //
+                    | "rejected" // an unknown command's name, and only its name
                 ),
                 "non-allowlisted key {key} in {summary}"
+            );
+        }
+        if let Some(rejected) = obj.get("rejected") {
+            assert_eq!(row["command"], "unknown", "{row}");
+            assert!(
+                rejected == "context" || rejected == "recall",
+                "rejected carries the typed verb only: {summary}"
             );
         }
         if let Some(path) = obj.get("path").and_then(Value::as_str) {
@@ -1420,75 +1323,6 @@ fn an_unknown_command_records_the_name_it_was_rejected_for() {
     );
     // Privacy holds: nothing else from the invocation leaks into the row.
     assert_eq!(row["status"], "error");
-}
-
-// ── issue #4: savings on paths that actually omit reads ──
-
-/// A ranged read returned a SLICE of the file; the rest of the file is bytes the caller did not
-/// pull into its context. `saved_bytes` used to ignore this — one nonzero row in a quarter's
-/// log — so the value story read as a flatline. The formula is measured, not counterfactual:
-/// file bytes on disk minus the body returned. A whole-file read saves nothing, and format
-/// choices / would-have-read-it-all stay out of the column on purpose (the NOTE's vanity
-/// warning).
-#[test]
-fn a_ranged_read_records_the_file_bytes_it_omitted() {
-    let (_p, cwd, _c, cache) = sandbox();
-    let mut body = String::new();
-    for i in 1..=200 {
-        body.push_str(&format!("export function f{i}() {{ return {i}; }}\n"));
-    }
-    fs::write(cwd.join("src/big.ts"), &body).unwrap();
-    fs::write(
-        cwd.join("src/small.ts"),
-        "export function s() { return 1; }\n",
-    )
-    .unwrap();
-    let idx = run_cort(&["index"], &cwd, &cache);
-    if idx.code != 0 {
-        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
-        return;
-    }
-
-    let r = run_cort(
-        &["read", "src/big.ts", "--start", "1", "--end", "5"],
-        &cwd,
-        &cache,
-    );
-    assert_eq!(r.code, 0, "stderr={}", r.stderr);
-    let returned = payload(&r)["content"].as_str().unwrap().len() as i64;
-    let total = fs::metadata(cwd.join("src/big.ts")).unwrap().len() as i64;
-    assert!(
-        total > returned,
-        "precondition: the read is a real subrange"
-    );
-
-    let rows = log_rows(&cache);
-    let row = rows
-        .iter()
-        .rev()
-        .find(|row| row["command"] == "read")
-        .expect("the read is recorded");
-    assert_eq!(
-        row["saved_bytes"].as_i64(),
-        Some(total - returned),
-        "the omitted file bytes are the savings: row={}",
-        row["saved_bytes"]
-    );
-
-    // A whole-file read leaves nothing behind — savings must be 0, not a vanity number.
-    let r = run_cort(&["read", "src/big.ts", "--content", "full"], &cwd, &cache);
-    assert_eq!(r.code, 0);
-    let rows = log_rows(&cache);
-    let row = rows
-        .iter()
-        .rev()
-        .find(|row| row["command"] == "read")
-        .unwrap();
-    assert_eq!(
-        row["saved_bytes"].as_i64(),
-        Some(0),
-        "whole file: nothing omitted"
-    );
 }
 
 /// The census is the tool's own answer to "do the funnel numbers sum?" — the lesson of the 87-row

@@ -2,13 +2,10 @@
 //! Read/recall lean shapes follow proposal §1 and §3 (supersede JS D-41).
 
 use cort::ast_grep::resolve_ast_grep_bin;
-use cort::budget::estimate_tokens;
-use cort::context::{context_command, ContextOptions, DEFAULT_BUDGET};
 use cort::db::{ensure_schema, open_db, project_id_for};
 use cort::errors::CortError;
 use cort::impact::impact_command;
 use cort::indexer::full_index;
-use cort::r#struct::{struct_command, StructOptions};
 use cort::render::{parse_format, render, render_error, Format};
 use serde_json::{json, Value};
 use std::fs;
@@ -84,38 +81,10 @@ fn indexed(
     (dir, root, db, project_id, bin)
 }
 
-fn chain() -> (tempfile::TempDir, rusqlite::Connection, Value, Value, Value) {
+fn chain() -> (tempfile::TempDir, rusqlite::Connection, Value) {
     let (dir, root, db, project_id, bin) = indexed(CHAIN);
     let impact = impact_command(&db, &bin, &root, &project_id, "d", 3).unwrap();
-    let context = context_command(
-        &db,
-        &bin,
-        &root,
-        &project_id,
-        "c",
-        ContextOptions {
-            budget: DEFAULT_BUDGET,
-            include_ambiguous: false,
-            full_content: false,
-        },
-    )
-    .unwrap();
-    let glob = root.join("src/c.ts").to_string_lossy().into_owned();
-    let strukt = struct_command(
-        &db,
-        &bin,
-        &root,
-        &project_id,
-        "d()",
-        "ts",
-        StructOptions {
-            globs: vec![glob.clone()],
-            budget: 1500,
-            file_limit: None,
-        },
-    )
-    .unwrap();
-    (dir, db, impact, context, strukt)
+    (dir, db, impact)
 }
 
 /// D-35
@@ -131,7 +100,7 @@ fn parse_format_accepts_json_and_lean_case_insensitively_and_rejects_anything_el
 /// D-36
 #[test]
 fn lean_impact_output_lists_every_dependent_with_its_hop_and_drops_the_stored_chunk_id() {
-    let (_dir, _db, impact, _, _) = chain();
+    let (_dir, _db, impact) = chain();
     let out = render(Some("impact"), Format::Lean, &impact);
     assert!(
         out.lines()
@@ -220,59 +189,17 @@ fn lean_impact_output_lists_every_dependent_with_its_hop_and_drops_the_stored_ch
 
 /// D-37
 #[test]
-fn lean_is_smaller_than_json_for_the_same_payload_on_all_three_verbs() {
-    let (_dir, _db, impact, context, strukt) = chain();
-    for (command, payload) in [
-        ("impact", &impact),
-        ("context", &context),
-        ("struct", &strukt),
-    ] {
-        let json = render(Some(command), Format::Json, payload);
-        let lean = render(Some(command), Format::Lean, payload);
-        assert!(
-            lean.len() < json.len(),
-            "{command}: lean {} should be < json {}",
-            lean.len(),
-            json.len()
-        );
-        assert!(lean.ends_with('\n'));
-        let _ = estimate_tokens(&json);
-    }
-}
-
-/// D-38
-#[test]
-fn lean_context_keeps_neighbours_and_unresolved_refs_one_per_line() {
-    let (_dir, _db, _, context, _) = chain();
-    let out = render(Some("context"), Format::Lean, &context);
+fn lean_is_smaller_than_json_for_the_same_impact_payload() {
+    let (_dir, _db, impact) = chain();
+    let json = render(Some("impact"), Format::Json, &impact);
+    let lean = render(Some("impact"), Format::Lean, &impact);
     assert!(
-        out.starts_with("# context c resolution=exact_symbol"),
-        "{out}"
+        lean.len() < json.len(),
+        "impact: lean {} should be < json {}",
+        lean.len(),
+        json.len()
     );
-    assert!(out.lines().any(|l| l == "src/c.ts:2\tc\tfunction"), "{out}");
-    for n in context["seeds"][0]["neighbors"].as_array().unwrap() {
-        let path = n["file_path"].as_str().unwrap();
-        assert!(out.contains(path), "neighbour {} missing", n["symbol_name"]);
-    }
-}
-
-/// D-39
-#[test]
-fn lean_struct_emits_one_row_per_match_with_the_enclosing_symbol() {
-    let (_dir, _db, _, _, strukt) = chain();
-    let out = render(Some("struct"), Format::Lean, &strukt);
-    assert!(
-        out.lines()
-            .any(|l| { l == "# struct d() lang=ts matches=1 shown=1 truncated=false stale=false" }),
-        "{out}"
-    );
-    let rows: Vec<&str> = out.split('\n').skip(1).filter(|s| !s.is_empty()).collect();
-    assert_eq!(rows.len(), strukt["matches"].as_array().unwrap().len());
-    assert!(
-        rows[0].starts_with("src/c.ts:") && rows[0].contains("\tc\t"),
-        "{}",
-        rows[0]
-    );
+    assert!(lean.ends_with('\n'));
 }
 
 /// D-40
@@ -289,111 +216,6 @@ fn unknown_commands_and_json_format_fall_through_to_the_json_contract() {
     );
 }
 
-/// D-41 — proposal §1 receipt/full lean headers (supersedes JS header without content=/hash=).
-#[test]
-fn lean_reading_output_identifies_cache_provenance_and_keeps_stored_content() {
-    let receipt = json!({
-        "file_path": "src/main.rs",
-        "start_line": 10,
-        "end_line": 12,
-        "source": "store",
-        "read_count": 2,
-        "content_mode": "receipt",
-        "content_hash_prefix": "82d25b9f72a6",
-    });
-    let out = render(Some("read"), Format::Lean, &receipt);
-    assert_eq!(
-        out,
-        "# read src/main.rs:10-12 source=store reads=2 content=receipt hash=82d25b9f72a6\n"
-    );
-    assert!(!out.contains("fn work()"));
-
-    let full = json!({
-        "file_path": "src/main.rs",
-        "start_line": 10,
-        "end_line": 12,
-        "source": "store",
-        "read_count": 2,
-        "content_mode": "full",
-        "content_hash_prefix": "82d25b9f72a6",
-        "content": "fn work() {\n}",
-    });
-    let full_out = render(Some("read"), Format::Lean, &full);
-    assert!(full_out.starts_with(
-        "# read src/main.rs:10-12 source=store reads=2 content=full hash=82d25b9f72a6\n"
-    ));
-    assert!(full_out.contains("fn work() {"));
-    assert!(full_out.ends_with('\n'));
-
-    let recall = render(
-        Some("recall"),
-        Format::Lean,
-        &json!({
-            "query": "work",
-            "reading_count": 1,
-            "truncated_query": false,
-            "readings": [{
-                "file_path": "src/main.rs",
-                "start_line": 10,
-                "end_line": 12,
-                "content": "fn work() {\n}",
-                "content_truncated": false,
-                "read_count": 2,
-                "last_read_at": 1,
-            }],
-        }),
-    );
-    assert!(recall
-        .lines()
-        .any(|l| l == "# recall work readings=1 truncated_query=false"));
-    assert!(recall.lines().any(|l| l == "src/main.rs:10-12\treads=2"));
-}
-
-/// Proposal §3 — validation_error lean is one line; null errno/os_code become "-".
-#[test]
-fn validation_error_lean_is_a_single_line_and_nulls_become_dash() {
-    let err = CortError::new(
-        "validation_error",
-        json!({
-            "command": "recall",
-            "file_path": "src/main.rs",
-            "operation": "read",
-            "errno": "EIO",
-            "os_code": 5,
-            "retryable": true,
-            "note_action": "retained",
-        }),
-    );
-    let lean = render_error(Format::Lean, &err);
-    assert_eq!(
-        lean,
-        "! validation_error command=recall file=src/main.rs operation=read errno=EIO os_code=5 retryable=true note=retained\n"
-    );
-    assert!(!lean.contains('{'));
-
-    let nulls = CortError::new(
-        "validation_error",
-        json!({
-            "command": "recall",
-            "file_path": "src/main.rs",
-            "operation": "read",
-            "errno": null,
-            "os_code": null,
-            "retryable": false,
-            "note_action": "retained",
-        }),
-    );
-    assert_eq!(
-        render_error(Format::Lean, &nulls),
-        "! validation_error command=recall file=src/main.rs operation=read errno=- os_code=- retryable=false note=retained\n"
-    );
-
-    let json_out = render_error(Format::Json, &err);
-    let parsed: Value = serde_json::from_str(json_out.trim_end()).unwrap();
-    assert_eq!(parsed["error"], "validation_error");
-    assert_eq!(parsed["detail"]["errno"], "EIO");
-}
-
 /// Error envelope to_json field names (spec §4.1).
 #[test]
 fn error_envelope_to_json_uses_error_not_code() {
@@ -403,6 +225,8 @@ fn error_envelope_to_json_uses_error_not_code() {
     assert_eq!(parsed, err.to_json());
     assert!(parsed.get("code").is_none());
     assert_eq!(parsed["error"], "unknown_format");
+    // Errors have no lean shape: `-f lean` gets the same JSON envelope.
+    assert_eq!(render_error(Format::Lean, &err), out);
 }
 
 /// SAMPLE is referenced so the frozen fixture stays available for field-order checks.

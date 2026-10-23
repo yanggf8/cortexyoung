@@ -173,10 +173,6 @@ fn every_spelling_of_help_reaches_the_same_usage_and_none_of_them_is_an_error() 
         vec!["-h"],
         vec!["impact", "-h"],
         vec!["delete", "--help"],
-        vec!["struct", "--help"],
-        vec!["context", "-h"],
-        vec!["read", "-h"],
-        vec!["recall", "--help"],
         vec!["status", "-h"],
         vec!["projects", "--help"],
     ] {
@@ -184,6 +180,10 @@ fn every_spelling_of_help_reaches_the_same_usage_and_none_of_them_is_an_error() 
         assert_eq!(r.code, 0, "{} should exit 0", args.join(" "));
         let p = payload(&r);
         assert_eq!(p["usage"], "cort <command> [options]");
+        // Removed 2026-10-23 (zero invocations in 30 days); the map must not advertise them.
+        for gone in ["context", "struct", "read", "recall"] {
+            assert!(p["commands"].get(gone).is_none(), "{gone} is still listed");
+        }
         assert_eq!(
             fs::read_dir(&cache).unwrap().count(),
             0,
@@ -305,46 +305,43 @@ fn index_without_help_still_indexes_so_the_guard_did_not_swallow_the_command() {
     );
 }
 
-/// D-47 — second auto-read is store/receipt (proposal §1); recall still finds it.
+/// `context`, `struct`, `read` and `recall` were removed on 2026-10-23 (zero invocations in 30 days
+/// on both machines). A caller still typing one gets the structured unknown-command error.
 #[test]
-fn read_persists_a_fragment_and_recall_finds_it_through_fts() {
+fn the_removed_verbs_are_unknown_commands() {
     let (_p, cwd, _c, cache) = sandbox();
-    assert_eq!(run_cort(&["index"], &cwd, &cache).code, 0);
-    let first = run_cort(
-        &["read", "src/alpha.ts", "--start", "2", "--end", "2"],
-        &cwd,
-        &cache,
-    );
-    assert_eq!(first.code, 0, "stderr={}", first.stderr);
-    let first_p = payload(&first);
-    assert_eq!(first_p["source"], "filesystem");
-    let second = run_cort(
-        &["read", "src/alpha.ts", "--start", "2", "--end", "2"],
-        &cwd,
-        &cache,
-    );
-    let second_p = payload(&second);
-    assert_eq!(second_p["source"], "store");
-    assert_eq!(second_p["content_mode"], "receipt");
-    assert!(second_p.get("content").is_none());
-    let recalled = run_cort(&["recall", "alpha"], &cwd, &cache);
-    assert_eq!(recalled.code, 0);
-    let rec = payload(&recalled);
-    assert_eq!(rec["reading_count"], 1);
-    assert_eq!(rec["readings"][0]["file_path"], "src/alpha.ts");
+    for verb in ["context", "struct", "read", "recall"] {
+        let r = run_cort(&[verb, "helper"], &cwd, &cache);
+        assert_eq!(r.code, 1, "{verb} stdout={}", r.stdout);
+        let p = payload(&r);
+        assert_eq!(p["error"], "unknown_command", "{verb}");
+        assert_eq!(p["detail"]["command"], verb);
+    }
 }
 
 #[test]
 fn unknown_format_is_a_structured_error_and_format_is_case_insensitive() {
     let (_p, cwd, _c, cache) = sandbox();
     assert_eq!(run_cort(&["index"], &cwd, &cache).code, 0);
-    let bad = run_cort(&["context", "helper", "-f", "yaml"], &cwd, &cache);
+    let bad = run_cort(
+        &["impact", "--symbol", "helper", "-f", "yaml"],
+        &cwd,
+        &cache,
+    );
     assert_eq!(bad.code, 1);
     let p = payload(&bad);
     assert_eq!(p["error"], "unknown_format");
-    let lean = run_cort(&["context", "helper", "-f", "LEAN"], &cwd, &cache);
+    let lean = run_cort(
+        &["impact", "--symbol", "helper", "-f", "LEAN"],
+        &cwd,
+        &cache,
+    );
     assert_eq!(lean.code, 0, "stderr={}", lean.stderr);
-    assert!(lean.stdout.starts_with("# context helper"));
+    assert!(
+        lean.stdout.starts_with("# impact helper"),
+        "{}",
+        lean.stdout
+    );
 }
 
 #[test]
@@ -392,62 +389,11 @@ fn cli_canonicalizes_root_before_project_id_for() {
 }
 
 #[test]
-fn missing_query_and_missing_symbol_are_structured_errors_not_panics() {
+fn missing_symbol_is_a_structured_error_not_a_panic() {
     let (_p, cwd, _c, cache) = sandbox();
-    let ctx = run_cort(&["context"], &cwd, &cache);
-    assert_eq!(ctx.code, 1);
-    assert_eq!(payload(&ctx)["error"], "missing_query");
     let impact = run_cort(&["impact"], &cwd, &cache);
     assert_eq!(impact.code, 1);
     assert_eq!(payload(&impact)["error"], "missing_symbol");
-    let strukt = run_cort(&["struct"], &cwd, &cache);
-    assert_eq!(strukt.code, 1);
-    assert_eq!(payload(&strukt)["error"], "missing_pattern");
-}
-
-#[test]
-fn type_method_end_to_end_cli_json_and_lean() {
-    let body = [
-        "struct Ledger;",
-        "impl Ledger {",
-        "    fn run(&self) {}",
-        "}",
-        "",
-    ]
-    .join("\n");
-    let (proj, cwd) = make_project(&[("src/lib.rs", body.as_str())]);
-    let cache = tempfile::Builder::new()
-        .prefix("cort-cache-")
-        .tempdir()
-        .unwrap();
-    assert_eq!(run_cort(&["index"], &cwd, cache.path()).code, 0);
-    let json_r = run_cort(
-        &["context", "Ledger::run", "--content", "full", "-f", "json"],
-        &cwd,
-        cache.path(),
-    );
-    assert_eq!(json_r.code, 0, "stderr={}", json_r.stderr);
-    let p = payload(&json_r);
-    assert_eq!(p["resolution"], "exact_symbol");
-    assert_eq!(p["seeds"][0]["symbol_name"], "Ledger::run");
-    assert_eq!(p["seeds"][0]["chunk_type"], "method");
-    let lean = run_cort(
-        &["context", "Ledger::run", "--content", "full", "-f", "lean"],
-        &cwd,
-        cache.path(),
-    );
-    assert!(
-        lean.stdout.contains("Ledger::run\tmethod"),
-        "{}",
-        lean.stdout
-    );
-    let none = run_cort(
-        &["context", "Ledger::nope", "-f", "json"],
-        &cwd,
-        cache.path(),
-    );
-    assert_eq!(payload(&none)["resolution"], "none");
-    let _ = proj;
 }
 
 /// The coverage screen reached only through its `attach()` unit tests until now -- the audit noted
@@ -1248,9 +1194,11 @@ fn an_index_predating_the_schema_is_reported_as_outdated_not_busy() {
         eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
         return;
     }
-    // Reproduce the observed shape: a database from before `reading_notes` existed. The file is
-    // located by scanning the sandbox cache -- `db_path_for` reads CORT_CACHE_DIR from *this*
-    // process, which does not have it, and would silently create a stray database in the real one.
+    // The observed shape was a database from before `reading_notes` existed. Since `read`/`recall`
+    // were removed `status` no longer reads that table, so its absence must now be harmless. The
+    // file is located by scanning the sandbox cache -- `db_path_for` reads CORT_CACHE_DIR from
+    // *this* process, which does not have it, and would silently create a stray database in the
+    // real one.
     let db_file = fs::read_dir(&cache)
         .unwrap()
         .filter_map(|e| e.ok().map(|e| e.path()))
@@ -1258,6 +1206,14 @@ fn an_index_predating_the_schema_is_reported_as_outdated_not_busy() {
         .expect("index wrote a database into the sandbox cache");
     let db = rusqlite::Connection::open(&db_file).unwrap();
     db.execute_batch("DROP TABLE reading_notes;").unwrap();
+    drop(db);
+    let ok = run_cort(&["status"], &cwd, &cache);
+    assert_eq!(ok.code, 0, "stdout={} stderr={}", ok.stdout, ok.stderr);
+    assert_eq!(payload(&ok)["indexed"], true, "stdout={}", ok.stdout);
+
+    // A table `status` does read, missing, is still an outdated schema and not contention.
+    let db = rusqlite::Connection::open(&db_file).unwrap();
+    db.execute_batch("DROP TABLE relationships;").unwrap();
     drop(db);
 
     let r = run_cort(&["status"], &cwd, &cache);
@@ -3338,29 +3294,6 @@ fn cort_no_heal_keeps_the_old_contract() {
             .is_some_and(|a| !a.is_empty()),
         "no heal happened, so the debt is still named: {status}"
     );
-}
-
-#[test]
-fn context_heals_a_drifted_index_too() {
-    let (_p, cwd, _c, cache) = sandbox();
-    git_in_fixture(&cwd);
-    let idx = run_cort(&["index"], &cwd, &cache);
-    if idx.code != 0 {
-        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
-        return;
-    }
-    let db_file = cache.join(
-        cort::db::db_path_for(cwd.to_str().unwrap())
-            .file_name()
-            .unwrap(),
-    );
-    let db = cort::db::open_db(&db_file).unwrap();
-    cort::db::set_meta(&db, "extractor_version", "not-the-one-that-ships").unwrap();
-    drop(db);
-
-    let r = run_cort(&["context", "helper", "-f", "json"], &cwd, &cache);
-    assert_eq!(r.code, 0, "{} {}", r.stdout, r.stderr);
-    assert_eq!(payload(&r)["self_healed"], json!(true), "{}", r.stdout);
 }
 
 /// The foreground keeps its rebuild. `cort index --incremental` is a typed command a person ran on

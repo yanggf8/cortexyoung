@@ -16,36 +16,30 @@ The repository is pure Rust: the product crate lives in [`rust/`](rust/), the de
 harness in [`evals/`](evals/), and no JavaScript, TypeScript or Python exists as executable code. Bash
 appears only in `install.sh` and `tests/install-smoke.sh`, where the platform requires a shell.
 
-Eight shipped commands (plus `status`/`projects`/`delete` utilities):
+Four shipped commands (plus `status`/`projects`/`delete` utilities):
 
 - `cort index [--incremental] [path]` — build or incrementally refresh the index (`ast-grep` + SQLite)
-- `cort struct -p '<pattern>' --lang <lang>` — structural search joined to enclosing symbols + 3 neighbours. `-g '<glob>'` narrows the search (fixed 2026-09-01: globs used to reach the CLI as literal paths and answer `No such file or directory`; they now go to `--globs`, matched relative to the search root, in both backends)
-- `cort context <symbol-or-query>` — "what else deals with X" (exact symbol or FTS recall, depth-1 neighbours, ~1500-token budget; seed bodies are head-truncated to 12 lines, pass `--content full` for the whole body)
 - `cort impact --symbol <name[,name2,...]>` — "what breaks if I change X": reverse dependents to
   depth 3, accepting a comma-separated batch. In `lean`, each row carries the dependent's definition
   line *and* the site that ties it to the seed (`@626`), tagged with the shape that attached it
   (`bare` / `scoped` / `receiver` / `type`)
-- `cort read <file> [--start N] [--end N]` — read a file or line range and persist it as a reading note; unchanged repeats come from SQLite
-- `cort recall <query>` — FTS lookup over previously read files/fragments (default 12-line heads; pass `--content full` for stored bodies)
 - `cort memory <record|resolve|recall|status|sync|configure|import-config|import-legacy>` — reviewed project facts in a shared Turso ledger, owned by cort; see [Project memory](docs/memory.md)
 - `cort usage [days]` — local per-machine usage stats (best-effort; 1–90 days, default 30)
 
-All query/read verbs take `-f lean`: the same answer in a compact agent-oriented format, at about a
-fifth of the tokens of the default JSON. Agents should pass it; see [Token cost](#token-cost)
-below.
+`struct`, `context`, `read` and `recall` were removed on 2026-10-23 after zero invocations in 30 days
+on both machines; for those jobs use `ast-grep run`, `rg`, or open the file. `cort memory recall` is a
+different command and is unaffected. Existing indexes keep their (now unused) reading-notes tables, so
+no re-index is needed.
+
+`cort impact` takes `-f lean`: the same answer in a compact agent-oriented format, at about a fifth of
+the tokens of the default JSON. Agents should pass it; see [Token cost](#token-cost) below.
 
 Rust (`.rs`) is indexed through the pinned `ast-grep` 0.45.3 rule pack. Top-level functions, `impl`
 methods and type declarations (`struct`, `enum`, `trait`) are stored as symbol-scoped chunks, so
-`cort context <symbol> --content full -f lean` returns one function body rather than forcing an agent to
-read a large source file — and `cort impact --symbol <Type>` answers for a type the way it does for a
-function. A type alias and a `const` are deliberately not chunks; see limitation 8.
+`cort impact --symbol <Type>` answers for a type the way it does for a function. A type alias and a
+`const` are deliberately not chunks; see limitation 8.
 
-Reading notes are content-addressed and project-local. `cort read` records the exact file/range on first
-use and reports `source:"store"` on an unchanged repeat. Each entry carries file hash, size, and mtime;
-`cort recall` validates them and removes entries whose source changed, so stale text is never returned as
-a remembered reading. Run `cort index` once before using either command.
-
-Routing for agents is in `skills/ast-grep/SKILL.md` — it states when to use `rg`, `ast-grep run`, and `cort struct`/`context`/`impact`.
+Routing for agents is in `skills/ast-grep/SKILL.md` — it states when to use `rg`, `ast-grep run`, and `cort impact`.
 
 ## Token cost
 
@@ -76,9 +70,6 @@ below). Treat these as a floor on what the tool is worth in the harness it actua
 runs in, not a controlled `cort`-vs-`rg` comparison. Full evidence: the `Eval results`
 and `Re-analysis (2026-08-28)` sections below, `docs/2026-08-28-real-session-cost.md`
 and `evals/runs/2026-08-30-graph{,-sample2}/`.
-
-The cheapest supported case is a Rust symbol slice: `cort context <symbol> --content full
--f lean` measures 27k → 89 tokens (`docs/2026-08-28-real-session-cost.md` §1.3).
 
 **Current Claude Code cost screen (2026-10-18).** A fresh 30-day local transcript census found
 39.03 million estimated tool-result tokens and 14.77 billion provider-reported cache-read tokens.
@@ -111,13 +102,13 @@ changed the ranking. **Relations** is which kinds of edge exist at all; **call-s
 much of one language's calling syntax the `calls` rules actually reach. Rust has the most relations
 and the least complete call coverage — those are not the same axis.
 
-| Language | `struct` | `context` (symbol slice) | `read`/`recall` | `impact`: relations | `impact`: call-shape coverage |
-|---|---|---|---|---|---|
-| TypeScript, TSX, JavaScript | yes | yes (plus AngularJS 1.x registrations, see below) | yes | `calls` only | **whole** — one undifferentiated `call_expression` rule |
-| Python | yes | yes | yes | `calls` only | **whole** — same |
-| Rust | yes | **yes** (free functions, `impl`/trait methods as `Type::method`, `struct`/`enum`/`trait`) | **yes** | `calls` **+ `references`** | **partial** — bare, qualified `Type::method()`, module-path `crate::m::f()` via suffix + `use`, gated receiver `x.m()` |
-| Java | yes | **yes** (class/interface/enum/record, methods & constructors as `Owner::method`) | **yes** | `calls` **+ `references`** | **partial** — bare `run()`, gated receiver `x.m()` / `Foo.bar()` / `this.m()`, `new Foo()`, types bare or qualified; `super.m()` is refused and surfaces as a gap |
-| HTML | yes | no | **yes** (whole-file `unparsed` chunk, fts-searchable) | none — no rule file, by design | none; template calls surface as **coverage gap rows** instead |
+| Language | `impact`: relations | `impact`: call-shape coverage |
+|---|---|---|
+| TypeScript, TSX, JavaScript | `calls` only (plus AngularJS 1.x registrations as seeds, see below) | **whole** — one undifferentiated `call_expression` rule |
+| Python | `calls` only | **whole** — same |
+| Rust | `calls` **+ `references`** (seeds: free functions, `impl`/trait methods as `Type::method`, `struct`/`enum`/`trait`) | **partial** — bare, qualified `Type::method()`, module-path `crate::m::f()` via suffix + `use`, gated receiver `x.m()` |
+| Java | `calls` **+ `references`** (seeds: class/interface/enum/record, methods & constructors as `Owner::method`) | **partial** — bare `run()`, gated receiver `x.m()` / `Foo.bar()` / `this.m()`, `new Foo()`, types bare or qualified; `super.m()` is refused and surfaces as a gap |
+| HTML | none — no rule file, by design (whole-file `unparsed` chunk) | none; template calls surface as **coverage gap rows** instead |
 
 Java's methods all carry owners, so the receiver gate works the way it does in Rust — but Java
 receivers rarely trace their owner's name (`customer` does not look like `CustomerRepository`), so
@@ -127,8 +118,7 @@ an `extracted_but_unresolved` coverage row naming file and line, never as a gues
 HTML templates are indexed on purpose without rules: an attribute value is an opaque string to
 ast-grep, so no honest edge can be cut from `ng-click="vm.save()"`. What indexing buys is the
 completeness half — every indexed file's text is scanned, so a controller method called only from a
-template appears as a named gap row instead of the file silently not existing — plus fts over the
-template body.
+template appears as a named gap row instead of the file silently not existing.
 
 ### AngularJS (1.x)
 
@@ -137,7 +127,7 @@ template body.
 - **Registrations** — `angular.module('app').controller('UserListController', function …)` (also
   `service`/`factory`/`directive`/`provider`/`filter`/`component`, with or without the
   `['$scope', fn]` injection array) becomes a chunk named after the registered string, so
-  `cort context UserService` resolves. `run`/`config` name nothing and register no chunk.
+  `cort impact --symbol UserService` resolves. `run`/`config` name nothing and register no chunk.
 - **Assigned methods** — `vm.reload = function () {…}` and `Foo.prototype.bar = function`, the
   controller-as style: chunked as bare-name methods (JS chunks carry no owner, so a receiver-shaped
   call to one is refused by the gate and surfaces as a coverage gap).
@@ -183,11 +173,9 @@ The honest gap is the other direction — TS/JS/Python have no type-reference ru
 where `extends`, `implements` and type annotations live in those languages.
 
 There is no callee direction anywhere in the product. `impact` emits `dependents`; there is no
-`dependencies` verb, and `cort context` answers "what else deals with X" rather than "what does X
-call".
+`dependencies` verb.
 
-For Rust, `cort context <symbol> --content full -f lean` is the supported use (that is the case the
-27k→89-token measurement below covers). Rust `impact` covers the indexed call shapes and resolves
+Rust `impact` covers the indexed call shapes and resolves
 module paths by suffix — treat its output as candidates. For the precise caller list use `cargo check` /
 `cargo build` errors — a compiler beats a name-resolved graph here. See `docs/2026-08-28-real-session-cost.md` §1.3.
 
@@ -211,7 +199,9 @@ file on disk — issue #4; one nonzero row in the first quarter's log was the wh
 before this second formula landed). A `no_shape` silence additionally records a shape
 fingerprint — the tool name plus the payload's top-level key *names* — so the 83% of hook runs
 that decline on shape can be ordered by demand (issue #3); key names are harness vocabulary,
-never payload content.
+never payload content. Both `saved_bytes` paths, the content modes and `source` belonged to `read`,
+removed on 2026-10-23: no new row carries them, and the columns and report fields stay so the older
+rows inside the 90-day window still read the way they were written.
 
 The one content exception is a hook suggestion that actually reaches the agent: that row stores
 the final user-authored prompt as an excerpt (up to 240 characters), beside the hook outcome.
@@ -227,8 +217,8 @@ payload has no transcript path, so its outcome can be logged but its demand is m
 `no_transcript_path`. Integration tests exercise the real hook command and usage row for Claude
 Code and Codex, including redaction and the silent-search case; they verify capture, not uptake.
 
-What is otherwise never recorded: file contents, `recall` queries, `struct` patterns, unresolved
-free-text `context` queries, clap/error messages, absolute home paths. The recorder is best-effort:
+What is otherwise never recorded: file contents, the arguments of an unknown or removed command
+(only the typed command name is kept, as `rejected`), clap/error messages, absolute home paths. The recorder is best-effort:
 it never retries, never blocks beyond 25 ms for database writes, and a logging failure can never
 change a command's output or exit code — which also means the report can only ever under-count.
 
@@ -384,7 +374,7 @@ Pre-existing binaries and unmanaged skills are never removed. A machine that too
 
 ## The ast-grep 0.45.3 pin — why fail-closed
 
-`ast-grep` is the only parser (never add an in-process parser, never call `sg` — on Linux `/usr/bin/sg` is `setgroups(1)`). The pin is `0.45.3` exactly: the installer verifies the download's SHA-256 against repo-maintained hashes for `app-<target>.zip` before extracting. An empty expected hash is fatal (`no checksum on record`), and a mismatch is fatal (`refusing to install an unverified binary`). This is fail-closed because installing an unverified binary would silently change parse behaviour — `parse_failed` detection, pattern validation, and struct/context/impact all depend on the same parser version.
+`ast-grep` is the only parser (never add an in-process parser, never call `sg` — on Linux `/usr/bin/sg` is `setgroups(1)`). The pin is `0.45.3` exactly: the installer verifies the download's SHA-256 against repo-maintained hashes for `app-<target>.zip` before extracting. An empty expected hash is fatal (`no checksum on record`), and a mismatch is fatal (`refusing to install an unverified binary`). This is fail-closed because installing an unverified binary would silently change parse behaviour — `parse_failed` detection, pattern validation, and `impact` all depend on the same parser version.
 
 Alternative install (same pin, same fail-closed version check):
 
@@ -538,17 +528,17 @@ set the flag for every one of 60 sampled seeds. What remains is the receiver gat
 
 ## Documented limitations (contracts, not apologies)
 
-1. **Index staleness — and the heal that owns it:** the index can lag unsaved edits and brand-new untracked files, but the query repairs the cache itself: `impact` and `context` bring the index up to the tree **before** answering (milliseconds when an incremental suffices, ~1-2s when a full rebuild is owed), and say so with `self_healed` + `heal_mode` in the payload. A tree past `CORT_HEAL_MAX_FILES` (default 2000 indexed files — measured anchor: gwebcdb at 9,022) answers immediately with `heal_deferred` naming why, while a single-flight background rebuilder (`.heal-<project>.lock`, flock, kernel-released on death) clears the debt; `CORT_NO_HEAL=1` restores a strictly read-only run. `cort index` must have been run once for the project — the heal repairs, it never creates, and an empty husk (a create that died mid-run) is named as `heal_deferred: "empty_index_never_creates"` instead of answering `rebuild_required` in silence. Staleness covers three things, not one: a file whose indexed content no longer matches disk; a relationship graph that has not been recomputed since its chunks changed (the `graph_pending` marker — set by an interrupted index or an older-schema database — makes every graph answer stale instead of quietly wrong); and a HEAD the index was never built from, which is how a `git pull`, `checkout`, `rebase` or someone else's commit arrives — the tree is clean against the new head while every chunk still describes the old one. `impact` also carries `repair` (lean header and JSON) — what the edit hook's automatic repair would do about that staleness, in the hook's own outcome vocabulary: `none` (nothing owed), `refreshable` (an incremental is accepted; the next edit heals it), `rebuild_required` (the hook refuses — superseded extractor or schema, an incomplete graph, or a tree git cannot narrow — and the next foreground query heals it instead). The JSON keeps the raw facts beside the token: the `rebuild_required` reasons and `candidates_narrowed`.
+1. **Index staleness — and the heal that owns it:** the index can lag unsaved edits and brand-new untracked files, but the query repairs the cache itself: `impact` brings the index up to the tree **before** answering (milliseconds when an incremental suffices, ~1-2s when a full rebuild is owed), and say so with `self_healed` + `heal_mode` in the payload. A tree past `CORT_HEAL_MAX_FILES` (default 2000 indexed files — measured anchor: gwebcdb at 9,022) answers immediately with `heal_deferred` naming why, while a single-flight background rebuilder (`.heal-<project>.lock`, flock, kernel-released on death) clears the debt; `CORT_NO_HEAL=1` restores a strictly read-only run. `cort index` must have been run once for the project — the heal repairs, it never creates, and an empty husk (a create that died mid-run) is named as `heal_deferred: "empty_index_never_creates"` instead of answering `rebuild_required` in silence. Staleness covers three things, not one: a file whose indexed content no longer matches disk; a relationship graph that has not been recomputed since its chunks changed (the `graph_pending` marker — set by an interrupted index or an older-schema database — makes every graph answer stale instead of quietly wrong); and a HEAD the index was never built from, which is how a `git pull`, `checkout`, `rebase` or someone else's commit arrives — the tree is clean against the new head while every chunk still describes the old one. `impact` also carries `repair` (lean header and JSON) — what the edit hook's automatic repair would do about that staleness, in the hook's own outcome vocabulary: `none` (nothing owed), `refreshable` (an incremental is accepted; the next edit heals it), `rebuild_required` (the hook refuses — superseded extractor or schema, an incomplete graph, or a tree git cannot narrow — and the next foreground query heals it instead). The JSON keeps the raw facts beside the token: the `rebuild_required` reasons and `candidates_narrowed`.
 2. **`chunk_id` stability:** `chunk_id` is stable only while a symbol's first line does not move — inserting lines above a symbol changes its id.
-3. **`context` is FTS-only:** `cort context` uses SQLite FTS keyword recall, not semantic search or embeddings. No vector, no RRF, no reranking.
+3. **No keyword or semantic search:** `cort context`, the FTS keyword verb, was removed on 2026-10-23 (zero invocations in 30 days). There is no vector search, RRF or reranking either; use `rg`.
 4. **Const-bound functions are chunks; plain aliases and collection transforms are not.** `const f = (x) => ...`,
    `const f = function () {...}` and `const f = factory(async () => {...})` are indexed (`src/pack/rules/*.yml`,
    `cort-*-chunk-const-function`). `const rows = xs.map(x => x)` stays data — the wrapper form only counts when
    the callee is a bare identifier, so method-call transforms never become symbols. Rebuilding an index written
    before this rule adds ~1% chunks and ~2% relationships; `cort index` (full) is required once.
 5. **Name-based target resolution:** relationship targets are resolved by symbol name. A same-named symbol in an unimported file can still surface as `AMBIGUOUS`, even if it is not actually imported.
-6. **`--lang` is required on `struct`:** `cort struct -p '<pattern>' --lang <lang>` fails with `{"error":"missing_lang"}` if `--lang` is absent. It also drives the pattern pre-flight that turns a malformed pattern into `{"error":"parse_failed"}` instead of a silent empty result. The binary is `ast-grep`, never `sg`.
-7. **FTS tokenizer is bare `unicode61`:** the design calls for `unicode61 "remove_diacritics 1" "tokenchars ._$"`, but the bundled SQLite that ships with rusqlite 0.32 rejects every parameterised `unicode61` form (the JS reference via `better-sqlite3` had the same limit). Consequence: `cort context` keyword recall splits identifiers on `.`, `_` and `$` — searching `foo.bar` matches `foo` and `bar` separately, and diacritics are not folded. CJK still tokenizes. `src/schema.sql` carries a `NOTE` and reverting is one line once a SQLite build accepts the parameters.
+6. **No structural search verb:** `cort struct` was removed on 2026-10-23 (zero invocations in 30 days). Run `ast-grep run -p '<pattern>' --lang <lang>` directly. The binary is `ast-grep`, never `sg`.
+7. **FTS tokenizer is bare `unicode61`:** the design calls for `unicode61 "remove_diacritics 1" "tokenchars ._$"`, but the bundled SQLite that ships with rusqlite 0.32 rejects every parameterised `unicode61` form (the JS reference via `better-sqlite3` had the same limit). The index still maintains `chunks_fts`, but since `cort context` was removed no command queries it. `src/schema.sql` carries a `NOTE` and reverting is one line once a SQLite build accepts the parameters.
 8. **`impact` is only as good as a language's edge rules:** the relationship graph indexes the call
    shapes the language's `edge:calls`/`edge:imports`/`edge:references` rules in `src/pack/rules/`
    capture. For Rust that is three call shapes — bare (`foo()`), qualified (`Type::method()`) and
@@ -628,9 +618,10 @@ set the flag for every one of 60 sampled seeds. What remains is the receiver gat
    FTS-only `unparsed` chunk on timeout, on a non-zero `ast-grep` exit, **and** when the scan returns
    zero records. A file that legitimately declares no functions (e.g. `rust/src/lib.rs`, which is only
    `pub mod` lines) is therefore included in that count. It does not mean the parser failed.
-10. **Reading recall is lexical and source-validated:** `cort recall` searches only fragments previously
-   captured by `cort read`; it is FTS5, not semantic memory. Changed or deleted source files invalidate
-   their stored readings. Reading notes survive full and incremental re-indexing when the source is unchanged.
+10. **No reading store:** `cort read` and `cort recall` were removed on 2026-10-23 (zero invocations in
+   30 days). Existing indexes keep their `reading_notes` tables untouched and nothing reads them;
+   dropping them would need a schema bump, which forces a full re-index of every project. `cort memory
+   recall` is the project-memory ledger and is a different command.
 
 What landed on the recall line, and what is still open (`unparsed` and the gap boolean, the wording
 that has to change with it, trait declarations labelled `call`, the ±2-line tolerance), is recorded in
@@ -700,7 +691,7 @@ that pass only fixed recall and payload inside the four verbs that already ship,
 - `modules` (`cort modules` Louvain Phase-1 greedy community detection)
 - `--watch` (file-watcher with `inFlight` serialization)
 - `impact --from-diff` (diff-aware blast radius)
-- `search` as a first-class verb (`cort search` — use `cort struct` / `cort context` instead)
+- `search` as a first-class verb (`cort search` — use `rg` / `ast-grep run` instead)
 - `embeddings` / `cort embed --backfill` (`ALTER TABLE chunks ADD COLUMN embedding BLOB`, BGE, dense search, three-arm RRF)
 
 ## Prior art — the two other ways a caller-set question gets answered
@@ -778,8 +769,7 @@ Any path can be inspected via `git show v6-final:<path>` without checking out th
 
 ## How the skill is used
 
-The `ast-grep` skill teaches agents when to use `rg` vs `ast-grep` vs `cort` — see `skills/ast-grep/SKILL.md` (also installed to `~/.claude/skills/ast-grep/`). `rg` for fresh/short/small and for finding strings, `ast-grep run` for one shape, `cort struct` for shape +
-neighbours, `cort context` for neighbourhood, and `cort impact` for multi-hop blast radius. The skill states the
+The `ast-grep` skill teaches agents when to use `rg` vs `ast-grep` vs `cort` — see `skills/ast-grep/SKILL.md` (also installed to `~/.claude/skills/ast-grep/`). `rg` for fresh/short/small and for finding strings, `ast-grep run` for one shape, and `cort impact` for the caller set / multi-hop blast radius. The skill states the
 measured break-even so an agent does not route a string question into a graph tool.
 
 ## The PreToolUse hook — the retrospective half of the routing
@@ -899,7 +889,8 @@ drifted index still answers too; this install ships no repair for it, and failin
 name an action that does not exist.
 **When it fires.** The first pipeline segment must be `rg`, `grep` or `egrep`; the pattern must
 resolve to a single symbol; and the search must look like a caller-set question. It stays silent
-on: any `-A`/`-B`/`-C` context flag (that is `cort context`'s question, not `impact`'s), searches
+on: any `-A`/`-B`/`-C` context flag (surrounding lines are not `impact`'s question; recorded as
+`context_lines_requested`), searches
 into logs, transcripts, `node_modules`, `.claude`/`.codex` and other non-source paths, searches
 naming only file extensions the rule pack does not index, and searches confined to concrete
 files. The rejections carry as much weight as the fires: a hook that also fires on ordinary

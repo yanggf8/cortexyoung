@@ -695,10 +695,10 @@ pub enum RootProbe {
 /// `full_index` INSERTS the row. A resolver that stopped at a schema-only database would make the
 /// repair hook create an index in a directory nobody asked about, against its first refusal.
 ///
-/// The row test is the one `readings` already asks, through a read-only connection so this can never
-/// be the thing that creates a database. It sets the same 5s busy timeout every other connection in
-/// this module sets; rusqlite's default is 0, and a hook whose contract is "give up rather than
-/// wait" should still not trip on the first contended read.
+/// The row test asks for a `projects` row with `last_indexed_at`, through a read-only connection so
+/// this can never be the thing that creates a database. It sets the same 5s busy timeout every
+/// other connection in this module sets; rusqlite's default is 0, and a hook whose contract is
+/// "give up rather than wait" should still not trip on the first contended read.
 fn probe_root(dir: &Path) -> RootProbe {
     let Some(dir) = dir.to_str() else {
         return RootProbe::Absent;

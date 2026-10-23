@@ -1,5 +1,4 @@
-//! Relationships + containment join.
-//! Spec §5.6 assigns `applyBudget` to struct/context (Job D), not this module.
+//! Relationships.
 
 use crate::chunker::{bare_name, CallForm, Chunk, Edge};
 use crate::db::Db;
@@ -64,17 +63,6 @@ pub struct Dependent {
     pub start_line: i64,
     pub end_line: i64,
     pub hop: i64,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct ContainingChunk {
-    pub chunk_id: String,
-    pub file_path: String,
-    pub symbol_name: Option<String>,
-    pub chunk_type: Option<String>,
-    pub start_line: i64,
-    pub end_line: i64,
-    pub language: Option<String>,
 }
 
 pub fn build_import_map(edges: &[Edge]) -> HashMap<String, String> {
@@ -817,37 +805,6 @@ pub fn get_transitive_dependents(
     })?;
     rows.collect()
 }
-
-/// Smallest enclosing chunk (span ASC, then start_line DESC). Spec §5.5; JS lives on struct.
-pub fn containment_join(
-    db: &Db,
-    project_id: &str,
-    file_path: &str,
-    start_line: i64,
-    end_line: i64,
-) -> rusqlite::Result<Option<ContainingChunk>> {
-    let mut stmt = db.prepare(
-        "SELECT chunk_id, file_path, symbol_name, chunk_type, start_line, end_line, language
-           FROM chunks
-          WHERE project_id = ?1 AND file_path = ?2 AND start_line <= ?3 AND end_line >= ?4
-          ORDER BY (end_line - start_line) ASC, start_line DESC
-          LIMIT 1",
-    )?;
-    let mut rows = stmt.query(params![project_id, file_path, start_line, end_line])?;
-    match rows.next()? {
-        Some(r) => Ok(Some(ContainingChunk {
-            chunk_id: r.get(0)?,
-            file_path: r.get(1)?,
-            symbol_name: r.get(2)?,
-            chunk_type: r.get(3)?,
-            start_line: r.get(4)?,
-            end_line: r.get(5)?,
-            language: r.get(6)?,
-        })),
-        None => Ok(None),
-    }
-}
-
 const INSERT_REL: &str = "INSERT INTO relationships
   (source_chunk_id, target_chunk_id, rel_type, confidence, confidence_score, confidence_reasoning,
    call_site_line, call_form)

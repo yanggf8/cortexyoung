@@ -184,6 +184,8 @@ up unverifiable.
 
 ## Stop/go gate (spec section 8)
 
+Historical: `cort struct` and `cort context` were removed on 2026-10-23 (zero invocations in 30 days on both machines), so this gate no longer runs against the shipped CLI; it is kept as the record of what the eval measured.
+
 This is a gate, not a report. The rule verbatim:
 
 > If `cort struct` + `cort context` does not beat `ast-grep` + manual `Read` on **both** token count and success rate, stop adding features.

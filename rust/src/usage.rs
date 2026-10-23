@@ -175,26 +175,6 @@ pub fn args_summary(
     Value::Object(map).to_string()
 }
 
-pub fn saved_bytes_for(
-    source: Option<&str>,
-    effective: Option<&str>,
-    omitted_body_len: i64,
-) -> i64 {
-    if source == Some("store") && effective == Some("receipt") {
-        omitted_body_len.max(0)
-    } else {
-        0
-    }
-}
-
-pub fn omitted_body_len(content: &str, note_start: i64, start: i64, end: i64) -> i64 {
-    let lines: Vec<&str> = content.split('\n').collect();
-    let from = (start - note_start) as usize;
-    let to = ((end - note_start + 1) as usize).min(lines.len());
-    let from = from.min(to);
-    lines[from..to].join("\n").len() as i64
-}
-
 /// Absorbs every failure. Zero panic, zero retry, busy gives up within 25ms.
 pub fn record_command(rec: &CommandRecord) {
     let Some(path) = usage_db_path() else {

@@ -535,7 +535,6 @@ pub struct Status {
     pub indexed: bool,
     pub files: i64,
     pub chunks: i64,
-    pub readings: i64,
     pub relationships: i64,
     pub extractor_version: String,
     pub git_head: Option<String>,
@@ -577,7 +576,6 @@ pub fn status_of(db: &Db, root: impl AsRef<Path>) -> Result<Status, IndexError> 
             indexed: false,
             files: 0,
             chunks: 0,
-            readings: 0,
             relationships: 0,
             extractor_version: String::new(),
             git_head: None,
@@ -594,11 +592,6 @@ pub fn status_of(db: &Db, root: impl AsRef<Path>) -> Result<Status, IndexError> 
         params![canon.project_id],
         |r| r.get(0),
     )?;
-    let readings: i64 = db.query_row(
-        "SELECT COUNT(*) FROM reading_notes WHERE project_id = ?1",
-        params![canon.project_id],
-        |r| r.get(0),
-    )?;
     let relationships: i64 = db.query_row(
         "SELECT COUNT(*) FROM relationships r
            JOIN chunks s ON s.chunk_id = r.source_chunk_id WHERE s.project_id = ?1",
@@ -611,7 +604,6 @@ pub fn status_of(db: &Db, root: impl AsRef<Path>) -> Result<Status, IndexError> 
         indexed: true,
         files,
         chunks,
-        readings,
         relationships,
         extractor_version,
         git_head,

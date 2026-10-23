@@ -218,11 +218,12 @@ pub const SUGGEST_OUTCOMES: [&str; 10] = [
 /// The stable identifiers `no_shape` carries as its decline tag, split across the two paths that
 /// can produce it: the payload/parser path (`grep_fields_no_pattern`, `unsupported_tool_surface`,
 /// `not_a_search_tool`, `unparseable_command`) and the `judge` path (`pattern_not_symbol`,
-/// `non_source_target`, `unindexed_extension`, `concrete_file_read`, `target_not_source`).
+/// `non_source_target`, `unindexed_extension`, `concrete_file_read`, `target_not_source`,
+/// `context_lines_requested`).
 /// Identifiers, never prose, for the same reason `NoShape`'s doc gives: mining groups on them.
 /// A `no_shape` row whose summary carries no tag at all is the pre-issue-#3 shape, a deployment
-/// state rather than a ninth cause — the census names it `decline_absent` instead of guessing.
-pub const SUGGEST_DECLINES: [&str; 9] = [
+/// state rather than one more cause — the census names it `decline_absent` instead of guessing.
+pub const SUGGEST_DECLINES: [&str; 10] = [
     "grep_fields_no_pattern",
     "unsupported_tool_surface",
     "not_a_search_tool",
@@ -232,6 +233,7 @@ pub const SUGGEST_DECLINES: [&str; 9] = [
     "unindexed_extension",
     "concrete_file_read",
     "target_not_source",
+    "context_lines_requested",
 ];
 
 /// The closed outcome vocabulary `hook-refresh` can record, one entry per writer path — the
@@ -267,9 +269,9 @@ pub const REFRESH_OUTCOMES: [&str; 8] = [
 pub enum SilenceReason {
     /// Not the narrow shape where the index beats `rg`. The payload is a *stable identifier* for
     /// the rule that declined -- `pattern_not_symbol`, `non_source_target`, `unindexed_extension`,
-    /// `concrete_file_read`, `target_not_source` -- so the no_shape bucket
-    /// (83% of hook-suggest rows over the 30d window ending 2026-09-06) becomes attributable rule
-    /// by rule instead of one impenetrable number (issue #3). Identifiers, never prose: mining
+    /// `concrete_file_read`, `target_not_source`, `context_lines_requested` -- so the no_shape
+    /// bucket (83% of hook-suggest rows over the 30d window ending 2026-09-06) becomes attributable
+    /// rule by rule instead of one impenetrable number (issue #3). Identifiers, never prose: mining
     /// groups on them, so renaming one is a breaking change to the log's vocabulary.
     NoShape(&'static str),
     /// Right shape, no index for this project -- a missed opportunity, not a refusal. The symbol
@@ -290,18 +292,16 @@ pub enum Verdict {
     Silent(SilenceReason),
 }
 
-/// Which subcommand answers this search. The shape gate is the same for both -- one bare symbol in
-/// project source -- and only the agent's stated intent tells them apart: a plain search is asking
-/// who else names the symbol (`impact`), a `-A`/`-B`/`-C` search is asking to read around it
-/// (`context`). Suggesting `impact` to someone who asked for surrounding lines answers a question
-/// they did not ask, which is why that shape was silent until now; suggesting nothing answers
-/// nothing, which is what the 2026-09-01 probe was read as endorsing and never showed.
+/// Which subcommand answers this search. Only `impact` remains: from 2026-09-07 a `-A`/`-B`/`-C`
+/// search routed to `cort context`, and when that verb was removed (zero invocations in 30 days on
+/// both machines, 2026-10-23) the shape went back to being declined (`context_lines_requested`)
+/// rather than handed to `impact` -- an agent asking for surrounding lines is not asking who calls
+/// the symbol. Rows already in `usage.db` keep their `kind: "context"` tag; it is history, and no
+/// writer path produces it any more.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Suggest {
     /// Who calls it -- `cort impact --symbol`.
     Impact,
-    /// What is around it -- `cort context`.
-    Context,
 }
 
 impl Suggest {
@@ -311,7 +311,6 @@ impl Suggest {
     pub fn tag(self) -> &'static str {
         match self {
             Suggest::Impact => "impact",
-            Suggest::Context => "context",
         }
     }
 }
@@ -319,7 +318,7 @@ impl Suggest {
 /// What the rule concluded about one command.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HookHit {
-    /// The symbol to hand to `cort impact --symbol` or `cort context`.
+    /// The symbol to hand to `cort impact --symbol`.
     pub symbol: String,
     /// Why it fired, for the report; a hit nobody can explain is not evidence.
     pub reason: &'static str,
@@ -649,10 +648,8 @@ fn tool_index(tokens: &[String]) -> usize {
 /// Fires only on the narrow shape it can actually beat: one bare symbol, searched in project
 /// source. Everything else -- alternations, phrases, logs, transcripts, build output -- stays with
 /// `rg`, which is what the routing skill already says and what the traffic shows the agent doing
-/// correctly hundreds of times. The name predates `Suggest`: since 2026-09-07 the shape it reports
-/// covers both subcommands, and callers that care which one read `hit.kind`. Kept as-is because
-/// renaming it would touch `evals` for no measurement gain -- but a count taken from it is a count
-/// of *routed* searches, not of `impact` suggestions.
+/// correctly hundreds of times. Every hit it reports is an `impact` suggestion: the 2026-09-07
+/// `context` arm is gone, and a `-A`/`-B`/`-C` search is declined (`context_lines_requested`).
 pub fn suggests_impact_shape(command: &str) -> Option<HookHit> {
     match judge(&search_from_shell(command)?, |_| Evidence::Unknown) {
         Verdict::Fire(hit) => Some(hit),
@@ -685,8 +682,8 @@ pub struct Search {
     /// What the search was pointed at: paths and globs, plus (from a shell line) the flag tokens
     /// that trailed the pattern, which the source/extension tests read as text.
     pub targets: Vec<String>,
-    /// The agent asked for the lines around each match (`-A`/`-B`/`-C`). That is `cort context`'s
-    /// question, not `impact`'s -- it selects the subcommand, it does not silence the hook.
+    /// The agent asked for the lines around each match (`-A`/`-B`/`-C`). That is not `impact`'s
+    /// question, so `judge` declines it as `context_lines_requested` once every other check passed.
     pub wants_context: bool,
     /// The search descends through directories rather than reading named files.
     pub recursive: bool,
@@ -850,6 +847,12 @@ pub fn judge(search: &Search, evidence: impl FnOnce(&str) -> Evidence) -> Verdic
     } else {
         return Verdict::Silent(SilenceReason::NoShape("target_not_source"));
     };
+    // Last of the shape checks, so every other decline keeps the count it had: this tag names only
+    // searches that passed the whole gate and asked for surrounding lines. That question belonged
+    // to `cort context`, which no longer exists, and it is not `impact`'s question.
+    if search.wants_context {
+        return Verdict::Silent(SilenceReason::NoShape("context_lines_requested"));
+    }
     // Only now, with every shape check passed, is the index asked -- and the closure is what opens
     // it. This ordering is the budget: the shape gate turns down about 95% of searches and none of
     // them may cost a database open or a `git rev-parse`.
@@ -864,14 +867,7 @@ pub fn judge(search: &Search, evidence: impl FnOnce(&str) -> Evidence) -> Verdic
         Evidence::RawOnly | Evidence::Unknown => Verdict::Fire(HookHit {
             symbol,
             reason,
-            // Every gate above is about whether the index can answer *anything* here, and neither
-            // subcommand escapes one: a `-C` search into `node_modules` is as unanswerable as a
-            // plain one. So the flag picks the subcommand and nothing else.
-            kind: if search.wants_context {
-                Suggest::Context
-            } else {
-                Suggest::Impact
-            },
+            kind: Suggest::Impact,
             // An edge rests on a call site, not a definition -- there is nothing to disambiguate
             // against, and inventing a location would be worse than omitting one.
             defined_at: None,
@@ -879,11 +875,7 @@ pub fn judge(search: &Search, evidence: impl FnOnce(&str) -> Evidence) -> Verdic
         Evidence::Seed { defined_at } => Verdict::Fire(HookHit {
             symbol,
             reason,
-            kind: if search.wants_context {
-                Suggest::Context
-            } else {
-                Suggest::Impact
-            },
+            kind: Suggest::Impact,
             defined_at,
         }),
     }
