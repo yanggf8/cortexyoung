@@ -413,3 +413,39 @@ fn record_without_config_fails_cleanly() {
     assert!(left.is_empty(), "record left behind {left:?}");
     assert!(!Path::new(&data.join("measure-last-sync")).exists());
 }
+
+#[test]
+fn same_host_warns_even_after_one_machine_was_renamed() {
+    let (_t, mut s) = store();
+    s.upsert_machine_host("m1", "A", 100).unwrap();
+    s.upsert_machine_host("m1", "B", 200).unwrap();
+    s.upsert_machine_host("m2", "A", 150).unwrap();
+    s.upsert_compaction(&row(
+        "m1",
+        "a",
+        THU_W43_MS,
+        w(5, 0, 0, 0, 0),
+        w(5, 1, 0, 0, 0),
+    ))
+    .unwrap();
+    let v = report(&mut s, &inputs(FRI_W43_MS)).unwrap();
+    let warns: Vec<&str> = v["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x.as_str().unwrap())
+        .collect();
+    assert!(
+        warns.iter().any(|x| x.contains("host A")
+            && x.contains("2 machine ids")
+            && x.contains("m1")
+            && x.contains("m2")),
+        "{warns:?}"
+    );
+    assert!(
+        warns
+            .iter()
+            .any(|x| x.contains("machine m1") && x.contains("2 hosts")),
+        "{warns:?}"
+    );
+}

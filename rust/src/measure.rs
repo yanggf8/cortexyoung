@@ -499,12 +499,16 @@ pub fn report(store: &mut dyn MeasureStore, input: &ReportInputs) -> Result<Valu
             ));
         }
     }
+    // Every recorded (machine, host) pair counts here, not just each machine's latest host.
     let mut machines_of: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for (machine, host) in &host_of {
-        machines_of
-            .entry(host.clone())
-            .or_default()
-            .push(machine.clone());
+    for h in &hosts {
+        let ids = machines_of.entry(h.host.clone()).or_default();
+        if !ids.contains(&h.machine_id) {
+            ids.push(h.machine_id.clone());
+        }
+    }
+    for ids in machines_of.values_mut() {
+        ids.sort();
     }
     for (host, ids) in &machines_of {
         if ids.len() >= 2 {
