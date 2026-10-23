@@ -27,12 +27,12 @@ pub struct MemoryStatus {
 }
 
 #[derive(Deserialize, Serialize)]
-struct Config {
-    url: String,
-    token: String,
+pub(crate) struct Config {
+    pub(crate) url: String,
+    pub(crate) token: String,
 }
 
-fn digest(s: &str) -> String {
+pub(crate) fn digest(s: &str) -> String {
     Sha256::digest(s.as_bytes())
         .iter()
         .map(|b| format!("{b:02x}"))
@@ -43,25 +43,34 @@ fn config_path() -> PathBuf {
     crate::data_dir::data_dir().join("turso-memory.json")
 }
 
-pub fn configure(url: &str, token: &str) -> Result<PathBuf, String> {
+/// Validate a URL/token pair the way every cort Turso client does.
+pub(crate) fn validated_config(url: &str, token: &str) -> Result<Config, String> {
     let url = url.trim().trim_end_matches('/');
     if !(url.starts_with("https://") || url.starts_with("turso://") || url.starts_with("libsql://"))
         || token.trim().is_empty()
     {
         return Err("provide a Turso database URL and a nonempty auth token".into());
     }
-    let path = config_path();
-    let body = serde_json::to_string(&Config {
+    Ok(Config {
         url: url.to_string(),
         token: token.trim().to_string(),
     })
-    .map_err(|e| e.to_string())?;
+}
+
+/// Write a credential file: private to its owner, never through a symlink, atomically renamed.
+/// `label` names the file in the symlink error.
+pub(crate) fn write_private_config(
+    path: &Path,
+    config: &Config,
+    label: &str,
+) -> Result<PathBuf, String> {
+    let body = serde_json::to_string(config).map_err(|e| e.to_string())?;
     // A credential file is local to this machine and private to its owner.
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    if fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
-        return Err("Turso memory config must not be a symlink".into());
+    if fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err(format!("{label} must not be a symlink"));
     }
     #[cfg(unix)]
     {
@@ -80,11 +89,16 @@ pub fn configure(url: &str, token: &str) -> Result<PathBuf, String> {
         use std::io::Write;
         file.write_all(body.as_bytes()).map_err(|e| e.to_string())?;
         file.sync_all().map_err(|e| e.to_string())?;
-        fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
+        fs::rename(&tmp, path).map_err(|e| e.to_string())?;
     }
     #[cfg(not(unix))]
-    crate::data_dir::write_atomic(&path, &body).map_err(|e| e.to_string())?;
-    Ok(path)
+    crate::data_dir::write_atomic(path, &body).map_err(|e| e.to_string())?;
+    Ok(path.to_path_buf())
+}
+
+pub fn configure(url: &str, token: &str) -> Result<PathBuf, String> {
+    let config = validated_config(url, token)?;
+    write_private_config(&config_path(), &config, "Turso memory config")
 }
 
 /// Move a machine's existing ClaudeCat connection to cort without printing the credential.
@@ -100,15 +114,20 @@ pub fn import_config(from: &Path) -> Result<PathBuf, String> {
 }
 
 fn config() -> Result<Config, String> {
-    let path = config_path();
-    if fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
-        return Err("Turso memory config must not be a symlink".into());
+    read_config(
+        &config_path(),
+        "Turso memory config",
+        "Turso memory is not configured; run `cort memory configure --url URL --token-stdin`",
+    )
+}
+
+/// Read a credential file written by `write_private_config`, refusing a symlink.
+pub(crate) fn read_config(path: &Path, label: &str, unconfigured: &str) -> Result<Config, String> {
+    if fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err(format!("{label} must not be a symlink"));
     }
-    let body = fs::read_to_string(&path).map_err(|_| {
-        "Turso memory is not configured; run `cort memory configure --url URL --token-stdin`"
-            .to_string()
-    })?;
-    serde_json::from_str(&body).map_err(|e| format!("invalid Turso memory config: {e}"))
+    let body = fs::read_to_string(path).map_err(|_| unconfigured.to_string())?;
+    serde_json::from_str(&body).map_err(|e| format!("invalid {label}: {e}"))
 }
 
 pub fn project(root: &Path) -> Result<String, String> {
@@ -190,7 +209,7 @@ fn require_committed_source(root: &Path, source: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn runtime() -> Result<tokio::runtime::Runtime, String> {
+pub(crate) fn runtime() -> Result<tokio::runtime::Runtime, String> {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -202,8 +221,17 @@ async fn open(config: &Config) -> Result<turso::sync::Database, String> {
 }
 
 async fn open_replica(config: &Config, file: &str) -> Result<turso::sync::Database, String> {
+    open_replica_in("turso-memory", config, file).await
+}
+
+/// Open (creating) a sync replica at `data_dir()/<subdir>/<digest(url)>/<file>`.
+pub(crate) async fn open_replica_in(
+    subdir: &str,
+    config: &Config,
+    file: &str,
+) -> Result<turso::sync::Database, String> {
     let dir = crate::data_dir::data_dir()
-        .join("turso-memory")
+        .join(subdir)
         .join(digest(&config.url));
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     #[cfg(unix)]
@@ -215,11 +243,14 @@ async fn open_replica(config: &Config, file: &str) -> Result<turso::sync::Databa
     turso::sync::Builder::new_remote(&path.to_string_lossy())
         .with_remote_url(&config.url)
         .with_auth_token(&config.token)
+        // turso 0.9.0-pre.1 `sync::Builder::bootstrap_if_empty(bool)`: download schema and data
+        // when the local replica is empty. It already defaults to true; stated so a fresh
+        // machine's first open pulls the remote instead of starting a divergent database.
+        .bootstrap_if_empty(true)
         .build()
         .await
         .map_err(|e| format!("cannot open Turso sync replica: {e}"))
 }
-
 async fn read_ledger(conn: &turso::Connection, project: &str) -> Result<MemoryLedger, String> {
     ensure_schema(conn).await?;
     let mut rows = conn
@@ -339,14 +370,19 @@ fn with_lock<T>(
 fn with_store_lock<T>(action: impl FnOnce(Config) -> Result<T, String>) -> Result<T, String> {
     with_named_lock("memory.lock", action)
 }
-
 fn with_named_lock<T>(
     name: &str,
     action: impl FnOnce(Config) -> Result<T, String>,
 ) -> Result<T, String> {
     let config = config()?;
+    let _lock = lock_in("turso-memory", &config, name)?;
+    action(config)
+}
+
+/// Take an exclusive flock on `data_dir()/<subdir>/<digest(url)>/<name>`; released on drop.
+pub(crate) fn lock_in(subdir: &str, config: &Config, name: &str) -> Result<fs::File, String> {
     let lock_path = crate::data_dir::data_dir()
-        .join("turso-memory")
+        .join(subdir)
         .join(digest(&config.url))
         .join(name);
     fs::create_dir_all(lock_path.parent().unwrap()).map_err(|e| e.to_string())?;
@@ -357,7 +393,7 @@ fn with_named_lock<T>(
         .open(&lock_path)
         .map_err(|e| e.to_string())?;
     lock.lock().map_err(|e| e.to_string())?;
-    action(config)
+    Ok(lock)
 }
 
 pub fn recall(root: &Path, query: &str) -> Result<MemoryRecall, String> {

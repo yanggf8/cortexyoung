@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 // `hook-suggest` is here so its rows are recorded under their own name rather than `_unknown`:
 // whether the harness hook fires, and whether a fire is followed by an `impact` call, is the one
 // measurement that has a numerator. It is not a verb anyone types.
-const KNOWN_COMMANDS: [&str; 13] = [
+const KNOWN_COMMANDS: [&str; 14] = [
     "index",
     "status",
     "projects",
@@ -35,6 +35,7 @@ const KNOWN_COMMANDS: [&str; 13] = [
     "impact",
     "usage",
     "memory",
+    "measure",
     "hook-suggest",
     "hook-refresh",
     "hook-install",
@@ -54,6 +55,7 @@ fn usage_value() -> Value {
             "impact": "cort impact --symbol <name> [--depth <n>] [--coverage] [-f json|lean]",
             "usage": "cort usage [days] [-f json|lean]",
             "memory": "cort memory <configure|import-config|record|resolve|recall|status|sync|import-legacy> [options]",
+            "measure": "cort measure configure --url URL --token-stdin",
             "hook-suggest": "cort hook-suggest  (PreToolUse hook: records search verdicts; silent unless CORT_SUGGEST=1; not a verb to type)",
             "hook-refresh": "cort hook-refresh  (PostToolUse hook: brings this project's index up to the tree after an edit; silent, never creates an index; not a verb to type)",
             "hook-install": "cort hook-install [--settings <path>] [--command <cmd>] [--remove|--status]  (installer-invoked: wires hook-suggest into settings.json; not a verb to type)",
@@ -636,6 +638,7 @@ fn dispatch(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError> 
         Some("impact") => cmd_impact(&args[1..], usage),
         Some("usage") => cmd_usage(&args[1..], usage),
         Some("memory") => cmd_memory(&args[1..], usage),
+        Some("measure") => cmd_measure(&args[1..], usage),
         Some("hook-suggest") => cmd_hook_suggest(&args[1..], usage),
         Some("hook-refresh") => cmd_hook_refresh(&args[1..], usage),
         Some("hook-install") => cmd_hook_install(&args[1..], usage),
@@ -2662,6 +2665,53 @@ fn cmd_memory(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError
 
 fn memory_error(message: String) -> CortError {
     CortError::new("memory_error", json!({"message":message}))
+}
+
+#[derive(Parser, Debug)]
+#[command(
+    no_binary_name = true,
+    disable_help_flag = true,
+    disable_version_flag = true
+)]
+struct MeasureArgs {
+    #[command(subcommand)]
+    action: MeasureAction,
+}
+
+#[derive(Subcommand, Debug)]
+enum MeasureAction {
+    Configure {
+        #[arg(long)]
+        url: String,
+        #[arg(long, required = true)]
+        token_stdin: bool,
+    },
+}
+
+fn cmd_measure(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, CortError> {
+    let a = MeasureArgs::try_parse_from(args.iter()).map_err(clap_fail)?;
+    let value = match a.action {
+        MeasureAction::Configure { url, token_stdin } => {
+            if !token_stdin {
+                return Err(CortError::new(
+                    "measure_error",
+                    json!({"message":"pass --token-stdin"}),
+                ));
+            }
+            let mut token = String::new();
+            std::io::stdin()
+                .read_to_string(&mut token)
+                .map_err(|e| CortError::new("measure_error", json!({"message":e.to_string()})))?;
+            let path = cort::measure_store::configure(&url, &token)
+                .map_err(|m| CortError::new("measure_error", json!({"message":m})))?;
+            json!({"status":"configured","path":path})
+        }
+    };
+    Ok(Emit {
+        render_command: None,
+        format: Format::Json,
+        payload: value,
+    })
 }
 
 fn peek_format(args: &[String]) -> Format {
