@@ -363,6 +363,11 @@ fn config_path() -> PathBuf {
     crate::data_dir::data_dir().join("turso-measure.json")
 }
 
+/// Whether `cort measure configure` has been run on this machine (the config file exists).
+pub fn is_configured() -> bool {
+    config_path().exists()
+}
+
 /// Store the measurement database's URL and token, private to this user.
 pub fn configure(url: &str, token: &str) -> Result<PathBuf, String> {
     let config = memory_store::validated_config(url, token)?;

@@ -1,6 +1,7 @@
 pub mod ast_grep;
 pub mod chunker;
 pub mod coverage;
+pub mod cron;
 pub mod data_dir;
 pub mod db;
 pub mod errors;

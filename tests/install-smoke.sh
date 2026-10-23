@@ -128,6 +128,10 @@ export PATH="$TMPHOME/fakebin:$PATH"
 # paths directly — binary install is skipped because mock xg already matches
 # and mock ast-grep already matches.
 
+# Never the real crontab: the cron step of every install below reads and writes this file.
+CORT_CRONTAB_FILE="$(mktemp)"
+export CORT_CRONTAB_FILE
+
 echo "=== install-smoke: temp HOME=$TMPHOME ==="
 
 # ── 1. first install (ast-grep skill only) ────────────────────────
@@ -1375,9 +1379,33 @@ else
   rm -f "$ACQUIRED" "$DONE"
 fi
 
+# ── 23. the measure cron entry is merged only when measurement is configured ──
+# `crontab` is per-user and system-wide, not HOME-scoped: the whole file runs against
+# CORT_CRONTAB_FILE (exported near the top), never the real crontab.
+echo "--- Test 23: measure cron entry follows the measure config ---"
+fresh_home_with_install
+assert_not_contains "$CORT_CRONTAB_FILE" "measure record" "unconfigured install writes no measure cron entry"
+T23_CORT="$(grep "^cort_bin:" "$HOME/.local/share/cortexyoung/manifest" | head -n1 | cut -d: -f2-)"
+export CORT_MEMORY_DIR="$HOME/.local/share/cortexyoung/memory"
+mkdir -p "$CORT_MEMORY_DIR"
+printf '{}\n' > "$CORT_MEMORY_DIR/turso-measure.json"
+for _ in 1 2; do
+  ( set --; export SOURCE_ONLY=1
+    # shellcheck disable=SC1090
+    . "$INSTALL_SH"
+    deploy_measure_cron "$T23_CORT" ) >/dev/null 2>&1 || true
+done
+if [ "$(grep -c "measure record" "$CORT_CRONTAB_FILE" 2>/dev/null || true)" = "1" ]; then
+  pass "configured install leaves exactly one measure cron entry across two runs"
+else
+  fail "configured install leaves exactly one measure cron entry (got: $(cat "$CORT_CRONTAB_FILE" 2>/dev/null))"
+fi
+assert_contains "$CORT_CRONTAB_FILE" "$T23_CORT measure record" "the entry runs the installed shim"
+unset CORT_MEMORY_DIR T23_CORT
+
 # ── summary ──────────────────────────────────────────────────────
 echo ""
 echo "=== smoke results: $PASS passed, $FAIL failed ==="
 # Cleanup
-rm -rf "$TMPHOME"
+rm -rf "$TMPHOME" "$CORT_CRONTAB_FILE"
 if [ "$FAIL" -gt 0 ]; then exit 1; fi

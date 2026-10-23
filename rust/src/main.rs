@@ -2690,6 +2690,21 @@ enum MeasureAction {
     Show { id: String },
     /// Scan local transcripts into the store, then push and pull.
     Record,
+    /// Own the hourly crontab line that runs `measure record`.
+    Cron {
+        #[arg(long, group = "cron_action")]
+        install: bool,
+        #[arg(long, group = "cron_action")]
+        uninstall: bool,
+        #[arg(long, group = "cron_action")]
+        status: bool,
+        /// Install only when the measurement store is configured (what install.sh and upgrade pass).
+        #[arg(long)]
+        if_configured: bool,
+        /// The command the crontab line runs: the installed shim. Required, never `current_exe()`.
+        #[arg(long)]
+        command_prefix: Option<String>,
+    },
     /// Cross-machine report; compaction cost first.
     Report {
         #[arg(long, default_value_t = 7)]
@@ -2722,6 +2737,44 @@ fn cmd_measure(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, CortErr
         MeasureAction::Show { id } => {
             cort::measure::compaction_details(&cort::measure::claude_projects_dir(), &id)
                 .map_err(|m| CortError::new("measure_error", json!({"message":m})))?
+        }
+        MeasureAction::Cron {
+            install,
+            uninstall,
+            status,
+            if_configured,
+            command_prefix,
+        } => {
+            let fail = |m: &str| CortError::new("measure_error", json!({"message":m}));
+            let need_prefix = || {
+                command_prefix
+                    .clone()
+                    .filter(|p| !p.is_empty())
+                    .ok_or_else(|| fail("pass --command-prefix"))
+            };
+            let action = if install {
+                cort::cron::CronAction::Install {
+                    prefix: need_prefix()?,
+                    if_configured,
+                }
+            } else if uninstall {
+                cort::cron::CronAction::Uninstall
+            } else if status {
+                cort::cron::CronAction::Status {
+                    prefix: need_prefix()?,
+                }
+            } else {
+                return Err(fail("pass one of --install, --uninstall, --status"));
+            };
+            let value = cort::cron::run(action).map_err(|m| fail(&m))?;
+            if value["status"] == "skipped" {
+                return Ok(Emit {
+                    render_command: Some("internal-shim-lean"),
+                    format: Format::Json,
+                    payload: json!({"lean": value["message"]}),
+                });
+            }
+            value
         }
         MeasureAction::Record => {
             let input = cort::measure::RecordInputs {
