@@ -231,6 +231,22 @@ deliberately **not** counted, because a counterfactual is where a savings number
 become vanity. The report itself is written to the log after it is rendered, so an invocation
 never appears in its own report.
 
+
+**Uploading these rows (`cort measure sync`, and the event step of `cort measure record`).**
+`cort measure record` (hourly, from cron) writes new `command_log` rows into the local measurement
+replica first and pushes afterwards, so a dead network loses nothing: the rows wait in the replica.
+The local file only keeps 90 days, so events are lost only if they go unuploaded for 90 days in a
+row -- `record` not running, or uploads refused because this machine has no passing dry run yet (the
+refusal is printed to `measure.log` every hour) -- which prunes them from `usage.db` first. Uploaded
+events are kept remotely for good. The event ids are claudecat's, byte for byte (alphabetical
+payload keys, rowid 0 in the hash; `rust/tests/telemetry.rs` pins them against values claudecat
+itself produced), so history it already uploaded is not uploaded twice. Because a wrong id would
+re-upload that history and a remote row cannot be taken back, a machine with no event watermark yet
+uploads nothing until `cort measure sync --dry-run` has passed for it: the dry run compares the ids
+computed here with the stored ones for the same machine and row, never pushes, and fails on any
+mismatch or on zero overlap. Until then `record` still records compactions and reports
+`events.status: "refused"` (also on stderr, so cron's `measure.log` shows it); a changed
+`command_log` column set voids the dry run.
 ## Install
 
 ```bash

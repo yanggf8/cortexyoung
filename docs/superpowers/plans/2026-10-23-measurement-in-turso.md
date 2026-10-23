@@ -201,7 +201,7 @@
 
 **Files:**
 - Create: `rust/src/telemetry.rs`
-- Modify: `rust/src/measure_store.rs`（`telemetry_events`、`telemetry_project_aliases` 表沿用 claudecat DDL 原文，見 `claudecat/src/turso_memory.rs:13-14`；加索引 `(source, time_ms)`；加 `event_watermarks(machine_id, source, max_rowid)`）、`rust/src/measure.rs`（`record` 加上傳事件）、`rust/src/main.rs`（`measure sync [--dry-run]`）、`rust/src/usage_schema.sql`（只加一行註解：欄位順序會進 event_id 雜湊）
+- Modify: `rust/src/measure_store.rs`（`telemetry_events`、`telemetry_project_aliases` 表沿用 claudecat DDL 原文，見 `claudecat/src/turso_memory.rs:13-14`；加索引 `(source, time_ms)`；加 `event_watermarks(machine_id, source, max_rowid, row_fingerprint)`）、`rust/src/measure.rs`（`record` 加上傳事件）、`rust/src/main.rs`（`measure sync [--dry-run]`）、`rust/src/usage_schema.sql`（只加一行註解：欄位名稱會進 event_id 雜湊；key 是字母序，不是欄位順序）
 - Test: `rust/tests/telemetry.rs`
 
 **Interfaces:**
@@ -221,11 +221,11 @@
   fn set_event_watermark(&mut self, machine_id: &str, source: &str, max_rowid: i64) -> Result<(), String>;
   fn upsert_aliases(&mut self, rows: &[(String, String, String)]) -> Result<(), String>;
   ```
-- 算法逐項照 spec「原始事件」一節；`dry_run` 比對單位是 `(source, machine_id, rowid)`，重疊為 0 回 Err（`no overlap: nothing proves the ids match`），不符回 Err 並列前 5 筆。正式同步：有水位只算水位之後；沒水位走全範圍再設水位。
+- 算法逐項照 spec「原始事件」一節；`dry_run` 比對單位是 `(source, machine_id, payload 的 id 欄)`，重疊為 0 回 Err（`no overlap: nothing proves the ids match`），不符回 Err 並列前 5 筆。正式同步：有水位只算水位之後；沒水位走全範圍再設水位。
 - `measure sync --help` 與 README 寫明保留邊界：本機 `command_log` 只留 90 天，每次 `record` 先寫進本機副本；只有連續 90 天沒跑 `record`，事件才會在上傳前被刪掉。
 
 - [ ] **Step 1: 產生 golden 值。** 在測試裡用 helper 建一份固定的 fixture `usage.db`（v2 列、pre-v2 legacy 列＋`_usage_meta`、NULL、浮點、BLOB、非 ASCII 文字），先寫出到暫存檔；在 `/home/yanggf/a/claudecat`（已封存，只在本機，**不 commit**）加一個臨時測試呼叫 `claudecat::telemetry::scan` 讀同一份檔、印出每列 payload 與 id；跑完把值抄進 cort 的測試，刪掉臨時測試（`git -C /home/yanggf/a/claudecat status` 要回到乾淨）。
-- [ ] **Step 2: 寫失敗的測試**：`event_ids_match_claudecat_golden`、`payload_keys_follow_column_order`、`legacy_row_takes_machine_from_meta_and_drops_stamp`、`dry_run_refuses_on_mismatch`、`dry_run_refuses_empty_overlap`、`dry_run_counts_local_only_and_remote_only`、`watermark_skips_already_uploaded`、`missing_watermark_full_range_inserts_no_duplicates`。
+- [ ] **Step 2: 寫失敗的測試**：`event_ids_match_claudecat_golden`、`payload_keys_are_sorted_not_in_column_order`、`command_event_ids_hash_rowid_zero`、`legacy_row_takes_machine_from_meta_and_drops_stamp`、`dry_run_refuses_on_mismatch`、`dry_run_refuses_empty_overlap`、`dry_run_counts_local_only_and_remote_only`、`watermark_skips_already_uploaded`、`missing_watermark_full_range_inserts_no_duplicates`。
 - [ ] **Step 3: 跑 `cargo test --locked --test telemetry`，預期失敗。**
 - [ ] **Step 4: 實作。**
 - [ ] **Step 5: 跑測試，全綠。**

@@ -5,6 +5,7 @@
 use crate::data_dir::{data_dir, write_atomic};
 use crate::measure_store::{CompactionRow, MeasureStore};
 use crate::memory_store::project_from_git_origin;
+use crate::telemetry::{upload_events, UploadInputs};
 use crate::transcript::{compactions, parse_transcript_bytes, Compaction, Step, WindowDetails};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
@@ -49,17 +50,23 @@ pub struct ScanSummary {
     pub compactions: usize,
     pub skipped_lines: usize,
     pub unknown_type_lines: usize,
+    /// What the event upload did (`None` when events are not part of this run). Local only.
+    pub events: Option<Value>,
 }
 
 impl ScanSummary {
     pub fn to_json(&self) -> Value {
-        json!({
+        let mut v = json!({
             "files_seen": self.files_seen,
             "files_scanned": self.files_scanned,
             "compactions": self.compactions,
             "skipped_lines": self.skipped_lines,
             "unknown_type_lines": self.unknown_type_lines,
-        })
+        });
+        if let Some(events) = &self.events {
+            v["events"] = events.clone();
+        }
+        v
     }
 }
 
@@ -290,6 +297,8 @@ pub struct RecordInputs {
     pub machine_id: String,
     pub host: String,
     pub now_ms: i64,
+    /// Event upload for this run; `None` leaves events out (compaction only).
+    pub events: Option<UploadInputs>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -318,8 +327,13 @@ pub fn record_with_scan(
 ) -> Result<(ScanSummary, RecordOutcome), String> {
     store.upsert_machine_host(&input.machine_id, &input.host, input.now_ms)?;
     let mut marks = Watermarks::load(&input.marks_path);
-    let scan = scan_transcripts(store, &input.projects_dir, &mut marks, &input.machine_id)?;
+    let mut scan = scan_transcripts(store, &input.projects_dir, &mut marks, &input.machine_id)?;
     marks.save(&input.marks_path)?;
+    // Events are independent of compactions: a refusal or failure here is reported beside the scan
+    // and never fails the record (see `upload_events`).
+    if let Some(events) = &input.events {
+        scan.events = Some(upload_events(store, events).to_json());
+    }
     if let Err(e) = store.push() {
         return Ok((scan, RecordOutcome::SavedLocallyPushFailed(e)));
     }

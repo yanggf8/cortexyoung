@@ -23,3 +23,4 @@ CREATE TABLE IF NOT EXISTS command_log (
 );
 CREATE INDEX IF NOT EXISTS idx_command_log_ts ON command_log(ts);
 CREATE INDEX IF NOT EXISTS idx_command_log_project_ts ON command_log(project_id, ts);
+-- NOTE: command_log's column names are hashed into every cort_command event_id (src/telemetry.rs); changing them voids `cort measure sync --dry-run`.

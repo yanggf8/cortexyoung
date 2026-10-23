@@ -173,28 +173,31 @@ Code；Codex／Kimi 的記錄不在本版。
 - **event_id 必須跟 claudecat 算的完全一樣**，否則 claudecat 已上傳的列會被當成新事件再上傳一次
   （反目標）。claudecat 的算法在 `claudecat/src/telemetry.rs:39-170`，以下每一項都會進雜湊，移植時
   逐項照做：
-  - `source="cort_command"`；payload＝`SELECT rowid, * FROM command_log` 依欄位順序組成的**緊湊**
-    JSON 物件（`telemetry.rs:46`、`:113`）。
+  - `source="cort_command"`；payload＝`SELECT rowid, * FROM command_log` 組成的**緊湊** JSON 物件
+    （`telemetry.rs:46`、`:113`），key 依**字母序**（2026-10-23 實作時對 `harnessuse` 真實列更正，
+    見下方「payload 的 key 順序」）。
   - SQLite 值的轉換：NULL→`null`、整數、浮點、文字以 lossy UTF-8 轉、BLOB→`"blob:<hex>"`。
   - pre-v2 legacy 列：machine id 取自 `_usage_meta`，序列化與雜湊前先移除後來加上的
     `machine_id`/`machine_source` 欄（`telemetry.rs:70`、`:126`、`:152`）。
   - 雜湊輸入是 UTF-8 的 `source\0machine_id\0rowid\0payload`，SHA-256，小寫 hex（`telemetry.rs:39`、
-    `:158`）。
+    `:158`）。**`cort_command` 的 rowid 恆為 0**（2026-10-23 更正）：`command_log` 的主鍵就是 rowid 的
+    別名，SQLite 把 `SELECT rowid, *` 的第一欄也命名為 `id`，第二個 `id` 蓋掉第一個，claudecat 取
+    `rowid` 永遠拿不到值。`cost_daily` 的第三欄是檔名，不是 rowid。
 - **golden 測試先做，才移植**（審查後補）：claudecat 現有測試（`tests/telemetry_test.rs:146`）只
   斷言兩次掃描的 id 相同，沒有固定的期望值，不能當對照。所以在 claudecat 還在時，用它對一份固定的
   fixture `usage.db`（含 v2 列、pre-v2 legacy 列、NULL、浮點、BLOB、非 ASCII 文字）算出 payload 與
   id，把這些值寫死進 cort 的測試。
-- **payload 的 key 順序會進雜湊**：JSON 是照欄位插入順序輸出，因為 serde_json 的 `preserve_order`
-  是開著的——但兩邊的 `Cargo.toml` 都只寫 `serde_json = "1"`，這個 feature 是被別的套件順便帶進來
-  的（兩邊 `Cargo.lock` 的 serde_json 都依賴 `indexmap`）。所以 cort 要在 `Cargo.toml` **明確**開
-  `preserve_order`，golden test 要斷言 key 順序本身；之後改 `usage_schema.sql` 的欄位順序也會改掉
-  所有雜湊，要在 schema 旁邊註明。
+- **payload 的 key 順序會進雜湊**：原本以為 JSON 照欄位插入順序輸出（serde_json `preserve_order`）。
+  2026-10-23 用 claudecat 實際產出的 golden 值與 `harnessuse` 隨機 5 筆真實列對照，更正為：claudecat
+  的 JSON map 是 `BTreeMap`，key 一律**字母序**，跟表的欄位順序無關。cort 因此在 `BTreeMap` 上手寫
+  JSON，不開也不依賴 `preserve_order`；golden test 斷言 key 順序本身。進雜湊的是**欄位名稱**而非順序，
+  改名或增刪欄位會改掉之後的雜湊，`usage_schema.sql` 旁邊已註明。
 - **上傳前先對帳**：同步指令要有 `--dry-run`：在本機算出 id，跟遠端已有的列比對，不 push。第一次
   正式同步前必須先跑它。理由：`INSERT OR IGNORE` 只擋得住 id 完全相同的列，id 算錯一個欄位就會把
   約 13 萬筆舊事件再上傳一份，而遠端寫進去就收不回來。比對範圍要講清楚（rowid 只在一個 `usage.db`
   內有意義）：
-  - 以 `(source, machine_id, payload 裡的 rowid)` 配對本機列與遠端列；machine_id 用跟算 id 時同一套
-    歸屬（legacy 列取 `_usage_meta`）。
+  - 以 `(source, machine_id, payload 裡的 id 欄)` 配對本機列與遠端列（payload 沒有 `rowid` key，`id`
+    就是 rowid 的別名）；machine_id 用跟算 id 時同一套歸屬（legacy 列取 `_usage_meta`）。
   - 配得上的列，event_id 必須 100% 相符，不符就拒絕同步，並列出前幾筆不符的 payload 差異。
   - **每台機器的重疊不能是空的**：重疊為 0 時對帳等於沒做（2026-10-23 查到 NUC11i5 從沒跑過
     `claudecat telemetry sync`，`harnessuse` 裡沒有它的事件）。退場步驟因此先讓 claudecat 把每台
@@ -202,7 +205,15 @@ Code；Codex／Kimi 的記錄不在本版。
   - 只在本機、或只在遠端的列分開計數印出，不算失敗。
 - **去重不載入全部遠端 id**（審查後補，我的判斷）：遠端會一直長，每小時把全部 `(source, event_id)`
   讀進記憶體不可行。正式同步以每台機器、每個來源已上傳的最大本機 rowid 當水位，只算水位之後的列；
-  `--dry-run` 與水位遺失時才做全範圍比對。
+  `--dry-run` 與水位遺失時才做全範圍比對。實作補充（2026-10-23）：
+  - 水位另存該列原始的 `ts|command` 指紋，不存算出的 id——id 會隨 schema 變動而變，拿它當身分會在
+    加欄位後把歷史重傳一次。指紋不符或該列已被刪 → 全範圍讀取，不重新要求 dry-run。
+  - 全範圍讀取時，先抓遠端同機器、同時間範圍（加上 `time_ms` 為 NULL）的 payload，以 `(ts, command)`
+    配候選；本機列 L 與遠端 P 若 P ⊆ L 或 L ⊆ P 即視為已上傳，加欄位、減欄位都不會重傳。同時加又減
+    欄位的情況配不上，是已知缺口。
+  - 每頁 2000 列上傳，每頁成功就推進水位。
+  - 機器沒有水位時，第一次上傳要有 `--dry-run` 留下的通過標記（`measure-events-verified.json`，記
+    machine 與欄位清單）；標記證明的是算法，不是某個檔案。
 - **遠端事件永久保留**（使用者 2026-10-23 決定）：不刪、不彙總。本機只留 90 天，新資料庫是事件唯一
   的長期存放處；副本每年大約多幾百 MB，這個副本只放量測，不影響記憶。pull 是增量的，去重用下面的
   水位，所以每小時的成本不隨總量成長。
@@ -401,7 +412,7 @@ Thinkpade15）第一次記錄時就會寫進對照，它們以前上傳的事件
   - 匯入用量另存 host × 日的表；同一天有事件就用事件算的。
   - 缺快照以 host 為單位判斷。
   - 沒有對照的 machine_id 以前 8 碼顯示，不手動補。
-  - 去重用每台、每來源的 rowid 水位；`--dry-run` 要求每台重疊非空。
+  - 去重用每台、每來源的 rowid 水位（加 `ts|command` 指紋）；`--dry-run` 要求每台重疊非空。
   - 退場時 claudecat 最後一次同步直接寫進新資料庫，之後才從 `harnessuse` 複製舊事件。
 - 測試：記錄與查詢走一層儲存介面；測試用本機假儲存（暫存目錄裡的 rusqlite，不是同步副本檔，
   不違反限制）自動測 upsert、異常規則、活躍判定、同名警告、push 失敗保留資料、離線第一行；

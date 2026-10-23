@@ -313,6 +313,7 @@ fn rec_env() -> Rec {
         machine_id: "m1".into(),
         host: "box".into(),
         now_ms: 5_000,
+        events: None,
     };
     Rec { _tmp: tmp, input }
 }
@@ -518,4 +519,94 @@ fn record_pull_failure_still_returns_scan() {
     assert!(record(&mut s, &r.input)
         .unwrap_err()
         .contains("pull failed"));
+}
+
+// ---------------------------------------------------------------------------------------------
+// record + events: the event step may refuse or fail without costing the compaction record
+// ---------------------------------------------------------------------------------------------
+
+fn usage_db_with_rows(dir: &Path) -> PathBuf {
+    let path = dir.join("usage.db");
+    let c = rusqlite::Connection::open(&path).unwrap();
+    c.execute_batch(include_str!("../src/usage_schema.sql"))
+        .unwrap();
+    c.execute_batch(
+        "INSERT INTO command_log (id,ts,project_id,machine_id,machine_source,command,args_summary,status,bytes_out)
+         VALUES (1,1760000000000,NULL,'m1','env','impact','a','ok',1)",
+    )
+    .unwrap();
+    path
+}
+
+fn with_events(r: &mut Rec, usage_db: PathBuf) {
+    r.input.events = Some(cort::telemetry::UploadInputs {
+        usage_db,
+        cost_dir: r._tmp.path().join("no-cost"),
+        marker_path: r._tmp.path().join("verified.json"),
+        machine_id: "m1".into(),
+    });
+}
+
+#[test]
+fn record_keeps_compactions_when_events_refuse() {
+    let (_t, mut s) = store();
+    let mut r = rec_env();
+    let db = usage_db_with_rows(r._tmp.path());
+    with_events(&mut r, db);
+    let (scan, outcome) = record_with_scan(&mut s, &r.input).unwrap();
+    assert_eq!(outcome, RecordOutcome::Pushed);
+    assert_eq!(scan.compactions, 1);
+    assert_eq!(s.compactions_since(0).unwrap().len(), 1);
+    let events = scan.to_json()["events"].clone();
+    assert_eq!(events["status"], "refused", "{events}");
+    assert!(events["reason"].as_str().unwrap().contains("--dry-run"));
+    // Nothing reached the store: no events, no watermark.
+    assert!(s.remote_ids("m1", "cort_command").unwrap().is_empty());
+    assert_eq!(s.event_watermark("m1", "cort_command").unwrap(), None);
+}
+
+#[test]
+fn record_keeps_compactions_when_events_fail() {
+    let (_t, mut s) = store();
+    let mut r = rec_env();
+    let bad = r._tmp.path().join("usage.db");
+    fs::write(&bad, "this is not a sqlite file").unwrap();
+    s.set_event_watermark("m1", "cort_command", 0, "stale")
+        .unwrap(); // past the gate, so the read fails
+    with_events(&mut r, bad);
+    let (scan, outcome) = record_with_scan(&mut s, &r.input).unwrap();
+    assert_eq!(outcome, RecordOutcome::Pushed);
+    assert_eq!(s.compactions_since(0).unwrap().len(), 1);
+    assert_eq!(scan.to_json()["events"]["status"], "failed");
+}
+
+#[test]
+fn record_uploads_events_before_the_push() {
+    let (_t, mut s) = store();
+    let mut r = rec_env();
+    let db = usage_db_with_rows(r._tmp.path());
+    s.set_event_watermark("m1", "cort_command", 0, "stale")
+        .unwrap();
+    with_events(&mut r, db);
+    s.fail_push(true);
+    let (scan, outcome) = record_with_scan(&mut s, &r.input).unwrap();
+    // Push failed, yet the event is already in the local replica and the watermark moved.
+    assert!(matches!(outcome, RecordOutcome::SavedLocallyPushFailed(_)));
+    let events = scan.to_json()["events"].clone();
+    assert_eq!(events["status"], "uploaded");
+    assert_eq!(events["inserted"], 1);
+    assert_eq!(
+        s.event_watermark("m1", "cort_command")
+            .unwrap()
+            .map(|w| w.0),
+        Some(1)
+    );
+}
+
+#[test]
+fn record_without_events_input_has_no_events_key() {
+    let (_t, mut s) = store();
+    let r = rec_env();
+    let (scan, _) = record_with_scan(&mut s, &r.input).unwrap();
+    assert!(scan.to_json().get("events").is_none());
 }

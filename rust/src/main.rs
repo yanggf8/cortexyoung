@@ -55,7 +55,7 @@ fn usage_value() -> Value {
             "impact": "cort impact --symbol <name> [--depth <n>] [--coverage] [-f json|lean]",
             "usage": "cort usage [days] [-f json|lean]",
             "memory": "cort memory <configure|import-config|record|resolve|recall|status|sync|import-legacy> [options]",
-            "measure": "cort measure configure --url URL --token-stdin",
+            "measure": "cort measure <configure|show|record|sync|cron|report> [options]  (sync --dry-run compares event ids and never pushes; the local command_log keeps 90 days, so events are lost only if they go unuploaded for 90 days in a row: record not running, or uploads refused pending a dry run)",
             "hook-suggest": "cort hook-suggest  (PreToolUse hook: records search verdicts; silent unless CORT_SUGGEST=1; not a verb to type)",
             "hook-refresh": "cort hook-refresh  (PostToolUse hook: brings this project's index up to the tree after an edit; silent, never creates an index; not a verb to type)",
             "hook-install": "cort hook-install [--settings <path>] [--command <cmd>] [--remove|--status]  (installer-invoked: wires hook-suggest into settings.json; not a verb to type)",
@@ -2678,6 +2678,21 @@ struct MeasureArgs {
     action: MeasureAction,
 }
 
+/// Retention boundary and the first-upload gate, shown by `cort measure sync --help`.
+const SYNC_HELP: &str = "Upload usage events (command_log rows and cost reports) to the measurement database, \
+then push and pull.
+
+Retention boundary: the local command_log keeps only 90 days. `cort measure record` (hourly, from \
+cron) writes new events into the local replica first and pushes afterwards, so a dead network loses \
+nothing. Events are lost only if they go unuploaded for 90 days in a row -- `record` not running, \
+or uploads refused because no dry run has passed for this machine (printed to measure.log every \
+hour): they are pruned from the local file first. Uploaded events are kept remotely for good.
+
+First upload: `cort measure record` and `cort measure sync` refuse to upload events for a machine \
+that has no event watermark yet, unless `cort measure sync --dry-run` has passed for it. The dry \
+run compares the ids computed here with the ids already stored for the same machine and row, never \
+pushes, and fails on any mismatch or when no row overlaps. Re-run it after command_log's columns change.";
+
 #[derive(Subcommand, Debug)]
 enum MeasureAction {
     Configure {
@@ -2690,6 +2705,14 @@ enum MeasureAction {
     Show { id: String },
     /// Scan local transcripts into the store, then push and pull.
     Record,
+    /// Upload usage events (and push/pull); `--dry-run` only compares ids and never pushes.
+    #[command(long_about = SYNC_HELP)]
+    Sync {
+        /// Compare local event ids with the remote ones without uploading. A passing run is what
+        /// allows the first real upload for this machine.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Own the hourly crontab line that runs `measure record`.
     Cron {
         #[arg(long, group = "cron_action")]
@@ -2714,6 +2737,26 @@ enum MeasureAction {
         #[arg(long)]
         json: bool,
     },
+}
+
+/// Where events come from on this machine; `None` when even the default `usage.db` path is unknown.
+fn event_inputs() -> Option<cort::telemetry::UploadInputs> {
+    Some(cort::telemetry::UploadInputs {
+        usage_db: usage::usage_db_path()?,
+        cost_dir: cort::telemetry::default_cost_dir(),
+        marker_path: cort::telemetry::default_marker_path(),
+        machine_id: usage::machine_id().to_string(),
+    })
+}
+
+/// A refused or failed event step does not fail `record` (the compaction rows are independent),
+/// so it must not pass silently either: cron appends stderr to measure.log.
+fn warn_events(scan: &cort::measure::ScanSummary) {
+    if let Some(events) = &scan.events {
+        if events["status"] != "uploaded" {
+            eprintln!("measure record: events not uploaded: {events}");
+        }
+    }
 }
 
 fn cmd_measure(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, CortError> {
@@ -2806,11 +2849,13 @@ fn cmd_measure(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, CortErr
                 machine_id: usage::machine_id().to_string(),
                 host: cort::measure::host_name(),
                 now_ms: usage::now_ms(),
+                events: event_inputs(),
             };
             let (scan, outcome) = cort::measure_store::with_turso_store(|store| {
                 cort::measure::record_with_scan(store, &input)
             })
             .map_err(|m| CortError::new("measure_error", json!({"message":m})))?;
+            warn_events(&scan);
             match outcome {
                 cort::measure::RecordOutcome::Pushed => {
                     cort::measure::write_last_sync(usage::now_ms())
@@ -2829,6 +2874,42 @@ fn cmd_measure(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, CortErr
                         json!({"message": format!("saved locally, push failed: {m}"), "scan": scan.to_json()}),
                     ));
                 }
+            }
+        }
+        MeasureAction::Sync { dry_run } => {
+            let Some(up) = event_inputs() else {
+                return Err(CortError::new(
+                    "measure_error",
+                    json!({"message":"cannot locate usage.db (HOME is unset and CORT_CACHE_DIR is not set)"}),
+                ));
+            };
+            let fail = |m: String| CortError::new("measure_error", json!({"message":m}));
+            if dry_run {
+                let report = cort::measure_store::with_turso_store(|store| {
+                    cort::telemetry::verify_events(store, &up, usage::now_ms())
+                })
+                .map_err(|m| CortError::new("measure_dry_run_failed", json!({"message":m})))?;
+                json!({"status":"dry_run_ok","pushed":false,
+                    "matched":report.matched,"local_only":report.local_only,
+                    "remote_only":report.remote_only,
+                    "verified":report.matched > 0,
+                    "note":"ids match; the next `record` or `sync` may upload events for this machine"})
+            } else {
+                let (events, synced) = cort::measure_store::with_turso_store(|store| {
+                    let events = cort::telemetry::upload_events(store, &up);
+                    Ok((events, cort::measure::sync(store)))
+                })
+                .map_err(fail)?;
+                synced.map_err(fail)?;
+                cort::measure::write_last_sync(usage::now_ms()).map_err(fail)?;
+                if !events.is_ok() {
+                    // An explicit sync that did not upload what it was asked to is a failure.
+                    return Err(CortError::new(
+                        "measure_events_not_uploaded",
+                        json!({"events": events.to_json()}),
+                    ));
+                }
+                json!({"status":"synced","pushed":true,"events":events.to_json()})
             }
         }
         MeasureAction::Report {

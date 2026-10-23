@@ -6,6 +6,8 @@
 //! Both run the same [`MEASURE_SCHEMA`] and the same SQL text.
 
 use crate::memory_store::{self, Config};
+use crate::telemetry::TelemetryEvent;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -58,6 +60,51 @@ pub trait MeasureStore {
         seen_ms: i64,
     ) -> Result<(), String>;
     fn machine_hosts(&mut self) -> Result<Vec<MachineHost>, String>;
+    /// `INSERT OR IGNORE` each event; returns how many were new. One transaction per chunk.
+    fn insert_events(&mut self, events: &[TelemetryEvent]) -> Result<usize, String>;
+    /// Local rowid (the payload's `id`) -> event_id for what the store holds for this machine.
+    fn remote_ids(
+        &mut self,
+        machine_id: &str,
+        source: &str,
+    ) -> Result<HashMap<i64, String>, String>;
+    /// The stored payload of one event, for a mismatch report.
+    fn remote_payload(
+        &mut self,
+        machine_id: &str,
+        source: &str,
+        event_id: &str,
+    ) -> Result<Option<String>, String>;
+    /// Payloads of this machine's stored events whose `time_ms` lies in `[min_ms, max_ms]`.
+    /// Payloads of this machine's stored events that have no `time_ms`.
+    fn remote_payloads_without_time(
+        &mut self,
+        machine_id: &str,
+        source: &str,
+    ) -> Result<Vec<String>, String>;
+    fn remote_payloads_in_range(
+        &mut self,
+        machine_id: &str,
+        source: &str,
+        min_ms: i64,
+        max_ms: i64,
+    ) -> Result<Vec<String>, String>;
+    fn event_watermark(
+        &mut self,
+        machine_id: &str,
+        source: &str,
+    ) -> Result<Option<(i64, String)>, String>;
+    /// Replace the watermark: the highest local rowid uploaded and a fingerprint of that row's raw
+    /// `ts` and `command`. The fingerprint lets the next run notice that `usage.db` was replaced
+    /// under the same rowids; it ignores the column set, so a schema change does not trip it.
+    fn set_event_watermark(
+        &mut self,
+        machine_id: &str,
+        source: &str,
+        max_rowid: i64,
+        row_fingerprint: &str,
+    ) -> Result<(), String>;
+    fn upsert_aliases(&mut self, rows: &[(String, String, String)]) -> Result<(), String>;
     fn push(&mut self) -> Result<(), String>;
     fn pull(&mut self) -> Result<(), String>;
 }
@@ -95,6 +142,19 @@ pub const MEASURE_SCHEMA: &[&str] = &[
         last_seen_ms INTEGER NOT NULL,
         PRIMARY KEY (machine_id, host)
     )",
+    // The next two are claudecat's DDL verbatim (turso_memory.rs), so rows it already wrote fit.
+    "CREATE TABLE IF NOT EXISTS telemetry_events (source TEXT NOT NULL, event_id TEXT NOT NULL, machine_id TEXT NOT NULL, machine_source TEXT NOT NULL, project_id TEXT, time_ms INTEGER, payload TEXT NOT NULL, PRIMARY KEY (source, event_id))",
+    "CREATE TABLE IF NOT EXISTS telemetry_project_aliases (machine_id TEXT NOT NULL, local_project_id TEXT NOT NULL, shared_project_id TEXT NOT NULL, PRIMARY KEY (machine_id, local_project_id, shared_project_id))",
+    "CREATE INDEX IF NOT EXISTS telemetry_events_source_time ON telemetry_events (source, time_ms)",
+    // Highest local rowid already uploaded, per machine and source: what keeps the hourly sync from
+    // reading the whole remote table.
+    "CREATE TABLE IF NOT EXISTS event_watermarks (
+        machine_id TEXT NOT NULL,
+        source TEXT NOT NULL,
+        max_rowid INTEGER NOT NULL,
+        row_fingerprint TEXT NOT NULL,
+        PRIMARY KEY (machine_id, source)
+    )",
 ];
 
 const COMPACTION_COLUMNS: &str = "machine_id, boundary_uuid, session_id, time_ms, project_id, \
@@ -117,6 +177,29 @@ const UPSERT_HOST: &str = "INSERT INTO machine_hosts (machine_id, host, last_see
     VALUES (?, ?, ?) ON CONFLICT (machine_id, host) DO UPDATE SET \
     last_seen_ms = MAX(last_seen_ms, excluded.last_seen_ms)";
 const SELECT_HOSTS: &str = "SELECT machine_id, host, last_seen_ms FROM machine_hosts";
+const INSERT_EVENT: &str = "INSERT OR IGNORE INTO telemetry_events (source, event_id, machine_id, \
+    machine_source, project_id, time_ms, payload) VALUES (?, ?, ?, ?, ?, ?, ?)";
+const SELECT_REMOTE: &str =
+    "SELECT event_id, CASE WHEN json_valid(payload) THEN json_extract(payload, '$.id') END \
+     FROM telemetry_events WHERE source = ? AND machine_id = ?";
+const SELECT_RANGE: &str =
+    "SELECT payload FROM telemetry_events WHERE source = ? AND machine_id = ? \
+    AND time_ms >= ? AND time_ms <= ?";
+const SELECT_NO_TIME: &str =
+    "SELECT payload FROM telemetry_events WHERE source = ? AND machine_id = ? \
+    AND time_ms IS NULL";
+const SELECT_PAYLOAD: &str =
+    "SELECT payload FROM telemetry_events WHERE source = ? AND machine_id = ? AND event_id = ?";
+const SELECT_WATERMARK: &str =
+    "SELECT max_rowid, row_fingerprint FROM event_watermarks WHERE machine_id = ? AND source = ?";
+const UPSERT_WATERMARK: &str =
+    "INSERT INTO event_watermarks (machine_id, source, max_rowid, row_fingerprint) \
+    VALUES (?, ?, ?, ?) ON CONFLICT (machine_id, source) DO UPDATE SET \
+    max_rowid = excluded.max_rowid, row_fingerprint = excluded.row_fingerprint";
+const INSERT_ALIAS: &str = "INSERT OR IGNORE INTO telemetry_project_aliases \
+    (machine_id, local_project_id, shared_project_id) VALUES (?, ?, ?)";
+/// Events per transaction: a commit per row is minutes on a 130k-row first upload.
+const EVENT_CHUNK: usize = 2000;
 
 fn select_since() -> String {
     format!("SELECT {COMPACTION_COLUMNS} FROM compactions WHERE time_ms >= ? ORDER BY time_ms, machine_id, boundary_uuid")
@@ -227,11 +310,61 @@ fn host_from_cells(c: &[Cell]) -> Result<MachineHost, String> {
     })
 }
 
+fn event_cells(e: &TelemetryEvent) -> Vec<Cell> {
+    vec![
+        Cell::Text(e.source.clone()),
+        Cell::Text(e.event_id.clone()),
+        Cell::Text(e.machine_id.clone()),
+        Cell::Text(e.machine_source.clone()),
+        e.project_id.clone().map_or(Cell::Null, Cell::Text),
+        opt_int(e.time_ms),
+        Cell::Text(e.payload.clone()),
+    ]
+}
+
+/// `(event_id, id)` rows, `id` being the payload's `id` key (NULL when absent) -> id -> event_id.
+fn remote_map(rows: &[Vec<Cell>]) -> Result<HashMap<i64, String>, String> {
+    let mut out = HashMap::new();
+    for r in rows {
+        if let Some(id) = opt_i(&r[1])? {
+            out.insert(id, text(&r[0])?);
+        }
+    }
+    Ok(out)
+}
+
+/// COMMIT failed: try to roll back so the connection is not left inside a transaction, then
+/// return the COMMIT error (the rollback's own error adds nothing).
+fn commit_or_rollback(commit: Result<(), String>, rollback: impl FnOnce()) -> Result<(), String> {
+    if commit.is_err() {
+        rollback();
+    }
+    commit
+}
+
+fn range_params(machine_id: &str, source: &str, min_ms: i64, max_ms: i64) -> Vec<Cell> {
+    vec![
+        Cell::Text(source.into()),
+        Cell::Text(machine_id.into()),
+        Cell::Int(min_ms),
+        Cell::Int(max_ms),
+    ]
+}
+
+fn alias_cells(r: &(String, String, String)) -> Vec<Cell> {
+    vec![
+        Cell::Text(r.0.clone()),
+        Cell::Text(r.1.clone()),
+        Cell::Text(r.2.clone()),
+    ]
+}
+
 /// A plain SQLite file implementing the store; `push`/`pull` have nothing to sync.
 pub struct SqliteStore {
     conn: rusqlite::Connection,
     fail_push: bool,
     fail_pull: bool,
+    pushes: usize,
 }
 
 fn sql_err(e: rusqlite::Error) -> String {
@@ -248,6 +381,7 @@ impl SqliteStore {
             conn,
             fail_push: false,
             fail_pull: false,
+            pushes: 0,
         })
     }
 
@@ -259,6 +393,11 @@ impl SqliteStore {
     /// Test hook: make `pull` return an error.
     pub fn fail_pull(&mut self, fail: bool) {
         self.fail_pull = fail;
+    }
+
+    /// Test hook: how many times `push` was called (failed or not).
+    pub fn push_calls(&self) -> usize {
+        self.pushes
     }
 
     fn query(&self, sql: &str, params: Vec<Cell>, cols: usize) -> Result<Vec<Vec<Cell>>, String> {
@@ -352,7 +491,139 @@ impl MeasureStore for SqliteStore {
             .collect()
     }
 
+    fn insert_events(&mut self, events: &[TelemetryEvent]) -> Result<usize, String> {
+        let mut inserted = 0usize;
+        for chunk in events.chunks(EVENT_CHUNK) {
+            self.conn.execute_batch("BEGIN").map_err(sql_err)?;
+            for e in chunk {
+                let params: Vec<rusqlite::types::Value> =
+                    event_cells(e).into_iter().map(to_sqlite).collect();
+                match self
+                    .conn
+                    .execute(INSERT_EVENT, rusqlite::params_from_iter(params))
+                {
+                    Ok(n) => inserted += n,
+                    Err(err) => {
+                        let _ = self.conn.execute_batch("ROLLBACK");
+                        return Err(sql_err(err));
+                    }
+                }
+            }
+            let commit = self.conn.execute_batch("COMMIT").map_err(sql_err);
+            commit_or_rollback(commit, || {
+                let _ = self.conn.execute_batch("ROLLBACK");
+            })?;
+        }
+        Ok(inserted)
+    }
+
+    fn remote_ids(
+        &mut self,
+        machine_id: &str,
+        source: &str,
+    ) -> Result<HashMap<i64, String>, String> {
+        let rows = self.query(
+            SELECT_REMOTE,
+            vec![Cell::Text(source.into()), Cell::Text(machine_id.into())],
+            2,
+        )?;
+        remote_map(&rows)
+    }
+
+    fn remote_payload(
+        &mut self,
+        machine_id: &str,
+        source: &str,
+        event_id: &str,
+    ) -> Result<Option<String>, String> {
+        let rows = self.query(
+            SELECT_PAYLOAD,
+            vec![
+                Cell::Text(source.into()),
+                Cell::Text(machine_id.into()),
+                Cell::Text(event_id.into()),
+            ],
+            1,
+        )?;
+        rows.first().map(|r| text(&r[0])).transpose()
+    }
+
+    /// Payloads of this machine's stored events whose `time_ms` lies in `[min_ms, max_ms]`.
+    /// Payloads of this machine's stored events that have no `time_ms`.
+    fn remote_payloads_without_time(
+        &mut self,
+        machine_id: &str,
+        source: &str,
+    ) -> Result<Vec<String>, String> {
+        self.query(
+            SELECT_NO_TIME,
+            vec![Cell::Text(source.into()), Cell::Text(machine_id.into())],
+            1,
+        )?
+        .iter()
+        .map(|r| text(&r[0]))
+        .collect()
+    }
+
+    fn remote_payloads_in_range(
+        &mut self,
+        machine_id: &str,
+        source: &str,
+        min_ms: i64,
+        max_ms: i64,
+    ) -> Result<Vec<String>, String> {
+        self.query(
+            SELECT_RANGE,
+            range_params(machine_id, source, min_ms, max_ms),
+            1,
+        )?
+        .iter()
+        .map(|r| text(&r[0]))
+        .collect()
+    }
+
+    fn event_watermark(
+        &mut self,
+        machine_id: &str,
+        source: &str,
+    ) -> Result<Option<(i64, String)>, String> {
+        let rows = self.query(
+            SELECT_WATERMARK,
+            vec![Cell::Text(machine_id.into()), Cell::Text(source.into())],
+            2,
+        )?;
+        rows.first()
+            .map(|r| Ok((int(&r[0])?, text(&r[1])?)))
+            .transpose()
+    }
+
+    fn set_event_watermark(
+        &mut self,
+        machine_id: &str,
+        source: &str,
+        max_rowid: i64,
+        row_fingerprint: &str,
+    ) -> Result<(), String> {
+        self.exec(
+            UPSERT_WATERMARK,
+            vec![
+                Cell::Text(machine_id.into()),
+                Cell::Text(source.into()),
+                Cell::Int(max_rowid),
+                Cell::Text(row_fingerprint.into()),
+            ],
+        )
+    }
+
+    fn upsert_aliases(&mut self, rows: &[(String, String, String)]) -> Result<(), String> {
+        for r in rows {
+            self.exec(INSERT_ALIAS, alias_cells(r))?;
+        }
+        Ok(())
+    }
+
     fn push(&mut self) -> Result<(), String> {
+        self.pushes += 1;
         if self.fail_push {
             return Err("push failed (fail_push set)".into());
         }
@@ -455,6 +726,31 @@ async fn turso_query(
     Ok(out)
 }
 
+async fn turso_insert_events(
+    conn: &turso::Connection,
+    events: &[TelemetryEvent],
+) -> Result<usize, String> {
+    let mut inserted = 0usize;
+    for chunk in events.chunks(EVENT_CHUNK) {
+        conn.execute("BEGIN", ()).await.map_err(te)?;
+        for e in chunk {
+            let params = turso::params_from_iter(event_cells(e).into_iter().map(tv));
+            match conn.execute(INSERT_EVENT, params).await {
+                Ok(n) => inserted += n as usize,
+                Err(err) => {
+                    let _ = conn.execute("ROLLBACK", ()).await;
+                    return Err(te(err));
+                }
+            }
+        }
+        if let Err(e) = conn.execute("COMMIT", ()).await {
+            let _ = conn.execute("ROLLBACK", ()).await;
+            return Err(te(e));
+        }
+    }
+    Ok(inserted)
+}
+
 impl TursoStore {
     fn open(config: &Config) -> Result<Self, String> {
         let rt = memory_store::runtime()?;
@@ -534,6 +830,124 @@ impl MeasureStore for TursoStore {
             .collect()
     }
 
+    fn insert_events(&mut self, events: &[TelemetryEvent]) -> Result<usize, String> {
+        self.rt.block_on(turso_insert_events(&self.conn, events))
+    }
+
+    fn remote_ids(
+        &mut self,
+        machine_id: &str,
+        source: &str,
+    ) -> Result<HashMap<i64, String>, String> {
+        let rows = self.rt.block_on(turso_query(
+            &self.conn,
+            SELECT_REMOTE,
+            vec![Cell::Text(source.into()), Cell::Text(machine_id.into())],
+            2,
+        ))?;
+        remote_map(&rows)
+    }
+
+    fn remote_payload(
+        &mut self,
+        machine_id: &str,
+        source: &str,
+        event_id: &str,
+    ) -> Result<Option<String>, String> {
+        let rows = self.rt.block_on(turso_query(
+            &self.conn,
+            SELECT_PAYLOAD,
+            vec![
+                Cell::Text(source.into()),
+                Cell::Text(machine_id.into()),
+                Cell::Text(event_id.into()),
+            ],
+            1,
+        ))?;
+        rows.first().map(|r| text(&r[0])).transpose()
+    }
+
+    /// Payloads of this machine's stored events whose `time_ms` lies in `[min_ms, max_ms]`.
+    /// Payloads of this machine's stored events that have no `time_ms`.
+    fn remote_payloads_without_time(
+        &mut self,
+        machine_id: &str,
+        source: &str,
+    ) -> Result<Vec<String>, String> {
+        self.rt
+            .block_on(turso_query(
+                &self.conn,
+                SELECT_NO_TIME,
+                vec![Cell::Text(source.into()), Cell::Text(machine_id.into())],
+                1,
+            ))?
+            .iter()
+            .map(|r| text(&r[0]))
+            .collect()
+    }
+
+    fn remote_payloads_in_range(
+        &mut self,
+        machine_id: &str,
+        source: &str,
+        min_ms: i64,
+        max_ms: i64,
+    ) -> Result<Vec<String>, String> {
+        self.rt
+            .block_on(turso_query(
+                &self.conn,
+                SELECT_RANGE,
+                range_params(machine_id, source, min_ms, max_ms),
+                1,
+            ))?
+            .iter()
+            .map(|r| text(&r[0]))
+            .collect()
+    }
+
+    fn event_watermark(
+        &mut self,
+        machine_id: &str,
+        source: &str,
+    ) -> Result<Option<(i64, String)>, String> {
+        let rows = self.rt.block_on(turso_query(
+            &self.conn,
+            SELECT_WATERMARK,
+            vec![Cell::Text(machine_id.into()), Cell::Text(source.into())],
+            2,
+        ))?;
+        rows.first()
+            .map(|r| Ok((int(&r[0])?, text(&r[1])?)))
+            .transpose()
+    }
+
+    fn set_event_watermark(
+        &mut self,
+        machine_id: &str,
+        source: &str,
+        max_rowid: i64,
+        row_fingerprint: &str,
+    ) -> Result<(), String> {
+        self.rt.block_on(turso_exec(
+            &self.conn,
+            UPSERT_WATERMARK,
+            vec![
+                Cell::Text(machine_id.into()),
+                Cell::Text(source.into()),
+                Cell::Int(max_rowid),
+                Cell::Text(row_fingerprint.into()),
+            ],
+        ))
+    }
+
+    fn upsert_aliases(&mut self, rows: &[(String, String, String)]) -> Result<(), String> {
+        for r in rows {
+            self.rt
+                .block_on(turso_exec(&self.conn, INSERT_ALIAS, alias_cells(r)))?;
+        }
+        Ok(())
+    }
+
     fn push(&mut self) -> Result<(), String> {
         self.rt.block_on(self.db.push()).map_err(te)
     }
@@ -556,6 +970,17 @@ pub fn with_turso_store<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn commit_failure_rolls_back_and_returns_the_commit_error() {
+        let mut rolled_back = false;
+        let r = commit_or_rollback(Err("commit boom".into()), || rolled_back = true);
+        assert_eq!(r, Err("commit boom".to_string()));
+        assert!(rolled_back);
+        let mut untouched = true;
+        assert_eq!(commit_or_rollback(Ok(()), || untouched = false), Ok(()));
+        assert!(untouched);
+    }
 
     /// The shared SQL text must run on Turso's engine too, not only on SQLite.
     #[test]
@@ -604,6 +1029,88 @@ mod tests {
             }
             let hosts = turso_query(&conn, SELECT_HOSTS, vec![], 3).await.unwrap();
             assert_eq!(host_from_cells(&hosts[0]).unwrap().last_seen_ms, 900);
+            // Events: chunked transaction, INSERT OR IGNORE counting, watermark that never lowers.
+            let ev = |id: &str, rowid: i64| TelemetryEvent {
+                source: "cort_command".into(),
+                event_id: id.into(),
+                machine_id: "m".into(),
+                machine_source: "env".into(),
+                project_id: None,
+                time_ms: Some(1),
+                payload: format!("{{\"id\":{rowid}}}"),
+                rowid: Some(rowid),
+            };
+            let batch = vec![ev("a", 1), ev("b", 2)];
+            assert_eq!(turso_insert_events(&conn, &batch).await.unwrap(), 2);
+            let mut junk = ev("j", 4);
+            junk.payload = "not json".into(); // json_valid must keep it from failing the query
+            let again = vec![ev("b", 2), ev("c", 3), junk];
+            assert_eq!(turso_insert_events(&conn, &again).await.unwrap(), 2);
+            let rows = turso_query(
+                &conn,
+                SELECT_REMOTE,
+                vec![Cell::Text("cort_command".into()), Cell::Text("m".into())],
+                2,
+            )
+            .await
+            .unwrap();
+            assert_eq!(remote_map(&rows).unwrap().len(), 3);
+            let ranged = turso_query(
+                &conn,
+                SELECT_RANGE,
+                range_params("m", "cort_command", 0, 5),
+                1,
+            )
+            .await
+            .unwrap();
+            assert_eq!(ranged.len(), 4);
+            let outside = turso_query(
+                &conn,
+                SELECT_RANGE,
+                range_params("m", "cort_command", 2, 5),
+                1,
+            )
+            .await
+            .unwrap();
+            assert!(outside.is_empty());
+            let mut notime = ev("n", 5);
+            notime.time_ms = None;
+            turso_insert_events(&conn, &[notime]).await.unwrap();
+            let none_rows = turso_query(
+                &conn,
+                SELECT_NO_TIME,
+                vec![Cell::Text("cort_command".into()), Cell::Text("m".into())],
+                1,
+            )
+            .await
+            .unwrap();
+            assert_eq!(none_rows.len(), 1);
+            for mark in [10, 4] {
+                let p = vec![
+                    Cell::Text("m".into()),
+                    Cell::Text("cort_command".into()),
+                    Cell::Int(mark),
+                    Cell::Text(format!("id{mark}")),
+                ];
+                turso_exec(&conn, UPSERT_WATERMARK, p).await.unwrap();
+            }
+            let w = turso_query(
+                &conn,
+                SELECT_WATERMARK,
+                vec![Cell::Text("m".into()), Cell::Text("cort_command".into())],
+                2,
+            )
+            .await
+            .unwrap();
+            // Replaced, not raised: a recreated usage.db restarts its rowids.
+            assert_eq!(int(&w[0][0]).unwrap(), 4);
+            assert_eq!(text(&w[0][1]).unwrap(), "id4");
+            let alias = ("m".to_string(), "l".to_string(), "s".to_string());
+            for _ in 0..2 {
+                turso_exec(&conn, INSERT_ALIAS, alias_cells(&alias))
+                    .await
+                    .unwrap();
+            }
         });
     }
 }
