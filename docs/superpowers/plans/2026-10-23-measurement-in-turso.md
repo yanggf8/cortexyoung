@@ -239,7 +239,7 @@
 
 **Interfaces:**
 - Consumes: Task 6 的表與 `insert_events`、`upsert_aliases`。
-- Produces: `pub fn copy_events(from: &mut dyn MeasureStore, to: &mut dyn MeasureStore) -> Result<Vec<(String, String, usize, usize)>, String>;`（每組 `(source, machine_id, 來源列數, 目的列數)`）；`MeasureStore` 加 `fn events_page(&mut self, after: Option<(String, String)>, limit: usize) -> Result<Vec<TelemetryEvent>, String>;` 與 `fn aliases(&mut self)`。
+- Produces: `pub fn copy_events(from: &mut dyn MeasureStore, to: &mut dyn MeasureStore) -> Result<CopyReport, String>;`（`groups` 每組 `(source, machine_id, 來源列數, 目的列數)`，加 `conflicts` 與前 5 筆 `conflict_examples`：同 key 但欄位不同的列，不覆寫；被擋下又查不到的列回 Err）；`MeasureStore` 加 `fn events_page(&mut self, after: Option<(String, String)>, limit: usize) -> Result<Vec<TelemetryEvent>, String>;`、`fn aliases(&mut self)`、`fn event_counts(&mut self)`、`fn events_in_key_range(&mut self, first, last)`。兩份設定指向同一個資料庫（比對主機）時拒絕執行，什麼都不開。（2026-10-24 依 Codex 三輪審查更新）
 - 來源設定讀 `cort memory` 的設定（`harnessuse`），副本檔另開 `legacy-telemetry.db`，不動 `memory.db`。只讀來源，不刪任何東西。
 
 - [ ] **Step 1: 寫失敗的測試**：`copy_is_idempotent`、`copy_reports_counts_by_source_and_machine`、`copy_keeps_event_ids_byte_identical`、`copy_never_writes_to_source`。

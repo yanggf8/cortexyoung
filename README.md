@@ -247,6 +247,18 @@ computed here with the stored ones for the same machine and row, never pushes, a
 mismatch or on zero overlap. Until then `record` still records compactions and reports
 `events.status: "refused"` (also on stderr, so cron's `measure.log` shows it); a changed
 `command_log` column set voids the dry run.
+
+**Copying the old history (`cort measure copy-events`).** A one-time migration of what claudecat
+already uploaded: it copies `telemetry_events` and `telemetry_project_aliases` from the
+`harnessuse` database (the one `cort memory` is configured for) into the measurement database,
+every column unchanged, `INSERT OR IGNORE`, so it is safe to re-run. The source is a separate
+replica file (`legacy-telemetry.db`, its own lock), pulled and read only: nothing is pushed to or
+deleted from `harnessuse`, and `memory.db` is not opened. The destination is pushed after each
+page of 2,000 rows, so a failure leaves a state the next run resumes from. It prints the row counts
+per `(source, machine_id)` on both sides. It refuses to run when the memory and measure configs name
+the same database, never overwrites a destination row, and reports same-key rows whose columns differ
+as `conflicts` (`status: copied_with_conflicts`, exit 0) instead of hiding them behind equal counts.
+
 ## Install
 
 ```bash

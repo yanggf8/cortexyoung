@@ -55,7 +55,7 @@ fn usage_value() -> Value {
             "impact": "cort impact --symbol <name> [--depth <n>] [--coverage] [-f json|lean]",
             "usage": "cort usage [days] [-f json|lean]",
             "memory": "cort memory <configure|import-config|record|resolve|recall|status|sync|import-legacy> [options]",
-            "measure": "cort measure <configure|show|record|sync|cron|report> [options]  (sync --dry-run compares event ids and never pushes; the local command_log keeps 90 days, so events are lost only if they go unuploaded for 90 days in a row: record not running, or uploads refused pending a dry run)",
+            "measure": "cort measure <configure|show|record|sync|copy-events|cron|report> [options]  (copy-events: one-time, re-runnable, read-only copy of claudecat's uploaded events from harnessuse, never overwrites, reports same-key rows whose columns differ as conflicts; sync --dry-run compares event ids and never pushes; the local command_log keeps 90 days, so events are lost only if they go unuploaded for 90 days in a row: record not running, or uploads refused pending a dry run)",
             "hook-suggest": "cort hook-suggest  (PreToolUse hook: records search verdicts; silent unless CORT_SUGGEST=1; not a verb to type)",
             "hook-refresh": "cort hook-refresh  (PostToolUse hook: brings this project's index up to the tree after an edit; silent, never creates an index; not a verb to type)",
             "hook-install": "cort hook-install [--settings <path>] [--command <cmd>] [--remove|--status]  (installer-invoked: wires hook-suggest into settings.json; not a verb to type)",
@@ -2713,6 +2713,10 @@ enum MeasureAction {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Copy claudecat's already-uploaded events and aliases from the `harnessuse` database (the
+    /// `cort memory` one) into the measurement database. One-time, re-runnable, and read-only on
+    /// the source: nothing is pushed to or deleted from it. Refuses when both configs name one database.
+    CopyEvents,
     /// Own the hourly crontab line that runs `measure record`.
     Cron {
         #[arg(long, group = "cron_action")]
@@ -2911,6 +2915,32 @@ fn cmd_measure(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, CortErr
                 }
                 json!({"status":"synced","pushed":true,"events":events.to_json()})
             }
+        }
+        MeasureAction::CopyEvents => {
+            let report = cort::measure_store::with_legacy_and_measure_stores(|from, to| {
+                cort::measure::copy_events(from, to)
+            })
+            .map_err(|m| CortError::new("measure_copy_failed", json!({"message":m})))?;
+            let rows = &report.groups;
+            let groups: Vec<_> = rows
+                .iter()
+                .map(|(source, machine_id, src, dst)| {
+                    json!({"source":source,"machine_id":machine_id,
+                        "source_rows":src,"destination_rows":dst})
+                })
+                .collect();
+            let examples: Vec<_> = report
+                .conflict_examples
+                .iter()
+                .map(|(source, event_id, cols)| {
+                    json!({"source":source,"event_id":event_id,"differing_columns":cols})
+                })
+                .collect();
+            json!({"status": if report.conflicts > 0 {"copied_with_conflicts"} else {"copied"},
+                "source_pushed":false,"groups":groups,
+                "source_rows":rows.iter().map(|r| r.2).sum::<usize>(),
+                "destination_rows":rows.iter().map(|r| r.3).sum::<usize>(),
+                "conflicts":report.conflicts,"conflict_examples":examples})
         }
         MeasureAction::Report {
             days,

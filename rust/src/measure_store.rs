@@ -105,6 +105,24 @@ pub trait MeasureStore {
         row_fingerprint: &str,
     ) -> Result<(), String>;
     fn upsert_aliases(&mut self, rows: &[(String, String, String)]) -> Result<(), String>;
+    /// Every alias row as `(machine_id, local_project_id, shared_project_id)`.
+    fn aliases(&mut self) -> Result<Vec<(String, String, String)>, String>;
+    /// Up to `limit` events with `(source, event_id)` strictly after `after`, ascending (keyset
+    /// pagination on the primary key). `rowid` is `None`: a stored row has no local rowid.
+    fn events_page(
+        &mut self,
+        after: Option<(String, String)>,
+        limit: usize,
+    ) -> Result<Vec<TelemetryEvent>, String>;
+    /// Every stored event whose `(source, event_id)` lies between `first` and `last` inclusive,
+    /// in the same key order `events_page` uses; there may be rows the caller did not ask about.
+    fn events_in_key_range(
+        &mut self,
+        first: &(String, String),
+        last: &(String, String),
+    ) -> Result<Vec<TelemetryEvent>, String>;
+    /// `(source, machine_id, rows)` for every group, counted by the database.
+    fn event_counts(&mut self) -> Result<Vec<(String, String, usize)>, String>;
     fn push(&mut self) -> Result<(), String>;
     fn pull(&mut self) -> Result<(), String>;
 }
@@ -198,6 +216,19 @@ const UPSERT_WATERMARK: &str =
     max_rowid = excluded.max_rowid, row_fingerprint = excluded.row_fingerprint";
 const INSERT_ALIAS: &str = "INSERT OR IGNORE INTO telemetry_project_aliases \
     (machine_id, local_project_id, shared_project_id) VALUES (?, ?, ?)";
+const SELECT_ALIASES: &str =
+    "SELECT machine_id, local_project_id, shared_project_id FROM telemetry_project_aliases";
+const SELECT_EVENTS_FIRST_PAGE: &str = "SELECT source, event_id, machine_id, machine_source, \
+    project_id, time_ms, payload FROM telemetry_events ORDER BY source, event_id LIMIT ?";
+const SELECT_EVENTS_AFTER: &str = "SELECT source, event_id, machine_id, machine_source, \
+    project_id, time_ms, payload FROM telemetry_events \
+    WHERE source > ? OR (source = ? AND event_id > ?) ORDER BY source, event_id LIMIT ?";
+const SELECT_EVENTS_IN_RANGE: &str = "SELECT source, event_id, machine_id, machine_source, \
+    project_id, time_ms, payload FROM telemetry_events \
+    WHERE (source > ? OR (source = ? AND event_id >= ?)) \
+    AND (source < ? OR (source = ? AND event_id <= ?)) ORDER BY source, event_id";
+const COUNT_EVENTS: &str = "SELECT source, machine_id, COUNT(*) FROM telemetry_events \
+    GROUP BY source, machine_id ORDER BY source, machine_id";
 /// Events per transaction: a commit per row is minutes on a 130k-row first upload.
 const EVENT_CHUNK: usize = 2000;
 
@@ -320,6 +351,58 @@ fn event_cells(e: &TelemetryEvent) -> Vec<Cell> {
         opt_int(e.time_ms),
         Cell::Text(e.payload.clone()),
     ]
+}
+
+fn alias_from_cells(c: &[Cell]) -> Result<(String, String, String), String> {
+    Ok((text(&c[0])?, text(&c[1])?, text(&c[2])?))
+}
+
+fn event_from_cells(c: &[Cell]) -> Result<TelemetryEvent, String> {
+    Ok(TelemetryEvent {
+        source: text(&c[0])?,
+        event_id: text(&c[1])?,
+        machine_id: text(&c[2])?,
+        machine_source: text(&c[3])?,
+        project_id: match &c[4] {
+            Cell::Null => None,
+            other => Some(text(other)?),
+        },
+        time_ms: opt_i(&c[5])?,
+        payload: text(&c[6])?,
+        rowid: None,
+    })
+}
+
+fn events_page_query(after: Option<(String, String)>, limit: usize) -> (&'static str, Vec<Cell>) {
+    let limit = Cell::Int(limit as i64);
+    match after {
+        None => (SELECT_EVENTS_FIRST_PAGE, vec![limit]),
+        Some((source, event_id)) => (
+            SELECT_EVENTS_AFTER,
+            vec![
+                Cell::Text(source.clone()),
+                Cell::Text(source),
+                Cell::Text(event_id),
+                limit,
+            ],
+        ),
+    }
+}
+
+fn range_key_params(first: &(String, String), last: &(String, String)) -> Vec<Cell> {
+    let t = |s: &String| Cell::Text(s.clone());
+    vec![
+        t(&first.0),
+        t(&first.0),
+        t(&first.1),
+        t(&last.0),
+        t(&last.0),
+        t(&last.1),
+    ]
+}
+
+fn count_from_cells(c: &[Cell]) -> Result<(String, String, usize), String> {
+    Ok((text(&c[0])?, text(&c[1])?, int(&c[2])? as usize))
 }
 
 /// `(event_id, id)` rows, `id` being the payload's `id` key (NULL when absent) -> id -> event_id.
@@ -622,6 +705,43 @@ impl MeasureStore for SqliteStore {
         Ok(())
     }
 
+    fn aliases(&mut self) -> Result<Vec<(String, String, String)>, String> {
+        self.query(SELECT_ALIASES, vec![], 3)?
+            .iter()
+            .map(|r| alias_from_cells(r))
+            .collect()
+    }
+
+    fn events_page(
+        &mut self,
+        after: Option<(String, String)>,
+        limit: usize,
+    ) -> Result<Vec<TelemetryEvent>, String> {
+        let (sql, params) = events_page_query(after, limit);
+        self.query(sql, params, 7)?
+            .iter()
+            .map(|r| event_from_cells(r))
+            .collect()
+    }
+
+    fn events_in_key_range(
+        &mut self,
+        first: &(String, String),
+        last: &(String, String),
+    ) -> Result<Vec<TelemetryEvent>, String> {
+        self.query(SELECT_EVENTS_IN_RANGE, range_key_params(first, last), 7)?
+            .iter()
+            .map(|r| event_from_cells(r))
+            .collect()
+    }
+
+    fn event_counts(&mut self) -> Result<Vec<(String, String, usize)>, String> {
+        self.query(COUNT_EVENTS, vec![], 3)?
+            .iter()
+            .map(|r| count_from_cells(r))
+            .collect()
+    }
+
     fn push(&mut self) -> Result<(), String> {
         self.pushes += 1;
         if self.fail_push {
@@ -664,7 +784,15 @@ fn config() -> Result<Config, String> {
 }
 
 fn with_config_lock<T>(action: impl FnOnce(Config) -> Result<T, String>) -> Result<T, String> {
-    let config = config()?;
+    with_lock_for(config()?, action)
+}
+
+/// Like [`with_config_lock`] for a `Config` the caller already read, so a check made on that value
+/// and the lock and open that follow cannot see two different files.
+fn with_lock_for<T>(
+    config: Config,
+    action: impl FnOnce(Config) -> Result<T, String>,
+) -> Result<T, String> {
     let _lock = memory_store::lock_in(SUBDIR, &config, "measure.lock")?;
     action(config)
 }
@@ -753,12 +881,25 @@ async fn turso_insert_events(
 
 impl TursoStore {
     fn open(config: &Config) -> Result<Self, String> {
+        Self::open_replica(SUBDIR, config, "measure.db", true)
+    }
+
+    /// `create_schema = false` opens a replica of somebody else's database without issuing a
+    /// single statement of ours against it.
+    fn open_replica(
+        subdir: &str,
+        config: &Config,
+        file: &str,
+        create_schema: bool,
+    ) -> Result<Self, String> {
         let rt = memory_store::runtime()?;
         let (db, conn) = rt.block_on(async {
-            let db = memory_store::open_replica_in(SUBDIR, config, "measure.db").await?;
+            let db = memory_store::open_replica_in(subdir, config, file).await?;
             let conn = db.connect().await.map_err(te)?;
-            for stmt in MEASURE_SCHEMA {
-                conn.execute(stmt, ()).await.map_err(te)?;
+            if create_schema {
+                for stmt in MEASURE_SCHEMA {
+                    conn.execute(stmt, ()).await.map_err(te)?;
+                }
             }
             Ok::<_, String>((db, conn))
         })?;
@@ -948,6 +1089,52 @@ impl MeasureStore for TursoStore {
         Ok(())
     }
 
+    fn aliases(&mut self) -> Result<Vec<(String, String, String)>, String> {
+        self.rt
+            .block_on(turso_query(&self.conn, SELECT_ALIASES, vec![], 3))?
+            .iter()
+            .map(|r| alias_from_cells(r))
+            .collect()
+    }
+
+    fn events_page(
+        &mut self,
+        after: Option<(String, String)>,
+        limit: usize,
+    ) -> Result<Vec<TelemetryEvent>, String> {
+        let (sql, params) = events_page_query(after, limit);
+        self.rt
+            .block_on(turso_query(&self.conn, sql, params, 7))?
+            .iter()
+            .map(|r| event_from_cells(r))
+            .collect()
+    }
+
+    fn events_in_key_range(
+        &mut self,
+        first: &(String, String),
+        last: &(String, String),
+    ) -> Result<Vec<TelemetryEvent>, String> {
+        self.rt
+            .block_on(turso_query(
+                &self.conn,
+                SELECT_EVENTS_IN_RANGE,
+                range_key_params(first, last),
+                7,
+            ))?
+            .iter()
+            .map(|r| event_from_cells(r))
+            .collect()
+    }
+
+    fn event_counts(&mut self) -> Result<Vec<(String, String, usize)>, String> {
+        self.rt
+            .block_on(turso_query(&self.conn, COUNT_EVENTS, vec![], 3))?
+            .iter()
+            .map(|r| count_from_cells(r))
+            .collect()
+    }
+
     fn push(&mut self) -> Result<(), String> {
         self.rt.block_on(self.db.push()).map_err(te)
     }
@@ -967,6 +1154,64 @@ pub fn with_turso_store<T>(
     })
 }
 
+/// The database a Turso URL names: its host, lower-cased, without scheme, userinfo, port, path,
+/// query, fragment or trailing slash. `libsql://x.turso.io` and `turso://X.turso.io/` are the same
+/// database, and so are `https://x.turso.io` and `https://x.turso.io:443`. The port is dropped on
+/// purpose: two databases that differ only by port are refused as one, which is the safe direction
+/// for a guard whose job is to stop a copy writing into its own source. A bracketed IPv6 host
+/// keeps its brackets.
+pub fn database_identity(url: &str) -> String {
+    let rest = url.trim().split_once("://").map_or(url.trim(), |(_, r)| r);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host_port = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    let host = if host_port.starts_with('[') {
+        host_port
+            .find(']')
+            .map_or(host_port, |end| &host_port[..=end])
+    } else {
+        host_port.split(':').next().unwrap_or("")
+    };
+    host.to_ascii_lowercase()
+}
+
+/// Whether two configured URLs name the same database.
+pub fn same_database(a: &str, b: &str) -> bool {
+    database_identity(a) == database_identity(b)
+}
+
+/// Run `f(source, destination)` where `source` is a replica of the `cort memory` database
+/// (`harnessuse`) kept in its own `legacy-telemetry.db`, and `destination` is the measure store.
+/// The source has its own lock, so a copy does not block `cort memory`; neither `memory.db` nor
+/// the source's schema is touched. Both configs are read before any file or lock is created.
+pub fn with_legacy_and_measure_stores<T>(
+    f: impl FnOnce(&mut dyn MeasureStore, &mut dyn MeasureStore) -> Result<T, String>,
+) -> Result<T, String> {
+    let memory_config = memory_store::load_config()?;
+    let measure_config = config()?;
+    if same_database(&memory_config.url, &measure_config.url) {
+        return Err(format!(
+            "the memory config and the measure config name the same database ({}); copying a \
+             database into itself would write to the source, so nothing was opened",
+            database_identity(&memory_config.url)
+        ));
+    }
+    with_lock_for(measure_config, |config| {
+        let _legacy_lock = memory_store::lock_in(
+            memory_store::SUBDIR,
+            &memory_config,
+            "legacy-telemetry.lock",
+        )?;
+        let mut to = TursoStore::open(&config)?;
+        let mut from = TursoStore::open_replica(
+            memory_store::SUBDIR,
+            &memory_config,
+            "legacy-telemetry.db",
+            false,
+        )?;
+        f(&mut from, &mut to)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -980,6 +1225,82 @@ mod tests {
         let mut untouched = true;
         assert_eq!(commit_or_rollback(Ok(()), || untouched = false), Ok(()));
         assert!(untouched);
+    }
+
+    /// The copy's paging and counting SQL must also run on Turso's engine.
+    #[test]
+    fn database_identity_ignores_scheme_case_slash_and_path() {
+        assert!(same_database("libsql://x.turso.io", "turso://X.turso.io/"));
+        assert!(same_database(
+            "https://x.turso.io/v2/pipeline?a=1",
+            "libsql://x.TURSO.io"
+        ));
+        assert!(!same_database("libsql://x.turso.io", "libsql://y.turso.io"));
+        assert_eq!(
+            database_identity(" turso://Db-Org.turso.io/ "),
+            "db-org.turso.io"
+        );
+        assert!(same_database(
+            "https://x.turso.io",
+            "https://x.turso.io:443"
+        ));
+        assert!(same_database(
+            "https://u:p@x.turso.io:8080/p",
+            "libsql://X.turso.io"
+        ));
+        assert_eq!(database_identity("https://[::1]:8080/p"), "[::1]");
+        assert!(same_database("http://[::1]:1", "http://[::1]:2/x"));
+        assert!(!same_database("http://[::1]", "http://[::2]"));
+    }
+
+    #[test]
+    fn copy_sql_runs_on_turso_local() {
+        let rt = memory_store::runtime().unwrap();
+        rt.block_on(async {
+            let db = turso::Builder::new_local(":memory:").build().await.unwrap();
+            let conn = db.connect().unwrap();
+            for stmt in MEASURE_SCHEMA {
+                conn.execute(stmt, ()).await.unwrap();
+            }
+            let mk = |source: &str, id: &str| TelemetryEvent {
+                source: source.into(),
+                event_id: id.into(),
+                machine_id: "m".into(),
+                machine_source: "env".into(),
+                project_id: None,
+                time_ms: None,
+                payload: "{}".into(),
+                rowid: None,
+            };
+            let events = [mk("a", "2"), mk("a", "1"), mk("b", "1")];
+            assert_eq!(turso_insert_events(&conn, &events).await.unwrap(), 3);
+            let (sql, params) = events_page_query(Some(("a".into(), "1".into())), 5);
+            let rows = turso_query(&conn, sql, params, 7).await.unwrap();
+            let got: Vec<_> = rows.iter().map(|r| event_from_cells(r).unwrap()).collect();
+            assert_eq!(got, vec![mk("a", "2"), mk("b", "1")]);
+            let range = turso_query(
+                &conn,
+                SELECT_EVENTS_IN_RANGE,
+                range_key_params(&("a".into(), "2".into()), &("b".into(), "1".into())),
+                7,
+            )
+            .await
+            .unwrap();
+            let range: Vec<_> = range.iter().map(|r| event_from_cells(r).unwrap()).collect();
+            assert_eq!(range, vec![mk("a", "2"), mk("b", "1")]);
+            let counts = turso_query(&conn, COUNT_EVENTS, vec![], 3).await.unwrap();
+            let counts: Vec<_> = counts
+                .iter()
+                .map(|r| count_from_cells(r).unwrap())
+                .collect();
+            assert_eq!(
+                counts,
+                vec![
+                    ("a".to_string(), "m".to_string(), 2),
+                    ("b".to_string(), "m".to_string(), 1)
+                ]
+            );
+        });
     }
 
     /// The shared SQL text must run on Turso's engine too, not only on SQLite.

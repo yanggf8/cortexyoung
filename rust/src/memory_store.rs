@@ -121,6 +121,14 @@ fn config() -> Result<Config, String> {
     )
 }
 
+/// The `cort memory` connection, for a second replica of the same database.
+pub(crate) fn load_config() -> Result<Config, String> {
+    config()
+}
+
+/// Directory name (under `data_dir()`) of the memory replica and its sibling replicas.
+pub(crate) const SUBDIR: &str = "turso-memory";
+
 /// Read a credential file written by `write_private_config`, refusing a symlink.
 pub(crate) fn read_config(path: &Path, label: &str, unconfigured: &str) -> Result<Config, String> {
     if fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
@@ -221,7 +229,7 @@ async fn open(config: &Config) -> Result<turso::sync::Database, String> {
 }
 
 async fn open_replica(config: &Config, file: &str) -> Result<turso::sync::Database, String> {
-    open_replica_in("turso-memory", config, file).await
+    open_replica_in(SUBDIR, config, file).await
 }
 
 /// Open (creating) a sync replica at `data_dir()/<subdir>/<digest(url)>/<file>`.
