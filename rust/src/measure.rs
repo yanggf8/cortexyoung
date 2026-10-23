@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::UNIX_EPOCH;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Per-file `(size, mtime_ms)` seen at the last successful scan, keyed by file path.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -64,46 +64,56 @@ pub fn claude_projects_dir() -> PathBuf {
 struct TranscriptFile {
     path: PathBuf,
     size: u64,
-    mtime_ms: i64,
+    mtime: SystemTime,
+}
+
+impl TranscriptFile {
+    /// Millisecond form, kept only for the watermark format; ordering uses `mtime`.
+    fn mtime_ms(&self) -> i64 {
+        self.mtime
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0)
+    }
 }
 
 /// `projects_dir/*/*.jsonl` only; `<session>/subagents/` is a directory and never matches.
-fn transcript_files(projects_dir: &Path) -> Vec<TranscriptFile> {
+fn transcript_files(projects_dir: &Path) -> Result<Vec<TranscriptFile>, String> {
     let mut out = Vec::new();
-    let Ok(projects) = fs::read_dir(projects_dir) else {
-        return out;
+    // A missing projects dir is a confirmed absence; any other failure is not.
+    let projects = match fs::read_dir(projects_dir) {
+        Ok(p) => p,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
+        Err(e) => return Err(format!("cannot read {}: {e}", projects_dir.display())),
     };
-    for project in projects.flatten() {
-        if !project.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+    let io = |p: &Path, e: std::io::Error| format!("cannot read {}: {e}", p.display());
+    for project in projects {
+        let project = project.map_err(|e| io(projects_dir, e))?;
+        let ftype = project.file_type().map_err(|e| io(&project.path(), e))?;
+        if !ftype.is_dir() {
             continue;
         }
-        let Ok(entries) = fs::read_dir(project.path()) else {
-            continue;
-        };
-        for entry in entries.flatten() {
+        let entries = fs::read_dir(project.path()).map_err(|e| io(&project.path(), e))?;
+        for entry in entries {
+            let entry = entry.map_err(|e| io(&project.path(), e))?;
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
                 continue;
             }
-            let Ok(meta) = entry.metadata() else { continue };
+            let meta = entry.metadata().map_err(|e| io(&path, e))?;
             if !meta.is_file() {
                 continue;
             }
-            let mtime_ms = meta
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                .map(|d| d.as_millis() as i64)
-                .unwrap_or(0);
+            let mtime = meta.modified().map_err(|e| io(&path, e))?;
             out.push(TranscriptFile {
                 path,
                 size: meta.len(),
-                mtime_ms,
+                mtime,
             });
         }
     }
-    out.sort_by(|a, b| (a.mtime_ms, &a.path).cmp(&(b.mtime_ms, &b.path)));
-    out
+    out.sort_by(|a, b| (a.mtime, &a.path).cmp(&(b.mtime, &b.path)));
+    Ok(out)
 }
 
 fn read_lossy(path: &Path) -> std::io::Result<String> {
@@ -116,7 +126,10 @@ pub fn scan_transcripts(
     marks: &mut Watermarks,
     machine_id: &str,
 ) -> Result<ScanSummary, String> {
-    let files = transcript_files(projects_dir);
+    if matches!(fs::metadata(projects_dir), Err(e) if e.kind() == std::io::ErrorKind::NotFound) {
+        return Ok(ScanSummary::default());
+    }
+    let files = transcript_files(projects_dir)?;
     let mut summary = ScanSummary {
         files_seen: files.len(),
         ..ScanSummary::default()
@@ -125,7 +138,7 @@ pub fn scan_transcripts(
     let mut next: BTreeMap<String, (u64, i64)> = BTreeMap::new();
     for file in &files {
         let key = file.path.to_string_lossy().into_owned();
-        let stamp = (file.size, file.mtime_ms);
+        let stamp = (file.size, file.mtime_ms());
         if marks.files.get(&key) == Some(&stamp) {
             next.insert(key, stamp);
             continue;
@@ -204,7 +217,7 @@ fn compaction_json(file: &Path, c: &Compaction) -> Value {
 /// (`id` = boundary uuid). Reads local files only and never opens the store.
 pub fn compaction_details(projects_dir: &Path, id: &str) -> Result<Value, String> {
     let mut found = Vec::new();
-    for file in transcript_files(projects_dir) {
+    for file in transcript_files(projects_dir)? {
         let by_stem = file.path.file_stem().and_then(|s| s.to_str()) == Some(id);
         let Ok(text) = read_lossy(&file.path) else {
             continue;

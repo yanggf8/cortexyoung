@@ -252,3 +252,87 @@ fn details_print_paths_and_corrections_locally() {
     }
     assert!(compaction_details(&e.projects, "nope").is_err());
 }
+
+#[test]
+fn file_written_before_and_read_after_counts_as_reread_in_store() {
+    let mut e = env();
+    let c = notgit(&e);
+    let body = format!(
+        "{}{}{}{}",
+        tool("Write", json!({"file_path":"/w/a.rs","content":"x"})),
+        boundary("u1", "s1", &c),
+        read("/w/a.rs"),
+        filler(2)
+    );
+    write(&e.projects.join("p/s1.jsonl"), &body, 10);
+    scan(&mut e);
+    let rows = e.store.compactions_since(0).unwrap();
+    assert_eq!(rows[0].post.rereads, 1);
+}
+
+#[test]
+fn files_within_one_millisecond_order_by_full_mtime() {
+    let mut e = env();
+    let c = notgit(&e);
+    // "a" sorts first by path but is the newer file by 100 microseconds.
+    let base = SystemTime::now() - Duration::from_secs(100);
+    for (name, session, off) in [("z.jsonl", "first", 0u64), ("a.jsonl", "second", 100)] {
+        let path = e.projects.join("p").join(name);
+        write(
+            &path,
+            &format!("{}{}", boundary("u1", session, &c), filler(2)),
+            0,
+        );
+        File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(base + Duration::from_micros(off))
+            .unwrap();
+    }
+    scan(&mut e);
+    assert_eq!(e.store.compactions_since(0).unwrap()[0].session_id, "first");
+}
+
+#[test]
+fn unreadable_subdirectory_is_an_error_and_keeps_watermarks() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut e = env();
+    let c = notgit(&e);
+    write(
+        &e.projects.join("p/s1.jsonl"),
+        &boundary("u1", "s1", &c),
+        10,
+    );
+    fs::create_dir_all(e.projects.join("locked")).unwrap();
+    scan(&mut e);
+    let before = e.marks.clone();
+    let locked = e.projects.join("locked");
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+    if fs::read_dir(&locked).is_ok() {
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        println!("SKIP: permissions are not enforced (running as root?)");
+        return;
+    }
+    let r = scan_transcripts(&mut e.store, &e.projects, &mut e.marks, M);
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(r.is_err());
+    assert_eq!(e.marks, before);
+}
+
+#[test]
+fn missing_projects_dir_is_empty_and_keeps_watermarks() {
+    let mut e = env();
+    let c = notgit(&e);
+    write(
+        &e.projects.join("p/s1.jsonl"),
+        &boundary("u1", "s1", &c),
+        10,
+    );
+    scan(&mut e);
+    let before = e.marks.clone();
+    let gone = e._tmp.path().join("nope");
+    let s = scan_transcripts(&mut e.store, &gone, &mut e.marks, M).unwrap();
+    assert_eq!(s.files_seen, 0);
+    assert_eq!(e.marks, before);
+}
