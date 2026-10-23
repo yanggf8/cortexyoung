@@ -236,8 +236,8 @@ assert_file_exists "$CORT_HOME_PATH/pack/sgconfig.yml" "the active generation ca
 
 # A second install must leave a usable installation. `|| true` here would let "the install failed
 # before touching anything" pass every assertion below, because the first installation is still
-# valid -- so its status is asserted rather than discarded. --force: a bare rerun declines
-# since Task 0 (see the deferral block below); explicit insistence still reinstalls, and the
+# valid -- so its status is asserted rather than discarded. --force: a bare rerun hands off
+# to cort_upgrade since Task 0 (see the hand-off block below); explicit insistence still reinstalls, and the
 # byte-identical tree must land on the same generation id.
 if bash "$INSTALL_SH" --force >/tmp/smoke_reinstall.log 2>&1; then
   pass "a forced reinstall succeeds"
@@ -378,27 +378,94 @@ if [ "$GEN_OK" -eq 1 ] && [ "$(readlink "$CORT_HOME_PATH" 2>/dev/null || echo "N
 else
   fail "a refused activation moved the link"
 fi
-echo "--- Task 0: bare install on an installed machine declines ---"
-MANIFEST_SHA_BEFORE="$(sha256sum "$MANIFEST_D/manifest" 2>/dev/null | cut -d' ' -f1 || echo NONE)"
+echo "--- Task 0: bare install on an installed machine hands off to cort_upgrade ---"
+UPGRADER="$REPO_ROOT/rust/target/release/cort_upgrade"
 set +e
-bash "$INSTALL_SH" >/tmp/smoke_defer.log 2>&1
-DEFER_EC=$?
+bash "$INSTALL_SH" >/tmp/smoke_defer.log 2>/tmp/smoke_defer.err
 set -e
-if [ "$DEFER_EC" -eq 3 ]; then
-  pass "bare install declines with exit 3 on an installed machine"
+if grep -qF "existing installation — upgrading with rust/target/release/cort_upgrade" /tmp/smoke_defer.err; then
+  pass "bare install on an installed machine says it is upgrading, on stderr"
 else
-  fail "bare install declined with exit $DEFER_EC, want 3"
+  fail "bare install printed no hand-off line on stderr"
 fi
-if grep -q "rust/target/release/cort_upgrade" /tmp/smoke_defer.log; then
-  pass "the decline names the tree-built cort_upgrade path"
+# Proof cort_upgrade ran, not just that install.sh announced it: its verdict table is on stdout.
+if grep -q '^skill_ast_grep: ' /tmp/smoke_defer.log && grep -q '^hooks: ' /tmp/smoke_defer.log; then
+  pass "the hand-off ran cort_upgrade (its verdict lines are the output)"
 else
-  fail "the decline does not name the tree-built cort_upgrade path"
+  fail "no cort_upgrade verdict lines in the hand-off output"
 fi
-if [ "$(sha256sum "$MANIFEST_D/manifest" 2>/dev/null | cut -d' ' -f1 || echo NONE)" = "$MANIFEST_SHA_BEFORE" ]; then
-  pass "a declined install changes nothing"
+# stdout is cort_upgrade's alone: the build's progress line goes to stderr on this path.
+if ! grep -q 'building cort' /tmp/smoke_defer.log && head -n 1 /tmp/smoke_defer.log | grep -q '^[a-z_]*: '; then
+  pass "hand-off stdout starts with cort_upgrade's own output (no build line)"
 else
-  fail "a declined install rewrote the manifest"
+  fail "hand-off stdout is not purely cort_upgrade's (first line: $(head -n 1 /tmp/smoke_defer.log))"
 fi
+if ! grep -q 'run this tree' /tmp/smoke_defer.err; then
+  pass "the old decline message is gone"
+else
+  fail "the old decline message is still printed"
+fi
+if [ "$(grep -c '^cort_bin:' "$MANIFEST_D/manifest")" = "1" ]; then
+  pass "a hand-off leaves exactly one cort_bin manifest entry"
+else
+  fail "a hand-off left a duplicated or missing cort_bin entry"
+fi
+# Flags cort_upgrade has no counterpart for are refused on the hand-off path, not silently dropped.
+echo "--- Task 0: --no-hook and --gen are refused when upgrading ---"
+REJ_SHA_BEFORE="$(sha256sum "$MANIFEST_D/manifest" | cut -d' ' -f1)"
+for rejflag in "--no-hook" "--gen cort-000000000000" "--gen="; do
+  set +e
+  # shellcheck disable=SC2086
+  bash "$INSTALL_SH" $rejflag >/tmp/smoke_rej.log 2>&1
+  REJ_EC=$?
+  set -e
+  if [ "$REJ_EC" -eq 2 ] && grep -q 'does not apply when upgrading an existing installation' /tmp/smoke_rej.log; then
+    pass "'$rejflag' on an installed machine exits 2 with an explanation"
+  else
+    fail "'$rejflag' on an installed machine exited $REJ_EC"
+  fi
+done
+if [ "$(sha256sum "$MANIFEST_D/manifest" | cut -d' ' -f1)" = "$REJ_SHA_BEFORE" ]; then
+  pass "a refused flag leaves the manifest byte-identical"
+else
+  fail "a refused flag changed the manifest"
+fi
+# --keep-mine is forwarded: an edited managed skill is kept and reported, not redeployed over.
+echo "--- Task 0: --keep-mine reaches cort_upgrade on the hand-off ---"
+KM_SKILL="$HOME/.claude/skills/ast-grep/SKILL.md"
+printf 'kept by --keep-mine\n' >> "$KM_SKILL"
+set +e; bash "$INSTALL_SH" --keep-mine >/tmp/smoke_keep.log 2>/tmp/smoke_keep.err; set -e
+assert_contains /tmp/smoke_keep.err "existing installation — upgrading with" "--keep-mine run still announces the hand-off"
+assert_contains /tmp/smoke_keep.log "skill_ast_grep: deferred-by-user" "--keep-mine reports the edited skill as deferred-by-user"
+assert_contains "$KM_SKILL" "kept by --keep-mine" "--keep-mine left the edited skill alone"
+set +e; bash "$INSTALL_SH" >/tmp/smoke_keep2.log 2>/dev/null; set -e
+assert_not_contains "$KM_SKILL" "kept by --keep-mine" "without --keep-mine the upgrade redeploys the repo skill"
+assert_pristine_skill "$KM_SKILL" "$REPO_ROOT/skills/ast-grep/SKILL.md" "the redeployed skill is the repo file"
+# Upgrade flags mean something only to cort_upgrade: on a fresh machine they are an error that
+# names the flag and installs nothing.
+echo "--- Task 0: upgrade flags are an error on a fresh install ---"
+FLAGS_SAVED_HOME="$HOME"; FLAGS_SAVED_XDG="$XDG_DATA_HOME"
+export HOME="$(mktemp -d)"; export XDG_DATA_HOME="$HOME/.local/share"
+mkdir -p "$HOME/.claude/skills" "$HOME/.local/share"
+for flagset in "--keep-mine" "--defer" "--ack skill_ast_grep" "--ack=skill_ast_grep"; do
+  set +e
+  # shellcheck disable=SC2086
+  bash "$INSTALL_SH" $flagset >/tmp/smoke_flag.log 2>&1
+  FLAG_EC=$?
+  set -e
+  if [ "$FLAG_EC" -eq 2 ]; then pass "fresh install rejects '$flagset' with exit 2"; else fail "fresh install with '$flagset' exited $FLAG_EC, want 2"; fi
+done
+assert_contains /tmp/smoke_flag.log "only applies when upgrading an existing installation" "the rejection explains itself"
+if [ ! -e "$XDG_DATA_HOME/cortexyoung/manifest" ] && [ ! -e "$HOME/.claude/skills/ast-grep/SKILL.md" ]; then
+  pass "a rejected flag installs nothing"
+else
+  fail "a rejected flag still installed something"
+fi
+set +e; bash "$INSTALL_SH" --ack >/tmp/smoke_flag.log 2>&1; FLAG_EC=$?; set -e
+if [ "$FLAG_EC" -eq 2 ] && grep -q -- '--ack needs a value' /tmp/smoke_flag.log; then pass "--ack without a value exits 2"; else fail "--ack without a value exited $FLAG_EC"; fi
+set +e; bash "$INSTALL_SH" --check --keep-mine >/tmp/smoke_flag.log 2>&1; FLAG_EC=$?; set -e
+if [ "$FLAG_EC" -eq 2 ]; then pass "--check does not take --keep-mine (exit 2)"; else fail "--check --keep-mine exited $FLAG_EC, want 2"; fi
+export HOME="$FLAGS_SAVED_HOME"; export XDG_DATA_HOME="$FLAGS_SAVED_XDG"
 # profile block — installer picks one candidate; check any of them
 PROFILE_HIT=0
 for p in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile" "$HOME/.config/fish/config.fish"; do
@@ -410,7 +477,7 @@ echo "    manifest lines: $MANIFEST_LINES"
 
 # ── 2. identical rerun (idempotent) ──────────────────────────────
 echo "--- Test 2: identical rerun (idempotent) ---"
-# Post-Task-0 isolation: bare install.sh on an installed machine declines (exit 3), so
+# Post-Task-0 isolation: bare install.sh on an installed machine hands off to cort_upgrade, so
 # every test below that exercises fresh-install behavior gets its own HOME instead of
 # inheriting Test 1's machine. The fakebin mocks live on PATH globally; only per-HOME
 # dirs need recreating (mirrors the setup above). XDG_DATA_HOME must follow HOME.
@@ -434,7 +501,7 @@ fresh_home_with_install() {
     return 1
   }
 }
-# Installed files WITHOUT installer memory: the bare-install decline keys off the cort_bin
+# Installed files WITHOUT installer memory: the bare-install hand-off keys off the cort_bin
 # manifest entry, but preflight/collision/repair logic lives downstream of it and reads file
 # state alone. Tests exercising that downstream logic on an installed-looking machine remove
 # the manifest after installing. (Uninstall tests are the exception — do_uninstall reads the
@@ -456,7 +523,12 @@ set +e
 bash "$INSTALL_SH" > /tmp/smoke2.log 2>&1
 EC2=$?
 set -e
-if [ "$EC2" -eq 3 ]; then pass "rerun on an installed machine declines (exit 3)"; else fail "rerun declined with exit $EC2, want 3"; fi
+if grep -qF "existing installation — upgrading with" /tmp/smoke2.log && grep -q '^skill_ast_grep: ' /tmp/smoke2.log; then
+  pass "rerun on an installed machine hands off to cort_upgrade"
+else
+  fail "rerun did not hand off to cort_upgrade (exit $EC2)"
+fi
+if [ "$(sha256sum "$HOME/.local/share/cortexyoung/manifest" 2>/dev/null | cut -d' ' -f1 || echo NONE)" = "$MANIFEST_SHA_T2" ]; then pass "a handed-off steady-state rerun rewrites no manifest row"; else fail "a handed-off rerun rewrote the manifest"; fi
 MARKER_COUNT_AFTER=0
 for p in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
   if [ -f "$p" ]; then
@@ -464,8 +536,30 @@ for p in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
     MARKER_COUNT_AFTER=$((MARKER_COUNT_AFTER + c))
   fi
 done
-if [ "$MARKER_COUNT_BEFORE" -eq "$MARKER_COUNT_AFTER" ]; then pass "a declined rerun duplicates no profile block"; else fail "a declined rerun touched the profile ($MARKER_COUNT_BEFORE -> $MARKER_COUNT_AFTER)"; fi
-if [ "$(sha256sum "$HOME/.local/share/cortexyoung/manifest" 2>/dev/null | cut -d' ' -f1 || echo NONE)" = "$MANIFEST_SHA_T2" ]; then pass "a declined rerun rewrites no manifest row"; else fail "a declined rerun rewrote the manifest"; fi
+if [ "$MARKER_COUNT_BEFORE" -eq "$MARKER_COUNT_AFTER" ]; then pass "a handed-off rerun duplicates no profile block"; else fail "a handed-off rerun touched the profile ($MARKER_COUNT_BEFORE -> $MARKER_COUNT_AFTER)"; fi
+if [ "$(grep -c '^cort_bin:' "$HOME/.local/share/cortexyoung/manifest")" = "1" ]; then pass "a handed-off rerun leaves one cort_bin row"; else fail "a handed-off rerun duplicated or lost the cort_bin row"; fi
+
+# Exit-status and stdout pass-through, deterministically. A forwarded flag cannot make cort_upgrade
+# fail (--ack records any name and succeeds), so the reproducible non-zero is a drift it cannot
+# repair: a manifest key no release knows. It exits 1 (Partial) on every run, from any state.
+echo "--- Test 2b: install.sh's exit status and stdout are cort_upgrade's ---"
+fresh_home_with_install
+printf 'smoke_unknown_key:1\n' >> "$HOME/.local/share/cortexyoung/manifest"
+set +e
+"$REPO_ROOT/rust/target/release/cort_upgrade" >/tmp/smoke_pt_direct0.log 2>/dev/null; PT_D0=$?
+"$REPO_ROOT/rust/target/release/cort_upgrade" >/tmp/smoke_pt_direct.log 2>/dev/null; PT_D=$?
+bash "$INSTALL_SH" >/tmp/smoke_pt_via.log 2>/dev/null; PT_V=$?
+set -e
+if [ "$PT_D" -ne 0 ] && [ "$PT_D" -eq "$PT_D0" ] && [ "$PT_V" -eq "$PT_D" ]; then
+  pass "install.sh exits with cort_upgrade's non-zero status ($PT_V)"
+else
+  fail "exit pass-through broke (direct $PT_D0/$PT_D, via install.sh $PT_V)"
+fi
+if cmp -s /tmp/smoke_pt_direct.log /tmp/smoke_pt_via.log && grep -q '^manifest_keys: drifted' /tmp/smoke_pt_via.log; then
+  pass "install.sh's stdout is byte-identical to cort_upgrade's"
+else
+  fail "stdout differs between direct cort_upgrade and install.sh hand-off"
+fi
 
 # ── 3. managed update (installer replaces outdated managed skill) ─
 echo "--- Test 3: a deployed skill edited in place is a collision, not a licence to overwrite ---"
@@ -874,19 +968,19 @@ else
   fail "claude and codex skill copies are byte-identical"
 fi
 assert_contains "$HOME/.local/share/cortexyoung/manifest" "skill_ast_grep_codex:" "manifest records the codex skill"
-# A bare rerun declines since Task 0: the stamp must still be exactly one hash afterwards,
-# and the skill still pristine — declined means untouched, which is the new idempotence.
+# A bare rerun hands off to cort_upgrade since Task 0: the stamp must still be exactly one hash
+# afterwards, and the skill still pristine — upgrade policy keeps an unedited skill idempotent.
 set +e
 bash "$INSTALL_SH" > /tmp/smoke16.log 2>&1; EC16R=$?
 set -e
-if [ "$EC16R" -eq 3 ]; then pass "rerun on an installed machine declines (exit 3)"; else fail "rerun declined with exit $EC16R, want 3"; fi
+if grep -q '^skill_ast_grep_codex: ' /tmp/smoke16.log; then pass "rerun on an installed machine hands off to cort_upgrade"; else fail "rerun did not hand off (exit $EC16R)"; fi
 if [ "$(grep -c '^skill_sha256:' "$(dirname "$CODEX_DEST")/$STAMP_NAME")" = "1" ]; then
-  pass "a declined rerun duplicates no codex stamp hash"
+  pass "a handed-off rerun duplicates no codex stamp hash"
 else
-  fail "a declined rerun touched the codex stamp"
+  fail "a handed-off rerun touched the codex stamp"
 fi
-assert_pristine_skill "$CODEX_DEST" "$REPO_ROOT/skills/ast-grep/SKILL.md" "codex skill still pristine after a declined rerun"
-# The collision refusal below needs preflight to run, which the decline precedes: drop
+assert_pristine_skill "$CODEX_DEST" "$REPO_ROOT/skills/ast-grep/SKILL.md" "codex skill still pristine after a handed-off rerun"
+# The collision refusal below needs preflight to run, which the hand-off precedes: drop
 # installer memory (files stay) so the bare install proceeds to the collision.
 rm -f "$HOME/.local/share/cortexyoung/manifest"
 # An unmanaged file in the Codex home must be refused, and refused before anything is mutated.

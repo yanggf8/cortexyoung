@@ -245,8 +245,11 @@ never appears in its own report.
 ```
 
 On a machine that already has a `cort_bin` manifest entry, a bare `./install.sh`
-**declines** (exit 3) and changes nothing — full installs do not own upgrades.
-That path is [`cort-upgrade`](#update)'s.
+says `existing installation — upgrading with rust/target/release/cort_upgrade`,
+builds the release tree if needed and hands off to [`cort-upgrade`](#update) —
+full installs do not own upgrades, so its output and exit status are the result.
+`--keep-mine`, `--defer` and `--ack NAME` are forwarded to it (and are an error,
+exit 2, on a fresh install). `./install.sh --force` really reinstalls over it.
 
 **What it does:**
 
@@ -269,7 +272,7 @@ cargo build --release --locked --manifest-path rust/Cargo.toml
 ```
 
 `cort-upgrade` is the upgrade path on any machine that already has a `cort_bin`
-manifest entry (a bare `./install.sh` declines there — see [Install](#install)).
+manifest entry (a bare `./install.sh` hands off to it there — see [Install](#install)).
 The binary is repo-local and never installed: it runs the new tree's code, so it
 inherently knows what the new release needs; its only question about the machine
 is "what's installed". The sequence, each boundary re-verified: **diagnose**

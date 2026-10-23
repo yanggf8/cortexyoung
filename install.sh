@@ -5,6 +5,7 @@ set -euo pipefail
 # Upstream publishes NO checksums; SHA-256 is repo-maintained (verified 2026-09-17) and comes from
 # the cort binary's own provenance table, not from a second copy here.
 # Usage: ./install.sh [--check] [--uninstall] [--force] [--with-rustup]
+#        ./install.sh [--keep-mine] [--defer] [--ack NAME]...   (installed machine: hands off to cort_upgrade)
 
 CORT_VERSION="0.1.0"
 # Ownership text, written into a stamp file NEXT TO a deployed SKILL.md. It is deliberately not
@@ -47,7 +48,10 @@ CODEX_SKILL_DEST="${CODEX_HOME:-$HOME/.codex}/skills/ast-grep/SKILL.md"
 # main.rs:582 (why Grok needs no entry of its own).
 WITH_HOOK=1
 
-FORCE=0; WITH_RUSTUP=0; MODE="install"; GEN_ID_ARG=""
+FORCE=0; WITH_RUSTUP=0; MODE="install"; GEN_ID_ARG=""; NO_HOOK_GIVEN=0; GEN_GIVEN=0
+# Flags that only mean something to cort_upgrade; collected here and forwarded verbatim on the
+# hand-off path, rejected everywhere else (see the dispatch).
+UPGRADE_ARGS=()
 
 # while+shift (not for-arg): --gen consumes the following word.
 while [ $# -gt 0 ]; do
@@ -56,19 +60,29 @@ while [ $# -gt 0 ]; do
     --uninstall) MODE="uninstall" ;;
     --stage-only) MODE="stage" ;;
     --activate-only) MODE="activate" ;;
-    --gen) [ $# -ge 2 ] || { echo "--gen needs a value (see --help)" >&2; exit 2; }; GEN_ID_ARG="$2"; shift ;;
-    --gen=*) GEN_ID_ARG="${1#--gen=}" ;;
+    --gen) [ $# -ge 2 ] || { echo "--gen needs a value (see --help)" >&2; exit 2; }; GEN_ID_ARG="$2"; GEN_GIVEN=1; shift ;;
+    --gen=*) GEN_ID_ARG="${1#--gen=}"; GEN_GIVEN=1 ;;
+    --keep-mine) UPGRADE_ARGS+=("--keep-mine") ;;
+    --defer)     UPGRADE_ARGS+=("--defer") ;;
+    --ack) [ $# -ge 2 ] || { echo "--ack needs a value (see --help)" >&2; exit 2; }; UPGRADE_ARGS+=("--ack" "$2"); shift ;;
+    --ack=*) UPGRADE_ARGS+=("--ack" "${1#--ack=}") ;;
     --force)     FORCE=1 ;;
     --with-rustup) WITH_RUSTUP=1 ;;
-    --no-hook)   WITH_HOOK=0 ;;
+    --no-hook)   WITH_HOOK=0; NO_HOOK_GIVEN=1 ;;
     --help|-h) cat <<EOF
 Usage: ./install.sh [OPTIONS]
   --check         Verify installation without mutating
   --uninstall     Remove managed artifacts only (reads manifest)
   --force         On unmanaged skill collision: backup and replace.
-                  Also bypasses the installed-machine decline below.
+                  Also bypasses the installed-machine hand-off below and
+                  really reinstalls over it.
+  --keep-mine     Upgrade only: keep edited skills (forwarded to cort_upgrade)
+  --defer         Upgrade only: record index debt, do not rebuild (forwarded)
+  --ack NAME      Upgrade only: accept one drifted component; repeatable (forwarded)
   --with-rustup   If cargo missing, bootstrap rustup via https://sh.rustup.rs
   --no-hook       Do not wire the PreToolUse hook into settings.json
+                  (fresh install only; an error when upgrading: cort_upgrade
+                  repairs hooks itself)
   --stage-only    Build, stage and validate one generation; print its id
                   (cort-<12hex>) on stdout and touch nothing live. Skips the
                   installer lock on purpose: staging is invisible work.
@@ -79,9 +93,12 @@ Usage: ./install.sh [OPTIONS]
   --help          Show this help
 
 With no mode flag on a machine that already has a cort_bin manifest entry,
-install.sh declines (exit 3) and changes nothing: full installs do not own
-upgrades — run this tree's rust/target/release/cort_upgrade. --force
-overrides the decline.
+install.sh says so and hands off to this tree's rust/target/release/cort_upgrade
+(building it first if needed): full installs do not own upgrades, so
+cort_upgrade's output and exit status are the result. --keep-mine, --defer and
+--ack are forwarded to it and are an error (exit 2) anywhere else; --no-hook
+and --gen do not apply to an upgrade and are an error (exit 2) there. --force
+reinstalls over the existing installation instead.
 EOF
       exit 0 ;;
     *) echo "Unknown option: $1 (see --help)" >&2; exit 2 ;;
@@ -1292,19 +1309,45 @@ if [ "${SOURCE_ONLY:-0}" = "1" ]; then
 fi
 
 # ── dispatch ───────────────────────────────────────────────────────
+
+# --keep-mine / --defer / --ack mean something only to cort_upgrade, so they are legal on exactly
+# one path: a bare install that finds an existing installation and hands off (below). Everywhere
+# else they would be silently ignored, which is how a user believes an edited skill is protected
+# when nothing read the flag -- refuse instead.
+reject_upgrade_flags() {
+  if [ "${#UPGRADE_ARGS[@]}" -gt 0 ]; then
+    echo "${UPGRADE_ARGS[0]} only applies when upgrading an existing installation (see --help)" >&2
+    exit 2
+  fi
+}
+
 case "$MODE" in
-  check)     do_check ;;
-  uninstall) do_uninstall ;;
-  stage)     do_stage_only ;;
-  activate)  do_activate_only ;;
+  check)     reject_upgrade_flags; do_check ;;
+  uninstall) reject_upgrade_flags; do_uninstall ;;
+  stage)     reject_upgrade_flags; do_stage_only ;;
+  activate)  reject_upgrade_flags; do_activate_only ;;
   install)
-    # Fresh-install-only: a machine that already has a cort_bin manifest entry is owned by
-    # cort-upgrade now. Reinstalling over it would redeploy skills ahead of upgrade policy
-    # (no --keep-mine here) and skip index migration and the verdict. Decline with a distinct
-    # exit code and change nothing; --force (explicit insistence) still proceeds.
+    # A machine that already has a cort_bin manifest entry is owned by cort_upgrade: reinstalling
+    # over it would redeploy skills ahead of upgrade policy (no --keep-mine here) and skip index
+    # migration and the verdict. So say so and hand off -- build the tree's release binaries
+    # (cargo owns freshness) and exec cort_upgrade, whose output and exit status are the user's.
+    # No drift, skill or index logic lives here; that all stays in cort_upgrade. --force (explicit
+    # insistence) still reinstalls.
     if [ "$FORCE" -eq 0 ] && manifest_has "cort_bin"; then
-      echo "existing installation — run this tree's rust/target/release/cort_upgrade" >&2
-      exit 3
+      # Flags cort_upgrade has no counterpart for must not be silently dropped on the way in.
+      if [ "$NO_HOOK_GIVEN" -eq 1 ]; then
+        echo "--no-hook does not apply when upgrading an existing installation (see --help)" >&2; exit 2
+      fi
+      if [ "$GEN_GIVEN" -eq 1 ]; then
+        echo "--gen does not apply when upgrading an existing installation (see --help)" >&2; exit 2
+      fi
+      UPGRADER="$SCRIPT_DIR/rust/target/release/cort_upgrade"
+      echo "existing installation — upgrading with rust/target/release/cort_upgrade" >&2
+      # stderr: stdout past this point is cort_upgrade's alone.
+      build_cort >&2
+      [ -x "$UPGRADER" ] || die "cort_upgrade missing after build: $UPGRADER"
+      exec "$UPGRADER" ${UPGRADE_ARGS[@]+"${UPGRADE_ARGS[@]}"}
     fi
+    reject_upgrade_flags
     do_install ;;
 esac

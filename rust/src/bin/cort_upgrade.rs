@@ -94,7 +94,7 @@ fn state_word(s: &ComponentState) -> &'static str {
 fn next_action(c: &Component) -> &'static str {
     // ast_grep is the one drifted/unreadable component a rerun cannot repair: cort-upgrade
     // judges it, install.sh provisions it — and on an installed machine that takes --force,
-    // because the bare installer declines (exit 3) to leave upgrades to this binary. The
+    // because the bare installer hands off to this binary instead of provisioning. The
     // generic advice sent this machine in a circle on 2026-09-18: two reruns, ast_grep
     // unchanged both times.
     if c.name == "ast_grep"
