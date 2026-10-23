@@ -1074,8 +1074,18 @@ pub fn load_acks(cache: &Path) -> Vec<String> {
     out
 }
 
-/// Persist one ack (idempotent — acking twice is not two acks). The bin `save_ack`s each
-/// `--ack <name>` BEFORE applying it, so the next invocation already knows.
+/// The requested `--ack` names this run's diagnosis does not contain, in request order.
+/// A name that matches no component would be persisted forever and never match (a typo).
+pub fn unknown_acks(requested: &[String], components: &[Component]) -> Vec<String> {
+    requested
+        .iter()
+        .filter(|r| !components.iter().any(|c| &c.name == *r))
+        .cloned()
+        .collect()
+}
+
+/// Persist one ack (idempotent — acking twice is not two acks). The bin saves each validated
+/// `--ack <name>` after diagnosis and before anything is judged, so the next invocation knows.
 pub fn save_ack(cache: &Path, name: &str) -> std::io::Result<()> {
     let path = cache.join(".upgrade-acks");
     let mut names = load_acks(cache);

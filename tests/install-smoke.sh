@@ -540,7 +540,7 @@ if [ "$MARKER_COUNT_BEFORE" -eq "$MARKER_COUNT_AFTER" ]; then pass "a handed-off
 if [ "$(grep -c '^cort_bin:' "$HOME/.local/share/cortexyoung/manifest")" = "1" ]; then pass "a handed-off rerun leaves one cort_bin row"; else fail "a handed-off rerun duplicated or lost the cort_bin row"; fi
 
 # Exit-status and stdout pass-through, deterministically. A forwarded flag cannot make cort_upgrade
-# fail (--ack records any name and succeeds), so the reproducible non-zero is a drift it cannot
+# fail (--ack either persists a valid name or exits 2), so the reproducible non-zero is a drift it cannot
 # repair: a manifest key no release knows. It exits 1 (Partial) on every run, from any state.
 echo "--- Test 2b: install.sh's exit status and stdout are cort_upgrade's ---"
 fresh_home_with_install
@@ -559,6 +559,36 @@ if cmp -s /tmp/smoke_pt_direct.log /tmp/smoke_pt_via.log && grep -q '^manifest_k
   pass "install.sh's stdout is byte-identical to cort_upgrade's"
 else
   fail "stdout differs between direct cort_upgrade and install.sh hand-off"
+fi
+
+# --ack validates its names against this run's diagnosis: a typo is a fatal error (exit 2) that
+# names the unknown ack and lists the valid components, and persists NOTHING (valid names on the
+# same command line included).
+echo "--- Test 2c: --ack rejects an unknown component name and persists nothing ---"
+fresh_home_with_install
+set +e
+ACK_CACHE="$HOME/.cache/cortex-ng"
+CORT_CACHE_DIR="$ACK_CACHE" "$REPO_ROOT/rust/target/release/cort_upgrade" --ack smoke_bogus --ack skill_ast_grep >/tmp/smoke_ack_out.log 2>/tmp/smoke_ack_err.log; ACK_EC=$?
+set -e
+if [ "$ACK_EC" -eq 2 ] && grep -q 'smoke_bogus' /tmp/smoke_ack_err.log && grep -q 'valid component names' /tmp/smoke_ack_err.log; then
+  pass "--ack with an unknown name exits 2 and names it"
+else
+  fail "--ack with an unknown name exited $ACK_EC"; sed 's/^/    /' /tmp/smoke_ack_err.log | tail -5
+fi
+# Pin the store path the binary uses (CORT_CACHE_DIR may be inherited from the caller).
+if [ ! -e "$ACK_CACHE/.upgrade-acks" ] && [ -z "$(find "$HOME" -name .upgrade-acks 2>/dev/null)" ]; then
+  pass "a rejected --ack persists nothing, valid names on the same line included"
+else
+  fail "a rejected --ack left an ack store behind"
+fi
+# Positive control: a valid name alone lands in exactly that store, so the absence above is proof.
+set +e
+CORT_CACHE_DIR="$ACK_CACHE" "$REPO_ROOT/rust/target/release/cort_upgrade" --check --ack skill_ast_grep >/dev/null 2>&1
+set -e
+if grep -qx 'skill_ast_grep' "$ACK_CACHE/.upgrade-acks" 2>/dev/null; then
+  pass "a valid --ack persists to the store Test 2c checked"
+else
+  fail "a valid --ack did not persist to $ACK_CACHE/.upgrade-acks"
 fi
 
 # ── 3. managed update (installer replaces outdated managed skill) ─

@@ -13,8 +13,8 @@ use cort::upgrade::{
     acquire_upgrade_locks, ast_grep_mismatch_found, check_hooks, check_skills, diagnose,
     diagnose_for_check, first_upgrade_note, live_generation, load_acks, migrate_indexes,
     prune_generations, repair_skill, run_capture_with_deadline, run_status_with_deadline, save_ack,
-    skill_repair_target, verdict, Component, ComponentState, DiagnoseInputs, LockError,
-    UpgradeExit,
+    skill_repair_target, unknown_acks, verdict, Component, ComponentState, DiagnoseInputs,
+    LockError, UpgradeExit,
 };
 use std::path::{Path, PathBuf};
 use std::process::exit;
@@ -194,17 +194,6 @@ fn main() {
         .unwrap_or_default();
 
     let cache = cort::db::cache_dir();
-    // --ack persists BEFORE anything is judged (spec §6: the next invocation already
-    // knows), and every path below — --check, steady state, final verdict — judges with
-    // the SAME ack set: the store plus the command line.
-    for a in &args.acks {
-        if let Err(e) = save_ack(&cache, a) {
-            fatal(&format!("cannot persist --ack {a}: {e}"));
-        }
-    }
-    let acks = load_acks(&cache);
-    let ack_names: Vec<&str> = acks.iter().map(String::as_str).collect();
-
     // ── Step 1: diagnose, unlocked. --check stops here. ─────────────
     let inputs = DiagnoseInputs {
         install_root: &install_root,
@@ -218,6 +207,28 @@ fn main() {
     let shim_ref: &Path = &shim;
     let runner = status_runner(shim_ref);
     let components = diagnose_for_check(&inputs, shim_ref, &runner);
+    // --ack persists before anything is judged, after the names are validated (spec §6: the
+    // next invocation already knows), and every path below — --check, steady state, final
+    // verdict — judges with the SAME ack set: the store plus the command line. All or nothing:
+    // one unknown name persists none, so a typo never lands in the store.
+    let unknown = unknown_acks(&args.acks, &components);
+    if !unknown.is_empty() {
+        let mut valid: Vec<&str> = components.iter().map(|c| c.name.as_str()).collect();
+        valid.sort_unstable();
+        valid.dedup();
+        fatal(&format!(
+            "unknown --ack name(s): {}; valid component names: {}",
+            unknown.join(", "),
+            valid.join(", ")
+        ));
+    }
+    for a in &args.acks {
+        if let Err(e) = save_ack(&cache, a) {
+            fatal(&format!("cannot persist --ack {a}: {e}"));
+        }
+    }
+    let acks = load_acks(&cache);
+    let ack_names: Vec<&str> = acks.iter().map(String::as_str).collect();
     if args.check {
         // No first-upgrade note here: --check takes no locks, so no drain ran and there is
         // nothing the note could honestly describe (Grok round).

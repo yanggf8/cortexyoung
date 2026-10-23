@@ -1678,3 +1678,32 @@ fn a_failed_removal_names_the_cause() {
     assert_eq!(report.failed[0].0, "cort-cccccccccccc");
     assert!(!report.failed[0].1.is_empty(), "the cause is carried");
 }
+
+/// `--ack` names are validated against this run's diagnosis: a typo must not be persisted
+/// forever as a name that will never match anything.
+#[test]
+fn unknown_acks_reports_only_names_the_diagnosis_does_not_have() {
+    use cort::upgrade::{unknown_acks, ComponentState};
+    let comps = vec![
+        comp("shim", ComponentState::Drifted),
+        comp("skill_ast_grep", ComponentState::Current),
+        comp("index:/abs/proj", ComponentState::Drifted),
+    ];
+    let req = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    assert!(unknown_acks(&req(&["shim", "skill_ast_grep"]), &comps).is_empty());
+    assert_eq!(
+        unknown_acks(&req(&["skill_ast_grp"]), &comps),
+        vec!["skill_ast_grp".to_string()]
+    );
+    // all-or-nothing input: valid and invalid mixed reports just the invalid ones, in order
+    assert_eq!(
+        unknown_acks(&req(&["bogus", "shim", "nope"]), &comps),
+        vec!["bogus".to_string(), "nope".to_string()]
+    );
+    // a dynamic index name is known only when this run's diagnosis produced it
+    assert!(unknown_acks(&req(&["index:/abs/proj"]), &comps).is_empty());
+    assert_eq!(
+        unknown_acks(&req(&["index:/gone"]), &comps),
+        vec!["index:/gone".to_string()]
+    );
+}
