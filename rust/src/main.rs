@@ -2686,6 +2686,8 @@ enum MeasureAction {
         #[arg(long, required = true)]
         token_stdin: bool,
     },
+    /// Local detail for one transcript (session id) or one compaction (boundary uuid).
+    Show { id: String },
 }
 
 fn cmd_measure(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, CortError> {
@@ -2705,6 +2707,10 @@ fn cmd_measure(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, CortErr
             let path = cort::measure_store::configure(&url, &token)
                 .map_err(|m| CortError::new("measure_error", json!({"message":m})))?;
             json!({"status":"configured","path":path})
+        }
+        MeasureAction::Show { id } => {
+            cort::measure::compaction_details(&cort::measure::claude_projects_dir(), &id)
+                .map_err(|m| CortError::new("measure_error", json!({"message":m})))?
         }
     };
     Ok(Emit {
