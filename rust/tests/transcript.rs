@@ -256,3 +256,82 @@ fn counts_derive_from_details() {
     let c = comps(&s)[0].post.counts();
     assert_eq!((c.tool_calls, c.rereads), (1, 1));
 }
+
+#[test]
+fn short_windows_are_symmetric_for_humans() {
+    let s = format!(
+        "{}{}{}{}{}",
+        boundary("u1"),
+        human("a"),
+        read("x"),
+        boundary("u2"),
+        human("b")
+    );
+    let c = comps(&s);
+    assert_eq!(c[0].post.human_messages, 1);
+    assert_eq!(c[1].pre.human_messages, 1);
+    // file start behaves like a previous boundary
+    let s = format!("{}{}{}", human("a"), read("x"), boundary("u1"));
+    assert_eq!(comps(&s)[0].pre.human_messages, 1);
+}
+
+#[test]
+fn full_pre_window_starts_at_the_fiftieth_tool() {
+    let s = format!(
+        "{}{}{}{}",
+        human("early"),
+        filler(50),
+        human("late"),
+        boundary("u1")
+    );
+    assert_eq!(comps(&s)[0].pre.human_messages, 1);
+}
+
+fn ms_of(ts: &str) -> i64 {
+    let l = line(
+        json!({"type":"system","subtype":"compact_boundary","uuid":"u","sessionId":"s","timestamp":ts,
+        "compactMetadata":{"trigger":"auto"}}),
+    );
+    match &parse_transcript(&l).steps[0] {
+        Step::Boundary(m) => m.time_ms,
+        _ => panic!(),
+    }
+}
+
+#[test]
+fn timestamp_calendar_is_validated() {
+    assert_eq!(ms_of("1970-01-01T00:00:00Z"), 0);
+    assert_eq!(ms_of("1970-01-02T00:00:00.5Z"), 86_400_500);
+    for ok in ["2028-02-29T00:00:00Z", "2000-02-29T00:00:00Z"] {
+        assert!(ms_of(ok) > 0, "{ok}");
+    }
+    for bad in [
+        "2026-02-29T00:00:00Z",
+        "2100-02-29T00:00:00Z",
+        "2026-04-31T00:00:00Z",
+        "2026-13-01T00:00:00Z",
+        "2026-00-10T00:00:00Z",
+        "2026-10-00T00:00:00Z",
+    ] {
+        assert_eq!(ms_of(bad), 0, "{bad}");
+    }
+}
+
+#[test]
+fn timestamp_time_fields_are_validated() {
+    for bad in [
+        "2026-10-22T24:00:00Z",
+        "2026-10-22T-1:00:00Z",
+        "2026-10-22T+1:00:00Z",
+        "2026-10-22T10:60:00Z",
+        "2026-10-22T10:-5:00Z",
+        "2026-10-22T10:00:60Z",
+        "2026-10-22T10:00:00.Z",
+        "2026-10-22T10:00:00.1x2Z",
+        "2026-10-22T10:00:00.-5Z",
+        "2026-10-22T10:00:00",
+        "2026-10-22 10:00:00Z",
+    ] {
+        assert_eq!(ms_of(bad), 0, "{bad}");
+    }
+}

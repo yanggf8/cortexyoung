@@ -145,31 +145,48 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     era * 146_097 + doe - 719_468
 }
 
-/// `2026-10-22T23:37:47.345Z` to epoch milliseconds; 0 when it does not parse.
+/// Fixed-width ASCII digits only (no sign, no whitespace).
+fn digits(s: &str, width: usize) -> Option<i64> {
+    if s.len() != width || !s.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    s.parse().ok()
+}
+
+fn is_leap(y: i64) -> bool {
+    (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
+}
+
+fn days_in_month(y: i64, m: i64) -> i64 {
+    match m {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        _ if is_leap(y) => 29,
+        _ => 28,
+    }
+}
+
+/// `2026-10-22T23:37:47.345Z` to epoch milliseconds; 0 when it is not a valid UTC timestamp.
 fn parse_time_ms(ts: &str) -> i64 {
     fn go(ts: &str) -> Option<i64> {
         let ts = ts.strip_suffix('Z')?;
         let (date, time) = ts.split_once('T')?;
         let mut d = date.split('-');
-        let (y, m, day) = (
-            d.next()?.parse::<i64>().ok()?,
-            d.next()?.parse::<i64>().ok()?,
-            d.next()?.parse::<i64>().ok()?,
-        );
-        if d.next().is_some() || !(1..=12).contains(&m) || !(1..=31).contains(&day) {
+        let y = digits(d.next()?, 4)?;
+        let m = digits(d.next()?, 2)?;
+        let day = digits(d.next()?, 2)?;
+        if d.next().is_some() || !(1..=12).contains(&m) || day < 1 || day > days_in_month(y, m) {
             return None;
         }
-        let (hms, frac) = match time.split_once('.') {
-            Some((a, b)) => (a, b),
-            None => (time, ""),
-        };
+        let (hms, frac) = time.split_once('.').unwrap_or((time, ""));
+        if time.contains('.') && frac.is_empty() {
+            return None;
+        }
         let mut t = hms.split(':');
-        let (h, mi, s) = (
-            t.next()?.parse::<i64>().ok()?,
-            t.next()?.parse::<i64>().ok()?,
-            t.next()?.parse::<i64>().ok()?,
-        );
-        if t.next().is_some() || h > 23 || mi > 59 || s > 60 {
+        let h = digits(t.next()?, 2)?;
+        let mi = digits(t.next()?, 2)?;
+        let s = digits(t.next()?, 2)?;
+        if t.next().is_some() || h > 23 || mi > 59 || s > 59 {
             return None;
         }
         let ms = if frac.is_empty() {
@@ -184,7 +201,13 @@ fn parse_time_ms(ts: &str) -> i64 {
             }
             f.parse::<i64>().ok()?
         };
-        Some(((days_from_civil(y, m, day) * 24 + h) * 60 + mi) * 60_000 + s * 1000 + ms)
+        days_from_civil(y, m, day)
+            .checked_mul(24)?
+            .checked_add(h)?
+            .checked_mul(60)?
+            .checked_add(mi)?
+            .checked_mul(60_000)?
+            .checked_add(s * 1000 + ms)
     }
     go(ts).unwrap_or(0)
 }
@@ -373,24 +396,28 @@ pub fn compactions(steps: &[Step]) -> Vec<Compaction> {
         let post = details(steps, b + 1, post_end);
 
         // Pre window: the last WINDOW tools before the boundary, cut at the previous boundary.
-        let mut tools = 0;
-        let mut pre_start = None;
+        let mut pre_tools = 0;
+        let mut pre_start = 0; // after the previous boundary, or file start
         for i in (0..b).rev() {
             match &steps[i] {
-                Step::Boundary(_) => break,
+                Step::Boundary(_) => {
+                    pre_start = i + 1;
+                    break;
+                }
                 Step::Tool { .. } => {
-                    tools += 1;
-                    pre_start = Some(i);
-                    if tools == WINDOW {
+                    pre_tools += 1;
+                    if pre_tools == WINDOW {
+                        pre_start = i;
                         break;
                     }
                 }
                 Step::Human { .. } => {}
             }
         }
-        let pre = match pre_start {
-            Some(s) => details(steps, s, b - 1),
-            None => WindowDetails::default(),
+        let pre = if b == 0 || pre_start >= b {
+            WindowDetails::default()
+        } else {
+            details(steps, pre_start, b - 1)
         };
 
         out.push(Compaction {
