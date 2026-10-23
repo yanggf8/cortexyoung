@@ -449,3 +449,73 @@ fn same_host_warns_even_after_one_machine_was_renamed() {
         "{warns:?}"
     );
 }
+
+#[test]
+fn recorded_host_without_compactions_still_gets_a_section() {
+    let (_t, mut s) = store();
+    s.upsert_machine_host("m1", "busy", 1).unwrap();
+    s.upsert_machine_host("m2", "quiet", 2).unwrap();
+    s.upsert_compaction(&row(
+        "m1",
+        "a",
+        THU_W43_MS,
+        w(10, 2, 1, 0, 1),
+        w(10, 5, 1, 2, 1),
+    ))
+    .unwrap();
+    let v = report(&mut s, &inputs(FRI_W43_MS)).unwrap();
+    assert_eq!(v["compactions"]["total"], 1);
+    let quiet = host_json(&v, "quiet");
+    assert_eq!(quiet["compactions"], 0);
+    assert_eq!(quiet["compared"], 0);
+    assert_eq!(quiet["machine_ids"], json!(["m2"]));
+    assert!(quiet["weeks"].as_array().unwrap().is_empty());
+    assert_eq!(host_json(&v, "busy")["compactions"], 1);
+    let text = render_report(&v, false);
+    let quiet_at = text.find("quiet").unwrap();
+    assert!(
+        text[quiet_at..].contains("這段期間沒有壓縮"),
+        "empty host must say so under its own section: {text}"
+    );
+    assert!(
+        !text[..text.find("quiet").unwrap()].contains("這段期間沒有壓縮"),
+        "the busy host must not claim it: {text}"
+    );
+}
+
+#[test]
+fn record_surfaces_scan_summary_in_both_outcomes() {
+    for fail in [false, true] {
+        let (_t, mut s) = store();
+        s.fail_push(fail);
+        let r = rec_env();
+        let mut body = fs::read_to_string(r.input.projects_dir.join("p1/sess-1.jsonl")).unwrap();
+        body.push_str("not json\n{\"type\":\"brand-new-thing\"}\n");
+        fs::write(r.input.projects_dir.join("p1/sess-1.jsonl"), body).unwrap();
+        let (scan, outcome) = record_with_scan(&mut s, &r.input).unwrap();
+        assert_eq!(matches!(outcome, RecordOutcome::Pushed), !fail);
+        assert_eq!(
+            scan.to_json(),
+            json!({"files_seen": 1, "files_scanned": 1, "compactions": 1,
+                "skipped_lines": 1, "unknown_type_lines": 1})
+        );
+    }
+}
+
+#[test]
+fn record_pull_failure_still_returns_scan() {
+    let (_t, mut s) = store();
+    s.fail_pull(true);
+    let r = rec_env();
+    let (scan, outcome) = record_with_scan(&mut s, &r.input).unwrap();
+    assert!(
+        matches!(&outcome, RecordOutcome::PushedPullFailed(m) if !m.is_empty()),
+        "{outcome:?}"
+    );
+    assert_eq!(scan.compactions, 1);
+    assert_eq!(scan.files_scanned, 1);
+    // The plain wrapper keeps its old contract: a pull failure is an error.
+    assert!(record(&mut s, &r.input)
+        .unwrap_err()
+        .contains("pull failed"));
+}

@@ -5,7 +5,7 @@
 use crate::data_dir::{data_dir, write_atomic};
 use crate::measure_store::{CompactionRow, MeasureStore};
 use crate::memory_store::project_from_git_origin;
-use crate::transcript::{compactions, parse_transcript, Compaction, Step, WindowDetails};
+use crate::transcript::{compactions, parse_transcript_bytes, Compaction, Step, WindowDetails};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
@@ -48,6 +48,19 @@ pub struct ScanSummary {
     pub files_scanned: usize,
     pub compactions: usize,
     pub skipped_lines: usize,
+    pub unknown_type_lines: usize,
+}
+
+impl ScanSummary {
+    pub fn to_json(&self) -> Value {
+        json!({
+            "files_seen": self.files_seen,
+            "files_scanned": self.files_scanned,
+            "compactions": self.compactions,
+            "skipped_lines": self.skipped_lines,
+            "unknown_type_lines": self.unknown_type_lines,
+        })
+    }
 }
 
 pub fn claude_projects_dir() -> PathBuf {
@@ -138,10 +151,6 @@ fn collect_files(
     Ok((out, unreadable))
 }
 
-fn read_lossy(path: &Path) -> std::io::Result<String> {
-    Ok(String::from_utf8_lossy(&fs::read(path)?).into_owned())
-}
-
 pub fn scan_transcripts(
     store: &mut dyn MeasureStore,
     projects_dir: &Path,
@@ -166,15 +175,16 @@ pub fn scan_transcripts(
             continue;
         }
         // An unreadable file keeps its old watermark, so the next scan tries it again.
-        let Ok(text) = read_lossy(&file.path) else {
+        let Ok(text) = fs::read(&file.path) else {
             if let Some(old) = marks.files.get(&key) {
                 next.insert(key, *old);
             }
             continue;
         };
-        let parsed = parse_transcript(&text);
+        let parsed = parse_transcript_bytes(&text);
         summary.files_scanned += 1;
         summary.skipped_lines += parsed.skipped_lines;
+        summary.unknown_type_lines += parsed.unknown_type_lines;
         for c in compactions(&parsed.steps) {
             let owner = store.compaction_session(machine_id, &c.boundary.uuid)?;
             if matches!(&owner, Some(s) if *s != c.boundary.session_id) {
@@ -242,14 +252,14 @@ pub fn compaction_details(projects_dir: &Path, id: &str) -> Result<Value, String
     let (files, mut unreadable) = collect_files(projects_dir, false)?;
     for file in files {
         let by_stem = file.path.file_stem().and_then(|s| s.to_str()) == Some(id);
-        let Ok(text) = read_lossy(&file.path) else {
+        let Ok(text) = fs::read(&file.path) else {
             unreadable += 1;
             continue;
         };
-        if !by_stem && !text.contains(id) {
+        if !by_stem && !String::from_utf8_lossy(&text).contains(id) {
             continue;
         }
-        let parsed = parse_transcript(&text);
+        let parsed = parse_transcript_bytes(&text);
         let has_boundary = parsed.steps.iter().any(|s| matches!(s, Step::Boundary(_)));
         if !has_boundary {
             continue;
@@ -286,23 +296,37 @@ pub struct RecordInputs {
 pub enum RecordOutcome {
     Pushed,
     SavedLocallyPushFailed(String),
+    /// The push landed but the pull did not; the scan summary must still reach the caller.
+    PushedPullFailed(String),
 }
 
 /// Local writes first (host mapping, compaction rows), then the watermarks, then the network.
 /// A failed local write returns before the watermarks move, so the next run rescans; a failed
 /// push never loses data, because the rows are already in the local replica.
 pub fn record(store: &mut dyn MeasureStore, input: &RecordInputs) -> Result<RecordOutcome, String> {
+    match record_with_scan(store, input)?.1 {
+        RecordOutcome::PushedPullFailed(e) => Err(format!("pushed, but pull failed: {e}")),
+        other => Ok(other),
+    }
+}
+
+/// [`record`], also handing back what the scan saw. The summary is local only: it is printed to
+/// the caller (cron appends it to measure.log) and never stored or uploaded.
+pub fn record_with_scan(
+    store: &mut dyn MeasureStore,
+    input: &RecordInputs,
+) -> Result<(ScanSummary, RecordOutcome), String> {
     store.upsert_machine_host(&input.machine_id, &input.host, input.now_ms)?;
     let mut marks = Watermarks::load(&input.marks_path);
-    scan_transcripts(store, &input.projects_dir, &mut marks, &input.machine_id)?;
+    let scan = scan_transcripts(store, &input.projects_dir, &mut marks, &input.machine_id)?;
     marks.save(&input.marks_path)?;
     if let Err(e) = store.push() {
-        return Ok(RecordOutcome::SavedLocallyPushFailed(e));
+        return Ok((scan, RecordOutcome::SavedLocallyPushFailed(e)));
     }
-    store
-        .pull()
-        .map_err(|e| format!("pushed, but pull failed: {e}"))?;
-    Ok(RecordOutcome::Pushed)
+    if let Err(e) = store.pull() {
+        return Ok((scan, RecordOutcome::PushedPullFailed(e)));
+    }
+    Ok((scan, RecordOutcome::Pushed))
 }
 
 /// Push then pull. `Ok` means the local replica is as current as the remote was a moment ago.
@@ -520,20 +544,31 @@ pub fn report(store: &mut dyn MeasureStore, input: &ReportInputs) -> Result<Valu
         }
     }
 
-    let mut grouped: BTreeMap<String, Vec<&CompactionRow>> = BTreeMap::new();
+    // Every recorded host gets a section, compactions or not: a quiet machine is not an absent one.
+    let mut grouped: BTreeMap<String, (Vec<String>, Vec<&CompactionRow>)> = BTreeMap::new();
+    for (machine, host) in &host_of {
+        grouped
+            .entry(host.clone())
+            .or_default()
+            .0
+            .push(machine.clone());
+    }
     for r in &rows {
         let host = host_of
             .get(&r.machine_id)
             .cloned()
             .unwrap_or_else(|| format!("machine {}", short(&r.machine_id)));
-        grouped.entry(host).or_default().push(r);
+        let entry = grouped.entry(host).or_default();
+        if !entry.0.contains(&r.machine_id) {
+            entry.0.push(r.machine_id.clone());
+        }
+        entry.1.push(r);
     }
     let sections: Vec<Value> = grouped
         .iter()
-        .map(|(host, rs)| {
-            let mut ids: Vec<String> = rs.iter().map(|r| r.machine_id.clone()).collect();
+        .map(|(host, (ids, rs))| {
+            let mut ids = ids.clone();
             ids.sort();
-            ids.dedup();
             host_section(host, &ids, rs)
         })
         .collect();
@@ -595,6 +630,10 @@ pub fn render_report(v: &Value, color: bool) -> String {
             ids.join(", ")
         )));
         out.push('\n');
+        if h["compactions"].as_i64().unwrap_or(0) == 0 {
+            out.push_str("  這段期間沒有壓縮\n");
+            continue;
+        }
         out.push_str(&format!(
             "  壓縮 {} 次；可比較 {}，no baseline {}（前窗沒有工具呼叫，只列後窗、不拿來比）\n",
             h["compactions"], h["compared"], h["no_baseline"]

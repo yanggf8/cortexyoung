@@ -124,32 +124,56 @@ fn config_file_is_private() {
 
 #[test]
 fn store_lock_serializes_two_holders() {
+    use std::sync::mpsc::channel;
+    use std::time::{Duration, Instant};
     let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tempfile::tempdir().unwrap();
     std::env::set_var("CORT_MEMORY_DIR", dir.path());
     configure("https://x.turso.io", "tok").unwrap();
     let inside = Arc::new(AtomicUsize::new(0));
     let overlap = Arc::new(AtomicUsize::new(0));
-    let handles: Vec<_> = (0..2)
-        .map(|_| {
-            let (inside, overlap) = (inside.clone(), overlap.clone());
-            std::thread::spawn(move || {
-                with_measure_lock(|| {
-                    if inside.fetch_add(1, Ordering::SeqCst) != 0 {
-                        overlap.fetch_add(1, Ordering::SeqCst);
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(200));
-                    inside.fetch_sub(1, Ordering::SeqCst);
-                    Ok(())
-                })
-                .unwrap();
-            })
+    let (entered_tx, entered_rx) = channel::<()>();
+    let (asking_tx, asking_rx) = channel::<Instant>();
+    let a_inside = inside.clone();
+    let a = std::thread::spawn(move || {
+        let mut released_at = None;
+        with_measure_lock(|| {
+            a_inside.fetch_add(1, Ordering::SeqCst);
+            entered_tx.send(()).unwrap();
+            // Hold the lock until B has announced it is about to ask, then give it time to block.
+            let asked_at = asking_rx.recv().unwrap();
+            std::thread::sleep(Duration::from_millis(100));
+            a_inside.fetch_sub(1, Ordering::SeqCst);
+            released_at = Some(Instant::now());
+            Ok(asked_at)
         })
-        .collect();
-    for h in handles {
-        h.join().unwrap();
-    }
+        .map(|asked_at| (asked_at, released_at.unwrap()))
+        .unwrap()
+    });
+    // B is spawned only once A is provably inside the critical section.
+    entered_rx.recv().unwrap();
+    let (b_inside, b_overlap) = (inside.clone(), overlap.clone());
+    let b = std::thread::spawn(move || {
+        let asked_at = Instant::now();
+        asking_tx.send(asked_at).unwrap();
+        let mut entered_at = None;
+        with_measure_lock(|| {
+            entered_at = Some(Instant::now());
+            if b_inside.fetch_add(1, Ordering::SeqCst) != 0 {
+                b_overlap.fetch_add(1, Ordering::SeqCst);
+            }
+            b_inside.fetch_sub(1, Ordering::SeqCst);
+            Ok(())
+        })
+        .unwrap();
+        entered_at.unwrap()
+    });
+    let (b_asked, a_released) = a.join().unwrap();
+    let b_entered = b.join().unwrap();
     assert_eq!(overlap.load(Ordering::SeqCst), 0);
+    // B asked while A still held the lock, and got in only after A let go.
+    assert!(b_asked < a_released, "B asked after A had already released");
+    assert!(b_entered >= a_released, "B entered before A released");
     assert!(dir
         .path()
         .join("turso-measure")

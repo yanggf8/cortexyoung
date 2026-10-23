@@ -50,7 +50,42 @@ pub enum Step {
 pub struct Parsed {
     pub steps: Vec<Step>,
     pub skipped_lines: usize,
+    /// Parsed lines whose `type` is missing or outside `KNOWN_TYPES`: upstream vocabulary drift,
+    /// counted apart from damage and never uploaded.
+    pub unknown_type_lines: usize,
 }
+
+// Census of every `type` seen in both machines' transcripts on 2026-10-23.
+const KNOWN_TYPES: &[&str] = &[
+    "user",
+    "assistant",
+    "system",
+    "attachment",
+    "last-prompt",
+    "atis-latch",
+    "api-request",
+    "api-request-blob",
+    "api-request-shape",
+    "permission-mode",
+    "mode",
+    "ai-title",
+    "queue-operation",
+    "bridge-session",
+    "history-suppression",
+    "frame-link",
+    "file-history-snapshot",
+    "file-history-delta",
+    "cost-state",
+    "agent-name",
+    "agent-setting",
+    "artifact-comment-monitor",
+    "artifact-autoreact-ledger",
+    "continued-in",
+    "summary",
+    "progress",
+    "custom-title",
+    "environment",
+];
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WindowDetails {
@@ -240,15 +275,21 @@ fn boundary_meta(line: &Value) -> BoundaryMeta {
 }
 
 pub fn parse_transcript(jsonl: &str) -> Parsed {
+    parse_transcript_bytes(jsonl.as_bytes())
+}
+
+/// Decodes per line: a line that is not valid UTF-8 is skipped and counted, like a non-JSON one.
+pub fn parse_transcript_bytes(raw_bytes: &[u8]) -> Parsed {
     let mut parsed = Parsed::default();
-    let ends_with_newline = jsonl.ends_with('\n');
-    let lines: Vec<&str> = jsonl.split('\n').collect();
+    let ends_with_newline = raw_bytes.ends_with(b"\n");
+    let lines: Vec<&[u8]> = raw_bytes.split(|b| *b == b'\n').collect();
     let last = lines.len().saturating_sub(1);
     for (i, raw) in lines.iter().enumerate() {
-        if raw.trim().is_empty() {
+        let decoded = std::str::from_utf8(raw).ok();
+        if decoded.is_some_and(|s| s.trim().is_empty()) || raw.is_empty() {
             continue;
         }
-        let Ok(line) = serde_json::from_str::<Value>(raw) else {
+        let Some(line) = decoded.and_then(|s| serde_json::from_str::<Value>(s).ok()) else {
             // A writer may be mid-line: an unterminated last line is not damage.
             if i != last || ends_with_newline {
                 parsed.skipped_lines += 1;
@@ -287,7 +328,8 @@ pub fn parse_transcript(jsonl: &str) -> Parsed {
                     parsed.steps.push(Step::Human { text });
                 }
             }
-            _ => {}
+            Some(t) if KNOWN_TYPES.contains(&t) => {}
+            _ => parsed.unknown_type_lines += 1,
         }
     }
     parsed

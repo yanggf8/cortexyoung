@@ -231,6 +231,7 @@ fn host_from_cells(c: &[Cell]) -> Result<MachineHost, String> {
 pub struct SqliteStore {
     conn: rusqlite::Connection,
     fail_push: bool,
+    fail_pull: bool,
 }
 
 fn sql_err(e: rusqlite::Error) -> String {
@@ -246,12 +247,18 @@ impl SqliteStore {
         Ok(Self {
             conn,
             fail_push: false,
+            fail_pull: false,
         })
     }
 
     /// Test hook: make `push` return an error while keeping local data.
     pub fn fail_push(&mut self, fail: bool) {
         self.fail_push = fail;
+    }
+
+    /// Test hook: make `pull` return an error.
+    pub fn fail_pull(&mut self, fail: bool) {
+        self.fail_pull = fail;
     }
 
     fn query(&self, sql: &str, params: Vec<Cell>, cols: usize) -> Result<Vec<Vec<Cell>>, String> {
@@ -353,6 +360,9 @@ impl MeasureStore for SqliteStore {
     }
 
     fn pull(&mut self) -> Result<(), String> {
+        if self.fail_pull {
+            return Err("pull failed (fail_pull set)".into());
+        }
         Ok(())
     }
 }

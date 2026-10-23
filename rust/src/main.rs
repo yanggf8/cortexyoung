@@ -2732,7 +2732,25 @@ fn cmd_measure(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, CortErr
                 .map_err(|e| CortError::new("measure_error", json!({"message":e.to_string()})))?;
             let path = cort::measure_store::configure(&url, &token)
                 .map_err(|m| CortError::new("measure_error", json!({"message":m})))?;
-            json!({"status":"configured","path":path})
+            // install.sh only schedules cron on a machine that is already configured, so say
+            // whether the schedule exists. Never install it here (the shim path is unknown) and
+            // never fail configure over it.
+            let mut value = json!({"status":"configured","path":path});
+            match cort::cron::read_crontab() {
+                Ok(text) => {
+                    let installed = text.lines().any(cort::cron::is_measure_entry);
+                    value["cron_installed"] = json!(installed);
+                    if !installed {
+                        value["next"] =
+                            json!("cort measure cron --install --command-prefix <shim>");
+                    }
+                }
+                Err(e) => {
+                    value["cron_installed"] = Value::Null;
+                    value["cron_error"] = json!(e.message());
+                }
+            }
+            value
         }
         MeasureAction::Show { id } => {
             cort::measure::compaction_details(&cort::measure::claude_projects_dir(), &id)
@@ -2789,19 +2807,26 @@ fn cmd_measure(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, CortErr
                 host: cort::measure::host_name(),
                 now_ms: usage::now_ms(),
             };
-            let outcome =
-                cort::measure_store::with_turso_store(|store| cort::measure::record(store, &input))
-                    .map_err(|m| CortError::new("measure_error", json!({"message":m})))?;
+            let (scan, outcome) = cort::measure_store::with_turso_store(|store| {
+                cort::measure::record_with_scan(store, &input)
+            })
+            .map_err(|m| CortError::new("measure_error", json!({"message":m})))?;
             match outcome {
                 cort::measure::RecordOutcome::Pushed => {
                     cort::measure::write_last_sync(usage::now_ms())
                         .map_err(|m| CortError::new("measure_error", json!({"message":m})))?;
-                    json!({"status":"recorded","pushed":true})
+                    json!({"status":"recorded","pushed":true,"scan":scan.to_json()})
+                }
+                cort::measure::RecordOutcome::PushedPullFailed(m) => {
+                    return Err(CortError::new(
+                        "measure_pull_failed",
+                        json!({"message": format!("pushed, but pull failed: {m}"), "scan": scan.to_json()}),
+                    ));
                 }
                 cort::measure::RecordOutcome::SavedLocallyPushFailed(m) => {
                     return Err(CortError::new(
                         "measure_push_failed",
-                        json!({"message": format!("saved locally, push failed: {m}")}),
+                        json!({"message": format!("saved locally, push failed: {m}"), "scan": scan.to_json()}),
                     ));
                 }
             }

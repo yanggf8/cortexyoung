@@ -433,3 +433,49 @@ fn unterminated_last_line_gets_a_newline_before_our_entry() {
     let (out, _) = merge("0 3 * * * /bin/backup", &line());
     assert_eq!(out, format!("0 3 * * * /bin/backup\n{}\n", line()));
 }
+
+fn configure_out(file: &Path, data: &Path) -> serde_json::Value {
+    use std::io::Write;
+    let mut child = Command::new(PathBuf::from(env!("CARGO_BIN_EXE_cort")))
+        .args([
+            "measure",
+            "configure",
+            "--url",
+            "https://x.turso.io",
+            "--token-stdin",
+        ])
+        .env("CORT_CRONTAB_FILE", file)
+        .env("CORT_MEMORY_DIR", data)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(b"tok\n").unwrap();
+    let o = child.wait_with_output().unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    serde_json::from_str(&out(&o)).unwrap()
+}
+
+#[test]
+fn cli_configure_reports_cron_installed_false_with_next_step() {
+    let (_d, file, data) = fixture();
+    std::fs::write(&file, FOREIGN).unwrap();
+    let v = configure_out(&file, &data);
+    assert_eq!(v["status"], "configured");
+    assert_eq!(v["cron_installed"], false);
+    assert!(v["next"]
+        .as_str()
+        .unwrap()
+        .contains("cort measure cron --install --command-prefix"));
+    assert_eq!(count_entries(&file), 0, "configure must not install cron");
+}
+
+#[test]
+fn cli_configure_reports_cron_installed_true() {
+    let (_d, file, data) = fixture();
+    std::fs::write(&file, format!("{FOREIGN}{}\n", line())).unwrap();
+    let v = configure_out(&file, &data);
+    assert_eq!(v["cron_installed"], true);
+    assert!(v.get("next").is_none());
+}

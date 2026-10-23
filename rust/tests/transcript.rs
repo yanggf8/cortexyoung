@@ -335,3 +335,51 @@ fn timestamp_time_fields_are_validated() {
         assert_eq!(ms_of(bad), 0, "{bad}");
     }
 }
+
+#[test]
+fn invalid_utf8_line_is_skipped_and_counted() {
+    let mut bytes = boundary("u1").into_bytes();
+    bytes.extend_from_slice(b"{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"name\":\"Read\",\"input\":{\"file_path\":\"a\xff\"}}]}}\n");
+    bytes.extend_from_slice(read("b").as_bytes());
+    let p = parse_transcript_bytes(&bytes);
+    assert_eq!(p.skipped_lines, 1);
+    assert_eq!(p.steps.len(), 2, "only the boundary and the valid read");
+    assert_eq!(p.unknown_type_lines, 0);
+}
+
+#[test]
+fn invalid_utf8_unterminated_last_line_is_not_damage() {
+    let mut bytes = boundary("u1").into_bytes();
+    bytes.extend_from_slice(b"{\"type\":\"assis\xff");
+    let p = parse_transcript_bytes(&bytes);
+    assert_eq!(p.skipped_lines, 0);
+    assert_eq!(p.steps.len(), 1);
+}
+
+#[test]
+fn unknown_type_is_counted_apart_from_skipped() {
+    let s = format!(
+        "{}{}{}",
+        line(json!({"type":"brand-new-thing"})),
+        line(json!({"no_type":true})),
+        read("a")
+    );
+    let p = parse_transcript(&s);
+    assert_eq!(p.unknown_type_lines, 2);
+    assert_eq!(p.skipped_lines, 0);
+    assert_eq!(p.steps.len(), 1);
+}
+
+#[test]
+fn known_unhandled_type_counts_nowhere() {
+    let s = line(json!({"type":"attachment"}));
+    let p = parse_transcript(&s);
+    assert_eq!(p.unknown_type_lines, 0);
+    assert_eq!(p.skipped_lines, 0);
+}
+
+#[test]
+fn sidechain_lines_precede_the_type_check() {
+    let s = line(json!({"type":"brand-new-thing","isSidechain":true}));
+    assert_eq!(parse_transcript(&s).unknown_type_lines, 0);
+}
