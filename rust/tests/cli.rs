@@ -129,11 +129,12 @@ fn hooks_without_measure_configuration_record_collect_label() {
             json!({"tool_name":"Bash","tool_input":{"command":"rg foo"}}),
             None,
         ),
-        // Rejected on shape: the path most Bash calls take, so it must kick too.
+        // Every readable payload is a fire now; the shape gate that used to reject this one is
+        // gone, and the thin trigger still kicks collection from the same exit.
         (
             "hook-suggest",
             json!({"tool_name":"Bash","tool_input":{"command":"ls -la"}}),
-            Some("no_shape"),
+            Some("fired"),
         ),
     ] {
         let mut child = Command::new(cort_bin())
@@ -502,10 +503,157 @@ fn coverage_flows_through_the_cli_in_lean() {
 /// A call-site search that the rule fires on.
 const FIRING_SEARCH: &str = "grep -rn 'helper(' src --include=*.ts";
 
-/// The same spawn as `run_hook_suggest_payload` WITHOUT `CORT_SUGGEST=1` -- the default, muted
-/// world the 2026-09-27 direction shipped: the hook records every verdict, symbol and demand
-/// excerpt, and says nothing to the agent.
-fn run_hook_suggest_muted(command: &str, cwd: &Path, cache: &Path) -> Run {
+/// The same spawn as `run_hook_suggest_payload`, with `CORT_SUGGEST` optionally set. The variable
+/// used to re-enable the announcement; it is kept in the signature so the test can prove it now
+/// changes nothing.
+fn run_hook_suggest_with_cort_suggest(suggest: bool, cwd: &Path, cache: &Path) -> Run {
+    use std::io::Write;
+    use std::process::Stdio;
+    let mut cmd = Command::new(cort_bin());
+    cmd.arg("hook-suggest")
+        .current_dir(cwd)
+        .env("CORT_CACHE_DIR", cache)
+        // `kick` reads the data dir; never let a hook test reach the real one.
+        .env("CORT_MEMORY_DIR", cache.join("data"));
+    if suggest {
+        cmd.env("CORT_SUGGEST", "1");
+    }
+    let mut child = cmd
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn cort hook-suggest");
+    let payload = serde_json::json!({
+        "tool_name": "Bash",
+        "tool_input": { "command": FIRING_SEARCH },
+    });
+    let body = serde_json::to_vec(&payload).unwrap();
+    child.stdin.take().unwrap().write_all(&body).unwrap();
+    let out = child.wait_with_output().expect("wait cort hook-suggest");
+    Run {
+        code: out.status.code().unwrap_or(1),
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+    }
+}
+
+/// The thin trigger has no announcement left to switch on, so `CORT_SUGGEST=1` must change
+/// nothing. It used to restore the suggestion for the copy-locking tests; that whole vocabulary
+/// went with the suggestion, and a variable nothing reads is worth a test that says so -- otherwise
+/// the next person to "re-enable" it gets silence and no explanation.
+///
+/// No index is built on purpose: the fire row is now written before any project state is consulted.
+#[test]
+fn cort_suggest_no_longer_makes_the_hook_speak() {
+    let (_p, cwd, _c, cache) = sandbox();
+    for suggest in [false, true] {
+        let r = run_hook_suggest_with_cort_suggest(suggest, &cwd, &cache);
+        assert_eq!(r.code, 0, "stdout={} stderr={}", r.stdout, r.stderr);
+        assert!(
+            r.stderr.is_empty(),
+            "the hook is silent on stderr too: {}",
+            r.stderr
+        );
+        assert_eq!(
+            payload(&r),
+            serde_json::json!({}),
+            "CORT_SUGGEST={} made the hook speak: {}",
+            suggest,
+            r.stdout
+        );
+    }
+    let rows = read_hook_rows(&cache.join("usage.db"), "hook-suggest");
+    assert_eq!(rows.len(), 2, "one fire, one row each: {rows:?}");
+    for row in &rows {
+        assert_eq!(row["hook"], "fired", "the fire is still recorded: {row}");
+        assert_eq!(row["tool"], "Bash", "the tool is still recorded: {row}");
+    }
+}
+
+/// Every `fired` row names the project it fired in, and that id is the one a later `cort index`
+/// of the same directory takes -- so a fire joins the projects table without a second derivation.
+///
+/// The live db carried 13,233 hook-suggest rows and not one named a project, which made "did the
+/// project this hook fired in ever get indexed" a question only transcripts could answer. The id
+/// comes from the directory the hook ran in, canonicalised and hashed; nothing about the index is
+/// needed to state it, so this holds whether or not the project was ever indexed.
+///
+/// The other direction is just as deliberate: a payload that was never read is not attributed. A
+/// `no_payload` row keeps `project_id` NULL, because the harness has not said where it is.
+#[test]
+fn every_fired_row_names_the_project_it_fired_in() {
+    let (_p, cwd, _c, cache) = sandbox();
+    let usage_db = cache.join("usage.db");
+    let canon = fs::canonicalize(&cwd).unwrap();
+    let expected = project_id_for(canon.to_str().unwrap());
+
+    // No index is built: the fire row no longer depends on one.
+    let fire = run_hook_suggest_payload(
+        serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": { "command": FIRING_SEARCH },
+            "session_id": "sess-adopt-1",
+            "cwd": cwd.to_str().unwrap(),
+        }),
+        &[],
+        &cwd,
+        &cache,
+    );
+    assert_eq!(fire.code, 0, "{} {}", fire.stdout, fire.stderr);
+    assert_eq!(
+        row_project_id(&usage_db, "fired"),
+        expected,
+        "a fired row must name the project it fired in"
+    );
+
+    // Invalid stdin never gets as far as a harness or a project.
+    let raw = run_hook_suggest_raw(b"not json at all", &cwd, &cache);
+    assert_eq!(raw.code, 0, "{} {}", raw.stdout, raw.stderr);
+    assert_eq!(
+        row_project_id(&usage_db, "no_payload"),
+        "",
+        "an unread payload is not attributed to a project"
+    );
+}
+
+/// A hook must never panic, and every fire now derives a project from the directory it ran in.
+/// A directory name that is not UTF-8 has no project id to give -- the id is a hash of the path
+/// string -- so the fire is still recorded and kicked, just without a project.
+#[cfg(unix)]
+#[test]
+fn a_fire_in_a_non_utf8_directory_is_recorded_without_a_project() {
+    use std::os::unix::ffi::OsStrExt;
+    let temp = tempfile::tempdir().unwrap();
+    let cache = temp.path().join("cache");
+    fs::create_dir_all(&cache).unwrap();
+    let cwd = temp.path().join(std::ffi::OsStr::from_bytes(b"proj-\xff"));
+    fs::create_dir_all(&cwd).unwrap();
+    let r = run_hook_suggest_payload(
+        serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": { "command": FIRING_SEARCH },
+        }),
+        &[],
+        &cwd,
+        &cache,
+    );
+    assert_eq!(r.code, 0, "{} {}", r.stdout, r.stderr);
+    assert!(
+        r.stderr.is_empty(),
+        "a hook says nothing on stderr: {}",
+        r.stderr
+    );
+    assert_eq!(r.stdout, "{}\n");
+    assert_eq!(
+        row_project_id(&cache.join("usage.db"), "fired"),
+        "",
+        "a path with no UTF-8 spelling has no project id"
+    );
+}
+
+/// The hook's raw stdin path, for payloads that are not JSON at all.
+fn run_hook_suggest_raw(body: &[u8], cwd: &Path, cache: &Path) -> Run {
     use std::io::Write;
     use std::process::Stdio;
     let mut child = Command::new(cort_bin())
@@ -519,129 +667,13 @@ fn run_hook_suggest_muted(command: &str, cwd: &Path, cache: &Path) -> Run {
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn cort hook-suggest");
-    let payload = serde_json::json!({
-        "tool_name": "Bash",
-        "tool_input": { "command": command },
-    });
-    let body = serde_json::to_vec(&payload).unwrap();
-    child.stdin.take().unwrap().write_all(&body).unwrap();
+    child.stdin.take().unwrap().write_all(body).unwrap();
     let out = child.wait_with_output().expect("wait cort hook-suggest");
     Run {
         code: out.status.code().unwrap_or(1),
         stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
     }
-}
-
-/// 2026-09-27 direction call: the hook is a demand instrument first. Measured across three
-/// windows the announcement was never once adopted in the wild (0/9, then 0 suggestions at all),
-/// and the agent correlates on its own; the caller-set service cort still renders on demand is
-/// not this hook's job to advertise. By default the hook therefore RECORDS AND SPEAKS TO NO ONE
-/// -- no suggestion, no `cort index` hint, no name pointer, no Kimi deny. `CORT_SUGGEST=1`
-/// (set by the helpers above) restores the announcement for the copy-locking tests and for any
-/// future re-enable that comes with its own measured reason.
-#[test]
-fn by_default_the_hook_records_but_speaks_to_no_one() {
-    let (_p, cwd, _c, cache) = sandbox();
-    let idx = run_cort(&["index"], &cwd, &cache);
-    if idx.code != 0 {
-        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
-        return;
-    }
-    let r = run_hook_suggest_muted(FIRING_SEARCH, &cwd, &cache);
-    assert_eq!(r.code, 0, "stdout={} stderr={}", r.stdout, r.stderr);
-    assert_eq!(
-        payload(&r),
-        serde_json::json!({}),
-        "muted means no suggestion reaches the agent: {} {}",
-        r.stdout,
-        r.stderr
-    );
-    let row = latest_command_row(&cache.join("usage.db"), "hook-suggest");
-    assert_eq!(row["hook"], "hit", "the verdict is still recorded: {row}");
-    assert_eq!(
-        row["symbol"], "helper",
-        "the symbol is still recorded: {row}"
-    );
-}
-
-/// Every hook-suggest outcome that paid for the index probe (`no_index_hinted`, `hit`,
-/// `no_evidence`) must write its usage row with the project it probed.
-///
-/// The live db carried 13,233 hook-suggest rows and not one named a project -- while
-/// `hook-refresh`, which runs through the same probe, names one on every row it can. The cost was
-/// concrete: "did the hinted project ever get indexed" is the adoption funnel's own follow-up, and
-/// with no project on the row it can only be answered by re-reading transcripts. The probe already
-/// holds the id, so the row carries it; and the id has to be the one a later index of the same
-/// directory takes, so a hint row joins the projects table without a second derivation.
-#[test]
-fn the_rows_that_probed_the_index_name_the_project_they_probed() {
-    let (_p, cwd, _c, cache) = sandbox();
-    let usage_db = cache.join("usage.db");
-    let expected = project_id_for(cwd.to_str().unwrap());
-
-    // No index yet: the hint fires once for this (session, dir) and its row says where.
-    let hint = run_hook_suggest_payload(
-        serde_json::json!({
-            "tool_name": "Bash",
-            "tool_input": { "command": FIRING_SEARCH },
-            "session_id": "sess-adopt-1",
-            "cwd": cwd.to_str().unwrap(),
-        }),
-        &[],
-        &cwd,
-        &cache,
-    );
-    assert_eq!(hint.code, 0, "{} {}", hint.stdout, hint.stderr);
-    assert!(
-        payload(&hint)["hookSpecificOutput"]["additionalContext"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("cort index"),
-        "precondition: the hint fired: {}",
-        hint.stdout
-    );
-    assert_eq!(
-        row_project_id(&usage_db, "no_index_hinted"),
-        expected,
-        "the hint must name the project it hinted at"
-    );
-
-    // Once indexed, the injection row names the same project -- and that id is the db filename,
-    // which is what makes the hint row joinable against a project that did not exist when it
-    // was written.
-    let idx = run_cort(&["index"], &cwd, &cache);
-    if idx.code != 0 {
-        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
-        return;
-    }
-    run_hook_suggest_payload(
-        serde_json::json!({
-            "tool_name": "Bash",
-            "tool_input": { "command": FIRING_SEARCH },
-        }),
-        &[],
-        &cwd,
-        &cache,
-    );
-    assert_eq!(row_project_id(&usage_db, "hit"), expected);
-    assert!(
-        cache.join(format!("{expected}.db")).exists(),
-        "the id on a hint row must be the id an index of the same directory takes"
-    );
-
-    // A shaped search the index holds nothing about is a refusal, and the refusal is attributable
-    // too: 10 of them in the live 3-day window with no way to say against which project.
-    run_hook_suggest_payload(
-        serde_json::json!({
-            "tool_name": "Bash",
-            "tool_input": { "command": "grep -rn 'zzz_absent_from_index(' src --include=*.ts" },
-        }),
-        &[],
-        &cwd,
-        &cache,
-    );
-    assert_eq!(row_project_id(&usage_db, "no_evidence"), expected);
 }
 
 /// The single hook-suggest row of the given outcome, reduced to its `project_id` (empty string
@@ -974,8 +1006,6 @@ fn run_hook_suggest_payload(
         .env("CORT_CACHE_DIR", cache)
         // `kick` reads the data dir; never let a hook test reach the real one.
         .env("CORT_MEMORY_DIR", cache.join("data"))
-        // The announcement is opt-in since 2026-09-27; the copy-locking tests run with it on.
-        .env("CORT_SUGGEST", "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1361,11 +1391,6 @@ fn a_refresh_row_says_which_harness_wrote_it_and_is_never_summed_with_the_sugges
 #[test]
 fn a_hook_row_names_the_model_that_answered_and_never_invents_one() {
     let (_p, cwd, _c, cache) = sandbox();
-    let idx = run_cort(&["index"], &cwd, &cache);
-    if idx.code != 0 {
-        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
-        return;
-    }
     let usage_db = cache.join("usage.db");
     // A router session: the harness is genuinely claude-code, the model is not Anthropic's.
     let mut routed = serde_json::json!({
@@ -1391,10 +1416,9 @@ fn a_hook_row_names_the_model_that_answered_and_never_invents_one() {
         Some("glm-5.3"),
         "the model the payload named was dropped: {last}"
     );
-    // v5: the per-search keys (`symbol`, and `why` on no_evidence) joined the row shape in v4;
-    // v5 adds `demand` on rows that actually fired a suggestion (8a632015). This assertion
-    // was left at 4 by that commit and the suite has been red here since.
-    assert_eq!(last.get("v").and_then(Value::as_i64), Some(5));
+    // v6 is the thin trigger: `symbol`/`why`/`demand` belong to v≤5 rows, and a fire row now
+    // carries `tool` instead.
+    assert_eq!(last.get("v").and_then(Value::as_i64), Some(6));
 
     // A payload with no model gets no model. Absence is visible; a wrong name would not be.
     let bare = serde_json::json!({
@@ -2691,115 +2715,135 @@ fn the_refresh_hook_does_not_migrate_the_schema() {
     );
 }
 
-/// Codex's structural fix for a funnel that does not sum: the outcome vocabulary is a constant in
-/// the library, the census is the tool's own partition, and this test drives representative
-/// branches through the real binary and holds all three against each other. A new outcome emitted
-/// without a vocabulary entry fails here the day it lands, and the partition's sum is checked
-/// against the row count — the 87-row reconciliation is the funnel this exists to prevent.
+/// The structural fix for a funnel that does not sum: the outcome vocabulary is a constant in the
+/// library, the census is the tool's own partition, and this test drives every branch the thin
+/// trigger has through the real binary and holds all three against each other.
+///
+/// There are only two branches left. `no_payload` is stdin that was not a payload this hook could
+/// read (invalid JSON, or a missing or null `tool_input`); `fired` is a payload that was read, whatever tool it
+/// names. A new outcome emitted without a vocabulary entry fails here the day it lands, and the
+/// partition's sum is checked against the row count.
 #[test]
 fn the_suggest_vocabulary_is_closed_and_the_census_sums_to_the_fires() {
     let (_p, cwd, _c, cache) = sandbox();
     let usage_db = cache.join("usage.db");
 
     // Invalid stdin never reaches the parser: the default outcome, recorded before anything read.
-    use std::io::Write;
-    use std::process::{Command, Stdio};
-    let mut child = Command::new(cort_bin())
-        .arg("hook-suggest")
-        .current_dir(&cwd)
-        .env("CORT_CACHE_DIR", &cache)
-        // `kick` reads the data dir; never let a hook test reach the real one.
-        .env("CORT_MEMORY_DIR", cache.join("data"))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn cort hook-suggest");
-    child
-        .stdin
-        .as_mut()
-        .unwrap()
-        .write_all(b"not json at all")
-        .unwrap();
-    let r = child.wait_with_output().expect("wait");
-    // A silence still prints the empty payload; what it must not do is inject.
-    let out = String::from_utf8_lossy(&r.stdout);
-    assert_eq!(out.trim(), "{}", "no injection: the empty payload only");
+    let invalid = run_hook_suggest_raw(b"not json at all", &cwd, &cache);
+    assert_eq!(invalid.code, 0, "{} {}", invalid.stdout, invalid.stderr);
+    assert_eq!(
+        invalid.stdout.trim(),
+        "{}",
+        "no injection: the empty payload only"
+    );
 
-    // A command the rule has nothing to say about; a rule match the gate declines.
-    let fire = |command: &str| {
+    // JSON, but the harness has not said what is about to run: still not a fire.
+    let no_input = run_hook_suggest_payload(
+        serde_json::json!({ "tool_name": "Bash" }),
+        &[],
+        &cwd,
+        &cache,
+    );
+    assert_eq!(no_input.code, 0, "{} {}", no_input.stdout, no_input.stderr);
+    // A null `tool_input` says no more than a missing one.
+    let null_input = run_hook_suggest_payload(
+        serde_json::json!({ "tool_name": "Bash", "tool_input": null }),
+        &[],
+        &cwd,
+        &cache,
+    );
+    assert_eq!(
+        null_input.code, 0,
+        "{} {}",
+        null_input.stdout, null_input.stderr
+    );
+
+    let fire = |tool: &str, input: Value| {
         run_hook_suggest_payload(
-            serde_json::json!({
-                "tool_name": "Bash",
-                "tool_input": { "command": command },
-            }),
+            serde_json::json!({ "tool_name": tool, "tool_input": input }),
             &[],
             &cwd,
             &cache,
         )
     };
-    fire("cargo test --workspace");
-    fire(FIRING_SEARCH);
+    // A shell line the old rule had no suggestion for, and one it did.
+    fire(
+        "Bash",
+        serde_json::json!({ "command": "cargo test --workspace" }),
+    );
+    fire("Bash", serde_json::json!({ "command": FIRING_SEARCH }));
+    // Kimi's structured search surface, and a tool that is not a search at all.
+    fire(
+        "Grep",
+        serde_json::json!({ "pattern": "helper", "path": "src" }),
+    );
+    fire("Read", serde_json::json!({ "file_path": "src/helper.ts" }));
 
-    // And a hit, when ast-grep exists to build the index (same SKIP guard as its siblings).
-    let idx = run_cort(&["index"], &cwd, &cache);
-    let hit_expected = idx.code == 0;
-    if hit_expected {
-        fire(FIRING_SEARCH);
-    }
-
-    let conn = rusqlite::Connection::open(&usage_db).expect("open usage db");
-    let fires: i64 = conn
-        .query_row(
-            "SELECT count(*) FROM command_log WHERE command = 'hook-suggest'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert!(fires >= 3, "{fires}");
-
-    // Observed vocabulary against the library's constants: one new value without an entry is red.
-    let mut stmt = conn
-        .prepare("SELECT args_summary FROM command_log WHERE command = 'hook-suggest'")
-        .unwrap();
-    let rows: Vec<String> = stmt
-        .query_map([], |r| r.get(0))
-        .unwrap()
-        .collect::<Result<_, _>>()
-        .unwrap();
-    for raw in &rows {
-        let parsed: Value = serde_json::from_str(raw)
-            .unwrap_or_else(|e| panic!("every row the writer makes is JSON: {e} in {raw}"));
-        let hook = parsed.get("hook").and_then(Value::as_str).unwrap();
-        assert!(
-            cort::hook::SUGGEST_OUTCOMES.contains(&hook),
-            "an unlisted outcome means the vocabulary const rotted: {hook}"
-        );
-        if let Some(decline) = parsed.get("decline").and_then(Value::as_str) {
-            assert!(
-                cort::hook::SUGGEST_DECLINES.contains(&decline),
-                "an unlisted decline means the vocabulary const rotted: {decline}"
-            );
+    let rows = read_hook_rows(&usage_db, "hook-suggest");
+    assert_eq!(rows.len(), 7, "one row per fire: {rows:?}");
+    let expected: [(&str, Option<&str>); 7] = [
+        ("no_payload", None),
+        ("no_payload", None),
+        ("no_payload", None),
+        ("fired", Some("Bash")),
+        ("fired", Some("Bash")),
+        ("fired", Some("Grep")),
+        ("fired", Some("Read")),
+    ];
+    for (row, (outcome, tool)) in rows.iter().zip(expected) {
+        assert_eq!(row["hook"], outcome, "{row}");
+        assert_eq!(row["v"], 6, "the thin trigger is v6: {row}");
+        match tool {
+            Some(tool) => {
+                assert_eq!(row["tool"], tool, "{row}");
+                assert!(row.get("collect").is_some(), "a fire kicks: {row}");
+            }
+            None => assert!(
+                row.get("collect").is_none(),
+                "an unread payload does not kick: {row}"
+            ),
         }
     }
 
-    // The partition sums to the fires, and every driven branch landed in its own named bucket.
+    // The partition sums to the fires, and every row landed in one of the two named buckets.
     let census = cort::usage::hook_census_at(&usage_db, "hook-suggest", 0).expect("read usage db");
     let total: i64 = census.values().filter_map(|v| v.as_i64()).sum();
-    assert_eq!(total, fires, "the census must close: {census:?}");
-    assert!(census.contains_key("no_payload"), "{census:?}");
+    assert_eq!(total, 7, "the census must close: {census:?}");
+    assert_eq!(census.get("no_payload").and_then(Value::as_i64), Some(3));
+    assert_eq!(census.get("fired").and_then(Value::as_i64), Some(4));
     assert!(
-        census.contains_key("no_shape/not_a_search_tool"),
-        "{census:?}"
-    );
-    assert!(census.contains_key("no_index"), "{census:?}");
-    if hit_expected {
-        assert!(census.contains_key("hit"), "{census:?}");
-    }
-    assert!(
-        !census.keys().any(|k| k.starts_with("unknown/")),
+        census
+            .keys()
+            .all(|k| cort::hook::SUGGEST_OUTCOMES.contains(&k.as_str())),
         "the vocabulary above must already cover what this binary emits: {census:?}"
     );
+}
+
+/// `tool` is an identifier, not content: a name that fits `[A-Za-z0-9_.:-]{1,64}` is recorded
+/// verbatim, and everything else collapses to one stable value. The alternatives would be to drop
+/// the field (losing "which tool fired" for every MCP-style name) or to record arbitrary payload
+/// text into a log that is read by mining.
+#[test]
+fn an_unrecognisable_tool_name_is_recorded_as_unrecognised() {
+    let (_p, cwd, _c, cache) = sandbox();
+    let long = "a".repeat(65);
+    let cases: [(Option<Value>, &str); 5] = [
+        (Some(json!("mcp__x__y")), "mcp__x__y"),
+        (Some(json!("has space/and/slash")), "unrecognised"),
+        (Some(json!(long)), "unrecognised"),
+        (Some(json!(7)), "unrecognised"),
+        (None, "unrecognised"),
+    ];
+    for (tool_name, expected) in cases {
+        let mut payload = json!({ "tool_input": { "command": "ls -la" } });
+        if let Some(name) = tool_name {
+            payload["tool_name"] = name;
+        }
+        let r = run_hook_suggest_payload(payload, &[], &cwd, &cache);
+        assert_eq!(r.code, 0, "{} {}", r.stdout, r.stderr);
+        let row = latest_command_row(&cache.join("usage.db"), "hook-suggest");
+        assert_eq!(row["tool"], expected, "{row}");
+    }
 }
 
 /// The same closure for the other hook: `hook-refresh`'s outcomes are their own constant, and the

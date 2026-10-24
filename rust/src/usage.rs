@@ -764,13 +764,17 @@ pub fn hook_models_at(
 ///   skipped: a row that vanishes from the reader is a row every funnel silently miscounts.
 /// * `legacy_unsplit` -- valid JSON with no readable `hook`: a row from before outcomes existed.
 ///   Same name `hook_outcomes_at` uses, for the same reason.
-/// * `no_shape/<decline>` -- suggest only: the one outcome whose attribution lives one level
-///   down, per `crate::hook::SUGGEST_DECLINES`; `no_shape/decline_absent` is the pre-tag shape, a
-///   deployment state rather than a tenth cause. A `no_shape` value on any other command is not
-///   that command's shape to attribute, so it surfaces as `unknown/no_shape` instead.
+/// * `no_shape/<decline>` -- suggest only, and only for legacy rows: v≤5 rows attribute the one
+///   outcome whose reason lives one level down, per `crate::hook::SUGGEST_DECLINES`;
+///   `no_shape/decline_absent` is the pre-tag shape, a deployment state rather than a tenth cause.
+///   The thin trigger never writes `no_shape`, but the local 90-day retention and the remote's
+///   forever still hold rows that do. A `no_shape` value on any other command is not that
+///   command's shape to attribute, so it surfaces as `unknown/no_shape` instead.
 /// * every `crate::hook::SUGGEST_OUTCOMES` (suggest) or `crate::hook::REFRESH_OUTCOMES` (refresh)
 ///   value -- verbatim; the vocabulary is the writing command's own, and the decline split below
-///   is suggest's contract alone
+///   is suggest's contract alone. For suggest that means the current vocabulary *plus*
+///   `crate::hook::LEGACY_SUGGEST_OUTCOMES`: what is written now and what old rows say, so the
+///   census stays closed across the thin trigger rather than reporting history as `unknown/`.
 /// * `unknown/<value>` -- anything else, verbatim under a prefix that makes it impossible to
 ///   mistake for a known outcome. A vocabulary that grew without its constant grows here first.
 ///
@@ -781,10 +785,17 @@ pub fn hook_census_at(
     command: &str,
     since_ms: i64,
 ) -> Result<Map<String, Value>, CortError> {
+    // suggest's known set is the current vocabulary plus the judging hook's, because both are real
+    // rows in the same table; refresh has only ever had one vocabulary and needs no union.
+    let suggest_known: Vec<&str> = crate::hook::SUGGEST_OUTCOMES
+        .iter()
+        .chain(crate::hook::LEGACY_SUGGEST_OUTCOMES.iter())
+        .copied()
+        .collect();
     let (known, splits_decline): (&[&str], bool) = if command == "hook-refresh" {
         (&crate::hook::REFRESH_OUTCOMES, false)
     } else {
-        (&crate::hook::SUGGEST_OUTCOMES, true)
+        (&suggest_known, true)
     };
     let mut out: Map<String, Value> = Map::new();
     if !path.exists() {

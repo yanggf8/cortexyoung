@@ -197,13 +197,22 @@ fn like_literal(s: &str) -> String {
 /// census of real rows that surfaces a value not listed here means a writer path grew without the
 /// vocabulary growing with it (the test that drives representative branches through the binary
 /// holds these against what is actually emitted). Each string's single home:
-/// - `no_payload` — the default, installed before stdin is read (`main.rs`, the payload read)
-/// - `no_shape` — the parser could not build a `Search`, or `judge` returned `NoShape`
-/// - `upgrade_stood_down` — a `Search` was built but the protected-entry guard was held
-/// - `no_index` / `no_index_hinted` / `no_evidence` / `no_evidence_hinted` / `hit` / `hit_stale` /
-///   `hit_yielded` — the `judge` verdicts, once the payload parsed
-pub const SUGGEST_OUTCOMES: [&str; 10] = [
-    "no_payload",
+/// - `no_payload` — the default, installed before stdin is read; also the answer when stdin was
+///   not JSON or carried no (or a null) `tool_input`, because the harness has not said what is about to run
+/// - `fired` — a payload was read, the row was written, and collection was kicked
+///
+/// Since the thin trigger (2026-10-25) the hook no longer judges anything, so the vocabulary is
+/// two values. Rows written by the judging hook are still in `usage.db` inside its 90-day
+/// retention -- and forever on the remote -- and [`LEGACY_SUGGEST_OUTCOMES`] is what a census has
+/// to keep recognising so those rows do not fall into `unknown/`.
+pub const SUGGEST_OUTCOMES: [&str; 2] = ["no_payload", "fired"];
+
+/// The `hook-suggest` outcomes that only v≤5 rows can carry: the judging hook's vocabulary minus
+/// `no_payload`, which the thin trigger still writes. They are not written any more, but the local
+/// database keeps 90 days and the remote keeps everything, so a census that did not know them would
+/// report live history as `unknown/<value>`. One entry per value, never a prefix rule: a bucket is
+/// a name someone can quote.
+pub const LEGACY_SUGGEST_OUTCOMES: [&str; 9] = [
     "no_shape",
     "upgrade_stood_down",
     "no_index",
@@ -215,14 +224,17 @@ pub const SUGGEST_OUTCOMES: [&str; 10] = [
     "hit_yielded",
 ];
 
-/// The stable identifiers `no_shape` carries as its decline tag, split across the two paths that
-/// can produce it: the payload/parser path (`grep_fields_no_pattern`, `unsupported_tool_surface`,
-/// `not_a_search_tool`, `unparseable_command`) and the `judge` path (`pattern_not_symbol`,
-/// `non_source_target`, `unindexed_extension`, `concrete_file_read`, `target_not_source`,
-/// `context_lines_requested`).
+/// The stable identifiers a legacy `no_shape` row carries as its decline tag, split across the two
+/// paths that produced it: the payload/parser path (`grep_fields_no_pattern`,
+/// `unsupported_tool_surface`, `not_a_search_tool`, `unparseable_command`) and the `judge` path
+/// (`pattern_not_symbol`, `non_source_target`, `unindexed_extension`, `concrete_file_read`,
+/// `target_not_source`, `context_lines_requested`).
 /// Identifiers, never prose, for the same reason `NoShape`'s doc gives: mining groups on them.
 /// A `no_shape` row whose summary carries no tag at all is the pre-issue-#3 shape, a deployment
 /// state rather than one more cause — the census names it `decline_absent` instead of guessing.
+///
+/// Only used to split legacy rows: the thin trigger writes no `no_shape` at all, and these tags
+/// exist here so a reader can still break the old ones down by the rule that refused them.
 pub const SUGGEST_DECLINES: [&str; 10] = [
     "grep_fields_no_pattern",
     "unsupported_tool_surface",

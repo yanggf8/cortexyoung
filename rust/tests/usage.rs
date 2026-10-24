@@ -1398,6 +1398,57 @@ fn the_census_partitions_every_hook_row_exactly_once() {
     );
 }
 
+/// The thin trigger writes only `no_payload` and `fired`, but the judging hook's rows stay in
+/// `usage.db` for 90 days and on the remote forever. Every outcome that hook could write must
+/// still land in its own bucket. The list is spelled out here rather than read from the constant,
+/// so a value dropped from `LEGACY_SUGGEST_OUTCOMES` turns this red instead of shrinking with it.
+#[test]
+fn every_outcome_the_judging_hook_wrote_still_has_a_census_bucket() {
+    let dir = tempfile::Builder::new()
+        .prefix("cort-census-legacy-")
+        .tempdir()
+        .unwrap();
+    let path = dir.path().join("usage.db");
+    seed_schema(&path);
+    let db = Connection::open(&path).unwrap();
+    let legacy = [
+        "no_payload",
+        "upgrade_stood_down",
+        "no_index",
+        "no_index_hinted",
+        "no_evidence",
+        "no_evidence_hinted",
+        "hit",
+        "hit_stale",
+        "hit_yielded",
+    ];
+    for outcome in legacy {
+        db.execute(
+            "INSERT INTO command_log
+                (ts, project_id, command, args_summary, status, error_code,
+                 read_source, requested_content_mode, effective_content_mode,
+                 receipt_hit, index_stale, bytes_out, saved_bytes)
+             VALUES (?1, NULL, 'hook-suggest', ?2, 'ok', NULL, NULL, NULL, NULL, NULL, NULL, 0, 0)",
+            params![NOW_MS, format!(r#"{{"v":5,"hook":"{outcome}"}}"#)],
+        )
+        .unwrap();
+    }
+    drop(db);
+
+    let census = cort::usage::hook_census_at(&path, "hook-suggest", 0).unwrap();
+    for outcome in legacy {
+        assert_eq!(
+            census.get(outcome).and_then(Value::as_i64),
+            Some(1),
+            "a v5 `{outcome}` row lost its bucket: {census:?}"
+        );
+    }
+    assert!(
+        !census.keys().any(|k| k.starts_with("unknown/")),
+        "history must not read as unknown: {census:?}"
+    );
+}
+
 /// The refresh census speaks the refresh vocabulary, not the suggest one: `cmd_hook_refresh`
 /// attributes every outcome directly, so its rows bucket verbatim instead of piling into
 /// `unknown/` — which is what they did while the census only knew the suggest constants, and why

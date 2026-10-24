@@ -21,12 +21,14 @@ use cort::staleness::compute_stale;
 use cort::usage::{self, CommandRecord};
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{json, Value};
-use std::io::{Read, Seek, SeekFrom};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 // `hook-suggest` is here so its rows are recorded under their own name rather than `_unknown`:
 // whether the harness hook fires, and whether a fire is followed by an `impact` call, is the one
-// measurement that has a numerator. It is not a verb anyone types.
+// measurement that has a numerator -- and since the thin trigger landed the row says only that a
+// fire happened, so that pairing is now read from the rows rather than inferred from a verdict.
+// It is not a verb anyone types.
 const KNOWN_COMMANDS: [&str; 14] = [
     "index",
     "status",
@@ -56,7 +58,7 @@ fn usage_value() -> Value {
             "usage": "cort usage [days] [-f json|lean]",
             "memory": "cort memory <configure|import-config|record|resolve|recall|status|sync|import-legacy> [options]",
             "measure": "cort measure <configure|show|record|sync|copy-events|import-audit|cron|report> [options]  (copy-events: one-time, re-runnable, read-only copy of claudecat's uploaded events from harnessuse, never overwrites, reports same-key rows whose columns differ as conflicts; import-audit: one-time, re-runnable import of CORT-AUDIT.md's health and usage columns, never overwrites, run on one machine only; sync --dry-run compares event ids and never pushes; the local command_log keeps 90 days, so events are lost only if they go unuploaded for 90 days in a row: record not running, or uploads refused pending a dry run)",
-            "hook-suggest": "cort hook-suggest  (PreToolUse hook: records search verdicts; silent unless CORT_SUGGEST=1; not a verb to type)",
+            "hook-suggest": "cort hook-suggest  (PreToolUse hook: records one fire row and kicks collection; never speaks; not a verb to type)",
             "hook-refresh": "cort hook-refresh  (PostToolUse hook: brings this project's index up to the tree after an edit; silent, never creates an index; not a verb to type)",
             "hook-install": "cort hook-install [--settings <path>] [--command <cmd>] [--remove|--status]  (installer-invoked: wires hook-suggest into settings.json; not a verb to type)",
             "internal-shim": "cort internal-shim --cort-home <dir>  (installer-invoked: renders the $BIN_DIR/cort shim for a CORT_HOME; not a verb to type)",
@@ -679,18 +681,23 @@ fn dispatch(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError> 
 /// Omitted rather than guessed when the payload has none, and a v1/v2 row is a row from before the
 /// field existed -- the version tells a reader which of the two silences it is looking at.
 ///
-/// `v: 4` adds the per-search keys stamped beside the outcome where the probe produced them:
+/// `v: 4` added the per-search keys stamped beside the outcome where the probe produced them:
 /// `symbol` on `hit`/`hit_stale`/`no_index`/`no_index_hinted`/`no_evidence`, and `why` (a
 /// `NoEvidenceWhy` identifier) on `no_evidence`. A symbol name is a program identifier, not
-/// payload content -- the same class of fact as the `decline` tag and the shape fingerprint -- and
-/// it is the one key the improvement loop cannot do without: a refusal that does not name its
-/// symbol cannot be matched against files, other projects' chunks, or the gate refusals
-/// afterwards. A v3 row predates the keys and says so.
+/// payload content -- the same class of fact as the `decline` tag and the shape fingerprint.
 ///
-/// `v: 5` adds `demand` only when the hook emits a suggestion. It is a redacted, 240-character
-/// excerpt of the latest user-authored prompt, or a status explaining why no excerpt was captured.
+/// `v: 5` added `demand` only when the hook emitted a suggestion: a redacted, 240-character
+/// excerpt of the latest user-authored prompt, or a status explaining why none was captured.
+/// Those two keys belong to a v≤5 row; the suggestion itself was removed in `v: 6`.
+///
+/// `v: 6` is the thin trigger. `hook-suggest` now writes only `no_payload` (stdin was not a
+/// payload this hook could read) and `fired` (it was), and a `fired` row carries `tool`, the
+/// harness's own tool name when that name is an identifier and `unrecognised` otherwise. The
+/// `symbol`, `why`, `decline`, `shape`, `demand` and `kind` keys appear only in v≤5 rows, which
+/// stay in `usage.db` for the 90-day retention (and forever on the remote). `hook-refresh` shares
+/// this row shape, so its rows are v6 too and unchanged in every field they carry.
 fn hook_row(outcome: &str, harness: &str, declared: Option<&str>, model: Option<&str>) -> Value {
-    let mut v = json!({ "v": 5, "hook": outcome, "harness": harness });
+    let mut v = json!({ "v": 6, "hook": outcome, "harness": harness });
     if let Some(d) = declared {
         v["harness_declared"] = json!(d);
     }
@@ -704,37 +711,6 @@ fn hook_args(outcome: &str, harness: &str, declared: Option<&str>, model: Option
     hook_row(outcome, harness, declared, model).to_string()
 }
 
-/// 在已序列化的 hook row 上補 `decline` 標籤——NoShape 的細分原因（issue #3）。標籤是
-/// 穩定的識別子、永不攜帶 payload 內容：mining 要的是「哪條規則拒絕了它」，不是命令本身。
-fn hook_args_decline(hook_args_json: &str, decline: &str) -> String {
-    hook_args_tag(hook_args_json, "decline", decline)
-}
-
-/// Issue #3 的後半：decline 說的是「哪條規則拒絕」，形狀指紋說的是「被拒絕的長什麼樣」——
-/// 90 天日誌裡 83% 的 hook run 是 `no_shape`，只有前者時這 83% 無法按需求排序規則工作。
-/// 指紋 = 工具名 + payload 的 top-level key 集合（排序後以 `+` 串接）。欄位「名」是各
-/// harness 的穩定詞彙、永不攜帶內容；prompt 摘錄只會另存於實際發出提示的列。
-fn hook_args_shape(hook_args_json: &str, shape: &str) -> String {
-    hook_args_tag(hook_args_json, "shape", shape)
-}
-
-/// 由 payload 組形狀指紋。見 [`hook_args_shape`]。
-fn shape_fingerprint(v: &Value) -> String {
-    let tool = v.get("tool_name").and_then(Value::as_str).unwrap_or("?");
-    let mut keys: Vec<&str> = v
-        .as_object()
-        .map(|o| o.keys().map(String::as_str).collect())
-        .unwrap_or_default();
-    keys.sort_unstable();
-    format!("{tool}|{}", keys.join("+"))
-}
-
-/// 補 `kind` 標籤——這次的 hit 建議的是哪個子命令（現在只有 `impact`；2026-10-23 移除前還有 `context`）。與 `decline` 對稱：
-/// 一個說不出是哪條規則產生的命中，無法用來評分產生它的那條規則。
-fn hook_args_kind(hook_args_json: &str, kind: &str) -> String {
-    hook_args_tag(hook_args_json, "kind", kind)
-}
-
 /// 在已序列化的 hook row 上補一個穩定識別子。值永遠是識別子而非 payload 內容，兩個呼叫端共用
 /// 同一份解析與退場行為，免得其中一個悄悄漂走。
 fn hook_args_tag(hook_args_json: &str, key: &str, value: &str) -> String {
@@ -744,215 +720,30 @@ fn hook_args_tag(hook_args_json: &str, key: &str, value: &str) -> String {
     v.to_string()
 }
 
-/// Keep a small, auditable excerpt of the user's need beside each suggestion that actually fires.
-/// The transcript itself is never copied: only its final user-authored prompt is read, from a
-/// bounded tail, then paths, URLs, common credentials, and the local account name are redacted.
-/// Kimi currently provides no transcript path, so its hit is explicitly marked unavailable.
-fn hook_demand(payload: &Value) -> Value {
-    const TAIL_BYTES: u64 = 2 * 1024 * 1024;
-    const MAX_CHARS: usize = 240;
-    let path = payload
-        .get("transcript_path")
-        .or_else(|| payload.get("transcriptPath"))
-        .and_then(Value::as_str);
-    let Some(path) = path else {
-        return json!({"status": "no_transcript_path"});
-    };
-    let Ok(mut file) = std::fs::File::open(path) else {
-        return json!({"status": "transcript_unreadable"});
-    };
-    let Ok(len) = file.metadata().map(|m| m.len()) else {
-        return json!({"status": "transcript_unreadable"});
-    };
-    let start = len.saturating_sub(TAIL_BYTES);
-    if file.seek(SeekFrom::Start(start)).is_err() {
-        return json!({"status": "transcript_unreadable"});
-    }
-    let mut tail = Vec::with_capacity((len - start) as usize);
-    if file.read_to_end(&mut tail).is_err() {
-        return json!({"status": "transcript_unreadable"});
-    }
-    let tail = String::from_utf8_lossy(&tail);
-    let harness = payload
-        .get("transcript_path")
-        .or_else(|| payload.get("transcriptPath"))
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let codex = harness.contains("/.codex/");
-    let user_prompt_of = |line: &str| -> Option<String> {
-        let event: Value = serde_json::from_str(line).ok()?;
-        if codex {
-            codex_user_prompt(&event)
-        } else {
-            claude_user_prompt(&event)
+/// The `tool` a fire row carries: the harness's own `tool_name` when it is shaped like an
+/// identifier, `unrecognised` otherwise.
+///
+/// This is an identifier, not content, and it is the only payload value besides `model` and
+/// `transcript_path` that the row reads. The check is hand-written rather than a regex because the
+/// crate carries no regex and this is the whole rule: 1-64 bytes of `[A-Za-z0-9_.:-]`. Names that
+/// are outside it -- a Kimi/MCP spelling with spaces, a number, a missing field, anything longer --
+/// all collapse to one value, so the mining asks "how often was this harness's tool name outside
+/// the vocabulary" rather than reading arbitrary payload text back out of a log.
+fn hook_tool_label(v: &Value) -> &str {
+    match v.get("tool_name").and_then(Value::as_str) {
+        Some(name)
+            if !name.is_empty()
+                && name.len() <= 64
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | ':' | '-')) =>
+        {
+            name
         }
-    };
-    // Walk the tail newest-first. `find_map` stops at the first typed prompt, which is the one
-    // to use when the tail holds one; when it holds none, the walk has seen every line and
-    // `saw_compaction` then says honestly whether a boundary is the reason.
-    let mut saw_compaction = false;
-    let prompt = tail.lines().rev().find_map(|line| {
-        let compact = serde_json::from_str::<Value>(line)
-            .ok()
-            .and_then(|e| e.get("isCompactSummary").and_then(Value::as_bool));
-        if compact == Some(true) {
-            saw_compaction = true;
-        }
-        user_prompt_of(line)
-    });
-    // Compaction washes the original typed prompt out of the bounded tail (adopt-v4 measured 8
-    // such episodes in one week): the newest history-shaped line is the continuation entry --
-    // no `promptSource`, so it is skipped -- and the user's words sit megabytes back, before the
-    // boundary. When the tail says a boundary is present, read back up to three more blocks for
-    // the last typed/queued prompt before it, and mark the capture as having crossed. A block
-    // boundary can clip one line in two, losing it on both sides; at one line per 2 MiB that is
-    // a residue, and it is named here rather than hidden.
-    let mut across = false;
-    let prompt = match prompt {
-        Some(p) => Some(p),
-        None if saw_compaction => {
-            let mut found = None;
-            let mut block_end = start;
-            for _ in 0..3 {
-                if block_end == 0 {
-                    break;
-                }
-                let block_start = block_end.saturating_sub(TAIL_BYTES);
-                if file.seek(SeekFrom::Start(block_start)).is_err() {
-                    break;
-                }
-                let mut limited = (&file).take(block_end - block_start);
-                let mut buf = Vec::with_capacity((block_end - block_start) as usize);
-                if limited.read_to_end(&mut buf).is_err() {
-                    break;
-                }
-                let block = String::from_utf8_lossy(&buf);
-                let hit = block.lines().rev().find_map(user_prompt_of);
-                block_end = block_start;
-                if let Some(p) = hit {
-                    found = Some(p);
-                    break;
-                }
-            }
-            across = found.is_some();
-            found
-        }
-        None => None,
-    };
-    let Some(prompt) = prompt else {
-        // Here `saw_compaction` can only mean the read-back ran and found nothing before the
-        // boundary; without a boundary the tail's silence was always an honest one.
-        return json!({"status": if saw_compaction {
-            "no_user_prompt_before_compaction"
-        } else {
-            "no_user_prompt"
-        }});
-    };
-    let excerpt = scrub_hook_prompt(&prompt, MAX_CHARS);
-    if excerpt.is_empty() {
-        json!({"status": "empty_after_redaction"})
-    } else if across {
-        json!({"status": "captured", "excerpt": excerpt, "across_compaction": true})
-    } else {
-        json!({"status": "captured", "excerpt": excerpt})
+        _ => "unrecognised",
     }
 }
 
-fn claude_user_prompt(event: &Value) -> Option<String> {
-    if event.get("type")?.as_str()? != "user"
-        || event.get("isMeta").and_then(Value::as_bool) == Some(true)
-        || event.get("isSidechain").and_then(Value::as_bool) == Some(true)
-        || !matches!(event.get("promptSource")?.as_str()?, "typed" | "queued")
-    {
-        return None;
-    }
-    event
-        .get("message")?
-        .get("content")?
-        .as_str()
-        .map(str::to_string)
-}
-
-fn codex_user_prompt(event: &Value) -> Option<String> {
-    let payload = event.get("payload")?;
-    if payload.get("type")?.as_str()? != "message" || payload.get("role")?.as_str()? != "user" {
-        return None;
-    }
-    match payload.get("content")? {
-        Value::String(text) => Some(text.clone()),
-        Value::Array(parts) => {
-            let text = parts
-                .iter()
-                .filter_map(|part| {
-                    if let Some(text) = part.as_str() {
-                        Some(text)
-                    } else {
-                        part.get("text").and_then(Value::as_str)
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join(" ");
-            (!text.is_empty()).then_some(text)
-        }
-        _ => None,
-    }
-}
-
-fn scrub_hook_prompt(text: &str, max_chars: usize) -> String {
-    let home_user = std::env::var("HOME").ok().and_then(|home| {
-        Path::new(&home)
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-    });
-    let mut redact_next = false;
-    text.split_whitespace()
-        .map(|token| {
-            let core = token.trim_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != '-');
-            let lower = core.to_ascii_lowercase();
-            let path_start = token.trim_start_matches(['(', '"', '\'', '[', '{', '<']);
-            if core.contains("://") || path_start.starts_with('/') || path_start.starts_with("~/") {
-                token.replace(
-                    core,
-                    if core.contains("://") {
-                        "<url>"
-                    } else {
-                        "<path>"
-                    },
-                )
-            } else if redact_next {
-                redact_next = false;
-                "<redacted>".to_string()
-            } else if lower == "bearer" {
-                redact_next = true;
-                token.to_string()
-            } else if lower.starts_with("sk-")
-                || lower.starts_with("ghp_")
-                || lower.starts_with("github_pat_")
-                || lower.starts_with("akia")
-                || lower.starts_with("bearer-")
-                || home_user.as_deref().is_some_and(|user| core == user)
-            {
-                token.replace(core, "<redacted>")
-            } else {
-                token.to_string()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-        .chars()
-        .take(max_chars)
-        .collect()
-}
-
-fn hook_args_demand(hook_args_json: &str, demand: Value) -> String {
-    let mut v: Value =
-        serde_json::from_str(hook_args_json).unwrap_or_else(|_| json!({ "hook": "unknown" }));
-    v["demand"] = demand;
-    v.to_string()
-}
-
-/// The model that answered, as the harness named it in its own payload. Never inferred: a guess
-/// here is worse than the absence, because absence is visible and a wrong model name is not.
 fn model_of_payload(v: &Value) -> Option<&str> {
     v.get("model").and_then(Value::as_str)
 }
@@ -981,11 +772,14 @@ fn model_of_payload(v: &Value) -> Option<&str> {
 /// survived the correction, the reasoning did not. Re-add the arm when a Kimi payload actually
 /// carries a path -- not on the assumption that it does.
 ///
-/// Whether to wire Kimi at all is a separate decision, not a leftover. Its `PreToolUse` keeps only
-/// results whose `action` is `block` and discards every allow-shaped one before the model sees it
-/// (`blockDecision`; every other hook event drops its result outright), and `cort hook-suggest`
-/// never blocks -- so an entry there would have to trade that rule for a deny. That is a contract
-/// change, not a third call to the same installer. `docs/2026-09-02-hook-wiring-correction.md` §14.
+/// Whether to wire Kimi at all was once a separate decision, not a leftover. Its `PreToolUse` keeps
+/// only results whose `action` is `block` and discards every allow-shaped one before the model sees
+/// it (`blockDecision`; every other hook event drops its result outright), so while `hook-suggest`
+/// delivered a suggestion an entry there would have had to trade that rule for a deny
+/// (`docs/2026-09-02-hook-wiring-correction.md` §14). The thin trigger has nothing to deliver: it
+/// writes a row and returns `{}`, so the block-shaped-only rule costs it nothing, and Kimi is
+/// wired like the other two. Its rows are the ones `harness_of` cannot settle from the payload --
+/// no transcript path -- and they carry the declared `kimi-code`, which is the honest answer.
 fn harness_of(payload: &Value, declared: &str) -> (String, Option<String>) {
     let path = payload
         .get("transcript_path")
@@ -1008,122 +802,6 @@ fn harness_of(payload: &Value, declared: &str) -> (String, Option<String>) {
     }
 }
 
-/// The search a hook payload describes, on either surface.
-///
-/// `tool_input.command` is a shell line and is parsed as one. A payload without it may still be a
-/// search: Kimi's `Grep` tool carries `pattern`/`path`/`glob` and the context flags as fields, and
-/// on that harness it is the *majority* surface -- 834 structured calls against 32 shell greps in
-/// the local corpus (`docs/2026-09-02-hook-wiring-correction.md` §15). Both parsers live in
-/// `cort::hook` beside the one `judge` they feed, so adding a surface never adds a second verdict.
-fn search_of_payload(v: &Value) -> Option<cort::hook::Search> {
-    let input = v.get("tool_input")?;
-    if let Some(command) = input.get("command").and_then(Value::as_str) {
-        return cort::hook::search_from_shell(command);
-    }
-    if v.get("tool_name").and_then(Value::as_str) != Some("Grep") {
-        return None;
-    }
-    let field = |k: &str| {
-        input
-            .get(k)
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-    };
-    cort::hook::search_from_grep_fields(
-        field("pattern")?,
-        field("path"),
-        field("glob"),
-        ["-A", "-B", "-C"].iter().any(|k| input.get(*k).is_some()),
-    )
-}
-
-/// Has this session already been told about this symbol?
-///
-/// Only Kimi needs the question, and it needs it because of what its `PreToolUse` will carry: it
-/// keeps only results whose `action` is `block` and discards every allow-shaped one before the
-/// model sees it, so on that harness a suggestion has to arrive as a deny or not at all. A deny
-/// that repeats is a loop -- the agent re-issues the search, gets stopped again, and never gets its
-/// answer. Firing once per session per symbol turns the cost of a false positive into one extra
-/// turn, which is what a suggestion already costs everywhere else.
-///
-/// A live probe on 2026-09-02 recorded the intended sequence: `Grep cmd_hook_install` denied, then
-/// `cort impact --symbol cmd_hook_install …` run by the model of its own accord, then the same grep
-/// re-issued and allowed. State lives beside the index rather than in `usage.db` because it is a
-/// gate, not a measurement: losing it costs one extra deny, and nothing reads it afterwards.
-fn gate_already_fired(session_id: &str, symbol: &str) -> bool {
-    gate_line_seen_once(session_id, symbol)
-}
-
-/// The shared once-per-session gate: one file per session under `hook-gate/`, one line per
-/// fired thing. `line` must be newline-free (callers sanitize their payload-sourced halves).
-fn gate_line_seen_once(session_id: &str, line: &str) -> bool {
-    let Some(file) = gate_file_for(session_id) else {
-        // No cache directory means no memory of a previous fire, and a deny we cannot remember is
-        // the loop this gate exists to prevent. Treat it as already fired: stay silent.
-        return true;
-    };
-    let seen = std::fs::read_to_string(&file).unwrap_or_default();
-    if seen.lines().any(|l| l == line) {
-        return true;
-    }
-    if file
-        .parent()
-        .map(|d| std::fs::create_dir_all(d).is_err())
-        .unwrap_or(true)
-    {
-        return true;
-    }
-    let mut body = seen;
-    body.push_str(line);
-    body.push('\n');
-    // A failed write is the same unrememberable deny as a missing directory.
-    std::fs::write(&file, body).is_err()
-}
-
-/// The per-session gate file's path, sanitized down to alphanumerics, dashes and underscores.
-/// Shared by both gates; a session that cannot produce a safe name has no memory and no gate.
-fn gate_file_for(session_id: &str) -> Option<std::path::PathBuf> {
-    let dir = cort::usage::usage_db_path().and_then(|p| p.parent().map(|d| d.join("hook-gate")))?;
-    let safe: String = session_id
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
-        .take(128)
-        .collect();
-    if safe.is_empty() {
-        return None;
-    }
-    Some(dir.join(safe))
-}
-
-/// The `no_evidence` pointer: once per session per symbol, and at most three symbols per
-/// session. The cap is what keeps a survey session's six absent fields from becoming six
-/// permanent context lines -- the 09-14 sidechain fired on six in three minutes. Three answers
-/// the question the session is actually asking; past that, it has already been told where the
-/// grain ends.
-fn no_evidence_pointer_fired(session_id: &str, symbol: &str) -> bool {
-    const SESSION_POINTER_CAP: usize = 3;
-    if let Some(file) = gate_file_for(session_id) {
-        let seen = std::fs::read_to_string(&file).unwrap_or_default();
-        if seen
-            .lines()
-            .filter(|l| l.starts_with("no_evidence_pointer:"))
-            .count()
-            >= SESSION_POINTER_CAP
-        {
-            return true;
-        }
-    }
-    let line = format!("no_evidence_pointer:{}", symbol.replace(['\n', '\r'], " "));
-    gate_line_seen_once(session_id, &line)
-}
-
-/// The `no_index` hint fires once per session per directory: the directory is the payload's
-/// own `cwd`, newline-stripped before it joins the gate file.
-fn no_index_hint_fired(session_id: &str, dir: &str) -> bool {
-    let line: String = format!("no_index:{}", dir.replace(['\n', '\r'], " "));
-    gate_line_seen_once(session_id, &line)
-}
-
 /// A `PostToolUse` hook on the edit tools, not a verb anyone types. It brings this project's index
 /// up to the tree it now describes, and says nothing either way.
 ///
@@ -1139,7 +817,7 @@ fn no_index_hint_fired(session_id: &str, dir: &str) -> bool {
 ///
 /// * **It never creates an index.** No row in `projects` means this tree was never indexed on
 ///   purpose, and a hook that starts indexing whatever directory an agent edited in would be a
-///   side effect nobody asked for. Same gate, same reason, as `hook-suggest`'s.
+///   side effect nobody asked for. Bootstrapping stays an explicit `cort index`.
 /// * **It gives up rather than wait.** Another refresh, or a real `cort index`, may hold the write
 ///   lock; a busy database is a reason to do nothing, not to block the agent's next tool call.
 ///   Nothing is lost -- the next edit refreshes it.
@@ -1153,10 +831,11 @@ fn no_index_hint_fired(session_id: &str, dir: &str) -> bool {
 /// this at its timeout rolls back rather than leaving a half-written graph.
 fn cmd_hook_refresh(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError> {
     // Same `--harness` the installer already passes on this entry's command line (`install.sh`
-    // builds both events' commands from one template), and same `v: 2` row shape `hook-suggest`
-    // writes. It was being discarded: the argument list arrived as `_args` and the summary was a
-    // bare `outcome=`, so once three harnesses were wired every reindex became an anonymous row and
-    // "is Kimi's post-hook actually firing?" had no answer in the data. That is the defect
+    // builds both events' commands from one template), and the same row shape `hook-suggest`
+    // writes (`hook_row`, now `v: 6`). It was being discarded: the argument list arrived as
+    // `_args` and the summary was a bare `outcome=`, so once three harnesses were wired every
+    // reindex became an anonymous row and "is Kimi's post-hook actually firing?" had no answer
+    // in the data. That is the defect
     // `f3cb567f` fixed for the pre-event and never carried across to this one.
     let declared = HookSuggestArgs::try_parse_from(args.iter())
         .ok()
@@ -1305,41 +984,25 @@ fn cmd_hook_refresh(args: &[String], usage: &mut UsageEvent) -> Result<Emit, Cor
         Err(_) => quiet("busy_or_failed", usage),
     }
 }
-/// A PreToolUse hook, not a verb anyone types. It reads the harness's hook payload on stdin and,
-/// when the shell command about to run is a caller-set search, hands back one line of context
-/// naming the query that answers it.
+
+/// A `PreToolUse` hook, not a verb anyone types. It records one row per fire and kicks the
+/// collection lanes; it does not judge the tool call and says nothing to the agent.
 ///
-/// Three rules, each measured rather than assumed:
+/// This is what is left of the suggestion. The announcement was measured worthless -- 409 searches
+/// in skill-bearing sessions followed by zero `cort` calls, then 0/9 external uptake and a window
+/// in which no suggestion anyone acted on fired -- so the product removed it rather than keep
+/// tuning it. What remains is the demand instrument: a fire is a fact about how often an agent
+/// reaches for a shell search, and the row says which harness and model ran, which project it ran
+/// in, and which tool was about to run. `CORT_SUGGEST` no longer exists; nothing here reads it.
 ///
-/// * It never blocks and never denies. The agent is right about `rg` most of the time -- 409
-///   searches in the sampled sessions, ~6 of them caller-set work -- so anything stronger than a
-///   suggestion would be wrong far more often than right.
-/// * Silence is the default. No fire, no output, exit 0. A hook that prints on every search is
-///   noise, and noise is what gets ignored.
-/// * It stays silent when this project has no index. Suggesting a query that can only answer
-///   `no_seed_resolved` would spend the agent's turn to tell it nothing, and would make the
-///   suggestion itself untrustworthy the first time it happened.
+/// The row is decided before anything can fail: `no_payload` is installed first, and only a
+/// payload that was actually read replaces it with `fired`. A payload the harness never finished
+/// sending is not a fire, so that arm does not kick collection either.
 fn cmd_hook_suggest(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError> {
-    // 2026-09-27 direction call: measured across three windows the announcement was never once
-    // adopted in the wild (0/9 external, then a window with zero suggestions anyone acted on),
-    // and agents correlate on their own -- this hook's job is to be a demand instrument. It
-    // still judges every search, still stamps every outcome, symbol and demand excerpt into
-    // usage.db; it just no longer speaks. `CORT_SUGGEST=1` restores the announcement for the
-    // copy-locking tests and for any future re-enable that arrives with its own measured
-    // reason. The gates above the silence (no_index_hint_fired, the name-pointer cap, the Kimi
-    // yield) keep running so the recorded outcome vocabulary does not change under the mining.
-    let speaks = std::env::var("CORT_SUGGEST").is_ok_and(|v| v == "1");
     let declared = HookSuggestArgs::try_parse_from(args.iter())
         .ok()
         .and_then(|a| a.harness)
         .unwrap_or_else(|| "unspecified".to_string());
-    // Every invocation used to record the same `hook` summary whether it injected or stayed
-    // silent, so `usage` could only ever report how often the hook *ran* -- which is how often the
-    // agent ran any Bash command. The injection count then had exactly one source, the transcript,
-    // and the 09-01 "two independent sources agree" cross-check was two readings of the same
-    // number. The outcome splits the row by what the hook did, which makes `hit` a second source
-    // for the numerator and names the one silence that is a missed opportunity rather than a
-    // correct pass: `no_index`, the rule fired on a project cort has never indexed.
     usage.args_summary = hook_args("no_payload", &declared, None, None);
     let mut payload = String::new();
     let _ = std::io::Read::read_to_string(&mut std::io::stdin(), &mut payload);
@@ -1353,393 +1016,49 @@ fn cmd_hook_suggest(args: &[String], usage: &mut UsageEvent) -> Result<Emit, Cor
     let Ok(v) = serde_json::from_str::<Value>(&payload) else {
         return quiet();
     };
-    // A payload with no `tool_input` at all is one this hook could not read, and stays
-    // `no_payload`. One it can read but has nothing to say about is `no_shape`. Conflating the two
-    // would leave the funnel unable to tell "the hook never saw the command" from "the hook saw it
-    // and correctly stayed quiet" -- and the second is the number that says the rule is selective.
-    if v.get("tool_input").is_none() {
+    // A payload with no `tool_input` (absent or null) is one this hook could not read -- the
+    // harness has not said what it is about to run. It stays `no_payload` and does not kick: there
+    // is no fire to collect.
+    if matches!(v.get("tool_input"), None | Some(Value::Null)) {
         return quiet();
     }
     let (harness, declared_differs) = harness_of(&v, &declared);
     let model = model_of_payload(&v);
-    let harness_args =
-        |outcome: &str| hook_args(outcome, &harness, declared_differs.as_deref(), model);
-    let search = match search_of_payload(&v) {
-        Some(s) => s,
-        None => {
-            // The payload could be read but yielded no search at all -- a different silence from
-            // the rule-based declines `judge` emits, and each of its three causes gets its own
-            // stable identifier for the same reason: unattributable silences cannot be tuned.
-            let tag = match v.get("tool_name").and_then(Value::as_str) {
-                Some("Grep") => "grep_fields_no_pattern",
-                _ => match v.get("tool_input").and_then(|ti| ti.get("command")) {
-                    Some(Value::String(cmd)) => cort::hook::shell_search_decline(cmd),
-                    _ => "unsupported_tool_surface",
-                },
-            };
-            // Most Bash calls end here, so this is where PreToolUse mostly kicks collection;
-            // `kick` does its own upgrade check.
-            usage.args_summary = hook_args_tag(
-                &hook_args_shape(
-                    &hook_args_decline(&harness_args("no_shape"), tag),
-                    &shape_fingerprint(&v),
-                ),
-                "collect",
-                cort::collect::kick(&harness),
-            );
-            return quiet();
-        }
-    };
-    // Upgrade stand-down, evidence path only (spec §3b's cost note): the shape gate turned
-    // down ~95% of searches without paying for anything, and they keep it that way — two
-    // opens is the price only a search that would actually touch the index pays. An upgrade
-    // in flight means the index is about to be repacked; stand down and say which silence
-    // this was, by the same per-cause rule as the decline tags above.
-    let _guard = match cort::upgrade::try_protected_entry(&cache_dir()) {
-        Ok(g) => g,
-        Err(_) => {
-            usage.args_summary = hook_args_tag(
-                &harness_args("upgrade_stood_down"),
-                "collect",
-                cort::collect::kick(&harness),
-            );
-            return quiet();
-        }
-    };
-    let result = (|| {
-        // The probe runs inside the closure and nowhere else. A search rejected on shape therefore pays
-        // for no canonicalize, no database open, no `status_of` and no `git rev-parse` -- and the shape
-        // gate turns down about 95% of searches against a 5s budget. The `Cell` carries the freshness
-        // half back out, so the fire path probes once rather than twice.
-        let observed: std::cell::Cell<Option<IndexState>> = std::cell::Cell::new(None);
-        let probed_project: std::cell::RefCell<Option<String>> = std::cell::RefCell::new(None);
-        // The boundary-5 trail: when the evidence comes back Absent, the same open database is asked
-        // where the name occurs inside indexed bodies, and the list rides out here -- the verdict
-        // path cannot reopen the database without paying the probe twice. A pointer query that fails
-        // leaves this `None`, and the refusal degrades to the plain silence it always was.
-        const NAME_POINTER_LIMIT: usize = 3;
-        let pointers: std::cell::RefCell<Option<Vec<String>>> = std::cell::RefCell::new(None);
-        let verdict = cort::hook::judge(&search, |symbol| {
-            let (state, db, project_id) = probe_index();
-            observed.set(Some(state));
-            probed_project.borrow_mut().replace(project_id.clone());
-            match db {
-                None => cort::hook::Evidence::NoIndex,
-                // A storage failure fires. A hook that went quiet because a disk hiccuped would be
-                // silently narrowing the product on a transient.
-                Some(db) => {
-                    let evidence = cort::hook::evidence_in(&db, &project_id, symbol)
-                        .unwrap_or(cort::hook::Evidence::Unknown);
-                    if matches!(
-                        &evidence,
-                        cort::hook::Evidence::Neither(cort::hook::NoEvidenceWhy::Absent)
-                    ) {
-                        if let Ok(found) =
-                            cort::hook::name_pointers(&db, &project_id, symbol, NAME_POINTER_LIMIT)
-                        {
-                            pointers.borrow_mut().replace(found);
-                        }
-                    }
-                    evidence
-                }
-            }
-        });
-        // Every outcome past this point paid for the probe, so the row it writes can say which
-        // project it probed -- `hit`, `no_evidence`, `no_index`, `no_index_hinted` alike. The
-        // `no_shape` exits above never ran the probe and stay unattributed by design: attributing
-        // them would have cost a canonicalize on ~95% of fires.
-        usage.project_id = probed_project.borrow().clone();
-        let hit = match verdict {
-            cort::hook::Verdict::Fire(hit) => hit,
-            cort::hook::Verdict::Silent(reason) => {
-                let (outcome, decline) = match reason {
-                    cort::hook::SilenceReason::NoShape(tag) => ("no_shape", Some(tag)),
-                    // Unchanged meaning: the rule matched a real call-site search and the gate declined
-                    // it -- a missed opportunity, which `tests/cli.rs` pins as its own name. An empty
-                    // index reaches here, not `no_evidence`, because `probe_index` applies the same
-                    // `status.indexed` test the old gate did.
-                    //
-                    // The silence stays a silence for the suggestion itself -- there is no index to
-                    // answer with -- but it no longer stays INVISIBLE. Mining 90 days of transcripts
-                    // found the funnel's biggest hole exactly here: ~985 searches in unindexed
-                    // projects produced 0 suggestions, and nobody ever learned that one `cort index`
-                    // would turn this hook on for the whole project. So the FIRST shaped search of a
-                    // session, per directory, says so -- once. The repair is the caller's own one-off
-                    // `cort index`; this hook keeps never creating an index (refresh keeps what
-                    // exists current), and every later search in that session is silent as before.
-                    cort::hook::SilenceReason::NoIndex { symbol } => {
-                        let session = v.get("session_id").and_then(Value::as_str).unwrap_or("");
-                        let dir = v.get("cwd").and_then(Value::as_str).unwrap_or("");
-                        if !session.is_empty()
-                            && !dir.is_empty()
-                            && !no_index_hint_fired(session, dir)
-                        {
-                            usage.args_summary = hook_args_demand(
-                                &hook_args_tag(&harness_args("no_index_hinted"), "symbol", &symbol),
-                                hook_demand(&v),
-                            );
-                            // The `suppressOutput` guard is the same one the Fire payload carries:
-                            // Codex rejects the whole output over the field, and a hint it discards
-                            // teaches the user the hook is broken, not that one `cort index` exists.
-                            if !speaks {
-                                return quiet();
-                            }
-                            let mut payload = json!({
-                                "hookSpecificOutput": {
-                                    "hookEventName": "PreToolUse",
-                                    "additionalContext": "No index for this project yet: one \
-                                `cort index` and searches like this get caller-set suggestions (who calls this symbol), kept \
-                                current by the edit hook afterwards. Ignore if you do not need call-site answers here.",
-                                },
-                            });
-                            if harness != "codex" {
-                                payload["suppressOutput"] = json!(true);
-                            }
-                            return Ok(Emit {
-                                payload,
-                                format: Format::Lean,
-                                render_command: Some("hook-suggest"),
-                            });
-                        }
-                        usage.args_summary =
-                            hook_args_tag(&harness_args("no_index"), "symbol", &symbol);
-                        return quiet();
-                    }
-                    // The rule matched, the project is genuinely indexed, and the index holds neither
-                    // a seed nor a raw edge naming the symbol. A refusal, not a missed chance -- and
-                    // no longer a dead end: the symbol is what the offline improvement loop matches
-                    // the index against (files, other projects' chunks), and the `why` splits
-                    // "extracted under a different name shape" from "never extracted".
-                    cort::hook::SilenceReason::NoEvidence { symbol, why } => {
-                        // The verdict keeps its meaning -- no caller set exists, and none is claimed
-                        // below -- but Absent no longer has to be a dead end: when the name occurs
-                        // inside indexed bodies, the first ask per session per symbol carries those
-                        // locations. Kimi is excluded the way every additionalContext is: its
-                        // `PreToolUse` keeps only block-shaped results, so the pointer would reach
-                        // nobody. docs/2026-09-15-field-and-variant-boundaries.md, boundary 5.
-                        if why == cort::hook::NoEvidenceWhy::Absent && harness != "kimi-code" {
-                            let session = v.get("session_id").and_then(Value::as_str).unwrap_or("");
-                            let found = pointers
-                                .borrow()
-                                .clone()
-                                .filter(|list| !list.is_empty())
-                                .filter(|_| !session.is_empty());
-                            if let Some(found) = found {
-                                if !no_evidence_pointer_fired(session, &symbol) {
-                                    usage.args_summary = hook_args_demand(
-                                        &hook_args_tag(
-                                            &hook_args_tag(
-                                                &harness_args("no_evidence_hinted"),
-                                                "symbol",
-                                                &symbol,
-                                            ),
-                                            "why",
-                                            why.as_str(),
-                                        ),
-                                        hook_demand(&v),
-                                    );
-                                    // Same guard as the hint and the Fire payload: Codex discards the
-                                    // entire output over `suppressOutput`, taking the pointer with it.
-                                    if !speaks {
-                                        return quiet();
-                                    }
-                                    let mut payload = json!({
-                                        "hookSpecificOutput": {
-                                            "hookEventName": "PreToolUse",
-                                            "additionalContext": format!(
-                                                "No caller-set answer for '{symbol}': it is not an \
-                                        indexed definition (fields and enum variants are outside the grain). The name appears inside: \
-                                        {}. That is where it occurs, not a complete enumeration.",
-                                                found.join("; ")
-                                            ),
-                                        },
-                                    });
-                                    if harness != "codex" {
-                                        payload["suppressOutput"] = json!(true);
-                                    }
-                                    return Ok(Emit {
-                                        payload,
-                                        format: Format::Lean,
-                                        render_command: Some("hook-suggest"),
-                                    });
-                                }
-                            }
-                        }
-                        usage.args_summary = hook_args_tag(
-                            &hook_args_tag(&harness_args("no_evidence"), "symbol", &symbol),
-                            "why",
-                            why.as_str(),
-                        );
-                        return quiet();
-                    }
-                };
-                usage.args_summary = match decline {
-                    Some(tag) => hook_args_shape(
-                        &hook_args_decline(&harness_args(outcome), tag),
-                        &shape_fingerprint(&v),
-                    ),
-                    None => harness_args(outcome),
-                };
-                return quiet();
-            }
-        };
-        // A stale index is still worth suggesting -- most seeds resolve -- and the suggestion
-        // carries no maintenance instruction at all: the `impact` command it names heals
-        // the index itself before answering (see `heal.rs`), so assigning a reindex to the agent
-        // would be assigning work that no longer exists. The P2 chained clause that once sat here
-        // measured 1 adoption in 4 days; the heal retired it. The outcome is still recorded
-        // separately (`hit_stale`) so the mining can tell the two shapes of fire apart.
-        // `Fire` is only reachable from inside `match evidence(&symbol)`, so the closure ran and this is
-        // `Some`. That coupling is invisible from here: the day someone adds a fast path to `judge` that
-        // fires without consulting evidence, this would read `None` and silently downgrade `hit_stale`
-        // to `hit` with no test noticing. Assert it rather than trust it.
-        debug_assert!(
-            observed.get().is_some(),
-            "judge fired without consulting the evidence closure"
-        );
-        // `None` is unreachable today, and the assert above says so in debug -- but it compiles out of
-        // the release binary this hook actually ships in, so the release behaviour has to be chosen too.
-        // It fails toward disclosure: an unset cell is treated as behind-head, which over-warns rather
-        // than silently dropping the `hit_stale` outcome from a suggestion.
-        let stale = observed.get().unwrap_or(IndexState::BehindHead) == IndexState::BehindHead;
-        usage.args_summary = hook_args_demand(
-            &hook_args_tag(
-                &hook_args_kind(
-                    &harness_args(if stale { "hit_stale" } else { "hit" }),
-                    hit.kind.tag(),
-                ),
-                "symbol",
-                &hit.symbol,
-            ),
-            hook_demand(&v),
-        );
-        // P4 (Kimi-round mining): 5 of 11 ignored suggestions were definition/implementation
-        // lookups, not caller-set questions — the copy now leads with the verb condition so an
-        // agent opening a definition can dismiss it in one glance instead of reading an essay.
-        //
-        // P5 (2026-09-15, Taps mining): the one field injection that was truly a miss had the agent
-        // verifying a wiring claim ("is Taps even connected?") -- a completeness question -- and it
-        // answered from a zero-result grep. The trigger list now names that question so the session
-        // can recognise itself, and the coverage clause replaces "a grep cannot tell you" with the
-        // concrete bad inference a zero-result grep invites.
-        //
-        // P6 (2026-09-15, Taps again, the other half): the Taps fire recommended an impact on a
-        // resampling struct while the session was asking about a sound variant of the same name --
-        // seed-or-edge matches by name and cannot tell. When the seed carries a location, the copy
-        // names it, so a wrong-symbol fire costs the agent one glance instead of one misleading
-        // caller set. An edge-only fire carries no location and says nothing.
-        let context = match hit.kind {
-            cort::hook::Suggest::Impact => format!(
-                "If you need the caller set (rename / delete / \"nothing uses this\" / \"is this \
-wired up?\"), run `cort impact --symbol '{}' --depth 1 --coverage -f lean`{}. `--coverage` lists \
-what the enumeration could not see, and a zero-result grep is not proof nobody calls it. If you \
-are opening the definition, ignore this and keep the grep.",
-                hit.symbol,
-                hit.defined_at
-                    .as_deref()
-                    .map(|at| format!(" -- the index's match is defined at {at}"))
-                    .unwrap_or_default()
-            ),
-        };
-        // Kimi is the one harness where a suggestion cannot arrive as a suggestion. Its `PreToolUse`
-        // keeps only results whose `action` is `block` and drops every allow-shaped one before the
-        // model sees it, so `additionalContext` there reaches nobody. The contract is therefore
-        // deliberately different on this harness and only on it: deny once per session per symbol,
-        // carrying the same sentence as the reason, and yield on every later attempt. The reason text
-        // says so explicitly, because a stop the agent cannot get past is a worse failure than any
-        // false positive this rule can produce.
-        if !speaks {
-            return quiet();
-        }
-        if harness == "kimi-code" {
-            let session = v
-                .get("session_id")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            if gate_already_fired(session, &hit.symbol) {
-                usage.args_summary = hook_args_kind(&harness_args("hit_yielded"), hit.kind.tag());
-                return quiet();
-            }
-            return Ok(Emit {
-                payload: json!({
-                    "hookSpecificOutput": {
-                        "hookEventName": "PreToolUse",
-                        "permissionDecision": "deny",
-                        "permissionDecisionReason": format!(
-                            "{context} This search was not run. Issue exactly the same search again and \
-                it will run -- this fires once per symbol per session."
-                        ),
-                    },
-                }),
-                format: Format::Json,
-                render_command: Some("hook-suggest"),
-            });
-        }
-        // `suppressOutput` keeps the raw JSON out of the user's transcript view. Codex 0.152.1 rejects
-        // the whole output when it is present -- the hook is reported `Failed` and the context never
-        // reaches the model -- even though its own embedded `pre-tool-use.command.output` schema lists
-        // the field. Bisected on 2026-09-02 by emitting the shapes one at a time: `{}`, `continue`,
-        // `hookSpecificOutput` alone, and `hookSpecificOutput` with `additionalContext` all report
-        // `Completed` and deliver; adding `suppressOutput` is the single change that fails. Claude Code
-        // and Grok both accept it and both suppress the noise, so it is dropped only where it breaks.
-        let mut payload = json!({
-            "hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "additionalContext": context,
-            },
-        });
-        if harness != "codex" {
-            payload["suppressOutput"] = json!(true);
-        }
-        Ok(Emit {
-            payload,
-            format: Format::Json,
-            render_command: Some("hook-suggest"),
-        })
-    })();
-    usage.args_summary = hook_args_tag(
-        &usage.args_summary,
-        "collect",
-        cort::collect::kick(&harness),
+    // The project is the directory the hook ran in, canonicalised and hashed -- the same id
+    // `cort index` will take for it, so a fire row joins the projects table without a second
+    // derivation. No git and no database: the old probe opened the project's index and read its
+    // head to decide whether to suggest, and none of that decision is left to make. Not
+    // `canonicalize_root`: it `expect`s a UTF-8 path, and a hook must never panic, so a directory
+    // that is not UTF-8 simply has no project on its row.
+    usage.project_id = std::fs::canonicalize(cwd())
+        .ok()
+        .and_then(|path| path.to_str().map(project_id_for));
+    let row = hook_args_tag(
+        &hook_args("fired", &harness, declared_differs.as_deref(), model),
+        "tool",
+        hook_tool_label(&v),
     );
-    result
+    // External resource gate hook point: claudecat's gate hands off here, fail-open, before kick.
+    usage.args_summary = hook_args_tag(&row, "collect", cort::collect::kick(&harness));
+    quiet()
 }
 
-/// Does the cwd's project have an index with a `projects` row -- the same question `cort status`
-/// answers as `indexed`. Every failure is a `false`: a hook that cannot read the index has nothing
-/// to suggest, and must never turn a broken cache into a broken tool call.
-/// How long the hook will wait for git before deciding it cannot tell.
+/// How long `cort projects` will wait for git before deciding it cannot tell.
 ///
 /// `git rev-parse HEAD` is milliseconds on a warm local checkout and can be seconds on a network
-/// mount or a cold worktree. This runs inside a PreToolUse hook the harness gives 5 seconds, and
-/// spending that budget to decide whether to add one sentence would cost the injection entirely --
-/// which the funnel would then read as the hook correctly staying silent. Timing out is neither
-/// fresh nor stale; it is `HeadUnknown`.
+/// mount or a cold worktree. The screen walks every project on the machine, and a `rev-parse` that
+/// hangs would hold the whole report behind one unreachable checkout. Timing out is neither fresh
+/// nor stale -- the row says `stale: null`, because a project that cannot be checked is not a
+/// project that is fresh. The hooks no longer use this: `hook-suggest` stopped probing the index
+/// when its suggestion was removed, and `hook-refresh` reaches git only through
+/// `incremental_index`'s candidate set.
 const HOOK_GIT_BUDGET_MS: u64 = 400;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum IndexState {
-    /// No index the hook may speak for. Every failure lands here.
-    Missing,
-    /// Indexed, and `git rev-parse HEAD` returned the commit the index was built on.
-    ///
-    /// Deliberately not called `Fresh`. It is "the same commit was observed", which is weaker: a
-    /// tree at that commit with uncommitted edits is stale and lands here, and so does a tree whose
-    /// head could not be read at all (no git, or git too slow -- see `HOOK_GIT_BUDGET_MS`). The
-    /// recorded `hit` outcome inherits exactly that meaning and no more; `impact` still computes
-    /// real staleness and still reports `stale=true` on those trees.
-    HeadMatches,
-    /// Indexed on a different commit. Provably behind: the full `compute_stale` walk is too
-    /// expensive for a hook with a 5s budget, and one `git rev-parse HEAD` catches the case that
-    /// actually bites -- an index left behind by commits made since it was built.
-    BehindHead,
-}
-
-/// `git rev-parse HEAD`, abandoned if it does not answer inside the hook's budget.
+/// `git rev-parse HEAD`, abandoned if it does not answer inside the budget.
 ///
-/// The worker thread is left running when it times out. That is deliberate and bounded: this
-/// process is a hook that exits within milliseconds of returning, so the thread cannot outlive
-/// anything, and the alternative -- killing a child mid-`rev-parse` -- buys nothing.
+/// The worker thread is left running when it times out. That is deliberate and bounded: the caller
+/// (`cort projects`) is a one-shot command whose output does not depend on the abandoned thread,
+/// and the alternative -- killing a child mid-`rev-parse` -- buys nothing.
 fn git_head_quickly(root: &Path) -> Option<String> {
     let (tx, rx) = std::sync::mpsc::channel();
     let root = root.to_path_buf();
@@ -1749,40 +1068,6 @@ fn git_head_quickly(root: &Path) -> Option<String> {
     rx.recv_timeout(std::time::Duration::from_millis(HOOK_GIT_BUDGET_MS))
         .ok()
         .flatten()
-}
-
-fn probe_index() -> (IndexState, Option<Connection>, String) {
-    let Ok(canon) = canonicalize_root(cwd()) else {
-        return (IndexState::Missing, None, String::new());
-    };
-    // The project id leaves the probe even when the probe finds no index: `no_index_hinted` is
-    // exactly the row that must name a project which does not exist yet, and the id it carries is
-    // the one a later `cort index` of the same directory will take -- that is what makes a hint
-    // row joinable against the projects table without a second derivation. Only a directory that
-    // cannot be canonicalised at all has no id to give.
-    let project_id = project_id_for(&canon.path_str);
-    let path = db_path_for(&canon.path_str);
-    if !path.exists() {
-        return (IndexState::Missing, None, project_id);
-    }
-    let Ok(db) = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY) else {
-        return (IndexState::Missing, None, project_id);
-    };
-    let Ok(status) = status_of(&db, &canon.path) else {
-        return (IndexState::Missing, None, project_id);
-    };
-    if !status.indexed {
-        return (IndexState::Missing, None, project_id);
-    }
-    let state = match (status.git_head.as_deref(), git_head_quickly(&canon.path)) {
-        // Only a definite disagreement is called stale. A tree with no git, or a head that could
-        // not be read inside the budget, is not evidence of staleness and must not be reported as
-        // if it were -- but it is not evidence of freshness either, which is why the other arm is
-        // named for what was observed rather than for what the reader would like it to mean.
-        (Some(stored), Some(now)) if stored != now => IndexState::BehindHead,
-        _ => IndexState::HeadMatches,
-    };
-    (state, Some(db), project_id)
 }
 
 /// Wiring the PreToolUse hook into a Claude Code `settings.json`. `install.sh` calls this so the
@@ -1885,8 +1170,9 @@ fn default_settings_path_for(fmt: SettingsFormat) -> Result<PathBuf, CortError> 
 /// exactly how `--status --format kimi` came to answer `wired: false` about a file that was never
 /// Kimi's. Two implementations of one rule, and the untested one is always the one that is wrong.
 ///
-/// This is the same reason `judge` is single and `hook-probe` replays it rather than
-/// reimplementing it. The parsers may be plural; the table may not.
+/// The same rule the hook's own history keeps paying for: a settings *parser* may be plural (one
+/// module per dialect), because each speaks a different file format. The table that says which
+/// harness reads which file, through which format, and which subcommand each event runs may not.
 const HOOK_TARGETS: [(SettingsFormat, &str); 3] = [
     // The names come from `cort::settings::HOOK_HARNESSES` — the one home for the list
     // (`entry_shape_ok` dispatches on the same indices), not a second copy here.
