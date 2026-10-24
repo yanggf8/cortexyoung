@@ -499,58 +499,10 @@ fn coverage_flows_through_the_cli_in_lean() {
     let _ = proj;
 }
 
-fn run_hook_suggest(command: &str, cwd: &Path, cache: &Path) -> Run {
-    run_hook_suggest_with(command, &[], cwd, cache)
-}
-
-fn run_hook_suggest_with(command: &str, extra: &[&str], cwd: &Path, cache: &Path) -> Run {
-    run_hook_suggest_full(command, None, extra, cwd, cache)
-}
-
-fn run_hook_suggest_full(
-    command: &str,
-    transcript_path: Option<&str>,
-    extra: &[&str],
-    cwd: &Path,
-    cache: &Path,
-) -> Run {
-    use std::io::Write;
-    use std::process::Stdio;
-    let mut child = Command::new(cort_bin())
-        .arg("hook-suggest")
-        .args(extra)
-        .current_dir(cwd)
-        .env("CORT_CACHE_DIR", cache)
-        // `kick` reads the data dir; never let a hook test reach the real one.
-        .env("CORT_MEMORY_DIR", cache.join("data"))
-        // The announcement is opt-in since 2026-09-27; the copy-locking tests run with it on.
-        .env("CORT_SUGGEST", "1")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn cort hook-suggest");
-    let mut payload = serde_json::json!({
-        "tool_name": "Bash",
-        "tool_input": { "command": command },
-    });
-    if let Some(t) = transcript_path {
-        payload["transcript_path"] = serde_json::json!(t);
-    }
-    let body = serde_json::to_vec(&payload).unwrap();
-    child.stdin.take().unwrap().write_all(&body).unwrap();
-    let out = child.wait_with_output().expect("wait cort hook-suggest");
-    Run {
-        code: out.status.code().unwrap_or(1),
-        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-    }
-}
-
 /// A call-site search that the rule fires on.
 const FIRING_SEARCH: &str = "grep -rn 'helper(' src --include=*.ts";
 
-/// The same spawn as `run_hook_suggest_full` WITHOUT `CORT_SUGGEST=1` -- the default, muted
+/// The same spawn as `run_hook_suggest_payload` WITHOUT `CORT_SUGGEST=1` -- the default, muted
 /// world the 2026-09-27 direction shipped: the hook records every verdict, symbol and demand
 /// excerpt, and says nothing to the agent.
 fn run_hook_suggest_muted(command: &str, cwd: &Path, cache: &Path) -> Run {
@@ -663,7 +615,15 @@ fn the_rows_that_probed_the_index_name_the_project_they_probed() {
         eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
         return;
     }
-    run_hook_suggest(FIRING_SEARCH, &cwd, &cache);
+    run_hook_suggest_payload(
+        serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": { "command": FIRING_SEARCH },
+        }),
+        &[],
+        &cwd,
+        &cache,
+    );
     assert_eq!(row_project_id(&usage_db, "hit"), expected);
     assert!(
         cache.join(format!("{expected}.db")).exists(),
@@ -672,8 +632,12 @@ fn the_rows_that_probed_the_index_name_the_project_they_probed() {
 
     // A shaped search the index holds nothing about is a refusal, and the refusal is attributable
     // too: 10 of them in the live 3-day window with no way to say against which project.
-    run_hook_suggest(
-        "grep -rn 'zzz_absent_from_index(' src --include=*.ts",
+    run_hook_suggest_payload(
+        serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": { "command": "grep -rn 'zzz_absent_from_index(' src --include=*.ts" },
+        }),
+        &[],
         &cwd,
         &cache,
     );
@@ -731,20 +695,6 @@ fn impact_waits_out_an_exclusive_db_lock_instead_of_reporting_the_store_occupied
     let r = run_cort(&["impact", "--symbol", "helper"], &cwd, &cache);
     holder.join().unwrap();
     assert_eq!(r.code, 0, "stdout={} stderr={}", r.stdout, r.stderr);
-}
-
-fn git_in(root: &Path, args: &[&str]) {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(args)
-        .output()
-        .expect("run git");
-    assert!(
-        out.status.success(),
-        "git {args:?} failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
 }
 
 /// An index built before the current schema is not a busy database. `cort status` opens read-only
@@ -856,49 +806,75 @@ fn deleting_a_path_that_is_neither_a_directory_nor_a_row_still_fails() {
 /// compares those rows against a single harness's transcripts. A row that cannot say which harness
 /// wrote it cannot be counted on either side, and one from a different harness must not be folded
 /// in -- it would raise the injection count while every guard still read green.
+///
+/// The count is taken from the rows themselves, not from a verdict word: what the judge concluded
+/// about a search is a different question from who fired the hook, and the verdict vocabulary is
+/// being replaced while this attribution has to outlive it. No index is built on purpose -- the
+/// current binary and the thin trigger that replaces it both write one row per fire.
 #[test]
 fn a_usage_row_records_which_harness_fired_the_hook() {
     let (_p, cwd, _c, cache) = sandbox();
-    let idx = run_cort(&["index"], &cwd, &cache);
-    if idx.code != 0 {
-        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
-        return;
-    }
     let usage_db = cache.join("usage.db");
-    run_hook_suggest_with(FIRING_SEARCH, &["--harness", "claude-code"], &cwd, &cache);
-    let mine = cort::usage::hook_outcomes_at(&usage_db, 0, None, Some("claude-code")).unwrap();
-    assert!(
-        mine.get("hit").and_then(|v| v.as_i64()).unwrap_or(0)
-            + mine.get("hit_stale").and_then(|v| v.as_i64()).unwrap_or(0)
-            >= 1,
-        "the claude-code fire was not counted: {mine:?}"
-    );
+    let fire = |extra: &[&str]| {
+        run_hook_suggest_payload(
+            serde_json::json!({
+                "tool_name": "Bash",
+                "tool_input": { "command": FIRING_SEARCH },
+            }),
+            extra,
+            &cwd,
+            &cache,
+        )
+    };
+    fire(&["--harness", "claude-code"]);
+    fire(&["--harness", "grok"]);
+    // A fire from a harness the installer never named is not attributed to whichever one it did.
+    fire(&[]);
 
-    // A fire from somewhere else is visible, but never as this harness's injection.
-    run_hook_suggest_with(FIRING_SEARCH, &["--harness", "grok"], &cwd, &cache);
-    let mine = cort::usage::hook_outcomes_at(&usage_db, 0, None, Some("claude-code")).unwrap();
+    let rows = read_hook_rows(&usage_db, "hook-suggest");
+    assert_eq!(rows.len(), 3, "every fire is exactly one row: {rows:?}");
     assert_eq!(
-        mine.get("other_harness").and_then(|v| v.as_i64()),
-        Some(1),
-        "a grok fire was not held apart: {mine:?}"
+        rows[0].get("harness").and_then(Value::as_str),
+        Some("claude-code"),
+        "the fire did not name its own harness: {:?}",
+        rows[0]
     );
-
-    // And a row from before the field existed is `unspecified`, not attributed to whichever
-    // harness happened to be wired first.
-    run_hook_suggest_with(FIRING_SEARCH, &[], &cwd, &cache);
-    let mine = cort::usage::hook_outcomes_at(&usage_db, 0, None, Some("claude-code")).unwrap();
     assert_eq!(
-        mine.get("unspecified").and_then(|v| v.as_i64()),
-        Some(1),
-        "a harness-less row was attributed anyway: {mine:?}"
+        rows[1].get("harness").and_then(Value::as_str),
+        Some("grok"),
+        "a grok fire was folded into claude-code: {:?}",
+        rows[1]
+    );
+    assert_eq!(
+        rows[2].get("harness").and_then(Value::as_str),
+        Some("unspecified"),
+        "a harness-less row was attributed to a real harness instead of `unspecified`: {:?}",
+        rows[2]
     );
 
-    // With no filter the outcomes are reported as they are, so `cort usage` is unaffected.
-    let all = cort::usage::hook_outcomes_at(&usage_db, 0, None, None).unwrap();
-    assert!(
-        all.get("other_harness").is_none(),
-        "unfiltered read split by harness: {all:?}"
-    );
+    // And the row names the machine that produced it -- a figure that cannot say where it came
+    // from is not comparable to anything.
+    let conn = rusqlite::Connection::open(&usage_db).expect("open usage db");
+    let mut stmt = conn
+        .prepare(
+            "SELECT machine_id, machine_source FROM command_log
+              WHERE command = 'hook-suggest' ORDER BY id",
+        )
+        .expect("prepare");
+    let stamps: Vec<(String, String)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .expect("query")
+        .collect::<Result<_, _>>()
+        .expect("rows");
+    assert_eq!(stamps.len(), 3);
+    for (id, source) in &stamps {
+        assert_eq!(
+            id,
+            cort::usage::machine_id(),
+            "the row names another machine"
+        );
+        assert_eq!(source, cort::usage::machine_id_source());
+    }
 }
 
 /// One settings file can be read by more than one harness: Grok loads `~/.claude/settings.json` for
@@ -909,220 +885,77 @@ fn a_usage_row_records_which_harness_fired_the_hook() {
 #[test]
 fn the_harness_is_taken_from_the_payload_not_from_the_flag_alone() {
     let (_p, cwd, _c, cache) = sandbox();
-    let idx = run_cort(&["index"], &cwd, &cache);
-    if idx.code != 0 {
-        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
-        return;
-    }
     let usage_db = cache.join("usage.db");
+    let fire = |transcript: &str| {
+        run_hook_suggest_payload(
+            serde_json::json!({
+                "hook_event_name": "PreToolUse",
+                "tool_name": "Bash",
+                "tool_input": { "command": FIRING_SEARCH },
+                "transcript_path": transcript,
+            }),
+            &["--harness", "claude-code"],
+            &cwd,
+            &cache,
+        )
+    };
 
     // Wired as claude-code, but the transcript says the process running it is Grok.
-    run_hook_suggest_full(
-        FIRING_SEARCH,
-        Some("/home/u/.grok/sessions/x/updates.jsonl"),
-        &["--harness", "claude-code"],
-        &cwd,
-        &cache,
-    );
-    let as_claude = cort::usage::hook_outcomes_at(&usage_db, 0, None, Some("claude-code")).unwrap();
-    assert_eq!(
-        as_claude.get("other_harness").and_then(|v| v.as_i64()),
-        Some(1),
-        "a Grok fire was credited to claude-code: {as_claude:?}"
-    );
-    let as_grok = cort::usage::hook_outcomes_at(&usage_db, 0, None, Some("grok")).unwrap();
-    assert_eq!(
-        as_grok.get("hit").and_then(|v| v.as_i64()).unwrap_or(0)
-            + as_grok
-                .get("hit_stale")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(0),
-        1,
-        "the fire was not attributed to grok: {as_grok:?}"
-    );
-
+    fire("/home/u/.grok/sessions/x/updates.jsonl");
     // A transcript path naming nothing we recognise leaves the declared value standing: a declared
     // harness is still better than none.
-    run_hook_suggest_full(
-        FIRING_SEARCH,
-        Some("/var/tmp/somewhere/else.jsonl"),
-        &["--harness", "claude-code"],
-        &cwd,
-        &cache,
-    );
-    let as_claude = cort::usage::hook_outcomes_at(&usage_db, 0, None, Some("claude-code")).unwrap();
+    fire("/var/tmp/somewhere/else.jsonl");
+    // Codex sends Claude Code's payload byte for byte; only its transcript says who it is.
+    fire("/home/u/.codex/sessions/2026/10/25/rollout-x.jsonl");
+
+    let rows = read_hook_rows(&usage_db, "hook-suggest");
+    assert_eq!(rows.len(), 3, "one fire, one row: {rows:?}");
     assert_eq!(
-        as_claude.get("hit").and_then(|v| v.as_i64()).unwrap_or(0)
-            + as_claude
-                .get("hit_stale")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(0),
-        1,
-        "an unrecognised transcript path discarded the declared harness: {as_claude:?}"
+        rows[0].get("harness").and_then(Value::as_str),
+        Some("grok"),
+        "a Grok fire was credited to claude-code: {:?}",
+        rows[0]
+    );
+    assert_eq!(
+        rows[1].get("harness").and_then(Value::as_str),
+        Some("claude-code"),
+        "an unrecognised transcript path discarded the declared harness: {:?}",
+        rows[1]
+    );
+    assert_eq!(
+        rows[2].get("harness").and_then(Value::as_str),
+        Some("codex"),
+        "a Codex fire was credited to claude-code: {:?}",
+        rows[2]
     );
 }
 
-/// Codex 0.152.1 rejects the entire hook output when `suppressOutput` is present -- it reports the
-/// hook `Failed` and the context never reaches the model -- despite listing the field in its own
-/// embedded `pre-tool-use.command.output` schema. Bisected by emitting the shapes one at a time;
-/// `hookSpecificOutput` with `additionalContext` alone both completes and delivers. The field is
-/// dropped only for the harness that breaks on it, because it is what keeps the raw JSON out of the
-/// transcript view everywhere else.
+/// Field NAMES are stable vocabulary; payload content never enters the log. The row is counted
+/// whatever the hook concluded about the call, so this holds for any tool and any outcome.
 #[test]
-fn suppress_output_is_omitted_for_codex_and_kept_for_the_others() {
+fn payload_content_never_enters_the_hook_row() {
     let (_p, cwd, _c, cache) = sandbox();
-    let idx = run_cort(&["index"], &cwd, &cache);
-    if idx.code != 0 {
-        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
-        return;
-    }
-    let for_codex = run_hook_suggest_full(
-        FIRING_SEARCH,
-        Some("/home/u/.codex/sessions/2026/09/02/rollout-x.jsonl"),
-        &[],
-        &cwd,
-        &cache,
-    );
-    let v = payload(&for_codex);
-    assert!(
-        v["hookSpecificOutput"]["additionalContext"].is_string(),
-        "codex still needs the context: {}",
-        for_codex.stdout
-    );
-    assert!(
-        v.get("suppressOutput").is_none(),
-        "suppressOutput would make codex discard the whole output: {}",
-        for_codex.stdout
-    );
-
-    let for_claude = run_hook_suggest_full(
-        FIRING_SEARCH,
-        Some("/home/u/.claude/projects/x/y.jsonl"),
-        &[],
-        &cwd,
-        &cache,
-    );
-    assert_eq!(
-        payload(&for_claude)["suppressOutput"],
-        serde_json::json!(true),
-        "the others still suppress the raw JSON: {}",
-        for_claude.stdout
-    );
-}
-
-/// The same Codex 0.152.1 rejection, on the two hint payloads added AFTER the fix above: the
-/// no_index hint (ff66ee59) and the no_evidence pointer (078a0c5c) both re-attached
-/// `suppressOutput` unconditionally, and Codex reported `PreToolUse hook returned unsupported
-/// suppressOutput` — discarding the hint the payload existed to deliver. A hint that arrives
-/// broken is worse than the silence it replaced: it teaches the user the hook is broken, not
-/// that one `cort index` would turn it on.
-#[test]
-fn the_no_index_hint_omits_suppress_output_for_codex() {
-    let (_p, cwd, _c, cache) = sandbox(); // unindexed on purpose: no cort index run
-    let mk = |session: &str, transcript: &str| {
+    let run = run_hook_suggest_payload(
         serde_json::json!({
-            "tool_name": "Bash",
-            "tool_input": { "command": FIRING_SEARCH },
-            "session_id": session,
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Read",
+            "tool_input": { "file_path": "/tmp/secret-notes.md" },
             "cwd": cwd.to_str().unwrap(),
-            "transcript_path": transcript,
-        })
-    };
-    let for_codex = run_hook_suggest_payload(
-        mk(
-            "s-codex-noidx",
-            "/home/u/.codex/sessions/2026/09/22/rollout-x.jsonl",
-        ),
+            "session_id": "fp1",
+        }),
         &[],
         &cwd,
         &cache,
     );
-    assert_eq!(for_codex.code, 0);
-    let v = payload(&for_codex);
+    assert_eq!(run.code, 0);
+    let rows = read_hook_rows(&cache.join("usage.db"), "hook-suggest");
+    assert_eq!(rows.len(), 1, "one fire, one row: {rows:?}");
+    let summary = rows[0].to_string();
     assert!(
-        v["hookSpecificOutput"]["additionalContext"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("cort index"),
-        "codex still needs the hint: {}",
-        for_codex.stdout
-    );
-    assert!(
-        v.get("suppressOutput").is_none(),
-        "suppressOutput would make codex discard the hint: {}",
-        for_codex.stdout
-    );
-
-    let for_claude = run_hook_suggest_payload(
-        mk("s-claude-noidx", "/home/u/.claude/projects/x/y.jsonl"),
-        &[],
-        &cwd,
-        &cache,
-    );
-    assert_eq!(
-        payload(&for_claude)["suppressOutput"],
-        serde_json::json!(true),
-        "the others still suppress the raw JSON: {}",
-        for_claude.stdout
+        !summary.contains("secret"),
+        "payload content must stay out of the log: {summary}"
     );
 }
-
-#[test]
-fn the_no_evidence_pointer_omits_suppress_output_for_codex() {
-    let (_proj, cwd, _cd, cache) = indexed_grain_project();
-    let idx = run_cort(&["index", "."], &cwd, &cache);
-    if idx.code != 0 {
-        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
-        return;
-    }
-    let mk = |session: &str, transcript: &str| {
-        serde_json::json!({
-            "tool_name": "Bash",
-            "tool_input": { "command": "grep -rn \"fuel_left\" src --include=*.ts | head -3" },
-            "session_id": session,
-            "transcript_path": transcript,
-        })
-    };
-    let for_codex = run_hook_suggest_payload(
-        mk(
-            "s-codex-noev",
-            "/home/u/.codex/sessions/2026/09/22/rollout-x.jsonl",
-        ),
-        &[],
-        &cwd,
-        &cache,
-    );
-    assert_eq!(for_codex.code, 0);
-    let v = payload(&for_codex);
-    assert!(
-        v["hookSpecificOutput"]["additionalContext"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("appears inside"),
-        "codex still needs the pointer: {}",
-        for_codex.stdout
-    );
-    assert!(
-        v.get("suppressOutput").is_none(),
-        "suppressOutput would make codex discard the pointer: {}",
-        for_codex.stdout
-    );
-
-    let for_claude = run_hook_suggest_payload(
-        mk("s-claude-noev", "/home/u/.claude/projects/x/y.jsonl"),
-        &[],
-        &cwd,
-        &cache,
-    );
-    assert_eq!(
-        payload(&for_claude)["suppressOutput"],
-        serde_json::json!(true),
-        "the others still suppress the raw JSON: {}",
-        for_claude.stdout
-    );
-}
-
-// --- Kimi: a structured search surface, and a contract that has to differ ----------------------
 
 /// Send a raw payload rather than a shell command, so a structured tool call can be tested the way
 /// the harness actually sends one.
@@ -1155,116 +988,6 @@ fn run_hook_suggest_payload(
         code: out.status.code().unwrap_or(1),
         stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-    }
-}
-
-fn kimi_grep(pattern: &str, path: &str, session: &str) -> serde_json::Value {
-    serde_json::json!({
-        "hook_event_name": "PreToolUse",
-        "session_id": session,
-        "tool_name": "Grep",
-        "tool_input": { "pattern": pattern, "path": path, "output_mode": "content", "-n": true },
-    })
-}
-
-/// Kimi's search surface is its structured `Grep` tool, not the shell. A hook that only reads
-/// `tool_input.command` is silent on the majority of that harness's traffic.
-#[test]
-fn a_structured_grep_payload_is_read_the_same_as_a_shell_search() {
-    let (_p, cwd, _c, cache) = sandbox();
-    let idx = run_cort(&["index"], &cwd, &cache);
-    if idx.code != 0 {
-        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
-        return;
-    }
-    let r = run_hook_suggest_payload(
-        kimi_grep("helper", "rust/src", "s1"),
-        &["--harness", "claude-code"],
-        &cwd,
-        &cache,
-    );
-    assert_eq!(r.code, 0);
-    let ctx = payload(&r)["hookSpecificOutput"]["additionalContext"]
-        .as_str()
-        .unwrap_or_default()
-        .to_string();
-    assert!(ctx.contains("cort impact --symbol 'helper'"), "got: {ctx}");
-}
-
-/// On Kimi and only on Kimi the suggestion has to arrive as a deny, because its `PreToolUse` keeps
-/// only blocking results and discards the rest before the model sees them. It fires once per symbol
-/// per session and yields afterwards, so a false positive costs one turn rather than the search.
-#[test]
-fn kimi_denies_once_per_symbol_then_gets_out_of_the_way() {
-    let (_p, cwd, _c, cache) = sandbox();
-    let idx = run_cort(&["index"], &cwd, &cache);
-    if idx.code != 0 {
-        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
-        return;
-    }
-    let kimi = &["--harness", "kimi-code"];
-
-    let first = run_hook_suggest_payload(
-        kimi_grep("helper", "rust/src", "sess-a"),
-        kimi,
-        &cwd,
-        &cache,
-    );
-    let out = payload(&first)["hookSpecificOutput"].clone();
-    assert_eq!(out["permissionDecision"].as_str(), Some("deny"));
-    let reason = out["permissionDecisionReason"].as_str().unwrap_or_default();
-    assert!(
-        reason.contains("cort impact --symbol 'helper'"),
-        "got: {reason}"
-    );
-    assert!(
-        reason.contains("Issue exactly the same search again"),
-        "a stop the agent cannot get past is worse than any false positive: {reason}"
-    );
-    assert!(
-        out["additionalContext"].is_null(),
-        "the allow-shaped field is discarded by Kimi and must not be sent there"
-    );
-
-    // Same symbol, same session: yields.
-    let second = run_hook_suggest_payload(
-        kimi_grep("helper", "rust/src", "sess-a"),
-        kimi,
-        &cwd,
-        &cache,
-    );
-    assert_eq!(payload(&second), serde_json::json!({}));
-
-    // A different session has not been told anything yet.
-    let other = run_hook_suggest_payload(
-        kimi_grep("helper", "rust/src", "sess-b"),
-        kimi,
-        &cwd,
-        &cache,
-    );
-    assert_eq!(
-        payload(&other)["hookSpecificOutput"]["permissionDecision"].as_str(),
-        Some("deny")
-    );
-}
-
-/// The other three harnesses keep the contract the rule was calibrated under: never block.
-#[test]
-fn no_other_harness_ever_receives_a_deny() {
-    let (_p, cwd, _c, cache) = sandbox();
-    let idx = run_cort(&["index"], &cwd, &cache);
-    if idx.code != 0 {
-        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
-        return;
-    }
-    for harness in ["claude-code", "codex", "grok"] {
-        let r = run_hook_suggest_with(FIRING_SEARCH, &["--harness", harness], &cwd, &cache);
-        let out = payload(&r)["hookSpecificOutput"].clone();
-        assert!(
-            out["permissionDecision"].is_null(),
-            "{harness} must never be denied"
-        );
-        assert!(out["additionalContext"].is_string(), "{harness} got: {out}");
     }
 }
 
@@ -1717,11 +1440,6 @@ fn read_hook_rows(usage_db: &Path, command: &str) -> Vec<Value> {
 #[test]
 fn a_model_breakdown_never_splits_the_harness_total() {
     let (_p, cwd, _c, cache) = sandbox();
-    let idx = run_cort(&["index"], &cwd, &cache);
-    if idx.code != 0 {
-        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
-        return;
-    }
     let usage_db = cache.join("usage.db");
     let fire = |model: Option<&str>| {
         let mut p = serde_json::json!({
@@ -1741,12 +1459,27 @@ fn a_model_breakdown_never_splits_the_harness_total() {
     fire(Some("glm-5.3"));
     fire(Some("glm-5.3"));
     fire(None); // the harness named no model
-    let total_before =
-        cort::usage::hook_outcomes_at(&usage_db, 0, None, Some("claude-code")).unwrap();
-    let fired: i64 = total_before.values().filter_map(Value::as_i64).sum();
+
+    // The primary number is the row count, and it never mentions `model`: one fire is one row
+    // however many models sat behind the harness. No index is built on purpose -- both the current
+    // binary and the thin trigger that replaces it write exactly one row per fire.
+    let conn = rusqlite::Connection::open(&usage_db).expect("open usage db");
+    let fired: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM command_log WHERE command = 'hook-suggest'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(fired, 4, "the harness total must count every fire");
+    let rows = read_hook_rows(&usage_db, "hook-suggest");
+    let for_harness = rows
+        .iter()
+        .filter(|r| r.get("harness").and_then(Value::as_str) == Some("claude-code"))
+        .count();
     assert_eq!(
-        fired, 4,
-        "the harness total must count every fire: {total_before:?}"
+        for_harness, 4,
+        "every row must name the harness that fired it: {rows:?}"
     );
 
     let models =
@@ -1764,13 +1497,8 @@ fn a_model_breakdown_never_splits_the_harness_total() {
     let model_sum: i64 = models.values().filter_map(Value::as_i64).sum();
     assert_eq!(
         model_sum, fired,
-        "the breakdown and the total disagree about how many rows exist: {models:?} vs {total_before:?}"
+        "the breakdown and the total disagree about how many rows exist: {models:?} vs {fired}"
     );
-
-    // Adding the lens changed nothing about the primary number.
-    let total_after =
-        cort::usage::hook_outcomes_at(&usage_db, 0, None, Some("claude-code")).unwrap();
-    assert_eq!(total_before, total_after);
 
     // A different harness's rows are not in this harness's breakdown.
     assert!(
@@ -1877,109 +1605,6 @@ fn the_lean_hook_report_has_six_non_empty_fields_on_every_line() {
         "the refusal must name the missing flag: {} {}",
         missing.stdout,
         missing.stderr
-    );
-}
-
-/// A concept search in an indexed project: right shape, and nothing in the index named `tide`. The
-/// hook must stay silent rather than send the agent to `impact` for an answer that would be
-/// `seeds=0 dependents=0` and nothing else.
-#[test]
-fn the_hook_is_silent_when_the_index_holds_nothing_about_the_symbol() {
-    let (_p, cwd, _c, cache) = sandbox();
-    // Without this guard the test passes vacuously when ast-grep is missing: indexing fails, the
-    // project has no index, the hook silences as `no_index`, stdout is still `{}` -- and nothing
-    // about the evidence predicate was exercised.
-    let idx = run_cort(&["index"], &cwd, &cache);
-    if idx.code != 0 {
-        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
-        return;
-    }
-    // Same shape as FIRING_SEARCH -- only the symbol differs -- so the shape gate accepts it and
-    // the silence can only come from the evidence half.
-    let r = run_hook_suggest("grep -rn 'tide(' src --include=*.ts", &cwd, &cache);
-    assert_eq!(
-        payload(&r),
-        serde_json::json!({}),
-        "a name the index never heard of: {} {}",
-        r.stdout,
-        r.stderr
-    );
-    // The silence has to be attributed, not merely observed. Both silences print `{}`, so without
-    // this a one-token slip wiring NoEvidence to "no_index" would leave every test green while the
-    // measurement this change exists to produce never gained a row.
-    let counts = cort::usage::hook_outcomes_at(&cache.join("usage.db"), 0, None, None)
-        .expect("read usage db");
-    assert_eq!(
-        counts.get("no_evidence").and_then(Value::as_i64),
-        Some(1),
-        "an indexed project holding nothing about the symbol is `no_evidence`: {counts:?}"
-    );
-}
-
-/// The same project, a symbol it does hold. Still fires.
-#[test]
-fn the_hook_still_fires_for_a_symbol_the_index_holds() {
-    let (_p, cwd, _c, cache) = sandbox();
-    let idx = run_cort(&["index"], &cwd, &cache);
-    if idx.code != 0 {
-        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
-        return;
-    }
-    let r = run_hook_suggest(FIRING_SEARCH, &cwd, &cache);
-    assert!(
-        r.stdout.contains("cort impact --symbol 'helper'"),
-        "expected a suggestion: {} {}",
-        r.stdout,
-        r.stderr
-    );
-}
-
-/// The case the whole predicate exists for, end to end through the shipped binary rather than
-/// through the shape-only wrapper. Index, delete the definition, re-index incrementally -- exactly
-/// what the PostToolUse hook does after an edit -- then run the deletion-verification grep. The
-/// `chunks` row is gone, so a seed-only gate would go quiet here; the surviving caller's raw edge is
-/// what keeps it firing.
-#[test]
-fn the_hook_still_fires_after_the_definition_is_deleted_and_reindexed() {
-    let (p, cwd, _c, cache) = sandbox();
-    std::fs::write(
-        p.path().join("src/gone.ts"),
-        "export function ensureSeedUserPasswords() { return 1; }\n",
-    )
-    .unwrap();
-    std::fs::write(
-        p.path().join("src/user.ts"),
-        "import { ensureSeedUserPasswords } from './gone';\n\
-export function boot() { return ensureSeedUserPasswords(); }\n",
-    )
-    .unwrap();
-    let idx = run_cort(&["index"], &cwd, &cache);
-    if idx.code != 0 {
-        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
-        return;
-    }
-
-    std::fs::remove_file(p.path().join("src/gone.ts")).unwrap();
-    // The incremental run's result cannot be ignored. If it fails, the deleted file's chunk is still
-    // in the index, evidence is `Seed`, and the assertion below passes for the wrong reason -- a
-    // seed-only gate would stay green here whenever incremental did not actually remove the file.
-    let inc = run_cort(&["index", "--incremental"], &cwd, &cache);
-    assert_eq!(
-        inc.code, 0,
-        "incremental must succeed or this test proves nothing: {}",
-        inc.stderr
-    );
-
-    let r = run_hook_suggest(
-        "grep -rn 'ensureSeedUserPasswords' src --include=*.ts 2>/dev/null",
-        &cwd,
-        &cache,
-    );
-    assert!(
-        r.stdout.contains("ensureSeedUserPasswords"),
-        "a deleted symbol its callers still name must keep firing: {} {}",
-        r.stdout,
-        r.stderr
     );
 }
 
@@ -3066,132 +2691,6 @@ fn the_refresh_hook_does_not_migrate_the_schema() {
     );
 }
 
-// ── no_index hint: the funnel's biggest hole was a total silence ──
-
-/// `no_index` used to be a total silence — the funnel's biggest hole (90-day mining: ~985
-/// searches in unindexed projects, 0 suggestions, and nobody ever learned that one `cort
-/// index` would turn this hook on for the whole project). The first shaped search in a
-/// session now says so, once per session per directory: the repair is the caller's own
-/// one-off `cort index` — this hook keeps never creating an index, and the refresh hook
-/// keeps the index current afterwards.
-#[test]
-fn a_no_index_search_hints_once_pointing_at_cort_index() {
-    let (_p, cwd, _c, cache) = sandbox(); // unindexed on purpose: no cort index run
-    let mk = |session: &str| {
-        serde_json::json!({
-            "tool_name": "Bash",
-            "tool_input": { "command": FIRING_SEARCH },
-            "session_id": session,
-            "cwd": cwd.to_str().unwrap(),
-        })
-    };
-    let run = run_hook_suggest_payload(mk("s1"), &[], &cwd, &cache);
-    assert_eq!(run.code, 0);
-    let parsed = payload(&run);
-    let ctx = parsed["hookSpecificOutput"]["additionalContext"]
-        .as_str()
-        .unwrap_or_default();
-    assert!(
-        ctx.contains("cort index"),
-        "the hint names the one-off repair: {ctx}"
-    );
-
-    // Same session, same directory: silent again — the hint said its one thing.
-    let again = run_hook_suggest_payload(mk("s1"), &[], &cwd, &cache);
-    assert!(
-        payload(&again).get("hookSpecificOutput").is_none(),
-        "the hint fires once per session per directory: {}",
-        payload(&again)
-    );
-
-    // A different session has not been told yet.
-    let other = run_hook_suggest_payload(mk("s2"), &[], &cwd, &cache);
-    assert!(
-        payload(&other).get("hookSpecificOutput").is_some(),
-        "a fresh session gets its own hint"
-    );
-}
-
-/// An indexed project never sees the hint: its searches get the real suggestion (or the
-/// correct `no_evidence` silence), and the hint text must not dilute that channel.
-#[test]
-fn an_indexed_project_never_gets_the_no_index_hint() {
-    let (_p, cwd, _c, cache) = sandbox();
-    git_in(&cwd, &["init", "-q"]);
-    git_in(&cwd, &["config", "user.email", "t@e.com"]);
-    git_in(&cwd, &["config", "user.name", "t"]);
-    git_in(&cwd, &["add", "-A"]);
-    git_in(&cwd, &["commit", "-qm", "one"]);
-    let idx = run_cort(&["index"], &cwd, &cache);
-    if idx.code != 0 {
-        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
-        return;
-    }
-    let run = run_hook_suggest_payload(
-        serde_json::json!({
-            "tool_name": "Bash",
-            "tool_input": { "command": FIRING_SEARCH },
-            "session_id": "s1",
-            "cwd": cwd.to_str().unwrap(),
-        }),
-        &[],
-        &cwd,
-        &cache,
-    );
-    let parsed = payload(&run);
-    let ctx = parsed["hookSpecificOutput"]["additionalContext"]
-        .as_str()
-        .unwrap_or_default();
-    assert!(
-        ctx.contains("cort impact --symbol"),
-        "an indexed project gets the real suggestion: {ctx}"
-    );
-    assert!(
-        !ctx.contains("No index for this project"),
-        "the hint must not fire where an index exists: {ctx}"
-    );
-}
-
-// ── issue #3: the no_shape silence carries a shape fingerprint ──
-
-/// 83% of hook runs were `no_shape` and the silence was unattributable: the decline tag says
-/// WHICH rule declined, but nothing said WHAT the payload looked like, so rule work could not
-/// be ordered by demand. Every `no_shape` row now also carries a fingerprint — the tool name
-/// plus the payload's sorted top-level keys. Field NAMES are stable vocabulary; payload
-/// content never enters the log.
-#[test]
-fn a_no_shape_row_carries_a_shape_fingerprint_without_payload_content() {
-    let (_p, cwd, _c, cache) = sandbox();
-    let run = run_hook_suggest_payload(
-        serde_json::json!({
-            "tool_name": "Read",
-            "tool_input": { "file_path": "/tmp/secret-notes.md" },
-            "cwd": cwd.to_str().unwrap(),
-            "session_id": "fp1",
-        }),
-        &[],
-        &cwd,
-        &cache,
-    );
-    assert_eq!(run.code, 0);
-    let db = rusqlite::Connection::open(cache.join("usage.db")).unwrap();
-    let summary: String = db
-        .query_row(
-            "SELECT args_summary FROM command_log WHERE command = 'hook-suggest' ORDER BY id DESC LIMIT 1",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert!(
-        summary.contains(r#""shape":"Read|"#) && summary.contains("tool_input+"),
-        "the fingerprint names the tool and the key set: {summary}"
-    );
-    assert!(
-        !summary.contains("secret"),
-        "payload content must stay out of the log: {summary}"
-    );
-}
-
 /// Codex's structural fix for a funnel that does not sum: the outcome vocabulary is a constant in
 /// the library, the census is the tool's own partition, and this test drives representative
 /// branches through the real binary and holds all three against each other. A new outcome emitted
@@ -3228,14 +2727,25 @@ fn the_suggest_vocabulary_is_closed_and_the_census_sums_to_the_fires() {
     assert_eq!(out.trim(), "{}", "no injection: the empty payload only");
 
     // A command the rule has nothing to say about; a rule match the gate declines.
-    run_hook_suggest("cargo test --workspace", &cwd, &cache);
-    run_hook_suggest(FIRING_SEARCH, &cwd, &cache);
+    let fire = |command: &str| {
+        run_hook_suggest_payload(
+            serde_json::json!({
+                "tool_name": "Bash",
+                "tool_input": { "command": command },
+            }),
+            &[],
+            &cwd,
+            &cache,
+        )
+    };
+    fire("cargo test --workspace");
+    fire(FIRING_SEARCH);
 
     // And a hit, when ast-grep exists to build the index (same SKIP guard as its siblings).
     let idx = run_cort(&["index"], &cwd, &cache);
     let hit_expected = idx.code == 0;
     if hit_expected {
-        run_hook_suggest(FIRING_SEARCH, &cwd, &cache);
+        fire(FIRING_SEARCH);
     }
 
     let conn = rusqlite::Connection::open(&usage_db).expect("open usage db");
@@ -3367,194 +2877,6 @@ fn the_refresh_vocabulary_is_closed_and_the_census_sums_to_the_fires() {
     assert!(
         !census.keys().any(|k| k.starts_with("unknown/")),
         "the refresh vocabulary must already cover what this binary emits: {census:?}"
-    );
-}
-
-// === the no_evidence pointer (boundary 5: refuse, but leave a trail) ===
-//
-// A field or variant is outside the extraction grain, so the honest answer is still "no caller
-// set" -- but 7 of the 11 rows in the 09-13..09-15 window were exactly this shape, and the name
-// they searched sits inside the bodies the index did extract. The refusal now names where, once
-// per session per symbol and at most three times per session.
-
-/// Like `run_hook_suggest`, but the payload carries a session id: the pointer gate is per-session,
-/// so the tests here hold one steady across calls.
-fn run_hook_suggest_session(command: &str, session: &str, cwd: &Path, cache: &Path) -> Run {
-    run_hook_suggest_payload(
-        serde_json::json!({
-            "session_id": session,
-            "tool_name": "Bash",
-            "tool_input": { "command": command },
-        }),
-        &[],
-        cwd,
-        cache,
-    )
-}
-
-const GRAIN_FIXTURE: &str = "\
-export class Tank {
-  fuel_left = 20;
-  ammo_left = 5;
-  shield_left = 100;
-  hull_left = 30;
-  drive() { this.fuel_left -= 1; return this.fuel_left; }
-  shoot() { this.ammo_left -= 1; }
-  block() { this.shield_left -= 5; }
-  hit() { this.hull_left -= 10; }
-}
-";
-
-fn indexed_grain_project() -> (tempfile::TempDir, PathBuf, tempfile::TempDir, PathBuf) {
-    let (proj, cwd) = make_project(&[("src/tank.ts", GRAIN_FIXTURE)]);
-    let cache_dir = tempfile::Builder::new()
-        .prefix("cort-grain-")
-        .tempdir()
-        .unwrap();
-    let cache = cache_dir.path().to_path_buf();
-    let idx = run_cort(&["index", "."], &cwd, &cache);
-    if idx.code != 0 {
-        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
-    }
-    (proj, cwd, cache_dir, cache)
-}
-
-fn hook_outcome_of(usage_db: &Path) -> String {
-    let conn =
-        rusqlite::Connection::open_with_flags(usage_db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .unwrap();
-    conn.query_row(
-        "SELECT args_summary FROM command_log WHERE command='hook-suggest' ORDER BY id DESC LIMIT 1",
-        [],
-        |r| {
-            let raw: String = r.get(0)?;
-            Ok(serde_json::from_str::<Value>(&raw)
-                .ok()
-                .and_then(|v| v.get("hook").and_then(Value::as_str).map(str::to_string))
-                .unwrap_or_else(|| "?".to_string()))
-        },
-    )
-    .unwrap()
-}
-
-fn usage_db_under(cache: &Path, _cwd: &Path) -> PathBuf {
-    // The usage database is one file per cache, not per project.
-    cache.join("usage.db")
-}
-
-#[test]
-fn an_absent_field_name_gets_a_pointer_into_the_indexed_bodies_once() {
-    let (_proj, cwd, _cd, cache) = indexed_grain_project();
-    let idx_row = run_cort(&["index", "."], &cwd, &cache);
-    if idx_row.code != 0 {
-        eprintln!(
-            "SKIP: index failed (ast-grep unavailable?): {}",
-            idx_row.stderr
-        );
-        return;
-    }
-    let usage_db = usage_db_under(&cache, &cwd);
-
-    let r = run_hook_suggest_session(
-        "grep -rn \"fuel_left\" src --include=*.ts | head -5",
-        "sess-pointer-1",
-        &cwd,
-        &cache,
-    );
-    assert_eq!(r.code, 0, "{} {}", r.stdout, r.stderr);
-    let ctx = payload(&r)["hookSpecificOutput"]["additionalContext"]
-        .as_str()
-        .unwrap_or_default()
-        .to_string();
-    // The pointer names the symbol, says what it is NOT, and lands the occurrences.
-    assert!(ctx.contains("fuel_left"), "{ctx}");
-    assert!(ctx.contains("appears inside"), "must name the trail: {ctx}");
-    assert!(ctx.contains(".ts:"), "must carry file:line: {ctx}");
-    assert!(
-        ctx.contains("not a complete enumeration"),
-        "the honesty clause is the whole point of a pointer: {ctx}"
-    );
-    assert_eq!(hook_outcome_of(&usage_db), "no_evidence_hinted");
-
-    // The same symbol, second ask of the session: back to the plain refusal.
-    let again = run_hook_suggest_session(
-        "grep -rn \"fuel_left\" src --include=*.ts | wc -l",
-        "sess-pointer-1",
-        &cwd,
-        &cache,
-    );
-    assert_eq!(
-        payload(&again),
-        serde_json::json!({}),
-        "the pointer fires once per session per symbol: {}",
-        again.stdout
-    );
-    assert_eq!(hook_outcome_of(&usage_db), "no_evidence");
-}
-
-#[test]
-fn the_pointer_is_capped_three_per_session() {
-    let (_proj, cwd, _cd, cache) = indexed_grain_project();
-    let idx_row = run_cort(&["index", "."], &cwd, &cache);
-    if idx_row.code != 0 {
-        eprintln!(
-            "SKIP: index failed (ast-grep unavailable?): {}",
-            idx_row.stderr
-        );
-        return;
-    }
-
-    for symbol in ["fuel_left", "ammo_left", "shield_left"] {
-        let r = run_hook_suggest_session(
-            &format!("grep -rn \"{symbol}\" src --include=*.ts | head -3"),
-            "sess-cap-1",
-            &cwd,
-            &cache,
-        );
-        assert!(
-            payload(&r)["hookSpecificOutput"]["additionalContext"]
-                .as_str()
-                .is_some(),
-            "{symbol} should still be inside the cap: {}",
-            r.stdout
-        );
-    }
-    let fourth = run_hook_suggest_session(
-        "grep -rn \"hull_left\" src --include=*.ts | head -3",
-        "sess-cap-1",
-        &cwd,
-        &cache,
-    );
-    assert_eq!(
-        payload(&fourth),
-        serde_json::json!({}),
-        "the fourth pointer of a session is context nobody asked for: {}",
-        fourth.stdout
-    );
-}
-
-#[test]
-fn kimi_gets_no_pointer_because_its_pretooluse_drops_context() {
-    let (_proj, cwd, _cd, cache) = indexed_grain_project();
-    let idx_row = run_cort(&["index", "."], &cwd, &cache);
-    if idx_row.code != 0 {
-        eprintln!(
-            "SKIP: index failed (ast-grep unavailable?): {}",
-            idx_row.stderr
-        );
-        return;
-    }
-    let r = run_hook_suggest_payload(
-        kimi_grep("fuel_left", "src", "sess-kimi-pointer"),
-        &[],
-        &cwd,
-        &cache,
-    );
-    assert_eq!(
-        payload(&r),
-        serde_json::json!({}),
-        "Kimi keeps only block-shaped results; a context pointer there reaches nobody: {}",
-        r.stdout
     );
 }
 
