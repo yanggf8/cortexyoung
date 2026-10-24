@@ -22,6 +22,53 @@ const LAST_PRUNE_KEY: &str = "LAST_PRUNE_DAY";
 const VERSION_KEY: &str = "USAGE_SCHEMA_VERSION";
 const MACHINE_KEY: &str = "MACHINE_ID";
 const MACHINE_SOURCE_KEY: &str = "MACHINE_ID_SOURCE";
+pub const INSTANCE_KEY: &str = "INSTANCE_ID";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KickCounters {
+    pub instance_id: String,
+    pub max_command_id: i64,
+    pub max_health_id: i64,
+}
+
+/// Read the two watermarks without creating or migrating a database.
+pub fn kick_counters_at(path: &Path) -> Option<KickCounters> {
+    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+    conn.busy_timeout(Duration::from_millis(RECORD_BUSY_MS))
+        .ok()?;
+    let objects: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name IN (
+                'command_log', 'index_health_log', 'idx_command_log_not_measure',
+                'idx_index_health_log_local')",
+            [],
+            |row| row.get(0),
+        )
+        .ok()?;
+    if objects != 4 {
+        return None;
+    }
+    let instance_id = meta(&conn, INSTANCE_KEY).ok()??;
+    let max_command_id = conn
+        .query_row(
+            "SELECT COALESCE(MAX(id), 0) FROM command_log WHERE command <> 'measure'",
+            [],
+            |row| row.get(0),
+        )
+        .ok()?;
+    let max_health_id = conn
+        .query_row(
+            "SELECT COALESCE(MAX(id), 0) FROM index_health_log",
+            [],
+            |row| row.get(0),
+        )
+        .ok()?;
+    Some(KickCounters {
+        instance_id,
+        max_command_id,
+        max_health_id,
+    })
+}
 
 /// Which machine these rows were recorded on, as a hash rather than a name.
 ///
@@ -196,7 +243,7 @@ fn record_inner(path: &Path, rec: &CommandRecord) -> Result<(), ()> {
     let conn = Connection::open(path).map_err(|_| ())?;
     let _ = conn.busy_timeout(Duration::from_millis(RECORD_BUSY_MS));
     chmod_600(path);
-    ensure_schema(&conn).map_err(|_| ())?;
+    ensure_schema(&conn, path).map_err(|_| ())?;
     let hit = rec.receipt_hit.map(i64::from);
     let stale = rec.index_stale.map(i64::from);
     conn.execute(
@@ -749,9 +796,10 @@ fn open_query(path: &Path) -> Result<Connection, CortError> {
     Ok(conn)
 }
 
-fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
+fn ensure_schema(conn: &Connection, path: &Path) -> rusqlite::Result<()> {
     conn.execute_batch(SCHEMA_SQL)?;
     stamp_machine(conn)?;
+    stamp_instance(conn, path)?;
     let found: Option<String> = meta(conn, VERSION_KEY)?;
     let expected = USAGE_SCHEMA_VERSION.to_string();
     match found.as_deref() {
@@ -794,6 +842,28 @@ fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
         }
         Some(_) => Err(rusqlite::Error::InvalidQuery),
     }
+}
+
+/// Name this database file once, so a replaced or restored `usage.db` can be told from the one a
+/// cursor was taken against. Read first, like [`stamp_machine`]: an unconditional
+/// `INSERT OR IGNORE` takes the write lock on every recorded row even when it ignores.
+fn stamp_instance(conn: &Connection, path: &Path) -> rusqlite::Result<()> {
+    use sha2::{Digest, Sha256};
+
+    if meta(conn, INSTANCE_KEY)?.is_some() {
+        return Ok(());
+    }
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    let seed = format!("{nanos}\0{}\0{}", std::process::id(), path.display());
+    let digest = crate::db::hex_lower(&Sha256::digest(seed.as_bytes()));
+    conn.execute(
+        "INSERT OR IGNORE INTO _usage_meta (key, value) VALUES (?1, ?2)",
+        params![INSTANCE_KEY, &digest[..32]],
+    )?;
+    Ok(())
 }
 
 /// Write the machine down the first time, and never overwrite it.
@@ -886,16 +956,18 @@ fn prune_best_effort(conn: &Connection, now: i64) {
         return;
     }
     let cutoff = now.saturating_sub(RETENTION_DAYS * DAY_MS);
-    loop {
-        match conn.execute(
-            "DELETE FROM command_log WHERE id IN (
-                SELECT id FROM command_log WHERE ts < ?1 LIMIT ?2
-             )",
-            params![cutoff, PRUNE_BATCH],
-        ) {
-            Ok(0) => break,
-            Ok(_) => continue,
-            Err(_) => return,
+    for sql in [
+        "DELETE FROM command_log WHERE id IN (
+            SELECT id FROM command_log WHERE ts < ?1 LIMIT ?2)",
+        "DELETE FROM index_health_log WHERE id IN (
+            SELECT id FROM index_health_log WHERE ts < ?1 LIMIT ?2)",
+    ] {
+        loop {
+            match conn.execute(sql, params![cutoff, PRUNE_BATCH]) {
+                Ok(0) => break,
+                Ok(_) => continue,
+                Err(_) => return,
+            }
         }
     }
     let _ = conn.execute(
