@@ -293,6 +293,16 @@
 
 ### Task 10: 匯入 `CORT-AUDIT.md`
 
+> **依 event-driven 設計第 8 節調整（2026-10-25 實作）**：`SnapshotRow`／`index_snapshots` 不做。
+> 實作在 `rust/src/audit_import.rs`：`parse_audit_md(md) -> Result<Vec<AuditRow>, String>`、
+> `audit_health_event`、`import_audit`；健康欄成為 `cort_index_health` 事件（`machine_id = imported:<host>`、
+> `machine_source = cort-audit-md`、payload ＝ `index_health_log` 去掉 `id` 的欄位加 `origin`，id 用
+> `telemetry::health_event_id`，Task F 沿用），用量欄進 `imported_usage`（已存在的列不覆蓋，不同就回報衝突）。
+> CLI 是 `cort measure import-audit <PATH>... --project-repo <DIR>`（`--project-repo` 必填，用該目錄的 git
+> origin 算 `project_id`；全部檔先解析才寫；寫前先 pull）。`unknown_host_excluded_from_activity` 移到 Task 9。
+> 匯入來源有兩份：本機 claudecat 的 `CORT-AUDIT.md`（55 列）與 i51149R3050 那份（多一列 10-21 i51149R3050，
+> 從未推上 claudecat），重疊列內容一致，聯集 56 列。
+
 **Files:**
 - Modify: `rust/src/measure.rs`、`rust/src/measure_store.rs`（`imported_usage` 表，PK `day, host`）、`rust/src/main.rs`（`measure import-audit <path>`）
 - Test: `rust/tests/measure_import.rs`（fixture：從真檔挑 4 列，含 09-06 那列）
@@ -319,7 +329,7 @@
 - [ ] 兩台 `claudecat telemetry configure` 指向**量測資料庫**，各跑最後一次 `claudecat telemetry sync`。i51149R3050 的 `claudecat-telemetry-sync.timer` 已於 2026-10-24 `disable --now`（unit 檔保留），所以它的最後一次 sync 要手動跑。
 - [ ] `cort measure copy-events`，比對各組列數。
 - [ ] 兩台 `cort measure sync --dry-run`：重疊非空、100% 相符；不符就停，修 Task 6。
-- [ ] NUC11i5 `cort measure import-audit /home/yanggf/a/claudecat/CORT-AUDIT.md`，對 53 列（加上封存後新增的列）。
+- [ ] NUC11i5 `cort measure import-audit <claudecat>/CORT-AUDIT.md <i51149R3050 那份的副本> --project-repo <claudecat>`，對 56 列（55＋i51149R3050 獨有的 1 列）。
 - [ ] 兩台 `cort measure cron --install --command-prefix <cort shim>`。
 - [ ] 隔天：遠端兩台都有昨天的快照、事件持續增加、無重複；壓縮列有新增。
 - [ ] 移除 `~/.cargo/bin/claudecat`（兩台）。

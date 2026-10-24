@@ -1,4 +1,5 @@
 pub mod ast_grep;
+pub mod audit_import;
 pub mod chunker;
 pub mod collect;
 pub mod coverage;

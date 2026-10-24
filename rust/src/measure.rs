@@ -289,7 +289,7 @@ pub fn compaction_details(projects_dir: &Path, id: &str) -> Result<Value, String
 // record / report
 // ---------------------------------------------------------------------------------------------
 
-const DAY_MS: i64 = 86_400_000;
+pub(crate) const DAY_MS: i64 = 86_400_000;
 
 pub struct RecordInputs {
     pub projects_dir: PathBuf,
@@ -496,7 +496,7 @@ pub fn host_name() -> String {
 }
 
 // Howard Hinnant's civil-date algorithms, so no date crate is needed.
-fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+pub(crate) fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     let y = if m <= 2 { y - 1 } else { y };
     let era = y.div_euclid(400);
     let yoe = y - era * 400;

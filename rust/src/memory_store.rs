@@ -151,7 +151,7 @@ pub fn project(root: &Path) -> Result<String, String> {
 
 /// Resolve an indexed project's identity from its own origin, ignoring the process-wide
 /// override that applies only to the current memory command's chosen project.
-pub(crate) fn project_from_git_origin(root: &Path) -> Result<String, String> {
+pub fn project_from_git_origin(root: &Path) -> Result<String, String> {
     let output = Command::new("git")
         .args(["remote", "get-url", "origin"])
         .current_dir(root)

@@ -34,6 +34,10 @@ use std::time::Duration;
 
 pub const SOURCE_COMMAND: &str = "cort_command";
 pub const SOURCE_COST: &str = "cost_daily";
+/// Index health observations. They have no claudecat history, so their id is a content key
+/// (day + root + the row's payload without `ts`) rather than a rowid: re-observing the same state
+/// on the same day -- including after `usage.db` is replaced -- must not store a second row.
+pub const SOURCE_HEALTH: &str = "cort_index_health";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TelemetryEvent {
@@ -70,6 +74,32 @@ fn digest_parts(source: &str, machine_id: &str, key: &str, payload: &str) -> Str
 /// SHA-256 hex of `source\0machine_id\0rowid\0payload`.
 pub fn event_id(source: &str, machine_id: &str, rowid: i64, payload: &str) -> String {
     digest_parts(source, machine_id, &rowid.to_string(), payload)
+}
+
+/// SHA-256 hex of `cort_index_health\0machine_id\0utc_day\0root\0payload_without_ts`.
+///
+/// `root` is `""` for a row that has none. The key goes through [`digest_parts`] as
+/// `"<day>\0<root>"`, which puts exactly the separators this contract names between the parts.
+pub fn health_event_id(
+    machine_id: &str,
+    utc_day: &str,
+    root: &str,
+    payload_without_ts: &str,
+) -> String {
+    digest_parts(
+        SOURCE_HEALTH,
+        machine_id,
+        &format!("{utc_day}\0{root}"),
+        payload_without_ts,
+    )
+}
+
+/// The compact JSON `cort_command` payloads use: object keys sorted, no spaces -- rendered by the
+/// one [`J`] serializer, so a health payload cannot differ from a command payload by one byte.
+pub fn sorted_compact_json(value: &Value) -> String {
+    // Every `serde_json::Value` deserialises into `J` (its numbers are always finite), so the
+    // error arm is unreachable; it renders `null` instead of panicking if the invariant breaks.
+    J::deserialize(value).unwrap_or(J::Null).render()
 }
 
 // ---------------------------------------------------------------------------------------------

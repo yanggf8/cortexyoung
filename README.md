@@ -60,7 +60,7 @@ Five shipped commands (plus `status`/`projects`/`delete` utilities):
   (`bare` / `scoped` / `receiver` / `type`)
 - `cort memory <record|resolve|recall|status|sync|configure|import-config|import-legacy>` — reviewed project facts in a shared Turso ledger, owned by cort; see [Project memory](docs/memory.md)
 - `cort usage [days]` — local per-machine usage stats (best-effort; 1–90 days, default 30)
-- `cort measure <configure|record|sync|report|show|copy-events|cron>` — agent measurement in its own Turso database; see [Local usage recording](#local-usage-recording-offline-hook-separate-tursodb-upload)
+- `cort measure <configure|record|sync|report|show|copy-events|import-audit|cron>` — agent measurement in its own Turso database; see [Local usage recording](#local-usage-recording-offline-hook-separate-tursodb-upload)
 
 `struct`, `context`, `read` and `recall` were removed on 2026-10-23 after zero invocations in 30 days
 on both machines; for those jobs use `ast-grep run`, `rg`, or open the file. `cort memory recall` is a
@@ -294,6 +294,17 @@ page of 2,000 rows, so a failure leaves a state the next run resumes from. It pr
 per `(source, machine_id)` on both sides. It refuses to run when the memory and measure configs name
 the same database, never overwrites a destination row, and reports same-key rows whose columns differ
 as `conflicts` (`status: copied_with_conflicts`, exit 0) instead of hiding them behind equal counts.
+
+**Importing the old audit table (`cort measure import-audit <PATH>... --project-repo <DIR>`).** A
+one-time import of the table claudecat's retired daily audit wrote to `CORT-AUDIT.md`. Each row's
+health columns become a `cort_index_health` event (`machine_id` `imported:<host>`, `machine_source`
+and payload `origin` `cort-audit-md`, id keyed on the row's content), and its usage columns a row of
+`imported_usage` keyed `(day, host)`. `--project-repo` is required: that directory's git origin
+names the project. Every file is parsed before anything is written, a cell the audit could not read
+(`?`, `-`) is stored as null rather than 0, and the import syncs (push, then pull) before deciding
+what already exists, so re-running is safe and repairs a failed push. A stored usage row is never
+overwritten; a differing one is reported under `usage_conflicts`. Run it on one machine: two
+machines importing at once would write the same keys into two replicas.
 
 ## Install
 

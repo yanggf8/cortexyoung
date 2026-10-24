@@ -55,7 +55,7 @@ fn usage_value() -> Value {
             "impact": "cort impact --symbol <name> [--depth <n>] [--coverage] [-f json|lean]",
             "usage": "cort usage [days] [-f json|lean]",
             "memory": "cort memory <configure|import-config|record|resolve|recall|status|sync|import-legacy> [options]",
-            "measure": "cort measure <configure|show|record|sync|copy-events|cron|report> [options]  (copy-events: one-time, re-runnable, read-only copy of claudecat's uploaded events from harnessuse, never overwrites, reports same-key rows whose columns differ as conflicts; sync --dry-run compares event ids and never pushes; the local command_log keeps 90 days, so events are lost only if they go unuploaded for 90 days in a row: record not running, or uploads refused pending a dry run)",
+            "measure": "cort measure <configure|show|record|sync|copy-events|import-audit|cron|report> [options]  (copy-events: one-time, re-runnable, read-only copy of claudecat's uploaded events from harnessuse, never overwrites, reports same-key rows whose columns differ as conflicts; import-audit: one-time, re-runnable import of CORT-AUDIT.md's health and usage columns, never overwrites, run on one machine only; sync --dry-run compares event ids and never pushes; the local command_log keeps 90 days, so events are lost only if they go unuploaded for 90 days in a row: record not running, or uploads refused pending a dry run)",
             "hook-suggest": "cort hook-suggest  (PreToolUse hook: records search verdicts; silent unless CORT_SUGGEST=1; not a verb to type)",
             "hook-refresh": "cort hook-refresh  (PostToolUse hook: brings this project's index up to the tree after an edit; silent, never creates an index; not a verb to type)",
             "hook-install": "cort hook-install [--settings <path>] [--command <cmd>] [--remove|--status]  (installer-invoked: wires hook-suggest into settings.json; not a verb to type)",
@@ -2745,6 +2745,18 @@ enum MeasureAction {
     /// `cort memory` one) into the measurement database. One-time, re-runnable, and read-only on
     /// the source: nothing is pushed to or deleted from it. Refuses when both configs name one database.
     CopyEvents,
+    /// Import claudecat's retired `CORT-AUDIT.md`: the health columns as `cort_index_health`
+    /// events, the usage columns into `imported_usage`. One-time and re-runnable; a stored row is
+    /// never overwritten, a differing one is reported as a conflict. Run it on one machine only:
+    /// two machines importing at once would insert the same keys into two replicas.
+    ImportAudit {
+        /// The audit files, all parsed before anything is written.
+        #[arg(required = true)]
+        paths: Vec<PathBuf>,
+        /// The repository whose git origin becomes the rows' project id. No default.
+        #[arg(long)]
+        project_repo: PathBuf,
+    },
     /// Own the hourly crontab line that runs `measure record`.
     Cron {
         #[arg(long, group = "cron_action")]
@@ -2969,6 +2981,41 @@ fn cmd_measure(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, CortErr
                 "source_rows":rows.iter().map(|r| r.2).sum::<usize>(),
                 "destination_rows":rows.iter().map(|r| r.3).sum::<usize>(),
                 "conflicts":report.conflicts,"conflict_examples":examples})
+        }
+        MeasureAction::ImportAudit {
+            paths,
+            project_repo,
+        } => {
+            let fail = |m: String| CortError::new("measure_error", json!({"message":m}));
+            let project_id =
+                cort::memory_store::project_from_git_origin(&project_repo).map_err(|e| {
+                    // `project_from_git_origin` never reads CORT_MEMORY_PROJECT, whatever its
+                    // message suggests: only the directory's own origin counts here.
+                    fail(format!(
+                        "cannot resolve a project id from {}: {e} (import-audit reads only this \
+                         directory's git origin remote)",
+                        project_repo.display()
+                    ))
+                })?;
+            // Parse every file first: one malformed row means the whole run writes nothing.
+            let mut rows = Vec::new();
+            for path in &paths {
+                let text = std::fs::read_to_string(path)
+                    .map_err(|e| fail(format!("cannot read {}: {e}", path.display())))?;
+                let parsed = cort::audit_import::parse_audit_md(&text)
+                    .map_err(|e| fail(format!("{}: {e}", path.display())))?;
+                rows.extend(parsed);
+            }
+            let value = cort::measure_store::with_turso_store(|store| {
+                let mut value = cort::audit_import::import_audit(store, &rows, &project_id)?;
+                cort::measure::sync(store)
+                    .map_err(|e| format!("imported locally, push failed: {e}"))?;
+                cort::measure::write_last_sync(usage::now_ms())?;
+                value["pushed"] = json!(true);
+                Ok(value)
+            })
+            .map_err(fail)?;
+            value
         }
         MeasureAction::Report {
             days,

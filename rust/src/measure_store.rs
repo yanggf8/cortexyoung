@@ -5,6 +5,7 @@
 //! [`with_turso_store`] is a sync replica that must only be opened through the `turso` crate.
 //! Both run the same [`MEASURE_SCHEMA`] and the same SQL text.
 
+use crate::audit_import::{ImportedUsage, ImportedUsageConflict, ImportedUsageOutcome};
 use crate::memory_store::{self, Config};
 use crate::telemetry::TelemetryEvent;
 use std::collections::HashMap;
@@ -60,6 +61,14 @@ pub trait MeasureStore {
         seen_ms: i64,
     ) -> Result<(), String>;
     fn machine_hosts(&mut self) -> Result<Vec<MachineHost>, String>;
+    /// Insert each row whose `(day, host)` is absent. An existing row is never overwritten:
+    /// identical -> unchanged, different -> returned as a conflict `(existing, incoming)`.
+    fn upsert_imported_usage(
+        &mut self,
+        rows: &[ImportedUsage],
+    ) -> Result<ImportedUsageOutcome, String>;
+    /// Every imported usage row, ordered by `(day, host)`.
+    fn imported_usage(&mut self) -> Result<Vec<ImportedUsage>, String>;
     /// `INSERT OR IGNORE` each event; returns how many were new. One transaction per chunk.
     fn insert_events(&mut self, events: &[TelemetryEvent]) -> Result<usize, String>;
     /// Local rowid (the payload's `id`) -> event_id for what the store holds for this machine.
@@ -160,6 +169,20 @@ pub const MEASURE_SCHEMA: &[&str] = &[
         last_seen_ms INTEGER NOT NULL,
         PRIMARY KEY (machine_id, host)
     )",
+    // Usage counters imported from claudecat's retired CORT-AUDIT.md, one row per host and day.
+    // Health rows of the same import are events (`cort_index_health`), not a table of their own.
+    "CREATE TABLE IF NOT EXISTS imported_usage (
+        day TEXT NOT NULL,
+        host TEXT NOT NULL,
+        commands_window INTEGER,
+        core_window INTEGER,
+        deep_window INTEGER,
+        commands_7d INTEGER,
+        deep_7d INTEGER,
+        decline_top TEXT,
+        window_days INTEGER NOT NULL,
+        PRIMARY KEY (day, host)
+    )",
     // The next two are claudecat's DDL verbatim (turso_memory.rs), so rows it already wrote fit.
     "CREATE TABLE IF NOT EXISTS telemetry_events (source TEXT NOT NULL, event_id TEXT NOT NULL, machine_id TEXT NOT NULL, machine_source TEXT NOT NULL, project_id TEXT, time_ms INTEGER, payload TEXT NOT NULL, PRIMARY KEY (source, event_id))",
     "CREATE TABLE IF NOT EXISTS telemetry_project_aliases (machine_id TEXT NOT NULL, local_project_id TEXT NOT NULL, shared_project_id TEXT NOT NULL, PRIMARY KEY (machine_id, local_project_id, shared_project_id))",
@@ -229,6 +252,12 @@ const SELECT_EVENTS_IN_RANGE: &str = "SELECT source, event_id, machine_id, machi
     AND (source < ? OR (source = ? AND event_id <= ?)) ORDER BY source, event_id";
 const COUNT_EVENTS: &str = "SELECT source, machine_id, COUNT(*) FROM telemetry_events \
     GROUP BY source, machine_id ORDER BY source, machine_id";
+const SELECT_IMPORTED_USAGE: &str =
+    "SELECT day, host, commands_window, core_window, deep_window, commands_7d, deep_7d, \
+     decline_top, window_days FROM imported_usage ORDER BY day, host";
+const INSERT_IMPORTED_USAGE: &str = "INSERT INTO imported_usage (day, host, commands_window, \
+    core_window, deep_window, commands_7d, deep_7d, decline_top, window_days) \
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)";
 /// Events per transaction: a commit per row is minutes on a 130k-row first upload.
 const EVENT_CHUNK: usize = 2000;
 
@@ -355,6 +384,37 @@ fn event_cells(e: &TelemetryEvent) -> Vec<Cell> {
 
 fn alias_from_cells(c: &[Cell]) -> Result<(String, String, String), String> {
     Ok((text(&c[0])?, text(&c[1])?, text(&c[2])?))
+}
+
+fn imported_usage_cells(u: &ImportedUsage) -> Vec<Cell> {
+    vec![
+        Cell::Text(u.day.clone()),
+        Cell::Text(u.host.clone()),
+        opt_int(u.commands_window),
+        opt_int(u.core_window),
+        opt_int(u.deep_window),
+        opt_int(u.commands_7d),
+        opt_int(u.deep_7d),
+        u.decline_top.clone().map_or(Cell::Null, Cell::Text),
+        Cell::Int(u.window_days),
+    ]
+}
+
+fn imported_usage_from_cells(c: &[Cell]) -> Result<ImportedUsage, String> {
+    Ok(ImportedUsage {
+        day: text(&c[0])?,
+        host: text(&c[1])?,
+        commands_window: opt_i(&c[2])?,
+        core_window: opt_i(&c[3])?,
+        deep_window: opt_i(&c[4])?,
+        commands_7d: opt_i(&c[5])?,
+        deep_7d: opt_i(&c[6])?,
+        decline_top: match &c[7] {
+            Cell::Null => None,
+            other => Some(text(other)?),
+        },
+        window_days: int(&c[8])?,
+    })
 }
 
 fn event_from_cells(c: &[Cell]) -> Result<TelemetryEvent, String> {
@@ -571,6 +631,46 @@ impl MeasureStore for SqliteStore {
         self.query(SELECT_HOSTS, vec![], 3)?
             .iter()
             .map(|r| host_from_cells(r))
+            .collect()
+    }
+
+    fn upsert_imported_usage(
+        &mut self,
+        rows: &[ImportedUsage],
+    ) -> Result<ImportedUsageOutcome, String> {
+        let mut known: HashMap<(String, String), ImportedUsage> = self
+            .query(SELECT_IMPORTED_USAGE, vec![], 9)?
+            .iter()
+            .map(|r| imported_usage_from_cells(r))
+            .collect::<Result<Vec<_>, String>>()?
+            .into_iter()
+            .map(|u| ((u.day.clone(), u.host.clone()), u))
+            .collect();
+        let mut outcome = ImportedUsageOutcome::default();
+        for row in rows {
+            let key = (row.day.clone(), row.host.clone());
+            if let Some(existing) = known.get(&key) {
+                if existing == row {
+                    outcome.unchanged += 1;
+                } else {
+                    outcome.conflicts.push(ImportedUsageConflict {
+                        existing: existing.clone(),
+                        incoming: row.clone(),
+                    });
+                }
+                continue;
+            }
+            self.exec(INSERT_IMPORTED_USAGE, imported_usage_cells(row))?;
+            known.insert(key, row.clone());
+            outcome.inserted += 1;
+        }
+        Ok(outcome)
+    }
+
+    fn imported_usage(&mut self) -> Result<Vec<ImportedUsage>, String> {
+        self.query(SELECT_IMPORTED_USAGE, vec![], 9)?
+            .iter()
+            .map(|r| imported_usage_from_cells(r))
             .collect()
     }
 
@@ -968,6 +1068,53 @@ impl MeasureStore for TursoStore {
             .block_on(turso_query(&self.conn, SELECT_HOSTS, vec![], 3))?
             .iter()
             .map(|r| host_from_cells(r))
+            .collect()
+    }
+
+    fn upsert_imported_usage(
+        &mut self,
+        rows: &[ImportedUsage],
+    ) -> Result<ImportedUsageOutcome, String> {
+        let known_rows =
+            self.rt
+                .block_on(turso_query(&self.conn, SELECT_IMPORTED_USAGE, vec![], 9))?;
+        let mut known: HashMap<(String, String), ImportedUsage> = known_rows
+            .iter()
+            .map(|r| imported_usage_from_cells(r))
+            .collect::<Result<Vec<_>, String>>()?
+            .into_iter()
+            .map(|u| ((u.day.clone(), u.host.clone()), u))
+            .collect();
+        let mut outcome = ImportedUsageOutcome::default();
+        for row in rows {
+            let key = (row.day.clone(), row.host.clone());
+            if let Some(existing) = known.get(&key) {
+                if existing == row {
+                    outcome.unchanged += 1;
+                } else {
+                    outcome.conflicts.push(ImportedUsageConflict {
+                        existing: existing.clone(),
+                        incoming: row.clone(),
+                    });
+                }
+                continue;
+            }
+            self.rt.block_on(turso_exec(
+                &self.conn,
+                INSERT_IMPORTED_USAGE,
+                imported_usage_cells(row),
+            ))?;
+            known.insert(key, row.clone());
+            outcome.inserted += 1;
+        }
+        Ok(outcome)
+    }
+
+    fn imported_usage(&mut self) -> Result<Vec<ImportedUsage>, String> {
+        self.rt
+            .block_on(turso_query(&self.conn, SELECT_IMPORTED_USAGE, vec![], 9))?
+            .iter()
+            .map(|r| imported_usage_from_cells(r))
             .collect()
     }
 
