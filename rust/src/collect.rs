@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Lane {
@@ -57,6 +58,129 @@ impl KickPaths {
             measure_config: crate::measure_store::config_path(),
         })
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum KickResult {
+    Spawned,
+    Busy,
+    Throttled,
+    StampFailed,
+    SpawnFailed,
+}
+
+fn try_lane(
+    paths: &KickPaths,
+    lane: Lane,
+    harness: &str,
+    now_ms: i64,
+    interval_ms: i64,
+    spawner: &mut dyn Spawner,
+) -> KickResult {
+    let (name, run_lock) = match lane {
+        Lane::Batch => ("batch", "measure-collect.lock"),
+        Lane::Health => ("health", "measure-health.lock"),
+    };
+    // The child owns the run lock. This probe must end before taking the kick lock.
+    match crate::upgrade::try_exclusive_lock(&paths.data_dir.join(run_lock)) {
+        Ok(lock) => drop(lock),
+        Err(crate::upgrade::LockError::AdmissionBusy) => return KickResult::Busy,
+        Err(_) => return KickResult::StampFailed,
+    }
+    let kick_lock = paths.data_dir.join(format!("measure-{name}.kick.lock"));
+    let _guard = match crate::upgrade::try_exclusive_lock(&kick_lock) {
+        Ok(lock) => lock,
+        Err(crate::upgrade::LockError::AdmissionBusy) => return KickResult::Busy,
+        Err(_) => return KickResult::StampFailed,
+    };
+    let stamp = paths.data_dir.join(format!("measure-{name}.spawned"));
+    let previous = fs::read_to_string(&stamp)
+        .ok()
+        .and_then(|s| s.trim().parse::<i64>().ok());
+    if previous.is_some_and(|last| now_ms >= last && now_ms - last < interval_ms) {
+        return KickResult::Throttled;
+    }
+    if write_atomic(&stamp, &now_ms.to_string()).is_err() {
+        return KickResult::StampFailed;
+    }
+    match spawner.spawn(lane, harness) {
+        Ok(()) => KickResult::Spawned,
+        Err(_) => KickResult::SpawnFailed,
+    }
+}
+
+pub fn kick_at(
+    paths: &KickPaths,
+    harness: &str,
+    now_ms: i64,
+    cfg: &CollectConfig,
+    spawner: &mut dyn Spawner,
+) -> &'static str {
+    if !paths.measure_config.is_file() {
+        return "not_configured";
+    }
+    let _upgrade = match crate::upgrade::try_protected_entry(&paths.cache_dir) {
+        Ok(guard) => guard,
+        Err(_) => return "upgrade",
+    };
+    let counters = match crate::usage::kick_counters_at(&paths.usage_db) {
+        Some(counters) => counters,
+        None => return "no_counters",
+    };
+    let batch = CollectState::load(&paths.data_dir.join("measure-collect-state.json"));
+    let health = HealthState::load(&paths.data_dir.join("measure-health-state.json"));
+    let batch_due = batch_due(&batch, &counters, harness, now_ms, cfg);
+    let health_due = health_due(&health, &counters, now_ms, cfg);
+    if !batch_due && !health_due {
+        return "not_due";
+    }
+    let batch_result = batch_due.then(|| {
+        try_lane(
+            paths,
+            Lane::Batch,
+            harness,
+            now_ms,
+            min_interval_ms(&batch, harness, cfg),
+            spawner,
+        )
+    });
+    let health_result = health_due.then(|| {
+        try_lane(
+            paths,
+            Lane::Health,
+            harness,
+            now_ms,
+            cfg.health_interval_ms,
+            spawner,
+        )
+    });
+    match (batch_result, health_result) {
+        (Some(KickResult::Spawned), Some(KickResult::Spawned)) => "spawned_both",
+        (Some(KickResult::Spawned), _) => "spawned_batch",
+        (_, Some(KickResult::Spawned)) => "spawned_health",
+        (Some(KickResult::SpawnFailed), _) | (_, Some(KickResult::SpawnFailed)) => "spawn_failed",
+        (Some(KickResult::StampFailed), _) | (_, Some(KickResult::StampFailed)) => "stamp_failed",
+        (Some(KickResult::Busy), _) | (_, Some(KickResult::Busy)) => "busy",
+        _ => "throttled",
+    }
+}
+
+pub fn kick(harness: &str) -> &'static str {
+    let Some(paths) = KickPaths::current() else {
+        return "no_counters";
+    };
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|d| i64::try_from(d.as_millis()).ok())
+        .unwrap_or(0);
+    kick_at(
+        &paths,
+        harness,
+        now_ms,
+        &CollectConfig::from_env(),
+        &mut DetachedSpawner,
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -261,6 +261,8 @@ mod hook_command {
             .arg("hook-suggest")
             .current_dir(cwd)
             .env("CORT_CACHE_DIR", cache)
+            // `kick` reads the data dir; never let a hook test reach the real one.
+            .env("CORT_MEMORY_DIR", cache.join("data"))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())

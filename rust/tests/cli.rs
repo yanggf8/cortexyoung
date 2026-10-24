@@ -109,6 +109,61 @@ fn latest_command_row(usage_db: &Path, command: &str) -> Value {
         .unwrap_or_else(|e| panic!("args_summary not json ({e}): {summary}"))
 }
 
+#[test]
+fn hooks_without_measure_configuration_record_collect_label() {
+    use std::io::Write;
+    use std::process::Stdio;
+    let temp = tempfile::tempdir().unwrap();
+    let cache = temp.path().join("cache");
+    let data = temp.path().join("data");
+    fs::create_dir_all(&cache).unwrap();
+    fs::create_dir_all(&data).unwrap();
+    for (hook, payload, outcome) in [
+        (
+            "hook-refresh",
+            json!({"tool_name":"Edit","tool_input":{"file_path":"x.rs"}}),
+            None,
+        ),
+        (
+            "hook-suggest",
+            json!({"tool_name":"Bash","tool_input":{"command":"rg foo"}}),
+            None,
+        ),
+        // Rejected on shape: the path most Bash calls take, so it must kick too.
+        (
+            "hook-suggest",
+            json!({"tool_name":"Bash","tool_input":{"command":"ls -la"}}),
+            Some("no_shape"),
+        ),
+    ] {
+        let mut child = Command::new(cort_bin())
+            .arg(hook)
+            .current_dir(temp.path())
+            .env("CORT_CACHE_DIR", &cache)
+            .env("CORT_MEMORY_DIR", &data)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(payload.to_string().as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert_eq!(output.status.code(), Some(0), "{hook}");
+        assert_eq!(output.stdout, b"{}\n", "{hook}");
+        assert!(output.stderr.is_empty(), "{hook}");
+        let row = latest_command_row(&cache.join("usage.db"), hook);
+        assert_eq!(row["collect"], "not_configured", "{hook} {payload}");
+        if let Some(outcome) = outcome {
+            assert_eq!(row["hook"], outcome, "{hook} {payload}");
+        }
+    }
+}
+
 fn sandbox() -> (tempfile::TempDir, PathBuf, tempfile::TempDir, PathBuf) {
     let (proj, cwd) = make_project(SAMPLE);
     let cache_dir = tempfile::Builder::new()
@@ -472,6 +527,8 @@ fn run_hook_suggest_full(
         .args(extra)
         .current_dir(cwd)
         .env("CORT_CACHE_DIR", cache)
+        // `kick` reads the data dir; never let a hook test reach the real one.
+        .env("CORT_MEMORY_DIR", cache.join("data"))
         // The announcement is opt-in since 2026-09-27; the copy-locking tests run with it on.
         .env("CORT_SUGGEST", "1")
         .stdin(Stdio::piped())
@@ -509,6 +566,8 @@ fn run_hook_suggest_muted(command: &str, cwd: &Path, cache: &Path) -> Run {
         .arg("hook-suggest")
         .current_dir(cwd)
         .env("CORT_CACHE_DIR", cache)
+        // `kick` reads the data dir; never let a hook test reach the real one.
+        .env("CORT_MEMORY_DIR", cache.join("data"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1574,6 +1633,8 @@ fn run_hook_suggest_payload(
         .args(extra)
         .current_dir(cwd)
         .env("CORT_CACHE_DIR", cache)
+        // `kick` reads the data dir; never let a hook test reach the real one.
+        .env("CORT_MEMORY_DIR", cache.join("data"))
         // The announcement is opt-in since 2026-09-27; the copy-locking tests run with it on.
         .env("CORT_SUGGEST", "1")
         .stdin(Stdio::piped())
@@ -1779,6 +1840,8 @@ fn run_hook_refresh(cwd: &Path, cache: &Path) -> Run {
         .arg("hook-refresh")
         .current_dir(cwd)
         .env("CORT_CACHE_DIR", cache)
+        // `kick` reads the data dir; never let a hook test reach the real one.
+        .env("CORT_MEMORY_DIR", cache.join("data"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1924,6 +1987,8 @@ fn run_hook_refresh_with(
         .args(extra)
         .current_dir(cwd)
         .env("CORT_CACHE_DIR", cache)
+        // `kick` reads the data dir; never let a hook test reach the real one.
+        .env("CORT_MEMORY_DIR", cache.join("data"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -3638,6 +3703,8 @@ fn the_suggest_vocabulary_is_closed_and_the_census_sums_to_the_fires() {
         .arg("hook-suggest")
         .current_dir(&cwd)
         .env("CORT_CACHE_DIR", &cache)
+        // `kick` reads the data dir; never let a hook test reach the real one.
+        .env("CORT_MEMORY_DIR", cache.join("data"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

@@ -197,7 +197,7 @@
   ```
   回傳的標籤（記進 hook 列 `args_summary` 的 `"collect"`）只會是：`not_configured`、`upgrade`、`no_counters`、`not_due`、`busy`、`throttled`、`stamp_failed`、`spawned_batch`、`spawned_health`、`spawned_both`、`spawn_failed`。
 
-- [ ] **Step 1: 寫失敗的測試**（暫存目錄 + 假 `Spawner` 記錄呼叫）
+- [x] **Step 1: 寫失敗的測試**（暫存目錄 + 假 `Spawner` 記錄呼叫）
   - `not_configured_touches_nothing`：沒有 measure 設定檔 → `not_configured`，data dir 內容前後相同。
   - `due_batch_spawns_once_and_writes_stamp`。
   - `throttled_within_interval`：剛寫過 stamp → 第二次 `throttled`，假 spawner 只被呼叫一次。
@@ -208,9 +208,9 @@
   - `both_lanes_due_spawn_both`。
   - `kick_median_cost`：20 萬列 `usage.db`、不到期的狀態下呼叫 200 次，印中位數，斷言 < 20 ms（實際數字寫進回報；設計目標 < 2 ms）。
   - hook 的 CLI 測試：`hook-refresh` 與 `hook-suggest` 在未設定 measure 時 stdout 為空、exit 0，寫進 `command_log` 的那列 `args_summary` 含 `"collect":"not_configured"`。
-- [ ] **Step 2: 跑 `cargo test --locked --test collect_kick`，預期失敗。**
-- [ ] **Step 3: 實作。** 步驟照設計第 1 節；升級檢查用 `upgrade::try_protected_entry(&paths.cache_dir)`；試鎖用 `upgrade::try_exclusive_lock` 試完立刻 drop；stamp 讀寫在 `*.kick.lock` 內。兩個 hook 在每個「已經過了升級檢查」的返回路徑都呼叫 `kick`，並把標籤放進該次的 hook row JSON。
-- [ ] **Step 4: 跑測試至綠，再跑全套 gate。**
+- [x] **Step 2: 跑 `cargo test --locked --test collect_kick`，預期失敗。**
+- [x] **Step 3: 實作。** 步驟照設計第 1 節；升級檢查用 `upgrade::try_protected_entry(&paths.cache_dir)`；試鎖用 `upgrade::try_exclusive_lock` 試完立刻 drop；stamp 讀寫在 `*.kick.lock` 內。兩個 hook 在每個「已經知道 harness」的返回路徑都呼叫 `kick`，並把標籤放進該次的 hook row JSON；`kick` 自己做升級檢查，所以 `hook-suggest` 在升級檢查之前就返回的 `no_shape`（大部分 Bash 呼叫走這條）也要 kick，只有讀不到 payload／沒有 `tool_input` 這兩條還不知道 harness 的路徑不 kick。
+- [x] **Step 4: 跑測試至綠，再跑全套 gate。**
 
 ### Task D1: 唯讀開檔、`repair_label`、`fresh_label`
 
