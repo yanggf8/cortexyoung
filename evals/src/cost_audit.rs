@@ -47,6 +47,26 @@ impl Usage {
     }
 }
 
+/// One model's share of the deduplicated usage census.
+#[derive(Default)]
+struct ModelTokens {
+    messages: u64,
+    input: u64,
+    cache_creation: u64,
+    cache_read: u64,
+    output: u64,
+}
+
+impl ModelTokens {
+    fn add(&mut self, usage: &Usage) {
+        self.messages += 1;
+        self.input += usage.input;
+        self.cache_creation += usage.cache_creation;
+        self.cache_read += usage.cache_read;
+        self.output += usage.output;
+    }
+}
+
 #[derive(Clone)]
 struct Call {
     name: String,
@@ -67,6 +87,7 @@ struct Census {
     messages_without_usage: u64,
     tool_results_unmatched: u64,
     total: Usage,
+    model_tokens: BTreeMap<String, ModelTokens>,
     tools: BTreeMap<String, ToolStats>,
     bash_leading_commands: BTreeMap<String, ToolStats>,
     session_costs: Vec<SessionCost>,
@@ -161,7 +182,9 @@ fn scan_file(path: &Path, since_ms: i64, until_ms: i64, census: &mut Census) {
     };
     census.files_read += 1;
     let mut in_window = false;
-    let mut usages: HashMap<String, Usage> = HashMap::new();
+    // One usage per message id; the model of whichever snapshot supplied the kept usage follows
+    // it, because a later snapshot replaces the whole usage record.
+    let mut usages: HashMap<String, (Usage, String)> = HashMap::new();
     let mut messages: HashSet<String> = HashSet::new();
     let mut calls: HashMap<String, Call> = HashMap::new();
     let mut results: HashSet<String> = HashSet::new();
@@ -207,7 +230,14 @@ fn scan_file(path: &Path, since_ms: i64, until_ms: i64, census: &mut Census) {
                     .and_then(|m| m.get("usage"))
                     .and_then(Usage::from_value)
                 {
-                    usages.insert(id.to_string(), usage);
+                    // A missing or non-string model is its own bucket, never dropped or filtered.
+                    let model = v
+                        .get("message")
+                        .and_then(|m| m.get("model"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown")
+                        .to_string();
+                    usages.insert(id.to_string(), (usage, model));
                 }
             }
             if let Some(items) = content.as_array() {
@@ -328,8 +358,13 @@ fn scan_file(path: &Path, since_ms: i64, until_ms: i64, census: &mut Census) {
         assistant_messages: messages.len() as u64,
         ..SessionCost::default()
     };
-    for usage in usages.values() {
+    for (usage, model) in usages.values() {
         census.total.add(usage);
+        census
+            .model_tokens
+            .entry(model.clone())
+            .or_default()
+            .add(usage);
         session.model_tokens +=
             usage.input + usage.cache_creation + usage.cache_read + usage.output;
         session.cache_read_tokens += usage.cache_read;
@@ -388,6 +423,24 @@ pub fn audit(dir: &Path, since: &str, until: &str) -> Result<Value, String> {
             )
         })
         .collect();
+    // Same dedup unit as `model_usage` totals: each message id once, keyed by the model of the
+    // snapshot whose usage was kept.
+    let by_model: BTreeMap<_, _> = c
+        .model_tokens
+        .iter()
+        .map(|(model, t)| {
+            (
+                model.clone(),
+                json!({
+                    "messages": t.messages,
+                    "input_tokens": t.input,
+                    "cache_creation_input_tokens": t.cache_creation,
+                    "cache_read_input_tokens": t.cache_read,
+                    "output_tokens": t.output,
+                }),
+            )
+        })
+        .collect();
     Ok(json!({
         "window": {"since_utc": since, "until_utc": until},
         "files_read": c.files_read,
@@ -405,6 +458,7 @@ pub fn audit(dir: &Path, since: &str, until: &str) -> Result<Value, String> {
             "cache_creation_input_tokens": c.total.cache_creation,
             "cache_read_input_tokens": c.total.cache_read,
             "output_tokens": c.total.output,
+            "by_model": by_model,
         },
         "estimated_tool_result_tokens": estimated_tool_tokens,
         "session_file_distribution": {
