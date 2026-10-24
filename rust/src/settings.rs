@@ -6,9 +6,9 @@
 //! touch a file it cannot parse. A `jq` pipeline in bash would be a second implementation of that
 //! with no tests attached, and `jq` is not a dependency the installer otherwise has.
 //!
-//! One entry is written, matched to `Bash`, because `hook-suggest` reads `tool_input.command` and
-//! has nothing to say about any other tool. An unmatched entry would fire on every tool call in
-//! the session to return `{}`.
+//! One entry is written, matched to `Bash`, because `hook-suggest` records which tool fired and
+//! `Bash` is the surface the measurement is about. An unmatched entry would record a row for every
+//! tool call in the session.
 
 use serde_json::{json, Map, Value};
 use std::fs;
@@ -72,10 +72,10 @@ impl From<io::Error> for SettingsError {
     }
 }
 
-/// The tool whose payload `hook-suggest` can read.
+/// The tool whose fires `hook-suggest` records.
 const MATCHER: &str = "Bash";
 
-/// Seconds. The rule is a string scan over one command line; the budget is here so a pathological
+/// Seconds. The hook writes one row and kicks collection; the budget is here so a pathological
 /// case can never hold up the agent's tool call.
 const TIMEOUT_SECS: u64 = 5;
 
@@ -111,7 +111,8 @@ pub(crate) const EDIT_MATCHER: &str = "Bash|Edit|Write|MultiEdit|NotebookEdit";
 /// of ours live in the same list and only the command line says which is which.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum HookEvent {
-    /// Before a search: suggest `cort impact`.
+    /// Before a matched tool call (`Bash`, plus Kimi's `Grep`): record the fire (thin trigger since
+    /// 2026-10-25).
     Suggest,
     /// After an edit: bring the index up to the tree.
     Refresh,

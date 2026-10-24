@@ -589,14 +589,19 @@ pub fn query_usage_at(path: &Path, days: i64, now_ms: i64) -> Result<Value, Cort
     }))
 }
 
-/// Count `hook-suggest` rows in `[since_ms, ..)` by the outcome its `args_summary` records.
+/// Count `hook-suggest` rows in `[since_ms, ..)` by the outcome its `args_summary` records --
+/// the harness facet of the fire rows, with [`hook_models_at`] as the model facet beside it.
 ///
-/// Aggregating by `command` cannot answer the question the adoption mining asks -- every Bash tool
+/// Aggregating by `command` cannot answer the question the measurement asks -- every Bash tool
 /// call the agent makes produces one `hook-suggest` row, so the command total is a measure of agent
-/// activity and not of interception. The outcome is the only column that separates `hit` (context
-/// was injected) from the silences -- `no_payload`, `no_shape`, `no_index` and, since
-/// 2026-09-05, `no_evidence` -- which is what makes this db a second source for the
-/// injection count rather than a second reading of the transcript.
+/// activity, not of which tool fired. The outcome column splits the two shapes a row can have: the
+/// judging hook wrote `hit*` when a suggestion was injected, which made this db a second source for
+/// that period's injection count, while since the thin trigger (2026-10-25) a row is only
+/// `no_payload` or `fired`. The legacy values are still read here because the local database keeps
+/// 90 days and the remote keeps everything.
+///
+/// Nothing in the product calls this today: the `usage` report reads [`hook_census_at`], and the
+/// lens functions are exercised by the test suite. They stay because the rows they read stay.
 ///
 /// Rows written before the outcome existed carry the bare summary `hook`; they are counted under
 /// `legacy_unsplit` rather than folded into a silence, because "we do not know" is not "no".
@@ -619,11 +624,12 @@ pub fn hook_outcomes_at(
 
 /// The same split for either hook event, told apart by the command that wrote the row.
 ///
-/// Two events ship (`hook-suggest` on search, `hook-refresh` on edit) and they answer different
-/// questions -- one is the suggestion funnel, the other is whether the index stayed level with the
-/// tree -- so they are never summed. They do share the `v: 2` row shape and therefore this reader:
-/// a second copy of the harness-attribution rule is how one of them would quietly start counting
-/// `unspecified` differently from the other.
+/// Two events ship (`hook-suggest` before the matched tool, `hook-refresh` after an edit) and
+/// they answer different questions -- one records a fire of the matched tool surface (every
+/// `Bash` call, plus Kimi's `Grep`, search or not), the other is whether the index stayed level
+/// with the tree -- so they are never summed. They do share one row shape (`hook_row` in
+/// `main.rs`) and therefore this reader: a second copy of the harness-attribution rule is how one
+/// of them would quietly start counting `unspecified` differently from the other.
 pub fn outcomes_of_hook_at(
     path: &Path,
     command: &str,

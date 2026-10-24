@@ -23,8 +23,8 @@
 //! * **The matcher is a regex, compiled with `new RegExp()`.** `"Bash|Grep"` is deliberate: Kimi's
 //!   search surface is mostly its structured `Grep` tool -- 834 calls against 32 shell greps in the
 //!   local corpus, the opposite of Claude Code's split -- so a `Bash`-only matcher would miss most
-//!   of the traffic the rule exists for. `"*"` is not a wildcard here; it throws, is caught, and
-//!   silently disables the hook.
+//!   of the search traffic whose fires the row records. `"*"` is not a wildcard here; it throws, is
+//!   caught, and silently disables the hook.
 //! * **This file already has other owners.** The Kimi plugin writes its own managed block into it,
 //!   one per host, and rewrites the file when it updates. `is_ours_for` is imported rather than
 //!   reimplemented for the same reason as in `settings_toml`, and `toml_edit` is used so that
@@ -39,7 +39,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 use toml_edit::{value, ArrayOfTables, DocumentMut, Item, Table};
 
-/// Both surfaces a search can arrive on. Compiled as a regex against the tool name.
+/// The tool surfaces whose fires the thin trigger records. Compiled as a regex against the tool
+/// name, so one entry covers both.
 const MATCHER: &str = "Bash|Grep";
 
 fn matcher_for(event: HookEvent) -> &'static str {
@@ -49,7 +50,7 @@ fn matcher_for(event: HookEvent) -> &'static str {
     }
 }
 /// Seconds. Kimi's schema allows 1..=600; the other two modules use 5 and there is no reason for
-/// this one to differ, since the work is the same subprocess doing the same lookup.
+/// this one to differ, since the work is the same subprocess writing the same row and kick.
 const TIMEOUT_SECS: i64 = 5;
 
 /// `${KIMI_CODE_HOME:-~/.kimi-code}/config.toml`, the same override `resolveKimiHome` reads.

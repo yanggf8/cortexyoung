@@ -466,9 +466,10 @@ fn the_users_own_empty_group_survives_a_remove() {
 /// `Write` happened, reporting `stale` on answers that were in fact correct and would have reported
 /// fresh on answers that were not.
 ///
-/// The negative half matters as much: the *pre* event must stay narrow. `hook-suggest` reads
-/// `tool_input.command` and has nothing to say about an `Edit`, so widening both would put a hook on
-/// every tool call in the session to return `{}`.
+/// The negative half matters as much: the *pre* event must stay narrow. `hook-suggest` writes one
+/// `usage.db` row and kicks collection per fire, and its fire count is the per-`Bash`-call demand
+/// figure, so widening both would put a row and a kick on every edit in the session and change
+/// what that figure counts.
 #[test]
 fn the_refresh_event_watches_the_shell_and_the_suggest_event_does_not() {
     let (_d, p) = tmp();
@@ -487,7 +488,7 @@ fn the_refresh_event_watches_the_shell_and_the_suggest_event_does_not() {
     let pre = v["hooks"]["PreToolUse"][0]["matcher"].as_str().unwrap();
     assert_eq!(
         pre, "Bash",
-        "the suggest event reads a command line and must not fire on the edit tools"
+        "the suggest event counts Bash calls and must not fire on the edit tools"
     );
 }
 

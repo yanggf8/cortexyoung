@@ -839,10 +839,10 @@ fn deleting_a_path_that_is_neither_a_directory_nor_a_row_still_fails() {
 /// wrote it cannot be counted on either side, and one from a different harness must not be folded
 /// in -- it would raise the injection count while every guard still read green.
 ///
-/// The count is taken from the rows themselves, not from a verdict word: what the judge concluded
-/// about a search is a different question from who fired the hook, and the verdict vocabulary is
-/// being replaced while this attribution has to outlive it. No index is built on purpose -- the
-/// current binary and the thin trigger that replaces it both write one row per fire.
+/// The count is taken from the rows themselves, not from a verdict word: what the removed judge
+/// concluded about a search was a different question from who fired the hook, and this attribution
+/// outlived that vocabulary. No index is built on purpose -- the thin trigger writes one row per
+/// fire whatever the project's index state.
 #[test]
 fn a_usage_row_records_which_harness_fired_the_hook() {
     let (_p, cwd, _c, cache) = sandbox();

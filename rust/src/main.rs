@@ -446,9 +446,9 @@ struct HookInstallArgs {
     /// Take the entry back out instead of putting one in.
     #[arg(long = "remove")]
     remove: bool,
-    /// Which of the two hooks to act on: `pre` (the search suggestion) or `post` (the index
-    /// refresh). Defaults to `pre`, so every existing caller keeps its meaning. `--remove` ignores
-    /// it and takes both out, because uninstalling is one act.
+    /// Which of the two hooks to act on: `pre` (the thin trigger on the matched tool) or `post`
+    /// (the index refresh). Defaults to `pre`, so every existing caller keeps its meaning.
+    /// `--remove` ignores it and takes both out, because uninstalling is one act.
     #[arg(long = "event")]
     event: Option<String>,
     /// Which settings dialect the target file speaks: `json` (Claude Code, and Grok through it),
@@ -682,9 +682,10 @@ fn dispatch(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError> 
 /// field existed -- the version tells a reader which of the two silences it is looking at.
 ///
 /// `v: 4` added the per-search keys stamped beside the outcome where the probe produced them:
-/// `symbol` on `hit`/`hit_stale`/`no_index`/`no_index_hinted`/`no_evidence`, and `why` (a
-/// `NoEvidenceWhy` identifier) on `no_evidence`. A symbol name is a program identifier, not
-/// payload content -- the same class of fact as the `decline` tag and the shape fingerprint.
+/// `symbol` on `hit`/`hit_stale`/`no_index`/`no_index_hinted`/`no_evidence`, and `why` (an
+/// identifier from the removed judging hook's `NoEvidenceWhy` vocabulary) on `no_evidence`.
+/// A symbol name is a program identifier, not payload content -- the same class of fact as the
+/// `decline` tag and the shape fingerprint.
 ///
 /// `v: 5` added `demand` only when the hook emitted a suggestion: a redacted, 240-character
 /// excerpt of the latest user-authored prompt, or a status explaining why none was captured.
@@ -992,8 +993,9 @@ fn cmd_hook_refresh(args: &[String], usage: &mut UsageEvent) -> Result<Emit, Cor
 /// in skill-bearing sessions followed by zero `cort` calls, then 0/9 external uptake and a window
 /// in which no suggestion anyone acted on fired -- so the product removed it rather than keep
 /// tuning it. What remains is the demand instrument: a fire is a fact about how often an agent
-/// reaches for a shell search, and the row says which harness and model ran, which project it ran
-/// in, and which tool was about to run. `CORT_SUGGEST` no longer exists; nothing here reads it.
+/// reaches for a matched tool (every `Bash` call, plus Kimi's `Grep`), and the row says which
+/// harness and model ran, which project it ran in, and which tool was about to run.
+/// `CORT_SUGGEST` no longer exists; nothing here reads it.
 ///
 /// The row is decided before anything can fail: `no_payload` is installed first, and only a
 /// payload that was actually read replaces it with `fired`. A payload the harness never finished

@@ -487,8 +487,9 @@ fn norm_name(raw: &str) -> String {
 /// carries no trace of its type. `--depth 3` on this repo therefore got +9 edges and +0 phantoms.
 /// The receiver separator (`t.add`, `T::add`), if the target is receiver-shaped at all. Shared
 /// with `cort-evals gate-audit`, whose census attributes the gate's refusal reasons and must
-/// read this precondition from the gate itself rather than re-derive it — the same reason
-/// `hook-probe` replays the judge instead of approximating it (a copy drifted 48%).
+/// read this precondition from the gate itself rather than re-derive it — a hand-rolled
+/// approximation of a shared rule over-counted its own corpus by 48% on 2026-09-02
+/// (`docs/2026-09-02-hook-wiring-correction.md` §15-16).
 pub fn receiver_shape(head: &str) -> Option<usize> {
     head.rfind(['.', ':'])
 }
