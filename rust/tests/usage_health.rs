@@ -1,5 +1,8 @@
 use cort::telemetry::command_log_columns;
-use cort::usage::{kick_counters_at, record_command_at, CommandRecord, INSTANCE_KEY};
+use cort::usage::{
+    health_rows_after_at, insert_health_row_at, kick_counters_at, last_health_rows_at,
+    record_command_at, touched_project_ids_at, CommandRecord, HealthRow, INSTANCE_KEY,
+};
 use rusqlite::{params, Connection};
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -38,6 +41,147 @@ fn health_row(conn: &Connection, ts: i64) {
         [ts],
     )
     .unwrap();
+}
+
+fn sample_health(local_project_id: &str, status: &str) -> HealthRow {
+    HealthRow {
+        id: -1,
+        ts: NOW_MS,
+        machine_id: "machine".into(),
+        machine_source: "test".into(),
+        root: Some("/project".into()),
+        local_project_id: local_project_id.into(),
+        project_id: Some("origin".into()),
+        status: status.into(),
+        error: Some("detail".into()),
+        fresh: Some("STALE".into()),
+        chunks: Some(3),
+        relationships: Some(4),
+        not_chunked: Some(5),
+        real_gap: Some(6),
+        fts: Some("drift=2".into()),
+    }
+}
+
+#[test]
+fn health_row_roundtrip() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("usage.db");
+    let _conn = db(&path);
+    let row = sample_health("local", "ok");
+    let id = insert_health_row_at(&path, &row).unwrap();
+    assert!(id > 0);
+    assert_eq!(
+        health_rows_after_at(&path, 0, 10).unwrap(),
+        vec![HealthRow { id, ..row }]
+    );
+}
+
+#[test]
+fn health_rows_after_pages_in_id_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("usage.db");
+    let _conn = db(&path);
+    let ids: Vec<i64> = (0..5)
+        .map(|i| {
+            let mut row = sample_health("local", "ok");
+            row.ts += i;
+            insert_health_row_at(&path, &row).unwrap()
+        })
+        .collect();
+    let page = health_rows_after_at(&path, ids[1], 2).unwrap();
+    assert_eq!(page.iter().map(|row| row.id).collect::<Vec<_>>(), ids[2..4]);
+    assert!(health_rows_after_at(&path, ids[4], 2).unwrap().is_empty());
+}
+
+#[test]
+fn last_health_rows_returns_latest_per_project() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("usage.db");
+    let _conn = db(&path);
+    let first = sample_health("first", "ok");
+    insert_health_row_at(&path, &first).unwrap();
+    let second = sample_health("second", "no_index");
+    let second_id = insert_health_row_at(&path, &second).unwrap();
+    let latest = sample_health("first", "unreadable");
+    let latest_id = insert_health_row_at(&path, &latest).unwrap();
+    let rows = last_health_rows_at(&path, "machine").unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(
+        rows["first"],
+        HealthRow {
+            id: latest_id,
+            ..latest
+        }
+    );
+    assert_eq!(
+        rows["second"],
+        HealthRow {
+            id: second_id,
+            ..second
+        }
+    );
+}
+
+#[test]
+fn last_health_rows_ignore_other_machines() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("usage.db");
+    let _conn = db(&path);
+    let mut older = sample_health("shared", "ok");
+    older.machine_id = "machine-b".into();
+    let older_id = insert_health_row_at(&path, &older).unwrap();
+    let mut newer = sample_health("shared", "no_index");
+    newer.machine_id = "machine-a".into();
+    insert_health_row_at(&path, &newer).unwrap();
+    let rows = last_health_rows_at(&path, "machine-b").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows["shared"],
+        HealthRow {
+            id: older_id,
+            ..older
+        }
+    );
+    assert!(last_health_rows_at(&path, "machine-c").unwrap().is_empty());
+}
+
+#[test]
+fn touched_project_ids_skip_measure_null_unknown() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("usage.db");
+    for (command, project_id) in [
+        ("measure", Some("ignored")),
+        ("impact", None),
+        ("impact", Some("_unknown")),
+        ("impact", Some("alpha")),
+        ("hook-refresh", Some("beta")),
+        ("impact", Some("alpha")),
+        ("measure", Some("ignored")),
+        ("impact", Some("beta")),
+        ("impact", None),
+    ] {
+        let mut rec = record(command, NOW_MS);
+        rec.project_id = project_id.map(str::to_owned);
+        record_command_at(&path, &rec);
+    }
+    let (mut ids, max_id) = touched_project_ids_at(&path, 0).unwrap();
+    ids.sort();
+    assert_eq!(ids, vec!["alpha", "beta"]);
+    assert_eq!(max_id, 9);
+    assert_eq!(
+        touched_project_ids_at(&path, max_id).unwrap(),
+        (vec![], max_id)
+    );
+}
+
+#[test]
+fn invalid_status_is_an_error_not_a_panic() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("usage.db");
+    let _conn = db(&path);
+    assert!(insert_health_row_at(&path, &sample_health("local", "bogus")).is_err());
+    assert!(health_rows_after_at(&path, 0, 10).unwrap().is_empty());
 }
 
 #[test]

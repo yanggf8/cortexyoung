@@ -4,6 +4,7 @@
 use crate::errors::CortError;
 use rusqlite::{params, Connection, ErrorCode, OpenFlags};
 use serde_json::{json, Map, Value};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -29,6 +30,172 @@ pub struct KickCounters {
     pub instance_id: String,
     pub max_command_id: i64,
     pub max_health_id: i64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct HealthRow {
+    pub id: i64,
+    pub ts: i64,
+    pub machine_id: String,
+    pub machine_source: String,
+    pub root: Option<String>,
+    pub local_project_id: String,
+    pub project_id: Option<String>,
+    pub status: String,
+    pub error: Option<String>,
+    pub fresh: Option<String>,
+    pub chunks: Option<i64>,
+    pub relationships: Option<i64>,
+    pub not_chunked: Option<i64>,
+    pub real_gap: Option<i64>,
+    pub fts: Option<String>,
+}
+
+const HEALTH_COLUMNS: &str = "id, ts, machine_id, machine_source, root, local_project_id, \
+    project_id, status, error, fresh, chunks, relationships, not_chunked, real_gap, fts";
+
+fn read_health_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HealthRow> {
+    Ok(HealthRow {
+        id: row.get(0)?,
+        ts: row.get(1)?,
+        machine_id: row.get(2)?,
+        machine_source: row.get(3)?,
+        root: row.get(4)?,
+        local_project_id: row.get(5)?,
+        project_id: row.get(6)?,
+        status: row.get(7)?,
+        error: row.get(8)?,
+        fresh: row.get(9)?,
+        chunks: row.get(10)?,
+        relationships: row.get(11)?,
+        not_chunked: row.get(12)?,
+        real_gap: row.get(13)?,
+        fts: row.get(14)?,
+    })
+}
+
+fn open_health_read(path: &Path) -> Result<Connection, String> {
+    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|e| e.to_string())?;
+    conn.busy_timeout(Duration::from_millis(RECORD_BUSY_MS))
+        .map_err(|e| e.to_string())?;
+    Ok(conn)
+}
+
+/// Insert an observation; the database allocates its id.
+pub fn insert_health_row_at(path: &Path, row: &HealthRow) -> Result<i64, String> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+    }
+    let conn = Connection::open(path).map_err(|e| e.to_string())?;
+    conn.busy_timeout(Duration::from_millis(RECORD_BUSY_MS))
+        .map_err(|e| e.to_string())?;
+    chmod_600(path);
+    ensure_schema(&conn, path).map_err(|e| e.to_string())?;
+    conn.execute(
+        "INSERT INTO index_health_log
+         (ts, machine_id, machine_source, root, local_project_id, project_id, status,
+          error, fresh, chunks, relationships, not_chunked, real_gap, fts)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+        params![
+            row.ts,
+            row.machine_id,
+            row.machine_source,
+            row.root,
+            row.local_project_id,
+            row.project_id,
+            row.status,
+            row.error,
+            row.fresh,
+            row.chunks,
+            row.relationships,
+            row.not_chunked,
+            row.real_gap,
+            row.fts,
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// Read this machine's newest observation for each local project.
+///
+/// Scoped to `machine_id` because a `usage.db` carried from another machine keeps that machine's
+/// rows: borrowing them would skip this machine's own observation as "same state, same day", or
+/// map a deleted index back to the other machine's root.
+pub fn last_health_rows_at(
+    path: &Path,
+    machine_id: &str,
+) -> Result<HashMap<String, HealthRow>, String> {
+    let conn = open_health_read(path)?;
+    let sql = format!(
+        "SELECT {HEALTH_COLUMNS} FROM index_health_log
+         WHERE id IN (SELECT MAX(id) FROM index_health_log WHERE machine_id = ?1
+                      GROUP BY local_project_id)"
+    );
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([machine_id], read_health_row)
+        .map_err(|e| e.to_string())?;
+    let mut latest = HashMap::new();
+    for row in rows {
+        let row = row.map_err(|e| e.to_string())?;
+        latest.insert(row.local_project_id.clone(), row);
+    }
+    Ok(latest)
+}
+
+/// Page health observations by id, oldest first.
+pub fn health_rows_after_at(
+    path: &Path,
+    after_id: i64,
+    limit: usize,
+) -> Result<Vec<HealthRow>, String> {
+    let conn = open_health_read(path)?;
+    let sql =
+        format!("SELECT {HEALTH_COLUMNS} FROM index_health_log WHERE id > ?1 ORDER BY id LIMIT ?2");
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(
+            params![after_id, i64::try_from(limit).unwrap_or(i64::MAX)],
+            read_health_row,
+        )
+        .map_err(|e| e.to_string())?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| e.to_string())
+}
+
+/// Return distinct projects touched since a command id and the last non-measure id read.
+///
+/// Both reads share one transaction: the caller stores the returned id as its cursor, so a prune
+/// committing between them would advance the cursor past rows the second read never saw.
+pub fn touched_project_ids_at(path: &Path, after_id: i64) -> Result<(Vec<String>, i64), String> {
+    let mut conn = open_health_read(path)?;
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let max_id: i64 = tx
+        .query_row(
+            "SELECT COALESCE(MAX(id), ?1) FROM command_log
+             WHERE id > ?1 AND command <> 'measure'",
+            [after_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    let mut stmt = tx
+        .prepare(
+            "SELECT DISTINCT project_id FROM command_log
+             WHERE id > ?1 AND id <= ?2 AND command <> 'measure'
+               AND project_id IS NOT NULL AND project_id <> '_unknown'
+             ORDER BY project_id",
+        )
+        .map_err(|e| e.to_string())?;
+    let ids = stmt
+        .query_map(params![after_id, max_id], |row| row.get(0))
+        .map_err(|e| e.to_string())?
+        .collect::<rusqlite::Result<Vec<String>>>()
+        .map_err(|e| e.to_string())?;
+    Ok((ids, max_id))
 }
 
 /// Read the two watermarks without creating or migrating a database.
