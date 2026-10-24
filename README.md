@@ -1,14 +1,40 @@
-# cortexyoung — cort, local code intelligence and shared project memory
+# cortexyoung — cort: agent and project memory, agent measurement, and the lookups agents need
 
-`cort` indexes code with `ast-grep` (the only parser, never `sg`) and SQLite. Code indexes, searches, and hooks remain local: one checkout, one SQLite index per project, no embeddings or server. The separate `memory` command uses an explicitly configured Turso sync replica for reviewed project facts across machines and agent harnesses.
+**Positioning (2026-10-24).** `cort` serves coding agents — Claude Code first, Codex and Kimi on the
+same hooks — with three things, in this order:
 
-**Product direction (corrected 2026-10-19):** cortexyoung should help Claude Code carry verified
-project knowledge and corrections across sessions, with source and supersession checks. Today's
-`cort` provides code lookup, caller-set evidence, source-validated reading notes, and an explicit
-project decision ledger; it does not automatically capture conversations. `cort memory` owns the
-ledger, its sync replica, and its CLI; ClaudeCat can call `cort` as a client. The
-[baseline and ownership correction](docs/2026-10-18-cross-agent-memory-baseline.md) preserve what
-was measured and what remains to be tested. See [Project memory](docs/memory.md) for the handoff.
+1. **Agent and project memory** (`cort memory`). Two kinds of reviewed memory that survive
+   sessions, machines and harnesses, each with its scope, source and supersession:
+   - **project memory** — facts and decisions about one codebase. This exists today: a shared Turso
+     ledger keyed by the normalized Git origin, with explicit supersession and a source-freshness
+     check on recall;
+   - **agent memory** — how an agent should work: the user's corrections, preferences and working
+     rules, which follow the agent across projects as well as across machines and harnesses. Today
+     that lives in each machine's own Claude Code auto-memory and hand-kept instruction files, and
+     Codex or Kimi sees none of it. Bringing it into the same reviewed ledger is the next step; the
+     ledger is project-scoped until then.
+
+   This is the repository's long-term goal; `cort memory` owns the ledger, its Turso sync replica and
+   its CLI. It does not yet capture conversations or recall unprompted. See
+   [Project memory](docs/memory.md) and the
+   [baseline and ownership correction](docs/2026-10-18-cross-agent-memory-baseline.md).
+2. **Measurement of how agents actually work** (`cort measure`). The primary metric is what a
+   context compaction costs afterwards — files re-read, commands repeated, things said wrong — read
+   from the agents' own transcripts, alongside per-command usage and index health. cort collects and
+   analyses this itself, into its own Turso database; the collection is being moved from cron to
+   cort's own hooks ([design](docs/superpowers/specs/2026-10-24-event-driven-collection-design.md)).
+   ClaudeCat no longer collects anything.
+3. **The helper functions agents need while editing code.** `cort index` keeps one local SQLite
+   index per checkout (`ast-grep` + SQLite, no embeddings, no server); `cort impact` returns the
+   caller set before a rename or delete, edge by edge and with a statement of what it could not
+   read. The `PostToolUse` hook repairs an existing index after an edit.
+
+What cort is **not**: a search router. The `PreToolUse` hook stays, because it is how cort records
+each call and will trigger collection, but the search-suggestion machinery behind it (`CORT_SUGGEST`
+delivery and the would-be verdict) is being removed — 409 searches in skill-bearing sessions produced
+zero `cort` calls. Nor is cort a machine-resource monitor: that is
+[ClaudeCat](https://github.com/yanggf8/claudecat)'s job now, reached through a gate cort's hook can
+hand off to without depending on it.
 
 Since 2026-09-01 the indexing scan runs the rule pack **in-process** through the `ast-grep-core`/`-config`/`-language` crates (proven byte-identical to the CLI on 1,604 match comparisons plus row-identical full indexes of two venues); the `ast-grep` CLI is still provisioned by `install.sh` and stays the engine of `struct --pattern` lookup. `CORT_SCAN_BACKEND=cli` puts the subprocess back on the indexing path; the scan engine's identity is part of `extractor_version`, so flipping it or bumping the crates forces a full re-index.
 
@@ -16,7 +42,7 @@ The repository is pure Rust: the product crate lives in [`rust/`](rust/), the de
 harness in [`evals/`](evals/), and no JavaScript, TypeScript or Python exists as executable code. Bash
 appears only in `install.sh` and `tests/install-smoke.sh`, where the platform requires a shell.
 
-Four shipped commands (plus `status`/`projects`/`delete` utilities):
+Five shipped commands (plus `status`/`projects`/`delete` utilities):
 
 - `cort index [--incremental] [path]` — build or incrementally refresh the index (`ast-grep` + SQLite)
 - `cort impact --symbol <name[,name2,...]>` — "what breaks if I change X": reverse dependents to
@@ -25,6 +51,7 @@ Four shipped commands (plus `status`/`projects`/`delete` utilities):
   (`bare` / `scoped` / `receiver` / `type`)
 - `cort memory <record|resolve|recall|status|sync|configure|import-config|import-legacy>` — reviewed project facts in a shared Turso ledger, owned by cort; see [Project memory](docs/memory.md)
 - `cort usage [days]` — local per-machine usage stats (best-effort; 1–90 days, default 30)
+- `cort measure <configure|record|sync|report|show|copy-events|cron>` — agent measurement in its own Turso database; see [Local usage recording](#local-usage-recording-offline-hook-separate-tursodb-upload)
 
 `struct`, `context`, `read` and `recall` were removed on 2026-10-23 after zero invocations in 30 days
 on both machines; for those jobs use `ast-grep run`, `rg`, or open the file. `cort memory recall` is a
