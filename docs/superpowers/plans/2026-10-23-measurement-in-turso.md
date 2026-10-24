@@ -248,6 +248,8 @@
 
 ### Task 8: index 健康快照
 
+> **已取代（2026-10-24）**：本節的每日快照設計不做。改由 `docs/superpowers/specs/2026-10-24-event-driven-collection-design.md` 與 `docs/superpowers/plans/2026-10-24-event-driven-collection.md`（Task A–I）實作；Task 9、10 依該設計第 8 節調整。
+
 **Files:**
 - Modify: `rust/src/measure.rs`、`rust/src/measure_store.rs`（`index_snapshots` 表，PK `day, machine_id, root`）
 - Test: `rust/tests/measure_snapshot.rs`
