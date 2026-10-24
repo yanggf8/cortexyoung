@@ -205,21 +205,16 @@ extern "C" {
     fn setsid() -> i32;
 }
 
-/// Spawn `cort index --incremental --heal-background <root>` detached: null stdio, own
-/// session, never waited on. The child records its own usage row (that is what the flag is
-/// for), so the rebuild is attributable without the parent hanging around to say so.
+/// Spawn a command detached: null stdio, own session, never waited on.
 #[cfg(unix)]
-fn spawn_background_healer(exe: &Path, root: &Path) -> std::io::Result<()> {
+pub(crate) fn spawn_detached(mut cmd: std::process::Command) -> std::io::Result<()> {
     use std::os::unix::process::CommandExt;
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
     // SAFETY: pre_exec runs between fork and exec, in the child alone; setsid is an
     // async-signal-safe syscall with no preconditions on a fresh child. Its return is
-    // deliberately ignored — a child that fails to detach still indexes correctly.
+    // deliberately ignored — a child that fails to detach still does its work.
     unsafe {
-        Command::new(exe)
-            .args(["index", "--incremental", "--heal-background"])
-            .arg(root)
-            .stdin(Stdio::null())
+        cmd.stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .pre_exec(|| {
@@ -232,16 +227,22 @@ fn spawn_background_healer(exe: &Path, root: &Path) -> std::io::Result<()> {
 }
 
 #[cfg(not(unix))]
-fn spawn_background_healer(exe: &Path, root: &Path) -> std::io::Result<()> {
-    use std::process::{Command, Stdio};
-    Command::new(exe)
-        .args(["index", "--incremental", "--heal-background"])
-        .arg(root)
-        .stdin(Stdio::null())
+pub(crate) fn spawn_detached(mut cmd: std::process::Command) -> std::io::Result<()> {
+    use std::process::Stdio;
+    cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
         .map(|_| ())
+}
+
+/// Spawn `cort index --incremental --heal-background <root>` detached. The child records
+/// its own usage row (that is what the flag is for), so the rebuild is attributable.
+fn spawn_background_healer(exe: &Path, root: &Path) -> std::io::Result<()> {
+    let mut cmd = std::process::Command::new(exe);
+    cmd.args(["index", "--incremental", "--heal-background"])
+        .arg(root);
+    spawn_detached(cmd)
 }
 
 #[cfg(test)]

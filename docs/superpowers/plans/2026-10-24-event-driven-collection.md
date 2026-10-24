@@ -174,13 +174,13 @@
   ```
 - `measure_config` 一律取自 `measure_store::config_path()`，`collect.rs` 不得自己拼 `turso-measure.json`；`cache_dir` 取自 `db::cache_dir()`；`usage_db` 取自 `usage::usage_db_path()`。
 
-- [ ] **Step 1: 寫失敗的測試**
+- [x] **Step 1: 寫失敗的測試**
   - `spawn_args_are_stable`。
   - `detached_command_carries_lane_and_harness`：`collect::detached_command(exe, Lane::Batch, "codex")` 的 `get_args()` 等於 `spawn_args(Lane::Batch)`、`get_envs()` 含 `(CORT_COLLECT_HARNESS, codex)`。不實際生程序。
   - `kick_paths_follow_env`：`CORT_MEMORY_DIR`、`CORT_CACHE_DIR` 指暫存目錄 → `data_dir`、`cache_dir` 相符，`measure_config == data_dir.join("turso-measure.json")`。
-- [ ] **Step 2: 跑 `cargo test --locked --test collect_kick`，預期失敗。**
-- [ ] **Step 3: 實作。** healer 的行為不得改變（同樣的 setsid、null stdio、引數）。
-- [ ] **Step 4: 跑測試至綠，再跑全套 gate；`heal` 既有測試必須全綠。**
+- [x] **Step 2: 跑 `cargo test --locked --test collect_kick`，預期失敗。**
+- [x] **Step 3: 實作。** healer 的行為不得改變（同樣的 setsid、null stdio、引數）。
+- [x] **Step 4: 跑測試至綠，再跑全套 gate；`heal` 既有測試必須全綠。**
 
 ### Task C2: `kick` 與 hook 接線
 

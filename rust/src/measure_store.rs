@@ -760,7 +760,7 @@ impl MeasureStore for SqliteStore {
 
 const SUBDIR: &str = "turso-measure";
 
-fn config_path() -> PathBuf {
+pub(crate) fn config_path() -> PathBuf {
     crate::data_dir::data_dir().join("turso-measure.json")
 }
 

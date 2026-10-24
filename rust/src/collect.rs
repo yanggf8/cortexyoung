@@ -7,6 +7,58 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lane {
+    Batch,
+    Health,
+}
+
+pub trait Spawner {
+    fn spawn(&mut self, lane: Lane, harness: &str) -> std::io::Result<()>;
+}
+
+pub struct DetachedSpawner;
+
+pub const HARNESS_ENV: &str = "CORT_COLLECT_HARNESS";
+
+pub fn spawn_args(lane: Lane) -> [&'static str; 3] {
+    match lane {
+        Lane::Batch => ["measure", "collect", "--background"],
+        Lane::Health => ["measure", "health", "--background"],
+    }
+}
+
+pub fn detached_command(exe: &Path, lane: Lane, harness: &str) -> std::process::Command {
+    let mut cmd = std::process::Command::new(exe);
+    cmd.args(spawn_args(lane)).env(HARNESS_ENV, harness);
+    cmd
+}
+
+impl Spawner for DetachedSpawner {
+    fn spawn(&mut self, lane: Lane, harness: &str) -> std::io::Result<()> {
+        let exe = std::env::current_exe()?;
+        crate::heal::spawn_detached(detached_command(&exe, lane, harness))
+    }
+}
+
+pub struct KickPaths {
+    pub data_dir: PathBuf,
+    pub usage_db: PathBuf,
+    pub cache_dir: PathBuf,
+    pub measure_config: PathBuf,
+}
+
+impl KickPaths {
+    pub fn current() -> Option<Self> {
+        Some(Self {
+            data_dir: crate::data_dir::data_dir(),
+            usage_db: crate::usage::usage_db_path()?,
+            cache_dir: crate::db::cache_dir(),
+            measure_config: crate::measure_store::config_path(),
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CollectConfig {
     pub base_interval_ms: i64,
