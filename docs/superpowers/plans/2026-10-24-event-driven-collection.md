@@ -54,7 +54,7 @@
   ```
 - `index_health_log` 欄位：`id INTEGER PRIMARY KEY`、`ts INTEGER NOT NULL`、`machine_id TEXT NOT NULL`、`machine_source TEXT NOT NULL`、`root TEXT`、`local_project_id TEXT NOT NULL`、`project_id TEXT`、`status TEXT NOT NULL CHECK(status IN ('ok','unreadable','missing_dir','no_index'))`、`error TEXT`、`fresh TEXT`、`chunks INTEGER`、`relationships INTEGER`、`not_chunked INTEGER`、`real_gap INTEGER`、`fts TEXT`；索引 `idx_index_health_log_local ON index_health_log(local_project_id, id)`。
 
-- [ ] **Step 1: 寫失敗的測試**（暫存 `usage.db`；健康列用測試內的原始 SQL 插入）
+- [x] **Step 1: 寫失敗的測試**（暫存 `usage.db`；健康列用測試內的原始 SQL 插入）
   - `schema_adds_health_table_and_partial_index`：`sqlite_master` 有 `index_health_log`、`idx_index_health_log_local`、`idx_command_log_not_measure`。
   - `command_log_columns_unchanged`：`telemetry::command_log_columns` 的結果與加表前相同（把目前的字串寫死在測試裡）。
   - `instance_id_is_stamped_once`：同一檔開兩次 instance 不變；另一個新檔 instance 不同；32 個 hex 字元。
@@ -63,9 +63,9 @@
   - `partial_index_is_used`：`EXPLAIN QUERY PLAN SELECT MAX(id) FROM command_log WHERE command <> 'measure'` 含 `idx_command_log_not_measure`。
   - `kick_counters_cost`：20 萬列（尾端 5 萬列是 `measure`）上呼叫 100 次，印中位數；斷言中位數 < 20 ms（寬鬆上限防 CI 抖動，實際數字寫進回報）。
   - `health_rows_pruned_with_command_log`：ts 為 91 天前的健康列在下一次 `record_command_at` 後消失，89 天前的留著。
-- [ ] **Step 2: 跑 `cargo test --locked --test usage_health`，預期失敗。**
-- [ ] **Step 3: 實作。** schema 用 `CREATE TABLE/INDEX IF NOT EXISTS`（不升 `USAGE_SCHEMA_VERSION`，因為沒有 migration）。instance_id 在 `ensure_schema` 以 `INSERT OR IGNORE` 寫入 `_usage_meta`，值取 sha256（目前時間的奈秒、pid、檔案路徑）的前 32 個 hex 字元。prune 對 `index_health_log` 用同一個 cutoff 與分批刪除。
-- [ ] **Step 4: 跑測試至綠，再跑全套 gate（Global Constraints）。**
+- [x] **Step 2: 跑 `cargo test --locked --test usage_health`，預期失敗。**
+- [x] **Step 3: 實作。** schema 用 `CREATE TABLE/INDEX IF NOT EXISTS`（不升 `USAGE_SCHEMA_VERSION`，因為沒有 migration）。instance_id 在 `ensure_schema` 以 `INSERT OR IGNORE` 寫入 `_usage_meta`，值取 sha256（目前時間的奈秒、pid、檔案路徑）的前 32 個 hex 字元。prune 對 `index_health_log` 用同一個 cutoff 與分批刪除。
+- [x] **Step 4: 跑測試至綠，再跑全套 gate（Global Constraints）。**
 
 ### Task A2: 健康列的讀寫函式
 
@@ -84,21 +84,22 @@
       pub fresh: Option<String>, pub chunks: Option<i64>, pub relationships: Option<i64>,
       pub not_chunked: Option<i64>, pub real_gap: Option<i64>, pub fts: Option<String> }
   pub fn insert_health_row_at(path: &Path, row: &HealthRow) -> Result<i64, String>; // 忽略 row.id，回新 id
-  pub fn last_health_rows_at(path: &Path) -> Result<HashMap<String, HealthRow>, String>; // 每個 local_project_id 最新一列
+  pub fn last_health_rows_at(path: &Path, machine_id: &str) -> Result<HashMap<String, HealthRow>, String>; // 只看該 machine_id 的列，每個 local_project_id 最新一列
   pub fn health_rows_after_at(path: &Path, after_id: i64, limit: usize) -> Result<Vec<HealthRow>, String>; // id 遞增
   pub fn touched_project_ids_at(path: &Path, after_id: i64) -> Result<(Vec<String>, i64), String>;
       // command <> 'measure' 且 project_id 非 NULL、非 '_unknown' 的不重複 project_id，以及讀到的最大 id（沒有列 → after_id）
   ```
 
-- [ ] **Step 1: 寫失敗的測試**
+- [x] **Step 1: 寫失敗的測試**
   - `health_row_roundtrip`：insert 後 `health_rows_after_at(0, 10)` 讀回相同欄位（id 除外）。
   - `health_rows_after_pages_in_id_order`：5 列、`after_id` = 第 2 列、limit 2 → 第 3、4 列。
   - `last_health_rows_returns_latest_per_project`。
+  - `last_health_rows_ignore_other_machines`：同一個 `local_project_id` 有 machine A 的較新列與 machine B 的較舊列 → 以 B 查只回 B 的那列；以 C 查回空。
   - `touched_project_ids_skip_measure_null_unknown`：混合 `measure`、NULL、`_unknown`、兩個真 id（各兩列）→ 回兩個 id，最大 id 是最後一列非 measure 的 id。
   - `invalid_status_is_an_error_not_a_panic`：`status="bogus"` → `Err`。
-- [ ] **Step 2: 跑 `cargo test --locked --test usage_health`，預期失敗。**
-- [ ] **Step 3: 實作。** 每個函式開一個連線；寫入沿用 `record_command_at` 的 busy timeout。
-- [ ] **Step 4: 跑測試至綠，再跑全套 gate。**
+- [x] **Step 2: 跑 `cargo test --locked --test usage_health`，預期失敗。**
+- [x] **Step 3: 實作。** 每個函式開一個連線；寫入沿用 `record_command_at` 的 busy timeout。
+- [x] **Step 4: 跑測試至綠，再跑全套 gate。**
 
 ### Task B: 收集狀態與到期規則（純函式）
 
@@ -226,12 +227,13 @@
   // staleness.rs
   pub fn repair_label(stale: &StaleReport) -> &'static str; // "none" | "refreshable" | "rebuild_required"
   // health.rs
-  pub fn fresh_label(repair: Option<&str>, stale: bool, graph_pending: Option<bool>) -> &'static str;
+  pub fn fresh_label(repair: Option<&str>, rebuild_reasons: &[String], stale: bool, graph_pending: Option<bool>) -> &'static str;
   ```
-- `fresh_label` 對應照 claudecat `src/cort_audit.rs` `row_md`（~562）：`rebuild_required`→`STALE/rebuild`、`refreshable`→`STALE/refresh`、否則 graph_pending `Some(true)`→`STALE/graph`、stale→`STALE`、未 stale 且 `None`→`fresh?`、未 stale 且 `Some(false)`→`fresh`。**沒有 7 天門檻。**
+- `fresh_label` 對應照 claudecat `src/cort_audit.rs` `row_md`（~562），但 rebuild 先看原因（設計第 3 節）：`rebuild_reasons` 非空且全是 `graph_incomplete` → `STALE/graph`；否則 `rebuild_required`→`STALE/rebuild`、`refreshable`→`STALE/refresh`、否則 graph_pending `Some(true)`→`STALE/graph`、stale→`STALE`、未 stale 且 `None`→`fresh?`、未 stale 且 `Some(false)`→`fresh`。**沒有 7 天門檻。**
 
 - [ ] **Step 1: 寫失敗的測試**
   - `fresh_label_covers_every_label`：六個標籤（`STALE/rebuild`、`STALE/refresh`、`STALE/graph`、`STALE`、`fresh?`、`fresh`）各一例。沒有 index 不是標籤，由 `status=no_index` 表達。
+  - `graph_reason_alone_is_stale_graph`：`repair=Some("rebuild_required")`、原因 `["graph_incomplete"]` → `STALE/graph`；原因 `["graph_incomplete","schema_changed"]` → `STALE/rebuild`。
   - `open_db_readonly_creates_nothing`：不存在的路徑 → `Err`，且檔案與父目錄都沒被建出來。
   - `open_db_readonly_refuses_writes`：對既有 index 開唯讀後 `INSERT` → `Err`。
   - `impact_repair_unchanged`：`impact` 既有 repair 相關測試全綠（重構後）。
@@ -253,6 +255,9 @@
       pub chunks: Option<i64>, pub relationships: Option<i64>, pub not_chunked: Option<i64>,
       pub real_gap: Option<i64>, pub fts: Option<String> }
   pub fn observe(root: &Path, local_project_id: &str, cfg: &CollectConfig) -> Observation;
+  pub fn bounded<F: FnOnce() -> Observation + Send + 'static>(f: F, timeout: Duration) -> Observation;
+      // 在新執行緒上跑 f，recv_timeout；逾時 → status=unreadable、error=Some("timeout")、指標全 None；被放棄的執行緒不 join
+  pub fn observe_bounded(root: &Path, local_project_id: &str, cfg: &CollectConfig) -> Observation; // bounded(observe, root_timeout_ms)
   ```
 - 指標 SQL 照 claudecat `src/cort.rs` ~595-680（not_chunked、real_gap、fts_drift）與 `read_meta`（~94-118，graph_pending）逐字移植，每段註解標原始 `claudecat src/<file>:<line>`（repo 內不寫絕對路徑）；FTS：drift 0 → `"synced"`、N → `"drift=N"`、讀不到 → NULL；`-1` 一律存 NULL。
 
@@ -264,9 +269,11 @@
   - `missing_index_is_no_index`、`missing_dir_is_missing_dir`。
   - `unreadable_index_records_error`：index 檔寫入垃圾 bytes → `status=unreadable`、`error` 非空、所有指標 None。
   - `large_tree_skips_staleness`：`CORT_HEAL_MAX_FILES=0` → `fresh=None`、`error=Some("staleness_skipped_large_tree")`，其他指標照讀。
+  - `graph_pending_index_is_stale_graph`：建好的 index 把 graph_pending 的 meta 設成 true（照 `read_meta` 讀的那個鍵）→ `fresh=Some("STALE/graph")`。
+  - `bounded_times_out`：`bounded(|| { sleep(2s); ok_obs }, 100ms)` 在 1 秒內回 `status=unreadable`、`error=Some("timeout")`。
   - `index_deleted_mid_observation_is_recorded`：測試注入點在讀完 chunks 後刪檔（用 `observe` 的內部分段函式測），結果 `unreadable` 或 `no_index`，不 panic。
 - [ ] **Step 2: 跑 `cargo test --locked --test health_observe`，預期失敗。**
-- [ ] **Step 3: 實作。** 開 index 一律 `open_db_readonly`；staleness 走 `compute_stale` 前先用與 `heal.rs` 相同的候選檔計數判斷是否超過 `heal_max_files()`；每個階段之間檢查 `cfg.root_timeout_ms`，超過就回 `error=Some("timeout")`、已讀到的指標保留。
+- [ ] **Step 3: 實作。** 開 index 一律 `open_db_readonly`；staleness 走 `compute_stale` 前先用與 `heal.rs` 相同的候選檔計數判斷是否超過 `heal_max_files()`；逾時一律由 `bounded` 處理（`compute_stale` 內部沒有可停下的點，不做階段間檢查）。
 - [ ] **Step 4: 跑測試至綠，再跑全套 gate。**
 
 ### Task E: 逐筆健康收集 `cort measure health`
@@ -276,14 +283,14 @@
 - Test: `rust/tests/health_worker.rs`
 
 **Interfaces:**
-- Consumes: Task A1（`kick_counters_at`）、A2（`touched_project_ids_at`、`last_health_rows_at`、`insert_health_row_at`）、Task B（`HealthState`）、Task C1／C2（`KickPaths`、`Spawner`、`kick_at`）、Task D2（`observe`）。
+- Consumes: Task A1（`kick_counters_at`）、A2（`touched_project_ids_at`、`last_health_rows_at`、`insert_health_row_at`）、Task B（`HealthState`）、Task C1／C2（`KickPaths`、`Spawner`、`kick_at`）、Task D2（`observe_bounded`）。
 - Produces:
   ```rust
   pub struct HealthRun { pub observed: usize, pub written: usize, pub unmapped: usize, pub skipped_busy: bool }
   pub fn run_health(paths: &KickPaths, machine_id: &str, machine_source: &str, now_ms: i64, cfg: &CollectConfig,
       spawner: &mut dyn Spawner) -> Result<HealthRun, String>; // CLI 傳 DetachedSpawner，測試傳假的
   ```
-- 流程照設計第 3 節：拿 `measure-health.lock`（拿不到 → `skipped_busy`）；instance／倒退 → 游標歸零；`touched_project_ids_at` → 對回 root（`list_projects()` 的 `Indexed`；`Unreadable` 由 `db_path` 檔名取 project_id 記 `unreadable`；`last_health_rows_at` 的歷史 root；都沒有 → `unmapped`，`unmapped_count` 加一、id 放到 `unmapped_recent` 最前面並去重，只留 5 個）；逐一 `observe`；**寫入條件**：與該 project 上一列所有指標與 status 相同且同一 UTC 日 → 不寫；`project_id` 用 `memory_store::project_from_git_origin(root)`（與壓縮列同一函式，回 `Result<String, String>`），`Err` 存 NULL；寫完推進 cursor、存 state；`written > 0` 時以同一個 `spawner` 呼叫一次 `kick_at(..., "measure-health", ..., spawner)`。
+- 流程照設計第 3 節：拿 `measure-health.lock`（拿不到 → `skipped_busy`）；instance／倒退 → 游標歸零；`touched_project_ids_at` → 對回 root（`list_projects()` 的 `Indexed`；`Unreadable` 由 `db_path` 檔名取 project_id 記 `unreadable`；`last_health_rows_at(path, machine_id)` 的本機歷史 root；都沒有 → `unmapped`，`unmapped_count` 加一、id 放到 `unmapped_recent` 最前面並去重，只留 5 個）；逐一 `observe_bounded`；**寫入條件**：與該 project 上一列所有指標與 status 相同且同一 UTC 日 → 不寫；`project_id` 用 `memory_store::project_from_git_origin(root)`（與壓縮列同一函式，回 `Result<String, String>`），`Err` 存 NULL；寫完推進 cursor、存 state；`written > 0` 時以同一個 `spawner` 呼叫一次 `kick_at(..., "measure-health", ..., spawner)`。
 - CLI：`cort measure health [--background]`；`--background` 時把一行 JSON 摘要附加到 `measure.log`、stdout 不輸出；沒有 `--background` 時印 JSON。兩者都 exit 0，除非 `usage.db` 寫入失敗（`measure_health_failed`）。
 
 - [ ] **Step 1: 寫失敗的測試**
@@ -294,6 +301,7 @@
   - `never_observed_deleted_index_is_unmapped`：`unmapped_count=1`、`unmapped_recent` 含該 id、沒有寫列。
   - `unmapped_recent_keeps_five_newest`：7 個不同的未對應 id → 留最後 5 個、最新在前；同一個 id 重複出現只留一次。
   - `measure_rows_do_not_trigger_observation`。
+  - `other_machine_history_is_ignored`：`usage.db` 裡有另一個 machine_id 的同日同狀態列 → 本機照樣寫一列。
   - `busy_lock_skips`。
   - `handoff_kicks_batch_when_written`：假 spawner 收到一次 `Lane::Batch`（若到期）；沒寫列時不 kick。
   - `background_writes_log_not_stdout`（CLI）。
@@ -317,6 +325,7 @@
   pub fn health_events(usage_db: &Path, after_id: i64, limit: usize) -> Result<Vec<TelemetryEvent>, String>;
   pub fn upload_health_events(store: &mut dyn MeasureStore, usage_db: &Path, machine_id: &str) -> EventsReport;
       // 不經 dry-run 閘門；水位 source=cort_index_health、指紋 "ts|root"；每頁 2000；每頁寫進副本後推進水位
+      // 水位先驗證（同 upload_events）：該列指紋不同或不在 → 全範圍讀，回報 reason watermark_row_changed / watermark_row_missing
   ```
 - payload：該列所有欄位的緊湊 JSON，key 字母序，用 `cort_command` 同一個序列化器；`payload_without_ts` 去掉 `id` 與 `ts`。`time_ms` = 列的 `ts`；`project_id` = 列的 `project_id`。
 
@@ -325,7 +334,9 @@
   - `uploads_without_dry_run_marker`：沒有 marker 也上傳。
   - `uploads_while_command_source_refused`：同一次 `cort_command` 回 `Refused`、健康照樣 `Uploaded`。
   - `watermark_skips_uploaded_health_rows`。
-  - `reobservation_after_replacement_is_one_event`：換一個新 `usage.db`、寫一列同日同狀態的觀察 → 上傳後遠端該 (day, root) 只有一列。
+  - `reobservation_after_replacement_is_one_event`：換一個新 `usage.db`、寫一列同日同狀態的觀察 → 上傳後遠端該 (day, root) 只有一列，且回報 `full_range=true`。
+  - `replacement_below_old_watermark_still_uploads`：舊庫上傳到水位 id 5；換新庫寫 3 列**不同狀態**的觀察（id 1..3）→ 三列都進遠端，回報 reason `watermark_row_missing`。
+  - `changed_row_at_watermark_reads_full_range`：新庫有 ≥ 舊水位 id 的列但該列 `ts|root` 不同 → `watermark_row_changed`、全範圍。
   - `payload_keys_sorted`。
 - [ ] **Step 2: 跑 `cargo test --locked --test health_upload`，預期失敗。**
 - [ ] **Step 3: 實作。**
@@ -334,7 +345,7 @@
 ### Task G1a: 批次收集核心 `run_collect`（成功、失敗、當機安全）
 
 **Files:**
-- Modify: `rust/src/collect.rs`（worker）、`rust/src/measure.rs`（`record_with_scan` ~324 讓呼叫端能分辨 push 失敗、pull 失敗、儲存失敗與事件 `Refused`）
+- Modify: `rust/src/collect.rs`（worker）、`rust/src/measure.rs`（`record_with_scan` ~324 讓呼叫端能分辨 push 失敗、pull 失敗、儲存失敗與事件 `Refused`）、`rust/src/memory_store.rs`（`lock_in` ~391 旁加有期限的版本）、`rust/src/measure_store.rs`（給 collect 用的有期限開 store）
 - Test: `rust/tests/collect_worker.rs`
 
 **Interfaces:**
@@ -344,10 +355,16 @@
   #[derive(Debug, Clone, Copy, PartialEq, Eq)] pub enum ErrorKind { Network, Storage, Other }
   pub struct CollectRun { pub outcome: &'static str /* ok|failed|skipped_busy */, pub refused: bool,
       pub error_kind: Option<ErrorKind>, pub summary: serde_json::Value }
-  pub fn run_collect(store_opener: &mut dyn FnMut() -> Result<Box<dyn MeasureStore>, String>,
+  // memory_store.rs
+  pub(crate) enum LockWait { TimedOut, Failed(String) }
+  pub(crate) fn lock_in_within(subdir: &str, config: &Config, name: &str, wait: Duration) -> Result<fs::File, LockWait>; // try_lock 輪詢到期限
+  // measure_store.rs
+  pub fn open_measure_store_within(wait: Duration) -> Result<Box<dyn MeasureStore>, OpenError>; // OpenError::{Busy, Other(String)}
+  // collect.rs
+  pub fn run_collect(store_opener: &mut dyn FnMut() -> Result<Box<dyn MeasureStore>, OpenError>,
       paths: &KickPaths, harness: &str, now_ms: i64, cfg: &CollectConfig, manual: bool) -> CollectRun;
   ```
-- 流程照設計第 2 節：拿 `measure-collect.lock`（本單只做背景：拿不到 → `skipped_busy`）；拿到後把自己的 `pid` 與 `started_ms` 寫進鎖檔；instance／倒退 → 游標歸零；**先**存 `push_pending=true`，再呼叫 `store_opener`（開 store 即拿 `measure.lock`）做 scan + `cort_command` 上傳 + 健康上傳 + push + pull；push/pull/儲存失敗記到該 harness 的 `failures`（`last_error_kind` 為 `network`／`storage`／`other`）；全部成功清 `push_pending`、該 harness 歸零、寫 `last_ok_ms`。`uploaded_through_id` / `health_uploaded_through_id` 從兩個來源的水位抄出。
+- 流程照設計第 2 節：拿 `measure-collect.lock`（本單只做背景：拿不到 → `skipped_busy`）；拿到後把自己的 `pid` 與 `started_ms` 寫進鎖檔；instance／倒退 → 游標歸零；**先**存 `push_pending=true`，再呼叫 `store_opener`（正式路徑是 `open_measure_store_within(manual_wait_ms)`，拿不到 `measure.lock` 回 `Busy` → `skipped_busy`，不算失敗）做 scan + `cort_command` 上傳 + 健康上傳 + push + pull；push/pull/儲存失敗記到該 harness 的 `failures`（`last_error_kind` 為 `network`／`storage`／`other`）；全部成功清 `push_pending`、該 harness 歸零、寫 `last_ok_ms`。`uploaded_through_id` / `health_uploaded_through_id` 從兩個來源的水位抄出。
 - `manual=true` 在本單直接回 `failed`/`Other`（G2 實作）。
 
 - [ ] **Step 1: 寫失敗的測試**（`SqliteStore` 經 `store_opener` 注入，`fail_push`/`fail_pull`）
@@ -356,6 +373,8 @@
   - `success_clears_push_pending_and_only_that_harness`：codex 先失敗 2 次、claude-code 成功 → codex 仍 2、claude-code 0。
   - `instance_change_resets_and_reuploads_nothing_twice`。
   - `lock_file_names_holder`：執行中鎖檔內容含本程序 pid。
+  - `lock_in_within_times_out`：測試先持有同一把 `measure.lock` → `lock_in_within(.., 300ms)` 在 1 秒內回 `TimedOut`；放開後立刻拿得到。
+  - `busy_store_is_skipped_not_failed`：opener 回 `OpenError::Busy` → `outcome=skipped_busy`、`failures` 不變、`push_pending` 為 true（開 store 前已持久化，下一次 kick 照樣到期）。
 - [ ] **Step 2: 跑 `cargo test --locked --test collect_worker`，預期失敗。**
 - [ ] **Step 3: 實作。**
 - [ ] **Step 4: 跑測試至綠，再跑全套 gate；`measure_report`、`telemetry`、`measure_copy` 既有測試全綠。**
@@ -442,8 +461,8 @@
 ## 派工（多 AI 工作流，aib `claude-code` #855／#856）
 
 - 每個 Task 一張單，依 A1 → A2 → B → C1 → C2 → D1 → D2 → E → F → G1a → G1b → G2 → H → I 順序派。依賴：C1 依 B；C2 依 A1、B、C1；D1 無；D2 依 B、D1；E 依 A1、A2、B、C2、D2；F 依 A2；G1a 依 B、C1、F；G1b 依 G1a；G2、H 依 G1b；I 依 G2。D1、D2、F 可在依賴滿足後平行派（看 `free -h`，cargo 不可同時兩支）。
-- D1、D2 的單要附 claudecat 的本機位置 `/home/yanggf/a/claudecat`（唯讀參考，絕不寫入；這個路徑只出現在派工提示，不進 repo）。
-- 實作：Codex，從該單的 worktree 目錄啟動 `codex-companion task --background --write`，不帶 `--model`，提示不得含 `-C <路徑>`，開頭寫「先讀 `/home/yanggf/c/agent-portal-tpm/dispatch/rules/agent-rules.md`，第 2、3 節不適用於本 repo」並附本計畫路徑與單號。
-- 審查：Muse 10/26 前沒額度 ⇒ GLM（`zglmcode`，唯讀；在 detached worktree 裡跑），TODO 記「待 Muse 補審」。
+- D1、D2 的單要在派工提示裡附 claudecat 的本機位置（唯讀參考，絕不寫入；路徑只寫在提示裡，不進 repo）。
+- 實作：Codex，從該單的 worktree 目錄啟動 `codex-companion task --background --write`，不帶 `--model`，提示不得含 `-C <路徑>`，開頭寫「先讀 agent-portal-tpm 的 `dispatch/rules/agent-rules.md`（本機路徑寫在提示裡），第 2、3 節不適用於本 repo」並附本計畫路徑與單號。
+- 審查：Muse 沒額度時由 K3.1 Pro 代審後端（kimi plugin `kimi_review`，`model: kimi-code/k3.1-pro`），不必等 Muse。
 - 測試：zglmcode 子代理跑全套 gate，整合者看原始輸出核定。
 - 整合者逐行審 diff → 使用者核准 → commit → `measure` 分支推送。

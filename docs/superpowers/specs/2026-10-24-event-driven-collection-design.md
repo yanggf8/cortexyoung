@@ -4,7 +4,7 @@
 `2026-10-23-measurement-in-turso-design.md` 的「每天的快照：index 健康」與「記錄：每天的排程」兩節，
 以及計畫 `docs/superpowers/plans/2026-10-23-measurement-in-turso.md` 的 Task 8；其餘章節（量測資料庫、
 原始事件、event_id、dry-run、copy-events、report 的壓縮一節）不變。第 2 版：併入 Codex 設計審查
-（8 點）與 builder check（4 題）；第 3 版：併入 Codex 第二輪（8 點）；第 4 版：併入 Codex 第三輪（3 點）；第 5 版：併入 Codex 第四輪（`usage.db` 被換掉）；第 6 版：併入 Codex 第五輪（approve with changes：倒退偵測、換庫後健康重複觀察）；第 7 版：併入 GLM 設計審查（代 Muse；concern 1 中 2 低＋2 附註），待 Muse 有額度後補審。
+（8 點）與 builder check（4 題）；第 3 版：併入 Codex 第二輪（8 點）；第 4 版：併入 Codex 第三輪（3 點）；第 5 版：併入 Codex 第四輪（`usage.db` 被換掉）；第 6 版：併入 Codex 第五輪（approve with changes：倒退偵測、換庫後健康重複觀察）；第 7 版：併入 GLM 設計審查（代 Muse；concern 1 中 2 低＋2 附註）；第 8 版：併入 K3.1 Pro 補審（代 Muse；block，7 點：健康水位驗證、`measure.lock` 等待上限、只用本機歷史、單一 root 逾時改執行緒、戳記檔名、`STALE/graph` 看原因、計畫裡的絕對路徑）。
 
 ## 為什麼改
 
@@ -97,8 +97,10 @@ push/pull），在 `measure.lock` 底下跑，外加第 4 節的 `cort_index_hea
 - 單一執行鎖 `measure-collect.lock`（拿不到就安靜退出，不寫 log）。
 - **時間上限**：每個網路操作（開副本的 bootstrap、push、pull）包在 120 秒逾時裡；整次執行上限 10
   分鐘（都可覆寫）。逾時記成 `network` 失敗、正常結束程序、放掉所有鎖——cron 拿掉之後沒有別的機制
-  會替卡住的程序收尾，所以不能依賴 turso client 自己的逾時。手動執行對 `measure.lock` 的等待同樣以
-  60 秒為上限。
+  會替卡住的程序收尾，所以不能依賴 turso client 自己的逾時。**`measure.lock` 的等待也有上限**（背景與手
+  動都是 60 秒，可覆寫）：現有的 `memory_store::lock_in` 是無期限阻塞的 `flock`，持有 `measure-collect.lock`
+  的背景程序若卡在它上面，之後每一次收集都會因第一把鎖忙碌而被跳過。背景等不到記成 `skipped_busy`
+  （不算失敗、不加退避）；手動等不到以錯誤碼 `measure_collect_busy` 結束。
 - **鎖的順序（所有路徑一致）**：要同時持有多把鎖的路徑，一律依序拿 `measure-collect.lock` →
   `measure.lock` →（`copy-events` 才有的）`legacy-telemetry.lock`，倒序放。背景收集、手動
   `record`、`sync`、`sync --dry-run` 都照這個順序；只拿 `measure.lock` 的路徑（`report`、
@@ -120,7 +122,7 @@ push/pull），在 `measure.lock` 底下跑，外加第 4 節的 `cort_index_hea
     pending；其他工作（transcript 掃描、`cort_index_health` 上傳、push）照常做、照常算成功。
     `measure.log` 只在 `refused` 由 false 變 true（或反過來）時寫一行，不是每次都寫。
   - **`refused` 的恢復**：`cort measure sync --dry-run` 通過時（它拿同一把鎖）把 `refused` 清成
-    false，並把節流戳記 `measure-collect.spawned` 刪掉，讓下一個 kick 立刻到期；手動 `sync` 本身
+    false，並把節流戳記 `measure-batch.spawned` 刪掉，讓下一個 kick 立刻到期；手動 `sync` 本身
     也會直接上傳。
   - 全部成功 → 這次觸發它的 harness 那一筆歸零、`push_pending = false`、`last_ok_ms = now`。別的
     harness 的失敗紀錄不因此歸零。
@@ -173,13 +175,18 @@ payload 讀不到）不算使用，也不需要觀察。`project_id` 是 NULL �
     不跑 migration、不走 `heal.rs`、不跑 `incremental_index`，絕不建立 index。
   - staleness 用 cort 自己的判定（`index_is_stale` 與 repair，**沒有 7 天門檻**）。它會走訪檔案、
     重抽候選檔；候選檔數超過 `CORT_HEAL_MAX_FILES` 同一個上限時，**不算** staleness：`fresh` 記 NULL、
-    `error` 記 `staleness_skipped_large_tree`。每個 root 的觀察有時間上限（預設 30 秒，可覆寫），
-    超過就記 `error=timeout` 換下一個。
+    `error` 記 `staleness_skipped_large_tree`。每個 root 的觀察有時間上限（預設 30 秒，可覆寫）：
+    觀察在一條獨立執行緒上跑，主迴圈只等這麼久；超過就記 `status=unreadable`、`error=timeout` 換下一個，
+    被放棄的執行緒只讀、隨 worker 程序結束而結束。階段之間檢查做不到這件事——`compute_stale` 的走訪、
+    git 與重抽都在單一呼叫裡，沒有可以停下來的點。
   - 樹在觀察途中變動造成的讀取錯誤記 `status=unreadable` 與 `error`，不重試、不略過。
 - 指標與舊設計相同：`fresh` 標籤（`fresh`／`STALE`／`STALE/refresh`／`STALE/rebuild`／
   `STALE/graph`／`fresh?`；`no-index` 由 `status` 表達）、chunks、relationships、未 chunk 檔數、
   真缺口、FTS（`synced`／`drift=N`）。NULL 一律代表讀不到，原因在 `status`／`error`；0 就是 0。
-- **寫入條件**：跟這個 root 上一次觀察的指標與狀態完全相同，而且上一次是同一個 UTC 日 → 不寫。否則
+  `graph_pending` 一定會讓 rebuild 原因含 `graph_incomplete`（`rust/src/indexer.rs` `rebuild_reasons_of`），
+  而任何 rebuild 原因都分類成 `rebuild_required`，所以標籤看的是**原因**：原因只有 `graph_incomplete`
+  → `STALE/graph`；還有其他原因 → `STALE/rebuild`。
+- **寫入條件**：跟這台機器對這個 root 上一次觀察的指標與狀態完全相同（帶到別台的 `usage.db` 裡別台的列不算），而且上一次是同一個 UTC 日 → 不寫。否則
   寫一列。有用到的那天至少一列，狀態變化時多一列；沒用到的那天沒有列。
 - 存在本機 `usage.db` 的**新表** `index_health_log`：`id INTEGER PRIMARY KEY`、`ts`、`machine_id`、
   `machine_source`、`root`、`local_project_id`（realpath 雜湊，給第 2 步對回 root 用）、`project_id`
@@ -208,6 +215,10 @@ payload 讀不到）不算使用，也不需要觀察。`project_id` 是 NULL �
   歷史，可以自由選算法。
 - 水位沿用 Task 6 的 `event_watermarks`（`source = 'cort_index_health'`），指紋用該列原始的
   `ts|root`。水位在列寫進**副本**後才前進；push 是否成功由第 2 節的 `push_pending` 負責。
+  **水位要先驗證**，跟 `cort_command` 同一套（`rust/src/telemetry.rs` `upload_events`）：水位那一列在
+  本機的指紋不同（`watermark_row_changed`）或不在了（`watermark_row_missing`）→ 這次全範圍讀。水位存在
+  副本裡、不會隨本機 state 歸零，不驗證的話換庫後 `id` 不大於舊水位的新觀察會永遠被跳過；全範圍讀
+  的重複由內容鍵 id 吸收。
 - 本機保留：`index_health_log` 跟 `command_log` 用同一套 90 天清理。邊界跟事件一樣：只有連續 90 天
   都沒上傳成功才會在上傳前被刪掉。
 - report 的健康表從 `telemetry_events` 裡 `source='cort_index_health'` 的 payload 讀（同一天取最後
