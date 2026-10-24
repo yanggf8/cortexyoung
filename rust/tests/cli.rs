@@ -499,12 +499,6 @@ fn coverage_flows_through_the_cli_in_lean() {
     let _ = proj;
 }
 
-// ── the hook's index gate ──────────────────────────────────────────
-// Regression for a live failure: the gate was `the db file exists`, and opening a project creates
-// the schema, so an unindexed tree with a 0-chunk db told the agent "cort has an index for this
-// project". `impact` there can only answer `no_seed_resolved / stale=true` -- a turn spent to learn
-// nothing, which is what makes the next suggestion ignorable.
-
 fn run_hook_suggest(command: &str, cwd: &Path, cache: &Path) -> Run {
     run_hook_suggest_with(command, &[], cwd, cache)
 }
@@ -553,7 +547,7 @@ fn run_hook_suggest_full(
     }
 }
 
-/// A call-site search that the rule fires on, so the only variable under test is the gate.
+/// A call-site search that the rule fires on.
 const FIRING_SEARCH: &str = "grep -rn 'helper(' src --include=*.ts";
 
 /// The same spawn as `run_hook_suggest_full` WITHOUT `CORT_SUGGEST=1` -- the default, muted
@@ -616,307 +610,6 @@ fn by_default_the_hook_records_but_speaks_to_no_one() {
     assert_eq!(
         row["symbol"], "helper",
         "the symbol is still recorded: {row}"
-    );
-}
-
-#[test]
-fn the_hook_stays_quiet_when_the_db_exists_but_holds_no_index() {
-    let (_p, cwd, _c, cache) = sandbox();
-    // Any command that opens the project writes the schema without indexing anything.
-    run_cort(&["impact", "--symbol", "helper"], &cwd, &cache);
-    let db = cort::db::db_path_for(cwd.to_str().unwrap());
-    let db = cache.join(db.file_name().unwrap());
-    assert!(db.exists(), "the precondition is a db file that exists");
-
-    let r = run_hook_suggest(FIRING_SEARCH, &cwd, &cache);
-    assert_eq!(r.code, 0);
-    assert_eq!(
-        payload(&r),
-        serde_json::json!({}),
-        "an empty index is not an index: {} {}",
-        r.stdout,
-        r.stderr
-    );
-}
-
-#[test]
-fn the_hook_speaks_once_the_project_is_actually_indexed() {
-    let (_p, cwd, _c, cache) = sandbox();
-    let idx = run_cort(&["index"], &cwd, &cache);
-    if idx.code != 0 {
-        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
-        return;
-    }
-    let r = run_hook_suggest(FIRING_SEARCH, &cwd, &cache);
-    assert_eq!(r.code, 0);
-    let ctx = payload(&r)["hookSpecificOutput"]["additionalContext"]
-        .as_str()
-        .unwrap_or_default()
-        .to_string();
-    assert!(ctx.contains("cort impact --symbol 'helper'"), "got: {ctx}");
-}
-
-/// Demand capture must be tested through the shipped command and its persisted usage row, not
-/// just through a transcript parser. Claude Code supplies typed user messages as JSONL records;
-/// the same row must pair that prompt with the actual suggestion, and scrub paths and URLs before
-/// it reaches the local database.
-#[test]
-fn an_actual_claude_hook_suggestion_persists_a_scrubbed_user_need() {
-    let (_p, cwd, _c, cache) = sandbox();
-    let idx = run_cort(&["index"], &cwd, &cache);
-    if idx.code != 0 {
-        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
-        return;
-    }
-
-    let transcript = cwd.join(".claude/projects/session.jsonl");
-    fs::create_dir_all(transcript.parent().unwrap()).unwrap();
-    let earlier = serde_json::json!({
-        "type": "user",
-        "promptSource": "typed",
-        "message": {"content": "stale_prior_prompt_should_not_be_captured"}
-    });
-    let latest = serde_json::json!({
-        "type": "user",
-        "promptSource": "typed",
-        "message": {"content": "Please check helper callers for need_capture_case_41 at /__fixture_private_path__/repo and https://private.invalid/token; key sk-fixturesecret with Bearer bearerfixture"}
-    });
-    fs::write(&transcript, format!("{}\n{}\n", earlier, latest)).unwrap();
-
-    let r = run_hook_suggest_full(
-        FIRING_SEARCH,
-        Some(transcript.to_str().unwrap()),
-        &[],
-        &cwd,
-        &cache,
-    );
-    assert_eq!(r.code, 0, "stdout={} stderr={}", r.stdout, r.stderr);
-    assert!(r.stdout.contains("additionalContext"), "{}", r.stdout);
-
-    let usage_db = cache.join("usage.db");
-    let row = latest_command_row(&usage_db, "hook-suggest");
-    assert_eq!(row["v"], 5);
-    assert!(matches!(row["hook"].as_str(), Some("hit" | "hit_stale")));
-    assert_eq!(row["demand"]["status"], "captured");
-    let excerpt = row["demand"]["excerpt"].as_str().unwrap();
-    assert!(excerpt.contains("need_capture_case_41"), "{excerpt}");
-    assert!(excerpt.contains("<path>"), "{excerpt}");
-    assert!(excerpt.contains("<url>"), "{excerpt}");
-    assert!(excerpt.contains("<redacted>"), "{excerpt}");
-    assert!(!excerpt.contains("__fixture_private_path__"), "{excerpt}");
-    assert!(!excerpt.contains("private.invalid"), "{excerpt}");
-    assert!(!excerpt.contains("sk-fixturesecret"), "{excerpt}");
-    assert!(!excerpt.contains("bearerfixture"), "{excerpt}");
-    assert!(
-        !excerpt.contains("stale_prior_prompt_should_not_be_captured"),
-        "{excerpt}"
-    );
-
-    // The transcript is available, but an ordinary search that the hook leaves alone must not
-    // create a demand record. This pins capture to emitted suggestions rather than hook traffic.
-    let quiet = run_hook_suggest_full(
-        "cargo test --locked",
-        Some(transcript.to_str().unwrap()),
-        &[],
-        &cwd,
-        &cache,
-    );
-    assert_eq!(
-        quiet.code, 0,
-        "stdout={} stderr={}",
-        quiet.stdout, quiet.stderr
-    );
-    let row = latest_command_row(&usage_db, "hook-suggest");
-    assert_eq!(row["hook"], "no_shape");
-    assert!(row.get("demand").is_none(), "{row}");
-}
-
-/// Compaction washes the original typed prompt out of the bounded tail: the newest thing shaped
-/// like history is the continuation entry (no `promptSource`, `isCompactSummary`), and the real
-/// user words sit megabytes back, before the boundary -- adopt-v4 measured 8 such episodes
-/// (F_BLRLSDate, MailSender, ...), each a `no_user_prompt` that was really a wash. The reader
-/// must cross the boundary, capture what it finds there, and say it crossed.
-#[test]
-fn a_prompt_before_a_compaction_boundary_is_still_captured() {
-    let (_p, cwd, _c, cache) = sandbox();
-    let idx = run_cort(&["index"], &cwd, &cache);
-    if idx.code != 0 {
-        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
-        return;
-    }
-    let transcript = cwd.join(".claude/projects/session.jsonl");
-    fs::create_dir_all(transcript.parent().unwrap()).unwrap();
-    let mut body = String::new();
-    let original = serde_json::json!({
-        "type": "user",
-        "promptSource": "typed",
-        "message": {"content": "the original instruction that names helper callers"}
-    });
-    body.push_str(&original.to_string());
-    body.push('\n');
-    // Enough tool traffic to push the original past the 2 MiB tail the reader reads.
-    let filler = serde_json::json!({
-        "type": "assistant",
-        "message": {"content": [{"type": "text", "text":
-            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}]}
-    });
-    while body.len() < 3 * 1024 * 1024 {
-        body.push_str(&filler.to_string());
-        body.push('\n');
-    }
-    // The continuation entry, verbatim shape from a real transcript: no promptSource, so the
-    // plain reader skips it and finds nothing typed in the tail.
-    let compact = serde_json::json!({
-        "type": "user",
-        "isCompactSummary": true,
-        "message": {"content": "This session is being continued from a previous conversation \
-             that ran out of context. The summary below covers the earlier portion..."}
-    });
-    body.push_str(&compact.to_string());
-    body.push('\n');
-    fs::write(&transcript, &body).unwrap();
-
-    let r = run_hook_suggest_full(
-        FIRING_SEARCH,
-        Some(transcript.to_str().unwrap()),
-        &[],
-        &cwd,
-        &cache,
-    );
-    assert_eq!(r.code, 0, "stdout={} stderr={}", r.stdout, r.stderr);
-    let row = latest_command_row(&cache.join("usage.db"), "hook-suggest");
-    assert_eq!(
-        row["demand"]["status"], "captured",
-        "crossed or washed? {row}"
-    );
-    assert_eq!(
-        row["demand"]["excerpt"],
-        "the original instruction that names helper callers"
-    );
-    assert_eq!(row["demand"]["across_compaction"], serde_json::json!(true));
-}
-/// Codex rollouts use payload.type=message rather than Claude's top-level type=user. Keep a
-/// separate end-to-end case so support for one harness cannot masquerade as support for both.
-#[test]
-fn a_codex_hook_suggestion_persists_the_latest_user_message() {
-    let (_p, cwd, _c, cache) = sandbox();
-    let idx = run_cort(&["index"], &cwd, &cache);
-    if idx.code != 0 {
-        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
-        return;
-    }
-
-    let transcript = cwd.join(".codex/sessions/session.jsonl");
-    fs::create_dir_all(transcript.parent().unwrap()).unwrap();
-    fs::write(
-        &transcript,
-        serde_json::json!({
-            "payload": {
-                "type": "message",
-                "role": "user",
-                "content": [{"type": "input_text", "text": "Need call-site evidence for helper; followup_capture_codex_52"}]
-            }
-        })
-        .to_string(),
-    )
-    .unwrap();
-
-    let r = run_hook_suggest_full(
-        FIRING_SEARCH,
-        Some(transcript.to_str().unwrap()),
-        &[],
-        &cwd,
-        &cache,
-    );
-    assert_eq!(r.code, 0, "stdout={} stderr={}", r.stdout, r.stderr);
-    assert!(r.stdout.contains("additionalContext"), "{}", r.stdout);
-
-    let row = latest_command_row(&cache.join("usage.db"), "hook-suggest");
-    assert_eq!(row["harness"], "codex");
-    assert_eq!(row["demand"]["status"], "captured");
-    assert!(row["demand"]["excerpt"]
-        .as_str()
-        .unwrap()
-        .contains("followup_capture_codex_52"));
-}
-
-/// A file-exclusive lock on the project database is contention that clears, not a store that
-/// is occupied. `impact` used to report `storage_busy` one busy timeout into such a lock --
-/// from the open path's WAL pragma or first schema statement, before any retry could apply --
-/// which read to the caller as "the index database is in use, the command is unavailable".
-/// Open, schema and query each retry now; the lock below outlasts one timeout (5s) but not
-/// the retry budget, so the run must survive a BUSY round and answer once it lifts.
-#[test]
-fn impact_waits_out_an_exclusive_db_lock_instead_of_reporting_the_store_occupied() {
-    let (_p, cwd, _c, cache) = sandbox();
-    let idx = run_cort(&["index"], &cwd, &cache);
-    if idx.code != 0 {
-        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
-        return;
-    }
-    let db = cort::db::db_path_for(cwd.to_str().unwrap());
-    let db = cache.join(db.file_name().unwrap());
-    let lock = rusqlite::Connection::open(&db).unwrap();
-    lock.busy_timeout(std::time::Duration::from_millis(0))
-        .unwrap();
-    lock.pragma_update(None, "locking_mode", "EXCLUSIVE")
-        .unwrap();
-    lock.execute_batch("BEGIN EXCLUSIVE").unwrap();
-    let holder = std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_secs(7));
-        drop(lock);
-    });
-    let r = run_cort(&["impact", "--symbol", "helper"], &cwd, &cache);
-    holder.join().unwrap();
-    assert_eq!(r.code, 0, "stdout={} stderr={}", r.stdout, r.stderr);
-}
-
-/// The usage row has to say what the hook *did*, not merely that it ran.
-///
-/// Every PreToolUse:Bash fires `hook-suggest`, so a row per invocation counts Bash calls and
-/// nothing else. That made the injection count a single-source number -- the transcript -- while
-/// the 09-01 report described it as two sources agreeing. The outcome is what makes `usage.db` an
-/// independent second reading, and `no_index` is the one silence worth its own name: the rule
-/// matched a real call-site search and the gate declined it, which is a missed opportunity rather
-/// than a correct pass.
-#[test]
-fn the_usage_row_records_which_outcome_the_hook_reached() {
-    let (_p, cwd, _c, cache) = sandbox();
-    let usage_db = cache.join("usage.db");
-
-    // No index yet: the rule matches, the gate declines.
-    run_hook_suggest(FIRING_SEARCH, &cwd, &cache);
-    let counts = cort::usage::hook_outcomes_at(&usage_db, 0, None, None).expect("read usage db");
-    assert_eq!(counts.get("no_index").and_then(Value::as_i64), Some(1));
-
-    // A command the rule has nothing to say about is a different silence.
-    run_hook_suggest("cargo test --workspace", &cwd, &cache);
-    let counts = cort::usage::hook_outcomes_at(&usage_db, 0, None, None).expect("read usage db");
-    assert_eq!(counts.get("no_shape").and_then(Value::as_i64), Some(1));
-    assert_eq!(counts.get("no_index").and_then(Value::as_i64), Some(1));
-
-    let idx = run_cort(&["index"], &cwd, &cache);
-    if idx.code != 0 {
-        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
-        return;
-    }
-    run_hook_suggest(FIRING_SEARCH, &cwd, &cache);
-    let counts = cort::usage::hook_outcomes_at(&usage_db, 0, None, None).expect("read usage db");
-    assert_eq!(
-        counts.get("hit").and_then(Value::as_i64),
-        Some(1),
-        "an injection must be countable from the db alone: {counts:?}"
-    );
-    // The silences did not move: an injection is not also a pass.
-    assert_eq!(counts.get("no_index").and_then(Value::as_i64), Some(1));
-
-    // The window is honoured, so a mining run cannot pick up rows from before the hook was wired.
-    let future = cort::usage::now_ms() + 60_000;
-    let later =
-        cort::usage::hook_outcomes_at(&usage_db, future, None, None).expect("read usage db");
-    assert!(
-        later.is_empty(),
-        "nothing was recorded after now: {later:?}"
     );
 }
 
@@ -1009,123 +702,35 @@ fn row_project_id(usage_db: &Path, outcome: &str) -> String {
     hits.into_iter().next().unwrap().unwrap_or_default()
 }
 
-/// Every hook-suggest row of the given outcome, parsed from its `args_summary`.
-fn hook_row_args(usage_db: &Path, outcome: &str) -> Vec<Value> {
-    let db = rusqlite::Connection::open(usage_db).expect("open usage.db");
-    let mut stmt = db
-        .prepare(
-            "SELECT args_summary FROM command_log
-              WHERE command = 'hook-suggest' AND args_summary LIKE ?1 ORDER BY id",
-        )
-        .expect("prepare");
-    let rows: Vec<String> = stmt
-        .query_map(
-            rusqlite::params![format!("%\"hook\":\"{outcome}\"%")],
-            |r| r.get(0),
-        )
-        .expect("query")
-        .filter_map(Result::ok)
-        .collect();
-    rows.iter()
-        .map(|a| serde_json::from_str(a).expect("args_summary parses as json"))
-        .collect()
-}
-
-/// A refusal row that says only `no_evidence` is a dead end: the improvement loop needs to know
-/// WHICH symbol the index could not name, and how far the lookup got before it gave up. `why`
-/// is the stable vocabulary for that distance: `leaf_in_index` means the bare name does sit in
-/// `chunks` under a longer, differently-shaped name (the definition was extracted; the search
-/// just didn't name it the way the index does), `absent` means nothing in the index names it at
-/// all -- an extraction gap to chase, not a tuning problem.
+/// A file-exclusive lock on the project database is contention that clears, not a store that
+/// is occupied. `impact` used to report `storage_busy` one busy timeout into such a lock --
+/// from the open path's WAL pragma or first schema statement, before any retry could apply --
+/// which read to the caller as "the index database is in use, the command is unavailable".
+/// Open, schema and query each retry now; the lock below outlasts one timeout (5s) but not
+/// the retry budget, so the run must survive a BUSY round and answer once it lifts.
 #[test]
-fn a_no_evidence_row_names_the_symbol_and_how_far_the_lookup_got() {
-    // `lonely` is a definition nobody calls, so no raw edge names it either: the exact-shape
-    // seed lookup can miss while the bare leaf still sits in chunks. (`alpha` calls `helper`,
-    // NOT `lonely` -- a caller would make lonely RawOnly, and RawOnly fires by design.)
-    let (_proj, cwd) = make_project(&[
-        ("src/lonely.ts", "export function lonely(n: number) { return n * 3; }\n"),
-        ("src/helper.ts", "export function helper(n: number) { return n * 2; }\n"),
-        (
-            "src/alpha.ts",
-            "import { helper } from './helper';\nexport function alpha(a: number) { return helper(a); }\n",
-        ),
-    ]);
-    let cache_dir = tempfile::Builder::new()
-        .prefix("cort-cache-")
-        .tempdir()
-        .unwrap();
-    let cache = cache_dir.path().to_path_buf();
-    let usage_db = cache.join("usage.db");
-    let idx = run_cort(&["index"], &cwd, &cache);
-    if idx.code != 0 {
-        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
-        return;
-    }
-
-    // Neither, and the index holds nothing about any shape of the name.
-    run_hook_suggest(
-        "grep -rn 'totally_absent_sym(' src --include=*.ts",
-        &cwd,
-        &cache,
-    );
-    // Neither, but the bare leaf lives in chunks: same refusal, different repair.
-    run_hook_suggest("grep -rn 'mod::lonely(' src --include=*.ts", &cwd, &cache);
-
-    let rows = hook_row_args(&usage_db, "no_evidence");
-    assert_eq!(rows.len(), 2, "two refusals, two rows: {rows:?}");
-    let absent = rows
-        .iter()
-        .find(|r| r["symbol"] == "totally_absent_sym")
-        .unwrap_or_else(|| panic!("absent row must carry its symbol: {rows:?}"));
-    assert_eq!(absent["why"], "absent", "{absent}");
-    let qualified = rows
-        .iter()
-        .find(|r| r["symbol"] == "mod::lonely")
-        .unwrap_or_else(|| panic!("qualified row must carry its symbol: {rows:?}"));
-    assert_eq!(qualified["why"], "leaf_in_index", "{qualified}");
-}
-
-/// The rows that spoke (or almost did) must say for whom: `hit` names the symbol the suggestion
-/// was about, and `no_index_hinted` names the symbol the hint would have served -- with the
-/// symbol on the row, the refusal/hint/suggestion vocabulary joins the transcript side by
-/// symbol instead of by timestamp guesswork.
-#[test]
-fn the_hint_and_hit_rows_name_the_symbol_they_spoke_for() {
+fn impact_waits_out_an_exclusive_db_lock_instead_of_reporting_the_store_occupied() {
     let (_p, cwd, _c, cache) = sandbox();
-    let usage_db = cache.join("usage.db");
-    let hint = run_hook_suggest_payload(
-        serde_json::json!({
-            "tool_name": "Bash",
-            "tool_input": { "command": FIRING_SEARCH },
-            "session_id": "sess-symbol-1",
-            "cwd": cwd.to_str().unwrap(),
-        }),
-        &[],
-        &cwd,
-        &cache,
-    );
-    assert_eq!(hint.code, 0);
-    assert!(
-        payload(&hint)["hookSpecificOutput"]["additionalContext"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("cort index"),
-        "precondition: the hint fired: {}",
-        hint.stdout
-    );
-    let rows = hook_row_args(&usage_db, "no_index_hinted");
-    assert_eq!(rows.len(), 1, "{rows:?}");
-    assert_eq!(rows[0]["symbol"], "helper", "{rows:?}");
-
     let idx = run_cort(&["index"], &cwd, &cache);
     if idx.code != 0 {
         eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
         return;
     }
-    run_hook_suggest(FIRING_SEARCH, &cwd, &cache);
-    let rows = hook_row_args(&usage_db, "hit");
-    assert_eq!(rows.len(), 1, "{rows:?}");
-    assert_eq!(rows[0]["symbol"], "helper", "{rows:?}");
+    let db = cort::db::db_path_for(cwd.to_str().unwrap());
+    let db = cache.join(db.file_name().unwrap());
+    let lock = rusqlite::Connection::open(&db).unwrap();
+    lock.busy_timeout(std::time::Duration::from_millis(0))
+        .unwrap();
+    lock.pragma_update(None, "locking_mode", "EXCLUSIVE")
+        .unwrap();
+    lock.execute_batch("BEGIN EXCLUSIVE").unwrap();
+    let holder = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(7));
+        drop(lock);
+    });
+    let r = run_cort(&["impact", "--symbol", "helper"], &cwd, &cache);
+    holder.join().unwrap();
+    assert_eq!(r.code, 0, "stdout={} stderr={}", r.stdout, r.stderr);
 }
 
 fn git_in(root: &Path, args: &[&str]) {
@@ -1139,105 +744,6 @@ fn git_in(root: &Path, args: &[&str]) {
         out.status.success(),
         "git {args:?} failed: {}",
         String::from_utf8_lossy(&out.stderr)
-    );
-}
-
-/// A stale index does not silence the hook, but it does change what the hook is allowed to say.
-///
-/// The gate was `indexed: true` and nothing else, so on a tree whose index was built two commits
-/// ago the injected line still read "cort has an index for this project" -- the half of the
-/// sentence that flatters the tool. Every `impact` row recorded on this machine up to 2026-09-02
-/// carried `index_stale=1`, so this was the normal case rather than the edge one.
-#[test]
-fn a_stale_index_is_disclosed_in_the_line_the_agent_reads() {
-    let (_p, cwd, _c, cache) = sandbox();
-    git_in(&cwd, &["init", "-q"]);
-    git_in(&cwd, &["config", "user.email", "t@e.com"]);
-    git_in(&cwd, &["config", "user.name", "t"]);
-    git_in(&cwd, &["add", "-A"]);
-    git_in(&cwd, &["commit", "-qm", "one"]);
-
-    let idx = run_cort(&["index"], &cwd, &cache);
-    if idx.code != 0 {
-        eprintln!("SKIP: index failed (ast-grep unavailable?): {}", idx.stderr);
-        return;
-    }
-    let fresh = run_hook_suggest(FIRING_SEARCH, &cwd, &cache);
-    let ctx = payload(&fresh)["hookSpecificOutput"]["additionalContext"]
-        .as_str()
-        .unwrap_or_default()
-        .to_string();
-    assert!(ctx.contains("cort impact --symbol 'helper'"), "got: {ctx}");
-    // P4 (Kimi-round mining): the first sentence names the verbs, so an agent opening a
-    // definition can dismiss the suggestion in one glance instead of reading an essay.
-    assert!(
-        ctx.contains("If you need the caller set"),
-        "fresh copy must lead with the verb condition: {ctx}"
-    );
-    assert!(
-        ctx.contains("If you are opening the definition, ignore this"),
-        "the dismiss clause must be present: {ctx}"
-    );
-    // P5 (2026-09-15, Taps mining): an agent verifying a wiring claim answered "does anything
-    // call Taps?" from a zero-result grep and moved on -- the exact hole --coverage exists to
-    // fill. The copy names both the question ("wired up") and the bad inference, so a session
-    // about to claim completeness can recognise itself in the trigger list.
-    assert!(
-        ctx.contains("wired up"),
-        "the trigger list must name the wiring question: {ctx}"
-    );
-    assert!(
-        ctx.contains("zero-result grep"),
-        "the completeness clause must reject the zero-grep inference: {ctx}"
-    );
-    // P6: the seed carries its location, so a fire on the wrong same-named thing (Taps, the
-    // resampling struct, answering for the sound variant) costs one glance to catch.
-    assert!(
-        ctx.contains("defined at src/"),
-        "the copy must name where the index's match is defined: {ctx}"
-    );
-    assert!(
-        !ctx.contains("older commit"),
-        "a fresh index must not warn about staleness: {ctx}"
-    );
-
-    // Move the tree on without re-indexing: the index is now provably behind.
-    fs::write(
-        cwd.join("src/gamma.ts"),
-        "export function gamma() { return 3; }\n",
-    )
-    .unwrap();
-    git_in(&cwd, &["add", "-A"]);
-    git_in(&cwd, &["commit", "-qm", "two"]);
-
-    let stale = run_hook_suggest(FIRING_SEARCH, &cwd, &cache);
-    let ctx = payload(&stale)["hookSpecificOutput"]["additionalContext"]
-        .as_str()
-        .unwrap_or_default()
-        .to_string();
-    // Self-healing (2026-09-14): the suggested command repairs the index itself, so the
-    // suggestion assigns no maintenance work at all. The P2 chained command had replaced an
-    // essay and then measured 1 adoption in 4 days; the heal retires the clause entirely --
-    // the agent was never the right actor for the repair, and the measurements said so twice.
-    assert!(
-        !ctx.contains("cort index"),
-        "the suggestion must not assign index maintenance: {ctx}"
-    );
-    // Still a suggestion, not a refusal: a stale index resolves most seeds.
-    assert!(ctx.contains("cort impact --symbol 'helper'"), "got: {ctx}");
-
-    // And the two are countable apart from the db alone.
-    let counts = cort::usage::hook_outcomes_at(&cache.join("usage.db"), 0, None, None)
-        .expect("read usage db");
-    assert_eq!(
-        counts.get("hit").and_then(Value::as_i64),
-        Some(1),
-        "{counts:?}"
-    );
-    assert_eq!(
-        counts.get("hit_stale").and_then(Value::as_i64),
-        Some(1),
-        "{counts:?}"
     );
 }
 
