@@ -29,12 +29,21 @@ same hooks — with three things, in this order:
    caller set before a rename or delete, edge by edge and with a statement of what it could not
    read. The `PostToolUse` hook repairs an existing index after an edit.
 
-What cort is **not**: a search router. The `PreToolUse` hook stays, because it is how cort records
-each call and will trigger collection, but the search-suggestion machinery behind it (`CORT_SUGGEST`
-delivery and the would-be verdict) is being removed — 409 searches in skill-bearing sessions produced
-zero `cort` calls. Nor is cort a machine-resource monitor: that is
-[ClaudeCat](https://github.com/yanggf8/claudecat)'s job now, reached through a gate cort's hook can
-hand off to without depending on it.
+### What cort owns, and what belongs to ClaudeCat
+
+| Concern | Owner | How |
+|---|---|---|
+| Agent and project memory: the reviewed ledger, its Turso sync replica and its CLI | cort | `cort memory`. The only owner; ClaudeCat may call cort, never keep a second ledger. |
+| Measurement of how agents work: collection and analysis | cort | `cort measure`, kicked from cort's own hooks into cort's own Turso database. ClaudeCat collects nothing; `claudecat telemetry sync` and its daily `CORT-AUDIT.md` audit are retired. |
+| Code helpers: the local index, `impact`, repairing the index after an edit | cort | `cort index`, `cort impact`, the `PostToolUse` hook. |
+| The hooks on Claude Code, Codex and Kimi | cort | `PreToolUse` and `PostToolUse` record each call and kick collection; they stay silent, exit 0 and never wait. |
+| Machine resources: load, memory and swap, the machine-wide heavy-work slots, never stacking two full builds, `nice`, `cargo -j`, orphaned delegate processes | [ClaudeCat](https://github.com/yanggf8/claudecat) | One canonical copy of the thresholds. A project keeps only its own dispatch flow (who writes, who reviews, tickets) and asks ClaudeCat: `claudecat gate check` from a shell, or through cort's hook. |
+| Search routing | nobody | Being removed: the `CORT_SUGGEST` delivery and the would-be verdict behind it. 409 searches in skill-bearing sessions produced zero `cort` calls. |
+
+The dependency runs one way, ClaudeCat → cort. cort's `PreToolUse` hook will offer a generic
+hand-off point that never names ClaudeCat; whatever answers there gets a time limit, and a missing,
+slow or failing answer lets the call through. Resource gating therefore cannot make a hook wait, and
+removing ClaudeCat changes nothing in cort.
 
 Since 2026-09-01 the indexing scan runs the rule pack **in-process** through the `ast-grep-core`/`-config`/`-language` crates (proven byte-identical to the CLI on 1,604 match comparisons plus row-identical full indexes of two venues); the `ast-grep` CLI is still provisioned by `install.sh` and stays the engine of `struct --pattern` lookup. `CORT_SCAN_BACKEND=cli` puts the subprocess back on the indexing path; the scan engine's identity is part of `extractor_version`, so flipping it or bumping the crates forces a full re-index.
 
