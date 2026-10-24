@@ -8,8 +8,6 @@
 //!   cort-evals summarize     <rows.json>... [--strict]
 //!   cort-evals demand        [--claude-dir DIR] [--codex-dir DIR] [--exclude a,b]
 //!                            [--show] [--out FILE]
-//!   cort-evals adopt-mine    --since RFC3339 [--claude-dir DIR] [--usage-db FILE]
-//!                            [--rows N] [--follow-calls N] [--exclude p,q] [--out FILE]
 //!   cort-evals cost-audit    --since UTC --until UTC [--claude-dir DIR] [--out FILE]
 //!   cort-evals cost-collect  [--day YYYY-MM-DD] [--claude-dir DIR]
 //!                            [--out-dir DIR] [--force]
@@ -42,7 +40,7 @@ fn print_report(value: &Value) {
 
 /// Insert the machine stamp every cort-evals report carries, so a figure can always say which
 /// computer produced it. `print_report` stamps what it prints; reports that reach the caller by
-/// another path (`adopt-mine`'s stdout and `--out` file) stamp themselves through this.
+/// another path stamp themselves through this.
 fn stamp_machine(v: &mut Value) {
     if let Some(o) = v.as_object_mut() {
         o.insert(
@@ -90,23 +88,6 @@ const RUN_AGENTS_FLAGS: &[&str] = &[
 const VERIFY_IMPACT_FLAGS: &[&str] = &["--repo", "--depth", "--symbols"];
 const RECALL_EXP_FLAGS: &[&str] = &["--venue", "--top"];
 const GATE_AUDIT_FLAGS: &[&str] = &["--venue", "--examples", "--report"];
-const HOOK_PROBE_FLAGS: &[&str] = &[
-    "--claude-dir",
-    "--codex-dir",
-    "--kimi-dir",
-    "--examples",
-    "--decline",
-];
-const ADOPT_MINE_FLAGS: &[&str] = &[
-    "--since",
-    "--until",
-    "--claude-dir",
-    "--usage-db",
-    "--rows",
-    "--follow-calls",
-    "--exclude",
-    "--out",
-];
 const COST_AUDIT_FLAGS: &[&str] = &["--since", "--until", "--claude-dir", "--out"];
 const COST_COLLECT_FLAGS: &[&str] = &["--day", "--days", "--claude-dir", "--out-dir", "--force"];
 const COST_TRIAL_FLAGS: &[&str] = &["--file"];
@@ -120,15 +101,12 @@ const DEMAND_FLAGS: &[&str] = &[
 ];
 
 const USAGE_TOP: &str =
-    "usage: cort-evals <run-agents|verify-impact|summarize|demand|recall-exp|hook-probe|adopt-mine|cost-audit|cost-collect|cost-trial|gate-audit|run-diff> [options]";
+    "usage: cort-evals <run-agents|verify-impact|summarize|demand|recall-exp|cost-audit|cost-collect|cost-trial|gate-audit> [options]";
 const USAGE_RUN_AGENTS: &str = "usage: cort-evals run-agents --venue DIR [--tasks FILE] [--only ID[,ID...]] [--arms a,b] [--max-turns N] [--config-dir DIR] [--cache-dir DIR] [--jail-dir DIR] [--jail] [--out DIR] [--concurrency N] [--delay-secs N]";
 const USAGE_VERIFY_IMPACT: &str =
     "usage: cort-evals verify-impact --repo DIR --symbols A,B [--depth N]";
 const USAGE_SUMMARIZE: &str = "usage: cort-evals summarize [--strict] rows.json [rows.json...]";
 const USAGE_DEMAND: &str = "usage: cort-evals demand [--claude-dir DIR] [--codex-dir DIR] [--exclude a,b,c] [--out FILE] [--show]";
-const USAGE_HOOK_PROBE: &str =
-    "usage: cort-evals hook-probe [--claude-dir DIR] [--codex-dir DIR] [--kimi-dir DIR] [--examples N] [--decline TAG]  (replays the routing rule over transcripts already on disk; --decline narrows passed_over_examples to one decline tag, the census always covers every tag; no model calls)";
-const USAGE_ADOPT_MINE: &str = "usage: cort-evals adopt-mine --since RFC3339 [--until RFC3339] [--claude-dir DIR] [--usage-db FILE] [--rows N] [--follow-calls N] [--exclude proj,proj] [--out FILE]  (the docs/2026-08-31-recall-wip.md §6 funnel, including subagent sidechains; reads transcripts already on disk, no model calls)";
 const USAGE_COST_AUDIT: &str = "usage: cort-evals cost-audit --since YYYY-MM-DDTHH:MM:SSZ --until YYYY-MM-DDTHH:MM:SSZ [--claude-dir DIR] [--out FILE]  (read-only Claude Code cost census; no model calls)";
 const USAGE_COST_COLLECT: &str = "usage: cort-evals cost-collect [--day YYYY-MM-DD | --days 1..90] [--claude-dir DIR] [--out-dir DIR] [--force]  (persist daily aggregates before transcript retention deletes them; default last seven complete UTC days, skipping existing files; no model calls)";
 const USAGE_COST_TRIAL: &str = "usage: cort-evals cost-trial --file PAIRS.json  (summarize one paired, full-task hypothesis; no model calls)";
@@ -709,48 +687,6 @@ fn gate_audit_main(argv: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-fn hook_probe_main(argv: &[String]) -> Result<(), String> {
-    guard_options(argv, HOOK_PROBE_FLAGS, USAGE_HOOK_PROBE)?;
-    let Ok(home) = std::env::var("HOME") else {
-        return Err(
-            "HOME is unset: pass --claude-dir, --codex-dir and --kimi-dir explicitly".to_string(),
-        );
-    };
-    let examples: usize = at(argv, "--examples", "40")
-        .parse()
-        .map_err(|_| "--examples must be a number".to_string())?;
-    let dirs = vec![
-        (
-            "claude",
-            std::path::PathBuf::from(at(
-                argv,
-                "--claude-dir",
-                &format!("{home}/.claude/projects"),
-            )),
-        ),
-        (
-            "codex",
-            std::path::PathBuf::from(at(argv, "--codex-dir", &format!("{home}/.codex/sessions"))),
-        ),
-        // Kimi's transcripts are `wire.jsonl` under a two-level session tree, and its searches are
-        // structured `Grep` calls rather than shell lines -- which is exactly why the probe had to
-        // learn a second surface rather than a third harness flag alone.
-        (
-            "kimi",
-            std::path::PathBuf::from(at(
-                argv,
-                "--kimi-dir",
-                &format!("{home}/.kimi-code/sessions"),
-            )),
-        ),
-    ];
-    let decline = at(argv, "--decline", "");
-    let decline = (!decline.is_empty()).then_some(decline.as_str());
-    let report = cort_evals::hook::probe(&dirs, examples, decline);
-    print_report(&report);
-    Ok(())
-}
-
 fn summarize_main(argv: &[String]) -> Result<(), String> {
     guard_options(argv, SUMMARIZE_FLAGS, USAGE_SUMMARIZE)?;
     // Accepts several row files so a multi-run experiment aggregates in one call, which is what
@@ -894,132 +830,12 @@ fn demand_main(argv: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-/// The adoption funnel of `docs/2026-08-31-recall-wip.md` §6, executed rather than described.
-///
-/// `--since` is mandatory and has no default. A default would have to be either the epoch, which
-/// silently mixes in every session recorded before the hook was wired, or "today", which is a local
-/// wall-clock guess -- and a wrong window here does not fail, it reports zeros that read exactly
-/// like a hook that never fired. That is not hypothetical: it is what the first hand-run of this
-/// protocol produced on 2026-09-02.
-const USAGE_RUN_DIFF: &str = "usage: cort-evals run-diff OLD.json NEW.json  (compare two adopt-mine reports: scalar and per-project deltas, demand-context counts, and the calibre breaks -- known instants where the measuring instrument itself changed between the two windows; refuses reports from different machines)";
-
-fn run_diff_main(argv: &[String]) -> Result<(), String> {
-    if argv.len() != 2 {
-        return Err(USAGE_RUN_DIFF.to_string());
-    }
-    let read = |path: &str| -> Result<Value, String> {
-        let body = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
-        serde_json::from_str(&body).map_err(|e| format!("{path}: not an adopt-mine report: {e}"))
-    };
-    let report = cort_evals::diff::diff(&read(&argv[0])?, &read(&argv[1])?)?;
-    println!("{}", serde_json::to_string_pretty(&report).unwrap());
-    Ok(())
-}
-
-fn adopt_mine_main(argv: &[String]) -> Result<(), String> {
-    guard_options(argv, ADOPT_MINE_FLAGS, USAGE_ADOPT_MINE)?;
-    let home = std::env::var("HOME").unwrap_or_default();
-    let since_raw = at(argv, "--since", "");
-    if since_raw.is_empty() {
-        return Err(format!(
-            "adopt-mine needs --since: the window start is the measurement, not a detail\n{USAGE_ADOPT_MINE}"
-        ));
-    }
-    let since_ms = cort_evals::adopt::parse_since(&since_raw)?;
-    // The closing edge is optional but singular in purpose: a window pinned on both ends is the
-    // only window a later `run-diff` can compare without re-deriving the boundary from memory.
-    let until_raw = at(argv, "--until", "");
-    let until_ms = if until_raw.is_empty() {
-        None
-    } else {
-        Some(cort_evals::adopt::parse_until(&until_raw)?)
-    };
-    let rows: usize = at(argv, "--rows", "200")
-        .parse()
-        .map_err(|_| "--rows must be a number".to_string())?;
-    let follow_calls: usize = at(
-        argv,
-        "--follow-calls",
-        &cort_evals::adopt::DEFAULT_FOLLOW_CALLS.to_string(),
-    )
-    .parse()
-    .map_err(|_| "--follow-calls must be a number".to_string())?;
-    // The project cort is developed in produces injections that are audit traffic, not use. It is
-    // not excluded by default -- a silent default exclusion is its own way of shaping a number --
-    // but the reading field says to pass it, and the report echoes what was dropped.
-    let exclude: Vec<String> = at(argv, "--exclude", "")
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .collect();
-    let claude_dir = at(argv, "--claude-dir", &format!("{home}/.claude/projects"));
-    let dir = std::path::Path::new(&claude_dir);
-    if !dir.is_dir() {
-        return Err(format!("{claude_dir} is not a directory"));
-    }
-    // The default is cort's own default cache. Naming it in the report matters: the 09-01 baseline
-    // was lost precisely because a run's rows landed in a second CORT_CACHE_DIR nobody recorded.
-    let usage_db = at(
-        argv,
-        "--usage-db",
-        &format!("{home}/.cache/cortex-ng/usage.db"),
-    );
-    let usage_path = std::path::Path::new(&usage_db);
-    let mut report = cort_evals::adopt::mine(
-        dir,
-        since_ms,
-        until_ms,
-        usage_path.exists().then_some(usage_path),
-        rows,
-        follow_calls,
-        &exclude,
-    );
-    if let Some(map) = report.as_object_mut() {
-        // $HOME is replaced so the artefact says which tree was read without publishing the account.
-        let hide = |p: &str| -> Value {
-            if home.is_empty() {
-                json!(p)
-            } else {
-                json!(p.replacen(&home, "<home>", 1))
-            }
-        };
-        map.insert("tree_read".to_string(), hide(&claude_dir));
-        map.insert(
-            "usage_db_read".to_string(),
-            if usage_path.exists() {
-                hide(&usage_db)
-            } else {
-                json!(null)
-            },
-        );
-        map.insert("since_as_given".to_string(), json!(since_raw));
-        if !until_raw.is_empty() {
-            map.insert("until_as_given".to_string(), json!(until_raw));
-        }
-    }
-    // The report's numbers get set beside other machines' numbers -- that reconciliation is the
-    // whole point of the funnel -- so it carries the same stamp `print_report` attaches, on both
-    // the stdout copy and the --out file.
-    stamp_machine(&mut report);
-    let out = at(argv, "--out", "");
-    if !out.is_empty() {
-        std::fs::write(
-            &out,
-            format!("{}\n", serde_json::to_string_pretty(&report).unwrap()),
-        )
-        .map_err(|e| format!("{out}: {e}"))?;
-    }
-    println!("{}", serde_json::to_string_pretty(&report).unwrap());
-    Ok(())
-}
-
 fn cost_audit_main(argv: &[String]) -> Result<(), String> {
     guard_options(argv, COST_AUDIT_FLAGS, USAGE_COST_AUDIT)?;
     let since = at(argv, "--since", "");
     let until = at(argv, "--until", "");
     for bound in [&since, &until] {
-        if !bound.ends_with('Z') || cort_evals::adopt::parse_since(bound).is_err() {
+        if !bound.ends_with('Z') || cort_evals::time::parse_since(bound).is_err() {
             return Err(USAGE_COST_AUDIT.to_string());
         }
     }
@@ -1042,14 +858,14 @@ fn cost_audit_main(argv: &[String]) -> Result<(), String> {
 fn cost_collect_day(raw: &str, now_ms: i64) -> Result<(String, String), String> {
     const DAY_MS: i64 = 86_400_000;
     let day = if raw.is_empty() {
-        cort_evals::adopt::format_utc(now_ms.div_euclid(DAY_MS) * DAY_MS - DAY_MS)[..10].to_string()
+        cort_evals::time::format_utc(now_ms.div_euclid(DAY_MS) * DAY_MS - DAY_MS)[..10].to_string()
     } else {
         raw.to_string()
     };
     let since = format!("{day}T00:00:00Z");
-    let ms = cort_evals::adopt::parse_since(&since)
+    let ms = cort_evals::time::parse_since(&since)
         .map_err(|_| format!("invalid --day {day}: expected a UTC YYYY-MM-DD date"))?;
-    if day.len() != 10 || cort_evals::adopt::format_utc(ms) != since {
+    if day.len() != 10 || cort_evals::time::format_utc(ms) != since {
         return Err(format!(
             "invalid --day {day}: expected a UTC YYYY-MM-DD date"
         ));
@@ -1057,7 +873,7 @@ fn cost_collect_day(raw: &str, now_ms: i64) -> Result<(String, String), String> 
     if ms + DAY_MS > now_ms.div_euclid(DAY_MS) * DAY_MS {
         return Err(format!("--day {day} is not a complete UTC day yet"));
     }
-    Ok((since, cort_evals::adopt::format_utc(ms + DAY_MS)))
+    Ok((since, cort_evals::time::format_utc(ms + DAY_MS)))
 }
 
 fn cost_collect_main(argv: &[String]) -> Result<(), String> {
@@ -1138,7 +954,7 @@ mod cost_collection_window {
 
     #[test]
     fn default_is_yesterday_utc_and_today_is_refused() {
-        let now = cort_evals::adopt::parse_since("2026-10-18T12:00:00Z").unwrap();
+        let now = cort_evals::time::parse_since("2026-10-18T12:00:00Z").unwrap();
         assert_eq!(
             cost_collect_day("", now).unwrap(),
             (
@@ -1160,12 +976,9 @@ fn main() {
         Some("demand") => demand_main(&argv[1..]),
         Some("recall-exp") => recall_exp_main(&argv[1..]),
         Some("gate-audit") => gate_audit_main(&argv[1..]),
-        Some("hook-probe") => hook_probe_main(&argv[1..]),
-        Some("adopt-mine") => adopt_mine_main(&argv[1..]),
         Some("cost-audit") => cost_audit_main(&argv[1..]),
         Some("cost-collect") => cost_collect_main(&argv[1..]),
         Some("cost-trial") => cost_trial_main(&argv[1..]),
-        Some("run-diff") => run_diff_main(&argv[1..]),
         other => {
             // Asking how to use the tool is never an error and never a run — including at the top
             // level, which is where F-17 stopped. `wants_help` already answered true for a bare
@@ -1177,10 +990,8 @@ fn main() {
                 println!("  {USAGE_VERIFY_IMPACT}");
                 println!("  {USAGE_SUMMARIZE}");
                 println!("  {USAGE_DEMAND}");
-                println!("  {USAGE_HOOK_PROBE}");
                 println!("  {USAGE_RECALL_EXP}");
                 println!("  {USAGE_GATE_AUDIT}");
-                println!("  {USAGE_ADOPT_MINE}");
                 println!("  {USAGE_COST_AUDIT}");
                 println!("  {USAGE_COST_COLLECT}");
                 println!("  {USAGE_COST_TRIAL}");
@@ -1445,8 +1256,6 @@ mod whitelist_coverage {
                         .chain(DEMAND_FLAGS.iter())
                         .chain(RECALL_EXP_FLAGS.iter())
                         .chain(GATE_AUDIT_FLAGS.iter())
-                        .chain(HOOK_PROBE_FLAGS.iter())
-                        .chain(ADOPT_MINE_FLAGS.iter())
                         .chain(COST_AUDIT_FLAGS.iter())
                         .chain(COST_COLLECT_FLAGS.iter())
                         .chain(COST_TRIAL_FLAGS.iter())
@@ -1578,11 +1387,8 @@ mod batch_consumption {
 mod machine_stamp {
     use super::*;
 
-    /// adopt-mine's report gets quoted against other machines' numbers too -- the 09-03
-    /// reconciliation burned real time on two reports that both looked local before anyone
-    /// noticed they were different computers. `print_report` stamps what it prints; the report
-    /// that reaches the caller by `adopt-mine`'s own stdout and `--out` file must carry the
-    /// same stamp, and this is the function that puts it there.
+    /// Reports are quoted against other machines' numbers, so every report that reaches the caller
+    /// must carry the same stamp `print_report` attaches, and `stamp_machine` is what puts it there.
     #[test]
     fn stamping_a_report_names_the_machine_and_its_source() {
         let mut report = json!({ "injections": 0 });

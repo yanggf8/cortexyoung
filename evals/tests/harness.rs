@@ -703,8 +703,6 @@ fn asking_for_help_exits_zero_and_names_every_subcommand() {
         "summarize",
         "demand",
         "recall-exp",
-        "hook-probe",
-        "adopt-mine",
     ] {
         assert!(out.contains(sub), "usage text never mentions {sub}: {out}");
     }

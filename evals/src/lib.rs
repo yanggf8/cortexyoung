@@ -4,18 +4,16 @@
 //! depend on it. It exists to answer one question with numbers that cannot lie: does an agent
 //! holding `cort` reach the labelled answer for less than an agent holding a shell?
 
-pub mod adopt;
 pub mod arms;
 pub mod cost_audit;
 pub mod cost_trial;
 pub mod demand;
-pub mod diff;
 pub mod gate_audit;
 pub mod grade;
-pub mod hook;
 pub mod recall;
 pub mod stream;
 pub mod summary;
+pub mod time;
 pub mod verify;
 
 pub const ESTIMATOR: &str = "ascii/4 + non-ascii*1 (v1)";

@@ -183,7 +183,7 @@ fn scan_file(path: &Path, since_ms: i64, until_ms: i64, census: &mut Census) {
         // Transcript timestamps can include milliseconds while window boundaries often do not.
         // Comparing their strings would exclude the first second and include the next day's first
         // second, because '.' sorts before 'Z'.
-        let Ok(ts_ms) = crate::adopt::parse_since(ts) else {
+        let Ok(ts_ms) = crate::time::parse_since(ts) else {
             census.lines_unparsed += 1;
             continue;
         };
@@ -343,8 +343,8 @@ fn scan_file(path: &Path, since_ms: i64, until_ms: i64, census: &mut Census) {
 /// is reported separately because cache reads replay old context and cannot be added to a tool
 /// result as if each byte entered the model only once.
 pub fn audit(dir: &Path, since: &str, until: &str) -> Result<Value, String> {
-    let since_ms = crate::adopt::parse_since(since)?;
-    let until_ms = crate::adopt::parse_since(until)?;
+    let since_ms = crate::time::parse_since(since)?;
+    let until_ms = crate::time::parse_since(until)?;
     if since_ms >= until_ms {
         return Err("--since must precede --until".to_string());
     }
