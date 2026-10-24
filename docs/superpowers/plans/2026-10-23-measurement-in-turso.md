@@ -325,7 +325,7 @@
 ### 退場（不是程式碼，使用者在場逐步做；照 spec「claudecat 退場步驟」）
 
 - [x] 移除 claudecat 的 09:17、09:29 條目（crontab 先備份到 scratchpad）。2026-10-24 16:22 UTC 使用者要求先退：NUC11i5、i51149R3050 已移除，備份在各自的 `~/.local/share/cortexyoung/crontab-backup-20261024T1622Z.txt`；Thinkpade15 本來就沒有。
-- [ ] 其餘機器的 claudecat 排程還沒退：MacBook-Pro、i5940r3070（RTX 3070）、RTX 4060 那台 WSL；ssh 連不到，使用者要用到那幾台時再處理（aib claude-code #881 列了要查的 crontab、systemd timer、launchd）。
+- [ ] 其餘機器的 claudecat 排程還沒退：MacBook-Pro、i5940r3070（RTX 3070）、RTX 4060 那台 WSL；ssh 連不到，使用者要用到那幾台時再處理（aib claude-code #881 列了要查的 crontab、systemd timer、launchd）。claudecat `86ed339`（2026-10-25）已刪掉 `cort-audit`、`findings`、`doctor`、`telemetry` 子命令：那幾台**升級 claudecat 前要先清**，否則舊 cron／timer 每天報 unknown subcommand。NUC11i5、Thinkpade15 已無殘留；i51149R3050 的 telemetry timer／service unit 檔已於 2026-10-25 刪除（備份在該機 `~/.local/share/cortexyoung/claudecat-units-backup-20261024T2111Z/`）。
 - [ ] 兩台 `claudecat telemetry configure` 指向**量測資料庫**，各跑最後一次 `claudecat telemetry sync`。i51149R3050 的 `claudecat-telemetry-sync.timer` 已於 2026-10-24 `disable --now`（unit 檔保留），所以它的最後一次 sync 要手動跑。
 - [ ] `cort measure copy-events`，比對各組列數。
 - [ ] 兩台 `cort measure sync --dry-run`：重疊非空、100% 相符；不符就停，修 Task 6。
