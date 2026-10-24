@@ -49,7 +49,8 @@
 - Produces:
   ```rust
   pub const INSTANCE_KEY: &str = "INSTANCE_ID";
-  pub struct KickCounters { pub instance_id: String, pub max_command_id: i64, pub max_health_id: i64 }
+  pub struct KickCounters { pub instance_id: String, pub max_command_id: i64, pub max_any_command_id: i64, pub max_health_id: i64 }
+  // max_any_command_id 由 B-fix 加入：不分 command 的 MAX(id)，只給倒退偵測用（設計 §1 第 4 步）
   pub fn kick_counters_at(path: &Path) -> Option<KickCounters>; // 唯讀、busy 25 ms；檔案/表/索引/instance 缺任何一個或出錯 → None
   ```
 - `index_health_log` 欄位：`id INTEGER PRIMARY KEY`、`ts INTEGER NOT NULL`、`machine_id TEXT NOT NULL`、`machine_source TEXT NOT NULL`、`root TEXT`、`local_project_id TEXT NOT NULL`、`project_id TEXT`、`status TEXT NOT NULL CHECK(status IN ('ok','unreadable','missing_dir','no_index'))`、`error TEXT`、`fresh TEXT`、`chunks INTEGER`、`relationships INTEGER`、`not_chunked INTEGER`、`real_gap INTEGER`、`fts TEXT`；索引 `idx_index_health_log_local ON index_health_log(local_project_id, id)`。
@@ -128,7 +129,7 @@
   impl CollectState { pub fn load(p: &Path) -> Self; pub fn save(&self, p: &Path) -> Result<(), String>; }
   impl HealthState  { pub fn load(p: &Path) -> Self; pub fn save(&self, p: &Path) -> Result<(), String>; }
       // load：缺檔或壞檔 → Default；save：data_dir::write_atomic
-  pub fn batch_cursors(s: &CollectState, c: &KickCounters) -> (i64, i64); // (command, health)；instance 不同或游標 > MAX → 0
+  pub fn batch_cursors(s: &CollectState, c: &KickCounters) -> (i64, i64); // (command, health)；instance 不同 → 0；command 游標 > max_any_command_id → 0；health 游標 > max_health_id → 0
   pub fn health_cursor(s: &HealthState, c: &KickCounters) -> i64;
   pub fn min_interval_ms(s: &CollectState, harness: &str, cfg: &CollectConfig) -> i64; // base × 2^count(該 harness)，上限 max
   pub fn batch_due(s: &CollectState, c: &KickCounters, harness: &str, now_ms: i64, cfg: &CollectConfig) -> bool;

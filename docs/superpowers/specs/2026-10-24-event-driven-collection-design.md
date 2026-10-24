@@ -50,11 +50,14 @@ transcript、`command_log`、index 變動都發生在 agent 工作時——觸�
 
 1. measure 沒設定（設定檔不存在）→ 返回。一次 `stat`。
 2. 升級進行中（`try_protected_entry` 拿不到）→ 返回。`hook-refresh` 已經判斷過；`hook-suggest` 也要判斷。
-3. 以**唯讀**、busy timeout 25 ms（跟 `usage.rs` 既有的讀取一樣）開 `usage.db`，取兩個數：
-   `SELECT MAX(id) FROM command_log WHERE command <> 'measure'` 與 `SELECT MAX(id) FROM
-   index_health_log`。前者靠新加的部分索引 `CREATE INDEX IF NOT EXISTS idx_command_log_not_measure
+3. 以**唯讀**、busy timeout 25 ms（跟 `usage.rs` 既有的讀取一樣）開 `usage.db`，取三個數：
+   `SELECT MAX(id) FROM command_log WHERE command <> 'measure'`、
+   `SELECT MAX(id) FROM command_log`（**不分** `command`；rowid 的 `MAX` 是 O(1)）與
+   `SELECT MAX(id) FROM index_health_log`。第一個數決定「有多少待收」（pending），第三個數同理
+   管健康那條；第二個數只用在第 4 步的倒退偵測——它回答的是「游標是否超過資料庫現有的任何一列」，
+   跟待收量無關。第一個查詢靠新加的部分索引 `CREATE INDEX IF NOT EXISTS idx_command_log_not_measure
    ON command_log(id) WHERE command <> 'measure'`（只是索引、不是欄位，不影響 event_id；由
-   `usage.db` 既有的開檔建表流程建立），兩個查詢都是 O(log n)；實作要量測。忙、失敗、表或索引還
+   `usage.db` 既有的開檔建表流程建立），O(log n)；實作要量測。忙、失敗、表或索引還
    不存在 → 返回。
 4. 讀兩條收集各自的狀態檔（第 2、3 節）；讀不到當「從沒跑過」。
    **`usage.db` 被換掉的偵測**：`usage.db` 開檔建表時，若 `_usage_meta` 沒有 `instance_id` 就寫入一個
@@ -65,9 +68,21 @@ transcript、`command_log`、index 變動都發生在 agent 工作時——觸�
    看到 `instance_id` 不同時，把自己的游標歸零、記下新的 `instance_id` 再做事；`cort_command` 的去重
    仍由 Task 6 既有的水位指紋與全範圍去重負責。既有的 `usage.db` 第一次補上 `instance_id` 時，最多多
    跑一次收集。
-   **倒退的偵測**（還原同一份舊的 `usage.db`，`instance_id` 相同但 rowid 倒退）：任一游標大於對應的
-   `MAX(id)` → 那個游標當 0、視為到期，收集程序同樣歸零再做。只要資料庫還沒長回舊游標，每個新列都會
-   觸發 kick，所以倒退一定在新列被清掉之前被發現。
+   **倒退的偵測**（還原同一份舊的 `usage.db`，`instance_id` 相同但 rowid 倒退）：`cort_command`
+   的游標（`uploaded_through_id`）與健康那條的 `command_log` 游標（`health_cursor`）大於**全部**
+   `command_log` 的 `MAX(id)`（不分 `command`）才算倒退；`health_uploaded_through_id` 比
+   `MAX(index_health_log.id)`。倒退的那個游標當 0、視為到期，收集程序同樣歸零再做。這裡必須用
+   不分 `command` 的 `MAX`，因為游標是「已寫進副本的最大本機 rowid」，**包含已上傳的 `measure`
+   列**——`measure` 列不計 pending，但它們確實佔用 rowid，所以「最後幾列是 `measure` 自己的」這種
+   最常見的狀態下，那些游標正常地大於 `MAX_non_measure_id`（`uploaded_through_id` 每批都會這樣，
+   因為每批都把自己的 `measure` 列一起上傳）；拿 `MAX_non_measure_id` 判斷會把它
+   誤判成倒退，游標歸 0、整個歷史又算成 pending，收集就自己養活自己。hook 寫的每個新列都會在同一個
+   hook 裡觸發 kick，所以只要新列都來自 hook，真倒退在資料庫長回舊游標之前就會被發現。**hook 以外的
+   寫入**（手動下的 `cort impact`、`measure record`/`sync` 等）會寫列卻不 kick；它們若在下一次 hook
+   之前把 `MAX(id)` 推回舊游標之上，倒退就不再被偵測。後果有界：批次那條的上傳以副本裡的水位為準，
+   Task 6 的水位驗證（`watermark_row_changed`／`watermark_row_missing` → 全範圍重讀、`INSERT OR
+   IGNORE` 去重）照樣把還原後的檔案整份重掃，只是晚一點；健康那條的 `health_cursor` 純本機、沒有
+   水位可退，還原帶（還原後的 `MAX(id)` 到舊游標之間）裡用過的專案那一天不會有健康觀察。
    **健康觀察在換庫或倒退後不會在遠端重複**：新的 `index_health_log` 沒有上一列可比，同一天同一個
    root 可能在本機再記一次，但第 4 節的健康 event_id 是內容鍵（UTC 日＋root＋不含 `ts` 的指標），同日
    同狀態的重觀察算出同一個 id，被 `INSERT OR IGNORE` 擋掉。
@@ -132,8 +147,9 @@ push/pull），在 `measure.lock` 底下跑，外加第 4 節的 `cort_index_hea
 
 - `pending = command_pending + health_pending`，**兩項各自先取下限 0**：
   `command_pending = refused ? 0 : max(0, MAX_non_measure_id − uploaded_through_id)`、
-  `health_pending = max(0, MAX(index_health_log.id) − health_uploaded_through_id)`。（`uploaded_through_id`
-  包含已上傳的 `measure` 列，可能大於 `MAX_non_measure_id`；不取下限的話負數會吃掉健康那項。）健康觀察的列算進待收，所以健康那條
+  `health_pending = max(0, MAX(index_health_log.id) − health_uploaded_through_id)`。**這個下限不是
+  防禦**：`uploaded_through_id` 包含已上傳的 `measure` 列，合法地可以大於 `MAX_non_measure_id`
+  （最後幾列是 `measure` 自己的，就是最常見的狀態），不取下限的話負數會吃掉健康那項。健康觀察的列算進待收，所以健康那條
   寫的列一定會被某次批次送出去（另見第 3 節結尾的交接）。
 - `min_interval = 5 分鐘 × 2^count`，`count` 是**這次 kick 的 harness** 自己的連續失敗次數，上限 60
   分鐘。沙箱裡一直失敗的 harness 最多每 60 分鐘試一次網路，別的 harness 不受它影響。
@@ -230,7 +246,11 @@ payload 讀不到）不算使用，也不需要觀察。`project_id` 是 NULL �
 `command_log` 列（`command='measure'`），所以「收集何時跑過」可以追。這些列：
 
 - **不計入** kick 的 pending 與兩條的到期判斷（第 1 節第 3 步的 `WHERE command <> 'measure'`）；
-- 照常被上傳（它們是使用紀錄的一部分），但只有在真有使用觸發收集時才會產生，不會自己養活自己；
+  但它們仍是 `command_log` 的列、照樣佔 rowid，所以第 3 步另外讀的不分 `command` 的 `MAX(id)`
+  **包含**它們——那是倒退偵測用的天花板，正是為了讓「已上傳的 measure 列」不會被誤判成倒退（第 1 節
+  第 4 步）。這兩個 `MAX` 不能互相取代；
+- 照常被上傳（它們是使用紀錄的一部分），但只有在真有使用觸發收集時才會產生，不會自己養活自己
+  （包含不會讓游標看起來倒退、因而每 `min_interval` 再生一次收集）；
 - 沒有 `project_id`，不會成為健康觀察的對象。
 
 ### 6. cron：拿掉

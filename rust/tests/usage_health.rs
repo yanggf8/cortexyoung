@@ -263,8 +263,24 @@ fn kick_counters_excludes_measure_rows() {
     drop(conn);
     let counters = kick_counters_at(&path).unwrap();
     assert_eq!(counters.max_command_id, 2);
+    assert_eq!(counters.max_any_command_id, 4);
     assert_eq!(counters.max_health_id, 1);
     assert_eq!(counters.instance_id.len(), 32);
+}
+
+/// The two maxima answer different questions and must be read separately: the filtered one says
+/// how many genuine rows are pending, the unfiltered one says whether a cursor has outrun the
+/// database. A cursor that only outran the measure rows is the ordinary post-batch state.
+#[test]
+fn kick_counters_read_max_over_all_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("usage.db");
+    for command in ["impact", "hook-suggest", "measure", "measure", "measure"] {
+        record_command_at(&path, &record(command, NOW_MS));
+    }
+    let counters = kick_counters_at(&path).unwrap();
+    assert_eq!(counters.max_command_id, 2);
+    assert_eq!(counters.max_any_command_id, 5);
 }
 
 #[test]

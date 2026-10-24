@@ -6,10 +6,14 @@ use cort::usage::KickCounters;
 
 const NOW: i64 = 1_800_000_000_000;
 
+/// `max_any_command_id` defaults to the larger of the two explicit maxima, so every fixture that
+/// was written before that field existed keeps its meaning: its cursors still compare against the
+/// same ceiling, and only the tests below move the two maxima apart.
 fn counters(command: i64, health: i64) -> KickCounters {
     KickCounters {
         instance_id: "db-a".into(),
         max_command_id: command,
+        max_any_command_id: command.max(health),
         max_health_id: health,
     }
 }
@@ -131,9 +135,10 @@ fn refused_excludes_command_pending() {
     assert!(batch_due(&s, &counters(5_000, 1), "codex", NOW, &cfg));
 }
 
-/// A cursor past MAX is a rewind: it resets to 0, so the whole command term counts as pending.
-/// (The per-term clamp in `batch_due` is defensive; `batch_cursors` never hands it a cursor past
-/// MAX, so no input reaches it.)
+/// A cursor past every row's id is a rewind: it resets to 0, so the whole command term counts as
+/// pending. (The per-term clamp in `batch_due` is not defensive: a cursor may legitimately exceed
+/// `max_command_id` by the `measure` rows it already copied, so the clamp is what keeps that
+/// negative from eating the health term.)
 #[test]
 fn rewound_cursor_counts_all_rows_as_pending() {
     let mut s = state(900_000);
@@ -217,6 +222,97 @@ fn rewind_resets_cursors() {
         health_cursor: 101,
         last_run_ms: Some(NOW - 600_000),
         ..Default::default()
+    };
+    assert_eq!(health_cursor(&h, &c), 0);
+    assert!(health_due(
+        &h,
+        &c,
+        NOW,
+        &CollectConfig::from_lookup(|_| None)
+    ));
+}
+
+/// The normal state after a batch: the last rows are `measure`'s own, so the command cursor sits
+/// past the non-`measure` max. Only the un-filtered max may call that a rewind -- otherwise the
+/// cursor resets, the whole history counts as pending, and collection keeps spawning itself with
+/// nothing to do.
+#[test]
+fn watermark_past_trailing_measure_rows_is_not_a_rewind() {
+    let mut s = state(3_600_000);
+    s.uploaded_through_id = 13;
+    let c = KickCounters {
+        instance_id: "db-a".into(),
+        max_command_id: 10,
+        max_any_command_id: 13,
+        max_health_id: 0,
+    };
+    assert_eq!(batch_cursors(&s, &c), (13, 0));
+    assert!(!s.push_pending);
+    assert!(!batch_due(
+        &s,
+        &c,
+        "codex",
+        NOW,
+        &CollectConfig::from_lookup(|_| None)
+    ));
+}
+
+#[test]
+fn cursor_past_every_row_is_still_a_rewind() {
+    let mut s = state(900_000);
+    s.uploaded_through_id = 20;
+    let c = KickCounters {
+        instance_id: "db-a".into(),
+        max_command_id: 10,
+        max_any_command_id: 13,
+        max_health_id: 0,
+    };
+    assert_eq!(batch_cursors(&s, &c), (0, 0));
+    assert!(batch_due(
+        &s,
+        &c,
+        "codex",
+        NOW,
+        &CollectConfig::from_lookup(|_| None)
+    ));
+}
+
+#[test]
+fn health_cursor_past_trailing_measure_rows_is_not_a_rewind() {
+    let h = HealthState {
+        instance_id: Some("db-a".into()),
+        health_cursor: 13,
+        last_run_ms: Some(NOW - 3_600_000),
+        ..Default::default()
+    };
+    let c = KickCounters {
+        instance_id: "db-a".into(),
+        max_command_id: 10,
+        max_any_command_id: 13,
+        max_health_id: 0,
+    };
+    assert_eq!(health_cursor(&h, &c), 13);
+    assert!(!health_due(
+        &h,
+        &c,
+        NOW,
+        &CollectConfig::from_lookup(|_| None)
+    ));
+}
+
+#[test]
+fn health_cursor_past_every_row_is_still_a_rewind() {
+    let h = HealthState {
+        instance_id: Some("db-a".into()),
+        health_cursor: 20,
+        last_run_ms: Some(NOW - 600_000),
+        ..Default::default()
+    };
+    let c = KickCounters {
+        instance_id: "db-a".into(),
+        max_command_id: 10,
+        max_any_command_id: 13,
+        max_health_id: 0,
     };
     assert_eq!(health_cursor(&h, &c), 0);
     assert!(health_due(

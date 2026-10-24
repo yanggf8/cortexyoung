@@ -28,7 +28,17 @@ pub const INSTANCE_KEY: &str = "INSTANCE_ID";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KickCounters {
     pub instance_id: String,
+    /// `MAX(id)` over `command_log` rows **excluding** `command = 'measure'`: how much genuine
+    /// usage is waiting to be collected. `measure` rows never make a batch due on their own.
     pub max_command_id: i64,
+    /// `MAX(id)` over **every** `command_log` row, `measure` included: the highest rowid that
+    /// exists at all. A cursor is only a rewind when it is past *this*, because
+    /// `uploaded_through_id` is the highest local rowid already copied -- and the copy takes
+    /// `measure` rows with it, so a cursor that is legitimately ahead of `max_command_id` is the
+    /// normal state right after a batch, not evidence of a restored database.
+    pub max_any_command_id: i64,
+    /// `MAX(id)` over `index_health_log`. That table has no `measure` rows, so one max serves both
+    /// the pending count and the rewind test.
     pub max_health_id: i64,
 }
 
@@ -223,6 +233,13 @@ pub fn kick_counters_at(path: &Path) -> Option<KickCounters> {
             |row| row.get(0),
         )
         .ok()?;
+    // No WHERE clause: headline rowid, so SQLite answers from the rowid table itself in O(1)
+    // rather than walking the partial index.
+    let max_any_command_id = conn
+        .query_row("SELECT COALESCE(MAX(id), 0) FROM command_log", [], |row| {
+            row.get(0)
+        })
+        .ok()?;
     let max_health_id = conn
         .query_row(
             "SELECT COALESCE(MAX(id), 0) FROM index_health_log",
@@ -233,6 +250,7 @@ pub fn kick_counters_at(path: &Path) -> Option<KickCounters> {
     Some(KickCounters {
         instance_id,
         max_command_id,
+        max_any_command_id,
         max_health_id,
     })
 }

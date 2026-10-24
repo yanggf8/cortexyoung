@@ -314,7 +314,9 @@ pub fn batch_cursors(state: &CollectState, counters: &KickCounters) -> (i64, i64
         return (0, 0);
     }
     (
-        if state.uploaded_through_id > counters.max_command_id {
+        // Compared against every row, not just the non-`measure` ones: the cursor counts the
+        // `measure` rows the last batch copied too, so it legitimately sits past max_command_id.
+        if state.uploaded_through_id > counters.max_any_command_id {
             0
         } else {
             state.uploaded_through_id
@@ -328,8 +330,11 @@ pub fn batch_cursors(state: &CollectState, counters: &KickCounters) -> (i64, i64
 }
 
 pub fn health_cursor(state: &HealthState, counters: &KickCounters) -> i64 {
+    // Also against every row. Whether Task E advances this cursor past trailing `measure` rows is
+    // still open (`touched_project_ids_at` reads non-`measure` rows only); the comparison is right
+    // either way, since a non-`measure` cursor never exceeds `max_command_id <= max_any_command_id`.
     if state.instance_id.as_deref() != Some(counters.instance_id.as_str())
-        || state.health_cursor > counters.max_command_id
+        || state.health_cursor > counters.max_any_command_id
     {
         0
     } else {
@@ -368,6 +373,9 @@ pub fn batch_due(
         return false;
     }
     let (command_cursor, health_cursor) = batch_cursors(state, counters);
+    // The clamp is not defensive: a cursor may legitimately sit past `max_command_id`, because the
+    // rows it already copied include the `measure` rows that `max_command_id` excludes. Without the
+    // floor that negative would eat into `health_pending`.
     let command_pending = if state.refused {
         0
     } else {
