@@ -329,7 +329,7 @@
 - [ ] 兩台 `claudecat telemetry configure` 指向**量測資料庫**，各跑最後一次 `claudecat telemetry sync`。i51149R3050 的 `claudecat-telemetry-sync.timer` 已於 2026-10-24 `disable --now`（unit 檔保留），所以它的最後一次 sync 要手動跑。
 - [ ] `cort measure copy-events`，比對各組列數。
 - [ ] 兩台 `cort measure sync --dry-run`：重疊非空、100% 相符；不符就停，修 Task 6。
-- [ ] NUC11i5 `cort measure import-audit <claudecat>/CORT-AUDIT.md <i51149R3050 那份的副本> --project-repo <claudecat>`，對 56 列（55＋i51149R3050 獨有的 1 列）。
+- [x] NUC11i5 `cort measure import-audit <claudecat>/CORT-AUDIT.md <i51149R3050 那份的副本> --project-repo <claudecat>`，對 56 列（55＋i51149R3050 獨有的 1 列）。2026-10-25 04:33 台灣時間（20:33Z）用 `645e9682` 的開發版 binary 執行（未安裝）：讀 109 列、健康事件與用量各新增 56、重疊 53、衝突 0、push 成功；重跑全部已存在。host：NUC11i5 48、i51149R3050 5、Thinkpade15 1、MacBook-Pro.local 1、unknown（09-06）1。
 - [ ] 兩台 `cort measure cron --install --command-prefix <cort shim>`。
 - [ ] 隔天：遠端兩台都有昨天的快照、事件持續增加、無重複；壓縮列有新增。
 - [ ] 移除 `~/.cargo/bin/claudecat`（兩台）。
