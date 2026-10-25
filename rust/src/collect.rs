@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Lane {
@@ -407,14 +407,289 @@ fn collect_failure(state: &mut CollectState, harness: &str, now_ms: i64, kind: E
     failure.last_failed_ms = now_ms;
 }
 
-fn uploaded_id(report: &Option<Value>) -> Option<i64> {
-    report
-        .as_ref()
-        .filter(|r| r["status"] == "uploaded")
-        .and_then(|r| r["watermark"].as_i64())
+fn finish_collect_state(
+    state: &mut CollectState,
+    harness: &str,
+    now_ms: i64,
+    kind: Option<ErrorKind>,
+    events: Option<&Value>,
+    health: Option<&Value>,
+) {
+    if let Some(report) = events {
+        if report["status"] == "uploaded" {
+            if let Some(id) = report["watermark"].as_i64() {
+                state.uploaded_through_id = id;
+            }
+        }
+        state.refused = report["status"] == "refused";
+    }
+    if let Some(report) = health {
+        if report["status"] == "uploaded" {
+            if let Some(id) = report["watermark"].as_i64() {
+                state.health_uploaded_through_id = id;
+            }
+        }
+    }
+    if let Some(kind) = kind {
+        collect_failure(state, harness, now_ms, kind);
+    } else {
+        state.failures.remove(harness);
+        state.push_pending = false;
+        state.last_ok_ms = Some(now_ms);
+    }
 }
 
-/// Execute one background batch while holding the collection lock. `manual` is reserved for G2.
+/// The first failed upload wins over later push/pull failures for both batch and manual record.
+pub fn classify_record(
+    scan: &measure::ScanSummary,
+    outcome: &RecordOutcome,
+) -> (Option<ErrorKind>, Option<String>) {
+    let upload_error = [&scan.events, &scan.health].iter().find_map(|report| {
+        report
+            .as_ref()
+            .filter(|r| r["status"] == "failed")
+            .map(|r| r["error"].as_str().unwrap_or("upload failed").to_string())
+    });
+    match (upload_error, outcome) {
+        (Some(error), _) => (Some(ErrorKind::Storage), Some(error)),
+        (None, RecordOutcome::Pushed) => (None, None),
+        (None, RecordOutcome::SavedLocallyPushFailed(error)) => (
+            Some(ErrorKind::Network),
+            Some(format!("push failed: {error}")),
+        ),
+        (None, RecordOutcome::PushedPullFailed(error)) => (
+            Some(ErrorKind::Network),
+            Some(format!("pull failed: {error}")),
+        ),
+    }
+}
+
+fn stamp_holder(lock: &mut fs::File, now_ms: i64) {
+    // Descriptive metadata on the locked inode. Failure to write it never invalidates the lock.
+    let _ = lock
+        .set_len(0)
+        .and_then(|_| lock.seek(SeekFrom::Start(0)))
+        .and_then(|_| writeln!(lock, "pid={} started_ms={}", std::process::id(), now_ms));
+}
+
+#[derive(Clone, Copy)]
+pub enum ManualMode {
+    Write,
+    DryRun,
+}
+
+pub struct ManualStep<T> {
+    pub value: T,
+    pub events: Option<Value>,
+    pub failure: Option<ErrorKind>,
+}
+
+pub type ManualActionResult<T> = Result<ManualStep<T>, (String, ErrorKind)>;
+
+/// A dry run passes only when it matched ids, because only then did `verify_events` write the
+/// marker the upload gate reads. `matched == 0` is still a successful command, but clearing
+/// `refused` (and the kick stamp) for it would only buy the next batch another refusal.
+pub fn dry_run_step(report: crate::telemetry::DryRun) -> ManualStep<crate::telemetry::DryRun> {
+    let failure = (report.matched == 0).then_some(ErrorKind::Other);
+    ManualStep {
+        value: report,
+        events: None,
+        failure,
+    }
+}
+
+/// A manual sync fails on a failed upload (storage) or a failed push/pull (network). A refused
+/// upload is the persistent state `refused` records, not a failure, so a sync whose replica work
+/// succeeded still clears `push_pending`; the CLI reports the refusal on its own.
+pub fn sync_step(
+    events: telemetry::EventsReport,
+    synced: Result<(), String>,
+) -> ManualStep<(telemetry::EventsReport, Result<(), String>)> {
+    let failure = if matches!(events, telemetry::EventsReport::Failed(_)) {
+        Some(ErrorKind::Storage)
+    } else if synced.is_err() {
+        Some(ErrorKind::Network)
+    } else {
+        None
+    };
+    ManualStep {
+        events: Some(events.to_json()),
+        failure,
+        value: (events, synced),
+    }
+}
+
+#[derive(Debug)]
+pub enum ManualError {
+    Busy(String),
+    Other(String),
+}
+
+impl ManualError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Busy(_) => "measure_collect_busy",
+            Self::Other(_) => "measure_error",
+        }
+    }
+
+    pub fn message(&self) -> &str {
+        match self {
+            Self::Busy(message) | Self::Other(message) => message,
+        }
+    }
+}
+
+fn holder_description(path: &Path) -> Option<String> {
+    let content = fs::read_to_string(path).ok()?;
+    let mut fields = content.split_whitespace();
+    let pid = fields.next()?.strip_prefix("pid=")?.parse::<u32>().ok()?;
+    let started = fields
+        .next()?
+        .strip_prefix("started_ms=")?
+        .parse::<i64>()
+        .ok()?;
+    if fields.next().is_some() {
+        return None;
+    }
+    Some(format!(
+        " (pid {pid}, started {})",
+        measure::format_utc(started)
+    ))
+}
+
+fn manual_lock(path: &Path, wait: Duration, now_ms: i64) -> Result<fs::File, ManualError> {
+    let start = Instant::now();
+    loop {
+        match crate::upgrade::try_exclusive_lock(path) {
+            Ok(mut lock) => {
+                stamp_holder(&mut lock, now_ms);
+                return Ok(lock);
+            }
+            Err(crate::upgrade::LockError::AdmissionBusy) => {
+                if start.elapsed() >= wait {
+                    let holder = holder_description(path).unwrap_or_default();
+                    return Err(ManualError::Busy(format!(
+                        "measure collect is running{holder}; try again later"
+                    )));
+                }
+            }
+            Err(error) => {
+                return Err(ManualError::Other(format!(
+                    "measure_collect_lock_unavailable: {error:?}"
+                )));
+            }
+        }
+        // Same bounded 50 ms polling as memory_store::lock_in_within.
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Hold the collection lock, then open the bounded measure store and update shared collection
+/// state around a manual record, sync, or dry run. The caller supplies the original CLI operation.
+pub fn run_manual<T>(
+    store_opener: &mut dyn FnMut() -> Result<Box<dyn MeasureStore>, OpenError>,
+    paths: &KickPaths,
+    now_ms: i64,
+    cfg: &CollectConfig,
+    mode: ManualMode,
+    action: &mut dyn FnMut(&mut dyn MeasureStore) -> ManualActionResult<T>,
+) -> Result<T, ManualError> {
+    fs::create_dir_all(&paths.data_dir).map_err(|e| ManualError::Other(e.to_string()))?;
+    let _lock = manual_lock(
+        &paths.data_dir.join("measure-collect.lock"),
+        Duration::from_millis(cfg.manual_wait_ms),
+        now_ms,
+    )?;
+    let state_path = paths.data_dir.join("measure-collect-state.json");
+    let mut state = CollectState::load(&state_path);
+    if matches!(mode, ManualMode::Write) {
+        let counters = crate::usage::kick_counters_at(&paths.usage_db);
+        if let Some(ref counters) = counters {
+            let (command, health) = batch_cursors(&state, counters);
+            state.instance_id = Some(counters.instance_id.clone());
+            state.uploaded_through_id = command;
+            state.health_uploaded_through_id = health;
+        }
+        state.push_pending = true;
+        state.last_run_ms = Some(now_ms);
+        if counters.is_none() {
+            finish_collect_state(
+                &mut state,
+                "manual",
+                now_ms,
+                Some(ErrorKind::Storage),
+                None,
+                None,
+            );
+        }
+        state.save(&state_path).map_err(ManualError::Other)?;
+        if counters.is_none() {
+            return Err(ManualError::Other("usage_db_unreadable".into()));
+        }
+    }
+    let mut store = match store_opener() {
+        Ok(store) => store,
+        Err(OpenError::Busy) => {
+            return Err(ManualError::Busy(
+                "measure store is busy; try again later".into(),
+            ));
+        }
+        Err(OpenError::Other(error)) => {
+            if matches!(mode, ManualMode::Write) {
+                finish_collect_state(
+                    &mut state,
+                    "manual",
+                    now_ms,
+                    Some(ErrorKind::Other),
+                    None,
+                    None,
+                );
+                state.save(&state_path).map_err(ManualError::Other)?;
+            }
+            return Err(ManualError::Other(error));
+        }
+    };
+    let result = action(store.as_mut());
+    match result {
+        Ok(step) => {
+            if matches!(mode, ManualMode::DryRun) {
+                // Only a pass lifts the refusal; see `dry_run_step`.
+                if step.failure.is_none() {
+                    state.refused = false;
+                    state.save(&state_path).map_err(ManualError::Other)?;
+                    let stamp = paths.data_dir.join("measure-batch.spawned");
+                    if let Err(error) = fs::remove_file(stamp) {
+                        if error.kind() != std::io::ErrorKind::NotFound {
+                            return Err(ManualError::Other(error.to_string()));
+                        }
+                    }
+                }
+            } else {
+                finish_collect_state(
+                    &mut state,
+                    "manual",
+                    now_ms,
+                    step.failure,
+                    step.events.as_ref(),
+                    None,
+                );
+                state.save(&state_path).map_err(ManualError::Other)?;
+            }
+            Ok(step.value)
+        }
+        Err((message, kind)) => {
+            if matches!(mode, ManualMode::Write) {
+                finish_collect_state(&mut state, "manual", now_ms, Some(kind), None, None);
+                state.save(&state_path).map_err(ManualError::Other)?;
+            }
+            Err(ManualError::Other(message))
+        }
+    }
+}
+
+/// Execute one background batch while holding the collection lock. Manual commands go through
+/// [`run_manual`], which keeps their failures out of the harness counts; `manual: true` is refused.
 pub fn run_collect(
     store_opener: &mut dyn FnMut() -> Result<Box<dyn MeasureStore>, OpenError>,
     paths: &KickPaths,
@@ -451,10 +726,7 @@ pub fn run_collect(
         return collect_run("skipped_busy", harness, false, None, None);
     }
     // This is descriptive metadata on the already locked file; never replace its inode or fd.
-    let _ = lock
-        .set_len(0)
-        .and_then(|_| lock.seek(SeekFrom::Start(0)))
-        .and_then(|_| writeln!(lock, "pid={} started_ms={}", std::process::id(), now_ms));
+    stamp_holder(&mut lock, now_ms);
 
     let state_path = paths.data_dir.join("measure-collect-state.json");
     let mut state = CollectState::load(&state_path);
@@ -529,44 +801,18 @@ pub fn run_collect(
         Ok((scan, outcome)) => {
             // Uploads happen command, then health, then push, then pull. The first failed stage
             // supplies the category (and the message) even when a later stage also fails.
-            let upload_error = [&scan.events, &scan.health].iter().find_map(|report| {
-                report
-                    .as_ref()
-                    .filter(|r| r["status"] == "failed")
-                    .map(|r| r["error"].as_str().unwrap_or("upload failed").to_string())
-            });
-            let (kind, error) = match (upload_error, outcome) {
-                (Some(e), _) => (Some(ErrorKind::Storage), Some(e)),
-                (None, RecordOutcome::Pushed) => (None, None),
-                (None, RecordOutcome::SavedLocallyPushFailed(e)) => {
-                    (Some(ErrorKind::Network), Some(format!("push failed: {e}")))
-                }
-                (None, RecordOutcome::PushedPullFailed(e)) => {
-                    (Some(ErrorKind::Network), Some(format!("pull failed: {e}")))
-                }
-            };
+            let (kind, error) = classify_record(&scan, &outcome);
             (Some(scan), kind, error)
         }
     };
-    if let Some(scan) = &scan {
-        if let Some(id) = uploaded_id(&scan.events) {
-            state.uploaded_through_id = id;
-        }
-        if let Some(id) = uploaded_id(&scan.health) {
-            state.health_uploaded_through_id = id;
-        }
-        state.refused = scan
-            .events
-            .as_ref()
-            .is_some_and(|r| r["status"] == "refused");
-    }
-    if let Some(kind) = kind {
-        collect_failure(&mut state, harness, now_ms, kind);
-    } else {
-        state.failures.remove(harness);
-        state.push_pending = false;
-        state.last_ok_ms = Some(now_ms);
-    }
+    finish_collect_state(
+        &mut state,
+        harness,
+        now_ms,
+        kind,
+        scan.as_ref().and_then(|s| s.events.as_ref()),
+        scan.as_ref().and_then(|s| s.health.as_ref()),
+    );
     let scan_json = scan.map(|s| s.to_json());
     // Decided before the save: a run whose state cannot be written still saw the transition, and
     // its line is the one that most needs the refusal's reason.

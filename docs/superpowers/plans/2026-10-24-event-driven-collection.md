@@ -411,15 +411,15 @@
 - Consumes: G1a／G1b `run_collect`。
 - Produces: 錯誤碼 `measure_collect_busy`（訊息：`measure collect is running (pid <pid>, started <UTC>); try again later`）。手動失敗記在 `failures["manual"]`，不動任何 harness 的計數。
 
-- [ ] **Step 1: 寫失敗的測試**
+- [x] **Step 1: 寫失敗的測試**
   - `manual_busy_times_out_with_holder`：持有者寫了 pid → 手動在 `manual_wait_ms`（測試設 1 秒）後回 `measure_collect_busy` 且訊息含 pid。
   - `manual_runs_even_when_not_due`：剛跑過、pending 0 → 手動 `record` 照跑。
   - `manual_failure_counts_manual_only`。
   - `dry_run_pass_clears_refused_and_stamp`：`sync --dry-run` 通過 → `refused=false`、`measure-batch.spawned` 被刪。
   - `record_cli_output_unchanged`：既有 `measure record` CLI 測試的輸出欄位不變。
-- [ ] **Step 2: 跑 `cargo test --locked --test collect_manual`，預期失敗。**
-- [ ] **Step 3: 實作。**
-- [ ] **Step 4: 跑測試至綠，再跑全套 gate。**
+- [x] **Step 2: 跑 `cargo test --locked --test collect_manual`，預期失敗。**
+- [x] **Step 3: 實作。**
+- [x] **Step 4: 跑測試至綠，再跑全套 gate。**
 
 ### Task H: 網路逾時與整次期限
 

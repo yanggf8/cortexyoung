@@ -2102,6 +2102,30 @@ fn warn_events(scan: &cort::measure::ScanSummary) {
     }
 }
 
+fn manual_error(error: cort::collect::ManualError, ordinary_code: &'static str) -> CortError {
+    let code = if error.code() == "measure_collect_busy" {
+        error.code()
+    } else {
+        ordinary_code
+    };
+    CortError::new(code, json!({"message":error.message()}))
+}
+
+/// `code` is the one the command used for an unconfigured store before it took the collect lock:
+/// `measure_dry_run_failed` for `sync --dry-run`, `measure_error` everywhere else.
+fn require_measure_config(code: &'static str) -> Result<(), CortError> {
+    if cort::measure_store::is_configured() {
+        Ok(())
+    } else {
+        Err(CortError::new(
+            code,
+            json!({
+                "message": "Turso measurement is not configured; run `cort measure configure --url URL --token-stdin`"
+            }),
+        ))
+    }
+}
+
 fn cmd_measure(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, CortError> {
     let a = MeasureArgs::try_parse_from(args.iter()).map_err(clap_fail)?;
     let value = match a.action {
@@ -2186,19 +2210,43 @@ fn cmd_measure(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, CortErr
             value
         }
         MeasureAction::Record => {
+            require_measure_config("measure_error")?;
+            let paths = cort::collect::KickPaths::current().ok_or_else(|| {
+                CortError::new("measure_error", json!({"message":"cannot locate usage.db"}))
+            })?;
+            let cfg = cort::collect::CollectConfig::from_env();
+            let now_ms = usage::now_ms();
             let input = cort::measure::RecordInputs {
                 projects_dir: cort::measure::claude_projects_dir(),
                 marks_path: cort::measure::Watermarks::default_path(),
                 machine_id: usage::machine_id().to_string(),
                 host: cort::measure::host_name(),
-                now_ms: usage::now_ms(),
+                now_ms,
                 events: event_inputs(),
                 health: None,
             };
-            let (scan, outcome) = cort::measure_store::with_turso_store(|store| {
-                cort::measure::record_with_scan(store, &input)
-            })
-            .map_err(|m| CortError::new("measure_error", json!({"message":m})))?;
+            let (scan, outcome) = cort::collect::run_manual(
+                &mut || {
+                    cort::measure_store::open_measure_store_within(
+                        std::time::Duration::from_millis(cfg.manual_wait_ms),
+                    )
+                },
+                &paths,
+                now_ms,
+                &cfg,
+                cort::collect::ManualMode::Write,
+                &mut |store| {
+                    let (scan, outcome) = cort::measure::record_with_scan(store, &input)
+                        .map_err(|e| (e, cort::collect::ErrorKind::Storage))?;
+                    let failure = cort::collect::classify_record(&scan, &outcome).0;
+                    Ok(cort::collect::ManualStep {
+                        events: scan.events.clone(),
+                        failure,
+                        value: (scan, outcome),
+                    })
+                },
+            )
+            .map_err(|e| manual_error(e, "measure_error"))?;
             warn_events(&scan);
             match outcome {
                 cort::measure::RecordOutcome::Pushed => {
@@ -2304,23 +2352,56 @@ fn cmd_measure(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, CortErr
                     json!({"message":"cannot locate usage.db (HOME is unset and CORT_CACHE_DIR is not set)"}),
                 ));
             };
+            require_measure_config(if dry_run {
+                "measure_dry_run_failed"
+            } else {
+                "measure_error"
+            })?;
             let fail = |m: String| CortError::new("measure_error", json!({"message":m}));
+            let paths = cort::collect::KickPaths::current()
+                .ok_or_else(|| fail("cannot locate usage.db".into()))?;
+            let cfg = cort::collect::CollectConfig::from_env();
+            let now_ms = usage::now_ms();
             if dry_run {
-                let report = cort::measure_store::with_turso_store(|store| {
-                    cort::telemetry::verify_events(store, &up, usage::now_ms())
-                })
-                .map_err(|m| CortError::new("measure_dry_run_failed", json!({"message":m})))?;
+                let report = cort::collect::run_manual(
+                    &mut || {
+                        cort::measure_store::open_measure_store_within(
+                            std::time::Duration::from_millis(cfg.manual_wait_ms),
+                        )
+                    },
+                    &paths,
+                    now_ms,
+                    &cfg,
+                    cort::collect::ManualMode::DryRun,
+                    &mut |store| {
+                        cort::telemetry::verify_events(store, &up, now_ms)
+                            .map(cort::collect::dry_run_step)
+                            .map_err(|e| (e, cort::collect::ErrorKind::Storage))
+                    },
+                )
+                .map_err(|e| manual_error(e, "measure_dry_run_failed"))?;
                 json!({"status":"dry_run_ok","pushed":false,
                     "matched":report.matched,"local_only":report.local_only,
                     "remote_only":report.remote_only,
                     "verified":report.matched > 0,
                     "note":"ids match; the next `record` or `sync` may upload events for this machine"})
             } else {
-                let (events, synced) = cort::measure_store::with_turso_store(|store| {
-                    let events = cort::telemetry::upload_events(store, &up);
-                    Ok((events, cort::measure::sync(store)))
-                })
-                .map_err(fail)?;
+                let (events, synced) = cort::collect::run_manual(
+                    &mut || {
+                        cort::measure_store::open_measure_store_within(
+                            std::time::Duration::from_millis(cfg.manual_wait_ms),
+                        )
+                    },
+                    &paths,
+                    now_ms,
+                    &cfg,
+                    cort::collect::ManualMode::Write,
+                    &mut |store| {
+                        let events = cort::telemetry::upload_events(store, &up);
+                        Ok(cort::collect::sync_step(events, cort::measure::sync(store)))
+                    },
+                )
+                .map_err(|e| manual_error(e, "measure_error"))?;
                 synced.map_err(fail)?;
                 cort::measure::write_last_sync(usage::now_ms()).map_err(fail)?;
                 if !events.is_ok() {
