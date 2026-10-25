@@ -57,7 +57,7 @@ fn usage_value() -> Value {
             "impact": "cort impact --symbol <name> [--depth <n>] [--coverage] [-f json|lean]",
             "usage": "cort usage [days] [-f json|lean]",
             "memory": "cort memory <configure|import-config|record|resolve|recall|status|sync|import-legacy> [options]",
-            "measure": "cort measure <configure|show|record|sync|copy-events|import-audit|cron|report> [options]  (copy-events: one-time, re-runnable, read-only copy of claudecat's uploaded events from harnessuse, never overwrites, reports same-key rows whose columns differ as conflicts; import-audit: one-time, re-runnable import of CORT-AUDIT.md's health and usage columns, never overwrites, run on one machine only; sync --dry-run compares event ids and never pushes; the local command_log keeps 90 days, so events are lost only if they go unuploaded for 90 days in a row: record not running, or uploads refused pending a dry run)",
+            "measure": "cort measure <configure|show|record|sync|health|copy-events|import-audit|cron|report> [options]  (health: observe recently used indexes and write local index_health_log, reading indexes only, with no network; --background appends the result to measure.log without stdout; copy-events: one-time, re-runnable, read-only copy of claudecat's uploaded events from harnessuse, never overwrites, reports same-key rows whose columns differ as conflicts; import-audit: one-time, re-runnable import of CORT-AUDIT.md's health and usage columns, never overwrites, run on one machine only; sync --dry-run compares event ids and never pushes; the local command_log keeps 90 days, so events are lost only if they go unuploaded for 90 days in a row: record not running, or uploads refused pending a dry run)",
             "hook-suggest": "cort hook-suggest  (PreToolUse hook: records one fire row and kicks collection; never speaks; not a verb to type)",
             "hook-refresh": "cort hook-refresh  (PostToolUse hook: brings this project's index up to the tree after an edit; silent, never creates an index; not a verb to type)",
             "hook-install": "cort hook-install [--settings <path>] [--command <cmd>] [--remove|--status]  (installer-invoked: wires hook-suggest into settings.json; not a verb to type)",
@@ -2021,6 +2021,12 @@ enum MeasureAction {
     Show { id: String },
     /// Scan local transcripts into the store, then push and pull.
     Record,
+    /// Observe recently used indexes, read-only, and write local index_health_log; no network.
+    Health {
+        /// For the kicked child: append the result to measure.log without stdout.
+        #[arg(long)]
+        background: bool,
+    },
     /// Upload usage events (and push/pull); `--dry-run` only compares ids and never pushes.
     #[command(long_about = SYNC_HELP)]
     Sync {
@@ -2208,6 +2214,50 @@ fn cmd_measure(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, CortErr
                 }
             }
         }
+        MeasureAction::Health { background } => {
+            let now_ms = usage::now_ms();
+            let result = cort::collect::KickPaths::current()
+                .ok_or_else(|| "cannot locate usage.db".to_string())
+                .and_then(|paths| {
+                    cort::health::run_health(
+                        &paths,
+                        usage::machine_id(),
+                        usage::machine_id_source(),
+                        now_ms,
+                        &cort::collect::CollectConfig::from_env(),
+                        &mut cort::collect::DetachedSpawner,
+                    )
+                });
+            // Every worker Err means this pass did not finish and did not advance its cursor.
+            let (summary, error) = match result {
+                Ok(run) => (
+                    json!({"lane":"health","ts_ms":now_ms,"observed":run.observed,
+                        "written":run.written,"unmapped":run.unmapped,
+                        "skipped_busy":run.skipped_busy}),
+                    None,
+                ),
+                Err(message) => (
+                    json!({"lane":"health","ts_ms":now_ms,"error":message}),
+                    Some(message),
+                ),
+            };
+            if background {
+                cort::collect::append_measure_log(
+                    &cort::data_dir::data_dir(),
+                    &summary.to_string(),
+                )
+                .map_err(|message| {
+                    CortError::new("measure_health_failed", json!({"message":message}))
+                })?;
+            }
+            if let Some(message) = error {
+                return Err(CortError::new(
+                    "measure_health_failed",
+                    json!({"message":message}),
+                ));
+            }
+            summary
+        }
         MeasureAction::Sync { dry_run } => {
             let Some(up) = event_inputs() else {
                 return Err(CortError::new(
@@ -2378,33 +2428,58 @@ fn peek_format(args: &[String]) -> Format {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // A kicked `measure health --background` child prints nothing on any path, the early
+    // `--help`/`--version` returns included: its stdio is null and `measure.log` is its only output.
+    let background_health = args.first().is_some_and(|a| a == "measure")
+        && args.get(1).is_some_and(|a| a == "health")
+        && args
+            .iter()
+            .any(|a| a == "--background" || a.starts_with("--background="));
     if wants_help(&args) {
         let usage = if args.first().is_some_and(|a| a == "memory") {
             memory_usage_value()
         } else {
             usage_value()
         };
-        print!("{}", render(None, Format::Json, &usage));
+        if !background_health {
+            print!("{}", render(None, Format::Json, &usage));
+        }
         return;
     }
     // Before `usage_from_args`, for the reason `--help` is: asking a binary its version must not
     // create a cache directory, a project database or a usage row.
     if wants_version(&args) {
-        println!("cort {} (rust)", env!("CARGO_PKG_VERSION"));
+        if !background_health {
+            println!("cort {} (rust)", env!("CARGO_PKG_VERSION"));
+        }
         return;
     }
     let mut usage_ev = usage_from_args(&args);
     match dispatch(&args, &mut usage_ev) {
         Ok(emitted) => {
             let rendered = render_emit(&emitted);
-            print!("{rendered}");
-            finish_record(&usage_ev, "ok", None, rendered.len());
+            if !background_health {
+                print!("{rendered}");
+            }
+            finish_record(
+                &usage_ev,
+                "ok",
+                None,
+                if background_health { 0 } else { rendered.len() },
+            );
         }
         Err(err) => {
             let format = peek_format(&args);
             let rendered = render_error(format, &err);
-            print!("{rendered}");
-            finish_record(&usage_ev, "error", Some(&err.code), rendered.len());
+            if !background_health {
+                print!("{rendered}");
+            }
+            finish_record(
+                &usage_ev,
+                "error",
+                Some(&err.code),
+                if background_health { 0 } else { rendered.len() },
+            );
             std::process::exit(1);
         }
     }

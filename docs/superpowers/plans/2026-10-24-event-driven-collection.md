@@ -294,7 +294,7 @@
 - 流程照設計第 3 節：拿 `measure-health.lock`（拿不到 → `skipped_busy`）；instance／倒退 → 游標歸零；`touched_project_ids_at` → 對回 root（`list_projects()` 的 `Indexed`；`Unreadable` 由 `db_path` 檔名取 project_id 記 `unreadable`；`last_health_rows_at(path, machine_id)` 的本機歷史 root；都沒有 → `unmapped`，`unmapped_count` 加一、id 放到 `unmapped_recent` 最前面並去重，只留 5 個）；逐一 `observe_bounded`；**寫入條件**：與該 project 上一列所有指標與 status 相同且同一 UTC 日 → 不寫；`project_id` 用 `memory_store::project_from_git_origin(root)`（與壓縮列同一函式，回 `Result<String, String>`），`Err` 存 NULL；寫完推進 cursor、存 state；`written > 0` 時以同一個 `spawner` 呼叫一次 `kick_at(..., "measure-health", ..., spawner)`。
 - CLI：`cort measure health [--background]`；`--background` 時把一行 JSON 摘要附加到 `measure.log`、stdout 不輸出；沒有 `--background` 時印 JSON。兩者都 exit 0，除非 `usage.db` 寫入失敗（`measure_health_failed`）。
 
-- [ ] **Step 1: 寫失敗的測試**
+- [x] **Step 1: 寫失敗的測試**（實作拆成 E1 `run_health`＋`tests/health_worker.rs`、E2 CLI＋`tests/health_cli.rs`；審查後另加：不同原因的 unreadable 同日重寫、升級中跳過、origin 查詢卡住不佔鎖、背景 `--help`／`--version` 不輸出、並發 append 不黏行）
   - `touched_project_is_observed_and_written`。
   - `same_state_same_day_not_rewritten`；`same_state_next_day_rewritten`；`changed_state_rewritten`。
   - `deleted_index_maps_back_via_history`：先觀察一次，刪 index，再寫一筆 command 列 → 第二列 `status=no_index`、root 相同。
@@ -306,9 +306,9 @@
   - `busy_lock_skips`。
   - `handoff_kicks_batch_when_written`：假 spawner 收到一次 `Lane::Batch`（若到期）；沒寫列時不 kick。
   - `background_writes_log_not_stdout`（CLI）。
-- [ ] **Step 2: 跑 `cargo test --locked --test health_worker`，預期失敗。**
-- [ ] **Step 3: 實作。**
-- [ ] **Step 4: 跑測試至綠，再跑全套 gate。**
+- [x] **Step 2: 跑 `cargo test --locked --test health_worker`，預期失敗。**
+- [x] **Step 3: 實作。**
+- [x] **Step 4: 跑測試至綠，再跑全套 gate。**
 
 ### Task F: 健康來源上傳 `cort_index_health`
 

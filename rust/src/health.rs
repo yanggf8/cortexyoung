@@ -14,11 +14,13 @@
 //! source states but does not always keep: **a failed read is NULL, never zero.** NULL means "could
 //! not read it", the reason is in `status`/`error`, and `0` is a fact.
 
-use crate::collect::CollectConfig;
+use crate::collect::{CollectConfig, HealthState, KickPaths, Spawner};
 use crate::db::Db;
+use crate::usage::HealthRow;
 use rusqlite::OptionalExtension;
+use std::collections::HashMap;
 use std::io::ErrorKind;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -498,6 +500,317 @@ pub fn observe_bounded(root: &Path, local_project_id: &str, cfg: &CollectConfig)
     let timeout = Duration::from_millis(cfg.root_timeout_ms);
     let cfg = cfg.clone();
     bounded(move || observe(&root, &project_id, &cfg), timeout)
+}
+
+/// What one [`run_health`] pass did.
+///
+/// `observed` counts every project id the pass **looked at**: one per [`observe_bounded`] call, plus
+/// one per cache entry `list_projects` reported as unreadable — that one is recorded from the scan's
+/// own reason instead of being observed, and only the scan knows why it will not open. An id that
+/// mapped to nothing is not observed; it is `unmapped`. `skipped_busy` means the pass did nothing
+/// because another pass held the run lock or an upgrade held admission.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HealthRun {
+    pub observed: usize,
+    pub written: usize,
+    pub unmapped: usize,
+    pub skipped_busy: bool,
+}
+
+/// One pass of design §3: observe the projects `command_log` has touched since the last pass, and
+/// record what changed.
+///
+/// **The bounds.** Take `measure-health.lock` and keep it until this function returns, the handoff
+/// [`crate::collect::kick_at`] included. Another pass holding it is `skipped_busy` with nothing
+/// read and nothing written, and so is an upgrade holding admission. The upgrade check is a check,
+/// not a guard held for the pass: `cort_upgrade` drains for 30 s and one pass may observe several
+/// roots at up to `root_timeout_ms` each, so holding the activity lock would time the upgrade out
+/// instead. What remains is the window where an upgrade starts mid-pass: it can move an index this
+/// pass is reading and leave one `unreadable` row, which the next touch of that project replaces.
+/// A lock file that cannot be opened is not an upgrade and does not stop the pass. A `usage.db`
+/// `kick_counters_at` cannot read is `Err("usage_db_unreadable")`, with the state file untouched.
+///
+/// **What is looked at.** `touched_project_ids_at` names the projects touched by non-`measure` rows
+/// after the stored cursor (as `collect::health_cursor` validates it: zeroed on a different
+/// `instance_id`, and on a cursor that outran every row). Each id is looked up, in the order that
+/// function returned it, in:
+///
+/// 1. the live index list — `list_projects`' `Indexed` entry, whose `path` is the observation root;
+/// 2. the same list's `Unreadable` entry, keyed by its `<local_project_id>.db` file name — recorded
+///    with `status = "unreadable"` and the scan's reason, never observed;
+/// 3. this machine's newest row for that id, whose `root` is the observation root (an index deleted
+///    since the last pass maps back this way, and D2 then answers `no_index` or `missing_dir`);
+/// 4. nothing — the id is `unmapped`: no row, `unmapped_count` grows, and the id moves to the front
+///    of `unmapped_recent` (deduplicated, five kept).
+///
+/// **When a row is written.** Only when the observation differs from this machine's previous row
+/// for the same id — `status`, `error`, `fresh`, `chunks`, `relationships`, `not_chunked`,
+/// `real_gap` and `fts` all compared — or when that row is from another UTC day. `error` is part of
+/// the comparison on purpose: two `unreadable` observations with different reasons are different
+/// states, and a row that dropped the reason would lose which one was seen when. Rows another
+/// machine recorded are invisible here (`last_health_rows_at` is scoped by `machine_id`), so a
+/// `usage.db` carried from elsewhere cannot make this machine skip its own first row.
+///
+/// **Failure.** A failed insert returns immediately: the cursor is not advanced and the state file
+/// is not rewritten, so the next pass reads the same ids again. Rows already inserted stay — the
+/// write condition above keeps them from being duplicated while the day and state still match.
+///
+/// **The cache directory.** `list_projects` and [`observe`] read the process-wide
+/// [`crate::db::cache_dir`], so `paths.cache_dir` has to name that same directory;
+/// [`KickPaths::current`] builds it that way. `paths.usage_db` is where the rows go.
+///
+/// `written > 0` ends with one `kick_at(..., "measure-health", ...)`, so a health row reaches the
+/// batch lane without waiting for the next hook (design §3, "交接給批次"). Its answer does not
+/// change this pass's result: the rows are written either way. Only the batch lane can spawn
+/// there -- the health lane is not due, because its state was just saved with this pass's
+/// `now_ms` and cursor.
+///
+/// A range with no touched project still moves the cursor (rows without a `project_id`, such as a
+/// `no_payload` fire, count toward `max_command_id`), so it saves the state and returns before
+/// reading the history or scanning the cache directory.
+pub fn run_health(
+    paths: &KickPaths,
+    machine_id: &str,
+    machine_source: &str,
+    now_ms: i64,
+    cfg: &CollectConfig,
+    spawner: &mut dyn Spawner,
+) -> Result<HealthRun, String> {
+    run_health_with_origin(
+        paths,
+        machine_id,
+        machine_source,
+        now_ms,
+        cfg,
+        spawner,
+        crate::memory_store::project_from_git_origin,
+    )
+}
+
+/// [`run_health`] with the origin lookup injected, so a test can make it hang. Not a second
+/// entry point for callers.
+#[doc(hidden)]
+pub fn run_health_with_origin(
+    paths: &KickPaths,
+    machine_id: &str,
+    machine_source: &str,
+    now_ms: i64,
+    cfg: &CollectConfig,
+    spawner: &mut dyn Spawner,
+    origin: fn(&Path) -> Result<String, String>,
+) -> Result<HealthRun, String> {
+    let _lock =
+        match crate::upgrade::try_exclusive_lock(&paths.data_dir.join("measure-health.lock")) {
+            Ok(lock) => lock,
+            Err(crate::upgrade::LockError::AdmissionBusy) => {
+                return Ok(HealthRun {
+                    skipped_busy: true,
+                    ..HealthRun::default()
+                })
+            }
+            Err(e) => return Err(format!("measure_health_lock_unavailable: {e:?}")),
+        };
+    if let Err(crate::upgrade::LockError::AdmissionBusy) =
+        crate::upgrade::try_protected_entry(&paths.cache_dir)
+    {
+        return Ok(HealthRun {
+            skipped_busy: true,
+            ..HealthRun::default()
+        });
+    }
+
+    let counters = crate::usage::kick_counters_at(&paths.usage_db)
+        .ok_or_else(|| "usage_db_unreadable".to_string())?;
+    let state_path = paths.data_dir.join("measure-health-state.json");
+    let mut state = HealthState::load(&state_path);
+    let cursor = crate::collect::health_cursor(&state, &counters);
+    let (ids, max_id) = crate::usage::touched_project_ids_at(&paths.usage_db, cursor)?;
+    if ids.is_empty() {
+        close_pass(
+            &mut state,
+            counters.instance_id,
+            max_id,
+            now_ms,
+            &state_path,
+        )?;
+        return Ok(HealthRun::default());
+    }
+    let mut history = crate::usage::last_health_rows_at(&paths.usage_db, machine_id)?;
+    let (indexed, unreadable) = cache_entries();
+
+    let mut run = HealthRun::default();
+    // One at a time, in `touched_project_ids_at`'s order: design §3's per-root budget is a budget
+    // for this loop, and two observations at once would spend it twice. A root that times out is
+    // the exception: `bounded` abandons its thread unjoined, so it keeps reading while the next
+    // root is observed, and the pass does not wait for it (design §3, "換下一個").
+    for id in ids {
+        let (root, observation) = if let Some(path) = indexed.get(&id) {
+            let root = PathBuf::from(path);
+            let observation = observe_bounded(&root, &id, cfg);
+            (Some(root), observation)
+        } else if let Some(reason) = unreadable.get(&id) {
+            let root = history
+                .get(&id)
+                .and_then(|row| row.root.clone())
+                .map(PathBuf::from);
+            let observation = Observation {
+                error: Some(reason.clone()),
+                ..Observation::blank(UNREADABLE)
+            };
+            (root, observation)
+        } else if let Some(root) = history.get(&id).and_then(|row| row.root.clone()) {
+            let root = PathBuf::from(root);
+            let observation = observe_bounded(&root, &id, cfg);
+            (Some(root), observation)
+        } else {
+            run.unmapped += 1;
+            state.unmapped_count = state.unmapped_count.saturating_add(1);
+            note_unmapped(&mut state.unmapped_recent, &id);
+            continue;
+        };
+        run.observed += 1;
+
+        let unchanged = history.get(&id).is_some_and(|previous| {
+            same_observation(previous, &observation) && same_utc_day(previous.ts, now_ms)
+        });
+        if unchanged {
+            continue;
+        }
+        let row = HealthRow {
+            id: 0,
+            ts: now_ms,
+            machine_id: machine_id.to_string(),
+            machine_source: machine_source.to_string(),
+            root: root
+                .as_deref()
+                .map(|root| root.to_string_lossy().into_owned()),
+            local_project_id: id.clone(),
+            project_id: root.as_deref().and_then(|root| {
+                project_of(root, origin, Duration::from_millis(cfg.root_timeout_ms))
+            }),
+            status: observation.status.to_string(),
+            error: observation.error.clone(),
+            fresh: observation.fresh.clone(),
+            chunks: observation.chunks,
+            relationships: observation.relationships,
+            not_chunked: observation.not_chunked,
+            real_gap: observation.real_gap,
+            fts: observation.fts.clone(),
+        };
+        let new_id = crate::usage::insert_health_row_at(&paths.usage_db, &row)
+            .map_err(|e| format!("index_health_log_write_failed: {e}"))?;
+        run.written += 1;
+        // Kept current so a second id that resolved to this same project would compare against the
+        // row just written; `touched_project_ids_at` returns distinct ids, so today it never does.
+        history.insert(id, HealthRow { id: new_id, ..row });
+    }
+
+    close_pass(
+        &mut state,
+        counters.instance_id,
+        max_id,
+        now_ms,
+        &state_path,
+    )?;
+
+    if run.written > 0 {
+        let _ = crate::collect::kick_at(paths, "measure-health", now_ms, cfg, spawner);
+    }
+    Ok(run)
+}
+
+/// The end of a completed pass: the cursor names the last non-`measure` row it read, under the
+/// `usage.db` instance it read it from.
+fn close_pass(
+    state: &mut HealthState,
+    instance_id: String,
+    cursor: i64,
+    now_ms: i64,
+    path: &Path,
+) -> Result<(), String> {
+    state.instance_id = Some(instance_id);
+    state.health_cursor = cursor;
+    state.last_run_ms = Some(now_ms);
+    state.save(path)
+}
+
+/// The cache scan as two maps keyed by the id `command_log` stores: each live index's root, and
+/// each entry that will not open with the reason the scan gave.
+fn cache_entries() -> (HashMap<String, String>, HashMap<String, String>) {
+    let mut indexed = HashMap::new();
+    let mut unreadable = HashMap::new();
+    for entry in crate::db::list_projects() {
+        match entry {
+            crate::db::ProjectEntry::Indexed(row) => {
+                indexed.insert(row.project_id, row.path);
+            }
+            // `db::db_path_for` names an index `<project_id>.db`, so the file stem is the id; an
+            // entry whose name is not of that shape can never be matched to a touched id.
+            crate::db::ProjectEntry::Unreadable { db_path, reason } => {
+                if let Some(id) = Path::new(&db_path)
+                    .file_stem()
+                    .map(|stem| stem.to_string_lossy().into_owned())
+                {
+                    unreadable.insert(id, reason);
+                }
+            }
+        }
+    }
+    (indexed, unreadable)
+}
+
+/// The normalised origin id a recorded row carries, or NULL: same function as the compressed rows,
+/// and an index without an origin remote simply has none.
+///
+/// Bounded the way the observation is, and by the same per-root budget, so a root costs at most
+/// twice `root_timeout_ms`. `git remote get-url` runs outside [`observe_bounded`], and a git that
+/// never answers (a hung network mount) would otherwise hold `measure-health.lock` for good and
+/// turn every later pass into `skipped_busy`. A lookup that times out, or whose thread cannot be
+/// started, is NULL -- "could not read", as everywhere else in this row -- and its thread is
+/// abandoned like a timed-out observation's. So is its `git` child: it is not killed or reaped
+/// here, the same stance design §3 takes for the git and ast-grep children a timed-out
+/// observation leaves behind (a git stuck on a hung mount is usually in uninterruptible sleep,
+/// where a kill would not land anyway). The leak is bounded by the write condition: a root that
+/// hangs keeps producing the same `unreadable`/`timeout` observation, which is written -- and
+/// looks its origin up -- at most once per UTC day.
+fn project_of(
+    root: &Path,
+    origin: fn(&Path) -> Result<String, String>,
+    timeout: Duration,
+) -> Option<String> {
+    let root = root.to_path_buf();
+    let (tx, rx) = mpsc::channel();
+    std::thread::Builder::new()
+        .name("health-origin".into())
+        .spawn(move || {
+            let _ = tx.send(origin(&root).ok());
+        })
+        .ok()?;
+    rx.recv_timeout(timeout).ok().flatten()
+}
+
+/// Whether a previous row already says exactly what this observation says -- `error` included.
+fn same_observation(previous: &HealthRow, observation: &Observation) -> bool {
+    previous.status == observation.status
+        && previous.error == observation.error
+        && previous.fresh == observation.fresh
+        && previous.chunks == observation.chunks
+        && previous.relationships == observation.relationships
+        && previous.not_chunked == observation.not_chunked
+        && previous.real_gap == observation.real_gap
+        && previous.fts == observation.fts
+}
+
+/// Same UTC day, which is the granularity design §3's write condition uses ("至少一列" per used day).
+fn same_utc_day(a: i64, b: i64) -> bool {
+    a.div_euclid(crate::measure::DAY_MS) == b.div_euclid(crate::measure::DAY_MS)
+}
+
+/// Record an id that resolved to no root: newest first, never twice, five kept.
+fn note_unmapped(recent: &mut Vec<String>, id: &str) {
+    recent.retain(|kept| kept != id);
+    recent.insert(0, id.to_string());
+    recent.truncate(5);
 }
 
 /// The `fresh` label for one observation.
