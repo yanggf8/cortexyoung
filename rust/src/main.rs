@@ -57,7 +57,7 @@ fn usage_value() -> Value {
             "impact": "cort impact --symbol <name> [--depth <n>] [--coverage] [-f json|lean]",
             "usage": "cort usage [days] [-f json|lean]",
             "memory": "cort memory <configure|import-config|record|resolve|recall|status|sync|import-legacy> [options]",
-            "measure": "cort measure <configure|show|record|sync|collect|health|copy-events|import-audit|cron|report> [options]  (collect: scan and upload the batch; --background appends at most one result to measure.log (none when skipped_busy) without stdout; health: observe recently used indexes and write local index_health_log, reading indexes only, with no network; --background appends the result to measure.log without stdout; copy-events: one-time, re-runnable, read-only copy of claudecat's uploaded events from harnessuse, never overwrites, reports same-key rows whose columns differ as conflicts; import-audit: one-time, re-runnable import of CORT-AUDIT.md's health and usage columns, never overwrites, run on one machine only; sync --dry-run compares event ids and never pushes; the local command_log keeps 90 days, so events are lost only if they go unuploaded for 90 days in a row: record not running, or uploads refused pending a dry run)",
+            "measure": "cort measure <configure|show|record|sync|collect|health|status|copy-events|import-audit|cron|report> [options]  (collect: scan and upload the batch; --background appends at most one result to measure.log (none when skipped_busy) without stdout; health: observe recently used indexes and write local index_health_log, reading indexes only, with no network; --background appends the result to measure.log without stdout; status: read local collection state, -f json|lean; copy-events: one-time, re-runnable, read-only copy of claudecat's uploaded events from harnessuse, never overwrites, reports same-key rows whose columns differ as conflicts; import-audit: one-time, re-runnable import of CORT-AUDIT.md's health and usage columns, never overwrites, run on one machine only; sync --dry-run compares event ids and never pushes; the local command_log keeps 90 days, so events are lost only if they go unuploaded for 90 days in a row: record not running, or uploads refused pending a dry run)",
             "hook-suggest": "cort hook-suggest  (PreToolUse hook: records one fire row and kicks collection; never speaks; not a verb to type)",
             "hook-refresh": "cort hook-refresh  (PostToolUse hook: brings this project's index up to the tree after an edit; silent, never creates an index; not a verb to type)",
             "hook-install": "cort hook-install [--settings <path>] [--command <cmd>] [--remove|--status]  (installer-invoked: wires hook-suggest into settings.json; not a verb to type)",
@@ -2019,6 +2019,11 @@ enum MeasureAction {
     },
     /// Local detail for one transcript (session id) or one compaction (boundary uuid).
     Show { id: String },
+    /// Read local collection state without opening the measurement store.
+    Status {
+        #[arg(short = 'f', long = "format", default_value = "json", value_parser = ["json", "lean"])]
+        format: String,
+    },
     /// Scan local transcripts into the store, then push and pull.
     Record,
     /// Scan local transcripts and upload batch events; a kicked child appends at most one line.
@@ -2111,8 +2116,9 @@ fn manual_error(error: cort::collect::ManualError, ordinary_code: &'static str) 
     CortError::new(code, json!({"message":error.message()}))
 }
 
-/// `code` is the one the command used for an unconfigured store before it took the collect lock:
-/// `measure_dry_run_failed` for `sync --dry-run`, `measure_error` everywhere else.
+/// `code` is the one each command reports for an unconfigured store, checked before any lock:
+/// `measure_dry_run_failed` for `sync --dry-run`, `measure_not_configured` for `status`,
+/// `measure_error` everywhere else.
 fn require_measure_config(code: &'static str) -> Result<(), CortError> {
     if cort::measure_store::is_configured() {
         Ok(())
@@ -2165,6 +2171,24 @@ fn cmd_measure(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, CortErr
         MeasureAction::Show { id } => {
             cort::measure::compaction_details(&cort::measure::claude_projects_dir(), &id)
                 .map_err(|m| CortError::new("measure_error", json!({"message":m})))?
+        }
+        MeasureAction::Status { format } => {
+            require_measure_config("measure_not_configured")?;
+            let paths = cort::collect::KickPaths::current().ok_or_else(|| {
+                CortError::new(
+                    "measure_error",
+                    json!({"message":"usage.db path unavailable"}),
+                )
+            })?;
+            let value = cort::collect::collection_status(&paths);
+            if format == "lean" {
+                return Ok(Emit {
+                    render_command: Some("internal-shim-lean"),
+                    format: Format::Json,
+                    payload: json!({"lean": cort::measure::render_collection_status(&value)}),
+                });
+            }
+            value
         }
         MeasureAction::Cron {
             install,
@@ -2485,6 +2509,11 @@ fn cmd_measure(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, CortErr
             json: as_json,
         } => {
             let now_ms = usage::now_ms();
+            // Always a value when run here, so the first section is never silently missing.
+            let collection = Some(match cort::collect::KickPaths::current() {
+                Some(paths) => cort::collect::collection_status(&paths),
+                None => json!({"unavailable": "cannot locate usage.db"}),
+            });
             let value = cort::measure_store::with_turso_store(|store| {
                 let offline = match cort::measure::sync(store) {
                     Ok(()) => {
@@ -2503,6 +2532,7 @@ fn cmd_measure(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, CortErr
                         compaction_days,
                         now_ms,
                         offline,
+                        collection,
                     },
                 )
             })

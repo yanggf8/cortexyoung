@@ -4,7 +4,7 @@ use crate::data_dir::{data_dir, write_atomic};
 use crate::measure::{self, RecordInputs, RecordOutcome};
 use crate::measure_store::{MeasureStore, OpenError};
 use crate::telemetry::{self, UploadInputs};
-use crate::usage::KickCounters;
+use crate::usage::{kick_counters_at, KickCounters};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -315,6 +315,59 @@ pub fn collect_state_path() -> PathBuf {
 
 pub fn health_state_path() -> PathBuf {
     data_dir().join("measure-health-state.json")
+}
+
+/// One state file as status reads it. The workers' `load` folds a broken file into the default
+/// (a fresh lane that simply runs again); status must not, or a corrupt file would print as a
+/// machine that never collected -- the whole history pending, never run, no failures -- and hide
+/// both the corruption and whatever failures it recorded.
+fn read_state<T: serde::de::DeserializeOwned + Default>(path: &Path) -> Result<T, &'static str> {
+    match fs::read_to_string(path) {
+        Ok(text) => serde_json::from_str(&text).map_err(|_| "state_unparseable"),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(T::default()),
+        Err(_) => Err("state_unreadable"),
+    }
+}
+
+/// A read-only view of both lanes. Missing or unreadable usage data leaves pending unknown; a
+/// state file that cannot be read leaves its whole lane unknown and names why.
+pub fn collection_status(paths: &KickPaths) -> Value {
+    let batch_path = paths.data_dir.join("measure-collect-state.json");
+    let health_path = paths.data_dir.join("measure-health-state.json");
+    let no_local_state = !batch_path.exists() && !health_path.exists();
+    let counters = kick_counters_at(&paths.usage_db);
+    let pending_error = counters.is_none().then_some("usage_db_unreadable");
+    let batch = match read_state::<CollectState>(&batch_path) {
+        Ok(batch) => json!({
+            "pending": counters.as_ref().map(|c| batch_pending(&batch, c)),
+            "pending_error": pending_error,
+            "last_run_ms": batch.last_run_ms,
+            "last_ok_ms": batch.last_ok_ms,
+            "push_pending": batch.push_pending,
+            "refused": batch.refused,
+            "failures": batch.failures,
+        }),
+        Err(error) => json!({"pending": null, "state_error": error}),
+    };
+    let health = match read_state::<HealthState>(&health_path) {
+        Ok(health) => json!({
+            "pending": counters.as_ref().map(|c| health_pending(&health, c)),
+            "pending_error": pending_error,
+            "last_run_ms": health.last_run_ms,
+            "unmapped_count": health.unmapped_count,
+            "unmapped_recent": health.unmapped_recent,
+        }),
+        Err(error) => json!({"pending": null, "state_error": error}),
+    };
+    let mut value = json!({"no_local_state": no_local_state, "batch": batch, "health": health});
+    for lane in ["batch", "health"] {
+        if value[lane]["pending_error"].is_null() {
+            if let Some(map) = value[lane].as_object_mut() {
+                map.remove("pending_error");
+            }
+        }
+    }
+    value
 }
 
 impl CollectState {
@@ -996,6 +1049,11 @@ pub fn batch_due(
     if elapsed < min_interval_ms(state, harness, cfg) {
         return false;
     }
+    let pending = batch_pending(state, counters);
+    state.push_pending || pending >= cfg.batch_rows || (pending >= 1 && elapsed >= cfg.idle_due_ms)
+}
+
+pub fn batch_pending(state: &CollectState, counters: &KickCounters) -> i64 {
     let (command_cursor, health_cursor) = batch_cursors(state, counters);
     // The clamp is not defensive: a cursor may legitimately sit past `max_command_id`, because the
     // rows it already copied include the `measure` rows that `max_command_id` excludes. Without the
@@ -1009,8 +1067,14 @@ pub fn batch_due(
             .max(0)
     };
     let health_pending = counters.max_health_id.saturating_sub(health_cursor).max(0);
-    let pending = command_pending.saturating_add(health_pending);
-    state.push_pending || pending >= cfg.batch_rows || (pending >= 1 && elapsed >= cfg.idle_due_ms)
+    command_pending.saturating_add(health_pending)
+}
+
+pub fn health_pending(state: &HealthState, counters: &KickCounters) -> i64 {
+    counters
+        .max_command_id
+        .saturating_sub(health_cursor(state, counters))
+        .max(0)
 }
 
 pub fn health_due(
@@ -1020,5 +1084,5 @@ pub fn health_due(
     cfg: &CollectConfig,
 ) -> bool {
     let elapsed = since_last_run(state.last_run_ms, now_ms).unwrap_or(i64::MAX);
-    counters.max_command_id > health_cursor(state, counters) && elapsed >= cfg.health_interval_ms
+    health_pending(state, counters) > 0 && elapsed >= cfg.health_interval_ms
 }

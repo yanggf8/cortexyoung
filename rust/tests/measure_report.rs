@@ -49,7 +49,36 @@ fn inputs(now_ms: i64) -> ReportInputs {
         compaction_days: 30,
         now_ms,
         offline: None,
+        collection: None,
     }
+}
+
+#[test]
+fn report_first_section_shows_collection_state() {
+    let (_t, mut s) = store();
+    let mut input = inputs(FRI_W43_MS);
+    input.collection = Some(json!({
+        "batch": {"pending": 3, "last_run_ms": 123, "last_ok_ms": 120,
+            "push_pending": true, "refused": false, "failures": {}},
+        "health": {"pending": 2, "last_run_ms": 122,
+            "unmapped_count": 1, "unmapped_recent": ["missing"]}
+    }));
+    let value = report(&mut s, &input).unwrap();
+    assert_eq!(value["collection"], input.collection.clone().unwrap());
+    let text = render_report(&value, false);
+    eprintln!(
+        "REPORT_FIRST_SECTION\n{}",
+        text.split("壓縮（").next().unwrap()
+    );
+    assert!(text.starts_with("collection:\nbatch "), "{text}");
+    assert!(text.contains("\nhealth "), "{text}");
+    input.collection = Some(json!({"no_local_state": true}));
+    let value = report(&mut s, &input).unwrap();
+    assert!(render_report(&value, false).starts_with("collection: no local state\n"));
+    input.collection = Some(json!({"unavailable": "cannot locate usage.db"}));
+    let value = report(&mut s, &input).unwrap();
+    assert!(render_report(&value, false)
+        .starts_with("collection: unavailable (cannot locate usage.db)\n"));
 }
 
 fn host_json<'a>(v: &'a Value, host: &str) -> &'a Value {

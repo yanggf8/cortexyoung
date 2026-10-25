@@ -571,6 +571,8 @@ pub struct ReportInputs {
     pub now_ms: i64,
     /// `Some(last sync text)` when this report is read from the local replica after a failed sync.
     pub offline: Option<String>,
+    /// Local collection snapshot supplied by the CLI; store-only callers may leave it absent.
+    pub collection: Option<Value>,
 }
 
 const METRICS: [&str; 4] = [
@@ -728,6 +730,7 @@ pub fn report(store: &mut dyn MeasureStore, input: &ReportInputs) -> Result<Valu
         .collect();
     Ok(json!({
         "offline": input.offline,
+        "collection": input.collection,
         "days": input.days,
         "compactions": {
             "days": input.compaction_days,
@@ -736,6 +739,89 @@ pub fn report(store: &mut dyn MeasureStore, input: &ReportInputs) -> Result<Valu
         },
         "warnings": warnings,
     }))
+}
+
+/// Two nonempty lines shared by `measure status -f lean` and the report's first section.
+pub fn render_collection_status(value: &Value) -> String {
+    let field = |lane: &Value, key: &str| {
+        lane[key]
+            .as_i64()
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "unknown".into())
+    };
+    // A person reads these two lines, so times are UTC, without the spaces `format_utc` puts in
+    // (one token per field); the JSON keeps milliseconds.
+    let when = |lane: &Value, key: &str| {
+        lane[key].as_i64().map_or_else(
+            || "never".to_string(),
+            |ms| format_utc(ms).replacen(' ', "T", 1).replace(" UTC", "Z"),
+        )
+    };
+    let batch = &value["batch"];
+    let health = &value["health"];
+    // Appended to a lane's line when its pending count is unknown, so `pending=unknown` always
+    // says why.
+    let why = |lane: &Value| {
+        lane["pending_error"]
+            .as_str()
+            .map(|e| format!(" pending_error={e}"))
+            .unwrap_or_default()
+    };
+    // A lane whose state file could not be read knows nothing but that.
+    let broken = |name: &str, lane: &Value| {
+        lane["state_error"]
+            .as_str()
+            .map(|e| format!("{name} pending=unknown state_error={e}\n"))
+    };
+    let failures = batch["failures"]
+        .as_object()
+        .map(|entries| {
+            entries
+                .iter()
+                .map(|(harness, failure)| {
+                    format!(
+                        "{harness}:{}/{}",
+                        failure["count"].as_u64().unwrap_or(0),
+                        failure["last_error_kind"].as_str().unwrap_or("unknown")
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(",")
+        })
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "none".into());
+    let recent = health["unmapped_recent"]
+        .as_array()
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(",")
+        })
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "none".into());
+    let batch_line = broken("batch", batch).unwrap_or_else(|| {
+        format!(
+            "batch pending={} last_run={} last_ok={} push_pending={} refused={} failures={failures}{}\n",
+            field(batch, "pending"),
+            when(batch, "last_run_ms"),
+            when(batch, "last_ok_ms"),
+            batch["push_pending"].as_bool().unwrap_or(false),
+            batch["refused"].as_bool().unwrap_or(false),
+            why(batch),
+        )
+    });
+    let health_line = broken("health", health).unwrap_or_else(|| {
+        format!(
+            "health pending={} last_run={} unmapped_count={} unmapped_recent={recent}{}\n",
+            field(health, "pending"),
+            when(health, "last_run_ms"),
+            field(health, "unmapped_count"),
+            why(health),
+        )
+    });
+    batch_line + &health_line
 }
 
 struct Paint(bool);
@@ -760,6 +846,17 @@ impl Paint {
 pub fn render_report(v: &Value, color: bool) -> String {
     let p = Paint(color);
     let mut out = String::new();
+    if let Some(collection) = v.get("collection").filter(|v| !v.is_null()) {
+        if let Some(why) = collection["unavailable"].as_str() {
+            out.push_str(&format!("collection: unavailable ({why})\n"));
+        } else if collection["no_local_state"] == true {
+            out.push_str("collection: no local state\n");
+        } else {
+            out.push_str("collection:\n");
+            out.push_str(&render_collection_status(collection));
+        }
+        out.push('\n');
+    }
     if let Some(when) = v["offline"].as_str() {
         out.push_str(&p.yellow(&format!("離線：讀本機副本，最後同步於 {when}")));
         out.push('\n');
