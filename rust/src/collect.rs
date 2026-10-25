@@ -352,6 +352,7 @@ impl ErrorKind {
 pub struct CollectRun {
     pub outcome: &'static str,
     pub refused: bool,
+    pub refused_changed: bool,
     pub error_kind: Option<ErrorKind>,
     pub summary: Value,
 }
@@ -366,6 +367,7 @@ fn collect_run(
     CollectRun {
         outcome,
         refused,
+        refused_changed: false,
         error_kind,
         summary: json!({"outcome": outcome, "harness": harness,
             "error_kind": error_kind.map(ErrorKind::label), "error": null, "refused": refused,
@@ -379,6 +381,23 @@ impl CollectRun {
         self.summary["error"] = Value::String(error.into());
         self
     }
+}
+
+/// A kicked child writes at most one line. Repeated refusals keep their status but omit the
+/// explanatory text; the transition line retains it for diagnosis.
+pub fn log_collect_run(data_dir: &Path, run: &CollectRun, now_ms: i64) -> Result<(), String> {
+    if run.outcome == "skipped_busy" {
+        return Ok(());
+    }
+    let mut summary = run.summary.clone();
+    summary["lane"] = json!("batch");
+    summary["ts_ms"] = json!(now_ms);
+    if run.refused_changed {
+        summary["refused_changed"] = json!(true);
+    } else if summary["scan"]["events"]["status"] == "refused" {
+        summary["scan"]["events"] = json!({"status":"refused"});
+    }
+    append_measure_log(data_dir, &summary.to_string())
 }
 
 fn collect_failure(state: &mut CollectState, harness: &str, now_ms: i64, kind: ErrorKind) {
@@ -408,6 +427,11 @@ pub fn run_collect(
         return collect_run("failed", harness, false, Some(ErrorKind::Other), None)
             .with_error("manual collection is not implemented");
     }
+    // open_lock does not create its parent; the first explicit collect may precede any kick.
+    if let Err(e) = fs::create_dir_all(&paths.data_dir) {
+        return collect_run("failed", harness, false, Some(ErrorKind::Other), None)
+            .with_error(format!("cannot create {}: {e}", paths.data_dir.display()));
+    }
     let mut lock =
         match crate::upgrade::try_exclusive_lock(&paths.data_dir.join("measure-collect.lock")) {
             Ok(lock) => lock,
@@ -434,6 +458,7 @@ pub fn run_collect(
 
     let state_path = paths.data_dir.join("measure-collect-state.json");
     let mut state = CollectState::load(&state_path);
+    let refused_before = state.refused;
     let Some(counters) = crate::usage::kick_counters_at(&paths.usage_db) else {
         state.last_run_ms = Some(now_ms);
         state.push_pending = true;
@@ -543,23 +568,28 @@ pub fn run_collect(
         state.last_ok_ms = Some(now_ms);
     }
     let scan_json = scan.map(|s| s.to_json());
+    // Decided before the save: a run whose state cannot be written still saw the transition, and
+    // its line is the one that most needs the refusal's reason.
+    let refused_changed = state.refused != refused_before;
     if let Err(e) = state.save(&state_path) {
-        return collect_run(
+        let mut run = collect_run(
             "failed",
             harness,
             state.refused,
             Some(ErrorKind::Storage),
             scan_json,
-        )
-        .with_error(e);
+        );
+        run.refused_changed = refused_changed;
+        return run.with_error(e);
     }
-    let run = collect_run(
+    let mut run = collect_run(
         if kind.is_some() { "failed" } else { "ok" },
         harness,
         state.refused,
         kind,
         scan_json,
     );
+    run.refused_changed = refused_changed;
     match error {
         Some(e) => run.with_error(e),
         None => run,

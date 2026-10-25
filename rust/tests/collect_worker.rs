@@ -498,3 +498,275 @@ fn unopenable_admission_lock_is_not_an_upgrade() {
         assert!(!state(paths).push_pending);
     });
 }
+
+#[test]
+fn fresh_data_dir_is_created_before_the_lock() {
+    sandbox(|paths, _| {
+        command(paths);
+        fs::remove_dir_all(&paths.data_dir).unwrap();
+        let result = run_collect(
+            &mut || Err(OpenError::Busy),
+            paths,
+            "codex",
+            NOW,
+            &CollectConfig::from_lookup(|_| None),
+            false,
+        );
+        assert_eq!(result.outcome, "skipped_busy");
+        assert!(paths.data_dir.join("measure-collect.lock").exists());
+    });
+}
+
+#[test]
+fn data_dir_creation_error_is_structured_other() {
+    sandbox(|paths, _| {
+        fs::remove_dir_all(&paths.data_dir).unwrap();
+        fs::write(&paths.data_dir, "occupied").unwrap();
+        let result = run_collect(
+            &mut || panic!("opener called"),
+            paths,
+            "codex",
+            NOW,
+            &CollectConfig::from_lookup(|_| None),
+            false,
+        );
+        assert_eq!(result.outcome, "failed");
+        assert_eq!(result.error_kind, Some(ErrorKind::Other));
+        assert!(result.summary["error"]
+            .as_str()
+            .is_some_and(|s| !s.is_empty()));
+    });
+}
+
+#[test]
+fn refusal_is_not_failure_and_logs_on_transition_only() {
+    sandbox(|paths, db| {
+        command(paths);
+        for iteration in 0..3 {
+            let result = run(paths, db, "codex", false, false);
+            assert_eq!(result.outcome, "ok");
+            assert!(result.refused);
+            assert_eq!(result.refused_changed, iteration == 0);
+            cort::collect::log_collect_run(&paths.data_dir, &result, NOW).unwrap();
+        }
+        assert!(state(paths).failures.is_empty());
+        let lines = fs::read_to_string(paths.data_dir.join("measure.log")).unwrap();
+        let logs: Vec<serde_json::Value> = lines
+            .lines()
+            .map(|s| serde_json::from_str(s).unwrap())
+            .collect();
+        assert_eq!(logs.len(), 3);
+        assert_eq!(
+            logs.iter().filter(|v| v["refused_changed"] == true).count(),
+            1
+        );
+        assert!(logs[0]["scan"]["events"]["reason"].is_string());
+        for log in &logs[1..] {
+            assert_eq!(
+                log["scan"]["events"],
+                serde_json::json!({"status":"refused"})
+            );
+        }
+        // A valid marker uses the current command_log column fingerprint.
+        let columns = cort::telemetry::command_log_columns(&paths.usage_db).unwrap();
+        fs::write(
+            paths.data_dir.join("measure-events-verified.json"),
+            serde_json::json!({"machine_id":cort::usage::machine_id(),"columns":columns})
+                .to_string(),
+        )
+        .unwrap();
+        let result = run(paths, db, "codex", false, false);
+        assert!(!result.refused);
+        assert!(result.refused_changed);
+        cort::collect::log_collect_run(&paths.data_dir, &result, NOW).unwrap();
+        let lines = fs::read_to_string(paths.data_dir.join("measure.log")).unwrap();
+        let last: serde_json::Value = serde_json::from_str(lines.lines().last().unwrap()).unwrap();
+        assert_eq!(last["refused"], false);
+        assert_eq!(last["refused_changed"], true);
+    });
+}
+
+#[test]
+fn background_busy_is_silent() {
+    sandbox(|paths, _| {
+        command(paths);
+        let _held = cort::upgrade::try_exclusive_lock(&paths.data_dir.join("measure-collect.lock"))
+            .unwrap();
+        let result = run_collect(
+            &mut || panic!("opener called"),
+            paths,
+            "codex",
+            NOW,
+            &CollectConfig::from_lookup(|_| None),
+            false,
+        );
+        assert_eq!(result.outcome, "skipped_busy");
+        cort::collect::log_collect_run(&paths.data_dir, &result, NOW).unwrap();
+        assert!(!paths.data_dir.join("measure.log").exists());
+    });
+}
+
+// The harness reaches run_collect as an argument. Reading CORT_COLLECT_HARNESS is the CLI's job,
+// covered in collect_cli.rs by background_failure_line_carries_error and the foreground test.
+#[test]
+fn push_failure_lands_in_the_named_harness_bucket() {
+    sandbox(|paths, db| {
+        command(paths);
+        let result = run(paths, db, "codex", true, false);
+        assert_eq!(result.outcome, "failed");
+        assert_eq!(state(paths).failures["codex"].count, 1);
+    });
+}
+
+#[test]
+fn lock_order_collect_then_measure() {
+    sandbox(|paths, db| {
+        command(paths);
+        fs::write(
+            &paths.measure_config,
+            r#"{"url":"libsql://unreachable.invalid","token":"test-token"}"#,
+        )
+        .unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            let collect_tx = tx.clone();
+            scope.spawn(move || {
+                let result = run_collect(
+                    &mut || {
+                        cort::measure_store::with_measure_lock(|| {
+                            collect_tx.send("collect").unwrap();
+                            std::thread::sleep(std::time::Duration::from_millis(50));
+                            Ok(Box::new(SqliteStore::open(db).unwrap()) as Box<dyn MeasureStore>)
+                        })
+                        .map_err(OpenError::Other)
+                    },
+                    paths,
+                    "codex",
+                    NOW,
+                    &CollectConfig::from_lookup(|_| None),
+                    false,
+                );
+                assert_eq!(result.outcome, "ok");
+            });
+            assert_eq!(
+                rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap(),
+                "collect"
+            );
+            scope.spawn(|| {
+                cort::measure_store::with_measure_lock(|| {
+                    tx.send("report").unwrap();
+                    Ok(())
+                })
+                .unwrap();
+            });
+            assert_eq!(
+                rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap(),
+                "report"
+            );
+        });
+    });
+}
+
+#[test]
+fn refusal_transition_survives_a_failed_final_save() {
+    sandbox(|paths, db| {
+        command(paths);
+        let state_file = state_path(paths);
+        let mut opener = || {
+            // The pre-run save already happened; a directory in its place fails the final one.
+            fs::remove_file(&state_file).unwrap();
+            fs::create_dir(&state_file).unwrap();
+            Ok(Box::new(SqliteStore::open(db).unwrap()) as Box<dyn MeasureStore>)
+        };
+        let result = run_collect(
+            &mut opener,
+            paths,
+            "codex",
+            NOW,
+            &CollectConfig::from_lookup(|_| None),
+            false,
+        );
+        assert_eq!(
+            (result.outcome, result.error_kind),
+            ("failed", Some(ErrorKind::Storage))
+        );
+        assert!(result.refused);
+        assert!(result.refused_changed);
+        cort::collect::log_collect_run(&paths.data_dir, &result, NOW).unwrap();
+        let line: serde_json::Value = serde_json::from_str(
+            fs::read_to_string(paths.data_dir.join("measure.log"))
+                .unwrap()
+                .trim(),
+        )
+        .unwrap();
+        assert_eq!(line["refused_changed"], true);
+        assert!(line["scan"]["events"]["reason"].is_string());
+    });
+}
+
+#[test]
+fn lock_order_collect_waits_for_report() {
+    sandbox(|paths, db| {
+        command(paths);
+        fs::write(
+            &paths.measure_config,
+            r#"{"url":"libsql://unreachable.invalid","token":"test-token"}"#,
+        )
+        .unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        std::thread::scope(|scope| {
+            let report_tx = tx.clone();
+            // The report path takes measure.lock alone and holds it until told to let go.
+            scope.spawn(move || {
+                cort::measure_store::with_measure_lock(|| {
+                    report_tx.send("report_holds").unwrap();
+                    release_rx.recv().unwrap();
+                    Ok(())
+                })
+                .unwrap();
+            });
+            assert_eq!(
+                rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap(),
+                "report_holds"
+            );
+            let collect_tx = tx.clone();
+            let collect = scope.spawn(move || {
+                run_collect(
+                    &mut || {
+                        collect_tx.send("collect_wants_measure_lock").unwrap();
+                        cort::measure_store::with_measure_lock(|| {
+                            Ok(Box::new(SqliteStore::open(db).unwrap()) as Box<dyn MeasureStore>)
+                        })
+                        .map_err(OpenError::Other)
+                    },
+                    paths,
+                    "codex",
+                    NOW,
+                    &CollectConfig::from_lookup(|_| None),
+                    false,
+                )
+                .outcome
+            });
+            assert_eq!(
+                rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap(),
+                "collect_wants_measure_lock"
+            );
+            // Collect holds the first lock while it waits for the second.
+            assert!(matches!(
+                cort::upgrade::try_exclusive_lock(&paths.data_dir.join("measure-collect.lock")),
+                Err(cort::upgrade::LockError::AdmissionBusy)
+            ));
+            release_tx.send(()).unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !collect.is_finished() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "collect never finished"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            assert_eq!(collect.join().unwrap(), "ok");
+        });
+    });
+}

@@ -391,15 +391,15 @@
 - 背景執行每次最多一行 JSON 摘要附加到 `measure.log`；`skipped_busy` 不寫；refused 只在 `refused` 由 false 變 true（或反過來）時寫一行，不計入 `failures`。
 - CLI：`cort measure collect [--background]`；harness 讀 `collect::HARNESS_ENV`（C1 的 `DetachedSpawner` 會設），沒有就記成 `unknown`。
 
-- [ ] **Step 1: 寫失敗的測試**
+- [x] **Step 1: 寫失敗的測試**
   - `refusal_is_not_failure_and_logs_on_transition_only`：連跑三次都 refused → `measure.log` 只有一行 refused；之後 marker 出現 → 一行恢復。
   - `background_busy_is_silent`：先持有鎖 → `skipped_busy`、`measure.log` 沒有新行。
   - `lock_order_collect_then_measure`：同時跑一個背景 collect 與一個只拿 `measure.lock` 的 `report` 不死鎖（10 秒內兩者結束）。
   - `collect_cli_background_prints_nothing`：`cort measure collect --background`（未設定 measure）stdout 為空、exit 0。
   - `harness_env_reaches_failure_bucket`：`CORT_COLLECT_HARNESS=codex` 且 push 失敗 → `failures["codex"].count == 1`。
-- [ ] **Step 2: 跑 `cargo test --locked --test collect_worker`，預期失敗。**
-- [ ] **Step 3: 實作。**
-- [ ] **Step 4: 跑測試至綠，再跑全套 gate。**
+- [x] **Step 2: 跑 `cargo test --locked --test collect_worker`，預期失敗。**
+- [x] **Step 3: 實作。**
+- [x] **Step 4: 跑測試至綠，再跑全套 gate。**
 
 ### Task G2: 手動 `record` / `sync` / `sync --dry-run` 改走同一套鎖與狀態
 
