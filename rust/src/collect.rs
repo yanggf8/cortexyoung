@@ -330,11 +330,9 @@ pub fn batch_cursors(state: &CollectState, counters: &KickCounters) -> (i64, i64
 }
 
 pub fn health_cursor(state: &HealthState, counters: &KickCounters) -> i64 {
-    // Also against every row, and the two maxima still answer different questions: the comparison
-    // here is the rewind test (a restored older `usage.db`), not a pending count. What the health
-    // worker stores is `touched_project_ids_at`'s maximum **non-`measure`** id -- the pass never
-    // reads `measure` rows, so its cursor names the last row it actually considered and never
-    // exceeds `max_command_id <= max_any_command_id`.
+    // Also against every row. Whether Task E advances this cursor past trailing `measure` rows is
+    // still open (`touched_project_ids_at` reads non-`measure` rows only); the comparison is right
+    // either way, since a non-`measure` cursor never exceeds `max_command_id <= max_any_command_id`.
     if state.instance_id.as_deref() != Some(counters.instance_id.as_str())
         || state.health_cursor > counters.max_any_command_id
     {
