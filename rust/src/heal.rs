@@ -34,7 +34,7 @@ fn heal_disabled() -> bool {
     std::env::var("CORT_NO_HEAL").ok().as_deref() == Some("1")
 }
 
-fn heal_max_files() -> i64 {
+pub(crate) fn heal_max_files() -> i64 {
     heal_max_files_from(std::env::var("CORT_HEAL_MAX_FILES").ok())
 }
 

@@ -8,7 +8,7 @@ use crate::graph::{
     ReceiverIndex,
 };
 use crate::indexer::IndexError;
-use crate::staleness::compute_stale;
+use crate::staleness::{compute_stale, repair_label};
 use rusqlite::{params, params_from_iter};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -203,20 +203,9 @@ pub fn impact_command(
     }
 
     let stale = compute_stale(db, bin, root, project_id).map_err(map_index)?;
-    // What the edit hook's repair attempt would do about this staleness, in the hook's own
-    // outcome vocabulary: `none` (nothing owed), `refreshable` (an incremental is accepted; the
-    // PostToolUse hook heals it on the next edit), `rebuild_required` (the hook refuses; only a
-    // foreground `cort index` fixes this). Classification, not history: busy, an upgrade
-    // stand-down and the other transient give-ups are not named here -- `forbid_refuses`
-    // classifies the refusal the hook would reach, and its doc says so.
-    let repair = if !stale.index_is_stale {
-        "none"
-    } else if crate::incremental::forbid_refuses(&stale.rebuild_required, stale.candidates_narrowed)
-    {
-        "rebuild_required"
-    } else {
-        "refreshable"
-    };
+    // The rule and its vocabulary live in `staleness::repair_label`; the observation path asks
+    // the same question of the same report (design §3).
+    let repair = repair_label(&stale);
     // Which line inside each dependent names the thing it calls. A dependent's parents are taken as
     // "the seeds plus everything nearer the seed than it is", because the recursion records the hop
     // a chunk entered at but not which edge carried it: the claim printed is then "this dependent

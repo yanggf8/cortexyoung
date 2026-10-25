@@ -124,3 +124,24 @@ pub fn compute_stale(
         candidates_narrowed: cands.narrowed,
     })
 }
+
+/// What the edit hook's repair attempt would do about this staleness, in the hook's own outcome
+/// vocabulary: `none` (nothing owed), `refreshable` (an incremental is accepted; the PostToolUse
+/// hook heals it on the next edit), `rebuild_required` (the hook refuses; only a foreground
+/// `cort index` fixes this). Classification, not history: busy, an upgrade stand-down and the
+/// other transient give-ups are not named here -- `forbid_refuses` classifies the refusal the
+/// hook would reach, and its doc says so.
+///
+/// It lives here rather than at its first caller because the observation path computes the same
+/// verdict from the same [`StaleReport`] (design §3), and two copies of this rule would be two
+/// answers to one question.
+pub fn repair_label(stale: &StaleReport) -> &'static str {
+    if !stale.index_is_stale {
+        "none"
+    } else if crate::incremental::forbid_refuses(&stale.rebuild_required, stale.candidates_narrowed)
+    {
+        "rebuild_required"
+    } else {
+        "refreshable"
+    }
+}

@@ -9,6 +9,7 @@ pub mod db;
 pub mod errors;
 pub mod graph;
 pub mod heal;
+pub mod health;
 pub mod hook;
 pub mod impact;
 pub mod incremental;

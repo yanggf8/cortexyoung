@@ -164,6 +164,46 @@ pub fn open_db(db_path: impl AsRef<Path>) -> rusqlite::Result<Db> {
     Ok(conn)
 }
 
+/// Open an *existing* index for reading, and change nothing about it.
+///
+/// This is `open_db` minus every step that writes, for the observation path (`health::observe`,
+/// design §3), which must be able to look at an index a user is actively editing without becoming
+/// a second writer of it. What is kept:
+///
+/// - `busy_timeout`, because an observation reads while a hook's incremental may be mid-write; a
+///   handle that returned `SQLITE_BUSY` immediately would turn a busy index into `unreadable`
+///   for no reason a reader could act on.
+/// - `foreign_keys`, because it is a connection-local setting and keeping it makes the read
+///   path's PRAGMAs a strict subset of the write path's. It constrains writes only, so reads are
+///   unaffected either way.
+///
+/// What is dropped, and why:
+///
+/// - `CREATE` is absent from the flags, so a missing path is `SQLITE_CANTOPEN` rather than a new
+///   empty database, and the parent directory is never created. Observation must be able to say
+///   `no_index`; creating the file would erase the fact it is reporting.
+/// - `journal_mode = WAL` is a write to the database header (and on a read-only handle it fails
+///   for a database that is not already WAL). The observation reads whatever mode the index is in.
+/// - The 0600 `chmod` changes the file's permissions. A read path that mutates the mode of a file
+///   it did not create is a change, however small. `open_db` is the one that creates the file and
+///   owns its mode.
+/// - No `ensure_schema`, no migration: that is this module's caller's job, not a reader's. A
+///   database this binary cannot read is reported, never upgraded in place.
+///
+/// One thing SQLite does on its own and this function cannot prevent: opening a WAL-mode database
+/// -- which every index is, `open_db` sets the mode -- creates `-shm` (and an empty `-wal`) beside
+/// it when the directory is writable, because the reader needs the wal-index. The database file
+/// itself is untouched; that is the boundary, and callers that compare directory contents must
+/// expect this pair rather than read it as a write.
+///
+/// `db_path` is a real index path; `:memory:` has nothing to read and is not special-cased here.
+pub fn open_db_readonly(db_path: &Path) -> rusqlite::Result<Db> {
+    let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    conn.busy_timeout(Duration::from_millis(5000))?;
+    conn.pragma_update(None, "foreign_keys", "ON")?;
+    Ok(conn)
+}
+
 pub fn get_meta(db: &Db, key: &str) -> rusqlite::Result<Option<String>> {
     let mut stmt = db.prepare("SELECT value FROM _cortex_meta WHERE key = ?1")?;
     let mut rows = stmt.query(params![key])?;
