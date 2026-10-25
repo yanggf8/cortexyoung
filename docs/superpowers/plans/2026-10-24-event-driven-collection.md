@@ -368,7 +368,7 @@
 - 流程照設計第 2 節：拿 `measure-collect.lock`（本單只做背景：拿不到 → `skipped_busy`）；拿到後把自己的 `pid` 與 `started_ms` 寫進鎖檔；instance／倒退 → 游標歸零；**先**存 `push_pending=true`，再呼叫 `store_opener`（正式路徑是 `open_measure_store_within(manual_wait_ms)`，拿不到 `measure.lock` 回 `Busy` → `skipped_busy`，不算失敗）做 scan + `cort_command` 上傳 + 健康上傳 + push + pull；push/pull/儲存失敗記到該 harness 的 `failures`（`last_error_kind` 為 `network`／`storage`／`other`）；全部成功清 `push_pending`、該 harness 歸零、寫 `last_ok_ms`。`uploaded_through_id` / `health_uploaded_through_id` 從兩個來源的水位抄出。
 - `manual=true` 在本單直接回 `failed`/`Other`（G2 實作）。
 
-- [ ] **Step 1: 寫失敗的測試**（`SqliteStore` 經 `store_opener` 注入，`fail_push`/`fail_pull`）
+- [x] **Step 1: 寫失敗的測試**（`SqliteStore` 經 `store_opener` 注入，`fail_push`/`fail_pull`）
   - `push_pending_persisted_before_replica_write`：opener 被呼叫時讀 state 檔，斷言當下 `push_pending == true`。
   - `push_failure_keeps_push_pending_and_counts_harness`。
   - `success_clears_push_pending_and_only_that_harness`：codex 先失敗 2 次、claude-code 成功 → codex 仍 2、claude-code 0。
@@ -376,9 +376,9 @@
   - `lock_file_names_holder`：執行中鎖檔內容含本程序 pid。
   - `lock_in_within_times_out`：測試先持有同一把 `measure.lock` → `lock_in_within(.., 300ms)` 在 1 秒內回 `TimedOut`；放開後立刻拿得到。
   - `busy_store_is_skipped_not_failed`：opener 回 `OpenError::Busy` → `outcome=skipped_busy`、`failures` 不變、`push_pending` 為 true（開 store 前已持久化，下一次 kick 照樣到期）。
-- [ ] **Step 2: 跑 `cargo test --locked --test collect_worker`，預期失敗。**
-- [ ] **Step 3: 實作。**
-- [ ] **Step 4: 跑測試至綠，再跑全套 gate；`measure_report`、`telemetry`、`measure_copy` 既有測試全綠。**
+- [x] **Step 2: 跑 `cargo test --locked --test collect_worker`，預期失敗。**
+- [x] **Step 3: 實作。**
+- [x] **Step 4: 跑測試至綠，再跑全套 gate；`measure_report`、`telemetry`、`measure_copy` 既有測試全綠。**
 
 ### Task G1b: refused 轉換、背景安靜、鎖序、`cort measure collect` CLI
 

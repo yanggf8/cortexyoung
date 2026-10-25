@@ -5,7 +5,7 @@
 use crate::data_dir::{data_dir, write_atomic};
 use crate::measure_store::{CompactionRow, MeasureStore};
 use crate::memory_store::project_from_git_origin;
-use crate::telemetry::{upload_events, TelemetryEvent, UploadInputs};
+use crate::telemetry::{upload_events, upload_health_events, TelemetryEvent, UploadInputs};
 use crate::transcript::{compactions, parse_transcript_bytes, Compaction, Step, WindowDetails};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
@@ -52,6 +52,8 @@ pub struct ScanSummary {
     pub unknown_type_lines: usize,
     /// What the event upload did (`None` when events are not part of this run). Local only.
     pub events: Option<Value>,
+    /// Health upload for this run (`None` for the existing manual record command).
+    pub health: Option<Value>,
 }
 
 impl ScanSummary {
@@ -65,6 +67,9 @@ impl ScanSummary {
         });
         if let Some(events) = &self.events {
             v["events"] = events.clone();
+        }
+        if let Some(health) = &self.health {
+            v["health"] = health.clone();
         }
         v
     }
@@ -299,6 +304,8 @@ pub struct RecordInputs {
     pub now_ms: i64,
     /// Event upload for this run; `None` leaves events out (compaction only).
     pub events: Option<UploadInputs>,
+    /// Local usage database to upload health observations from.
+    pub health: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -333,6 +340,9 @@ pub fn record_with_scan(
     // and never fails the record (see `upload_events`).
     if let Some(events) = &input.events {
         scan.events = Some(upload_events(store, events).to_json());
+    }
+    if let Some(usage_db) = &input.health {
+        scan.health = Some(upload_health_events(store, usage_db, &input.machine_id).to_json());
     }
     if let Err(e) = store.push() {
         return Ok((scan, RecordOutcome::SavedLocallyPushFailed(e)));

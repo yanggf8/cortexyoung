@@ -314,6 +314,7 @@ fn rec_env() -> Rec {
         host: "box".into(),
         now_ms: 5_000,
         events: None,
+        health: None,
     };
     Rec { _tmp: tmp, input }
 }

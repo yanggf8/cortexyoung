@@ -1,10 +1,15 @@
 //! Local collection state and the two event-driven due decisions.
 
 use crate::data_dir::{data_dir, write_atomic};
+use crate::measure::{self, RecordInputs, RecordOutcome};
+use crate::measure_store::{MeasureStore, OpenError};
+use crate::telemetry::{self, UploadInputs};
 use crate::usage::KickCounters;
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -324,6 +329,240 @@ impl CollectState {
         let text = serde_json::to_string(self).map_err(|error| error.to_string())?;
         write_atomic(path, &text)
             .map_err(|error| format!("cannot write {}: {error}", path.display()))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorKind {
+    Network,
+    Storage,
+    Other,
+}
+
+impl ErrorKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Network => "network",
+            Self::Storage => "storage",
+            Self::Other => "other",
+        }
+    }
+}
+
+pub struct CollectRun {
+    pub outcome: &'static str,
+    pub refused: bool,
+    pub error_kind: Option<ErrorKind>,
+    pub summary: Value,
+}
+
+fn collect_run(
+    outcome: &'static str,
+    harness: &str,
+    refused: bool,
+    error_kind: Option<ErrorKind>,
+    scan: Option<Value>,
+) -> CollectRun {
+    CollectRun {
+        outcome,
+        refused,
+        error_kind,
+        summary: json!({"outcome": outcome, "harness": harness,
+            "error_kind": error_kind.map(ErrorKind::label), "error": null, "refused": refused,
+            "scan": scan}),
+    }
+}
+
+impl CollectRun {
+    /// The summary is all a background run leaves behind, so a failure carries its own words.
+    fn with_error(mut self, error: impl Into<String>) -> Self {
+        self.summary["error"] = Value::String(error.into());
+        self
+    }
+}
+
+fn collect_failure(state: &mut CollectState, harness: &str, now_ms: i64, kind: ErrorKind) {
+    let failure = state.failures.entry(harness.to_string()).or_default();
+    failure.count = failure.count.saturating_add(1);
+    failure.last_error_kind = kind.label().to_string();
+    failure.last_failed_ms = now_ms;
+}
+
+fn uploaded_id(report: &Option<Value>) -> Option<i64> {
+    report
+        .as_ref()
+        .filter(|r| r["status"] == "uploaded")
+        .and_then(|r| r["watermark"].as_i64())
+}
+
+/// Execute one background batch while holding the collection lock. `manual` is reserved for G2.
+pub fn run_collect(
+    store_opener: &mut dyn FnMut() -> Result<Box<dyn MeasureStore>, OpenError>,
+    paths: &KickPaths,
+    harness: &str,
+    now_ms: i64,
+    _cfg: &CollectConfig,
+    manual: bool,
+) -> CollectRun {
+    if manual {
+        return collect_run("failed", harness, false, Some(ErrorKind::Other), None)
+            .with_error("manual collection is not implemented");
+    }
+    let mut lock =
+        match crate::upgrade::try_exclusive_lock(&paths.data_dir.join("measure-collect.lock")) {
+            Ok(lock) => lock,
+            Err(crate::upgrade::LockError::AdmissionBusy) => {
+                return collect_run("skipped_busy", harness, false, None, None);
+            }
+            Err(e) => {
+                return collect_run("failed", harness, false, Some(ErrorKind::Other), None)
+                    .with_error(format!("measure_collect_lock_unavailable: {e:?}"))
+            }
+        };
+    // Checked, not held, as in the health pass. An admission lock file that cannot be opened is
+    // not an upgrade -- no upgrader could hold it either -- so it does not stop the run.
+    if let Err(crate::upgrade::LockError::AdmissionBusy) =
+        crate::upgrade::try_protected_entry(&paths.cache_dir)
+    {
+        return collect_run("skipped_busy", harness, false, None, None);
+    }
+    // This is descriptive metadata on the already locked file; never replace its inode or fd.
+    let _ = lock
+        .set_len(0)
+        .and_then(|_| lock.seek(SeekFrom::Start(0)))
+        .and_then(|_| writeln!(lock, "pid={} started_ms={}", std::process::id(), now_ms));
+
+    let state_path = paths.data_dir.join("measure-collect-state.json");
+    let mut state = CollectState::load(&state_path);
+    let Some(counters) = crate::usage::kick_counters_at(&paths.usage_db) else {
+        state.last_run_ms = Some(now_ms);
+        state.push_pending = true;
+        collect_failure(&mut state, harness, now_ms, ErrorKind::Storage);
+        let _ = state.save(&state_path);
+        return collect_run(
+            "failed",
+            harness,
+            state.refused,
+            Some(ErrorKind::Storage),
+            None,
+        )
+        .with_error("usage_db_unreadable");
+    };
+    let (command_cursor, health_cursor) = batch_cursors(&state, &counters);
+    state.instance_id = Some(counters.instance_id);
+    state.uploaded_through_id = command_cursor;
+    state.health_uploaded_through_id = health_cursor;
+    state.push_pending = true;
+    state.last_run_ms = Some(now_ms);
+    if let Err(e) = state.save(&state_path) {
+        return collect_run(
+            "failed",
+            harness,
+            state.refused,
+            Some(ErrorKind::Storage),
+            None,
+        )
+        .with_error(e);
+    }
+
+    let mut store = match store_opener() {
+        Ok(store) => store,
+        Err(OpenError::Busy) => {
+            return collect_run("skipped_busy", harness, state.refused, None, None);
+        }
+        Err(OpenError::Other(e)) => {
+            collect_failure(&mut state, harness, now_ms, ErrorKind::Other);
+            let _ = state.save(&state_path);
+            return collect_run(
+                "failed",
+                harness,
+                state.refused,
+                Some(ErrorKind::Other),
+                None,
+            )
+            .with_error(e);
+        }
+    };
+    let machine_id = crate::usage::machine_id().to_string();
+    let input = RecordInputs {
+        projects_dir: measure::claude_projects_dir(),
+        marks_path: measure::Watermarks::default_path(),
+        machine_id: machine_id.clone(),
+        host: measure::host_name(),
+        now_ms,
+        events: Some(UploadInputs {
+            usage_db: paths.usage_db.clone(),
+            cost_dir: telemetry::default_cost_dir(),
+            marker_path: telemetry::default_marker_path(),
+            machine_id,
+        }),
+        health: Some(paths.usage_db.clone()),
+    };
+    let result = measure::record_with_scan(store.as_mut(), &input);
+    let (scan, kind, error) = match result {
+        Err(e) => (None, Some(ErrorKind::Storage), Some(e)),
+        Ok((scan, outcome)) => {
+            // Uploads happen command, then health, then push, then pull. The first failed stage
+            // supplies the category (and the message) even when a later stage also fails.
+            let upload_error = [&scan.events, &scan.health].iter().find_map(|report| {
+                report
+                    .as_ref()
+                    .filter(|r| r["status"] == "failed")
+                    .map(|r| r["error"].as_str().unwrap_or("upload failed").to_string())
+            });
+            let (kind, error) = match (upload_error, outcome) {
+                (Some(e), _) => (Some(ErrorKind::Storage), Some(e)),
+                (None, RecordOutcome::Pushed) => (None, None),
+                (None, RecordOutcome::SavedLocallyPushFailed(e)) => {
+                    (Some(ErrorKind::Network), Some(format!("push failed: {e}")))
+                }
+                (None, RecordOutcome::PushedPullFailed(e)) => {
+                    (Some(ErrorKind::Network), Some(format!("pull failed: {e}")))
+                }
+            };
+            (Some(scan), kind, error)
+        }
+    };
+    if let Some(scan) = &scan {
+        if let Some(id) = uploaded_id(&scan.events) {
+            state.uploaded_through_id = id;
+        }
+        if let Some(id) = uploaded_id(&scan.health) {
+            state.health_uploaded_through_id = id;
+        }
+        state.refused = scan
+            .events
+            .as_ref()
+            .is_some_and(|r| r["status"] == "refused");
+    }
+    if let Some(kind) = kind {
+        collect_failure(&mut state, harness, now_ms, kind);
+    } else {
+        state.failures.remove(harness);
+        state.push_pending = false;
+        state.last_ok_ms = Some(now_ms);
+    }
+    let scan_json = scan.map(|s| s.to_json());
+    if let Err(e) = state.save(&state_path) {
+        return collect_run(
+            "failed",
+            harness,
+            state.refused,
+            Some(ErrorKind::Storage),
+            scan_json,
+        )
+        .with_error(e);
+    }
+    let run = collect_run(
+        if kind.is_some() { "failed" } else { "ok" },
+        harness,
+        state.refused,
+        kind,
+        scan_json,
+    );
+    match error {
+        Some(e) => run.with_error(e),
+        None => run,
     }
 }
 

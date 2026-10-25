@@ -2188,6 +2188,7 @@ fn cmd_measure(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, CortErr
                 host: cort::measure::host_name(),
                 now_ms: usage::now_ms(),
                 events: event_inputs(),
+                health: None,
             };
             let (scan, outcome) = cort::measure_store::with_turso_store(|store| {
                 cort::measure::record_with_scan(store, &input)
