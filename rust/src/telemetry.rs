@@ -19,7 +19,9 @@
 //! compared local ids with the remote ones, or once the machine already has an event watermark.
 
 use crate::data_dir::write_atomic;
+use crate::measure::format_utc;
 use crate::measure_store::MeasureStore;
+use crate::usage::health_rows_after_at;
 use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OpenFlags};
 use serde::de::{self, Deserializer, MapAccess, SeqAccess, Visitor};
@@ -35,8 +37,9 @@ use std::time::Duration;
 pub const SOURCE_COMMAND: &str = "cort_command";
 pub const SOURCE_COST: &str = "cost_daily";
 /// Index health observations. They have no claudecat history, so their id is a content key
-/// (day + root + the row's payload without `ts`) rather than a rowid: re-observing the same state
-/// on the same day -- including after `usage.db` is replaced -- must not store a second row.
+/// (day + root + the row's payload without `id` or `ts`) rather than a rowid: re-observing the
+/// same state on the same day -- including after `usage.db` is replaced -- must not store a
+/// second row. `id` is left out because a replaced `usage.db` numbers its rows afresh.
 pub const SOURCE_HEALTH: &str = "cort_index_health";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -313,6 +316,70 @@ pub fn row_fingerprint(usage_db: &Path, rowid: i64) -> Result<Option<String>, St
         })
     };
     Ok(Some(format!("{}|{}", part(0)?, part(1)?)))
+}
+
+/// Raw `ts|root` for the health watermark. SQL NULL root is the empty string.
+fn health_row_fingerprint(usage_db: &Path, rowid: i64) -> Result<Option<String>, String> {
+    if !usage_db.exists() {
+        return Ok(None);
+    }
+    let conn = open_readonly(usage_db)?;
+    let mut stmt = conn
+        .prepare("SELECT ts, COALESCE(root, '') FROM index_health_log WHERE id = ?1")
+        .map_err(|e| e.to_string())?;
+    let mut rows = stmt.query([rowid]).map_err(|e| e.to_string())?;
+    let Some(row) = rows.next().map_err(|e| e.to_string())? else {
+        return Ok(None);
+    };
+    let ts: i64 = row.get(0).map_err(|e| e.to_string())?;
+    let root: String = row.get(1).map_err(|e| e.to_string())?;
+    Ok(Some(format!("{ts}|{root}")))
+}
+
+/// One page of local health observations, carrying every `index_health_log` column in the payload.
+pub fn health_events(
+    usage_db: &Path,
+    after_id: i64,
+    limit: usize,
+) -> Result<Vec<TelemetryEvent>, String> {
+    if !usage_db.exists() {
+        return Ok(Vec::new());
+    }
+    health_rows_after_at(usage_db, after_id, limit)?
+        .into_iter()
+        .map(|row| {
+            let mut value = json!({
+                "id": row.id, "ts": row.ts, "machine_id": row.machine_id,
+                "machine_source": row.machine_source, "root": row.root,
+                "local_project_id": row.local_project_id, "project_id": row.project_id,
+                "status": row.status, "error": row.error, "fresh": row.fresh,
+                "chunks": row.chunks, "relationships": row.relationships,
+                "not_chunked": row.not_chunked, "real_gap": row.real_gap, "fts": row.fts,
+            });
+            let payload = sorted_compact_json(&value);
+            if let Value::Object(fields) = &mut value {
+                fields.remove("id");
+                fields.remove("ts");
+            }
+            let utc = format_utc(row.ts);
+            let event_id = health_event_id(
+                &row.machine_id,
+                &utc[..10],
+                row.root.as_deref().unwrap_or(""),
+                &sorted_compact_json(&value),
+            );
+            Ok(TelemetryEvent {
+                source: SOURCE_HEALTH.into(),
+                event_id,
+                machine_id: row.machine_id,
+                machine_source: row.machine_source,
+                project_id: row.project_id,
+                time_ms: Some(row.ts),
+                payload,
+                rowid: Some(row.id),
+            })
+        })
+        .collect()
 }
 
 enum Scope {
@@ -860,46 +927,70 @@ pub fn upload_events(store: &mut dyn MeasureStore, input: &UploadInputs) -> Even
     }
 }
 
-fn try_upload(store: &mut dyn MeasureStore, input: &UploadInputs) -> Result<EventsReport, String> {
-    let machine = input.machine_id.as_str();
-    let stored = store.event_watermark(machine, SOURCE_COMMAND)?;
-    let mut reason = None;
-    let mut cursor = None;
-    match &stored {
-        None => {
-            if !marker_valid(input) {
-                return Ok(EventsReport::Refused(format!(
-                    "no event watermark for machine {machine} and no passing dry-run: run `cort \
-                     measure sync --dry-run` once; nothing was uploaded"
-                )));
-            }
-        }
-        Some((rowid, fingerprint)) => match row_fingerprint(&input.usage_db, *rowid)? {
-            Some(f) if f == *fingerprint => cursor = Some(*rowid),
-            Some(_) => reason = Some("watermark_row_changed".to_string()),
-            None => reason = Some("watermark_row_missing".to_string()),
+/// Copy local health observations to the store replica without the command dry-run gate.
+pub fn upload_health_events(
+    store: &mut dyn MeasureStore,
+    usage_db: &Path,
+    machine_id: &str,
+) -> EventsReport {
+    match try_upload_health(store, usage_db, machine_id) {
+        Ok(report) => report,
+        Err(error) => EventsReport::Failed(error),
+    }
+}
+
+type Fingerprint = fn(&Path, i64) -> Result<Option<String>, String>;
+type EventPage = fn(&Path, Option<i64>, usize) -> Result<Vec<TelemetryEvent>, String>;
+type WatermarkCheck = (Option<i64>, Option<String>, Option<i64>);
+
+struct UploadSource<'a> {
+    usage_db: &'a Path,
+    machine: &'a str,
+    source: &'static str,
+    fingerprint: Fingerprint,
+    read_page: EventPage,
+    compare_old_command_schema: bool,
+}
+
+fn health_events_page(
+    path: &Path,
+    after: Option<i64>,
+    limit: usize,
+) -> Result<Vec<TelemetryEvent>, String> {
+    health_events(path, after.unwrap_or(0), limit)
+}
+
+fn upload_cursor(
+    store: &mut dyn MeasureStore,
+    config: &UploadSource<'_>,
+) -> Result<WatermarkCheck, String> {
+    let stored = store.event_watermark(config.machine, config.source)?;
+    let (cursor, reason) = match &stored {
+        Some((rowid, prior)) => match (config.fingerprint)(config.usage_db, *rowid)? {
+            Some(current) if current == *prior => (Some(*rowid), None),
+            Some(_) => (None, Some("watermark_row_changed".into())),
+            None => (None, Some("watermark_row_missing".into())),
         },
-    }
+        None => (None, None),
+    };
+    Ok((cursor, reason, stored.map(|(rowid, _)| rowid)))
+}
+
+fn upload_pages(
+    store: &mut dyn MeasureStore,
+    config: &UploadSource<'_>,
+    mut cursor: Option<i64>,
+    mut watermark: Option<i64>,
+) -> Result<(usize, usize, usize, Option<i64>), String> {
     let full_range = cursor.is_none();
-    let mut scanned = 0usize;
-    let mut already_uploaded = 0usize;
-    let mut inserted = 0usize;
-    let mut watermark = stored.as_ref().map(|(r, _)| *r);
-    // Cost reports have no rowid to watermark; INSERT OR IGNORE is their only dedup, so they go
-    // under the same gate.
-    let cost = cost_events(&input.cost_dir)?;
-    if !cost.is_empty() {
-        scanned += cost.len();
-        inserted += store.insert_events(&cost)?;
-    }
-    // Page by rowid. The watermark moves after each page that was inserted, never ahead of it, so
-    // a failure on page N leaves a watermark a rerun can resume from (its row is verified again).
+    let mut scanned = 0;
+    let mut inserted = 0;
+    let mut already_uploaded = 0;
     loop {
-        let page = cort_events_page(&input.usage_db, cursor, PAGE)?;
+        let page = (config.read_page)(config.usage_db, cursor, PAGE)?;
         let Some(last) = page.last() else { break };
         scanned += page.len();
-        // Only a full-range read can meet rows that are already stored under an older schema.
-        let fresh: Vec<TelemetryEvent> = if full_range {
+        let fresh = if config.compare_old_command_schema && full_range {
             let (fresh, known) = drop_uploaded(store, &page)?;
             already_uploaded += known;
             fresh
@@ -909,16 +1000,79 @@ fn try_upload(store: &mut dyn MeasureStore, input: &UploadInputs) -> Result<Even
         if !fresh.is_empty() {
             inserted += store.insert_events(&fresh)?;
         }
-        let last_rowid = last.rowid.ok_or("command event without a rowid")?;
-        let fingerprint = row_fingerprint(&input.usage_db, last_rowid)?
+        let last_rowid = last.rowid.ok_or("event without a rowid")?;
+        let current = (config.fingerprint)(config.usage_db, last_rowid)?
             .ok_or("watermark row vanished while uploading")?;
-        store.set_event_watermark(machine, SOURCE_COMMAND, last_rowid, &fingerprint)?;
+        store.set_event_watermark(config.machine, config.source, last_rowid, &current)?;
         watermark = Some(last_rowid);
         cursor = Some(last_rowid);
         if page.len() < PAGE {
             break;
         }
     }
+    Ok((scanned, inserted, already_uploaded, watermark))
+}
+
+fn try_upload_health(
+    store: &mut dyn MeasureStore,
+    usage_db: &Path,
+    machine: &str,
+) -> Result<EventsReport, String> {
+    let config = UploadSource {
+        usage_db,
+        machine,
+        source: SOURCE_HEALTH,
+        fingerprint: health_row_fingerprint,
+        read_page: health_events_page,
+        compare_old_command_schema: false,
+    };
+    let (cursor, reason, watermark) = upload_cursor(store, &config)?;
+    let full_range = cursor.is_none();
+    let (scanned, inserted, already_uploaded, watermark) =
+        upload_pages(store, &config, cursor, watermark)?;
+    Ok(EventsReport::Uploaded {
+        scanned,
+        inserted,
+        aliases: 0,
+        already_uploaded,
+        full_range,
+        reason,
+        watermark,
+    })
+}
+
+fn try_upload(store: &mut dyn MeasureStore, input: &UploadInputs) -> Result<EventsReport, String> {
+    let machine = input.machine_id.as_str();
+    let config = UploadSource {
+        usage_db: &input.usage_db,
+        machine,
+        source: SOURCE_COMMAND,
+        fingerprint: row_fingerprint,
+        read_page: cort_events_page,
+        compare_old_command_schema: true,
+    };
+    let (cursor, reason, watermark) = upload_cursor(store, &config)?;
+    if watermark.is_none() && !marker_valid(input) {
+        return Ok(EventsReport::Refused(format!(
+            "no event watermark for machine {machine} and no passing dry-run: run `cort \
+             measure sync --dry-run` once; nothing was uploaded"
+        )));
+    }
+    let full_range = cursor.is_none();
+    let mut scanned = 0usize;
+    let mut inserted = 0usize;
+    // Cost reports have no rowid to watermark; INSERT OR IGNORE is their only dedup, so they go
+    // under the same gate.
+    let cost = cost_events(&input.cost_dir)?;
+    if !cost.is_empty() {
+        scanned += cost.len();
+        inserted += store.insert_events(&cost)?;
+    }
+    // The shared pager advances the watermark only after each page reaches the replica.
+    let (page_scanned, page_inserted, already_uploaded, watermark) =
+        upload_pages(store, &config, cursor, watermark)?;
+    scanned += page_scanned;
+    inserted += page_inserted;
     // Every run, over the whole file: an index or git origin may have appeared since the events
     // were uploaded.
     let aliases = project_aliases(&input.usage_db)?;

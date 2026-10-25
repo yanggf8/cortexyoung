@@ -330,7 +330,7 @@
   ```
 - payload：該列所有欄位的緊湊 JSON，key 字母序，用 `cort_command` 同一個序列化器；`payload_without_ts` 去掉 `id` 與 `ts`。`time_ms` = 列的 `ts`；`project_id` = 列的 `project_id`。
 
-- [ ] **Step 1: 寫失敗的測試**（`SqliteStore`）
+- [x] **Step 1: 寫失敗的測試**（`SqliteStore`）
   - `health_event_id_is_content_keyed`：同 day、root、指標但 ts 不同 → 同 id；任一指標不同 → 不同 id；不同 day → 不同 id。
   - `uploads_without_dry_run_marker`：沒有 marker 也上傳。
   - `uploads_while_command_source_refused`：同一次 `cort_command` 回 `Refused`、健康照樣 `Uploaded`。
@@ -339,9 +339,9 @@
   - `replacement_below_old_watermark_still_uploads`：舊庫上傳到水位 id 5；換新庫寫 3 列**不同狀態**的觀察（id 1..3）→ 三列都進遠端，回報 reason `watermark_row_missing`。
   - `changed_row_at_watermark_reads_full_range`：新庫有 ≥ 舊水位 id 的列但該列 `ts|root` 不同 → `watermark_row_changed`、全範圍。
   - `payload_keys_sorted`。
-- [ ] **Step 2: 跑 `cargo test --locked --test health_upload`，預期失敗。**
-- [ ] **Step 3: 實作。**
-- [ ] **Step 4: 跑測試至綠，再跑全套 gate。**
+- [x] **Step 2: 跑 `cargo test --locked --test health_upload`，預期失敗。**
+- [x] **Step 3: 實作。**
+- [x] **Step 4: 跑測試至綠，再跑全套 gate。**
 
 ### Task G1a: 批次收集核心 `run_collect`（成功、失敗、當機安全）
 
