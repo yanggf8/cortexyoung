@@ -80,7 +80,7 @@ Usage: ./install.sh [OPTIONS]
   --defer         Upgrade only: record index debt, do not rebuild (forwarded)
   --ack NAME      Upgrade only: accept one drifted component; repeatable (forwarded)
   --with-rustup   If cargo missing, bootstrap rustup via https://sh.rustup.rs
-  --no-hook       Do not wire the PreToolUse hook into settings.json
+  --no-hook       Do not wire the PreToolUse/PostToolUse hooks into any harness
                   (fresh install only; an error when upgrading: cort_upgrade
                   repairs hooks itself)
   --stage-only    Build, stage and validate one generation; print its id

@@ -38,7 +38,7 @@ same hooks — with three things, in this order:
 | Code helpers: the local index, `impact`, repairing the index after an edit | cort | `cort index`, `cort impact`, the `PostToolUse` hook. |
 | The hooks on Claude Code, Codex and Kimi | cort | `PreToolUse` and `PostToolUse` record each call and kick collection; they stay silent, exit 0 and never wait. |
 | Machine resources: load, memory and swap, the machine-wide heavy-work slots, never stacking two full builds, `nice`, `cargo -j`, orphaned delegate processes | [ClaudeCat](https://github.com/yanggf8/claudecat) | One canonical copy of the thresholds. A project keeps only its own dispatch flow (who writes, who reviews, tickets) and asks ClaudeCat: `claudecat gate check` from a shell, or through cort's hook. |
-| Search routing | nobody | Being removed: the `CORT_SUGGEST` delivery and the would-be verdict behind it. 409 searches in skill-bearing sessions produced zero `cort` calls. |
+| Search routing | nobody | Removed 2026-10-25: the `CORT_SUGGEST` delivery and the would-be verdict behind it. 409 searches in skill-bearing sessions produced zero `cort` calls. |
 
 The dependency runs one way, ClaudeCat → cort. cort's `PreToolUse` hook will offer a generic
 hand-off point that never names ClaudeCat; whatever answers there gets a time limit, and a missing,
@@ -121,10 +121,9 @@ result.
 
 **What keeps it true over time.** Every invocation appends one local row to
 `usage.db` (see the `Local usage recording` section above), and every hook fire records
-the outcome it reached; `cort-evals` replays the same `judge` over real transcripts
-(`hook-probe`), counts how often the walk is actually wanted (`demand`), and grades
-every reported edge against file text (`verify-impact`). Features are gated until `cort`
-wins on both token count and success rate — [`evals/README.md`](evals/README.md).
+its outcome; `cort-evals` counts how often the walk is actually wanted (`demand`)
+and grades every reported edge against file text (`verify-impact`). Features are gated
+until `cort` wins on both token count and success rate — [`evals/README.md`](evals/README.md).
 
 繁體中文版(僅此段): [Token cost · 台灣中文](docs/token-cost.zh-TW.md)
 
@@ -232,26 +231,27 @@ exact rendered output size (`bytes_out`), and `saved_bytes` — raw body bytes t
 pull into its context, counted on exactly two paths: a receipt cache hit (the body the receipt
 omitted) and a ranged `read` (the file bytes outside the requested range, measured against the
 file on disk — issue #4; one nonzero row in the first quarter's log was the whole column
-before this second formula landed). A `no_shape` silence additionally records a shape
+before this second formula landed). Until 2026-10-25 a `no_shape` silence also recorded a shape
 fingerprint — the tool name plus the payload's top-level key *names* — so the 83% of hook runs
-that decline on shape can be ordered by demand (issue #3); key names are harness vocabulary,
+that declined on shape could be ordered by demand (issue #3); key names are harness vocabulary,
 never payload content. Both `saved_bytes` paths, the content modes and `source` belonged to `read`,
 removed on 2026-10-23: no new row carries them, and the columns and report fields stay so the older
 rows inside the 90-day window still read the way they were written.
 
-The one content exception is a hook suggestion that actually reaches the agent: that row stores
-the final user-authored prompt as an excerpt (up to 240 characters), beside the hook outcome.
-Absolute paths, URLs, common credential prefixes, and the local account name are scrubbed. This
-lets us revisit what the hook caught without relying on transcripts that may later disappear.
-The transcript itself is never copied. If the hook cannot read a supported transcript, the row
-stores a status such as `no_transcript_path` or `transcript_unreadable`, not a guessed need. These
-excerpts enter the local `usage.db` and can be copied to TursoDB by telemetry sync. Local rows
-follow 90-day retention; uploaded rows currently have no automatic retention. This is an excerpt-level
-scrubber, not a guarantee that every sensitive phrase is detected.
-Transcript readers cover Claude Code/Grok-compatible JSONL and Codex rollout JSONL. Kimi's hook
-payload has no transcript path, so its outcome can be logged but its demand is marked
+Hook rows carry no payload content. The one exception that ever existed was a hook suggestion
+that actually reached the agent: a v≤5 row stored the final user-authored prompt as an excerpt
+(up to 240 characters), beside the hook outcome, scrubbed of absolute paths, URLs, common
+credential prefixes and the local account name. The suggestion was removed on 2026-10-25, and the
+thin trigger that replaced it writes identifiers only — harness, model, the harness's own tool
+name and the project id (see [the hook section](#the-pretooluse-hook--the-retrospective-half-of-the-routing)).
+v≤5 rows stay in the local `usage.db` for its 90-day retention and on the remote for good, so such
+an excerpt can still be found there; that scrubber was excerpt-level, not a guarantee that every
+sensitive phrase is detected. The transcript itself was never copied, and when the hook could not
+read a supported transcript it stored a status such as `no_transcript_path` or
+`transcript_unreadable`, not a guessed need. Transcript readers covered Claude Code/Grok-compatible
+JSONL and Codex rollout JSONL; Kimi's payload has no transcript path, so its demand was marked
 `no_transcript_path`. Integration tests exercise the real hook command and usage row for Claude
-Code and Codex, including redaction and the silent-search case; they verify capture, not uptake.
+Code and Codex; they verify capture, not uptake.
 
 What is otherwise never recorded: file contents, the arguments of an unknown or removed command
 (only the typed command name is kept, as `rejected`), clap/error messages, absolute home paths. The recorder is best-effort:
@@ -314,7 +314,7 @@ machines importing at once would write the same keys into two replicas.
 ./install.sh --uninstall  # remove managed artifacts only (reads manifest v2)
 ./install.sh --force      # on unmanaged skill collision: backup and replace
 ./install.sh --with-rustup # bootstrap rustup if cargo is missing
-./install.sh --no-hook    # skip wiring the PreToolUse hook into Claude Code / Codex settings
+./install.sh --no-hook    # skip wiring both hooks into Claude Code / Codex / Kimi settings
 ./install.sh --stage-only # build + stage + validate one generation; prints its id; touches nothing live
 ./install.sh --activate-only --gen <id>  # flip a staged generation live (symlink + shim + cort_bin only)
 ```
@@ -331,7 +331,7 @@ exit 2, on a fresh install). `./install.sh --force` really reinstalls over it.
 - Downloads pinned `ast-grep` v0.45.3 prebuilt `app-<target>.zip` for your platform (Linux x86_64/aarch64, macOS x86_64/arm64) from GitHub Releases and verifies SHA-256 (repo-maintained; upstream publishes no checksums) — fail-closed: an empty or mismatched checksum refuses to install. Falls back to `cargo install ast-grep --version 0.45.3 --locked` (requires Rust 1.88+).
 - Builds `cort` from `rust/` with `cargo build --release --locked` on **every** run and installs the binary plus its ast-grep pack (`src/pack`, located at runtime via `CORT_PACK_DIR`) to `~/.local/share/cortexyoung/cort`, shimming `~/.cargo/bin/cort` or `~/.local/bin/cort`.
 - Deploys `skills/ast-grep/SKILL.md` to **both** agent homes — `~/.claude/skills/ast-grep/SKILL.md` and `~/.codex/skills/ast-grep/SKILL.md` (honouring `CODEX_HOME`) — **byte-for-byte the repo file**. The installer writes nothing inside the document: the frontmatter block holds keys only (`name`, `description`, and nothing of ours), both loaders anchor that fence to line 1, and `rust/tests/skill_format.rs` fails the build if a source stops parsing. Ownership lives in `.cortexyoung-managed` beside the skill, which records the SHA-256 of the bytes we deployed — so a hand-edit of a deployed `SKILL.md` reads as someone else's file and is refused, not silently overwritten. Edit `skills/<name>/SKILL.md` in this repo instead; one source feeds both homes. Preflights collisions before mutating: skips if hash-equal, replaces what it owns, refuses what it does not (use `--force` to backup and replace). Uninstall removes the document and its stamp, and nothing else.
-- Wires **two** hooks into `~/.claude/settings.json`, `~/.codex/config.toml` and `~/.kimi-code/config.toml` in the **same run** as the skill (skip all of them with `--no-hook`): a `PreToolUse` search hook that records its verdict in local `usage.db` **without speaking by default** (`CORT_SUGGEST=1` restores delivery), and a `PostToolUse` edit hook that repairs an existing index. `cort hook-install --all` resolves all six entries from its own table (`install.sh` names no path, dialect or subcommand), and the single-entry form takes an explicit `--format` and `--event` — JSON via `rust/src/settings.rs`, Codex's nested TOML via `rust/src/settings_toml.rs`, Kimi's flat `[[hooks]]` TOML via `rust/src/settings_kimi.rs` — never `jq`: every one of them preserves the hooks you already have, rewrites our own entry when the binary moves instead of adding a second, collapses duplicates down to one, refuses outright to overwrite a settings file it could not parse, and gives an install-then-uninstall cycle back byte for byte. (The format used to be read off the file extension. Two of these three files are called `config.toml`, so each caller now names its own.) Grok reads the same `settings.json` as Claude Code and needs no entry of its own. See [the hook section](#the-pretooluse-hook--the-retrospective-half-of-the-routing) for the current runtime behavior and dated delivery measurements.
+- Wires **two** hooks into `~/.claude/settings.json`, `~/.codex/config.toml` and `~/.kimi-code/config.toml` in the **same run** as the skill (skip all of them with `--no-hook`): a `PreToolUse` trigger that records one row per fire in local `usage.db` and kicks collection, and a `PostToolUse` edit hook that repairs an existing index. Neither speaks; both exit 0 and never wait. `cort hook-install --all` resolves all six entries from its own table (`install.sh` names no path, dialect or subcommand), and the single-entry form takes an explicit `--format` and `--event` — JSON via `rust/src/settings.rs`, Codex's nested TOML via `rust/src/settings_toml.rs`, Kimi's flat `[[hooks]]` TOML via `rust/src/settings_kimi.rs` — never `jq`: every one of them preserves the hooks you already have, rewrites our own entry when the binary moves instead of adding a second, collapses duplicates down to one, refuses outright to overwrite a settings file it could not parse, and gives an install-then-uninstall cycle back byte for byte. (The format used to be read off the file extension. Two of these three files are called `config.toml`, so each caller now names its own.) Grok reads the same `settings.json` as Claude Code and needs no entry of its own. See [the hook section](#the-pretooluse-hook--the-retrospective-half-of-the-routing) for the current runtime behavior and the dated measurements behind the removal.
 - Adds a single bounded idempotent `PATH` block to your shell profile (`.bashrc`/`.zshrc`/`.profile`) so `cort` and `ast-grep` are on `PATH`; removed on `--uninstall`.
 - Records ownership in `~/.local/share/cortexyoung/manifest` (v2 `key:value` lines) — uninstall only removes what it installed, never a pre-existing binary.
 
@@ -641,13 +641,14 @@ set the flag for every one of 60 sampled seeds. What remains is the receiver gat
    tree by removing the three rules and re-indexing both ways: chunks 1,236 → 1,356, relationships
    2,222 → 2,714, raw edges 12,523 → 15,850 (+27%), index 978ms → 1,140ms (+17%).
 
-   Three things this does **not** do, stated because the first was the reason it was built. It does
+   Three things this does **not** do, stated because the first was the reason it was built. It did
    not move the routing numbers: over one corpus of 58,826 commands and 236 hook fires, the eval
    screen's confirmed bucket went **59 → 63**, four fires, not the ~26 a name-shape estimate
-   predicted. (Method note, because it caught this measurement out once: `hook-probe` has no
-   `--since` and reads whatever transcripts are on disk when it runs, so a before/after has to be two
-   binaries run **back to back** — an earlier version of this paragraph compared a 57,143-command run
-   against a 58,637-command one and called them the same corpus.) Spot-checking the CamelCase
+   predicted. (Method note, because it caught this measurement out once: `cort-evals hook-probe`
+   had no `--since` and read whatever transcripts were on disk when it ran, so a before/after had
+   to be two binaries run **back to back** — an earlier version of this paragraph compared a
+   57,143-command run against a 58,637-command one and called them the same corpus. The probe was
+   removed on 2026-10-24.) Spot-checking the CamelCase
    symbols still rejected — `StellarHazard`, `UnitDestroyed`, `AnalyticsEngine`, `D1ExecResult` —
    none is declared anywhere in those repositories: they are dependency and std types, and `cort` has
    no seed for them either, so the rejections are correct. It does not cover `const`/`static`
@@ -809,7 +810,8 @@ are git hooks (`post-commit`/`post-checkout`, `graphify/hooks.py`) that rebuild 
 injected into `CLAUDE.md`/`AGENTS.md`/`GEMINI.md` (`graphify/always_on/`), escalating to "This applies
 to YOU and to every subagent you spawn … Do not skip graphify because files are 'already known'"
 (`graphify/install.py:1115`). That is the arm measured here at 409 searches and zero `cort` calls in
-skill-bearing sessions, and it is why the routing rule lives in `rust/src/hook.rs` on `PreToolUse`.
+skill-bearing sessions, and it is why the routing rule lived in `rust/src/hook.rs` on `PreToolUse`
+until 2026-10-25, when the hook became a thin trigger and the rule was removed.
 
 Its numbers are not comparable to the ones above and should not be set beside them. Graphify's own
 `BENCHMARKS.md` reports the code-intelligence result as ERPNext (~1M LOC), **n=6** graded questions,
@@ -852,20 +854,28 @@ measured break-even so an agent does not route a string question into a graph to
 
 ## The PreToolUse hook — the retrospective half of the routing
 
-**Current behavior (`rust/src/main.rs`, since 2026-09-27):** the hook keeps running the routing
-rule and records every outcome in local `usage.db`, but it emits an empty response by default.
-No Claude Code, Codex or Kimi agent receives a `cort` suggestion or deny from it unless
-`CORT_SUGGEST=1` is set. The delivery observations below describe the earlier enabled trial.
+**Current behavior (`rust/src/main.rs`, since 2026-10-25):** the hook is a thin trigger. It does
+not judge the tool call and says nothing: a payload it cannot parse, or one with no (or a null)
+`tool_input`, is recorded as `no_payload` and kicks nothing; every other payload is recorded as
+`fired` with the harness, model, project and tool name, and calls `collect::kick` — which decides
+whether a collection run is due and, if so, starts `cort measure collect|health --background` in
+the background. stdout stays `{}`, exit 0, no waiting, no network. `CORT_SUGGEST` no longer exists;
+nothing reads it. The collection subcommands ship with the event-driven-collection plan, not with
+this trigger. Between 2026-09-27 and 2026-10-25 the hook ran the routing rule, recorded its verdict
+and stayed silent by default; before 2026-09-27 the verdict was delivered. Both are history, and
+the measurements below are dated to them.
 
 The skill above is **prospective**: it asks the model to recognise "I am about to rename this
 symbol" *before* running the search that would tell it what it is about to do. Measured over the
-sessions that carried it, that never fired — 409 searches, zero `cort` calls. The hook is the
-same rule in the **retrospective** shape: given the `grep`/`rg` the agent actually just ran, say
-whether `cort impact` answers it better. Nothing depends on the model remembering anything.
+sessions that carried it, that never fired — 409 searches, zero `cort` calls. The hook was the
+same rule in the **retrospective** shape: given the `grep`/`rg` the agent actually just ran, decide
+whether `cort impact` answers it better. That rule and its delivery were removed on 2026-10-25;
+what is left is the demand instrument — a fire is a fact about how often an agent reaches for a
+matched tool.
 
-It runs as a `PreToolUse` hook matched to `Bash` (`Bash|Grep` on Kimi, whose search surface is
-mostly its structured tool), reads the harness payload on stdin, records its verdict, and stays
-silent by default. `cort hook-suggest` is not a verb to type.
+It runs as a `PreToolUse` hook matched to `Bash` (`Bash|Grep` on Kimi), reads the harness payload
+on stdin, records one row, and stays silent. The matcher decides which tool calls become fires,
+not whether a search deserves an answer. `cort hook-suggest` is not a verb to type.
 
 **Earlier delivery rationale.** When enabled, the hook was the delivery mechanism; the number it delivered
 is the [`cort impact` cost result](#re-analysis-2026-08-28-the-gate-was-measured-on-the-wrong-case):
@@ -873,38 +883,41 @@ is the [`cort impact` cost result](#re-analysis-2026-08-28-the-gate-was-measured
 correct on the same tasks. Read that section's caveats along with the number — it is a floor on
 what a caller-set question is worth in this harness, not a controlled `cort` vs `rg` comparison, and
 the demand-side numbers a few paragraphs below it say plainly that this shape of question is rare in
-daily use. The later uptake measurements led to the current silent default.
+daily use. The later uptake measurements led first to the silent default (2026-09-27) and then to
+removal (2026-10-25).
 
-**Four harnesses, one rule, two surfaces.** Claude Code, Codex and Kimi each get their own wired
-entry — JSON in `~/.claude/settings.json`, nested TOML in `~/.codex/config.toml`, flat `[[hooks]]`
-TOML in `~/.kimi-code/config.toml`, all installed in the same run (see [Install](#install)). Grok
-reads Claude Code's `settings.json` for compatibility and fires the same entry with no wiring of its
-own; `harness_of` (`rust/src/main.rs`) tells them apart from the harness's own `transcript_path`
-rather than trusting a flag, because a flag stays right only as long as one settings file serves one
-harness. Codex additionally never receives `suppressOutput` in the hook's JSON reply — the field is
-legal by Codex's own schema but makes it discard the whole response if present
-(`docs/2026-09-02-hook-wiring-correction.md` §12) — while Claude Code and Grok both get it, to keep
-the raw JSON out of the transcript view.
+**Four harnesses, one trigger.** Claude Code, Codex and Kimi each get their own wired entry — JSON
+in `~/.claude/settings.json`, nested TOML in `~/.codex/config.toml`, flat `[[hooks]]` TOML in
+`~/.kimi-code/config.toml`, all installed in the same run (see [Install](#install)). Grok reads
+Claude Code's `settings.json` for compatibility and fires the same entry with no wiring of its own;
+`harness_of` (`rust/src/main.rs`) tells them apart from the harness's own `transcript_path` rather
+than trusting a flag, because a flag stays right only as long as one settings file serves one
+harness. While the hook still spoke, Codex never received `suppressOutput` in its JSON reply — the
+field is legal by Codex's own schema but makes it discard the whole response if present
+(`docs/2026-09-02-hook-wiring-correction.md` §12) — while Claude Code and Grok got it, to keep the
+raw JSON out of the transcript view. That rule went with the reply body: the trigger returns `{}`.
 
-**Not every harness searches through a shell.** Kimi's search surface is its structured `Grep` tool:
-1,078 structured searches against 3,417 shell ones across the whole local corpus, and on that
-harness specifically the split runs the other way from Claude Code's. So the rule is reached by two
-parsers and only one verdict — `search_from_shell` and `search_from_grep_fields` both build a
-`Search`, and `judge` decides. That the split is drawn in the right place is measured rather than
-asserted: replayed over 4,495 real searches, the same `judge` fires on 4.71% of shell searches and
-4.36% of structured ones. Parsing is per-harness by necessity; a second copy of the *decision* would
-leave `cort-evals hook-probe`'s calibration describing something other than what ships.
+**Not every harness searched through a shell.** Kimi's search surface was its structured `Grep`
+tool: 1,078 structured searches against 3,417 shell ones across the whole local corpus, and on that
+harness specifically the split ran the other way from Claude Code's. So the old rule was reached by
+two parsers and only one verdict — `search_from_shell` and `search_from_grep_fields` both built a
+`Search`, and `judge` decided. That the split was drawn in the right place was measured rather than
+asserted: replayed over 4,495 real searches, the same `judge` fired on 4.71% of shell searches and
+4.36% of structured ones. Parsing was per-harness by necessity; a second copy of the *decision*
+would have left `cort-evals hook-probe`'s calibration describing something other than what shipped.
+Both parsers, the verdict, the calibration probe (2026-10-24) and the judge (2026-10-25) are gone.
 
-**Kimi's earlier enabled behavior.** Its `PreToolUse` keeps
-only results whose `action` is `block` and discards every allow-shaped one before the model sees it
-(every other hook event drops its result outright), so `additionalContext` there reaches nobody. The
-contract is therefore deliberately different on that harness and only on it: deny once per symbol
-per session, carrying the same sentence as the reason, and yield on every later attempt — which
-turns a false positive's cost from "the search was blocked" into "one extra turn", what a suggestion
-already costs everywhere else. Measured live: the deny landed, the agent re-issued the identical
-search and it ran, and the gate recorded exactly one fire (§16). What is *not* yet established is
-whether the deny changes what the agent does — two runs, one of which took up `cort impact` and one
-of which re-ran the grep and reasoned from it. That number is now accumulating on its own.
+**Kimi's earlier enabled behavior.** Its `PreToolUse` kept only results whose `action` is `block`
+and discarded every allow-shaped one before the model saw it (every other hook event drops its
+result outright), so `additionalContext` there reached nobody. The contract was therefore
+deliberately different on that harness and only on it: deny once per symbol per session, carrying
+the same sentence as the reason, and yield on every later attempt — which turned a false positive's
+cost from "the search was blocked" into "one extra turn", what a suggestion already cost everywhere
+else. Measured live: the deny landed, the agent re-issued the identical search and it ran, and the
+gate recorded exactly one fire (§16). What was never established is whether the deny changed what
+the agent did — two runs, one of which took up `cort impact` and one of which re-ran the grep and
+reasoned from it. The deny was removed with the suggestion on 2026-10-25, and the thin trigger
+writes a row and returns `{}`, so Kimi's block-shaped-only rule costs it nothing.
 
 **Codex wiring is two steps, and only one of them is ours.** Codex will not run a hook it has not
 been shown. A wired entry sits in `config.toml` and fires nothing until it is reviewed once in an
@@ -922,7 +935,7 @@ the one thing the gate exists to prevent (`docs/2026-09-02-hook-wiring-correctio
 telling and started fixing.** A `PostToolUse` hook on the edit tools runs `cort index --incremental`.
 The suggestion hook could already detect a stale index and all it could do was say so — measured on
 this machine, 19 `cort index` runs against 2,700+ hook fires in 90 days, and in the one live run
-where a model read the warning it re-ran its grep instead. Worse, the staleness it reports compares
+where a model read the warning it re-ran its grep instead. Worse, the staleness it reported compared
 git heads, so the window in which a file is edited and not yet committed — most of the time anyone
 is working — read as fresh while the answers were already wrong. `--incremental` tracks file
 content, so it closes that window: 23–37ms when nothing changed, ~206ms after one edited file
@@ -952,7 +965,7 @@ this did **not** fix.
 That "tracks file content" was true of the files git named and of no others, which until 2026-09-03
 left the opposite window wide open: after a `git pull` the tree is clean against the new head, so
 `git diff HEAD` is empty, so nothing was re-extracted — and the run stamped the new head on anyway,
-erasing the very mismatch the suggestion hook compares. The candidate set is now diffed against the
+erasing the very mismatch the suggestion hook compared. The candidate set is now diffed against the
 head the index was built from as well, and a candidate set git will not narrow honestly widens to
 every file rather than quietly to none (`docs/2026-09-03-installer-dedup-and-attribution.md` §9).
 
@@ -965,117 +978,130 @@ axis `stale` cannot see: whether each index was built by the schema and extracto
 `stale=true` while it does, and the refresh hook closes that gap from the next edit onward. A
 drifted index still answers too; this install ships no repair for it, and failing the check would
 name an action that does not exist.
-**When it fires.** The first pipeline segment must be `rg`, `grep` or `egrep`; the pattern must
-resolve to a single symbol; and the search must look like a caller-set question. It stays silent
-on: any `-A`/`-B`/`-C` context flag (surrounding lines are not `impact`'s question; recorded as
-`context_lines_requested`), searches
+**When it fired (until 2026-10-25).** The first pipeline segment had to be `rg`, `grep` or
+`egrep`; the pattern had to resolve to a single symbol; and the search had to look like a
+caller-set question. It stayed silent on: any `-A`/`-B`/`-C` context flag (surrounding lines are
+not `impact`'s question; recorded as `context_lines_requested`), searches
 into logs, transcripts, `node_modules`, `.claude`/`.codex` and other non-source paths, searches
 naming only file extensions the rule pack does not index, and searches confined to concrete
-files. The rejections carry as much weight as the fires: a hook that also fires on ordinary
+files. The rejections carried as much weight as the fires: a hook that also fires on ordinary
 orientation greps trains the agent to ignore it, which is exactly how the over-broad prose in the
 skill failed. Calibrated by hand-adjudicating every fire over 192 real searches from 13 sessions
-— four rounds took it from 31 fires to 10, six of them genuine (`rust/src/hook.rs` at `ea0acd25`, unchanged since).
+— four rounds took it from 31 fires to 10, six of them genuine (`rust/src/hook.rs` at `ea0acd25`,
+where it stayed until the rule was removed on 2026-10-25).
 
-**One rule, two callers.** The rule lives in the product crate; `cort-evals hook-probe` replays
-that same function over transcripts to measure it. A second copy in the eval harness would let
-the measured rule and the installed rule drift apart.
+**One rule, two callers (until 2026-10-25).** The rule lived in the product crate; `cort-evals
+hook-probe` replayed that same function over transcripts to measure it (the probe was removed on
+2026-10-24, the rule the next day). A second copy in the eval harness would have let the measured
+rule and the installed rule drift apart.
 
-**It cannot claim freshness it did not check.** The gate is `indexed: true`, not "a db file
+**It could not claim freshness it did not check.** The gate was `indexed: true`, not "a db file
 exists" — opening a project creates the schema, so a zero-chunk database once passed a
 file-exists test and let the hook announce an index on a tree where `impact` could only answer
-`no_seed_resolved`. When the index is real but built on an older commit, the injected text says
-so and tells you to re-run `cort index`.
+`no_seed_resolved`. When the index was real but built on an older commit, the injected text said
+so and told you to re-run `cort index`.
 
-**It asks about the symbol, not just the project (2026-09-05).** Until this change the gate answered
-"can `cort` answer anything here" while the agent needed "can it answer *this*". Measured over the 110
-fires that landed in projects which do have an index, by running the suggested command in each:
-**74 (67%) returned `seeds=0 dependents=0`** — a constant, a dependency type, a struct field or a
-domain word. An empty answer is worse than silence, because it teaches the agent the hook is noise.
+**It asked about the symbol, not just the project (2026-09-05).** Until that change the gate
+answered "can `cort` answer anything here" while the agent needed "can it answer *this*". Measured
+over the 110 fires that landed in projects which do have an index, by running the suggested command
+in each: **74 (67%) returned `seeds=0 dependents=0`** — a constant, a dependency type, a struct
+field or a domain word. An empty answer is worse than silence, because it teaches the agent the
+hook is noise.
 
-The predicate now asks the index directly, and fires when it holds **a seed or a raw edge naming the
-symbol**. The second half is not an afterthought: `reindex_one_file` drops a changed file's chunks
-and the `PostToolUse` hook re-indexes on every edit, so a just-deleted symbol has no seed — and
-"verify this deletion is complete" is the exact task the goal sentence names. `raw_edges` outlives
-the `chunks` row it pointed at (schema F-01), so the surviving caller's edge is what keeps that
-search firing. Gating on a seed alone would have silenced the single case worth the most.
+The predicate then asked the index directly, and fired when it held **a seed or a raw edge naming
+the symbol**. The second half was not an afterthought: `reindex_one_file` drops a changed file's
+chunks and the `PostToolUse` hook re-indexes on every edit, so a just-deleted symbol has no seed —
+and "verify this deletion is complete" is the exact task the goal sentence names. `raw_edges`
+outlives the `chunks` row it pointed at (schema F-01), so the surviving caller's edge is what kept
+that search firing. Gating on a seed alone would have silenced the single case worth the most.
 
-Measured on the same 110 fires: 36 have a seed, 14 have only a raw edge, 60 have neither. Firing on
-seed-or-edge cuts empty answers from **74 to 14** and leaves the deletion case untouched. Live on
-this machine after deployment: `tide(`, `HOOK_TARGETS` and `owner` are silent; `compose_symbol_name(`,
-`CallForm` and `evidence_in(` still get their suggestion.
+Measured on the same 110 fires: 36 had a seed, 14 had only a raw edge, 60 had neither. Firing on
+seed-or-edge cut empty answers from **74 to 14** and left the deletion case untouched. Live on this
+machine after deployment: `tide(`, `HOOK_TARGETS` and `owner` were silent; `compose_symbol_name(`,
+`CallForm` and `evidence_in(` still got their suggestion.
 
-Two costs, both stated rather than buried. The lookup runs **only after every shape check passes** —
+Two costs, both stated rather than buried. The lookup ran **only after every shape check passed** —
 about one search in twenty — because the `raw_edges` half is a scan of the project's raw edges
-(~2.95ms over 15,850 rows here), and the hook's whole budget is 5s with `git rev-parse` already
-allowed 400ms of it. And the deletion case still *fires* while `impact` still answers `seeds=0`
-there: this change declines to make that worse, it does not fix it. Fixing it needs a tombstone
+(~2.95ms over 15,850 rows here), and the hook's whole budget was 5s with `git rev-parse` already
+allowed 400ms of it. And the deletion case still *fired* while `impact` still answered `seeds=0`
+there: that change declined to make it worse, it did not fix it. Fixing it needs a tombstone
 capability (`docs/2026-09-04-hook-precision-and-the-seed-gate.md` §10 exit B).
 
 **What it records.** Each fire appends one `hook-suggest` row to the same local `usage.db`
-described above, tagged with the outcome it reached: `hit`, `hit_stale`, `no_index`, `no_shape`,
-`no_evidence` or `no_payload`. `no_index` and `no_evidence` are different silences and the split is
-the point:
-`no_shape` is "not a caller-set question", `no_index` is a **missed opportunity** (index the project
-and the hook would help), and `no_evidence` is a **correct refusal** (the project is indexed and
-holds nothing about this symbol). Measured in the hour after deployment on this machine:
-60 `no_shape`, 5 `no_evidence`, 4 `hit`.
+described above. Its `args_summary` is `v: 6` and always carries `hook` — `fired`, or
+`no_payload` when stdin was not a payload this hook could read — and `harness` (which program ran:
+`claude-code`, `codex`, `kimi-code`, `grok`, or `unspecified` when neither the payload nor the flag
+says). A `fired` row adds `model` when the payload names one; `harness_declared`, only when the
+installer's `--harness` flag and the payload's own `transcript_path` disagree; `tool`, the
+harness's own `tool_name` when it is identifier-shaped (1–64 bytes of `[A-Za-z0-9_.:-]`) and
+`unrecognised` otherwise; and `collect`, the label `collect::kick` returned for that fire. It also
+sets the row's `project_id` column to the canonicalised directory the hook ran in, hashed the same
+way `cort index` takes it. Field names are vocabulary; payload content never enters the row, which
+`payload_content_never_enters_the_hook_row` (`rust/tests/cli.rs`) holds.
 
-Rows written before outcome recording existed read as `legacy_unsplit` and are
-attributable to neither side. `cort usage` rolls up counts only; the outcome split is read by
-`cort-evals adopt-mine`, whose cross-check refuses to compare two sides drawn from different
-populations rather than quietly reporting a ratio across them.
+Rows written by the judging hook carry `hit`, `hit_stale`, `no_index`, `no_shape` or `no_evidence`
+(the hinted, yielded and stood-down forms are in `rust/src/hook.rs`'s
+`LEGACY_SUGGEST_OUTCOMES`), and a `no_shape` row also carries a `decline` tag. `no_index` and
+`no_evidence` were different silences and the split was the point: `no_shape` is "not a caller-set
+question", `no_index` a **missed opportunity** (index the project and the hook would help), and
+`no_evidence` a **correct refusal** (the project is indexed and holds nothing about this symbol).
+Measured in the hour after the judging hook's deployment on this machine: 60 `no_shape`,
+5 `no_evidence`, 4 `hit`. Rows written before outcome
+recording existed read as `legacy_unsplit` and are attributable to neither side. `cort usage`'s
+`hook_census` still buckets every one of them — both current outcomes, the legacy set, and
+`no_shape/<decline>` — so history never surfaces as `unknown/`.
 
-**Two funnels, and the product number excludes the product tree.** The 90-day transcript mining
-(2026-09-08) found the funnel splits three ways and only the third layer is uptake: 9,670 hook
+**Two funnels, and the product number excluded the product tree.** The 90-day transcript mining
+(2026-09-08) found the funnel split three ways and only the third layer was uptake: 9,670 hook
 runs — most correctly silent (`not_a_search_tool`: `ls`, `git`, `cargo`) — reached **13**
 `cort impact` suggestions as Claude Code injections, of which **12 were cort auditing its own
 tree**; agents ran the suggested same-symbol `impact` **2** times, one of which was a hook
-self-test. That is why `--exclude` exists and is not a silent default: the tree being developed
-must be dropped explicitly, and the report echoes what it dropped. The exclude matches the
-transcript **directory name** (`-home-yanggf-a-cortexyoung`), not the repo's short name — a bare
-`cortexyoung` matches nothing and `excluded_sessions: 0` in the output is how you catch it:
+self-test. That is why the removed `adopt-mine` report's `--exclude` existed and was not a silent
+default: the tree being developed had to be dropped explicitly, and the report echoed what it
+dropped. The exclude matched the transcript **directory name**
+(`-home-yanggf-a-cortexyoung`), not the repo's short name — a bare `cortexyoung` matched nothing
+and `excluded_sessions: 0` in the output was how you caught it. The invocation was
+`cort-evals adopt-mine --since <iso> --exclude -home-yanggf-a-cortexyoung`; the command was
+removed with `hook-probe` on 2026-10-24.
 
-```bash
-cort-evals adopt-mine --since 2026-09-01T00:00:00Z \
-  --exclude -home-yanggf-a-cortexyoung
-```
-
-On the 2026-09-01→09-08 window that product-only verdict is **1 injection, 0 adoptions**
+On the 2026-09-01→09-08 window that product-only verdict was **1 injection, 0 adoptions**
 (full snapshot including the excluded tree: `evals/runs/2026-09-09-adopt-baseline/`). Three
 changes landed 2026-09-09 to move it, each tied to a mined cause: the two highest-search
-unindexed projects are now indexed (`GalaxyWarHero`, `hesocial` — the `no_index` hole); the
-stale clause is one copy-pasteable chained command instead of an essay (stale suggestions were
-ignored 6/6); the copy leads with the verb condition so definition lookups can dismiss in one
-glance (5/11 ignores). The next `adopt-mine` over a later window is scored against the
-baseline, product-only.
+unindexed projects were indexed (`GalaxyWarHero`, `hesocial` — the `no_index` hole); the
+stale clause became one copy-pasteable chained command instead of an essay (stale suggestions
+were ignored 6/6); the copy led with the verb condition so definition lookups could dismiss in
+one glance (5/11 ignores).
 
-**Measure caught demand and real follow-through, including dogfood.** `adopt-mine` v3 joins each
-injection to the nearest genuine user instruction in that session. `ask` / `task` reuse the
-`demand` screen's lexical classes. Each injection carries a scrubbed excerpt of its instruction
-when it has user-owned words, including `other` cases, so we can find needs the current vocabulary
-misses; `no_own_words` marks pasted or bare prompts, and matched needles appear for ask/task hits.
-It also counts editor actions in the existing five-action window. The
-`task_with_editor_action_candidates` and `ask_with_editor_action_candidates` values are the leads
-to inspect: they say a caller-set-shaped user task and an edit occurred near an injection, not that
-the hook caused or improved the edit. Same-symbol `impact` adoption remains a separate, stricter
-signal. This moves the review from a flat adoption ratio to **need → injection → impact → nearby
-work**, with the row-level evidence needed to reject false positives.
+**`adopt-mine` v3 joined demand and real follow-through, including dogfood.** It joined each
+injection to the nearest genuine user instruction in that session. `ask` / `task` reused the
+`demand` screen's lexical classes. Each injection carried a scrubbed excerpt of its instruction
+when it had user-owned words, including `other` cases, so needs the vocabulary missed could still
+be found; `no_own_words` marked pasted or bare prompts, and matched needles appeared for ask/task
+hits. It also counted editor actions in the existing five-action window. The
+`task_with_editor_action_candidates` and `ask_with_editor_action_candidates` values were the leads
+to inspect: they said a caller-set-shaped user task and an edit occurred near an injection, not
+that the hook caused or improved the edit. Same-symbol `impact` adoption stayed a separate,
+stricter signal. That moved the review from a flat adoption ratio to **need → injection → impact →
+nearby work**, with the row-level evidence to reject false positives. The `demand` screen survives
+as `cort-evals demand`; the adoption report did not.
 
-Keep self-use visible. Run the report once with no `--exclude` to see every project, including
-cortexyoung, and read its `by_project` rows as dogfood. Run a second time with the cortexyoung
-transcript directory excluded to measure external use. Do not merge those populations. The prompt
-classifier is a screen, not a verdict; check the included excerpts before treating a candidate as
-a real caller-set need. Triggering commands are path-scrubbed before they enter the report.
+Keeping self-use visible was part of that review: the report ran once with no `--exclude` so every
+project, cortexyoung included, appeared and its `by_project` rows could be read as dogfood, and a
+second time with the cortexyoung transcript directory excluded to measure external use. The two
+populations were never merged. The prompt classifier was a screen, not a verdict; the included
+excerpts were checked before a candidate was treated as a real caller-set need. Triggering
+commands were path-scrubbed before they entered the report.
 
 The same mining fixed the mirror mistake on the other side: `impact ok=423` in the usage log is
 **not** hook uptake either — 388 of those rows are one day's eval/probe traffic. Counts without
 their funnel layer measure nothing.
 
 **Turning it off.** `./install.sh --no-hook` skips every entry; `./install.sh --uninstall` unwires
-them all and hands each file back exactly as it was found; `./install.sh --check` prints `hook:`,
-`hook_codex:`, `hook_kimi:` for the suggestion and `refresh:`, `refresh_codex:`, `refresh_kimi:` for
-the index refresh — the Codex lines reading `(wired, NOT TRUSTED — start codex once and review the
-hook)` while Codex has not been shown that entry — or names what is wrong with each independently.
+them all and hands each file back exactly as it was found; `./install.sh --check` prints one line
+per entry — `claude-code/pre:`, `codex/pre:`, `kimi-code/pre:` for the trigger and
+`claude-code/post:`, `codex/post:`, `kimi-code/post:` for the index refresh — the Codex lines
+reading `(wired, NOT TRUSTED — start codex once and review the hook)` while Codex has not been
+shown that entry, or naming what is wrong with each independently.
 Six lines rather than one because a file can carry one of ours and not the other. Those lines exist
 because the wiring silently went down on this repo's own machine more than once, nothing said so,
 and Codex's TOML entry was left deliberately hand-wired (not deployed by `install.sh`) for a full day

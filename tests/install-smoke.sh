@@ -1396,7 +1396,7 @@ assert_contains "$CODEX_CFG" 'matcher = "Bash|Edit|Write|MultiEdit|NotebookEdit"
 assert_contains "$KIMI_CFG"  'event = "PreToolUse"' "Kimi got the flat dialect with the event as a field"
 assert_not_contains "$KIMI_CFG" "[[hooks.PreToolUse]]" "Kimi did not get Codex's nested shape"
 # Kimi's matcher has to reach its structured Grep tool, which is the majority of that harness's
-# search traffic; a Bash-only matcher there is silent on most of what the rule exists for.
+# search traffic; a Bash-only matcher there would miss recording most of the fires.
 assert_contains "$KIMI_CFG" 'matcher = "Bash|Grep"' "Kimi's matcher covers its structured Grep tool"
 # Idempotence, per file: a redeploy converges instead of stacking a second entry.
 bash "$INSTALL_SH" --force > /dev/null 2>&1

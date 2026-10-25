@@ -809,7 +809,7 @@ fn harness_of(payload: &Value, declared: &str) -> (String, Option<String>) {
 /// Why it exists. The `PreToolUse` hook could already tell that the index was behind, and all it
 /// could do was say so -- and measured, saying so is worth almost nothing: 19 `cort index` runs
 /// against 2,700+ hook fires in 90 days on this machine, and in the one live run where a model read
-/// the warning it re-ran its grep instead. Worse, the staleness that hook reports compares git
+/// the warning it re-ran its grep instead. Worse, the staleness that hook reported compared git
 /// heads, so the window in which a file is edited and not yet committed -- most of the time anyone
 /// is working -- reads as fresh while the answers are already wrong. That window is where the
 /// 2026-09-02 `impact` run put a caller at line 467 that was really at 482.

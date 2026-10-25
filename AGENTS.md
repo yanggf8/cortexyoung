@@ -53,23 +53,22 @@ for 62 of 63 sampled seeds -- which is why the instruction is *read the rows*, n
 change that makes an answer cheaper to verify is on the main line; a feature that only makes answers
 more numerous is not.
 
-**The routing rule has exactly one home: `rust/src/hook.rs`.** It is deployed as a `PreToolUse`
-hook by `install.sh` in the same run as the skill. Since 2026-09-27 the hook records its verdict
-in local `usage.db` but emits no suggestion by default (`CORT_SUGGEST=1` opts back into delivery).
-It measures demand; it is not a path by which ClaudeCat memory reaches an agent. The earlier
-delivery experiment followed 409 searches in skill-bearing sessions with zero `cort` calls.
-Be precise about which half is
-singular: **parsing is per-harness and plural, the verdict is singular.** Two spellings arrive in a
-*hook payload* and each gets its own constructor in `hook.rs`: a shell line (`search_from_shell` --
-Claude Code, Codex and Grok all send `tool_input.command` as a string) and Kimi's structured `Grep`
-fields. Codex's `["bash","-lc",…]` is a third spelling but not a third one there: it is the *rollout
-transcript* dialect, which only `cort-evals hook-probe` reads, so its extraction lives in
-`evals/src/hook.rs` and hands the recovered script to `search_from_shell`. All of them build a
-`Search` and hand it to the one `judge`. A second copy of a *parser* is just code; a second copy of
-the *decision* makes `hook-probe`'s calibration describe something other than what ships, which is
-the only thing that number is for. So `hook-probe` replays `judge` itself, and never reimplements it
--- a hand-rolled approximation of the rule was tried on 2026-09-02 and over-counted its own corpus
-by 48% and 4x on the two surfaces (`docs/2026-09-02-hook-wiring-correction.md` §15, §16).
+**`PreToolUse` is a thin trigger since 2026-10-25, and it decides nothing.** It is deployed by
+`install.sh` in the same run as the skill and runs `cort hook-suggest`, which reads the payload and
+records one row in local `usage.db` -- `fired` with the harness, model, tool and project, or
+`no_payload` when stdin was not JSON or carried no (or a null) `tool_input`; a `fired` row then kicks
+collection when a run is due, and the hook says nothing to the agent. It measures demand; it is not a
+path by which ClaudeCat memory reaches an agent. Recording without speaking began on 2026-09-27; the
+search suggestion and the `judge` behind it were removed on 2026-10-25 (T5/T6), and what survives of
+that vocabulary in `rust/src/hook.rs` is `LEGACY_SUGGEST_OUTCOMES` and `SUGGEST_DECLINES`, kept only
+so a census can still attribute the v≤5 rows the judging hook left behind. The dated lessons stand:
+the delivery experiment followed 409 searches in skill-bearing sessions with zero `cort` calls, and
+the rule behind the suggestion was one decision across plural parsers -- a second copy of a
+*parser* was just code, a second copy of the *decision* made `cort-evals hook-probe`'s calibration
+describe something other than what shipped. A hand-rolled approximation of that rule, tried on
+2026-09-02, over-counted its own corpus by 48% and 4x on the two surfaces
+(`docs/2026-09-02-hook-wiring-correction.md` §15, §16); `hook-probe` itself was removed on
+2026-10-24.
 
 **A parser may be plural; the table may not.** `cort hook-install` owns the settings merge for the
 same reason a `jq` pipeline would not -- preserving other people's hooks, collapsing duplicates, and
@@ -139,13 +138,13 @@ aggregate still warns when its file's origin differs from the current machine.
 and the harness total stays whole regardless of the other two (`hook_models_at` is a second lens,
 never a split of the first).
 
-**Delivery is disabled by default, including Kimi's deny.** When `CORT_SUGGEST=1` is set,
-Kimi's `PreToolUse` keeps only
-results whose `action` is `block` and discards every allow-shaped one before the model sees it, so a
-suggestion there arrives as a deny or not at all. That exception is bounded and must stay bounded:
-once per symbol per session, then yield, and `no_other_harness_ever_receives_a_deny` is a test.
-Whether the deny actually changes what the agent does is still two runs and one uptake -- do not
-quote it as established (§16).
+**Delivery was disabled by default, including Kimi's deny, and since 2026-10-25 there is nothing
+left to deliver.** The `CORT_SUGGEST` switch and Kimi's deny went out with the suggestion itself
+(T5/T6). The bounded exception is worth remembering as history: Kimi's `PreToolUse` kept only
+results whose `action` was `block` and discarded every allow-shaped one before the model saw it, so
+a suggestion there would have arrived as a deny or not at all -- once per symbol per session, then
+yield. Whether that deny actually changed what the agent did was never settled: two runs and one
+uptake is not enough to quote it as established (§16).
 
 **The repo is pure Rust. No JavaScript, TypeScript, Python or other scripting language may exist as executable code** — not as a product entry point, not as tooling, not as tests. The eval harness that used to be six `.mjs` files was ported into the `evals/` crate for exactly this reason. Bash stays only where the platform requires it (`install.sh`, `tests/install-smoke.sh`); it is not a place to put logic. If a task seems to need a script, add a Rust subcommand to `evals/` or `rust/` instead.
 
@@ -166,12 +165,12 @@ Everything executable is Rust except two files bash actually requires: `install.
 special feature and never installed — `tests/install-smoke.sh` asserts the payload ships nothing
 but `cort` and the pack.
 
-**Two hook events, and the second one repairs rather than reports.** `PreToolUse` on search
-tools records the would-be `cort impact` verdict without speaking by default; `PostToolUse` on
-edit tools runs `cort index --incremental`. The
-second exists because the first could only ever *say* the index was behind and that was measured at
-19 re-index runs against 2,700+ fires in 90 days -- and because `PreToolUse`'s staleness compares
-git heads, so an edited-but-uncommitted tree read as fresh while its answers were already wrong.
+**Two hook events, and the second one repairs rather than reports.** `PreToolUse` on `Bash` (and
+Kimi's `Grep`) records one row in `usage.db` and, for a `fired` row, kicks collection, speaking
+nothing to the agent; `PostToolUse` on edit tools runs `cort index --incremental`. The second
+exists because the first, while it still judged, could only ever *say* the index was behind and
+that was measured at 19 re-index runs against 2,700+ fires in 90 days -- and because the staleness it compared was git
+heads, so an edited-but-uncommitted tree read as fresh while its answers were already wrong.
 `hook-refresh` never creates an index, gives up rather than wait on a busy database, and is silent
 and exits 0 whatever happens. Both entries live in the same three files, told apart by their
 subcommand rather than by position -- in Kimi's flat `[[hooks]]` array nothing else can tell them
@@ -180,13 +179,14 @@ including comments that belong to other owners; that is a test, because it was a
 (`docs/2026-09-02-hook-wiring-correction.md` §17).
 
 **Both staleness checks are one-sided, and they lean opposite ways.** The head comparison
-(`main.rs`, what `hook-suggest` reads) misses an edited-but-uncommitted tree; the content
-comparison (`staleness.rs`, the `index_is_stale` printed beside every `impact` row) missed
-everything that moves HEAD *without* dirtying the tree -- `pull`, `checkout`, `rebase`, `reset`, a
-teammate's commit -- because its candidate set was `git diff HEAD` and after a pull that diff is
-empty. Fixed on 2026-09-03 by giving `git_candidates` the head the index was built from and
-diffing against it too (`docs/2026-09-03-installer-dedup-and-attribution.md` §9). The half worth remembering is the second one: `index --incremental` shared
-that candidate set, so it re-extracted nothing and then stamped the new head on anyway, which means
+(`main.rs`, what `hook-suggest` read while it still judged) missed an edited-but-uncommitted tree;
+the content comparison (`staleness.rs`, the `index_is_stale` printed beside every `impact` row)
+missed everything that moves HEAD *without* dirtying the tree -- `pull`, `checkout`, `rebase`,
+`reset`, a teammate's commit -- because its candidate set was `git diff HEAD` and after a pull that
+diff is empty. Fixed on 2026-09-03 by giving `git_candidates` the head the index was built from and
+diffing against it too (`docs/2026-09-03-installer-dedup-and-attribution.md` §9). The half worth
+remembering is the second one: `index --incremental` shared that candidate set, so it re-extracted
+nothing and then stamped the new head on anyway, which means
 the `PostToolUse` repair hook was not merely failing to repair a pulled tree -- on the next edit it
 *erased the one signal* saying repair was needed. Measured on this repo at `70e228f5..0d51e55b`:
 `index_is_stale: false` over 17 changed files and a 5-commit-old graph. **A candidate set that
@@ -200,16 +200,16 @@ attempt. So since 2026-09-14 `impact` runs the repair itself (`rust/src/heal.rs`
 before answering: milliseconds when an incremental suffices, the full 1-2s rebuild inline when it
 does not, and a single-flight background rebuilder (`flock`, kernel-released on death, never a pid
 file) for trees past `CORT_HEAL_MAX_FILES`. A foreground command a person chose to run has the
-budget a hook never will; the search hook stays a read-only probe and the edit hook only repairs
-an existing index. What the payload owes the reader is
-unchanged: `self_healed`/`heal_deferred` name what the query did about staleness, and every
-disclosure field still means what it meant — they describe the answer's basis, they never assign
-the caller maintenance work. One arm of that contract had to learn to speak on 2026-09-24: the
-never-create boundary no-opped **silently** on an empty index, so the husk a sandboxed create left
-behind on travel-2026 answered `repair=rebuild_required` with no heal marker and two separate
-agents read that as "the heal never fired" — the index was simply never bootstrapped on that
-machine. That arm now answers `heal_deferred: "empty_index_never_creates"`; the bootstrap lever
-remains an explicit `cort index`.
+budget a hook never will; the `PreToolUse` hook reads no index at all -- since 2026-10-25 it only records
+a row and kicks collection -- and the edit hook only repairs an existing index. What the payload
+owes the reader is unchanged: `self_healed`/`heal_deferred` name what the query did about
+staleness, and every disclosure field still means what it meant — they describe the answer's
+basis, they never assign the caller maintenance work. One arm of that contract had to learn to
+speak on 2026-09-24: the never-create boundary no-opped **silently** on an empty index, so the husk
+a sandboxed create left behind on travel-2026 answered `repair=rebuild_required` with no heal
+marker and two separate agents read that as "the heal never fired" — the index was simply never
+bootstrapped on that machine. That arm now answers
+`heal_deferred: "empty_index_never_creates"`; the bootstrap lever remains an explicit `cort index`.
 
 **CI's first gate is `rustfmt`, and a gate that fails is a gate that hides the ones behind it.** Both
 jobs run fmt, then clippy with warnings as errors, then `cargo test --locked --all-targets`; a
