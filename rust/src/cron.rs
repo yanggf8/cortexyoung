@@ -1,4 +1,5 @@
-//! The crontab entry that runs `cort measure record` hourly.
+//! The legacy crontab entry that ran `cort measure record` hourly: manual install and removal only;
+//! the installer and upgrader retire it, and the hook kick is the automatic collection trigger.
 //!
 //! Same discipline as `hook-install`: the binary owns the merge (the installer holds no logic),
 //! our own entry is recognised by tokens and never by a line suffix, and the command prefix is
@@ -79,21 +80,29 @@ pub fn measure_cron_line(command_prefix: &str, log: &Path) -> String {
     )
 }
 
-/// True for a crontab line that runs `cort measure record`: some shell word whose file name is
-/// exactly `cort` (quoted or not), immediately followed by the words `measure` and `record`.
-/// Comments never match, and whatever follows is irrelevant -- a token test, not a suffix test,
-/// because anchoring to the end of the line is what made `hook-install --status` lie twice.
+/// True for a crontab line whose command is `cort measure record`: the first word after the
+/// schedule (one `@` word, or five time fields) has the file name exactly `cort` (quoted or not),
+/// and the next two are `measure` and `record`. Comments never match, and whatever follows is
+/// irrelevant -- a token test, not a suffix test, because anchoring to the end of the line is what
+/// made `hook-install --status` lie twice. The start is anchored because uninstall drops the whole
+/// line: `echo cort measure record` or `backup && cort measure record` is someone else's job.
 pub fn is_measure_entry(line: &str) -> bool {
     let line = line.trim();
     if line.starts_with('#') {
         return false;
     }
     let words = shell_words(line);
-    words.windows(3).any(|w| {
-        w[1] == "measure"
-            && w[2] == "record"
-            && Path::new(&w[0]).file_name().and_then(|n| n.to_str()) == Some("cort")
-    })
+    let start = if words.first().is_some_and(|w| w.starts_with('@')) {
+        1
+    } else {
+        5
+    };
+    matches!(
+        words.get(start..start + 3),
+        Some([cmd, m, r]) if m == "measure"
+            && r == "record"
+            && Path::new(cmd).file_name().and_then(|n| n.to_str()) == Some("cort")
+    )
 }
 
 /// 兩種條目共用的整行合併：`is_entry` 認出的行中，trim 後與 `line` 不同者移除；
@@ -289,7 +298,14 @@ pub fn run(action: CronAction) -> Result<Value, String> {
             }
         }
         CronAction::Uninstall => {
-            let existing = read_crontab().map_err(|e| e.message().to_string())?;
+            // No `crontab` program means no entry can exist: the goal state, not a failure.
+            let existing = match read_crontab() {
+                Ok(text) => text,
+                Err(CronError::Absent(_)) => {
+                    return Ok(json!({"status":"not_present","crontab_available":false}))
+                }
+                Err(e) => return Err(e.message().to_string()),
+            };
             let out = remove_entries(&existing, is_measure_entry);
             let changed = out != existing;
             if changed {

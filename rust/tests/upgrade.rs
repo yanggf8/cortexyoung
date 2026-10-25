@@ -2,8 +2,57 @@
 //! real directory layouts, real symlinks, real installed-shaped files. No toy renames.
 
 use std::fs;
+
 // NOTE: no `use std::path::Path` here — no Task-1 test names bare `Path`, and an unused
 // import trips `-D warnings`. A later task needing it adds the import exactly once, here.
+
+/// The argv the upgrader runs through the shim removes cort's entry and nothing else. That the
+/// upgrader reaches this step is the smoke test's to show (Test 23): it needs an installed machine.
+#[test]
+fn upgrade_retire_args_remove_only_own_cron_entry() {
+    let home = tempfile::tempdir().unwrap();
+    let crontab = home.path().join("crontab");
+    let foreign = b"# keep this comment\n\n0 3 * * * /bin/backup --all\n";
+    fs::write(&crontab, foreign).unwrap();
+    let data = home.path().join("data");
+    let memory = home.path().join("memory");
+    let cache = home.path().join("cache");
+    let cort = env!("CARGO_BIN_EXE_cort");
+    let isolated = || {
+        let mut cmd = std::process::Command::new(cort);
+        cmd.env("HOME", home.path())
+            .env("XDG_DATA_HOME", &data)
+            .env("CORT_MEMORY_DIR", &memory)
+            .env("CORT_CACHE_DIR", &cache)
+            .env("CORT_CRONTAB_FILE", &crontab);
+        cmd
+    };
+    let install = isolated()
+        .args([
+            "measure",
+            "cron",
+            "--install",
+            "--command-prefix",
+            home.path().join("cort").to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(install.status.success(), "{install:?}");
+    assert!(fs::read_to_string(&crontab)
+        .unwrap()
+        .contains("measure record"));
+
+    assert_eq!(
+        cort::upgrade::RETIRE_MEASURE_CRON_ARGS,
+        ["measure", "cron", "--uninstall"]
+    );
+    let retire = isolated()
+        .args(cort::upgrade::RETIRE_MEASURE_CRON_ARGS)
+        .output()
+        .unwrap();
+    assert!(retire.status.success(), "{retire:?}");
+    assert_eq!(fs::read(&crontab).unwrap(), foreign);
+}
 
 /// A minimal installed-shape root: manifest with cort_bin, a real shim file, a pack dir.
 /// Returns ((root, home, bin) TempDirs alive, root path, home path, cort_home, bin path).

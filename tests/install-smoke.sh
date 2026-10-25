@@ -1503,29 +1503,56 @@ else
   rm -f "$ACQUIRED" "$DONE"
 fi
 
-# ── 23. the measure cron entry is merged only when measurement is configured ──
+# ── 23. install retires only cort's measure cron entry, configured or not ──
 # `crontab` is per-user and system-wide, not HOME-scoped: the whole file runs against
 # CORT_CRONTAB_FILE (exported near the top), never the real crontab.
-echo "--- Test 23: measure cron entry follows the measure config ---"
+echo "--- Test 23: install retires only cort's measure cron entry ---"
 fresh_home_with_install
-assert_not_contains "$CORT_CRONTAB_FILE" "measure record" "unconfigured install writes no measure cron entry"
 T23_CORT="$(grep "^cort_bin:" "$HOME/.local/share/cortexyoung/manifest" | head -n1 | cut -d: -f2-)"
-export CORT_MEMORY_DIR="$HOME/.local/share/cortexyoung/memory"
-mkdir -p "$CORT_MEMORY_DIR"
-printf '{}\n' > "$CORT_MEMORY_DIR/turso-measure.json"
-for _ in 1 2; do
+T23_ORIG="$(mktemp)"
+printf '# keep mine\n\n0 3 * * * /bin/backup --all\n' > "$T23_ORIG"
+for configured in no yes; do
+  cp "$T23_ORIG" "$CORT_CRONTAB_FILE"
+  "$T23_CORT" measure cron --install --command-prefix "$T23_CORT" >/dev/null
+  if [ "$configured" = yes ]; then
+    export CORT_MEMORY_DIR="$HOME/.local/share/cortexyoung/memory"
+    mkdir -p "$CORT_MEMORY_DIR"
+    printf '{}\n' > "$CORT_MEMORY_DIR/turso-measure.json"
+  fi
   ( set --; export SOURCE_ONLY=1
     # shellcheck disable=SC1090
     . "$INSTALL_SH"
-    deploy_measure_cron "$T23_CORT" ) >/dev/null 2>&1 || true
+    retire_measure_cron "$T23_CORT" ) >/dev/null 2>&1
+  if cmp -s "$T23_ORIG" "$CORT_CRONTAB_FILE"; then
+    pass "$configured measure config: install leaves foreign crontab byte-identical"
+  else
+    fail "$configured measure config: install did not retire only cort's entry"
+  fi
+  assert_not_contains "$CORT_CRONTAB_FILE" "measure record" "$configured measure config: no measure record entry remains"
+  unset CORT_MEMORY_DIR
 done
-if [ "$(grep -c "measure record" "$CORT_CRONTAB_FILE" 2>/dev/null || true)" = "1" ]; then
-  pass "configured install leaves exactly one measure cron entry across two runs"
+# The function alone proves nothing if the install stops calling it: a whole reinstall must too.
+# --force, because a bare run on an installed machine hands off to cort_upgrade instead.
+cp "$T23_ORIG" "$CORT_CRONTAB_FILE"
+"$T23_CORT" measure cron --install --command-prefix "$T23_CORT" >/dev/null
+if bash "$INSTALL_SH" --force > /tmp/smoke23.log 2>&1 && cmp -s "$T23_ORIG" "$CORT_CRONTAB_FILE"; then
+  pass "a reinstall retires cort's entry and leaves the foreign crontab byte-identical"
 else
-  fail "configured install leaves exactly one measure cron entry (got: $(cat "$CORT_CRONTAB_FILE" 2>/dev/null))"
+  fail "a reinstall did not retire only cort's entry (see /tmp/smoke23.log)"
 fi
-assert_contains "$CORT_CRONTAB_FILE" "$T23_CORT measure record" "the entry runs the installed shim"
-unset CORT_MEMORY_DIR T23_CORT
+# And the hand-off: cort_upgrade retires it too, but a current install exits before doing any work,
+# so drift the installed binary first -- an appended byte leaves it runnable and its hash different.
+cp "$T23_ORIG" "$CORT_CRONTAB_FILE"
+"$T23_CORT" measure cron --install --command-prefix "$T23_CORT" >/dev/null
+printf 'x' >> "$HOME/.local/share/cortexyoung/cort/cort"
+bash "$INSTALL_SH" > /tmp/smoke23u.log 2>&1 || true
+if grep -qF "existing installation — upgrading with" /tmp/smoke23u.log && cmp -s "$T23_ORIG" "$CORT_CRONTAB_FILE"; then
+  pass "an upgrade retires cort's entry and leaves the foreign crontab byte-identical"
+else
+  fail "an upgrade did not retire only cort's entry (see /tmp/smoke23u.log)"
+fi
+rm -f "$T23_ORIG"
+unset T23_CORT T23_ORIG
 
 # ── 24. uninstall takes the cron entry out and hands the crontab back byte for byte ──
 echo "--- Test 24: uninstall restores the foreign crontab exactly ---"
@@ -1534,13 +1561,7 @@ T24_ORIG="$(mktemp)"
 printf '# mine\nMAILTO=me@example.com\n\n9 17 * * * /home/u/.cargo/bin/claudecat analyze\n\n0 3 * * * /bin/backup --all\n' > "$T24_ORIG"
 cp "$T24_ORIG" "$CORT_CRONTAB_FILE"
 T24_CORT="$(grep "^cort_bin:" "$HOME/.local/share/cortexyoung/manifest" | head -n1 | cut -d: -f2-)"
-export CORT_MEMORY_DIR="$HOME/.local/share/cortexyoung/memory"
-mkdir -p "$CORT_MEMORY_DIR"
-printf '{}\n' > "$CORT_MEMORY_DIR/turso-measure.json"
-( set --; export SOURCE_ONLY=1
-  # shellcheck disable=SC1090
-  . "$INSTALL_SH"
-  deploy_measure_cron "$T24_CORT" ) >/dev/null 2>&1 || true
+"$T24_CORT" measure cron --install --command-prefix "$T24_CORT" >/dev/null
 assert_contains "$CORT_CRONTAB_FILE" "measure record" "the entry is installed before the uninstall"
 bash "$INSTALL_SH" --uninstall > /tmp/smoke24.log 2>&1 || true
 if cmp -s "$T24_ORIG" "$CORT_CRONTAB_FILE"; then
@@ -1549,7 +1570,7 @@ else
   fail "uninstall did not restore the crontab (see /tmp/smoke24.log)"
 fi
 rm -f "$T24_ORIG"
-unset CORT_MEMORY_DIR T24_CORT T24_ORIG
+unset T24_CORT T24_ORIG
 
 # ── summary ──────────────────────────────────────────────────────
 echo ""

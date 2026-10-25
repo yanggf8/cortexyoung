@@ -447,15 +447,15 @@
 - Consumes: Task B 狀態檔、Task A1 `kick_counters_at`、`cron::{read_crontab, remove_entries, is_measure_entry, write_crontab}`。
 - Produces: `cort measure status` 印 JSON：`{"batch":{"pending","last_run_ms","last_ok_ms","push_pending","refused","failures":{...}},"health":{"pending","last_run_ms","unmapped_count","unmapped_recent"}}`，lean 格式一行一條；未設定 measure → 錯誤碼 `measure_not_configured`。
 
-- [ ] **Step 1: 寫失敗的測試**
+- [x] **Step 1: 寫失敗的測試**
   - `status_reports_both_lanes`、`status_separates_refused_from_network_failure`、`status_unconfigured_errors`（未設定的判斷走 `measure_store::is_configured()`）。
   - `report_first_section_shows_collection_state`：本機有狀態檔時 `render_report` 第一段含 batch 與 health 兩條；沒有狀態檔時印 `collection: no local state`。
   - install-smoke：安裝後 `CORT_CRONTAB_FILE` 裡沒有 `measure record` 條目；預先放一條 cort 的條目與一條別人的條目 → 安裝後只剩別人的那條、bytes 相同。
   - `upgrade_removes_own_cron_entry`（`CORT_CRONTAB_FILE`）。
   - `help_states_the_retention_boundary`（既有測試）改成也斷言「閒置超過 90 天」的說法存在。
-- [ ] **Step 2: 跑測試，預期失敗。**
-- [ ] **Step 3: 實作。** README 與 help：kick 是唯一自動觸發；cron 已移除；保留期邊界照設計第 6 節。
-- [ ] **Step 4: 跑測試至綠，再跑全套 gate 與 `bash tests/install-smoke.sh`。**
+- [x] **Step 2: 跑測試，預期失敗。**
+- [x] **Step 3: 實作。** README 與 help：kick 是唯一自動觸發；cron 已移除；保留期邊界照設計第 6 節。
+- [x] **Step 4: 跑測試至綠，再跑全套 gate 與 `bash tests/install-smoke.sh`。**
 
 ---
 

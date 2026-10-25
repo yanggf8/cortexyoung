@@ -255,15 +255,16 @@ payload 讀不到）不算使用，也不需要觀察。`project_id` 是 NULL �
 
 ### 6. cron：拿掉
 
-`kick` 是**唯一**的自動觸發。最後一次 hook 之後還沒到期的那一小段資料（不到 15 分鐘的量）先存在
+`kick` 是**唯一**的自動觸發。最後一次 hook 之後還沒到期的那一小段資料（不到一個 idle 間隔的量，預設 15 分鐘）先存在
 本機，下次使用時第一個到期的 kick 就會送，只是晚到。**邊界**：`command_log` 在寫入時清掉 90 天前的
 列（`rust/src/usage.rs` 既有行為，`index_health_log` 照同一套），清理發生在新指令寫入的當下、
 早於非同步收集——所以機器**閒置超過 90 天**時，閒置前那一小段未到期的資料會在下次使用時先被清掉。
-這個損失有上限（不到 15 分鐘的使用量），不為它改清理規則；README 與 `--help` 的保留期說明照這句
+這個損失有上限（不到一個 idle 間隔的使用量；預設 15 分鐘，`CORT_COLLECT_IDLE_SECS` 可改），不為它改清理規則；README 與 `--help` 的保留期說明照這句
 補上。
 
-- `install.sh` 不再安裝 `measure record` 的 crontab 條目（目前只有 `install.sh` 的
-  `deploy_measure_cron` 會裝，`cort_upgrade` 本來就不裝）；安裝與升級時若看到 cort 自己的條目就移除
+- `install.sh` 不再安裝 `measure record` 的 crontab 條目（原本 `install.sh` 的
+  `deploy_measure_cron` 與 `cort_upgrade.rs` 的發布後步驟都會裝）；本單把兩者都改成移除，安裝與升級時若看到
+  cort 自己的條目就移除
   （Task 5 既有的 `measure cron --uninstall` 邏輯，只動 cort 自己那一行）。
 - 三台（NUC11i5、Thinkpade15、i51149R3050）目前都裝了這個條目，部署時移除，使用者在場。
 - `cort measure cron` 子命令暫時保留（手動用得到），之後再決定刪不刪。

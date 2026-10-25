@@ -57,7 +57,7 @@ fn usage_value() -> Value {
             "impact": "cort impact --symbol <name> [--depth <n>] [--coverage] [-f json|lean]",
             "usage": "cort usage [days] [-f json|lean]",
             "memory": "cort memory <configure|import-config|record|resolve|recall|status|sync|import-legacy> [options]",
-            "measure": "cort measure <configure|show|record|sync|collect|health|status|copy-events|import-audit|cron|report> [options]  (collect: scan and upload the batch; --background appends at most one result to measure.log (none when skipped_busy) without stdout; health: observe recently used indexes and write local index_health_log, reading indexes only, with no network; --background appends the result to measure.log without stdout; status: read local collection state, -f json|lean; copy-events: one-time, re-runnable, read-only copy of claudecat's uploaded events from harnessuse, never overwrites, reports same-key rows whose columns differ as conflicts; import-audit: one-time, re-runnable import of CORT-AUDIT.md's health and usage columns, never overwrites, run on one machine only; sync --dry-run compares event ids and never pushes; the local command_log keeps 90 days, so events are lost only if they go unuploaded for 90 days in a row: record not running, or uploads refused pending a dry run)",
+            "measure": "cort measure <configure|show|record|sync|collect|health|status|copy-events|import-audit|cron|report> [options]  (collect: scan and upload the batch; --background appends at most one result to measure.log (none when skipped_busy) without stdout; health: observe recently used indexes and write local index_health_log, reading indexes only, with no network; --background appends the result to measure.log without stdout; status: read local collection state, -f json|lean; cron: manual install or removal of the legacy entry, no longer installed automatically; hook kick is the only automatic collection trigger; copy-events: one-time, re-runnable, read-only copy of claudecat's uploaded events from harnessuse, never overwrites, reports same-key rows whose columns differ as conflicts; import-audit: one-time, re-runnable import of CORT-AUDIT.md's health and usage columns, never overwrites, run on one machine only; sync --dry-run compares event ids and never pushes; command_log and index_health_log keep 90 days, pruned when a new command is recorded before asynchronous collection; if the machine is idle for more than 90 days, the final uncollected events from less than the idle interval before idling (CORT_COLLECT_IDLE_SECS, 15 minutes by default) are pruned on the next use; events can also be lost if collection does not run for 90 days in a row or uploads remain refused pending a dry run for that long)",
             "hook-suggest": "cort hook-suggest  (PreToolUse hook: records one fire row and kicks collection; never speaks; not a verb to type)",
             "hook-refresh": "cort hook-refresh  (PostToolUse hook: brings this project's index up to the tree after an edit; silent, never creates an index; not a verb to type)",
             "hook-install": "cort hook-install [--settings <path>] [--command <cmd>] [--remove|--status]  (installer-invoked: wires hook-suggest into settings.json; not a verb to type)",
@@ -1998,11 +1998,16 @@ struct MeasureArgs {
 const SYNC_HELP: &str = "Upload usage events (command_log rows and cost reports) to the measurement database, \
 then push and pull.
 
-Retention boundary: the local command_log keeps only 90 days. `cort measure record` (hourly, from \
-cron) writes new events into the local replica first and pushes afterwards, so a dead network loses \
-nothing. Events are lost only if they go unuploaded for 90 days in a row -- `record` not running, \
-or uploads refused because no dry run has passed for this machine (printed to measure.log every \
-hour): they are pruned from the local file first. Uploaded events are kept remotely for good.
+Retention boundary: command_log and index_health_log keep 90 days, pruned when a new command is \
+recorded, before asynchronous collection. The hook's kick is the only automatic collection trigger \
+(`cort measure collect`, `record` and `sync` also collect when run by hand); collection writes new \
+events into the local replica first and pushes afterwards, so a dead network loses nothing. Events \
+are lost only if collection does not run for 90 days in a row, or uploads stay refused that long \
+because no dry run has passed for this machine (background collection writes the refusal to \
+measure.log and `cort measure status` shows it); and if the machine is idle for more than 90 days, \
+the final uncollected events from less than the idle interval before idling \
+(CORT_COLLECT_IDLE_SECS, 15 minutes by default) are pruned on the next use. Uploaded events are \
+kept remotely for good.
 
 First upload: `cort measure record` and `cort measure sync` refuse to upload events for a machine \
 that has no event watermark yet, unless `cort measure sync --dry-run` has passed for it. The dry \
@@ -2061,7 +2066,7 @@ enum MeasureAction {
         #[arg(long)]
         project_repo: PathBuf,
     },
-    /// Own the hourly crontab line that runs `measure record`.
+    /// Manually install or remove the legacy cron entry; hooks' kick is the only automatic trigger.
     Cron {
         #[arg(long, group = "cron_action")]
         install: bool,
@@ -2069,7 +2074,7 @@ enum MeasureAction {
         uninstall: bool,
         #[arg(long, group = "cron_action")]
         status: bool,
-        /// Install only when the measurement store is configured (what install.sh and upgrade pass).
+        /// For manual install, skip when the measurement store is not configured.
         #[arg(long)]
         if_configured: bool,
         /// The command the crontab line runs: the installed shim. Required, never `current_exe()`.
@@ -2098,7 +2103,7 @@ fn event_inputs() -> Option<cort::telemetry::UploadInputs> {
 }
 
 /// A refused or failed event step does not fail `record` (the compaction rows are independent),
-/// so it must not pass silently either: cron appends stderr to measure.log.
+/// so it must not pass silently either: say so on stderr.
 fn warn_events(scan: &cort::measure::ScanSummary) {
     if let Some(events) = &scan.events {
         if events["status"] != "uploaded" {
@@ -2148,17 +2153,16 @@ fn cmd_measure(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, CortErr
                 .map_err(|e| CortError::new("measure_error", json!({"message":e.to_string()})))?;
             let path = cort::measure_store::configure(&url, &token)
                 .map_err(|m| CortError::new("measure_error", json!({"message":m})))?;
-            // install.sh only schedules cron on a machine that is already configured, so say
-            // whether the schedule exists. Never install it here (the shim path is unknown) and
-            // never fail configure over it.
+            // Collection is kicked by the hook, so the legacy cron entry is no longer wanted:
+            // say whether one is still there and how to retire it. Never touch the crontab here
+            // and never fail configure over it.
             let mut value = json!({"status":"configured","path":path});
             match cort::cron::read_crontab() {
                 Ok(text) => {
                     let installed = text.lines().any(cort::cron::is_measure_entry);
                     value["cron_installed"] = json!(installed);
-                    if !installed {
-                        value["next"] =
-                            json!("cort measure cron --install --command-prefix <shim>");
+                    if installed {
+                        value["next"] = json!("cort measure cron --uninstall");
                     }
                 }
                 Err(e) => {

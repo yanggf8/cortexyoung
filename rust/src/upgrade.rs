@@ -8,6 +8,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// Retire the legacy hourly measurement job after an upgrade. Shared with the CLI test.
+pub const RETIRE_MEASURE_CRON_ARGS: [&str; 3] = ["measure", "cron", "--uninstall"];
+
 // ── the two flocks: admission closes the gate, activity drains the room (spec §3b) ──
 //
 // The FFI follows the `send_sigterm` precedent (`ast_grep.rs`): a three-line extern, no new

@@ -807,6 +807,8 @@ fn help_states_the_retention_boundary() {
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(text.contains("sync --dry-run"), "{text}");
     assert!(text.contains("90 days in a row"), "{text}");
+    assert!(text.contains("idle for more than 90 days"), "{text}");
+    assert!(!text.contains("record not running"), "{text}");
 }
 
 fn wm(s: &mut SqliteStore, machine: &str) -> Option<i64> {

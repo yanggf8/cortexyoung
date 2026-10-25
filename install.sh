@@ -613,15 +613,13 @@ $("$cort_bin" hook-install --all --lean --command-prefix "$cort_bin" 2>/dev/null
 EOF
 }
 
-# The binary owns the crontab merge, and owns the "is measurement configured" test (`--if-configured`);
-# this script passes only the one thing it alone knows: the shim the crontab must run. Never fatal.
-deploy_measure_cron() {
+# The binary owns recognition and removal of cort's legacy entry. This is best effort: collection
+# is now kicked by the hooks, and a cron read/write failure must not fail installation.
+retire_measure_cron() {
   local cort_bin="$1" out
   [ -x "$cort_bin" ] || return 0
-  if out="$("$cort_bin" measure cron --install --if-configured --command-prefix "$cort_bin" 2>&1)"; then
-    [ -z "$out" ] || info "$out"
-  else
-    info "measure: cron entry NOT installed — $out"
+  if ! out="$("$cort_bin" measure cron --uninstall 2>&1)"; then
+    info "measure: cron entry NOT removed — $out"
   fi
 }
 
@@ -1291,7 +1289,7 @@ do_install() {
   deploy_skill_at "$SCRIPT_DIR/$AST_GREP_SKILL_SRC_REL" "$AST_GREP_SKILL_DEST" "skill_ast_grep"
   deploy_skill_at "$SCRIPT_DIR/$AST_GREP_SKILL_SRC_REL" "$CODEX_SKILL_DEST" "skill_ast_grep_codex"
   deploy_hook "$BIN_DIR/cort"
-  deploy_measure_cron "$BIN_DIR/cort"
+  retire_measure_cron "$BIN_DIR/cort"
   ensure_path_block
   record_manifest "manifest_version" "2"
 

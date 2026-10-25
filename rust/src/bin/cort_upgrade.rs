@@ -14,7 +14,7 @@ use cort::upgrade::{
     diagnose_for_check, first_upgrade_note, live_generation, load_acks, migrate_indexes,
     prune_generations, repair_skill, run_capture_with_deadline, run_status_with_deadline, save_ack,
     skill_repair_target, unknown_acks, verdict, Component, ComponentState, DiagnoseInputs,
-    LockError, UpgradeExit,
+    LockError, UpgradeExit, RETIRE_MEASURE_CRON_ARGS,
 };
 use std::path::{Path, PathBuf};
 use std::process::exit;
@@ -336,23 +336,13 @@ fn main() {
     };
     let hooks = check_hooks(shim_ref, &runner, &repair);
 
-    // Measurement cron: same shim the hooks run, merged by the binary, and only when the
-    // measurement store is configured. Best effort -- the verdict does not read it.
-    if let Err(e) = run_capture_with_deadline(
-        &shim,
-        &[
-            "measure",
-            "cron",
-            "--install",
-            "--if-configured",
-            "--command-prefix",
-            &shim.to_string_lossy(),
-        ],
-        Duration::from_secs(60),
-    ) {
-        // Not fatal and not in the verdict, but never swallowed: the person reading the upgrade
-        // output must see that the hourly measurement job was not (re)installed.
-        eprintln!("warning: measure cron not installed: {e}");
+    // Retire only cort's own legacy measurement cron entry. Best effort -- the verdict does not
+    // read it; the hook kick is now the automatic collection trigger.
+    if let Err(e) =
+        run_capture_with_deadline(&shim, &RETIRE_MEASURE_CRON_ARGS, Duration::from_secs(60))
+    {
+        // Not fatal and not in the verdict, but the user must see that removal failed.
+        eprintln!("warning: measure cron not removed: {e}");
     }
 
     // Indexes: eager for live directories, deferred for gone ones (Task 4). The printed

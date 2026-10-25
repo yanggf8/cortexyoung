@@ -21,8 +21,8 @@ same hooks — with three things, in this order:
 2. **Measurement of how agents actually work** (`cort measure`). The primary metric is what a
    context compaction costs afterwards — files re-read, commands repeated, things said wrong — read
    from the agents' own transcripts, alongside per-command usage and index health. cort collects and
-   analyses this itself, into its own Turso database; the collection is being moved from cron to
-   cort's own hooks ([design](docs/superpowers/specs/2026-10-24-event-driven-collection-design.md)).
+   analyses this itself, into its own Turso database; cort's hooks kick background collection
+   ([design](docs/superpowers/specs/2026-10-24-event-driven-collection-design.md)).
    ClaudeCat no longer collects anything.
 3. **The helper functions agents need while editing code.** `cort index` keeps one local SQLite
    index per checkout (`ast-grep` + SQLite, no embeddings, no server); `cort impact` returns the
@@ -60,7 +60,7 @@ Five shipped commands (plus `status`/`projects`/`delete` utilities):
   (`bare` / `scoped` / `receiver` / `type`)
 - `cort memory <record|resolve|recall|status|sync|configure|import-config|import-legacy>` — reviewed project facts in a shared Turso ledger, owned by cort; see [Project memory](docs/memory.md)
 - `cort usage [days]` — local per-machine usage stats (best-effort; 1–90 days, default 30)
-- `cort measure <configure|record|sync|report|show|copy-events|import-audit|cron>` — agent measurement in its own Turso database; see [Local usage recording](#local-usage-recording-offline-hook-separate-tursodb-upload)
+- `cort measure <configure|record|sync|collect|health|status|report|show|copy-events|import-audit|cron>` — agent measurement in its own Turso database; see [Local usage recording](#local-usage-recording-offline-hook-separate-tursodb-upload)
 
 `struct`, `context`, `read` and `recall` were removed on 2026-10-23 after zero invocations in 30 days
 on both machines; for those jobs use `ast-grep run`, `rg`, or open the file. `cort memory recall` is a
@@ -268,20 +268,24 @@ become vanity. The report itself is written to the log after it is rendered, so 
 never appears in its own report.
 
 
-**Uploading these rows (`cort measure sync`, and the event step of `cort measure record`).**
-`cort measure record` (hourly, from cron) writes new `command_log` rows into the local measurement
-replica first and pushes afterwards, so a dead network loses nothing: the rows wait in the replica.
-The local file only keeps 90 days, so events are lost only if they go unuploaded for 90 days in a
-row -- `record` not running, or uploads refused because this machine has no passing dry run yet (the
-refusal is printed to `measure.log` every hour) -- which prunes them from `usage.db` first. Uploaded
-events are kept remotely for good. The event ids are claudecat's, byte for byte (alphabetical
+**Uploading these rows (`cort measure collect`, `cort measure sync`, and the event step of manual `cort measure record`).**
+The hooks' `kick` is the only automatic collection trigger; the installer and upgrader remove cort's
+legacy cron entry. `cort measure cron` remains available to install or remove it manually. Background
+collection uploads batches of local `command_log` and `index_health_log` rows and writes its result to
+`measure.log`. A dead network leaves rows local for a later attempt. Both logs keep 90 days and are
+pruned when a new command is recorded, before asynchronous collection. If the machine is idle for
+more than 90 days, the final uncollected events from less than the idle interval before idling
+(`CORT_COLLECT_IDLE_SECS`, 15 minutes by default) are pruned on the next use. Events can also
+be lost if collection does not run for 90 days in a row (for example, no hook fires), or uploads
+remain refused pending a dry run for that long. Uploaded
+events are kept remotely for good. The `command_log` event ids are claudecat's, byte for byte (alphabetical
 payload keys, rowid 0 in the hash; `rust/tests/telemetry.rs` pins them against values claudecat
 itself produced), so history it already uploaded is not uploaded twice. Because a wrong id would
 re-upload that history and a remote row cannot be taken back, a machine with no event watermark yet
 uploads nothing until `cort measure sync --dry-run` has passed for it: the dry run compares the ids
 computed here with the stored ones for the same machine and row, never pushes, and fails on any
-mismatch or on zero overlap. Until then `record` still records compactions and reports
-`events.status: "refused"` (also on stderr, so cron's `measure.log` shows it); a changed
+mismatch or on zero overlap. Until then manual `record` still records compactions and reports
+`events.status: "refused"`; background collection writes its result to `measure.log`. A changed
 `command_log` column set voids the dry run.
 
 **Copying the old history (`cort measure copy-events`).** A one-time migration of what claudecat

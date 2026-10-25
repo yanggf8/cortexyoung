@@ -100,6 +100,23 @@ fn entry_test_is_token_not_suffix() {
     assert!(!is_measure_entry(""));
 }
 
+#[test]
+fn entry_test_is_anchored_to_the_command_start() {
+    assert!(is_measure_entry("@hourly /x/cort measure record"));
+    // The words appear, but the line's command is someone else's: removing it would drop their job.
+    let theirs = [
+        "0 3 * * * /bin/echo cort measure record",
+        "0 4 * * * /bin/backup --all && /opt/other/cort measure record",
+        "@daily /bin/echo cort measure record",
+    ];
+    for l in theirs {
+        assert!(!is_measure_entry(l), "{l}");
+    }
+    let foreign = format!("{FOREIGN}{}\n", theirs.join("\n"));
+    let installed = merge(&foreign, &line()).0;
+    assert_eq!(remove_entries(&installed, is_measure_entry), foreign);
+}
+
 // ── CLI, always against a temp crontab file ───────────────────────────────
 
 fn cort(file: &Path, data: &Path, args: &[&str]) -> Output {
@@ -313,6 +330,12 @@ fn cli_if_configured_exits_zero_when_the_crontab_program_is_absent() {
     assert!(out(&o).contains("skipping cron"));
     // Without --if-configured the same absence is an error.
     assert!(!run(&["--install"]).status.success());
+    // Uninstall's goal is already met: no program, no entry. The installer must not warn on it.
+    let o = run(&["--uninstall"]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let v: serde_json::Value = serde_json::from_str(&out(&o)).unwrap();
+    assert_eq!(v["status"], "not_present");
+    assert_eq!(v["crontab_available"], false);
     let v: serde_json::Value = serde_json::from_str(&out(&run(&["--status"]))).unwrap();
     assert_eq!(v["installed"], false);
     assert_eq!(v["crontab_available"], false);
@@ -458,24 +481,30 @@ fn configure_out(file: &Path, data: &Path) -> serde_json::Value {
 }
 
 #[test]
-fn cli_configure_reports_cron_installed_false_with_next_step() {
+fn cli_configure_reports_cron_installed_false_without_next_step() {
     let (_d, file, data) = fixture();
     std::fs::write(&file, FOREIGN).unwrap();
     let v = configure_out(&file, &data);
     assert_eq!(v["status"], "configured");
     assert_eq!(v["cron_installed"], false);
-    assert!(v["next"]
-        .as_str()
-        .unwrap()
-        .contains("cort measure cron --install --command-prefix"));
+    assert!(
+        v.get("next").is_none(),
+        "configure must not suggest cron: {v}"
+    );
     assert_eq!(count_entries(&file), 0, "configure must not install cron");
 }
 
 #[test]
-fn cli_configure_reports_cron_installed_true() {
+fn cli_configure_reports_legacy_cron_with_uninstall_step() {
     let (_d, file, data) = fixture();
-    std::fs::write(&file, format!("{FOREIGN}{}\n", line())).unwrap();
+    let before = format!("{FOREIGN}{}\n", line());
+    std::fs::write(&file, &before).unwrap();
     let v = configure_out(&file, &data);
     assert_eq!(v["cron_installed"], true);
-    assert!(v.get("next").is_none());
+    assert_eq!(v["next"], "cort measure cron --uninstall");
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        before,
+        "configure must not touch the crontab"
+    );
 }
