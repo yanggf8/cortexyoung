@@ -136,7 +136,7 @@
   pub fn health_due(s: &HealthState, c: &KickCounters, now_ms: i64, cfg: &CollectConfig) -> bool;
   ```
 
-- [ ] **Step 1: 寫失敗的測試**（`from_lookup` 注入環境，不動真的環境變數）
+- [x] **Step 1: 寫失敗的測試**（`from_lookup` 注入環境，不動真的環境變數）
   - `defaults_match_spec`：九個預設值逐一斷言（Global Constraints 的數字）。
   - `garbage_env_keeps_default`：`"abc"` → 預設；`" 7 "` → 7 秒。
   - `never_run_with_pending_is_due`：預設 state、counters `max_command_id=1` → due。
@@ -150,9 +150,9 @@
   - `instance_change_resets_cursors`、`rewind_resets_cursors`（游標 > MAX → 0）。
   - `health_due_rules`：cursor < MAX 且距上次 ≥ 600 秒 → due；任一不成立 → 不 due。
   - `state_roundtrip_and_corrupt_file_is_default`。
-- [ ] **Step 2: 跑 `cargo test --locked --test collect_due`，預期失敗。**
-- [ ] **Step 3: 實作。** `batch_due` 依設計第 2 節到期規則；`pending = max(0, cmd) + max(0, health)`，refused 時 cmd 項為 0。
-- [ ] **Step 4: 跑測試至綠，再跑全套 gate。**
+- [x] **Step 2: 跑 `cargo test --locked --test collect_due`，預期失敗。**
+- [x] **Step 3: 實作。** `batch_due` 依設計第 2 節到期規則；`pending = max(0, cmd) + max(0, health)`，refused 時 cmd 項為 0。
+- [x] **Step 4: 跑測試至綠，再跑全套 gate。**
 
 ### Task C1: detached spawn 共用、`Lane`／`Spawner`、`KickPaths`
 
@@ -262,7 +262,7 @@
   ```
 - 指標 SQL 照 claudecat `src/cort.rs` ~595-680（not_chunked、real_gap、fts_drift）與 `read_meta`（~94-118，graph_pending）逐字移植，每段註解標原始 `claudecat src/<file>:<line>`（repo 內不寫絕對路徑）；FTS：drift 0 → `"synced"`、N → `"drift=N"`、讀不到 → NULL；`-1` 一律存 NULL。
 
-- [ ] **Step 1: 寫失敗的測試**（暫存目錄建小型 git repo，用既有的 `fake_ast_grep` 與 `cort index` 建 index；`CORT_CACHE_DIR` 指暫存；同一個 index 在多個測試間共用時各自複製一份）
+- [x] **Step 1: 寫失敗的測試**（暫存目錄建小型 git repo，用既有的 `fake_ast_grep` 與 `cort index` 建 index；`CORT_CACHE_DIR` 指暫存；同一個 index 在多個測試間共用時各自複製一份；實作改用真的 ast-grep 經 `cort index` 建 index，同 `tests/cli.rs`；沒有 ast-grep 時測試失敗而不是 SKIP，同 `tests/staleness.rs`）
   - `fresh_index_observed_ok`：剛建好的 index → `status=ok`、`fresh=Some("fresh")`、chunks ≥ 1、`fts=Some("synced")`。
   - `no_age_gate`：把 index 的 `last_indexed_at` 改成 40 天前、HEAD 不動 → 仍是 `fresh`。
   - `edited_file_is_stale_refresh`：改一個檔 → `STALE/refresh`。
@@ -273,9 +273,9 @@
   - `graph_pending_index_is_stale_graph`：建好的 index 把 graph_pending 的 meta 設成 true（照 `read_meta` 讀的那個鍵）→ `fresh=Some("STALE/graph")`。
   - `bounded_times_out`：`bounded(|| { sleep(2s); ok_obs }, 100ms)` 在 1 秒內回 `status=unreadable`、`error=Some("timeout")`。
   - `index_deleted_mid_observation_is_recorded`：測試注入點在讀完 chunks 後刪檔（用 `observe` 的內部分段函式測），結果 `unreadable` 或 `no_index`，不 panic。
-- [ ] **Step 2: 跑 `cargo test --locked --test health_observe`，預期失敗。**
-- [ ] **Step 3: 實作。** 開 index 一律 `open_db_readonly`，不用 `immutable=1`（連 `CANTOPEN` 的退路也不用：它承諾檔案不變、略過鎖與 WAL，會在 hook 正在寫時讀到不一致或漏掉 WAL 內容；開不起來就照實記 `no_index`／`unreadable`）；staleness 走 `compute_stale` 前先用與 `heal.rs` 相同的候選檔計數判斷是否超過 `heal_max_files()`；逾時一律由 `bounded` 處理（`compute_stale` 內部沒有可停下的點，不做階段間檢查）。
-- [ ] **Step 4: 跑測試至綠，再跑全套 gate。**
+- [x] **Step 2: 跑 `cargo test --locked --test health_observe`，預期失敗。**
+- [x] **Step 3: 實作。** 開 index 一律 `open_db_readonly`，不用 `immutable=1`（連 `CANTOPEN` 的退路也不用：它承諾檔案不變、略過鎖與 WAL，會在 hook 正在寫時讀到不一致或漏掉 WAL 內容；開不起來就照實記 `no_index`／`unreadable`）；staleness 走 `compute_stale` 前先用與 `heal.rs` 相同的候選檔計數判斷是否超過 `heal_max_files()`；逾時一律由 `bounded` 處理（`compute_stale` 內部沒有可停下的點，不做階段間檢查）。
+- [x] **Step 4: 跑測試至綠，再跑全套 gate。**
 
 ### Task E: 逐筆健康收集 `cort measure health`
 
