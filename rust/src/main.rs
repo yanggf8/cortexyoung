@@ -2227,8 +2227,9 @@ fn cmd_measure(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, CortErr
             };
             let (scan, outcome) = cort::collect::run_manual(
                 &mut || {
-                    cort::measure_store::open_measure_store_within(
+                    cort::measure_store::open_measure_store_within_timeout(
                         std::time::Duration::from_millis(cfg.manual_wait_ms),
+                        std::time::Duration::from_millis(cfg.net_timeout_ms),
                     )
                 },
                 &paths,
@@ -2284,8 +2285,9 @@ fn cmd_measure(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, CortErr
             // run_collect holds measure-collect.lock before this opener obtains measure.lock.
             let run = cort::collect::run_collect(
                 &mut || {
-                    cort::measure_store::open_measure_store_within(
+                    cort::measure_store::open_measure_store_within_timeout(
                         std::time::Duration::from_millis(cfg.manual_wait_ms),
+                        std::time::Duration::from_millis(cfg.net_timeout_ms),
                     )
                 },
                 &paths,
@@ -2365,8 +2367,9 @@ fn cmd_measure(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, CortErr
             if dry_run {
                 let report = cort::collect::run_manual(
                     &mut || {
-                        cort::measure_store::open_measure_store_within(
+                        cort::measure_store::open_measure_store_within_timeout(
                             std::time::Duration::from_millis(cfg.manual_wait_ms),
+                            std::time::Duration::from_millis(cfg.net_timeout_ms),
                         )
                     },
                     &paths,
@@ -2388,8 +2391,9 @@ fn cmd_measure(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, CortErr
             } else {
                 let (events, synced) = cort::collect::run_manual(
                     &mut || {
-                        cort::measure_store::open_measure_store_within(
+                        cort::measure_store::open_measure_store_within_timeout(
                             std::time::Duration::from_millis(cfg.manual_wait_ms),
+                            std::time::Duration::from_millis(cfg.net_timeout_ms),
                         )
                     },
                     &paths,

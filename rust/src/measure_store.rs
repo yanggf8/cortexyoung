@@ -907,11 +907,23 @@ pub fn with_measure_lock<T>(action: impl FnOnce() -> Result<T, String>) -> Resul
 #[derive(Debug)]
 pub enum OpenError {
     Busy,
+    /// The replica bootstrap ran out of its network limit.
+    Network(String),
     Other(String),
 }
 
-/// Open the configured replica while holding `measure.lock` for the returned store's lifetime.
+/// Open the configured replica while holding `measure.lock` for the returned store's lifetime,
+/// bounding each network operation by the configured `CORT_COLLECT_NET_TIMEOUT_SECS`.
 pub fn open_measure_store_within(wait: Duration) -> Result<Box<dyn MeasureStore>, OpenError> {
+    open_measure_store_within_timeout(wait, default_net_timeout())
+}
+
+/// [`open_measure_store_within`] with the caller's network limit, so a collect run bounds the
+/// replica bootstrap by the same value the run's own configuration names.
+pub fn open_measure_store_within_timeout(
+    wait: Duration,
+    net_timeout: Duration,
+) -> Result<Box<dyn MeasureStore>, OpenError> {
     let config = config().map_err(OpenError::Other)?;
     let lock =
         memory_store::lock_in_within(SUBDIR, &config, "measure.lock", wait).map_err(|error| {
@@ -920,9 +932,110 @@ pub fn open_measure_store_within(wait: Duration) -> Result<Box<dyn MeasureStore>
                 memory_store::LockWait::Failed(message) => OpenError::Other(message),
             }
         })?;
-    let mut store = TursoStore::open(&config).map_err(OpenError::Other)?;
+    let mut store = TursoStore::open(&config, net_timeout).map_err(open_error)?;
     store._lock = Some(lock);
     Ok(Box::new(store))
+}
+
+/// The network bound for paths outside a collect run (`report`, `import-audit`, `copy-events`):
+/// the same configured default, because a hung bootstrap or push is the same hazard there.
+/// Nothing about their output or error codes changes; only a call that would have hung forever
+/// now returns its existing error path.
+fn default_net_timeout() -> Duration {
+    Duration::from_millis(crate::collect::CollectConfig::from_env().net_timeout_ms)
+}
+
+const TIMEOUT_PREFIX: &str = "network timeout after ";
+
+/// Returned instead of touching the network once an earlier operation on the same store timed out.
+const POISONED: &str = "network disabled after a timeout; open the store again";
+
+fn timed_out(message: &str) -> bool {
+    message.starts_with(TIMEOUT_PREFIX)
+}
+
+/// A bootstrap that hit its limit is a network failure; any other open failure stays `Other`,
+/// as before the limit existed.
+fn open_error(message: String) -> OpenError {
+    if timed_out(&message) {
+        OpenError::Network(message)
+    } else {
+        OpenError::Other(message)
+    }
+}
+
+/// Run one network future under `limit`. The turso client retries on its own schedule, and a
+/// collect run has no other way to reclaim a process that hangs in it (cron is being removed, so
+/// nothing else will), which is why the bound is owned here and not by the client. Whole seconds,
+/// truncated, in the message.
+fn with_timeout<T, E: std::fmt::Display>(
+    rt: &tokio::runtime::Runtime,
+    limit: Duration,
+    fut: impl std::future::Future<Output = Result<T, E>>,
+) -> Result<T, String> {
+    // The timeout future itself arms a timer, which only works inside the runtime's context, so
+    // it is created by the async block rather than before `block_on`.
+    match rt.block_on(async { tokio::time::timeout(limit, fut).await }) {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(error)) => Err(error.to_string()),
+        Err(_) => Err(format!("{TIMEOUT_PREFIX}{}s", limit.as_secs())),
+    }
+}
+
+/// One store's network limit and the flag that outlives it, which is not reusable after a
+/// timeout.
+///
+/// Reusing it would mean pushing on top of a sync engine whose in-flight future was dropped
+/// mid-operation, and nothing here knows what that left half-done. Reopening instead is always
+/// safe: every local write reached the replica before the network call, `push_pending` stays true
+/// in the collection state, and the next run's push is idempotent (the events are keyed and
+/// `INSERT OR IGNORE`d, and the watermark is revalidated).
+#[derive(Debug, Clone, Copy)]
+struct NetworkGuard {
+    limit: Duration,
+    poisoned: bool,
+}
+
+impl NetworkGuard {
+    fn new(limit: Duration) -> Self {
+        Self {
+            limit,
+            poisoned: false,
+        }
+    }
+
+    fn limit(&self) -> Duration {
+        self.limit
+    }
+
+    /// `Err` once a previous operation timed out; the store must be reopened instead.
+    fn check(&self) -> Result<(), String> {
+        if self.poisoned {
+            Err(POISONED.to_string())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn observe<T>(&mut self, result: &Result<T, String>) {
+        if matches!(result, Err(message) if timed_out(message)) {
+            self.poisoned = true;
+        }
+    }
+}
+
+/// Every network operation of an open store: refuse once poisoned, bound by the limit, poison on
+/// a timeout. One function so the check and the poisoning cannot be wired to one call and not
+/// the other.
+fn guarded<T, E: std::fmt::Display>(
+    net: &mut NetworkGuard,
+    rt: &tokio::runtime::Runtime,
+    fut: impl std::future::Future<Output = Result<T, E>>,
+) -> Result<T, String> {
+    net.check()?;
+    let result = with_timeout(rt, net.limit(), fut);
+    net.observe(&result);
+    result
 }
 
 /// The Turso sync replica as a [`MeasureStore`]. `push`/`pull` talk to the network.
@@ -930,6 +1043,7 @@ struct TursoStore {
     rt: tokio::runtime::Runtime,
     db: turso::sync::Database,
     conn: turso::Connection,
+    net: NetworkGuard,
     // Last field drops last, after the connection and runtime have finished using the replica.
     _lock: Option<fs::File>,
 }
@@ -1005,20 +1119,24 @@ async fn turso_insert_events(
 }
 
 impl TursoStore {
-    fn open(config: &Config) -> Result<Self, String> {
-        Self::open_replica(SUBDIR, config, "measure.db", true)
+    fn open(config: &Config, net_timeout: Duration) -> Result<Self, String> {
+        Self::open_replica(SUBDIR, config, "measure.db", true, net_timeout)
     }
 
     /// `create_schema = false` opens a replica of somebody else's database without issuing a
     /// single statement of ours against it.
+    ///
+    /// The whole bootstrap -- download, connect, schema -- is one network operation and shares
+    /// the store's limit, so a first open on a fresh machine cannot outlive it.
     fn open_replica(
         subdir: &str,
         config: &Config,
         file: &str,
         create_schema: bool,
+        net_timeout: Duration,
     ) -> Result<Self, String> {
         let rt = memory_store::runtime()?;
-        let (db, conn) = rt.block_on(async {
+        let (db, conn) = with_timeout(&rt, net_timeout, async {
             let db = memory_store::open_replica_in(subdir, config, file).await?;
             let conn = db.connect().await.map_err(te)?;
             if create_schema {
@@ -1032,6 +1150,7 @@ impl TursoStore {
             rt,
             db,
             conn,
+            net: NetworkGuard::new(net_timeout),
             _lock: None,
         })
     }
@@ -1313,11 +1432,17 @@ impl MeasureStore for TursoStore {
     }
 
     fn push(&mut self) -> Result<(), String> {
-        self.rt.block_on(self.db.push()).map_err(te)
+        let db = &self.db;
+        guarded(&mut self.net, &self.rt, async move {
+            db.push().await.map_err(te)
+        })
     }
 
     fn pull(&mut self) -> Result<(), String> {
-        self.rt.block_on(self.db.pull()).map(|_| ()).map_err(te)
+        let db = &self.db;
+        guarded(&mut self.net, &self.rt, async move {
+            db.pull().await.map(|_| ()).map_err(te)
+        })
     }
 }
 
@@ -1326,7 +1451,7 @@ pub fn with_turso_store<T>(
     f: impl FnOnce(&mut dyn MeasureStore) -> Result<T, String>,
 ) -> Result<T, String> {
     with_config_lock(|config| {
-        let mut store = TursoStore::open(&config)?;
+        let mut store = TursoStore::open(&config, default_net_timeout())?;
         f(&mut store)
     })
 }
@@ -1378,12 +1503,14 @@ pub fn with_legacy_and_measure_stores<T>(
             &memory_config,
             "legacy-telemetry.lock",
         )?;
-        let mut to = TursoStore::open(&config)?;
+        let net_timeout = default_net_timeout();
+        let mut to = TursoStore::open(&config, net_timeout)?;
         let mut from = TursoStore::open_replica(
             memory_store::SUBDIR,
             &memory_config,
             "legacy-telemetry.db",
             false,
+            net_timeout,
         )?;
         f(&mut from, &mut to)
     })
@@ -1392,6 +1519,81 @@ pub fn with_legacy_and_measure_stores<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A network future that never finishes is abandoned at the limit; one that finishes first
+    /// keeps its own value or error.
+    #[test]
+    fn turso_timeout_wraps_future() {
+        let rt = memory_store::runtime().unwrap();
+        let started = std::time::Instant::now();
+        let error = with_timeout(
+            &rt,
+            Duration::from_millis(50),
+            std::future::pending::<Result<(), String>>(),
+        )
+        .unwrap_err();
+        assert!(error.starts_with("network timeout after "), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(1));
+        // The message names whole seconds, truncated.
+        let error = with_timeout(
+            &rt,
+            Duration::from_secs(1),
+            std::future::pending::<Result<(), String>>(),
+        )
+        .unwrap_err();
+        assert_eq!(error, "network timeout after 1s");
+        assert_eq!(
+            with_timeout(&rt, Duration::from_millis(50), async { Ok::<_, String>(7) }),
+            Ok(7)
+        );
+        assert_eq!(
+            with_timeout(&rt, Duration::from_millis(50), async {
+                Err::<u8, _>("boom".to_string())
+            }),
+            Err("boom".to_string())
+        );
+    }
+
+    /// The flag that refuses network work after a timeout. A store cannot be opened without a
+    /// network in this test, so the guard's own contract is what is checked.
+    /// The collector counts a bootstrap that hit its limit as a network failure.
+    #[test]
+    fn bootstrap_timeout_opens_as_network() {
+        assert!(matches!(
+            open_error("network timeout after 120s".into()),
+            OpenError::Network(_)
+        ));
+        assert!(matches!(
+            open_error("cannot open Turso sync replica: bad url".into()),
+            OpenError::Other(_)
+        ));
+    }
+
+    #[test]
+    fn poisoned_store_refuses_network() {
+        let mut guard = NetworkGuard::new(Duration::from_secs(120));
+        assert_eq!(guard.check(), Ok(()));
+        guard.observe::<()>(&Err("network timeout after 120s".to_string()));
+        assert_eq!(guard.check(), Err(POISONED.to_string()));
+        // An ordinary network error leaves the store usable; only a dropped future poisons it.
+        let mut guard = NetworkGuard::new(Duration::from_secs(120));
+        guard.observe::<()>(&Err("connection refused".to_string()));
+        guard.observe::<()>(&Ok(()));
+        assert_eq!(guard.check(), Ok(()));
+        // The path push and pull take: after a timeout the next operation is never polled.
+        let rt = memory_store::runtime().unwrap();
+        let mut net = NetworkGuard::new(Duration::from_millis(50));
+        let refused = guarded(&mut net, &rt, async { Err::<(), _>("connection refused") });
+        assert_eq!(refused, Err("connection refused".to_string()));
+        let hung = guarded(&mut net, &rt, std::future::pending::<Result<(), String>>());
+        assert_eq!(hung, Err("network timeout after 0s".to_string()));
+        let after = guarded(&mut net, &rt, async {
+            panic!("a poisoned store reached the network");
+            #[allow(unreachable_code)]
+            Ok::<(), String>(())
+        });
+        assert_eq!(after, Err(POISONED.to_string()));
+    }
 
     #[test]
     fn commit_failure_rolls_back_and_returns_the_commit_error() {

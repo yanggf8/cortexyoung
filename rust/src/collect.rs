@@ -464,6 +464,37 @@ pub fn classify_record(
     }
 }
 
+/// One run's wall-clock budget, counted from the instant the run began.
+///
+/// The network bounds in `measure_store` cap a single operation; this caps the whole run, which
+/// matters because several operations in a row can each stay inside its own bound and still leave
+/// a collector alive far longer than a kick expects (the design's §2 "時間上限").
+#[derive(Clone, Copy, Debug)]
+struct RunDeadline {
+    /// `None` when the limit lies past what `Instant` can represent (possible where it counts
+    /// nanoseconds in 64 bits, not on Linux): such a run never expires rather than panicking.
+    expires_at: Option<Instant>,
+    after_ms: u64,
+}
+
+impl RunDeadline {
+    fn after(entered: Instant, limit_ms: u64) -> Self {
+        Self {
+            expires_at: entered.checked_add(Duration::from_millis(limit_ms)),
+            after_ms: limit_ms,
+        }
+    }
+
+    fn expired(&self) -> bool {
+        self.expires_at.is_some_and(|at| Instant::now() >= at)
+    }
+
+    /// Whole seconds, truncated, matching the network timeout's wording.
+    fn error(&self) -> String {
+        format!("run deadline exceeded after {}s", self.after_ms / 1000)
+    }
+}
+
 fn stamp_holder(lock: &mut fs::File, now_ms: i64) {
     // Descriptive metadata on the locked inode. Failure to write it never invalidates the lock.
     let _ = lock
@@ -595,6 +626,7 @@ pub fn run_manual<T>(
     mode: ManualMode,
     action: &mut dyn FnMut(&mut dyn MeasureStore) -> ManualActionResult<T>,
 ) -> Result<T, ManualError> {
+    let deadline = RunDeadline::after(Instant::now(), cfg.run_deadline_ms);
     fs::create_dir_all(&paths.data_dir).map_err(|e| ManualError::Other(e.to_string()))?;
     let _lock = manual_lock(
         &paths.data_dir.join("measure-collect.lock"),
@@ -628,28 +660,43 @@ pub fn run_manual<T>(
             return Err(ManualError::Other("usage_db_unreadable".into()));
         }
     }
-    let mut store = match store_opener() {
-        Ok(store) => store,
+    let opened = match store_opener() {
+        Ok(store) => Ok(store),
         Err(OpenError::Busy) => {
             return Err(ManualError::Busy(
                 "measure store is busy; try again later".into(),
             ));
         }
-        Err(OpenError::Other(error)) => {
+        Err(OpenError::Network(error)) => Err((ErrorKind::Network, error)),
+        Err(OpenError::Other(error)) => Err((ErrorKind::Other, error)),
+    };
+    let mut store = match opened {
+        Ok(store) => store,
+        Err((kind, error)) => {
             if matches!(mode, ManualMode::Write) {
-                finish_collect_state(
-                    &mut state,
-                    "manual",
-                    now_ms,
-                    Some(ErrorKind::Other),
-                    None,
-                    None,
-                );
+                finish_collect_state(&mut state, "manual", now_ms, Some(kind), None, None);
                 state.save(&state_path).map_err(ManualError::Other)?;
             }
             return Err(ManualError::Other(error));
         }
     };
+    // The manual action is one opaque store operation owned by the CLI, so opening the store is
+    // its last checkpoint this layer can see: a caller whose limit is already gone must not start
+    // the network work. The background path additionally stops between the uploads and the push.
+    if deadline.expired() {
+        if matches!(mode, ManualMode::Write) {
+            finish_collect_state(
+                &mut state,
+                "manual",
+                now_ms,
+                Some(ErrorKind::Network),
+                None,
+                None,
+            );
+            state.save(&state_path).map_err(ManualError::Other)?;
+        }
+        return Err(ManualError::Other(deadline.error()));
+    }
     let result = action(store.as_mut());
     match result {
         Ok(step) => {
@@ -695,13 +742,14 @@ pub fn run_collect(
     paths: &KickPaths,
     harness: &str,
     now_ms: i64,
-    _cfg: &CollectConfig,
+    cfg: &CollectConfig,
     manual: bool,
 ) -> CollectRun {
     if manual {
         return collect_run("failed", harness, false, Some(ErrorKind::Other), None)
             .with_error("manual collection is not implemented");
     }
+    let deadline = RunDeadline::after(Instant::now(), cfg.run_deadline_ms);
     // open_lock does not create its parent; the first explicit collect may precede any kick.
     if let Err(e) = fs::create_dir_all(&paths.data_dir) {
         return collect_run("failed", harness, false, Some(ErrorKind::Other), None)
@@ -762,24 +810,36 @@ pub fn run_collect(
         .with_error(e);
     }
 
-    let mut store = match store_opener() {
-        Ok(store) => store,
+    let opened = match store_opener() {
+        Ok(store) => Ok(store),
         Err(OpenError::Busy) => {
             return collect_run("skipped_busy", harness, state.refused, None, None);
         }
-        Err(OpenError::Other(e)) => {
-            collect_failure(&mut state, harness, now_ms, ErrorKind::Other);
+        Err(OpenError::Network(e)) => Err((ErrorKind::Network, e)),
+        Err(OpenError::Other(e)) => Err((ErrorKind::Other, e)),
+    };
+    let mut store = match opened {
+        Ok(store) => store,
+        Err((kind, e)) => {
+            collect_failure(&mut state, harness, now_ms, kind);
             let _ = state.save(&state_path);
-            return collect_run(
-                "failed",
-                harness,
-                state.refused,
-                Some(ErrorKind::Other),
-                None,
-            )
-            .with_error(e);
+            return collect_run("failed", harness, state.refused, Some(kind), None).with_error(e);
         }
     };
+    // The opener's bootstrap is a network operation; if it alone spent the budget, stop before
+    // the transcript scan rather than running a batch that cannot be pushed.
+    if deadline.expired() {
+        collect_failure(&mut state, harness, now_ms, ErrorKind::Network);
+        let _ = state.save(&state_path);
+        return collect_run(
+            "failed",
+            harness,
+            state.refused,
+            Some(ErrorKind::Network),
+            None,
+        )
+        .with_error(deadline.error());
+    }
     let machine_id = crate::usage::machine_id().to_string();
     let input = RecordInputs {
         projects_dir: measure::claude_projects_dir(),
@@ -795,8 +855,22 @@ pub fn run_collect(
         }),
         health: Some(paths.usage_db.clone()),
     };
-    let result = measure::record_with_scan(store.as_mut(), &input);
+    // The second checkpoint: uploads are inside the record call, so the stop has to be handed to
+    // it. `stopped` tells a deadline stop apart from a storage error raised before the checkpoint.
+    // The run stops with the state exactly as the pre-open save left it: `push_pending` stays
+    // true, and what the uploads already did lives in the replica's watermarks, which the next
+    // run revalidates instead of trusting this file's cursors.
+    let mut stopped = false;
+    let result = measure::record_with_scan_until(store.as_mut(), &input, || {
+        if deadline.expired() {
+            stopped = true;
+            Err(deadline.error())
+        } else {
+            Ok(())
+        }
+    });
     let (scan, kind, error) = match result {
+        Err(e) if stopped => (None, Some(ErrorKind::Network), Some(e)),
         Err(e) => (None, Some(ErrorKind::Storage), Some(e)),
         Ok((scan, outcome)) => {
             // Uploads happen command, then health, then push, then pull. The first failed stage

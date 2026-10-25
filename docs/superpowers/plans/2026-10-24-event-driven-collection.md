@@ -430,12 +430,12 @@
 **Interfaces:**
 - Produces: `TursoStore` 的網路操作逾時回 `Err("network timeout after Ns")`；`run_collect` 超過 `run_deadline_ms` 時停在下一個檢查點，回 `failed` + `ErrorKind::Network`，放掉所有鎖。
 
-- [ ] **Step 1: 寫失敗的測試**
+- [x] **Step 1: 寫失敗的測試**
   - `turso_timeout_wraps_future`：對一個永不完成的 future 套用同一個包裝函式、逾時 50 ms → 回逾時錯誤（不連網）。
   - `deadline_stops_between_phases`：`run_deadline_ms=1`、opener 先睡 20 ms → `failed`/`Network`，之後能立刻拿到 `measure-collect.lock`。
-- [ ] **Step 2: 跑測試，預期失敗。**
-- [ ] **Step 3: 實作。**
-- [ ] **Step 4: 跑測試至綠，再跑全套 gate。**
+- [x] **Step 2: 跑測試，預期失敗。**
+- [x] **Step 3: 實作。**
+- [x] **Step 4: 跑測試至綠，再跑全套 gate。**
 
 ### Task I: `measure status`、拿掉 cron、文件
 

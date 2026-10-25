@@ -481,3 +481,52 @@ fn unconfigured_keeps_each_command_code() {
         assert!(!paths.data_dir.join("measure-collect.lock").exists());
     });
 }
+
+#[test]
+fn manual_deadline_stops_after_the_opener() {
+    sandbox(|paths, db| {
+        let cfg = CollectConfig {
+            run_deadline_ms: 1,
+            ..config()
+        };
+        let mut open = opener(db);
+        let result: Result<(), _> = run_manual(
+            &mut || {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                open()
+            },
+            paths,
+            NOW,
+            &cfg,
+            ManualMode::Write,
+            &mut |_| panic!("action ran past the deadline"),
+        );
+        let error = result.unwrap_err();
+        assert_eq!(error.code(), "measure_error");
+        assert!(error.message().contains("run deadline exceeded after"));
+        let after = state(paths);
+        assert!(after.push_pending);
+        assert_eq!(after.failures["manual"].last_error_kind, "network");
+        assert!(
+            cort::upgrade::try_exclusive_lock(&paths.data_dir.join("measure-collect.lock")).is_ok()
+        );
+    });
+}
+
+#[test]
+fn manual_bootstrap_timeout_is_a_network_failure() {
+    sandbox(|paths, _| {
+        let result: Result<(), _> = run_manual(
+            &mut || Err(OpenError::Network("network timeout after 120s".into())),
+            paths,
+            NOW,
+            &config(),
+            ManualMode::Write,
+            &mut |_| panic!("action called"),
+        );
+        assert_eq!(result.unwrap_err().code(), "measure_error");
+        let after = state(paths);
+        assert!(after.push_pending);
+        assert_eq!(after.failures["manual"].last_error_kind, "network");
+    });
+}

@@ -332,6 +332,23 @@ pub fn record_with_scan(
     store: &mut dyn MeasureStore,
     input: &RecordInputs,
 ) -> Result<(ScanSummary, RecordOutcome), String> {
+    record_with_scan_until(store, input, || Ok(()))
+}
+
+/// [`record_with_scan`] with a checkpoint between the uploads and the push.
+///
+/// `before_push` runs once the local writes and both uploads are done. An error there returns
+/// immediately, so the push and pull are skipped and no `RecordOutcome` is invented for a push
+/// that was never attempted; the collection worker uses it to stop a run that has spent its
+/// wall-clock budget. The scan summary does not survive that error -- the caller only needs the
+/// reason -- and nothing is lost by that: the uploads' progress lives in the replica's
+/// watermarks, which the next run revalidates, while the local state mirrors are re-derived from
+/// them.
+pub fn record_with_scan_until(
+    store: &mut dyn MeasureStore,
+    input: &RecordInputs,
+    before_push: impl FnOnce() -> Result<(), String>,
+) -> Result<(ScanSummary, RecordOutcome), String> {
     store.upsert_machine_host(&input.machine_id, &input.host, input.now_ms)?;
     let mut marks = Watermarks::load(&input.marks_path);
     let mut scan = scan_transcripts(store, &input.projects_dir, &mut marks, &input.machine_id)?;
@@ -344,6 +361,7 @@ pub fn record_with_scan(
     if let Some(usage_db) = &input.health {
         scan.health = Some(upload_health_events(store, usage_db, &input.machine_id).to_json());
     }
+    before_push()?;
     if let Err(e) = store.push() {
         return Ok((scan, RecordOutcome::SavedLocallyPushFailed(e)));
     }
