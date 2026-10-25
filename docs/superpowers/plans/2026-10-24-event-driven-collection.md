@@ -232,15 +232,15 @@
   ```
 - `fresh_label` 對應照 claudecat `src/cort_audit.rs` `row_md`（~562），但 rebuild 先看原因（設計第 3 節）：`rebuild_reasons` 非空且全是 `graph_incomplete` → `STALE/graph`；否則 `rebuild_required`→`STALE/rebuild`、`refreshable`→`STALE/refresh`、否則 graph_pending `Some(true)`→`STALE/graph`、stale→`STALE`、未 stale 且 `None`→`fresh?`、未 stale 且 `Some(false)`→`fresh`。**沒有 7 天門檻。**
 
-- [ ] **Step 1: 寫失敗的測試**
+- [x] **Step 1: 寫失敗的測試**
   - `fresh_label_covers_every_label`：六個標籤（`STALE/rebuild`、`STALE/refresh`、`STALE/graph`、`STALE`、`fresh?`、`fresh`）各一例。沒有 index 不是標籤，由 `status=no_index` 表達。
   - `graph_reason_alone_is_stale_graph`：`repair=Some("rebuild_required")`、原因 `["graph_incomplete"]` → `STALE/graph`；原因 `["graph_incomplete","schema_changed"]` → `STALE/rebuild`。
   - `open_db_readonly_creates_nothing`：不存在的路徑 → `Err`，且檔案與父目錄都沒被建出來。
   - `open_db_readonly_refuses_writes`：對既有 index 開唯讀後 `INSERT` → `Err`。
   - `impact_repair_unchanged`：`impact` 既有 repair 相關測試全綠（重構後）。
-- [ ] **Step 2: 跑 `cargo test --locked --test health_observe`，預期失敗。**
-- [ ] **Step 3: 實作。**
-- [ ] **Step 4: 跑測試至綠，再跑全套 gate。**
+- [x] **Step 2: 跑 `cargo test --locked --test health_observe`，預期失敗。**
+- [x] **Step 3: 實作。**
+- [x] **Step 4: 跑測試至綠，再跑全套 gate。**
 
 ### Task D2: 觀察單一 index 的健康（只讀）
 
@@ -266,7 +266,7 @@
   - `fresh_index_observed_ok`：剛建好的 index → `status=ok`、`fresh=Some("fresh")`、chunks ≥ 1、`fts=Some("synced")`。
   - `no_age_gate`：把 index 的 `last_indexed_at` 改成 40 天前、HEAD 不動 → 仍是 `fresh`。
   - `edited_file_is_stale_refresh`：改一個檔 → `STALE/refresh`。
-  - `observation_never_writes_the_index`：觀察前後 index db 檔的 bytes 與 mtime 相同；cache 目錄沒有新檔。
+  - `observation_never_writes_the_index`：觀察前後 index db 檔的 bytes 與 mtime 相同；cache 目錄的新檔只可能是該 index 的 `-shm`／`-wal` 這一對（唯讀開 WAL 資料庫時 SQLite 自己建的，D1 `open_db_readonly` 的文件與測試已釘住），且在沒有其他寫入者的 fixture 裡 `-wal` 為 0 bytes。
   - `missing_index_is_no_index`、`missing_dir_is_missing_dir`。
   - `unreadable_index_records_error`：index 檔寫入垃圾 bytes → `status=unreadable`、`error` 非空、所有指標 None。
   - `large_tree_skips_staleness`：`CORT_HEAL_MAX_FILES=0` → `fresh=None`、`error=Some("staleness_skipped_large_tree")`，其他指標照讀。
@@ -274,7 +274,7 @@
   - `bounded_times_out`：`bounded(|| { sleep(2s); ok_obs }, 100ms)` 在 1 秒內回 `status=unreadable`、`error=Some("timeout")`。
   - `index_deleted_mid_observation_is_recorded`：測試注入點在讀完 chunks 後刪檔（用 `observe` 的內部分段函式測），結果 `unreadable` 或 `no_index`，不 panic。
 - [ ] **Step 2: 跑 `cargo test --locked --test health_observe`，預期失敗。**
-- [ ] **Step 3: 實作。** 開 index 一律 `open_db_readonly`；staleness 走 `compute_stale` 前先用與 `heal.rs` 相同的候選檔計數判斷是否超過 `heal_max_files()`；逾時一律由 `bounded` 處理（`compute_stale` 內部沒有可停下的點，不做階段間檢查）。
+- [ ] **Step 3: 實作。** 開 index 一律 `open_db_readonly`，不用 `immutable=1`（連 `CANTOPEN` 的退路也不用：它承諾檔案不變、略過鎖與 WAL，會在 hook 正在寫時讀到不一致或漏掉 WAL 內容；開不起來就照實記 `no_index`／`unreadable`）；staleness 走 `compute_stale` 前先用與 `heal.rs` 相同的候選檔計數判斷是否超過 `heal_max_files()`；逾時一律由 `bounded` 處理（`compute_stale` 內部沒有可停下的點，不做階段間檢查）。
 - [ ] **Step 4: 跑測試至綠，再跑全套 gate。**
 
 ### Task E: 逐筆健康收集 `cort measure health`
