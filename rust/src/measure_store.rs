@@ -9,7 +9,9 @@ use crate::audit_import::{ImportedUsage, ImportedUsageConflict, ImportedUsageOut
 use crate::memory_store::{self, Config};
 use crate::telemetry::TelemetryEvent;
 use std::collections::HashMap;
+use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct WindowCounts {
@@ -902,11 +904,34 @@ pub fn with_measure_lock<T>(action: impl FnOnce() -> Result<T, String>) -> Resul
     with_config_lock(|_| action())
 }
 
+#[derive(Debug)]
+pub enum OpenError {
+    Busy,
+    Other(String),
+}
+
+/// Open the configured replica while holding `measure.lock` for the returned store's lifetime.
+pub fn open_measure_store_within(wait: Duration) -> Result<Box<dyn MeasureStore>, OpenError> {
+    let config = config().map_err(OpenError::Other)?;
+    let lock =
+        memory_store::lock_in_within(SUBDIR, &config, "measure.lock", wait).map_err(|error| {
+            match error {
+                memory_store::LockWait::TimedOut => OpenError::Busy,
+                memory_store::LockWait::Failed(message) => OpenError::Other(message),
+            }
+        })?;
+    let mut store = TursoStore::open(&config).map_err(OpenError::Other)?;
+    store._lock = Some(lock);
+    Ok(Box::new(store))
+}
+
 /// The Turso sync replica as a [`MeasureStore`]. `push`/`pull` talk to the network.
 struct TursoStore {
     rt: tokio::runtime::Runtime,
     db: turso::sync::Database,
     conn: turso::Connection,
+    // Last field drops last, after the connection and runtime have finished using the replica.
+    _lock: Option<fs::File>,
 }
 
 fn tv(c: Cell) -> turso::Value {
@@ -1003,7 +1028,12 @@ impl TursoStore {
             }
             Ok::<_, String>((db, conn))
         })?;
-        Ok(Self { rt, db, conn })
+        Ok(Self {
+            rt,
+            db,
+            conn,
+            _lock: None,
+        })
     }
 }
 

@@ -7,6 +7,7 @@ use sha2::{Digest, Sha256};
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 const CREATE_TABLE: &str = "CREATE TABLE IF NOT EXISTS project_memory (project TEXT NOT NULL, id TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY (project, id))";
 #[derive(Debug, Serialize)]
@@ -389,10 +390,7 @@ fn with_named_lock<T>(
 
 /// Take an exclusive flock on `data_dir()/<subdir>/<digest(url)>/<name>`; released on drop.
 pub(crate) fn lock_in(subdir: &str, config: &Config, name: &str) -> Result<fs::File, String> {
-    let lock_path = crate::data_dir::data_dir()
-        .join(subdir)
-        .join(digest(&config.url))
-        .join(name);
+    let lock_path = lock_path(subdir, config, name);
     fs::create_dir_all(lock_path.parent().unwrap()).map_err(|e| e.to_string())?;
     let lock = OpenOptions::new()
         .create(true)
@@ -402,6 +400,55 @@ pub(crate) fn lock_in(subdir: &str, config: &Config, name: &str) -> Result<fs::F
         .map_err(|e| e.to_string())?;
     lock.lock().map_err(|e| e.to_string())?;
     Ok(lock)
+}
+
+fn lock_path(subdir: &str, config: &Config, name: &str) -> PathBuf {
+    crate::data_dir::data_dir()
+        .join(subdir)
+        .join(digest(&config.url))
+        .join(name)
+}
+
+#[derive(Debug)]
+pub(crate) enum LockWait {
+    TimedOut,
+    Failed(String),
+}
+
+/// Take the same lock as `lock_in`, giving up after `wait` if another holder keeps it.
+pub(crate) fn lock_in_within(
+    subdir: &str,
+    config: &Config,
+    name: &str,
+    wait: Duration,
+) -> Result<fs::File, LockWait> {
+    let lock_path = lock_path(subdir, config, name);
+    fs::create_dir_all(
+        lock_path
+            .parent()
+            .ok_or_else(|| LockWait::Failed("lock path has no parent".into()))?,
+    )
+    .map_err(|e| LockWait::Failed(e.to_string()))?;
+    let lock = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(|e| LockWait::Failed(e.to_string()))?;
+    let start = Instant::now();
+    loop {
+        match lock.try_lock() {
+            Ok(()) => return Ok(lock),
+            Err(fs::TryLockError::WouldBlock) => {
+                if start.elapsed() >= wait {
+                    return Err(LockWait::TimedOut);
+                }
+            }
+            Err(fs::TryLockError::Error(e)) => return Err(LockWait::Failed(e.to_string())),
+        }
+        // As in acquire_upgrade_locks: polling can overshoot the deadline by one 50 ms interval.
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 pub fn recall(root: &Path, query: &str) -> Result<MemoryRecall, String> {
