@@ -377,8 +377,25 @@ mod locks {
         let stood_down = cort::upgrade::try_protected_entry(cache.path()).is_err();
         assert!(stood_down, "admission exclusive must turn new workers away");
         drop(locks);
-        // After release, a worker gets in again.
-        assert!(cort::upgrade::try_protected_entry(cache.path()).is_ok());
+        // After release, a worker gets in again -- within a bound, not on the first try. A
+        // sibling test in this binary spawning a child (`a_killed_holder_releases_the_locks`,
+        // the cli-style tests) forks with our just-dropped flock fds; until that child execs and
+        // CLOEXEC closes them, the lock is still held. 1 in 10 parallel runs hit that window,
+        // 0 in 10 with --test-threads=1. A worker that stands down there is the designed
+        // behaviour; what this test claims is that release lets workers back in.
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            match cort::upgrade::try_protected_entry(cache.path()) {
+                Ok(_guard) => break,
+                Err(e) => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "release must let workers back in: {e:?}"
+                    );
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }
+        }
     }
 
     /// A worker arriving MID-DRAIN stands down at admission instead of joining activity.
