@@ -234,6 +234,19 @@ configuration and `docs/2026-10-18-cross-agent-memory-baseline.md` for the corre
 The local `cort` index stays local, while `claudecat telemetry sync` copies structured usage
 events to the shared TursoDB without putting network work in a hook.
 
+**Use the ledger in this repo; do not wait to be asked.** The product is only evidence if its own
+developers lean on it, and on 2026-10-27 an agent kept a next-day plan in its harness-private memory
+alone, where no other machine or harness can read it, until the user asked why.
+- **Recall** with `cort memory recall "<topic>"` at the start of work, after a compaction, and
+  before asserting a project fact (a decision, a machine's state, what was retired). A hit whose
+  `evidence_status` is not `source_unchanged` is a lead to re-check, not a fact.
+- **Record** with `cort memory record --key <key> --claim <claim> --source <repo file> --line <n>`
+  when a decision is made or changed, when the user corrects a working assumption, and when a
+  deployment changes what a machine runs. Cite the line that states it (a doc, plan or code line);
+  if no line states it yet, write that line first. Replacing an earlier claim passes
+  `--supersedes <id>`.
+- A harness-private memory is for how one agent works, never the only copy of a project fact.
+
 ## claudecat (separate repo)
 
 **claudecat lives in its own repo ([yanggf8/claudecat](https://github.com/yanggf8/claudecat)) — do
