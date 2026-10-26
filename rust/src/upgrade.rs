@@ -1001,7 +1001,7 @@ pub fn retire_legacy_skills_at(paths: &[(&'static str, PathBuf, PathBuf)]) -> Ve
 // ── Task 3: hooks — expected-shape comparison, repair re-verified ──
 
 /// Pure judgment over one `--status --lean` TSV: the expected set is
-/// `HOOK_HARNESSES × EVENTS` with per-row command EQUALITY (`{shim} {subcommand} --harness
+/// each harness's shipped events with per-row command EQUALITY (`{shim} {subcommand} --harness
 /// {harness}`, the subcommand from the row's OWN event — expecting hook-suggest on a Refresh
 /// row was the first draft's bug) plus per-row `entry_shape_ok` on the settings file the row
 /// names. No subprocess, no repair: `--check` runs exactly this and cannot fix anything.
@@ -1014,7 +1014,7 @@ pub fn judge_hooks(shim: &Path, status_tsv: &str) -> Component {
         .collect();
     let mut misses: Vec<String> = Vec::new();
     for harness in crate::settings::HOOK_HARNESSES {
-        for event in crate::settings::EVENTS {
+        for &event in crate::settings::events_for(harness) {
             let expected = format!(
                 "{} {} --harness {}",
                 shim.display(),

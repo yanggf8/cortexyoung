@@ -27,7 +27,7 @@
 //! (`docs/2026-09-02-hook-wiring-correction.md` §7, §9), and a second copy of it here is a second
 //! place for the same bug to reappear.
 
-use crate::settings::{is_ours_for, HookEvent, EDIT_MATCHER, EVENTS};
+use crate::settings::{events_for, is_ours_for, HookEvent, EDIT_MATCHER};
 use crate::settings::{Change, Outcome};
 use std::fs;
 use std::io;
@@ -61,6 +61,7 @@ fn matcher_for(event: HookEvent) -> &'static str {
     match event {
         HookEvent::Suggest => MATCHER,
         HookEvent::Refresh => EDIT_MATCHER,
+        HookEvent::Recall => "",
     }
 }
 
@@ -77,6 +78,8 @@ pub enum SettingsError {
     /// the shape this module expects. Both are refusals, not repairs: overwriting a config file we
     /// failed to understand is the one unrecoverable thing this module could do.
     Unparsable(String),
+    /// An event this harness does not ship (`settings::events_for`), named by its hook event.
+    Unsupported(&'static str),
 }
 
 impl std::fmt::Display for SettingsError {
@@ -84,6 +87,7 @@ impl std::fmt::Display for SettingsError {
         match self {
             SettingsError::Io(e) => write!(f, "{e}"),
             SettingsError::Unparsable(m) => write!(f, "{m}"),
+            SettingsError::Unsupported(event) => write!(f, "{event} is not wired for this harness"),
         }
     }
 }
@@ -195,6 +199,10 @@ pub fn install_hook(
     command: &str,
     event: HookEvent,
 ) -> Result<Outcome, SettingsError> {
+    // The per-harness event set lives in settings::events_for; refuse what it does not ship.
+    if !crate::settings::events_for("codex").contains(&event) {
+        return Err(SettingsError::Unsupported(event.name()));
+    }
     let mut doc = read_doc(path)?;
     let list = event_list(&mut doc, event)?;
 
@@ -314,7 +322,7 @@ pub fn remove_hook(path: &Path) -> Result<Outcome, SettingsError> {
     let mut doc = read_doc(path)?;
     let mut removed = false;
 
-    for event in EVENTS {
+    for &event in events_for("codex") {
         let list = event_list(&mut doc, event)?;
         let mut empty_groups: Vec<usize> = Vec::new();
         for gi in 0..list.len() {
@@ -432,6 +440,7 @@ fn trusted_at(hooks: &Table, gi: usize, hi: usize, event: HookEvent) -> bool {
     let key = match event {
         HookEvent::Suggest => "pre_tool_use",
         HookEvent::Refresh => "post_tool_use",
+        HookEvent::Recall => "session_start",
     };
     let suffix = format!(":{key}:{gi}:{hi}");
     state.iter().any(|(key, entry)| {
@@ -459,7 +468,7 @@ fn prune_empty_scaffolding(doc: &mut DocumentMut) {
     else {
         return;
     };
-    for event in EVENTS {
+    for &event in events_for("codex") {
         if h.get(event.name())
             .and_then(Item::as_array_of_tables)
             .is_some_and(|a| a.is_empty())

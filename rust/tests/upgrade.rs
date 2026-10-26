@@ -700,7 +700,7 @@ fn an_absent_skill_source_is_absent_not_a_failure() {
 
 // ── Task 3: hooks — expected-shape comparison, repair re-verified ──
 
-/// Six wired rows produced by the crate's OWN installers into per-dialect temp files, in the
+/// Wired rows produced by the crate's OWN installers into per-dialect temp files, in the
 /// exact TSV shape `hook-install --all --status --lean` emits (harness, event, outcome,
 /// settings, detail, command). Building fixtures with anything else would test judge_hooks
 /// against a fantasy of what install_hook writes.
@@ -709,7 +709,7 @@ fn wired_fixture(dir: &std::path::Path, shim: &std::path::Path) -> String {
     let toml_path = dir.join("codex.toml");
     let kimi_path = dir.join("kimi.toml");
     for harness in cort::settings::HOOK_HARNESSES {
-        for event in cort::settings::EVENTS {
+        for &event in cort::settings::events_for(harness) {
             let command = format!(
                 "{} {} --harness {}",
                 shim.display(),
@@ -730,7 +730,7 @@ fn wired_fixture(dir: &std::path::Path, shim: &std::path::Path) -> String {
     }
     let mut rows = Vec::new();
     for harness in cort::settings::HOOK_HARNESSES {
-        for event in cort::settings::EVENTS {
+        for &event in cort::settings::events_for(harness) {
             let (settings, command) = match harness {
                 "claude-code" => (
                     json_path.clone(),
@@ -849,6 +849,24 @@ fn a_missing_hook_row_is_drifted() {
         "{c:?}"
     );
     assert!(c.detail.contains("missing"), "{c:?}");
+}
+
+#[test]
+fn missing_only_claude_session_entry_is_drifted() {
+    let dir = tempfile::tempdir().unwrap();
+    let shim = dir.path().join("cort");
+    let good = wired_fixture(dir.path(), &shim);
+    let without_session = good
+        .lines()
+        .filter(|line| !line.starts_with("claude-code\tsession\t"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let c = cort::upgrade::judge_hooks(&shim, &without_session);
+    assert!(
+        matches!(c.state, cort::upgrade::ComponentState::Drifted),
+        "{c:?}"
+    );
+    assert!(c.detail.contains("claude-code/session"), "{c:?}");
 }
 
 /// A correct command with an obsolete matcher still passes `--status` — the exact false-pass

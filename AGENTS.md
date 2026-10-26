@@ -8,7 +8,8 @@ cross-machine project memory client backed by TursoDB.
 **The repository's long-term product goal is durable, source-checkable project memory for Claude Code
 across sessions: an agent should recover the right project fact or correction, know its scope and
 source, and detect when it was superseded.** `cort memory` now supplies an explicit reviewed
-decision ledger across machines; automatic conversation capture and unprompted recall remain open.
+decision ledger across machines, and since 2026-10-27 Claude Code's `SessionStart` hook pushes its active
+entries into each session; automatic conversation capture remains open.
 The shipped code-intelligence CLI has its own measurable goal: make the caller-set enumeration an
 agent already performs — and often gets wrong — cheap, checkable edge by edge, and able to say
 whether the set is complete. The third clause was promoted from a property of
@@ -177,6 +178,15 @@ subcommand rather than by position -- in Kimi's flat `[[hooks]]` array nothing e
 apart. An install-then-uninstall cycle must hand every one of those files back byte for byte,
 including comments that belong to other owners; that is a test, because it was a bug first
 (`docs/2026-09-02-hook-wiring-correction.md` §17).
+
+**A third event, for Claude Code only: `SessionStart` runs `cort hook-recall`** (2026-10-27). Agents did
+not recall the ledger unprompted, so recall is pushed at session start, resume, clear and compaction:
+the active entries for the project go into `additionalContext`, newest first, capped at 20 entries and
+6000 bytes. It reads only an existing, already-synced local replica -- never push, pull or bootstrap,
+a try-lock that gives up, and a refusal (`unsynced_replica`) for every replica state in which turso
+would pull or write at open -- and records one `usage.db` row per run. Codex and Kimi are not wired:
+no `SessionStart` payload of theirs has been intercepted, and `settings::events_for` is the one place
+that says which harness gets which event.
 
 **Both staleness checks are one-sided, and they lean opposite ways.** The head comparison
 (`main.rs`, what `hook-suggest` read while it still judged) missed an edited-but-uncommitted tree;

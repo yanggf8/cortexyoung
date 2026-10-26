@@ -31,7 +31,7 @@
 //!   everything we do not own -- including Kimi's `[hooks.state]`-equivalent bookkeeping and other
 //!   people's `[[hooks]]` entries -- survives byte for byte.
 
-use crate::settings::{is_ours_for, HookEvent, EDIT_MATCHER, EVENTS};
+use crate::settings::{events_for, is_ours_for, HookEvent, EDIT_MATCHER};
 use crate::settings::{Change, Outcome};
 use crate::settings_toml::SettingsError;
 use std::fs;
@@ -47,6 +47,7 @@ fn matcher_for(event: HookEvent) -> &'static str {
     match event {
         HookEvent::Suggest => MATCHER,
         HookEvent::Refresh => EDIT_MATCHER,
+        HookEvent::Recall => "",
     }
 }
 /// Seconds. Kimi's schema allows 1..=600; the other two modules use 5 and there is no reason for
@@ -164,6 +165,10 @@ pub fn install_hook(
     command: &str,
     event: HookEvent,
 ) -> Result<Outcome, SettingsError> {
+    // The per-harness event set lives in settings::events_for; refuse what it does not ship.
+    if !crate::settings::events_for("kimi-code").contains(&event) {
+        return Err(SettingsError::Unsupported(event.name()));
+    }
     let mut doc = read_doc(path)?;
     let list = hooks_array(&mut doc)?;
 
@@ -240,7 +245,7 @@ pub fn remove_hook(path: &Path) -> Result<Outcome, SettingsError> {
         if entry
             .get("command")
             .and_then(Item::as_str)
-            .is_some_and(|c| EVENTS.into_iter().any(|e| is_ours_for(c, e)))
+            .is_some_and(|c| events_for("kimi-code").iter().any(|&e| is_ours_for(c, e)))
         {
             drop_idx.push(i);
         }

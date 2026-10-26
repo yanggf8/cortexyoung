@@ -674,7 +674,7 @@ remove_hook() {
     return 0
   fi
 
-  # The binary's own table first: same six entries the deploy wired, resolved the same way, so an
+  # The binary's own table first: every entry the deploy wired, resolved the same way, so an
   # uninstall cannot miss a file the install created because this script disagreed about its path.
   local harness ev outcome settings detail command
   local seen=""
@@ -969,7 +969,7 @@ do_check() {
   # Ask the binary this installation owns, not whatever `cort` PATH resolves to. `deploy_hook` wires
   # (managed_cort was resolved at the top of do_check, where the ast-grep pin also needs it.)
   if [ -x "$managed_cort" ]; then
-    # One query, six answers, and the same table the deploy used -- so --check cannot disagree with
+    # One query, one answer per shipped entry, and the same table the deploy used -- so --check cannot disagree with
     # the installer about which files exist, which is a way this pair has been wrong before. Every
     # entry is still reported on its own line: a file can carry one of ours and not the other, and a
     # single "wired" would hide it.

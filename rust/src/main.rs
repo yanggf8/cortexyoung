@@ -64,7 +64,7 @@ fn usage_value() -> Value {
             "hook-suggest": "cort hook-suggest  (PreToolUse hook: records one fire row and kicks collection; never speaks; not a verb to type)",
             "hook-refresh": "cort hook-refresh  (PostToolUse hook: brings this project's index up to the tree after an edit; silent, never creates an index; not a verb to type)",
             "hook-recall": "cort hook-recall --harness <h>  (SessionStart hook: reads the existing local memory replica; not a verb to type)",
-            "hook-install": "cort hook-install [--settings <path>] [--command <cmd>] [--remove|--status]  (installer-invoked: wires hook-suggest into settings.json; not a verb to type)",
+            "hook-install": "cort hook-install [--all|--settings <path>] [--event pre|post|session] [--command <cmd>] [--remove|--status]  (installer-invoked hook wiring; not a verb to type)",
             "internal-shim": "cort internal-shim --cort-home <dir>  (installer-invoked: renders the $BIN_DIR/cort shim for a CORT_HOME; not a verb to type)",
             "internal-ast-grep": "cort internal-ast-grep  (installer-invoked: prints the pinned ast-grep release and its checksums as lean TSV; not a verb to type)",
             "internal-manifest-keys": "cort internal-manifest-keys  (installer-invoked: prints known and legacy manifest keys as lean TSV; not a verb to type)",
@@ -1163,6 +1163,9 @@ fn map_toml_settings_err(e: settings_toml::SettingsError) -> CortError {
         settings_toml::SettingsError::Io(io) => {
             CortError::new("file_not_found", json!({ "message": io.to_string() }))
         }
+        e @ settings_toml::SettingsError::Unsupported(_) => {
+            CortError::new("bad_flag", json!({ "message": e.to_string() }))
+        }
     }
 }
 
@@ -1264,7 +1267,7 @@ fn hook_install_all(a: &HookInstallArgs) -> Result<Emit, CortError> {
     let mut rows: Vec<Value> = Vec::new();
     for (fmt, harness) in HOOK_TARGETS {
         let path = default_settings_path_for(fmt)?;
-        for event in cort::settings::EVENTS {
+        for &event in cort::settings::events_for(harness) {
             let mut row = json!({
                 "harness": harness,
                 "event": event.flag_name(),
@@ -1304,7 +1307,7 @@ fn hook_install_all(a: &HookInstallArgs) -> Result<Emit, CortError> {
                         row["change"] = json!(out.change.as_str());
                         row["backup"] = json!(out.backup.map(|b| b.to_string_lossy().into_owned()));
                     }
-                    // One target's failure is reported and the rest still deploy. Six independent
+                    // One target's failure is reported and the rest still deploy. Independent
                     // calls had that property for free and it is worth keeping: a machine with an
                     // unparsable Codex config should still get its Claude Code hook.
                     Err(e) => row["error"] = json!(e.to_string()),
@@ -1489,10 +1492,21 @@ fn cmd_hook_install(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, Co
         Some(s) => cort::settings::HookEvent::parse(s).ok_or_else(|| {
             CortError::new(
                 "bad_flag",
-                json!({ "message": format!("--event must be pre or post, not `{s}`") }),
+                json!({ "message": format!("--event must be pre, post or session, not `{s}`") }),
             )
         })?,
     };
+    // The harness for this dialect comes from HOOK_TARGETS, the one table that pairs them.
+    let harness = HOOK_TARGETS
+        .iter()
+        .find(|(f, _)| *f == fmt)
+        .map_or("", |(_, h)| *h);
+    if !cort::settings::events_for(harness).contains(&event) {
+        return Err(CortError::new(
+            "bad_flag",
+            json!({ "message": format!("{} is not supported for {harness}", event.flag_name()) }),
+        ));
+    }
     if a.status {
         // `trusted` is `null`, never `false`, wherever the question does not apply: Claude Code and
         // Grok have no trust gate, and a file with no entry of ours has nothing to be trusted. Only

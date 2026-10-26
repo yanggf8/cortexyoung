@@ -1,4 +1,4 @@
-//! Wiring `cort hook-suggest` into a Claude Code `settings.json`, and taking it back out.
+//! Wiring cort hooks into Claude Code `settings.json`, and taking them back out.
 //!
 //! This lives here rather than in `install.sh` for the reason the repo gives everywhere else: the
 //! merge is logic, not plumbing. It has to preserve every hook the user already configured, be
@@ -6,9 +6,7 @@
 //! touch a file it cannot parse. A `jq` pipeline in bash would be a second implementation of that
 //! with no tests attached, and `jq` is not a dependency the installer otherwise has.
 //!
-//! One entry is written, matched to `Bash`, because `hook-suggest` records which tool fired and
-//! `Bash` is the surface the measurement is about. An unmatched entry would record a row for every
-//! tool call in the session.
+//! The tool hooks have matchers; SessionStart has none so recall runs for every session source.
 
 use serde_json::{json, Map, Value};
 use std::fs;
@@ -105,7 +103,7 @@ const TIMEOUT_SECS: u64 = 5;
 /// would not be.
 pub(crate) const EDIT_MATCHER: &str = "Bash|Edit|Write|MultiEdit|NotebookEdit";
 
-/// Which of the two hooks an entry is, everywhere that has to tell them apart.
+/// Which hook an entry is, everywhere that has to tell them apart.
 ///
 /// The subcommand is the discriminator, not the event name: in Kimi's flat `[[hooks]]` array both
 /// of ours live in the same list and only the command line says which is which.
@@ -116,32 +114,47 @@ pub enum HookEvent {
     Suggest,
     /// After an edit: bring the index up to the tree.
     Refresh,
+    /// At Claude Code session start: recall reviewed project memory.
+    Recall,
 }
 
-pub const EVENTS: [HookEvent; 2] = [HookEvent::Suggest, HookEvent::Refresh];
+pub const EVENTS: [HookEvent; 3] = [HookEvent::Suggest, HookEvent::Refresh, HookEvent::Recall];
+const TOOL_EVENTS: [HookEvent; 2] = [HookEvent::Suggest, HookEvent::Refresh];
 
 /// Every harness we wire, in `HOOK_TARGETS` order. This is the one home for the list: main.rs
 /// builds its format mapping from these indices, and `entry_shape_ok` dispatches on these
 /// names — a fourth harness is added here and both consumers move in the same commit.
 pub const HOOK_HARNESSES: [&str; 3] = ["claude-code", "codex", "kimi-code"];
 
+/// The only shipped event policy. SessionStart payloads are confirmed only for Claude Code.
+pub fn events_for(harness: &str) -> &'static [HookEvent] {
+    match harness {
+        "claude-code" => &EVENTS,
+        "codex" | "kimi-code" => &TOOL_EVENTS,
+        _ => &[],
+    }
+}
+
 impl HookEvent {
     pub fn name(self) -> &'static str {
         match self {
             HookEvent::Suggest => "PreToolUse",
             HookEvent::Refresh => "PostToolUse",
+            HookEvent::Recall => "SessionStart",
         }
     }
     pub fn subcommand(self) -> &'static str {
         match self {
             HookEvent::Suggest => "hook-suggest",
             HookEvent::Refresh => "hook-refresh",
+            HookEvent::Recall => "hook-recall",
         }
     }
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "pre" | "suggest" | "PreToolUse" => Some(HookEvent::Suggest),
             "post" | "refresh" | "PostToolUse" => Some(HookEvent::Refresh),
+            "session" | "recall" | "SessionStart" => Some(HookEvent::Recall),
             _ => None,
         }
     }
@@ -151,6 +164,7 @@ impl HookEvent {
         match self {
             HookEvent::Suggest => "pre",
             HookEvent::Refresh => "post",
+            HookEvent::Recall => "session",
         }
     }
 }
@@ -215,18 +229,20 @@ fn hook_command_entry(command: &str) -> Value {
     })
 }
 
-fn matcher_for(event: HookEvent) -> &'static str {
+fn matcher_for(event: HookEvent) -> Option<&'static str> {
     match event {
-        HookEvent::Suggest => MATCHER,
-        HookEvent::Refresh => EDIT_MATCHER,
+        HookEvent::Suggest => Some(MATCHER),
+        HookEvent::Refresh => Some(EDIT_MATCHER),
+        HookEvent::Recall => None,
     }
 }
 
 fn hook_entry(command: &str, event: HookEvent) -> Value {
-    json!({
-        "matcher": matcher_for(event),
-        "hooks": [hook_command_entry(command)],
-    })
+    let mut group = json!({ "hooks": [hook_command_entry(command)] });
+    if let Some(matcher) = matcher_for(event) {
+        group["matcher"] = json!(matcher);
+    }
+    group
 }
 
 fn read_root(path: &Path) -> Result<Map<String, Value>, SettingsError> {
@@ -387,9 +403,14 @@ pub fn install_hook(
         // somebody else's routing, and rewriting it would silently re-aim their hook.
         if ours_here == 1
             && remaining == 1
-            && group.get("matcher").and_then(Value::as_str) != Some(matcher_for(event))
+            && (group.get("matcher").and_then(Value::as_str) != matcher_for(event)
+                || (event == HookEvent::Recall && group.get("matcher").is_some()))
         {
-            group["matcher"] = json!(matcher_for(event));
+            if let Some(matcher) = matcher_for(event) {
+                group["matcher"] = json!(matcher);
+            } else if let Some(obj) = group.as_object_mut() {
+                obj.remove("matcher");
+            }
             changed = true;
             found_same = false;
         }
@@ -550,7 +571,8 @@ fn entry_shape_ok_json(path: &Path, event: HookEvent, expected_command: &str) ->
         };
         for h in hooks {
             if h.get("command").and_then(Value::as_str) == Some(expected_command) {
-                return group.get("matcher").and_then(Value::as_str) == Some(matcher_for(event))
+                return group.get("matcher").and_then(Value::as_str) == matcher_for(event)
+                    && (event != HookEvent::Recall || group.get("matcher").is_none())
                     && h.get("type").and_then(Value::as_str) == Some("command")
                     && h.get("timeout").and_then(Value::as_u64) == Some(TIMEOUT_SECS);
             }

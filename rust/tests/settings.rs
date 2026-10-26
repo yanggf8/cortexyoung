@@ -79,6 +79,74 @@ fn every_hook_the_user_already_had_survives() {
 }
 
 #[test]
+fn session_start_preserves_foreign_hook_and_round_trips() {
+    let (_d, p) = tmp();
+    with_existing_hooks(&p);
+    let body = fs::read_to_string(&p).unwrap();
+    fs::write(&p, format!("{body}\n")).unwrap();
+    let before = fs::read(&p).unwrap();
+    let command = "/bin/cort hook-recall --harness claude-code";
+    assert_eq!(
+        install_hook(&p, command, HookEvent::Recall).unwrap().change,
+        Change::Installed
+    );
+    let groups = read(&p)["hooks"]["SessionStart"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(groups.len(), 2);
+    assert_eq!(groups[0]["hooks"][0]["command"], "mos hook");
+    assert!(groups[1].get("matcher").is_none());
+    assert_eq!(groups[1]["hooks"][0]["timeout"], 5);
+    assert!(cort::settings::entry_shape_ok(
+        "claude-code",
+        &p,
+        HookEvent::Recall,
+        command
+    ));
+    let installed = fs::read(&p).unwrap();
+    assert_eq!(
+        install_hook(&p, command, HookEvent::Recall).unwrap().change,
+        Change::AlreadyPresent
+    );
+    assert_eq!(fs::read(&p).unwrap(), installed);
+    remove_hook(&p).unwrap();
+    assert_eq!(fs::read(&p).unwrap(), before);
+}
+
+#[test]
+fn session_reinstall_collapses_our_duplicates_and_repairs_matcher() {
+    let (_d, p) = tmp();
+    let command = "/bin/cort hook-recall --harness claude-code";
+    install_hook(&p, command, HookEvent::Recall).unwrap();
+    let mut root = read(&p);
+    let groups = root["hooks"]["SessionStart"].as_array_mut().unwrap();
+    groups[0]["matcher"] = json!("startup");
+    let duplicate = groups[0].clone();
+    groups.push(duplicate);
+    fs::write(&p, serde_json::to_string_pretty(&root).unwrap()).unwrap();
+    assert!(!cort::settings::entry_shape_ok(
+        "claude-code",
+        &p,
+        HookEvent::Recall,
+        command
+    ));
+    install_hook(&p, command, HookEvent::Recall).unwrap();
+    let groups = read(&p)["hooks"]["SessionStart"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(groups.len(), 1);
+    assert!(groups[0].get("matcher").is_none());
+    assert!(cort::settings::entry_shape_ok(
+        "claude-code",
+        &p,
+        HookEvent::Recall,
+        command
+    ));
+}
+
+#[test]
 fn a_moved_binary_updates_the_entry_instead_of_adding_a_second_one() {
     let (_d, p) = tmp();
     install_hook(

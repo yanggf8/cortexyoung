@@ -1390,7 +1390,7 @@ if [ "$CHECK_RC" -ne 0 ]; then
 else
   fail "--check printed the finding but exited 0 (ok=0 did not propagate out of the loop)"
 fi
-# And one bad entry must not collapse the other five: they are separate entries in separate files
+# And one bad entry must not collapse the others: they are separate entries in separate files
 # and a single verdict would hide a partial install.
 HEALTHY="$(grep -cE '^(claude-code|codex|kimi-code)/(pre|post): .* \(wired' /tmp/smoke19c.log || true)"
 if [ "$HEALTHY" -ge 4 ]; then
@@ -1401,15 +1401,23 @@ fi
 # No wiring restore: Test 20 below brings its own HOME, so nothing later reads this one.
 rm -rf "$STALEBIN"
 
-# ── 20. all six wired entries, not just the one this file used to check ──
-# Six entries ship: three harnesses times two events. Until 2026-09-03 every hook assertion in this
+# ── 20. all seven wired entries, not just the one this file used to check ──
+# Seven entries ship: three harnesses have two tool events, and Claude Code has SessionStart too. Until 2026-09-03 every hook assertion in this
 # file pointed at `~/.claude/settings.json` and at the pre event, so five of the six were deployed
 # with no install-level test at all -- including both of Kimi's, whose file is a third TOML dialect,
 # and both post events. A deploy path with no assertion is the failure mode this whole file exists
 # for; `--check` reading green is not the same claim, because `--check` asks the same binary that
 # wrote the entry.
-echo "--- Test 20: all six hook entries are deployed, one per harness per event ---"
+echo "--- Test 20: all seven hook entries are deployed, per harness per shipped event ---"
 fresh_home_with_install
+CLAUDE_CFG="$HOME/.claude/settings.json"
+assert_contains "$CLAUDE_CFG" '"SessionStart"' "Claude Code has a SessionStart group"
+assert_contains "$CLAUDE_CFG" "hook-recall --harness claude-code" "Claude Code recall is wired"
+SESSION_COUNT="$(grep -c 'hook-recall --harness claude-code' "$CLAUDE_CFG" || true)"
+if [ "$SESSION_COUNT" = "1" ]; then pass "Claude Code starts with exactly one recall entry"
+else fail "Claude Code starts with $SESSION_COUNT recall entries"; fi
+bash "$INSTALL_SH" --check > /tmp/smoke20check.log 2>&1 || true
+assert_contains /tmp/smoke20check.log "claude-code/session: $CLAUDE_CFG (wired)" "--check reports Claude Code session wired"
 # --force: the bare rerun declines since Task 0; explicit insistence still redeploys, and
 # idempotence (exactly one entry per file) is what this test pins either way.
 bash "$INSTALL_SH" --force > /tmp/smoke20.log 2>&1; sed 's/^/    /' /tmp/smoke20.log
@@ -1422,6 +1430,8 @@ for pair in "claude-code:$HOME/.claude/settings.json" "codex:$CODEX_CFG" "kimi-c
   assert_contains "$f" "hook-suggest --harness $h" "$h pre-event wired in $(basename "$f")"
   assert_contains "$f" "hook-refresh --harness $h" "$h post-event wired in $(basename "$f")"
 done
+assert_not_contains "$CODEX_CFG" "SessionStart" "Codex has no SessionStart entry"
+assert_not_contains "$KIMI_CFG" "SessionStart" "Kimi has no SessionStart entry"
 # The two TOML dialects are not each other. Codex nests its groups; Kimi is flat with the event as
 # a field. Asserting the entry's own shape is what would catch a `--format` mixup that both files
 # would otherwise absorb silently, since both are called config.toml.
@@ -1448,6 +1458,24 @@ for f in "$HOME/.claude/settings.json" "$CODEX_CFG" "$KIMI_CFG"; do
   if [ "$n" = "1" ]; then pass "$(basename "$f") holds exactly one pre-event entry after a redeploy"
   else fail "$(basename "$f") holds $n pre-event entries after a redeploy"; fi
 done
+SESSION_COUNT="$(grep -c 'hook-recall --harness claude-code' "$CLAUDE_CFG" || true)"
+if [ "$SESSION_COUNT" = "1" ]; then pass "Claude Code holds exactly one recall entry after redeploy"
+else fail "Claude Code holds $SESSION_COUNT recall entries after redeploy"; fi
+# Simulate a pre-B2 install on this already installed machine: only pre/post are wired.
+# The bare installer must hand off to cort_upgrade, whose hook repair calls --all.
+"$HOME/.cargo/bin/cort" hook-install --settings "$CLAUDE_CFG" --remove >/dev/null
+"$HOME/.cargo/bin/cort" hook-install --settings "$CLAUDE_CFG" --event pre --command "$HOME/.cargo/bin/cort hook-suggest --harness claude-code" >/dev/null
+"$HOME/.cargo/bin/cort" hook-install --settings "$CLAUDE_CFG" --event post --command "$HOME/.cargo/bin/cort hook-refresh --harness claude-code" >/dev/null
+assert_not_contains "$CLAUDE_CFG" "hook-recall" "pre-B2 fixture lacks recall"
+UPGRADE_RC=0; bash "$INSTALL_SH" > /tmp/smoke20upgrade.log 2>&1 || UPGRADE_RC=$?
+if [ "$UPGRADE_RC" = "0" ]; then pass "upgrade hand-off exits 0"; else fail "upgrade hand-off exited $UPGRADE_RC"; fi
+assert_contains /tmp/smoke20upgrade.log "existing installation" "bare installer uses upgrade hand-off"
+assert_contains "$CLAUDE_CFG" "hook-recall --harness claude-code" "upgrade adds Claude Code recall"
+bash "$INSTALL_SH" --check > /tmp/smoke20upgradecheck.log 2>&1 && pass "--check OK after the upgrade hand-off" || fail "--check fails after the upgrade hand-off"
+assert_contains /tmp/smoke20upgradecheck.log "claude-code/session: $CLAUDE_CFG (wired)" "--check reports session wired after the upgrade"
+SESSION_COUNT="$(grep -c 'hook-recall --harness claude-code' "$CLAUDE_CFG" || true)"
+if [ "$SESSION_COUNT" = "1" ]; then pass "upgrade adds exactly one recall entry"
+else fail "upgrade left $SESSION_COUNT recall entries"; fi
 # And uninstall hands all three files back. `--check` cannot see this: it asks about our entry, not
 # about what we left behind in somebody else's file.
 bash "$INSTALL_SH" --uninstall > /tmp/smoke20b.log 2>&1
@@ -1455,10 +1483,61 @@ for f in "$HOME/.claude/settings.json" "$CODEX_CFG" "$KIMI_CFG"; do
   if [ ! -f "$f" ]; then pass "$(basename "$f") unwired on uninstall (file absent)"; continue; fi
   assert_not_contains "$f" "hook-suggest --harness" "$(basename "$f"): pre-event unwired on uninstall"
   assert_not_contains "$f" "hook-refresh --harness" "$(basename "$f"): post-event unwired on uninstall"
+  assert_not_contains "$f" "hook-recall --harness" "$(basename "$f"): session-event unwired on uninstall"
 done
 # No wiring restore: Test 21 brings its own HOME and Test 22 gets a fresh one below, so
 # nothing later reads this machine. (A bare reinstall here would decline since Task 0, and
 # an unobserved `|| true` would be the false-green this file refuses to carry.)
+
+# Foreign hooks and TOML comments belong to the user. Start with all three files present,
+# then prove install and uninstall hand their exact original bytes back.
+fresh_home
+mkdir -p "$HOME/.codex" "$HOME/.kimi-code"
+cat > "$HOME/.claude/settings.json" <<'FOREIGN_CLAUDE'
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "command": "foreign startup",
+            "type": "command"
+          }
+        ]
+      }
+    ]
+  }
+}
+FOREIGN_CLAUDE
+cat > "$HOME/.codex/config.toml" <<'FOREIGN_CODEX'
+# keep this Codex comment
+approvals_reviewer = "user"
+
+[[hooks.SessionStart]]
+[[hooks.SessionStart.hooks]]
+type = "command"
+command = "foreign startup"
+FOREIGN_CODEX
+cat > "$HOME/.kimi-code/config.toml" <<'FOREIGN_KIMI'
+# keep this Kimi comment
+[[hooks]]
+event = "SessionStart"
+command = "foreign startup"
+matcher = "startup"
+FOREIGN_KIMI
+cp "$HOME/.claude/settings.json" "$HOME/claude.before"
+cp "$HOME/.codex/config.toml" "$HOME/codex.before"
+cp "$HOME/.kimi-code/config.toml" "$HOME/kimi.before"
+bash "$INSTALL_SH" > /tmp/smoke20foreign.log 2>&1
+assert_contains "$HOME/.claude/settings.json" "hook-recall --harness claude-code" "recall installs beside a foreign SessionStart hook"
+assert_contains "$HOME/.codex/config.toml" "hook-suggest --harness codex" "Codex wired beside its foreign SessionStart hook"
+assert_contains "$HOME/.kimi-code/config.toml" "hook-suggest --harness kimi-code" "Kimi wired beside its foreign SessionStart hook"
+bash "$INSTALL_SH" --uninstall > /tmp/smoke20foreignremove.log 2>&1
+for pair in "claude:$HOME/.claude/settings.json" "codex:$HOME/.codex/config.toml" "kimi:$HOME/.kimi-code/config.toml"; do
+  h="${pair%%:*}"; f="${pair#*:}"
+  if cmp -s "$f" "$HOME/$h.before"; then pass "$h settings restored byte for byte"
+  else fail "$h settings changed after install and uninstall"; fi
+done
 
 # ── 21. preflight runs before the manifest is touched ─────────────
 # The comment at install.sh:1087 promises preflight runs "before any mutation". migrate_manifest_v2

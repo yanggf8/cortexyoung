@@ -934,3 +934,26 @@ fn a_kimi_entry_with_our_command_but_a_stale_matcher_is_not_in_shape() {
         "a matcher-only rewrite must fail the shape check"
     );
 }
+
+/// SessionStart ships for Claude Code only (`settings::events_for`); the TOML dialects refuse it
+/// at the library boundary too, so no future caller can wire an un-intercepted payload.
+#[test]
+fn toml_dialects_refuse_session_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let codex = dir.path().join("config.toml");
+    let kimi = dir.path().join("kimi.toml");
+    assert!(matches!(
+        install_hook(&codex, "/bin/cort hook-recall", HookEvent::Recall),
+        Err(cort::settings_toml::SettingsError::Unsupported(
+            "SessionStart"
+        ))
+    ));
+    assert!(matches!(
+        cort::settings_kimi::install_hook(&kimi, "/bin/cort hook-recall", HookEvent::Recall),
+        Err(cort::settings_toml::SettingsError::Unsupported(
+            "SessionStart"
+        ))
+    ));
+    assert!(!codex.exists());
+    assert!(!kimi.exists());
+}
