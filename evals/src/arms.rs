@@ -26,7 +26,7 @@ pub fn cort_bin() -> String {
         .unwrap_or_else(|| "cort".to_string())
 }
 
-/// Shipped guidance, not a hint invented for the eval: this is what `skills/ast-grep/SKILL.md`
+/// Shipped guidance, not a hint invented for the eval: this is what `skills/cort/SKILL.md`
 /// tells any agent that has cort. Withholding it would measure a tool nobody was told how to use —
 /// but results must record that the cort arm received it.
 pub fn cort_guidance() -> String {

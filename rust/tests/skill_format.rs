@@ -140,8 +140,8 @@ fn the_skills_are_not_vacuously_present() {
     // glob that silently matches nothing -- every assertion below iterates `skill_paths()`, so
     // an empty result would let the whole file pass while checking no bytes at all.
     assert!(
-        !paths.is_empty(),
-        "expected at least the ast-grep skill, found {:?}",
+        paths.contains(&skills_root().join("cort/SKILL.md")),
+        "expected the cort skill, found {:?}",
         paths
     );
 }

@@ -24,12 +24,14 @@ DEPLOY_LOG="$MANIFEST_DIR/deploy.log"
 # `legacy_xg_bin` from the manifest and falls back to this literal for a manifest that predates them.
 LEGACY_XGREP_SKILL_DEST="$HOME/.claude/skills/xgrep/SKILL.md"
 CORT_HOME="$MANIFEST_DIR/cort"
-AST_GREP_SKILL_SRC_REL="skills/ast-grep/SKILL.md"
-AST_GREP_SKILL_DEST="${CLAUDE_SKILL_HOME:-$HOME/.claude}/skills/ast-grep/SKILL.md"
+CORT_SKILL_SRC_REL="skills/cort/SKILL.md"
+CORT_SKILL_DEST="${CLAUDE_SKILL_HOME:-$HOME/.claude}/skills/cort/SKILL.md"
+LEGACY_AST_GREP_SKILL_DEST="${CLAUDE_SKILL_HOME:-$HOME/.claude}/skills/ast-grep/SKILL.md"
 # The same routing guidance is deployed for Codex (it reads $CODEX_HOME/skills, default
 # ~/.codex/skills). One source of truth in the repo, two agent homes — an agent that never sees the
 # skill routes ordinary lookups into the graph and re-reads whole files.
-CODEX_SKILL_DEST="${CODEX_HOME:-$HOME/.codex}/skills/ast-grep/SKILL.md"
+CODEX_CORT_SKILL_DEST="${CODEX_HOME:-$HOME/.codex}/skills/cort/SKILL.md"
+LEGACY_CODEX_AST_GREP_SKILL_DEST="${CODEX_HOME:-$HOME/.codex}/skills/ast-grep/SKILL.md"
 # The PreToolUse hook ships with the skill rather than being a second thing to wire per agent home.
 # The skill is prospective ("before you rename X, run impact") and measured over the sessions that
 # carried it, it never fired: 409 searches, zero cort calls. The hook is the retrospective half of
@@ -206,6 +208,34 @@ skill_is_managed() {
     return 1
   fi
   grep -qF "skill_sha256:$(skill_hash "$1")" "$stamp"
+}
+
+# legacy_skill_owned: the stamp beside "$1" records the SHA-256 of its current bytes, as a whole line.
+legacy_skill_owned() {
+  local stamp; stamp="$(skill_stamp_for "$1")"
+  [ -f "$stamp" ] && grep -qxF "skill_sha256:$(skill_hash "$1")" "$stamp"
+}
+
+# The retired skill is removed only when its stamp claims the bytes still on disk. Old in-file
+# markers do not grant migration ownership. With a source and a new destination (install, not
+# uninstall), it is also kept until the new cort skill is the repo file byte for byte: a deploy that
+# skipped or failed must not leave a home with neither skill.
+remove_legacy_ast_grep_skill_at() {
+  local path="$1" src="${2:-}" new_dest="${3:-}" stamp
+  [ -f "$path" ] || return 0
+  if [ -n "$src" ] && ! cmp -s "$src" "$new_dest"; then
+    info "old ast-grep skill kept (new cort skill missing or different): $path"
+    return 0
+  fi
+  stamp="$(skill_stamp_for "$path")"
+  if legacy_skill_owned "$path"; then
+    rm -f "$path" "$stamp"
+    rmdir "$(dirname "$path")" 2>/dev/null || true
+    info "removed old ast-grep skill: $path"
+    record_deploy "$path" "absent"
+  else
+    info "old ast-grep skill kept (unowned or modified): $path"
+  fi
 }
 
 # ensure_skill_stamp: claim "$1", a SKILL.md we just wrote, in the stamp file beside it.
@@ -955,26 +985,36 @@ do_check() {
   if [ -f "$legacy_xg_skill" ]; then
     echo "skill_xgrep: $legacy_xg_skill (RETIRED — left over from the removed --with-xgrep option; ./install.sh --uninstall removes it)"
   fi
-  if [ -f "$AST_GREP_SKILL_DEST" ]; then
-    if skill_is_managed "$AST_GREP_SKILL_DEST"; then
-      echo "skill_ast_grep: $AST_GREP_SKILL_DEST (managed)"
+  local legacy_label legacy_path
+  for legacy_label in skill_ast_grep skill_ast_grep_codex; do
+    if [ "$legacy_label" = skill_ast_grep ]; then legacy_path="$LEGACY_AST_GREP_SKILL_DEST"; else legacy_path="$LEGACY_CODEX_AST_GREP_SKILL_DEST"; fi
+    [ -f "$legacy_path" ] || continue
+    if legacy_skill_owned "$legacy_path"; then
+      echo "$legacy_label: $legacy_path (RETIRED - owned; the next install or upgrade removes it)"
     else
-      echo "skill_ast_grep: $AST_GREP_SKILL_DEST (UNMANAGED)"
+      echo "$legacy_label: $legacy_path (RETIRED - kept because unowned or modified; remove it by hand)"
+    fi
+  done
+  if [ -f "$CORT_SKILL_DEST" ]; then
+    if skill_is_managed "$CORT_SKILL_DEST"; then
+      echo "skill_cort: $CORT_SKILL_DEST (managed)"
+    else
+      echo "skill_cort: $CORT_SKILL_DEST (UNMANAGED)"
       ok=0
     fi
   else
-    echo "skill_ast_grep: $AST_GREP_SKILL_DEST (NOT INSTALLED)"
+    echo "skill_cort: $CORT_SKILL_DEST (NOT INSTALLED)"
     ok=0
   fi
-  if [ -f "$CODEX_SKILL_DEST" ]; then
-    if skill_is_managed "$CODEX_SKILL_DEST"; then
-      echo "skill_codex: $CODEX_SKILL_DEST (managed)"
+  if [ -f "$CODEX_CORT_SKILL_DEST" ]; then
+    if skill_is_managed "$CODEX_CORT_SKILL_DEST"; then
+      echo "skill_codex: $CODEX_CORT_SKILL_DEST (managed)"
     else
-      echo "skill_codex: $CODEX_SKILL_DEST (UNMANAGED)"
+      echo "skill_codex: $CODEX_CORT_SKILL_DEST (UNMANAGED)"
       ok=0
     fi
   else
-    echo "skill_codex: $CODEX_SKILL_DEST (NOT INSTALLED)"
+    echo "skill_codex: $CODEX_CORT_SKILL_DEST (NOT INSTALLED)"
     ok=0
   fi
   if [ -f "$MANIFEST_FILE" ]; then
@@ -1098,11 +1138,13 @@ do_uninstall() {
   remove_measure_cron
   remove_hook
   if [ -f "$MANIFEST_FILE" ]; then
-    local cort_owned ag_owned xg_owned skill_ag skill_xg
+    local cort_owned ag_owned xg_owned skill_ag skill_xg legacy_ag legacy_ag_codex
     cort_owned="$(manifest_get cort_bin || true)"
     ag_owned="$(manifest_get ast_grep_bin || true)"
     xg_owned="$(manifest_get legacy_xg_bin || true)"
-    skill_ag="$(manifest_get skill_ast_grep || true)"
+    skill_ag="$(manifest_get skill_cort || true)"
+    legacy_ag="$(manifest_get skill_ast_grep || true)"
+    legacy_ag_codex="$(manifest_get skill_ast_grep_codex || true)"
     skill_xg="$(manifest_get skill_xgrep || true)"
 
     if [ -n "$cort_owned" ] && [ -f "$cort_owned" ]; then
@@ -1148,8 +1190,8 @@ do_uninstall() {
       info "xg binary not owned by this installer — skipping (was pre-existing)"
     fi
 
-    skill_ag_codex="$(manifest_get skill_ast_grep_codex || true)"
-    remove_managed_skill_at "${skill_ag_codex:-$CODEX_SKILL_DEST}" skill_ast_grep_codex
+    skill_ag_codex="$(manifest_get skill_cort_codex || true)"
+    remove_managed_skill_at "${skill_ag_codex:-$CODEX_CORT_SKILL_DEST}" skill_cort_codex
 
     if [ -n "$skill_ag" ] && [ -f "$skill_ag" ]; then
       if skill_is_managed "$skill_ag"; then
@@ -1158,16 +1200,18 @@ do_uninstall() {
         record_deploy "$skill_ag" "absent"
         rmdir "$(dirname "$skill_ag")" 2>/dev/null || true
       else
-        info "skill_ast_grep no longer managed — skipping: $skill_ag"
+        info "skill_cort no longer managed — skipping: $skill_ag"
       fi
-    elif [ -f "$AST_GREP_SKILL_DEST" ] && skill_is_managed "$AST_GREP_SKILL_DEST"; then
-      rm -f "$AST_GREP_SKILL_DEST" "$(skill_stamp_for "$AST_GREP_SKILL_DEST")"
-      info "removed $AST_GREP_SKILL_DEST"
-      record_deploy "$AST_GREP_SKILL_DEST" "absent"
-      rmdir "$(dirname "$AST_GREP_SKILL_DEST")" 2>/dev/null || true
+    elif [ -f "$CORT_SKILL_DEST" ] && skill_is_managed "$CORT_SKILL_DEST"; then
+      rm -f "$CORT_SKILL_DEST" "$(skill_stamp_for "$CORT_SKILL_DEST")"
+      info "removed $CORT_SKILL_DEST"
+      record_deploy "$CORT_SKILL_DEST" "absent"
+      rmdir "$(dirname "$CORT_SKILL_DEST")" 2>/dev/null || true
     else
-      info "skill_ast_grep not managed — skipping"
+      info "skill_cort not managed — skipping"
     fi
+    remove_legacy_ast_grep_skill_at "${legacy_ag:-$LEGACY_AST_GREP_SKILL_DEST}"
+    remove_legacy_ast_grep_skill_at "${legacy_ag_codex:-$LEGACY_CODEX_AST_GREP_SKILL_DEST}"
 
     if [ -n "$skill_xg" ] && [ -f "$skill_xg" ]; then
       if skill_is_managed "$skill_xg"; then
@@ -1200,12 +1244,15 @@ do_uninstall() {
     else
       info "no manifest and skill_xgrep not managed — nothing to remove"
     fi
-    if [ -f "$AST_GREP_SKILL_DEST" ] && skill_is_managed "$AST_GREP_SKILL_DEST"; then
-      rm -f "$AST_GREP_SKILL_DEST" "$(skill_stamp_for "$AST_GREP_SKILL_DEST")"
-      info "removed $AST_GREP_SKILL_DEST (managed)"
-      record_deploy "$AST_GREP_SKILL_DEST" "absent"
-      rmdir "$(dirname "$AST_GREP_SKILL_DEST")" 2>/dev/null || true
+    if [ -f "$CORT_SKILL_DEST" ] && skill_is_managed "$CORT_SKILL_DEST"; then
+      rm -f "$CORT_SKILL_DEST" "$(skill_stamp_for "$CORT_SKILL_DEST")"
+      info "removed $CORT_SKILL_DEST (managed)"
+      record_deploy "$CORT_SKILL_DEST" "absent"
+      rmdir "$(dirname "$CORT_SKILL_DEST")" 2>/dev/null || true
     fi
+    remove_managed_skill_at "$CODEX_CORT_SKILL_DEST" skill_cort_codex
+    remove_legacy_ast_grep_skill_at "$LEGACY_AST_GREP_SKILL_DEST"
+    remove_legacy_ast_grep_skill_at "$LEGACY_CODEX_AST_GREP_SKILL_DEST"
     remove_path_block
     if [ -L "$CORT_HOME" ] || [ -d "$CORT_HOME" ]; then
       rm -rf "$CORT_HOME"
@@ -1274,8 +1321,8 @@ do_install() {
   resolve_bin_dir
 
   # Preflight every destination (claude + codex skill) before any mutation
-  preflight_skill_at "$SCRIPT_DIR/$AST_GREP_SKILL_SRC_REL" "$AST_GREP_SKILL_DEST"
-  preflight_skill_at "$SCRIPT_DIR/$AST_GREP_SKILL_SRC_REL" "$CODEX_SKILL_DEST"
+  preflight_skill_at "$SCRIPT_DIR/$CORT_SKILL_SRC_REL" "$CORT_SKILL_DEST"
+  preflight_skill_at "$SCRIPT_DIR/$CORT_SKILL_SRC_REL" "$CODEX_CORT_SKILL_DEST"
   migrate_manifest_v2
 
   # Build before provisioning: every installer-invoked verb below is queried from this binary, so
@@ -1286,16 +1333,18 @@ do_install() {
   build_cort
   install_ast_grep
   install_cort
-  deploy_skill_at "$SCRIPT_DIR/$AST_GREP_SKILL_SRC_REL" "$AST_GREP_SKILL_DEST" "skill_ast_grep"
-  deploy_skill_at "$SCRIPT_DIR/$AST_GREP_SKILL_SRC_REL" "$CODEX_SKILL_DEST" "skill_ast_grep_codex"
+  deploy_skill_at "$SCRIPT_DIR/$CORT_SKILL_SRC_REL" "$CORT_SKILL_DEST" "skill_cort"
+  deploy_skill_at "$SCRIPT_DIR/$CORT_SKILL_SRC_REL" "$CODEX_CORT_SKILL_DEST" "skill_cort_codex"
+  remove_legacy_ast_grep_skill_at "$LEGACY_AST_GREP_SKILL_DEST" "$SCRIPT_DIR/$CORT_SKILL_SRC_REL" "$CORT_SKILL_DEST"
+  remove_legacy_ast_grep_skill_at "$LEGACY_CODEX_AST_GREP_SKILL_DEST" "$SCRIPT_DIR/$CORT_SKILL_SRC_REL" "$CODEX_CORT_SKILL_DEST"
   deploy_hook "$BIN_DIR/cort"
   retire_measure_cron "$BIN_DIR/cort"
   ensure_path_block
   record_manifest "manifest_version" "2"
 
   echo ""
-  echo "Done. Verify with: cort --version && ast-grep --version && cat $AST_GREP_SKILL_DEST | head -5"
-  echo "Skill also deployed for Codex: $CODEX_SKILL_DEST"
+  echo "Done. Verify with: cort --version && ast-grep --version && cat $CORT_SKILL_DEST | head -5"
+  echo "Skill also deployed for Codex: $CODEX_CORT_SKILL_DEST"
   echo "If cort not in PATH, restart your shell or: export PATH=\"$BIN_DIR:\$PATH\""
 }
 

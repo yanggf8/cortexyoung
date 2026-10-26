@@ -748,8 +748,8 @@ const MANAGED_STAMP_NAME: &str = ".cortexyoung-managed";
 /// Skills, resolved the way install.sh resolves them. The env-reading wrapper; tests call
 /// `check_skills_at` (all paths explicit) because mutating process env inside parallel tests
 /// is unsound. Env mirroring:
-/// - ast-grep skill: `${CLAUDE_SKILL_HOME:-$HOME/.claude}/skills/ast-grep/SKILL.md`;
-/// - codex skill: `${CODEX_HOME:-$HOME/.codex}/skills/ast-grep/SKILL.md`.
+/// - cort skill: `${CLAUDE_SKILL_HOME:-$HOME/.claude}/skills/cort/SKILL.md`;
+/// - codex skill: `${CODEX_HOME:-$HOME/.codex}/skills/cort/SKILL.md`.
 ///
 /// The retired xgrep skill is deliberately absent: an upgrade's component list is what the tree
 /// ships, and the tree stopped shipping it on 2026-09-10. A machine that still carries a deployed
@@ -771,30 +771,31 @@ pub fn skill_paths(new_tree: &Path, home: &Path) -> Vec<(&'static str, PathBuf, 
     let codex_home = std::env::var_os("CODEX_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| home.join(".codex"));
+    skill_paths_at(new_tree, &claude_home, &codex_home)
+}
+
+fn skill_paths_at(
+    new_tree: &Path,
+    claude_home: &Path,
+    codex_home: &Path,
+) -> Vec<(&'static str, PathBuf, PathBuf)> {
     vec![
         (
-            "skill_ast_grep",
-            new_tree.join("skills/ast-grep/SKILL.md"),
-            claude_home.join("skills/ast-grep/SKILL.md"),
+            "skill_cort",
+            new_tree.join("skills/cort/SKILL.md"),
+            claude_home.join("skills/cort/SKILL.md"),
         ),
         (
-            "skill_ast_grep_codex",
-            new_tree.join("skills/ast-grep/SKILL.md"),
-            codex_home.join("skills/ast-grep/SKILL.md"),
+            "skill_cort_codex",
+            new_tree.join("skills/cort/SKILL.md"),
+            codex_home.join("skills/cort/SKILL.md"),
         ),
     ]
 }
 
-/// The one repair target an upgrade may act on: a skill that is Drifted AND owned — the
-/// installer's stamp beside the destination. An unmanaged divergence is install.sh --force's
-/// decision (spec: adopting it is never an upgrade's), and the decision reads the stamp on
-/// disk, never detail prose: the first draft's `contains("managed")` also matched
-/// "unmanaged" and would overwrite a user's own unstamped skill (Codex review round).
-///
-/// Deliberate consequence of reading the stamp: a DELETED skill whose stamp survives also
-/// reads Drifted ("missing (the new tree ships it)") and IS repaired — the file is
-/// re-created. A managed asset the user removed is drift, and repair rewrites the stamp in
-/// the installer's format, so ownership is preserved (Kimi review round, behavior note).
+/// Repair a drifted existing skill with an installer stamp, or migrate a missing cort skill
+/// only when the sibling ast-grep skill is still owned. A deliberately deleted cort skill
+/// without an owned old sibling stays deleted; an unstamped existing skill stays untouched.
 pub fn skill_repair_target(
     comp: &Component,
     new_tree: &Path,
@@ -803,11 +804,26 @@ pub fn skill_repair_target(
     if !matches!(comp.state, ComponentState::Drifted) {
         return None;
     }
-    let (_name, src, dest) = skill_paths(new_tree, home)
-        .into_iter()
-        .find(|(n, _, _)| *n == comp.name)?;
-    let managed = dest.parent()?.join(MANAGED_STAMP_NAME).exists();
-    managed.then_some((src, dest))
+    let paths = skill_paths(new_tree, home);
+    skill_repair_target_at(comp, &paths)
+}
+
+/// Path-explicit repair decision for tests and for the env-resolved wrapper.
+pub fn skill_repair_target_at(
+    comp: &Component,
+    paths: &[(&'static str, PathBuf, PathBuf)],
+) -> Option<(PathBuf, PathBuf)> {
+    if !matches!(comp.state, ComponentState::Drifted) {
+        return None;
+    }
+    let (_name, src, dest) = paths.iter().find(|(n, _, _)| *n == comp.name)?;
+    let parent = dest.parent()?;
+    let managed = if dest.exists() {
+        parent.join(MANAGED_STAMP_NAME).exists()
+    } else {
+        owned_skill(&parent.with_file_name("ast-grep").join("SKILL.md"))
+    };
+    managed.then_some((src.clone(), dest.clone()))
 }
 
 /// The testable core: all paths explicit, ZERO env dependence. Checks never write — repair
@@ -816,14 +832,14 @@ pub fn skill_repair_target(
 /// construction.
 pub fn check_skills_at(
     new_tree: &Path,
-    ast_grep_dest: &Path,
+    cort_dest: &Path,
     codex_dest: &Path,
     keep_mine: bool,
 ) -> Vec<Component> {
-    let ast_source = new_tree.join("skills/ast-grep/SKILL.md");
+    let cort_source = new_tree.join("skills/cort/SKILL.md");
     let specs = [
-        ("skill_ast_grep", ast_source.as_path(), ast_grep_dest),
-        ("skill_ast_grep_codex", ast_source.as_path(), codex_dest),
+        ("skill_cort", cort_source.as_path(), cort_dest),
+        ("skill_cort_codex", cort_source.as_path(), codex_dest),
     ];
     let mut out = Vec::new();
     for (name, src, dest) in specs {
@@ -916,6 +932,70 @@ pub fn repair_skill(source: &Path, dest: &Path) -> std::io::Result<()> {
         .ok_or_else(|| std::io::Error::other("skill dest has no parent directory"))?
         .join(MANAGED_STAMP_NAME);
     fs::write(stamp_path, stamp)
+}
+
+fn owned_skill(path: &Path) -> bool {
+    use sha2::{Digest, Sha256};
+    let Ok(bytes) = fs::read(path) else {
+        return false;
+    };
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    let stamp = parent.join(MANAGED_STAMP_NAME);
+    let expected = format!(
+        "skill_sha256:{}",
+        crate::db::hex_lower(&Sha256::digest(&bytes))
+    );
+    fs::read_to_string(&stamp).is_ok_and(|s| s.lines().any(|line| line == expected))
+}
+
+/// Retire each home's owned old skill only after that home's new skill matches the tree.
+pub fn retire_legacy_skills(new_tree: &Path, home: &Path) -> Vec<String> {
+    let paths = skill_paths(new_tree, home);
+    retire_legacy_skills_at(&paths)
+}
+
+/// Explicit paths keep tests independent of skill-home environment overrides.
+pub fn retire_legacy_skills_at(paths: &[(&'static str, PathBuf, PathBuf)]) -> Vec<String> {
+    let mut notices = Vec::new();
+    for (_, source, dest) in paths {
+        let Some(parent) = dest.parent() else {
+            continue;
+        };
+        let old_dir = parent.with_file_name("ast-grep");
+        let old = old_dir.join("SKILL.md");
+        if !old.exists() {
+            continue;
+        }
+        if !owned_skill(&old) {
+            notices.push(format!(
+                "old ast-grep skill kept (unowned or modified): {}",
+                old.display()
+            ));
+            continue;
+        }
+        let pristine = matches!((fs::read(source), fs::read(dest)), (Ok(a), Ok(b)) if a == b);
+        if !pristine {
+            notices.push(format!(
+                "old ast-grep skill kept (new cort skill missing or different): {}",
+                old.display()
+            ));
+            continue;
+        }
+        let stamp = old_dir.join(MANAGED_STAMP_NAME);
+        match fs::remove_file(&old).and_then(|()| fs::remove_file(&stamp)) {
+            Ok(()) => {
+                let _ = fs::remove_dir(&old_dir);
+                notices.push(format!("removed old ast-grep skill: {}", old.display()));
+            }
+            Err(e) => notices.push(format!(
+                "old ast-grep skill migration failed at {}: {e}",
+                old.display()
+            )),
+        }
+    }
+    notices
 }
 
 // ── Task 3: hooks — expected-shape comparison, repair re-verified ──

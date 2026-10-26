@@ -75,7 +75,7 @@ methods and type declarations (`struct`, `enum`, `trait`) are stored as symbol-s
 `cort impact --symbol <Type>` answers for a type the way it does for a function. A type alias and a
 `const` are deliberately not chunks; see limitation 8.
 
-Routing for agents is in `skills/ast-grep/SKILL.md` — it states when to use `rg`, `ast-grep run`, and `cort impact`.
+Agent guidance is in `skills/cort/SKILL.md`: recall and record source-backed project memory, then check caller sets with `cort impact` before changing symbols.
 
 ## Token cost
 
@@ -313,7 +313,7 @@ machines importing at once would write the same keys into two replicas.
 ## Install
 
 ```bash
-./install.sh              # cort v0.1.0 + ast-grep v0.45.3 + skill to ~/.claude/skills/ast-grep/
+./install.sh              # cort v0.1.0 + ast-grep v0.45.3 + skill to ~/.claude/skills/cort/
 ./install.sh --check      # verify without mutating
 ./install.sh --uninstall  # remove managed artifacts only (reads manifest v2)
 ./install.sh --force      # on unmanaged skill collision: backup and replace
@@ -334,7 +334,7 @@ exit 2, on a fresh install). `./install.sh --force` really reinstalls over it.
 
 - Downloads pinned `ast-grep` v0.45.3 prebuilt `app-<target>.zip` for your platform (Linux x86_64/aarch64, macOS x86_64/arm64) from GitHub Releases and verifies SHA-256 (repo-maintained; upstream publishes no checksums) — fail-closed: an empty or mismatched checksum refuses to install. Falls back to `cargo install ast-grep --version 0.45.3 --locked` (requires Rust 1.88+).
 - Builds `cort` from `rust/` with `cargo build --release --locked` on **every** run and installs the binary plus its ast-grep pack (`src/pack`, located at runtime via `CORT_PACK_DIR`) to `~/.local/share/cortexyoung/cort`, shimming `~/.cargo/bin/cort` or `~/.local/bin/cort`.
-- Deploys `skills/ast-grep/SKILL.md` to **both** agent homes — `~/.claude/skills/ast-grep/SKILL.md` and `~/.codex/skills/ast-grep/SKILL.md` (honouring `CODEX_HOME`) — **byte-for-byte the repo file**. The installer writes nothing inside the document: the frontmatter block holds keys only (`name`, `description`, and nothing of ours), both loaders anchor that fence to line 1, and `rust/tests/skill_format.rs` fails the build if a source stops parsing. Ownership lives in `.cortexyoung-managed` beside the skill, which records the SHA-256 of the bytes we deployed — so a hand-edit of a deployed `SKILL.md` reads as someone else's file and is refused, not silently overwritten. Edit `skills/<name>/SKILL.md` in this repo instead; one source feeds both homes. Preflights collisions before mutating: skips if hash-equal, replaces what it owns, refuses what it does not (use `--force` to backup and replace). Uninstall removes the document and its stamp, and nothing else.
+- Deploys `skills/cort/SKILL.md` to **both** agent homes — `~/.claude/skills/cort/SKILL.md` and `~/.codex/skills/cort/SKILL.md` (honouring `CODEX_HOME`) — **byte-for-byte the repo file**. The installer writes nothing inside the document: the frontmatter block holds keys only (`name`, `description`, and nothing of ours), both loaders anchor that fence to line 1, and `rust/tests/skill_format.rs` fails the build if a source stops parsing. Ownership lives in `.cortexyoung-managed` beside the skill, which records the SHA-256 of the bytes we deployed — so a hand-edit of a deployed `SKILL.md` reads as someone else's file and is refused, not silently overwritten. Edit `skills/<name>/SKILL.md` in this repo instead; one source feeds both homes. Preflights collisions before mutating: skips if hash-equal, replaces what it owns, refuses what it does not (use `--force` to backup and replace). An old `ast-grep` skill is removed only when its stamp matches its current bytes; edited or unstamped copies remain with a notice. Uninstall removes owned skill documents and stamps.
 - Wires **two** hooks into `~/.claude/settings.json`, `~/.codex/config.toml` and `~/.kimi-code/config.toml` in the **same run** as the skill (skip all of them with `--no-hook`): a `PreToolUse` trigger that records one row per fire in local `usage.db` and kicks collection, and a `PostToolUse` edit hook that repairs an existing index. Neither speaks; both exit 0 and never wait. `cort hook-install --all` resolves all six entries from its own table (`install.sh` names no path, dialect or subcommand), and the single-entry form takes an explicit `--format` and `--event` — JSON via `rust/src/settings.rs`, Codex's nested TOML via `rust/src/settings_toml.rs`, Kimi's flat `[[hooks]]` TOML via `rust/src/settings_kimi.rs` — never `jq`: every one of them preserves the hooks you already have, rewrites our own entry when the binary moves instead of adding a second, collapses duplicates down to one, refuses outright to overwrite a settings file it could not parse, and gives an install-then-uninstall cycle back byte for byte. (The format used to be read off the file extension. Two of these three files are called `config.toml`, so each caller now names its own.) Grok reads the same `settings.json` as Claude Code and needs no entry of its own. See [the hook section](#the-pretooluse-hook--the-retrospective-half-of-the-routing) for the current runtime behavior and the dated measurements behind the removal.
 - Adds a single bounded idempotent `PATH` block to your shell profile (`.bashrc`/`.zshrc`/`.profile`) so `cort` and `ast-grep` are on `PATH`; removed on `--uninstall`.
 - Records ownership in `~/.local/share/cortexyoung/manifest` (v2 `key:value` lines) — uninstall only removes what it installed, never a pre-existing binary.
@@ -853,8 +853,7 @@ Any path can be inspected via `git show v6-final:<path>` without checking out th
 
 ## How the skill is used
 
-The `ast-grep` skill teaches agents when to use `rg` vs `ast-grep` vs `cort` — see `skills/ast-grep/SKILL.md` (also installed to `~/.claude/skills/ast-grep/`). `rg` for fresh/short/small and for finding strings, `ast-grep run` for one shape, and `cort impact` for the caller set / multi-hop blast radius. The skill states the
-measured break-even so an agent does not route a string question into a graph tool.
+The `cort` skill teaches agents to recall project decisions at the start of work and before asserting project facts, record corrections and changed decisions with source lines, and inspect `cort impact --coverage` rows before renaming or deleting symbols. See `skills/cort/SKILL.md` (also installed to `~/.claude/skills/cort/`).
 
 ## The PreToolUse hook — the retrospective half of the routing
 

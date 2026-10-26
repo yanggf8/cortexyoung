@@ -78,6 +78,8 @@ pub const MANIFEST_KEYS: &[&str] = &[
     "skill_xgrep",
     "skill_ast_grep",
     "skill_ast_grep_codex",
+    "skill_cort",
+    "skill_cort_codex",
     "hook_settings",
     "hook_settings_codex",
     "hook_settings_kimi",

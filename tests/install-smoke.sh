@@ -134,15 +134,41 @@ export CORT_CRONTAB_FILE
 
 echo "=== install-smoke: temp HOME=$TMPHOME ==="
 
-# ── 1. first install (ast-grep skill only) ────────────────────────
+# ── 1. first install (cort skill only) ────────────────────────────
 echo "--- Test 1: first install ---"
 bash "$INSTALL_SH" > /tmp/smoke1.log 2>&1; cat /tmp/smoke1.log | sed 's/^/    /'
-assert_file_exists "$HOME/.claude/skills/ast-grep/SKILL.md" "ast-grep skill installed"
-assert_not_contains "$HOME/.claude/skills/ast-grep/SKILL.md" "$MANAGED_SIGNATURE" "deployed SKILL.md holds no installer bookkeeping"
-assert_frontmatter_first "$HOME/.claude/skills/ast-grep/SKILL.md" "deployed skill keeps its YAML fence on line 1"
-assert_frontmatter_keys_only "$HOME/.claude/skills/ast-grep/SKILL.md" "deployed frontmatter holds only YAML keys"
-assert_pristine_skill "$HOME/.claude/skills/ast-grep/SKILL.md" "$REPO_ROOT/skills/ast-grep/SKILL.md" "deployed skill is the repo source byte for byte"
-assert_skill_claimed "$HOME/.claude/skills/ast-grep/SKILL.md" "ownership recorded in the stamp file beside the skill"
+assert_file_exists "$HOME/.claude/skills/cort/SKILL.md" "cort skill installed"
+assert_file_not_exists "$HOME/.claude/skills/ast-grep/SKILL.md" "old ast-grep skill not installed"
+assert_not_contains "$HOME/.claude/skills/cort/SKILL.md" "$MANAGED_SIGNATURE" "deployed SKILL.md holds no installer bookkeeping"
+assert_frontmatter_first "$HOME/.claude/skills/cort/SKILL.md" "deployed skill keeps its YAML fence on line 1"
+assert_frontmatter_keys_only "$HOME/.claude/skills/cort/SKILL.md" "deployed frontmatter holds only YAML keys"
+assert_pristine_skill "$HOME/.claude/skills/cort/SKILL.md" "$REPO_ROOT/skills/cort/SKILL.md" "deployed skill is the repo source byte for byte"
+assert_skill_claimed "$HOME/.claude/skills/cort/SKILL.md" "ownership recorded in the stamp file beside the skill"
+assert_file_exists "$HOME/.codex/skills/cort/SKILL.md" "Codex cort skill installed"
+assert_file_not_exists "$HOME/.codex/skills/ast-grep/SKILL.md" "old Codex ast-grep skill not installed"
+
+# Legacy migration uses the stamp's hash, independent of the new skill's bytes.
+OLD_SKILL="$HOME/.claude/skills/ast-grep/SKILL.md"
+mkdir -p "$(dirname "$OLD_SKILL")"
+printf '%s\n' '---' 'name: ast-grep' 'description: old' '---' 'old body' > "$OLD_SKILL"
+( set --; export SOURCE_ONLY=1
+  # shellcheck disable=SC1090
+  . "$INSTALL_SH"
+  ensure_skill_stamp "$OLD_SKILL" )
+bash "$INSTALL_SH" --force > /tmp/smoke-legacy-owned.log 2>&1
+assert_file_not_exists "$OLD_SKILL" "owned, unchanged old skill removed on reinstall"
+assert_contains /tmp/smoke-legacy-owned.log "removed old ast-grep skill:" "owned legacy removal is reported"
+mkdir -p "$(dirname "$OLD_SKILL")"
+printf '%s\n' '---' 'name: ast-grep' 'description: old' '---' 'old body' > "$OLD_SKILL"
+( set --; export SOURCE_ONLY=1
+  # shellcheck disable=SC1090
+  . "$INSTALL_SH"
+  ensure_skill_stamp "$OLD_SKILL" )
+printf 'user edit\n' >> "$OLD_SKILL"
+bash "$INSTALL_SH" --force > /tmp/smoke-legacy-edited.log 2>&1
+assert_contains "$OLD_SKILL" "user edit" "modified old skill survives reinstall"
+assert_contains /tmp/smoke-legacy-edited.log "old ast-grep skill kept (unowned or modified):" "modified legacy copy gets one notice"
+rm -rf "$(dirname "$OLD_SKILL")"
 assert_file_not_exists "$HOME/.claude/skills/xgrep/SKILL.md" "retired xgrep skill is never deployed"
 # The hook is deployed in the same run as the skill: a routing half that has to be wired by hand
 # is a routing half that stays unwired, which is what the 2026-09-01 mining window measured (745
@@ -159,7 +185,7 @@ assert_contains "$HOME/.claude/settings.json" '"matcher": "Bash"' "the hook is m
 assert_contains "$HOME/.local/share/cortexyoung/manifest" "hook_settings:" "hook_settings recorded in the manifest"
 assert_file_exists "$HOME/.local/share/cortexyoung/manifest" "manifest created"
 assert_contains "$HOME/.local/share/cortexyoung/manifest" "manifest_version:2" "manifest version 2 recorded"
-assert_contains "$HOME/.local/share/cortexyoung/manifest" "skill_ast_grep:" "skill_ast_grep recorded"
+assert_contains "$HOME/.local/share/cortexyoung/manifest" "skill_cort:" "skill_cort recorded"
 assert_contains "$HOME/.local/share/cortexyoung/manifest" "cort_bin:" "cort_bin recorded"
 # The manifest is the only record uninstall has of what exists, and record_manifest is called about
 # nine times per run. Truncating the live file and appending afterwards means an interruption
@@ -199,13 +225,13 @@ printf 'seed\n' > "$SK_DIR/SKILL.md"
 ( set --; export SOURCE_ONLY=1
   # shellcheck disable=SC1090
   . "$INSTALL_SH"
-  write_skill "$REPO_ROOT/skills/ast-grep/SKILL.md" "$SK_DIR/SKILL.md" )
+  write_skill "$REPO_ROOT/skills/cort/SKILL.md" "$SK_DIR/SKILL.md" )
 sk_ino="$(inode_of "$SK_DIR/SKILL.md")"
 st_ino="$(inode_of "$SK_DIR/$STAMP_NAME")"
 ( set --; export SOURCE_ONLY=1
   # shellcheck disable=SC1090
   . "$INSTALL_SH"
-  write_skill "$REPO_ROOT/skills/ast-grep/SKILL.md" "$SK_DIR/SKILL.md" )
+  write_skill "$REPO_ROOT/skills/cort/SKILL.md" "$SK_DIR/SKILL.md" )
 if [ "$sk_ino" != "$(inode_of "$SK_DIR/SKILL.md")" ]; then
   pass "the skill is published by replacement, not truncated in place"
 else
@@ -388,7 +414,7 @@ else
   fail "bare install printed no hand-off line on stderr"
 fi
 # Proof cort_upgrade ran, not just that install.sh announced it: its verdict table is on stdout.
-if grep -q '^skill_ast_grep: ' /tmp/smoke_defer.log && grep -q '^hooks: ' /tmp/smoke_defer.log; then
+if grep -q '^skill_cort: ' /tmp/smoke_defer.log && grep -q '^hooks: ' /tmp/smoke_defer.log; then
   pass "the hand-off ran cort_upgrade (its verdict lines are the output)"
 else
   fail "no cort_upgrade verdict lines in the hand-off output"
@@ -431,22 +457,22 @@ else
 fi
 # --keep-mine is forwarded: an edited managed skill is kept and reported, not redeployed over.
 echo "--- Task 0: --keep-mine reaches cort_upgrade on the hand-off ---"
-KM_SKILL="$HOME/.claude/skills/ast-grep/SKILL.md"
+KM_SKILL="$HOME/.claude/skills/cort/SKILL.md"
 printf 'kept by --keep-mine\n' >> "$KM_SKILL"
 set +e; bash "$INSTALL_SH" --keep-mine >/tmp/smoke_keep.log 2>/tmp/smoke_keep.err; set -e
 assert_contains /tmp/smoke_keep.err "existing installation — upgrading with" "--keep-mine run still announces the hand-off"
-assert_contains /tmp/smoke_keep.log "skill_ast_grep: deferred-by-user" "--keep-mine reports the edited skill as deferred-by-user"
+assert_contains /tmp/smoke_keep.log "skill_cort: deferred-by-user" "--keep-mine reports the edited skill as deferred-by-user"
 assert_contains "$KM_SKILL" "kept by --keep-mine" "--keep-mine left the edited skill alone"
 set +e; bash "$INSTALL_SH" >/tmp/smoke_keep2.log 2>/dev/null; set -e
 assert_not_contains "$KM_SKILL" "kept by --keep-mine" "without --keep-mine the upgrade redeploys the repo skill"
-assert_pristine_skill "$KM_SKILL" "$REPO_ROOT/skills/ast-grep/SKILL.md" "the redeployed skill is the repo file"
+assert_pristine_skill "$KM_SKILL" "$REPO_ROOT/skills/cort/SKILL.md" "the redeployed skill is the repo file"
 # Upgrade flags mean something only to cort_upgrade: on a fresh machine they are an error that
 # names the flag and installs nothing.
 echo "--- Task 0: upgrade flags are an error on a fresh install ---"
 FLAGS_SAVED_HOME="$HOME"; FLAGS_SAVED_XDG="$XDG_DATA_HOME"
 HOME="$(mktemp -d)"; export HOME; export XDG_DATA_HOME="$HOME/.local/share"
 mkdir -p "$HOME/.claude/skills" "$HOME/.local/share"
-for flagset in "--keep-mine" "--defer" "--ack skill_ast_grep" "--ack=skill_ast_grep"; do
+for flagset in "--keep-mine" "--defer" "--ack skill_cort" "--ack=skill_cort"; do
   set +e
   # shellcheck disable=SC2086
   bash "$INSTALL_SH" $flagset >/tmp/smoke_flag.log 2>&1
@@ -455,7 +481,7 @@ for flagset in "--keep-mine" "--defer" "--ack skill_ast_grep" "--ack=skill_ast_g
   if [ "$FLAG_EC" -eq 2 ]; then pass "fresh install rejects '$flagset' with exit 2"; else fail "fresh install with '$flagset' exited $FLAG_EC, want 2"; fi
 done
 assert_contains /tmp/smoke_flag.log "only applies when upgrading an existing installation" "the rejection explains itself"
-if [ ! -e "$XDG_DATA_HOME/cortexyoung/manifest" ] && [ ! -e "$HOME/.claude/skills/ast-grep/SKILL.md" ]; then
+if [ ! -e "$XDG_DATA_HOME/cortexyoung/manifest" ] && [ ! -e "$HOME/.claude/skills/cort/SKILL.md" ]; then
   pass "a rejected flag installs nothing"
 else
   fail "a rejected flag still installed something"
@@ -522,12 +548,30 @@ set +e
 bash "$INSTALL_SH" > /tmp/smoke2.log 2>&1
 EC2=$?
 set -e
-if grep -qF "existing installation — upgrading with" /tmp/smoke2.log && grep -q '^skill_ast_grep: ' /tmp/smoke2.log; then
+if grep -qF "existing installation — upgrading with" /tmp/smoke2.log && grep -q '^skill_cort: ' /tmp/smoke2.log; then
   pass "rerun on an installed machine hands off to cort_upgrade"
 else
   fail "rerun did not hand off to cort_upgrade (exit $EC2)"
 fi
 if [ "$(sha256sum "$HOME/.local/share/cortexyoung/manifest" 2>/dev/null | cut -d' ' -f1 || echo NONE)" = "$MANIFEST_SHA_T2" ]; then pass "a handed-off steady-state rerun rewrites no manifest row"; else fail "a handed-off rerun rewrote the manifest"; fi
+# Installed machines take the hand-off, not do_install, so the rename has to be retired there too.
+echo "--- Test 2a: the upgrade hand-off retires an owned old ast-grep skill ---"
+HO_NEW="$HOME/.claude/skills/cort/SKILL.md"
+rm -rf "$(dirname "$HO_NEW")"
+HO_OLD="$HOME/.claude/skills/ast-grep/SKILL.md"
+mkdir -p "$(dirname "$HO_OLD")"
+printf '%s\n' '---' 'name: ast-grep' 'description: old' '---' 'old body' > "$HO_OLD"
+( set --; export SOURCE_ONLY=1
+  # shellcheck disable=SC1090
+  . "$INSTALL_SH"
+  ensure_skill_stamp "$HO_OLD" )
+set +e; bash "$INSTALL_SH" > /tmp/smoke2-legacy.log 2>&1; set -e
+assert_file_not_exists "$HO_OLD" "the hand-off removed the owned, unchanged old skill"
+assert_contains /tmp/smoke2-legacy.log "removed old ast-grep skill:" "the hand-off reports the removal"
+assert_pristine_skill "$HO_NEW" "$REPO_ROOT/skills/cort/SKILL.md" "the hand-off deployed cort byte-for-byte"
+rm -rf "$(dirname "$HO_NEW")"
+set +e; bash "$INSTALL_SH" > /tmp/smoke2-deleted.log 2>&1; set -e
+assert_file_not_exists "$HO_NEW" "the hand-off does not resurrect a deliberately deleted cort skill"
 MARKER_COUNT_AFTER=0
 for p in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
   if [ -f "$p" ]; then
@@ -567,7 +611,7 @@ echo "--- Test 2c: --ack rejects an unknown component name and persists nothing 
 fresh_home_with_install
 set +e
 ACK_CACHE="$HOME/.cache/cortex-ng"
-CORT_CACHE_DIR="$ACK_CACHE" "$REPO_ROOT/rust/target/release/cort_upgrade" --ack smoke_bogus --ack skill_ast_grep >/tmp/smoke_ack_out.log 2>/tmp/smoke_ack_err.log; ACK_EC=$?
+CORT_CACHE_DIR="$ACK_CACHE" "$REPO_ROOT/rust/target/release/cort_upgrade" --ack smoke_bogus --ack skill_cort >/tmp/smoke_ack_out.log 2>/tmp/smoke_ack_err.log; ACK_EC=$?
 set -e
 if [ "$ACK_EC" -eq 2 ] && grep -q 'smoke_bogus' /tmp/smoke_ack_err.log && grep -q 'valid component names' /tmp/smoke_ack_err.log; then
   pass "--ack with an unknown name exits 2 and names it"
@@ -582,9 +626,9 @@ else
 fi
 # Positive control: a valid name alone lands in exactly that store, so the absence above is proof.
 set +e
-CORT_CACHE_DIR="$ACK_CACHE" "$REPO_ROOT/rust/target/release/cort_upgrade" --check --ack skill_ast_grep >/dev/null 2>&1
+CORT_CACHE_DIR="$ACK_CACHE" "$REPO_ROOT/rust/target/release/cort_upgrade" --check --ack skill_cort >/dev/null 2>&1
 set -e
-if grep -qx 'skill_ast_grep' "$ACK_CACHE/.upgrade-acks" 2>/dev/null; then
+if grep -qx 'skill_cort' "$ACK_CACHE/.upgrade-acks" 2>/dev/null; then
   pass "a valid --ack persists to the store Test 2c checked"
 else
   fail "a valid --ack did not persist to $ACK_CACHE/.upgrade-acks"
@@ -593,7 +637,7 @@ fi
 # ── 3. managed update (installer replaces outdated managed skill) ─
 echo "--- Test 3: a deployed skill edited in place is a collision, not a licence to overwrite ---"
 fresh_home_with_files_but_no_manifest
-printf 'the user tuned this line by hand\n' >> "$HOME/.claude/skills/ast-grep/SKILL.md"
+printf 'the user tuned this line by hand\n' >> "$HOME/.claude/skills/cort/SKILL.md"
 set +e
 bash "$INSTALL_SH" > /tmp/smoke3.log 2>&1
 EC3=$?
@@ -603,19 +647,19 @@ if [ "$EC3" -ne 0 ] && grep -q "unmanaged.*collision" /tmp/smoke3.log; then
 else
   fail "an in-place edit of a deployed skill is refused (exit=$EC3)"
 fi
-assert_contains "$HOME/.claude/skills/ast-grep/SKILL.md" "the user tuned this line by hand" "the hand edit survives the refusal"
+assert_contains "$HOME/.claude/skills/cort/SKILL.md" "the user tuned this line by hand" "the hand edit survives the refusal"
 # The stamp recorded the bytes we deployed, so any drift at all reads as someone else's file.
 # --force is the documented way back, and it re-claims the new bytes.
 bash "$INSTALL_SH" --force > /tmp/smoke3b.log 2>&1; cat /tmp/smoke3b.log | sed 's/^/    /' > /dev/null
-assert_pristine_skill "$HOME/.claude/skills/ast-grep/SKILL.md" "$REPO_ROOT/skills/ast-grep/SKILL.md" "--force restores the repo source"
-assert_skill_claimed "$HOME/.claude/skills/ast-grep/SKILL.md" "--force re-claims the restored bytes"
+assert_pristine_skill "$HOME/.claude/skills/cort/SKILL.md" "$REPO_ROOT/skills/cort/SKILL.md" "--force restores the repo source"
+assert_skill_claimed "$HOME/.claude/skills/cort/SKILL.md" "--force re-claims the restored bytes"
 
 # ── 4. unmanaged collision — should refuse without --force ───────
 echo "--- Test 4: unmanaged collision refusal ---"
 # Test 3's --force restore recreated installer memory; the refusal below needs preflight to
 # run, so drop it again (files stay — same machine, continued story).
 rm -f "$HOME/.local/share/cortexyoung/manifest"
-cat > "$HOME/.claude/skills/ast-grep/SKILL.md" <<'UNMANAGED'
+cat > "$HOME/.claude/skills/cort/SKILL.md" <<'UNMANAGED'
 ---
 name: ast-grep
 description: user custom skill — unmanaged
@@ -629,14 +673,14 @@ EC=$?
 set -e
 if [ "$EC" -ne 0 ] && grep -q "unmanaged.*collision" /tmp/smoke4.log 2>/dev/null; then pass "unmanaged collision refused"; else fail "unmanaged collision refused (exit=$EC)"; cat /tmp/smoke4.log | sed 's/^/    /'; fi
 # File must be untouched
-assert_contains "$HOME/.claude/skills/ast-grep/SKILL.md" "user custom skill" "unmanaged file untouched after refusal"
+assert_contains "$HOME/.claude/skills/cort/SKILL.md" "user custom skill" "unmanaged file untouched after refusal"
 
 # ── 5. unmanaged collision with --force — backup and replace ─────
 echo "--- Test 5: unmanaged collision with --force ---"
 bash "$INSTALL_SH" --force > /tmp/smoke5.log 2>&1; cat /tmp/smoke5.log | sed 's/^/    /'
-if ls "$HOME/.claude/skills/ast-grep/SKILL.md.bak."* >/dev/null 2>&1; then pass "backup created on --force"; else fail "backup created on --force"; fi
-assert_pristine_skill "$HOME/.claude/skills/ast-grep/SKILL.md" "$REPO_ROOT/skills/ast-grep/SKILL.md" "skill is the repo source after --force"
-assert_skill_claimed "$HOME/.claude/skills/ast-grep/SKILL.md" "--force deploy records the new bytes in the stamp"
+if ls "$HOME/.claude/skills/cort/SKILL.md.bak."* >/dev/null 2>&1; then pass "backup created on --force"; else fail "backup created on --force"; fi
+assert_pristine_skill "$HOME/.claude/skills/cort/SKILL.md" "$REPO_ROOT/skills/cort/SKILL.md" "skill is the repo source after --force"
+assert_skill_claimed "$HOME/.claude/skills/cort/SKILL.md" "--force deploy records the new bytes in the stamp"
 
 # ── 6. unsupported OS/arch detection (inject via PATH shim) ───────
 echo "--- Test 6: unsupported arch handling ---"
@@ -694,7 +738,7 @@ fresh_home_with_install
 # Ensure skill is managed before uninstall
 bash "$INSTALL_SH" --force > /tmp/smoke8prep.log 2>&1; cat /tmp/smoke8prep.log | sed 's/^/    /' > /dev/null
 bash "$INSTALL_SH" --uninstall > /tmp/smoke8.log 2>&1; cat /tmp/smoke8.log | sed 's/^/    /'
-assert_file_not_exists "$HOME/.claude/skills/ast-grep/SKILL.md" "skill removed on uninstall"
+assert_file_not_exists "$HOME/.claude/skills/cort/SKILL.md" "skill removed on uninstall"
 # Also check cort shim removed
 if [ -f "$HOME/.local/bin/cort" ] || [ -f "$HOME/.cargo/bin/cort" ]; then fail "cort shim removed on uninstall (found in local/bin or cargo/bin)"; else pass "cort shim removed on uninstall"; fi
 # PATH block removed
@@ -842,27 +886,27 @@ rm -f "$TMPHOME/fakebin/sg"
 # absent. Deploy-then-check would leave a half-installed pair behind.
 echo "--- Test 12: a collision on the second skill rolls back both ---"
 fresh_home_with_files_but_no_manifest
-rm -f "$HOME/.claude/skills/ast-grep/SKILL.md" "$HOME/.codex/skills/ast-grep/SKILL.md"
-mkdir -p "$HOME/.codex/skills/ast-grep"
-printf -- '---\nname: ast-grep\n---\nuser custom, unmanaged\n' > "$HOME/.codex/skills/ast-grep/SKILL.md"
+rm -f "$HOME/.claude/skills/cort/SKILL.md" "$HOME/.codex/skills/cort/SKILL.md"
+mkdir -p "$HOME/.codex/skills/cort"
+printf -- '---\nname: ast-grep\n---\nuser custom, unmanaged\n' > "$HOME/.codex/skills/cort/SKILL.md"
 set +e
 bash "$INSTALL_SH" > /tmp/smoke12.log 2>&1
 EC12=$?
 set -e
 if [ "$EC12" -ne 0 ]; then pass "two-skill preflight refuses"; else fail "two-skill preflight refuses"; fi
-assert_file_not_exists "$HOME/.claude/skills/ast-grep/SKILL.md" "first skill was not deployed before the second preflight failed"
-assert_contains "$HOME/.codex/skills/ast-grep/SKILL.md" "user custom" "unmanaged file untouched"
+assert_file_not_exists "$HOME/.claude/skills/cort/SKILL.md" "first skill was not deployed before the second preflight failed"
+assert_contains "$HOME/.codex/skills/cort/SKILL.md" "user custom" "unmanaged file untouched"
 
 # ── 13. uninstall v2-owned artifacts ─────────────────────────────
 echo "--- Test 13: uninstall removes only v2-owned artifacts ---"
 bash "$INSTALL_SH" --force > /dev/null 2>&1
 bash "$INSTALL_SH" --uninstall > /tmp/smoke13.log 2>&1
-assert_file_not_exists "$HOME/.claude/skills/ast-grep/SKILL.md" "ast-grep skill removed"
+assert_file_not_exists "$HOME/.claude/skills/cort/SKILL.md" "ast-grep skill removed"
 # cort shim may be in cargo/bin or local/bin depending on BIN_DIR
 if [ -f "$HOME/.local/bin/cort" ]; then fail "cort shim removed (found $HOME/.local/bin/cort)"; else pass "cort shim removed"; fi
 if [ -f "$HOME/.cargo/bin/cort" ]; then fail "cort payload shim still in cargo bin"; else pass "cort shim not in cargo bin (or removed)"; fi
 assert_file_not_exists "$HOME/.local/share/cortexyoung/cort/cort" "cort payload removed"
-assert_file_not_exists "$HOME/.claude/skills/ast-grep/$STAMP_NAME" "manifest path removes the stamp too"
+assert_file_not_exists "$HOME/.claude/skills/cort/$STAMP_NAME" "manifest path removes the stamp too"
 assert_file_exists "$HOME/.cargo/bin/xg" "pre-existing xg preserved"
 
 # ── 13b. a retired xgrep leftover is still removable ─────────────
@@ -984,8 +1028,8 @@ fi
 
 echo "--- Test 16: the same routing skill is deployed for Codex ---"
 fresh_home_with_install
-CODEX_DEST="$HOME/.codex/skills/ast-grep/SKILL.md"
-CLAUDE_DEST="$HOME/.claude/skills/ast-grep/SKILL.md"
+CODEX_DEST="$HOME/.codex/skills/cort/SKILL.md"
+CLAUDE_DEST="$HOME/.claude/skills/cort/SKILL.md"
 assert_file_exists "$CODEX_DEST" "codex skill deployed"
 assert_not_contains "$CODEX_DEST" "$MANAGED_SIGNATURE" "codex SKILL.md holds no installer bookkeeping"
 assert_frontmatter_first "$CODEX_DEST" "codex skill keeps its YAML fence on line 1"
@@ -996,19 +1040,19 @@ if cmp -s "$CODEX_DEST" "$CLAUDE_DEST"; then
 else
   fail "claude and codex skill copies are byte-identical"
 fi
-assert_contains "$HOME/.local/share/cortexyoung/manifest" "skill_ast_grep_codex:" "manifest records the codex skill"
+assert_contains "$HOME/.local/share/cortexyoung/manifest" "skill_cort_codex:" "manifest records the codex skill"
 # A bare rerun hands off to cort_upgrade since Task 0: the stamp must still be exactly one hash
 # afterwards, and the skill still pristine — upgrade policy keeps an unedited skill idempotent.
 set +e
 bash "$INSTALL_SH" > /tmp/smoke16.log 2>&1; EC16R=$?
 set -e
-if grep -q '^skill_ast_grep_codex: ' /tmp/smoke16.log; then pass "rerun on an installed machine hands off to cort_upgrade"; else fail "rerun did not hand off (exit $EC16R)"; fi
+if grep -q '^skill_cort_codex: ' /tmp/smoke16.log; then pass "rerun on an installed machine hands off to cort_upgrade"; else fail "rerun did not hand off (exit $EC16R)"; fi
 if [ "$(grep -c '^skill_sha256:' "$(dirname "$CODEX_DEST")/$STAMP_NAME")" = "1" ]; then
   pass "a handed-off rerun duplicates no codex stamp hash"
 else
   fail "a handed-off rerun touched the codex stamp"
 fi
-assert_pristine_skill "$CODEX_DEST" "$REPO_ROOT/skills/ast-grep/SKILL.md" "codex skill still pristine after a handed-off rerun"
+assert_pristine_skill "$CODEX_DEST" "$REPO_ROOT/skills/cort/SKILL.md" "codex skill still pristine after a handed-off rerun"
 # The collision refusal below needs preflight to run, which the hand-off precedes: drop
 # installer memory (files stay) so the bare install proceeds to the collision.
 rm -f "$HOME/.local/share/cortexyoung/manifest"
@@ -1023,9 +1067,9 @@ else
   fail "unmanaged codex skill collision refused (exit=$EC16)"
 fi
 assert_contains "$CODEX_DEST" "my own codex skill" "unmanaged codex file untouched after refusal"
-assert_pristine_skill "$CLAUDE_DEST" "$REPO_ROOT/skills/ast-grep/SKILL.md" "claude skill untouched by the codex refusal"
+assert_pristine_skill "$CLAUDE_DEST" "$REPO_ROOT/skills/cort/SKILL.md" "claude skill untouched by the codex refusal"
 bash "$INSTALL_SH" --force > /tmp/smoke16c.log 2>&1; cat /tmp/smoke16c.log | sed 's/^/    /' > /dev/null
-assert_pristine_skill "$CODEX_DEST" "$REPO_ROOT/skills/ast-grep/SKILL.md" "codex skill adopted with --force"
+assert_pristine_skill "$CODEX_DEST" "$REPO_ROOT/skills/cort/SKILL.md" "codex skill adopted with --force"
 assert_skill_claimed "$CODEX_DEST" "--force on the codex home re-claims the new bytes"
 # uninstall removes the managed copy and never the other home's
 bash "$INSTALL_SH" --uninstall > /tmp/smoke16d.log 2>&1; cat /tmp/smoke16d.log | sed 's/^/    /' > /dev/null
@@ -1047,8 +1091,8 @@ fi
 # ── 17. the shape the previous installer wrote must be repaired, not reported "up to date" ──
 echo "--- Test 17: the two legacy in-document marker shapes are repaired ---"
 fresh_home_with_files_but_no_manifest
-LEGACY_SKILL="$HOME/.claude/skills/ast-grep/SKILL.md"
-SRC_SKILL="$REPO_ROOT/skills/ast-grep/SKILL.md"
+LEGACY_SKILL="$HOME/.claude/skills/cort/SKILL.md"
+SRC_SKILL="$REPO_ROOT/skills/cort/SKILL.md"
 
 # Shape A (install.sh up to F-15): marker above the fence. Both loaders then skip the whole skill.
 { echo "$MANAGED_SIGNATURE"; cat "$SRC_SKILL"; } > "$LEGACY_SKILL"
@@ -1119,7 +1163,7 @@ fi
 echo "--- Test 18: the deploy log dates every change of the deployed bytes ---"
 fresh_home_with_files_but_no_manifest
 DEPLOY_LOG_FILE="$XDG_DATA_HOME/cortexyoung/deploy.log"
-AG_DEST="$HOME/.claude/skills/ast-grep/SKILL.md"
+AG_DEST="$HOME/.claude/skills/cort/SKILL.md"
 if [ -f "$DEPLOY_LOG_FILE" ]; then
   pass "install writes a deploy log"
 else
@@ -1141,7 +1185,7 @@ DESC_BEFORE="$(sed -n 3p "$AG_DEST")"
 # never with `git checkout --`, which discards whatever uncommitted edit the developer had in that
 # file (it silently ate one on 2026-09-03) -- and arm a trap so an interrupt cannot leave the
 # appended line behind either.
-AG_SRC="$REPO_ROOT/skills/ast-grep/SKILL.md"
+AG_SRC="$REPO_ROOT/skills/cort/SKILL.md"
 AG_SRC_BACKUP="$(mktemp)"
 cp "$AG_SRC" "$AG_SRC_BACKUP"
 trap 'cp -f "$AG_SRC_BACKUP" "$AG_SRC" 2>/dev/null || true; rm -f "$AG_SRC_BACKUP"' EXIT
@@ -1436,8 +1480,8 @@ printf 'xg_bin:/old/xg\nskill:/old/skill\n' > "$HOME/.local/share/cortexyoung/ma
 # Dest without a stamp is the unmanaged-collision shape Test 4 already uses: preflight refuses.
 # The plan's sketch called this "an unreadable skill source"; the source is the repo file, and
 # the dest is what preflight_skill_at actually collides on (install.sh:398-431).
-mkdir -p "$HOME/.claude/skills/ast-grep"
-printf 'not a skill, no frontmatter\n' > "$HOME/.claude/skills/ast-grep/SKILL.md"
+mkdir -p "$HOME/.claude/skills/cort"
+printf 'not a skill, no frontmatter\n' > "$HOME/.claude/skills/cort/SKILL.md"
 bash "$INSTALL_SH" >/tmp/smoke_preflight.log 2>&1 || true
 if ! grep -q 'UNMANAGED\|collision' /tmp/smoke_preflight.log; then
   fail "the fixture did not abort the install (preflight adopted rather than refused)"

@@ -243,8 +243,8 @@ alone, where no other machine or harness can read it, until the user asked why.
 - **Record** with `cort memory record --key <key> --claim <claim> --source <repo file> --line <n>`
   when a decision is made or changed, when the user corrects a working assumption, and when a
   deployment changes what a machine runs. Cite the line that states it (a doc, plan or code line);
-  if no line states it yet, write that line first. Replacing an earlier claim passes
-  `--supersedes <id>`.
+  if no line states it yet, write and commit that line first (`record` refuses a source that is
+  untracked or dirty at HEAD). Replacing an earlier claim passes `--supersedes <id>`.
 - A harness-private memory is for how one agent works, never the only copy of a project fact.
 
 ## claudecat (separate repo)

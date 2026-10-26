@@ -21,7 +21,7 @@ vendored.
 
 - **Project:** https://github.com/BurntSushi/ripgrep
 - **License:** MIT OR Unlicense
-- **Usage:** Companion tool referenced in README and `skills/ast-grep/SKILL.md`; not installed by this repo. Expected to be present on the host or embedded in Claude Code.
+- **Usage:** Companion tool referenced in README and `skills/cort/SKILL.md`; not installed by this repo. Expected to be present on the host or embedded in Claude Code.
 
 ## Archived Cortex V6 dependencies (tag `v6-final` only)
 

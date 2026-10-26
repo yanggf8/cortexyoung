@@ -12,9 +12,9 @@ use clap::Parser;
 use cort::upgrade::{
     acquire_upgrade_locks, ast_grep_mismatch_found, check_hooks, check_skills, diagnose,
     diagnose_for_check, first_upgrade_note, live_generation, load_acks, migrate_indexes,
-    prune_generations, repair_skill, run_capture_with_deadline, run_status_with_deadline, save_ack,
-    skill_repair_target, unknown_acks, verdict, Component, ComponentState, DiagnoseInputs,
-    LockError, UpgradeExit, RETIRE_MEASURE_CRON_ARGS,
+    prune_generations, repair_skill, retire_legacy_skills, run_capture_with_deadline,
+    run_status_with_deadline, save_ack, skill_repair_target, unknown_acks, verdict, Component,
+    ComponentState, DiagnoseInputs, LockError, UpgradeExit, RETIRE_MEASURE_CRON_ARGS,
 };
 use std::path::{Path, PathBuf};
 use std::process::exit;
@@ -241,12 +241,16 @@ fn main() {
         });
     }
 
-    // The steady state must be cheap and touch nothing: if the VERDICT is already Ok —
-    // everything current, or only states that never fail (gone, deferred-by-user, acked
-    // drift) — there is nothing to do: no locks, no install.sh, exit 0. A Current-only
+    // The steady state must be cheap: if the VERDICT is already Ok — everything current, or
+    // only states that never fail (gone, deferred-by-user, acked drift) — there is nothing to
+    // upgrade: no locks, no install.sh, exit 0. The one thing it still does is retire an owned
+    // old ast-grep skill once the cort skill beside it is the tree file, which needs no lock. A Current-only
     // test here re-staged and re-locked on every --keep-mine / --ack run (Grok round).
     let probe = verdict(components.clone(), &ack_names);
     if matches!(probe.exit, UpgradeExit::Ok) {
+        for notice in retire_legacy_skills(&new_tree, &home) {
+            println!("{notice}");
+        }
         print_verdict(&probe);
         exit(0);
     }
@@ -316,6 +320,9 @@ fn main() {
         if let Some((src, dest)) = skill_repair_target(c, &new_tree, &home) {
             let _ = repair_skill(&src, &dest);
         }
+    }
+    for notice in retire_legacy_skills(&new_tree, &home) {
+        println!("{notice}");
     }
 
     // Hooks: judge → repair → re-run status → re-judge, all inside check_hooks. Repair is

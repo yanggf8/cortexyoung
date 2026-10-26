@@ -483,7 +483,7 @@ fn diverged_skill_fixture() -> (
     std::path::PathBuf,
 ) {
     let new_tree = tempfile::tempdir().unwrap();
-    let skill_dir = new_tree.path().join("skills/ast-grep");
+    let skill_dir = new_tree.path().join("skills/cort");
     fs::create_dir_all(&skill_dir).unwrap();
     fs::write(
         skill_dir.join("SKILL.md"),
@@ -491,7 +491,7 @@ fn diverged_skill_fixture() -> (
     )
     .unwrap();
     let home = tempfile::tempdir().unwrap();
-    let dest = home.path().join(".claude/skills/ast-grep/SKILL.md");
+    let dest = home.path().join(".claude/skills/cort/SKILL.md");
     fs::create_dir_all(dest.parent().unwrap()).unwrap();
     let old_body = "---\nname: ast-grep\n---\nold body\n";
     fs::write(&dest, old_body).unwrap();
@@ -505,6 +505,79 @@ fn stamp_for(body: &[u8]) -> String {
         "managed by cortexyoung install.sh\nskill_sha256:{}\n",
         cort::db::hex_lower(&Sha256::digest(body))
     )
+}
+
+#[test]
+fn legacy_skill_migration_respects_the_recorded_hash() {
+    let tree = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let source = tree.path().join("skills/cort/SKILL.md");
+    fs::create_dir_all(source.parent().unwrap()).unwrap();
+    fs::write(&source, b"new skill\n").unwrap();
+    let new = home.path().join(".claude/skills/cort/SKILL.md");
+    let paths = [("skill_cort", source, new.clone())];
+    let old = home.path().join(".claude/skills/ast-grep/SKILL.md");
+    fs::create_dir_all(old.parent().unwrap()).unwrap();
+    let body = b"---\nname: ast-grep\n---\nold\n";
+    fs::write(&old, body).unwrap();
+    let stamp = old.parent().unwrap().join(".cortexyoung-managed");
+    fs::write(&stamp, stamp_for(body)).unwrap();
+    let notices = cort::upgrade::retire_legacy_skills_at(&paths);
+    assert!(notices[0].contains("new cort skill missing"));
+    assert!(old.exists());
+    fs::create_dir_all(new.parent().unwrap()).unwrap();
+    fs::write(&new, b"different\n").unwrap();
+    let notices = cort::upgrade::retire_legacy_skills_at(&paths);
+    assert!(notices[0].contains("new cort skill missing or different"));
+    assert!(old.exists());
+    fs::write(&new, b"new skill\n").unwrap();
+    fs::write(&old, b"user edit\n").unwrap();
+    assert!(cort::upgrade::retire_legacy_skills_at(&paths)[0].contains("unowned or modified"));
+    assert!(old.exists());
+    fs::write(&old, body).unwrap();
+    assert!(cort::upgrade::retire_legacy_skills_at(&paths)[0].contains("removed"));
+    assert!(!old.exists());
+    assert!(!stamp.exists());
+    fs::create_dir_all(old.parent().unwrap()).unwrap();
+    fs::write(&old, body).unwrap();
+    assert!(cort::upgrade::retire_legacy_skills_at(&paths)[0].contains("unowned or modified"));
+    assert!(old.exists());
+}
+
+#[test]
+fn upgrade_repairs_missing_skill_only_for_owned_rename() {
+    let tree = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let source = tree.path().join("skills/cort/SKILL.md");
+    fs::create_dir_all(source.parent().unwrap()).unwrap();
+    fs::write(&source, b"---\nname: cort\n---\nnew\n").unwrap();
+    let dest = home.path().join(".claude/skills/cort/SKILL.md");
+    let codex = home.path().join(".codex/skills/cort/SKILL.md");
+    let comps = cort::upgrade::check_skills_at(tree.path(), &dest, &codex, false);
+    let component = comps.iter().find(|c| c.name == "skill_cort").unwrap();
+    assert!(matches!(
+        component.state,
+        cort::upgrade::ComponentState::Drifted
+    ));
+    let paths = [("skill_cort", source.clone(), dest.clone())];
+    assert!(cort::upgrade::skill_repair_target_at(component, &paths).is_none());
+    let old = home.path().join(".claude/skills/ast-grep/SKILL.md");
+    fs::create_dir_all(old.parent().unwrap()).unwrap();
+    let old_body = b"old skill\n";
+    fs::write(&old, old_body).unwrap();
+    fs::write(
+        old.parent().unwrap().join(".cortexyoung-managed"),
+        stamp_for(old_body),
+    )
+    .unwrap();
+    let (_, target) = cort::upgrade::skill_repair_target_at(component, &paths)
+        .expect("owned old skill permits rename migration");
+    assert_eq!(target, dest);
+    cort::upgrade::repair_skill(&source, &target).unwrap();
+    assert_eq!(fs::read(&dest).unwrap(), fs::read(&source).unwrap());
+    fs::remove_file(dest.parent().unwrap().join(".cortexyoung-managed")).unwrap();
+    fs::write(&dest, b"user skill\n").unwrap();
+    assert!(cort::upgrade::skill_repair_target_at(component, &paths).is_none());
 }
 
 /// A managed skill whose content diverged from the new tree is Drifted — NOT Current, which is
@@ -523,11 +596,11 @@ fn a_diverged_managed_skill_is_drifted_even_with_a_valid_stamp() {
     // tests is unsound, and a dev machine with CLAUDE_SKILL_HOME set would redirect the
     // wrapper elsewhere. The wrapper's env mirroring is review-verified, not test-pinned.
     let (ast, cx, _km) = {
-        let cx = home.path().join(".codex/skills/ast-grep/SKILL.md");
+        let cx = home.path().join(".codex/skills/cort/SKILL.md");
         (dest.clone(), cx, ())
     };
     let comps = cort::upgrade::check_skills_at(new_tree.path(), &ast, &cx, false);
-    let ast_c = comps.iter().find(|c| c.name == "skill_ast_grep").unwrap();
+    let ast_c = comps.iter().find(|c| c.name == "skill_cort").unwrap();
     assert!(
         matches!(ast_c.state, cort::upgrade::ComponentState::Drifted),
         "{ast_c:?}"
@@ -536,7 +609,7 @@ fn a_diverged_managed_skill_is_drifted_even_with_a_valid_stamp() {
         source.to_string_lossy(),
         new_tree
             .path()
-            .join("skills/ast-grep/SKILL.md")
+            .join("skills/cort/SKILL.md")
             .to_string_lossy()
     );
 }
@@ -552,9 +625,9 @@ fn keep_mine_leaves_a_diverged_skill_alone() {
         stamp_for(old_body),
     )
     .unwrap();
-    let cx = home.path().join(".codex/skills/ast-grep/SKILL.md");
+    let cx = home.path().join(".codex/skills/cort/SKILL.md");
     let comps = cort::upgrade::check_skills_at(new_tree.path(), &dest, &cx, true);
-    let ast_c = comps.iter().find(|c| c.name == "skill_ast_grep").unwrap();
+    let ast_c = comps.iter().find(|c| c.name == "skill_cort").unwrap();
     assert!(
         matches!(ast_c.state, cort::upgrade::ComponentState::DeferredByUser),
         "{ast_c:?}"
@@ -572,12 +645,12 @@ fn keep_mine_leaves_a_diverged_skill_alone() {
 #[test]
 fn repair_redeploys_skill_then_recheck_says_current() {
     let (new_tree, home, dest, source) = diverged_skill_fixture();
-    let cx = home.path().join(".codex/skills/ast-grep/SKILL.md");
+    let cx = home.path().join(".codex/skills/cort/SKILL.md");
     let at =
         |keep_mine: bool| cort::upgrade::check_skills_at(new_tree.path(), &dest, &cx, keep_mine);
     let ast_c = at(false)
         .into_iter()
-        .find(|c| c.name == "skill_ast_grep")
+        .find(|c| c.name == "skill_cort")
         .unwrap();
     assert!(
         matches!(ast_c.state, cort::upgrade::ComponentState::Drifted),
@@ -599,7 +672,7 @@ fn repair_redeploys_skill_then_recheck_says_current() {
     );
     let ast_c = at(false)
         .into_iter()
-        .find(|c| c.name == "skill_ast_grep")
+        .find(|c| c.name == "skill_cort")
         .unwrap();
     assert!(
         matches!(ast_c.state, cort::upgrade::ComponentState::Current),
@@ -613,12 +686,12 @@ fn repair_redeploys_skill_then_recheck_says_current() {
 fn an_absent_skill_source_is_absent_not_a_failure() {
     let empty_tree = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
-    let dest = home.path().join(".claude/skills/ast-grep/SKILL.md");
+    let dest = home.path().join(".claude/skills/cort/SKILL.md");
     fs::create_dir_all(dest.parent().unwrap()).unwrap();
     fs::write(&dest, "---\nname: ast-grep\n---\nsome old body\n").unwrap();
-    let cx = home.path().join(".codex/skills/ast-grep/SKILL.md");
+    let cx = home.path().join(".codex/skills/cort/SKILL.md");
     let comps = cort::upgrade::check_skills_at(empty_tree.path(), &dest, &cx, false);
-    let ast_c = comps.iter().find(|c| c.name == "skill_ast_grep").unwrap();
+    let ast_c = comps.iter().find(|c| c.name == "skill_cort").unwrap();
     assert!(
         matches!(ast_c.state, cort::upgrade::ComponentState::Absent),
         "{ast_c:?}"
@@ -1035,7 +1108,7 @@ fn comp(name: &str, state: cort::upgrade::ComponentState) -> cort::upgrade::Comp
 fn drifted_components_are_partial_never_fatal() {
     let comps = vec![
         comp("shim", cort::upgrade::ComponentState::Drifted),
-        comp("skill_ast_grep", cort::upgrade::ComponentState::Current),
+        comp("skill_cort", cort::upgrade::ComponentState::Current),
     ];
     let v = cort::upgrade::verdict(comps.clone(), &[]);
     assert!(matches!(v.exit, cort::upgrade::UpgradeExit::Partial));
@@ -1252,14 +1325,14 @@ fn a_gone_index_reads_absent_in_diagnose_too() {
 fn an_unmanaged_diverged_skill_has_no_repair_target() {
     let tree = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
-    fs::create_dir_all(tree.path().join("skills/ast-grep")).unwrap();
-    fs::write(tree.path().join("skills/ast-grep/SKILL.md"), "new bytes\n").unwrap();
-    let dest = home.path().join(".claude/skills/ast-grep/SKILL.md");
+    fs::create_dir_all(tree.path().join("skills/cort")).unwrap();
+    fs::write(tree.path().join("skills/cort/SKILL.md"), "new bytes\n").unwrap();
+    let dest = home.path().join(".claude/skills/cort/SKILL.md");
     fs::create_dir_all(dest.parent().unwrap()).unwrap();
     fs::write(&dest, "the user's own diverged skill\n").unwrap();
     // No stamp: unmanaged.
     let comps = cort::upgrade::check_skills_at(tree.path(), &dest, &dest, false);
-    let c = comps.iter().find(|c| c.name == "skill_ast_grep").unwrap();
+    let c = comps.iter().find(|c| c.name == "skill_cort").unwrap();
     assert!(matches!(c.state, cort::upgrade::ComponentState::Drifted));
     assert!(
         cort::upgrade::skill_repair_target(c, tree.path(), home.path()).is_none(),
@@ -1273,8 +1346,8 @@ fn an_unmanaged_diverged_skill_has_no_repair_target() {
 fn a_managed_diverged_skill_repairs_at_the_destination_diagnosis_read() {
     let tree = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
-    fs::create_dir_all(tree.path().join("skills/ast-grep")).unwrap();
-    fs::write(tree.path().join("skills/ast-grep/SKILL.md"), "new bytes\n").unwrap();
+    fs::create_dir_all(tree.path().join("skills/cort")).unwrap();
+    fs::write(tree.path().join("skills/cort/SKILL.md"), "new bytes\n").unwrap();
     // The destination comes from `skill_paths`, not from a literal: this test used to name the
     // xgrep skill precisely because that one had no env override, and it was retired on
     // 2026-09-10. Every skill left honours CLAUDE_SKILL_HOME / CODEX_HOME, so a hard-coded
@@ -1283,16 +1356,16 @@ fn a_managed_diverged_skill_repairs_at_the_destination_diagnosis_read() {
     // repair writes where diagnosis looked, whatever the env resolved to.
     let (_, _, dest) = cort::upgrade::skill_paths(tree.path(), home.path())
         .into_iter()
-        .find(|(n, _, _)| *n == "skill_ast_grep")
+        .find(|(n, _, _)| *n == "skill_cort")
         .expect("ast-grep skill is in the path table");
     fs::create_dir_all(dest.parent().unwrap()).unwrap();
     fs::write(&dest, "old managed bytes\n").unwrap();
     fs::write(dest.parent().unwrap().join(".cortexyoung-managed"), b"").unwrap();
     let comps = cort::upgrade::check_skills_at(tree.path(), &dest, &dest, false);
-    let c = comps.iter().find(|c| c.name == "skill_ast_grep").unwrap();
+    let c = comps.iter().find(|c| c.name == "skill_cort").unwrap();
     let (src, got_dest) = cort::upgrade::skill_repair_target(c, tree.path(), home.path())
         .expect("managed drift IS repairable");
-    assert_eq!(src, tree.path().join("skills/ast-grep/SKILL.md"));
+    assert_eq!(src, tree.path().join("skills/cort/SKILL.md"));
     assert_eq!(got_dest, dest);
 }
 
@@ -1305,9 +1378,9 @@ fn skill_repair_honours_the_skill_home_overrides() {
     let home = tempfile::tempdir().unwrap();
     let claude_skill_home = tempfile::tempdir().unwrap();
     let codex_home = tempfile::tempdir().unwrap();
-    fs::create_dir_all(tree.path().join("skills/ast-grep")).unwrap();
-    fs::write(tree.path().join("skills/ast-grep/SKILL.md"), "new bytes\n").unwrap();
-    let overridden = claude_skill_home.path().join("skills/ast-grep/SKILL.md");
+    fs::create_dir_all(tree.path().join("skills/cort")).unwrap();
+    fs::write(tree.path().join("skills/cort/SKILL.md"), "new bytes\n").unwrap();
+    let overridden = claude_skill_home.path().join("skills/cort/SKILL.md");
     fs::create_dir_all(overridden.parent().unwrap()).unwrap();
     fs::write(&overridden, "old managed bytes\n").unwrap();
     fs::write(
@@ -1325,7 +1398,7 @@ fn skill_repair_honours_the_skill_home_overrides() {
         ],
         || {
             let comps = cort::upgrade::check_skills(tree.path(), home.path(), false);
-            let c = comps.iter().find(|c| c.name == "skill_ast_grep").unwrap();
+            let c = comps.iter().find(|c| c.name == "skill_cort").unwrap();
             assert!(
                 matches!(c.state, cort::upgrade::ComponentState::Drifted),
                 "diagnosis reads the overridden home: {c:?}"
@@ -1735,11 +1808,11 @@ fn unknown_acks_reports_only_names_the_diagnosis_does_not_have() {
     use cort::upgrade::{unknown_acks, ComponentState};
     let comps = vec![
         comp("shim", ComponentState::Drifted),
-        comp("skill_ast_grep", ComponentState::Current),
+        comp("skill_cort", ComponentState::Current),
         comp("index:/abs/proj", ComponentState::Drifted),
     ];
     let req = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-    assert!(unknown_acks(&req(&["shim", "skill_ast_grep"]), &comps).is_empty());
+    assert!(unknown_acks(&req(&["shim", "skill_cort"]), &comps).is_empty());
     assert_eq!(
         unknown_acks(&req(&["skill_ast_grp"]), &comps),
         vec!["skill_ast_grp".to_string()]
