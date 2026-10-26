@@ -91,3 +91,14 @@ pub const REFRESH_OUTCOMES: [&str; 8] = [
     "rebuild_required",
     "busy_or_failed",
 ];
+
+/// Closed outcome vocabulary for the local SessionStart memory hook.
+pub const RECALL_OUTCOMES: [&str; 7] = [
+    "injected",
+    "none",
+    "not_configured",
+    "no_replica",
+    "unsynced_replica",
+    "busy",
+    "failed",
+];

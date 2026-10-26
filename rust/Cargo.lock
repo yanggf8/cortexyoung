@@ -638,6 +638,7 @@ dependencies = [
  "tokio",
  "toml_edit",
  "turso",
+ "turso_sync_engine",
 ]
 
 [[package]]

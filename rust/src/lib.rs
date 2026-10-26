@@ -11,6 +11,7 @@ pub mod graph;
 pub mod heal;
 pub mod health;
 pub mod hook;
+pub mod hook_recall;
 pub mod impact;
 pub mod incremental;
 pub mod indexer;

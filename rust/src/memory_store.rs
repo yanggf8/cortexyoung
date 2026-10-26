@@ -262,6 +262,13 @@ pub(crate) async fn open_replica_in(
 }
 async fn read_ledger(conn: &turso::Connection, project: &str) -> Result<MemoryLedger, String> {
     ensure_schema(conn).await?;
+    read_existing_ledger(conn, project).await
+}
+
+async fn read_existing_ledger(
+    conn: &turso::Connection,
+    project: &str,
+) -> Result<MemoryLedger, String> {
     let mut rows = conn
         .query(
             "SELECT body FROM project_memory WHERE project = ?",
@@ -297,6 +304,96 @@ async fn read_ledger(conn: &turso::Connection, project: &str) -> Result<MemoryLe
     }
     memory::validate(&ledger)?;
     Ok(ledger)
+}
+
+/// A session hook reads only a locally synced replica. The metadata guard excludes the
+/// legacy open path that pulls remotely even with bootstrap disabled.
+pub fn recall_local(root: &Path) -> Result<(MemoryRecall, usize), LocalRecallError> {
+    let config = config().map_err(|_| {
+        if fs::symlink_metadata(config_path()).is_ok() {
+            LocalRecallError::Failed
+        } else {
+            LocalRecallError::NotConfigured
+        }
+    })?;
+    let dir = crate::data_dir::data_dir()
+        .join(SUBDIR)
+        .join(digest(&config.url));
+    let path = dir.join("memory.db");
+    if !path.is_file() {
+        return Err(LocalRecallError::NoReplica);
+    }
+    let lock = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(dir.join("memory.lock"))
+        .map_err(|_| LocalRecallError::Failed)?;
+    match lock.try_lock() {
+        Ok(()) => {}
+        Err(fs::TryLockError::WouldBlock) => return Err(LocalRecallError::Busy),
+        Err(fs::TryLockError::Error(_)) => return Err(LocalRecallError::Failed),
+    }
+    // Read under the lock, so a writer cannot change the metadata between this check and the open.
+    let info_path = dir.join("memory.db-info");
+    let info = fs::read(&info_path)
+        .ok()
+        .and_then(|bytes| turso_sync_engine::types::DatabaseMetadata::load(&bytes).ok())
+        .ok_or(LocalRecallError::UnsyncedReplica)?;
+    // open_db pulls for Legacy { synced_frame_no: None }, regardless of bootstrap.
+    let safe = matches!(
+        info.synced_revision,
+        Some(turso_sync_engine::types::DatabasePullRevision::V1 { .. })
+            | Some(turso_sync_engine::types::DatabasePullRevision::Legacy {
+                synced_frame_no: Some(_),
+                ..
+            })
+    );
+    if !safe {
+        return Err(LocalRecallError::UnsyncedReplica);
+    }
+    // open_db creates missing auxiliaries; require them before it runs.
+    if !dir.join("memory.db-changes").is_file() {
+        return Err(LocalRecallError::UnsyncedReplica);
+    }
+    // An interrupted replace-base apply is recovered at open (restoring files, then possibly
+    // pulling), and metadata without a saved configuration is rewritten at open: neither is a
+    // read, so leave both to the next foreground `cort memory` command.
+    if dir.join("memory.db-replace-base-apply").exists()
+        || info
+            .saved_configuration
+            .as_ref()
+            .and_then(|c| c.remote_url.as_ref())
+            .is_none()
+    {
+        return Err(LocalRecallError::UnsyncedReplica);
+    }
+    let project = project(root).map_err(|_| LocalRecallError::Failed)?;
+    runtime()
+        .map_err(|_| LocalRecallError::Failed)?
+        .block_on(async {
+            let db = turso::sync::Builder::new_remote(&path.to_string_lossy())
+                .with_remote_url(&config.url)
+                .with_auth_token(&config.token)
+                .bootstrap_if_empty(false)
+                .build()
+                .await
+                .map_err(|_| LocalRecallError::Failed)?;
+            let conn = db.connect().await.map_err(|_| LocalRecallError::Failed)?;
+            let ledger = read_existing_ledger(&conn, &project)
+                .await
+                .map_err(|_| LocalRecallError::Failed)?;
+            Ok(memory::recall_ledger_for_hook(root, &ledger))
+        })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalRecallError {
+    NotConfigured,
+    NoReplica,
+    UnsyncedReplica,
+    Busy,
+    Failed,
 }
 
 async fn ensure_schema(conn: &turso::Connection) -> Result<(), String> {

@@ -230,11 +230,41 @@ pub(crate) fn recall_ledger(
     present: bool,
     sync_status: Option<String>,
 ) -> MemoryRecall {
+    recall_ledger_inner(root, query, ledger, present, sync_status, None).0
+}
+
+/// SessionStart evaluates evidence only for entries it can display.
+pub(crate) fn recall_ledger_for_hook(root: &Path, ledger: &MemoryLedger) -> (MemoryRecall, usize) {
+    recall_ledger_inner(
+        root,
+        "",
+        ledger,
+        !ledger.entries.is_empty(),
+        Some("local_replica".into()),
+        Some(20),
+    )
+}
+
+fn recall_ledger_inner(
+    root: &Path,
+    query: &str,
+    ledger: &MemoryLedger,
+    present: bool,
+    sync_status: Option<String>,
+    limit: Option<usize>,
+) -> (MemoryRecall, usize) {
     let terms: Vec<_> = query.split_whitespace().map(|s| s.to_lowercase()).collect();
-    let active = active_entries(ledger);
+    let mut active = active_entries(ledger);
     let mut counts: HashMap<&str, usize> = HashMap::new();
     for entry in &active {
         *counts.entry(&entry.key).or_default() += 1;
+    }
+    if limit.is_some() {
+        active.sort_by(|a, b| b.recorded_at.cmp(&a.recorded_at).then(b.id.cmp(&a.id)));
+    }
+    let omitted = limit.map_or(0, |n| active.len().saturating_sub(n));
+    if let Some(n) = limit {
+        active.truncate(n);
     }
     let mut hits = Vec::new();
     for entry in active {
@@ -273,11 +303,14 @@ pub(crate) fn recall_ledger(
             .cmp(&b.entry.key)
             .then(a.entry.id.cmp(&b.entry.id))
     });
-    MemoryRecall {
-        ledger_status: if present { "present" } else { "absent" }.into(),
-        sync_status,
-        hits,
-    }
+    (
+        MemoryRecall {
+            ledger_status: if present { "present" } else { "absent" }.into(),
+            sync_status,
+            hits,
+        },
+        omitted,
+    )
 }
 
 pub(crate) fn new_entry(

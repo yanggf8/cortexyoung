@@ -21,15 +21,17 @@ use cort::staleness::compute_stale;
 use cort::usage::{self, CommandRecord};
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{json, Value};
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 // `hook-suggest` is here so its rows are recorded under their own name rather than `_unknown`:
 // whether the harness hook fires, and whether a fire is followed by an `impact` call, is the one
 // measurement that has a numerator -- and since the thin trigger landed the row says only that a
 // fire happened, so that pairing is now read from the rows rather than inferred from a verdict.
 // It is not a verb anyone types.
-const KNOWN_COMMANDS: [&str; 14] = [
+const KNOWN_COMMANDS: [&str; 15] = [
     "index",
     "status",
     "projects",
@@ -40,6 +42,7 @@ const KNOWN_COMMANDS: [&str; 14] = [
     "measure",
     "hook-suggest",
     "hook-refresh",
+    "hook-recall",
     "hook-install",
     "internal-shim",
     "internal-ast-grep",
@@ -60,6 +63,7 @@ fn usage_value() -> Value {
             "measure": "cort measure <configure|show|record|sync|collect|health|status|copy-events|import-audit|cron|report> [options]  (collect: scan and upload the batch; --background appends at most one result to measure.log (none when skipped_busy) without stdout; health: observe recently used indexes and write local index_health_log, reading indexes only, with no network; --background appends the result to measure.log without stdout; status: read local collection state, -f json|lean; cron: manual install or removal of the legacy entry, no longer installed automatically; hook kick is the only automatic collection trigger; copy-events: one-time, re-runnable, read-only copy of claudecat's uploaded events from harnessuse, never overwrites, reports same-key rows whose columns differ as conflicts; import-audit: one-time, re-runnable import of CORT-AUDIT.md's health and usage columns, never overwrites, run on one machine only; sync --dry-run compares event ids and never pushes; command_log and index_health_log keep 90 days, pruned when a new command is recorded before asynchronous collection; if the machine is idle for more than 90 days, the final uncollected events from less than the idle interval before idling (CORT_COLLECT_IDLE_SECS, 15 minutes by default) are pruned on the next use; events can also be lost if collection does not run for 90 days in a row or uploads remain refused pending a dry run for that long)",
             "hook-suggest": "cort hook-suggest  (PreToolUse hook: records one fire row and kicks collection; never speaks; not a verb to type)",
             "hook-refresh": "cort hook-refresh  (PostToolUse hook: brings this project's index up to the tree after an edit; silent, never creates an index; not a verb to type)",
+            "hook-recall": "cort hook-recall --harness <h>  (SessionStart hook: reads the existing local memory replica; not a verb to type)",
             "hook-install": "cort hook-install [--settings <path>] [--command <cmd>] [--remove|--status]  (installer-invoked: wires hook-suggest into settings.json; not a verb to type)",
             "internal-shim": "cort internal-shim --cort-home <dir>  (installer-invoked: renders the $BIN_DIR/cort shim for a CORT_HOME; not a verb to type)",
             "internal-ast-grep": "cort internal-ast-grep  (installer-invoked: prints the pinned ast-grep release and its checksums as lean TSV; not a verb to type)",
@@ -351,6 +355,8 @@ fn render_emit(emit: &Emit) -> String {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string()
+    } else if emit.render_command == Some("hook-recall") {
+        emit.payload.as_str().unwrap_or_default().to_string()
     } else {
         render(emit.render_command, emit.format, &emit.payload)
     }
@@ -643,6 +649,7 @@ fn dispatch(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError> 
         Some("measure") => cmd_measure(&args[1..], usage),
         Some("hook-suggest") => cmd_hook_suggest(&args[1..], usage),
         Some("hook-refresh") => cmd_hook_refresh(&args[1..], usage),
+        Some("hook-recall") => cmd_hook_recall(&args[1..], usage),
         Some("hook-install") => cmd_hook_install(&args[1..], usage),
         Some("internal-shim") => cmd_internal_shim(&args[1..], usage),
         Some("internal-ast-grep") => cmd_internal_ast_grep(usage),
@@ -1043,6 +1050,68 @@ fn cmd_hook_suggest(args: &[String], usage: &mut UsageEvent) -> Result<Emit, Cor
     // External resource gate hook point: claudecat's gate hands off here, fail-open, before kick.
     usage.args_summary = hook_args_tag(&row, "collect", cort::collect::kick(&harness));
     quiet()
+}
+
+/// SessionStart reads the local memory replica without network work or waiting on a writer.
+fn cmd_hook_recall(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError> {
+    let declared = HookSuggestArgs::try_parse_from(args.iter())
+        .ok()
+        .and_then(|a| a.harness)
+        .unwrap_or_else(|| "unspecified".to_string());
+    let mut input = String::new();
+    let parsed = std::io::stdin()
+        .read_to_string(&mut input)
+        .ok()
+        .and_then(|_| serde_json::from_str::<Value>(&input).ok());
+    let (harness, differs) = parsed
+        .as_ref()
+        .map(|v| harness_of(v, &declared))
+        .unwrap_or((declared, None));
+    let model = parsed.as_ref().and_then(model_of_payload);
+    let root = parsed
+        .as_ref()
+        .and_then(|v| v.get("cwd"))
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(cwd);
+    usage.project_id = std::fs::canonicalize(&root)
+        .ok()
+        .and_then(|p| p.to_str().map(project_id_for));
+    let (outcome, content, count) = if parsed.is_none() {
+        ("failed", None, 0)
+    } else {
+        match cort::memory_store::recall_local(&root) {
+            Ok((recall, omitted)) => {
+                match cort::hook_recall::render_with_omitted(recall, omitted) {
+                    Some((text, count)) => ("injected", Some(text), count),
+                    None => ("none", None, 0),
+                }
+            }
+            Err(cort::memory_store::LocalRecallError::NotConfigured) => ("not_configured", None, 0),
+            Err(cort::memory_store::LocalRecallError::NoReplica) => ("no_replica", None, 0),
+            Err(cort::memory_store::LocalRecallError::UnsyncedReplica) => {
+                ("unsynced_replica", None, 0)
+            }
+            Err(cort::memory_store::LocalRecallError::Busy) => ("busy", None, 0),
+            Err(cort::memory_store::LocalRecallError::Failed) => ("failed", None, 0),
+        }
+    };
+    let mut row = hook_row(outcome, &harness, differs.as_deref(), model);
+    if outcome == "injected" {
+        row["entries"] = json!(count);
+    }
+    usage.args_summary = row.to_string();
+    let payload = content
+        .map(|text| {
+            json!({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": text}}).to_string()
+        })
+        .unwrap_or_default();
+    Ok(Emit {
+        payload: Value::String(payload),
+        format: Format::Lean,
+        render_command: Some("hook-recall"),
+    })
 }
 
 /// How long `cort projects` will wait for git before deciding it cannot tell.
@@ -2582,6 +2651,35 @@ fn peek_format(args: &[String]) -> Format {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    let recall_hook = args.first().is_some_and(|a| a == "hook-recall");
+    let claim = Arc::new(AtomicBool::new(false));
+    if recall_hook {
+        // A timeout exits before the normal usage writer; that missing row is intentional.
+        // The process must never hold up a session start, even if stdin or storage stalls.
+        // Losing the claim means the main path is writing stdout and its row; it gets two
+        // more seconds for that, then the process exits anyway (a stuck pipe or usage.db).
+        let watchdog_claim = Arc::clone(&claim);
+        if std::thread::Builder::new()
+            .name("hook-recall-watchdog".into())
+            .spawn(move || {
+                std::thread::sleep(std::time::Duration::from_secs(3));
+                if watchdog_claim
+                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
+                {
+                    std::process::exit(0);
+                }
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                std::process::exit(0);
+            })
+            .is_err()
+        {
+            let mut usage_ev = usage_from_args(&args);
+            usage_ev.args_summary = hook_row("failed", "unspecified", None, None).to_string();
+            finish_record(&usage_ev, "ok", None, 0);
+            return;
+        }
+    }
     // A kicked `measure {health,collect} --background` child prints nothing on any path, the early
     // `--help`/`--version` returns included: its stdio is null and `measure.log` is its only output.
     let background_measure = args.first().is_some_and(|a| a == "measure")
@@ -2612,8 +2710,23 @@ fn main() {
     match dispatch(&args, &mut usage_ev) {
         Ok(emitted) => {
             let rendered = render_emit(&emitted);
+            if recall_hook
+                && claim
+                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                    .is_err()
+            {
+                loop {
+                    std::thread::park();
+                }
+            }
             if !background_measure {
-                print!("{rendered}");
+                if recall_hook {
+                    let mut stdout = std::io::stdout().lock();
+                    let _ = stdout.write_all(rendered.as_bytes());
+                    let _ = stdout.flush();
+                } else {
+                    print!("{rendered}");
+                }
             }
             finish_record(
                 &usage_ev,

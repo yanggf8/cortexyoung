@@ -575,6 +575,7 @@ pub fn query_usage_at(path: &Path, days: i64, now_ms: i64) -> Result<Value, Cort
     };
     let suggest_census = with_total(hook_census_at(path, "hook-suggest", cutoff)?);
     let refresh_census = with_total(hook_census_at(path, "hook-refresh", cutoff)?);
+    let recall_census = with_total(hook_census_at(path, "hook-recall", cutoff)?);
     Ok(json!({
         "best_effort": true,
         "commands": commands,
@@ -582,6 +583,7 @@ pub fn query_usage_at(path: &Path, days: i64, now_ms: i64) -> Result<Value, Cort
         "hook_census": {
             "hook-suggest": suggest_census,
             "hook-refresh": refresh_census,
+            "hook-recall": recall_census,
         },
         "machine": machine_block(&conn),
         "note": NOTE,
@@ -798,7 +800,9 @@ pub fn hook_census_at(
         .chain(crate::hook::LEGACY_SUGGEST_OUTCOMES.iter())
         .copied()
         .collect();
-    let (known, splits_decline): (&[&str], bool) = if command == "hook-refresh" {
+    let (known, splits_decline): (&[&str], bool) = if command == "hook-recall" {
+        (&crate::hook::RECALL_OUTCOMES, false)
+    } else if command == "hook-refresh" {
         (&crate::hook::REFRESH_OUTCOMES, false)
     } else {
         (&suggest_known, true)
