@@ -175,6 +175,48 @@ fn touched_project_ids_skip_measure_null_unknown() {
     );
 }
 
+/// The cursor row itself is excluded even when it names a project: `>=` would re-observe the last
+/// project of every pass. Row 6 is `alpha`, so only `beta` (row 8) is new after it.
+#[test]
+fn touched_project_ids_exclude_the_cursor_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("usage.db");
+    for (command, project_id) in [
+        ("measure", Some("ignored")),
+        ("impact", None),
+        ("impact", Some("_unknown")),
+        ("impact", Some("alpha")),
+        ("hook-refresh", Some("beta")),
+        ("impact", Some("alpha")),
+        ("measure", Some("ignored")),
+        ("impact", Some("beta")),
+        ("impact", None),
+    ] {
+        let mut rec = record(command, NOW_MS);
+        rec.project_id = project_id.map(str::to_owned);
+        record_command_at(&path, &rec);
+    }
+    assert_eq!(
+        touched_project_ids_at(&path, 6).unwrap(),
+        (vec!["beta".to_string()], 9)
+    );
+}
+
+/// A first write through the health path creates `usage.db` private, like `record_command_at`:
+/// it holds roots and the machine id. SQLite creates the file at open, before the chmod runs.
+/// Under a umask of 077 the file is private anyway and this cannot catch a dropped chmod; the
+/// umask is not set here because it is process-wide and the tests run in parallel.
+#[cfg(unix)]
+#[test]
+fn health_insert_creates_a_private_database() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("fresh").join("usage.db");
+    insert_health_row_at(&path, &sample_health("local", "ok")).unwrap();
+    let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "mode {mode:o}");
+}
+
 #[test]
 fn invalid_status_is_an_error_not_a_panic() {
     let dir = tempfile::tempdir().unwrap();

@@ -150,6 +150,72 @@ fn concurrent_kicks_spawn_once() {
     assert_eq!(results.iter().map(|(_, n)| n).sum::<usize>(), 1);
 }
 
+/// Holds the lane's kick lock open by blocking inside `spawn` until released.
+struct BlockingSpawner {
+    entered: std::sync::mpsc::Sender<()>,
+    release: std::sync::mpsc::Receiver<()>,
+}
+impl Spawner for BlockingSpawner {
+    fn spawn(&mut self, _: Lane, _: &str) -> std::io::Result<()> {
+        self.entered.send(()).unwrap();
+        // Bounded: if the test body panics before releasing, the scope must still join.
+        let _ = self.release.recv_timeout(Duration::from_secs(10));
+        Ok(())
+    }
+}
+
+/// The race `concurrent_kicks_spawn_once` cannot force: a second kick arriving while the first is
+/// still inside its critical section. It must be turned away by the kick lock (`busy`); without
+/// the lock it would only be stopped by the first kick's stamp (`throttled`), which leaves the
+/// read-then-write of the stamp unguarded.
+#[test]
+fn kick_while_another_holds_the_lane_is_busy() {
+    let d = tempfile::tempdir().unwrap();
+    let p = fixture(d.path());
+    health_not_due(&p);
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        let p = &p;
+        let first = scope.spawn(move || {
+            let mut spawn = BlockingSpawner {
+                entered: entered_tx,
+                release: release_rx,
+            };
+            collect::kick_at(p, "codex", NOW, &CollectConfig::from_env(), &mut spawn)
+        });
+        entered_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the first kick never reached spawn");
+        let mut spawn = FakeSpawner::default();
+        let second = collect::kick_at(p, "codex", NOW, &CollectConfig::from_env(), &mut spawn);
+        release_tx.send(()).unwrap();
+        assert_eq!(second, "busy");
+        assert!(spawn.0.is_empty());
+        assert_eq!(first.join().unwrap(), "spawned_batch");
+    });
+}
+
+/// The stamp is plain text: a restored or hand-edited one can hold i64::MIN. The throttle test
+/// must saturate, not panic on the hook path (debug) or wrap into a permanent `throttled` (release).
+#[test]
+fn extreme_past_stamp_does_not_stall_the_lane() {
+    let d = tempfile::tempdir().unwrap();
+    let p = fixture(d.path());
+    health_not_due(&p);
+    fs::write(
+        p.data_dir.join("measure-batch.spawned"),
+        i64::MIN.to_string(),
+    )
+    .unwrap();
+    let mut spawn = FakeSpawner::default();
+    assert_eq!(
+        collect::kick_at(&p, "codex", NOW, &CollectConfig::from_env(), &mut spawn),
+        "spawned_batch"
+    );
+    assert_eq!(spawn.0, [Lane::Batch]);
+}
+
 #[cfg(unix)]
 #[test]
 fn stamp_write_failure_spawns_nothing() {

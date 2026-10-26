@@ -95,6 +95,9 @@ transcript、`command_log`、index 變動都發生在 agent 工作時——觸�
      該條的 `min_interval` → 放鎖返回；否則寫入現在的 ms，**寫成功才生程序**，生完放鎖。寫不了
      （例如沙箱不讓寫 `data_dir()`）就不生。檢查與更新在同一把鎖內，所以任何環境下每條收集每個
      `min_interval` 最多生一個程序，不可寫的環境一個都不生。這是 kick 唯一的寫入。
+     戳記先寫、生程序在後，所以生程序失敗（fork 資源不足、`current_exe` 讀不到）也算用掉這一次：
+     下一次嘗試要等該條的 `min_interval`，期間 hook 記 `throttled`。（時鐘撥回、`now < 戳記` 時不算節流，會立刻重寫戳記再試——與到期規則對未來時間的處理一致，避免撥回的時鐘讓這條停擺。）刻意不回滾戳記——一直失敗的
+     環境若每個 hook 都重試 fork，代價落在 hook 上（2026-10-26 Muse 補審 C2 後確認）。
    - 用 `spawn_background_healer` 同一套方式生子程序：`setsid`、stdin/stdout/stderr 全部 null、
      不等待、不保留 handle。子程序結果自己寫 `measure.log`。
 6. 任何錯誤都吞掉，不輸出、不改 hook 的 exit code 與輸出。kick 的結果記進 hook 自己的

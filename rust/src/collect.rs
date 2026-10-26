@@ -135,7 +135,7 @@ fn try_lane(
     let previous = fs::read_to_string(&stamp)
         .ok()
         .and_then(|s| s.trim().parse::<i64>().ok());
-    if previous.is_some_and(|last| now_ms >= last && now_ms - last < interval_ms) {
+    if previous.is_some_and(|last| now_ms >= last && now_ms.saturating_sub(last) < interval_ms) {
         return KickResult::Throttled;
     }
     if write_atomic(&stamp, &now_ms.to_string()).is_err() {
@@ -1021,11 +1021,13 @@ pub fn health_cursor(state: &HealthState, counters: &KickCounters) -> i64 {
 
 /// Time since `last_run_ms`, or `None` when the lane has never run. A `last_run_ms` in the future
 /// (the clock was set back, or a state file came from a clock that ran ahead) also reads as `None`:
-/// treating it as "just ran" would stall the lane for as long as the clock is behind.
+/// treating it as "just ran" would stall the lane for as long as the clock is behind. The
+/// subtraction saturates: a hand-edited or restored state file can hold any i64, and a wrapped
+/// negative elapsed would keep the lane under its interval forever.
 fn since_last_run(last_run_ms: Option<i64>, now_ms: i64) -> Option<i64> {
     last_run_ms
         .filter(|last| *last <= now_ms)
-        .map(|last| now_ms - last)
+        .map(|last| now_ms.saturating_sub(last))
 }
 
 pub fn min_interval_ms(state: &CollectState, harness: &str, cfg: &CollectConfig) -> i64 {

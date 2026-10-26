@@ -249,6 +249,44 @@ fn spawn_background_healer(exe: &Path, root: &Path) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
+    /// The child must really be detached, not just carry the right argv: inherited stdio would
+    /// hold the hook's pipe open after it exits, and a child left in the caller's session goes
+    /// down with it. The shell reports on itself (`$$`) from command substitutions, so its own
+    /// descriptors are read before any redirection of its own. Known limit: when the test process's
+    /// own stdin is already /dev/null (a backgrounded gate), the stdin assertion cannot tell a
+    /// dropped `Stdio::null()` apart; stdout and stderr are the test harness's and still can.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn spawn_detached_gives_the_child_null_stdio_and_its_own_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("probe");
+        let mut cmd = std::process::Command::new("sh");
+        cmd.arg("-c")
+            .arg(
+                r#"s=$(cat /proc/$$/stat); a=$(readlink /proc/$$/fd/0); b=$(readlink /proc/$$/fd/1); c=$(readlink /proc/$$/fd/2); printf '%s\n%s\n%s\n%s\n' "$s" "$a" "$b" "$c" > "$1.tmp" && mv "$1.tmp" "$1""#,
+            )
+            .arg("sh")
+            .arg(&out);
+        spawn_detached(cmd).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !out.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let text = std::fs::read_to_string(&out).expect("the detached child never reported");
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 4, "{text}");
+        let stat = lines[0];
+        let pid = stat.split(' ').next().unwrap();
+        // Fields after the parenthesised command name: state, ppid, pgrp, session.
+        let rest: Vec<&str> = stat[stat.rfind(')').unwrap() + 2..].split(' ').collect();
+        assert_eq!(rest[3], pid, "the child must lead its own session: {stat}");
+        assert_eq!(
+            &lines[1..],
+            ["/dev/null"; 3],
+            "stdin, stdout, stderr: {text}"
+        );
+    }
+
     #[test]
     fn a_fresh_or_disabled_outcome_adds_no_keys() {
         let mut payload = json!({"symbol": "x"});

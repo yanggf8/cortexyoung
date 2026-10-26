@@ -232,6 +232,33 @@ fn rewind_resets_cursors() {
     ));
 }
 
+/// The health watermark resets on its own: the due rule clamps a negative pending to zero, so only
+/// the returned cursor can tell a reset from a cursor left past the end.
+#[test]
+fn health_watermark_rewind_resets_to_zero() {
+    let mut s = state(900_000);
+    s.uploaded_through_id = 5;
+    s.health_uploaded_through_id = 10;
+    assert_eq!(batch_cursors(&s, &counters(100, 5)), (5, 0));
+}
+
+/// A state file is only JSON: a restored or hand-edited one can hold i64::MIN. Elapsed time must
+/// saturate, not wrap negative (release) or panic (debug, on the hook path).
+#[test]
+fn extreme_past_last_run_is_due_not_stalled() {
+    let cfg = CollectConfig::from_lookup(|_| None);
+    let mut s = state(0);
+    s.last_run_ms = Some(i64::MIN);
+    assert!(batch_due(&s, &counters(2_000, 0), "codex", NOW, &cfg));
+    let health = HealthState {
+        instance_id: Some("db-a".into()),
+        health_cursor: 1,
+        last_run_ms: Some(i64::MIN),
+        ..Default::default()
+    };
+    assert!(health_due(&health, &counters(2, 0), NOW, &cfg));
+}
+
 /// The normal state after a batch: the last rows are `measure`'s own, so the command cursor sits
 /// past the non-`measure` max. Only the un-filtered max may call that a rewind -- otherwise the
 /// cursor resets, the whole history counts as pending, and collection keeps spawning itself with
