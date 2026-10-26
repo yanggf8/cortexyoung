@@ -266,7 +266,7 @@ payload 讀不到）不算使用，也不需要觀察。`project_id` 是 NULL �
   `deploy_measure_cron` 與 `cort_upgrade.rs` 的發布後步驟都會裝）；本單把兩者都改成移除，安裝與升級時若看到
   cort 自己的條目就移除
   （Task 5 既有的 `measure cron --uninstall` 邏輯，只動 cort 自己那一行）。
-- 三台（NUC11i5、Thinkpade15、i51149R3050）目前都裝了這個條目，部署時移除，使用者在場。
+- 三台（NUC11i5、Thinkpade15、i51149R3050）原本都裝了這個條目。NUC11i5（2026-10-25 約 02:45Z，`cort measure cron --uninstall`）與 i51149R3050（2026-10-24，`crontab -r`）已移除；Thinkpade15 2026-10-26 查時仍在（`17 * * * * …/cort measure record >> …/measure.log 2>&1`），部署 I2（`80b56743`）時的安裝或升級會自動移除，不必另外手動刪；部署時使用者在場。
 - `cort measure cron` 子命令暫時保留（手動用得到），之後再決定刪不刪。
 
 ### 7. 本機自檢

@@ -331,6 +331,7 @@
 - [x] 兩台 `cort measure sync --dry-run`：重疊非空、100% 相符；不符就停，修 Task 6。通過：i51149R3050 2026-10-24T23:05Z（安裝的 871c3448）matched 14,705、remote_only 0；NUC11i5 2026-10-25T03:06Z（開發版 debug binary，`1eafe8b7` 加上只動 `health.rs` 的未提交 E1，未安裝）matched 1,000、remote_only 0、local_only 197,334、`verified: true`。
 - [x] NUC11i5 `cort measure import-audit <claudecat>/CORT-AUDIT.md <i51149R3050 那份的副本> --project-repo <claudecat>`，對 56 列（55＋i51149R3050 獨有的 1 列）。2026-10-25 04:33 台灣時間（20:33Z）用 `645e9682` 的開發版 binary 執行（未安裝）：讀 109 列、健康事件與用量各新增 56、重疊 53、衝突 0、push 成功；重跑全部已存在。host：NUC11i5 48、i51149R3050 5、Thinkpade15 1、MacBook-Pro.local 1、unknown（09-06）1。
 - [x] ~~兩台 `cort measure cron --install --command-prefix <cort shim>`。~~ 取消：使用者 2026-10-25 決定不用 cron，改由 hook 觸發收集（`docs/superpowers/plans/2026-10-24-event-driven-collection.md`）。i51149R3050 已 `crontab -r`（19:13Z）；NUC11i5 的 `:17 cort measure record` 於 2026-10-25 約 02:45Z 以 `cort measure cron --uninstall` 移除。在 G1b 部署前兩台都不會自動收集。
+- [ ] Thinkpade15 的 cron 條目：2026-10-26 查時仍在（`17 * * * * …/cort measure record >> …/measure.log 2>&1`）。部署 I2（`80b56743`）時跑 `install.sh` 或升級就會自動移除（只動 cort 自己那行）；部署後在該機 `crontab -l | grep "measure record"` 確認已不見。NUC11i5、i51149R3050 已無此條目。
 - [ ] 隔天：遠端兩台都有昨天的快照、事件持續增加、無重複；壓縮列有新增。
 - [ ] 移除 `~/.cargo/bin/claudecat`（兩台）。
 - [ ] **問使用者後**才清 `harnessuse` 的 `telemetry_events` 與 alias。
