@@ -2311,24 +2311,20 @@ fn cmd_measure(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, CortErr
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| "unknown".to_string());
             // run_collect holds measure-collect.lock before this opener obtains measure.lock.
-            let run = cort::collect::run_collect(
-                &mut || {
-                    cort::measure_store::open_measure_store_within_timeout(
-                        std::time::Duration::from_millis(cfg.manual_wait_ms),
-                        std::time::Duration::from_millis(cfg.net_timeout_ms),
-                    )
-                },
-                &paths,
-                &harness,
-                now_ms,
-                &cfg,
-                false,
-            );
-            if background {
-                cort::collect::log_collect_run(&paths.data_dir, &run, now_ms).map_err(
-                    |message| CortError::new("measure_collect_failed", json!({"message":message})),
-                )?;
-            }
+            let mut opener = || {
+                cort::measure_store::open_measure_store_within_timeout(
+                    std::time::Duration::from_millis(cfg.manual_wait_ms),
+                    std::time::Duration::from_millis(cfg.net_timeout_ms),
+                )
+            };
+            let run = if background {
+                cort::collect::run_background_collect(&mut opener, &paths, &harness, now_ms, &cfg)
+                    .map_err(|message| {
+                    CortError::new("measure_collect_failed", json!({"message":message}))
+                })?
+            } else {
+                cort::collect::run_collect(&mut opener, &paths, &harness, now_ms, &cfg, false)
+            };
             run.summary
         }
         MeasureAction::Health { background } => {

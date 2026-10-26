@@ -11,7 +11,11 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+const WATCHDOG_GRACE_MS: u64 = 60_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Lane {
@@ -460,6 +464,81 @@ fn collect_failure(state: &mut CollectState, harness: &str, now_ms: i64, kind: E
     failure.last_failed_ms = now_ms;
 }
 
+fn claim_run(claim: &AtomicBool) -> bool {
+    claim
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+}
+
+fn claim_normal(claim: &AtomicBool) {
+    if !claim_run(claim) {
+        // The watchdog owns the final record and is about to exit the process.
+        loop {
+            std::thread::park();
+        }
+    }
+}
+
+struct WatchdogSpec {
+    limit: Duration,
+    grace: Duration,
+    exit: Box<dyn FnOnce(i32) + Send>,
+}
+
+fn background_watchdog_limit(cfg: &CollectConfig) -> Duration {
+    Duration::from_millis(cfg.run_deadline_ms.saturating_add(WATCHDOG_GRACE_MS))
+}
+
+fn arm_collect_watchdog(
+    data_dir: PathBuf,
+    harness: String,
+    limit: Duration,
+    grace: Duration,
+    elapsed: Duration,
+    claim: Arc<AtomicBool>,
+    exit: impl FnOnce(i32) + Send + 'static,
+) -> std::io::Result<std::thread::JoinHandle<()>> {
+    std::thread::Builder::new()
+        .name("measure-collect-watchdog".to_string())
+        .spawn(move || {
+            std::thread::sleep(limit.saturating_sub(elapsed));
+            if !claim_run(&claim) {
+                // Final local state/log writes happen after the normal claim and can hang on disk.
+                std::thread::sleep(grace);
+                exit(1);
+                return;
+            }
+            let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
+            let rescue = std::thread::Builder::new()
+                .name("measure-collect-watchdog-rescue".to_string())
+                .spawn(move || {
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let now_ms = crate::usage::now_ms();
+                        let path = data_dir.join("measure-collect-state.json");
+                        let mut state = CollectState::load(&path);
+                        let message = format!("watchdog: run exceeded {}s", limit.as_secs());
+                        let run = collect_run(
+                            "failed",
+                            &harness,
+                            state.refused,
+                            Some(ErrorKind::Network),
+                            None,
+                        )
+                        .with_error(message);
+                        let _ = log_collect_run(&data_dir, &run, now_ms);
+                        collect_failure(&mut state, &harness, now_ms, ErrorKind::Network);
+                        state.push_pending = true;
+                        let _ = state.save(&path);
+                    }));
+                    let _ = done_tx.send(());
+                });
+            if rescue.is_ok() {
+                let _ = done_rx.recv_timeout(grace);
+            }
+            exit(1);
+        })
+}
+
 fn finish_collect_state(
     state: &mut CollectState,
     harness: &str,
@@ -798,11 +877,62 @@ pub fn run_collect(
     cfg: &CollectConfig,
     manual: bool,
 ) -> CollectRun {
+    run_collect_inner(store_opener, paths, harness, now_ms, cfg, manual, None)
+}
+
+pub fn run_background_collect(
+    store_opener: &mut dyn FnMut() -> Result<Box<dyn MeasureStore>, OpenError>,
+    paths: &KickPaths,
+    harness: &str,
+    now_ms: i64,
+    cfg: &CollectConfig,
+) -> Result<CollectRun, String> {
+    let watchdog = WatchdogSpec {
+        limit: background_watchdog_limit(cfg),
+        grace: Duration::from_millis(WATCHDOG_GRACE_MS),
+        exit: Box::new(|code| std::process::exit(code)),
+    };
+    background_collect_with(store_opener, paths, harness, now_ms, cfg, watchdog)
+}
+
+/// The body of [`run_background_collect`] with the watchdog supplied, so tests can pass an exit
+/// that does not end the test binary.
+fn background_collect_with(
+    store_opener: &mut dyn FnMut() -> Result<Box<dyn MeasureStore>, OpenError>,
+    paths: &KickPaths,
+    harness: &str,
+    now_ms: i64,
+    cfg: &CollectConfig,
+    watchdog: WatchdogSpec,
+) -> Result<CollectRun, String> {
+    let run = run_collect_inner(
+        store_opener,
+        paths,
+        harness,
+        now_ms,
+        cfg,
+        false,
+        Some(watchdog),
+    );
+    log_collect_run(&paths.data_dir, &run, now_ms)?;
+    Ok(run)
+}
+
+fn run_collect_inner(
+    store_opener: &mut dyn FnMut() -> Result<Box<dyn MeasureStore>, OpenError>,
+    paths: &KickPaths,
+    harness: &str,
+    now_ms: i64,
+    cfg: &CollectConfig,
+    manual: bool,
+    watchdog: Option<WatchdogSpec>,
+) -> CollectRun {
     if manual {
         return collect_run("failed", harness, false, Some(ErrorKind::Other), None)
             .with_error("manual collection is not implemented");
     }
-    let deadline = RunDeadline::after(Instant::now(), cfg.run_deadline_ms);
+    let started = Instant::now();
+    let deadline = RunDeadline::after(started, cfg.run_deadline_ms);
     // open_lock does not create its parent; the first explicit collect may precede any kick.
     if let Err(e) = fs::create_dir_all(&paths.data_dir) {
         return collect_run("failed", harness, false, Some(ErrorKind::Other), None)
@@ -863,9 +993,40 @@ pub fn run_collect(
         .with_error(e);
     }
 
+    let mut claim = None;
+    if let Some(spec) = watchdog {
+        let flag = Arc::new(AtomicBool::new(false));
+        // No watchdog thread exists if the spawn fails, so nothing can contend for the claim.
+        if let Err(e) = arm_collect_watchdog(
+            paths.data_dir.clone(),
+            harness.to_string(),
+            spec.limit,
+            spec.grace,
+            started.elapsed(),
+            Arc::clone(&flag),
+            spec.exit,
+        ) {
+            let mut state = CollectState::load(&state_path);
+            collect_failure(&mut state, harness, now_ms, ErrorKind::Other);
+            let _ = state.save(&state_path);
+            return collect_run(
+                "failed",
+                harness,
+                state.refused,
+                Some(ErrorKind::Other),
+                None,
+            )
+            .with_error(format!("cannot start collect watchdog: {e}"));
+        }
+        claim = Some(flag);
+    }
+
     let opened = match store_opener() {
         Ok(store) => Ok(store),
         Err(OpenError::Busy) => {
+            if let Some(claim) = &claim {
+                claim_normal(claim);
+            }
             return collect_run("skipped_busy", harness, state.refused, None, None);
         }
         Err(OpenError::Network(e)) => Err((ErrorKind::Network, e)),
@@ -874,6 +1035,9 @@ pub fn run_collect(
     let mut store = match opened {
         Ok(store) => store,
         Err((kind, e)) => {
+            if let Some(claim) = &claim {
+                claim_normal(claim);
+            }
             collect_failure(&mut state, harness, now_ms, kind);
             let _ = state.save(&state_path);
             return collect_run("failed", harness, state.refused, Some(kind), None).with_error(e);
@@ -882,6 +1046,10 @@ pub fn run_collect(
     // The opener's bootstrap is a network operation; if it alone spent the budget, stop before
     // the transcript scan rather than running a batch that cannot be pushed.
     if deadline.expired() {
+        drop(store);
+        if let Some(claim) = &claim {
+            claim_normal(claim);
+        }
         collect_failure(&mut state, harness, now_ms, ErrorKind::Network);
         let _ = state.save(&state_path);
         return collect_run(
@@ -932,6 +1100,10 @@ pub fn run_collect(
             (Some(scan), kind, error)
         }
     };
+    drop(store);
+    if let Some(claim) = &claim {
+        claim_normal(claim);
+    }
     finish_collect_state(
         &mut state,
         harness,
@@ -1087,4 +1259,260 @@ pub fn health_due(
 ) -> bool {
     let elapsed = since_last_run(state.last_run_ms, now_ms).unwrap_or(i64::MAX);
     health_pending(state, counters) > 0 && elapsed >= cfg.health_interval_ms
+}
+
+#[cfg(test)]
+mod watchdog_tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::mpsc;
+
+    fn paths_with_command(dir: &Path) -> KickPaths {
+        let paths = KickPaths {
+            data_dir: dir.join("data"),
+            cache_dir: dir.join("cache"),
+            usage_db: dir.join("cache/usage.db"),
+            measure_config: dir.join("data/turso-measure.json"),
+        };
+        fs::create_dir_all(&paths.cache_dir).unwrap();
+        crate::usage::record_command_at(
+            &paths.usage_db,
+            &crate::usage::CommandRecord {
+                now_ms: 1_800_000_000_000,
+                project_id: None,
+                command: "impact".into(),
+                args_summary: "{}".into(),
+                status: "ok".into(),
+                error_code: None,
+                read_source: None,
+                requested_content_mode: None,
+                effective_content_mode: None,
+                receipt_hit: None,
+                index_stale: None,
+                bytes_out: 0,
+                saved_bytes: 0,
+            },
+        );
+        paths
+    }
+
+    #[test]
+    fn background_watchdog_limit_saturates() {
+        let mut cfg = CollectConfig::from_lookup(|_| None);
+        assert_eq!(background_watchdog_limit(&cfg), Duration::from_secs(660));
+        cfg.run_deadline_ms = u64::MAX;
+        assert_eq!(
+            background_watchdog_limit(&cfg),
+            Duration::from_millis(u64::MAX)
+        );
+    }
+
+    #[test]
+    fn background_collect_logs_opener_failure_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_with_command(dir.path());
+        let cfg = CollectConfig::from_lookup(|_| None);
+        // A real `process::exit` here would outlive the test and end the test binary later on.
+        let run = background_collect_with(
+            &mut || Err(OpenError::Other("opener failed".into())),
+            &paths,
+            "codex",
+            1_800_000_000_000,
+            &cfg,
+            WatchdogSpec {
+                limit: Duration::from_secs(3_600),
+                grace: Duration::from_millis(50),
+                exit: Box::new(|_| {}),
+            },
+        )
+        .unwrap();
+        assert_eq!(run.outcome, "failed");
+        assert_eq!(run.summary["error"], "opener failed");
+        let lines = fs::read_to_string(paths.data_dir.join("measure.log")).unwrap();
+        assert_eq!(lines.lines().count(), 1);
+        let line: Value = serde_json::from_str(lines.lines().next().unwrap()).unwrap();
+        assert_eq!(line["outcome"], "failed");
+        assert_eq!(line["error"], "opener failed");
+    }
+
+    #[test]
+    fn background_collect_wires_watchdog_through_blocked_opener() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_with_command(dir.path());
+        let (exit_tx, exit_rx) = mpsc::channel();
+        let cfg = CollectConfig::from_lookup(|_| None);
+        std::thread::spawn(move || {
+            let mut opener = || {
+                std::thread::sleep(Duration::from_secs(2));
+                Err(OpenError::Busy)
+            };
+            let _ = run_collect_inner(
+                &mut opener,
+                &paths,
+                "codex",
+                1_800_000_000_000,
+                &cfg,
+                false,
+                Some(WatchdogSpec {
+                    limit: Duration::from_millis(50),
+                    grace: Duration::from_secs(5),
+                    exit: Box::new(move |code| exit_tx.send(code).unwrap()),
+                }),
+            );
+        });
+        assert_eq!(exit_rx.recv_timeout(Duration::from_secs(10)).unwrap(), 1);
+        assert!(exit_rx.recv_timeout(Duration::from_millis(100)).is_err());
+        let lines = fs::read_to_string(dir.path().join("data/measure.log")).unwrap();
+        assert_eq!(lines.lines().count(), 1);
+        let line: Value = serde_json::from_str(lines.lines().next().unwrap()).unwrap();
+        assert!(line["error"].as_str().unwrap().starts_with("watchdog:"));
+        let state = CollectState::load(&dir.path().join("data/measure-collect-state.json"));
+        assert_eq!(state.failures["codex"].count, 1);
+        assert!(state.push_pending);
+    }
+
+    #[test]
+    fn unclaimed_watchdog_records_failure_and_exits_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("measure-collect-state.json");
+        let mut state = CollectState {
+            instance_id: Some("original-instance".into()),
+            uploaded_through_id: 42,
+            health_uploaded_through_id: 27,
+            refused: true,
+            last_run_ms: Some(123),
+            last_ok_ms: Some(100),
+            ..CollectState::default()
+        };
+        state.failures.insert(
+            "codex".to_string(),
+            Failure {
+                count: 2,
+                ..Failure::default()
+            },
+        );
+        state.failures.insert(
+            "claude".to_string(),
+            Failure {
+                count: 4,
+                last_error_kind: "storage".into(),
+                last_failed_ms: 99,
+            },
+        );
+        state.save(&state_path).unwrap();
+        let exits = Arc::new(AtomicUsize::new(0));
+        let called = Arc::clone(&exits);
+        let claim = Arc::new(AtomicBool::new(false));
+        arm_collect_watchdog(
+            dir.path().to_path_buf(),
+            "codex".to_string(),
+            Duration::from_millis(50),
+            Duration::from_secs(5),
+            Duration::ZERO,
+            claim,
+            move |code| {
+                assert_eq!(code, 1);
+                called.fetch_add(1, Ordering::SeqCst);
+            },
+        )
+        .unwrap()
+        .join()
+        .unwrap();
+        assert_eq!(exits.load(Ordering::SeqCst), 1);
+        let lines = fs::read_to_string(dir.path().join("measure.log")).unwrap();
+        assert_eq!(lines.lines().count(), 1);
+        let line: Value = serde_json::from_str(lines.lines().next().unwrap()).unwrap();
+        assert_eq!(line["lane"], "batch");
+        assert_eq!(line["outcome"], "failed");
+        assert_eq!(line["harness"], "codex");
+        assert!(line["ts_ms"].as_i64().is_some());
+        assert_eq!(line["error_kind"], "network");
+        assert_eq!(line["error"], "watchdog: run exceeded 0s");
+        assert_eq!(line["refused"], true);
+        assert!(line["scan"].is_null());
+        let saved = CollectState::load(&state_path);
+        assert_eq!(saved.instance_id, state.instance_id);
+        assert_eq!(saved.uploaded_through_id, state.uploaded_through_id);
+        assert_eq!(
+            saved.health_uploaded_through_id,
+            state.health_uploaded_through_id
+        );
+        assert_eq!(saved.refused, state.refused);
+        assert_eq!(saved.last_run_ms, state.last_run_ms);
+        assert_eq!(saved.last_ok_ms, state.last_ok_ms);
+        assert_eq!(saved.failures["claude"], state.failures["claude"]);
+        assert_eq!(saved.failures["codex"].count, 3);
+        assert_eq!(saved.failures["codex"].last_error_kind, "network");
+        assert_eq!(
+            saved.failures["codex"].last_failed_ms,
+            line["ts_ms"].as_i64().unwrap()
+        );
+        assert!(saved.push_pending);
+    }
+
+    #[test]
+    fn normal_claim_gets_second_stage_exit_without_watchdog_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let claim = Arc::new(AtomicBool::new(false));
+        claim_normal(&claim);
+        let exits = Arc::new(AtomicUsize::new(0));
+        let called = Arc::clone(&exits);
+        arm_collect_watchdog(
+            dir.path().to_path_buf(),
+            "codex".to_string(),
+            Duration::from_millis(50),
+            Duration::from_millis(50),
+            Duration::ZERO,
+            claim,
+            move |code| {
+                assert_eq!(code, 1);
+                called.fetch_add(1, Ordering::SeqCst);
+            },
+        )
+        .unwrap()
+        .join()
+        .unwrap();
+        assert_eq!(exits.load(Ordering::SeqCst), 1);
+        assert!(!dir.path().join("measure.log").exists());
+        assert!(!dir.path().join("measure-collect-state.json").exists());
+    }
+
+    #[test]
+    fn watchdog_claim_prevents_normal_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let claim = Arc::new(AtomicBool::new(false));
+        let watchdog_claim = Arc::clone(&claim);
+        arm_collect_watchdog(
+            dir.path().to_path_buf(),
+            "codex".to_string(),
+            Duration::from_millis(50),
+            Duration::from_secs(5),
+            Duration::ZERO,
+            watchdog_claim,
+            |_| {},
+        )
+        .unwrap()
+        .join()
+        .unwrap();
+        assert!(!claim_run(&claim));
+        let (about_tx, about_rx) = mpsc::channel();
+        let (returned_tx, returned_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = about_tx.send(());
+            claim_normal(&claim);
+            let _ = returned_tx.send(());
+        });
+        about_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert!(matches!(
+            returned_rx.recv_timeout(Duration::from_millis(200)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        let lines = fs::read_to_string(dir.path().join("measure.log")).unwrap();
+        assert_eq!(lines.lines().count(), 1);
+        assert_eq!(
+            CollectState::load(&dir.path().join("measure-collect-state.json")).failures["codex"]
+                .count,
+            1
+        );
+    }
 }

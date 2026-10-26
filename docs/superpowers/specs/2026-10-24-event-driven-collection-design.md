@@ -119,6 +119,19 @@ push/pull），在 `measure.lock` 底下跑，外加第 4 節的 `cort_index_hea
   動都是 60 秒，可覆寫）：現有的 `memory_store::lock_in` 是無期限阻塞的 `flock`，持有 `measure-collect.lock`
   的背景程序若卡在它上面，之後每一次收集都會因第一把鎖忙碌而被跳過。背景等不到記成 `skipped_busy`
   （不算失敗、不加退避）；手動等不到以錯誤碼 `measure_collect_busy` 結束。
+
+  整次期限只在階段之間檢查，網路逾時是包在 future 外的 `tokio::time::timeout`，打斷不了不讓出
+  執行權的 CPU 迴圈：2026-10-26 一次 turso sync pull（套用遠端新底庫）在單一階段吃滿一顆 CPU 約
+  31 分鐘，期間一直占著 `measure-collect.lock`。所以背景批次收集另有一條獨立執行緒的硬性監看：
+  從開啟 store 前的狀態儲存成功之後啟動，一直監看到整支程序結束（正常結束時它隨程序消失）；
+  更早的本機鎖與狀態步驟不在監看範圍。從執行起算的期限加 60 秒仍未結束，就盡力記一筆 `network`
+  失敗（`error` 以 `watchdog:` 開頭）、保留 `push_pending`。啟動後無論正常路徑的最後本機寫入或補救寫入是否卡住，
+  程序都會在期限加 60 秒，再加一段 60 秒寬限內結束；這些寫入卡住時可能記不下失敗。鎖由核心放掉，
+  副本與 watermark 由下一次收集接續。只要 store 已開啟，開啟前已成功將 `push_pending = true`
+  寫入狀態。watchdog 失敗與其他網路失敗一樣，會增加該 harness 的失敗次數，下一次 kick 的退避
+  時間因此加倍。正好在期限邊界完成的批次，包括原本會是 `skipped_busy` 的執行，也可能被記為
+  網路失敗並觸發退避；資料不會遺失，下次收集會重新驗證 watermark。與正常結束以一次性旗標
+  互斥，最後的紀錄最多只由先搶到的一方寫（第二階段結束時可能雙方都沒寫完）。
 - **鎖的順序（所有路徑一致）**：要同時持有多把鎖的路徑，一律依序拿 `measure-collect.lock` →
   `measure.lock` →（`copy-events` 才有的）`legacy-telemetry.lock`，倒序放。背景收集、手動
   `record`、`sync`、`sync --dry-run` 都照這個順序；只拿 `measure.lock` 的路徑（`report`、
