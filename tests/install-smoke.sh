@@ -74,6 +74,11 @@ assert_skill_claimed() {
 inode_of() { stat -c %i "$1" 2>/dev/null || stat -f %i "$1"; }
 
 # ── isolated HOME ────────────────────────────────────────────────
+# Every temp file and HOME this run makes lives under one root, removed on exit: each run used to
+# leave about 44 MB in /tmp, and 2026-10-27 found 424 of them (about 11 GB) on one machine.
+SMOKE_ROOT="$(mktemp -d)"
+export TMPDIR="$SMOKE_ROOT"
+trap 'rm -rf "$SMOKE_ROOT"' EXIT
 TMPHOME="$(mktemp -d)"
 export HOME="$TMPHOME"
 export XDG_DATA_HOME="$HOME/.local/share"
@@ -1188,7 +1193,7 @@ DESC_BEFORE="$(sed -n 3p "$AG_DEST")"
 AG_SRC="$REPO_ROOT/skills/cort/SKILL.md"
 AG_SRC_BACKUP="$(mktemp)"
 cp "$AG_SRC" "$AG_SRC_BACKUP"
-trap 'cp -f "$AG_SRC_BACKUP" "$AG_SRC" 2>/dev/null || true; rm -f "$AG_SRC_BACKUP"' EXIT
+trap 'cp -f "$AG_SRC_BACKUP" "$AG_SRC" 2>/dev/null || true; rm -f "$AG_SRC_BACKUP"; rm -rf "$SMOKE_ROOT"' EXIT
 printf "\nA line appended by the smoke test.\n" >> "$AG_SRC"
 # Same memory problem as shape B above: the 798 redeploy was a full install. Drop it so
 # this bare install redeploys (and logs) instead of declining.
