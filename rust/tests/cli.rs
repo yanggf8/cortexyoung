@@ -628,7 +628,14 @@ fn a_fire_in_a_non_utf8_directory_is_recorded_without_a_project() {
     let cache = temp.path().join("cache");
     fs::create_dir_all(&cache).unwrap();
     let cwd = temp.path().join(std::ffi::OsStr::from_bytes(b"proj-\xff"));
-    fs::create_dir_all(&cwd).unwrap();
+    if let Err(e) = fs::create_dir_all(&cwd) {
+        // APFS refuses names that are not UTF-8 (EILSEQ), so such a directory cannot exist there.
+        if cfg!(target_os = "macos") {
+            println!("SKIP: this filesystem refuses non-UTF-8 names: {e}");
+            return;
+        }
+        panic!("cannot create the non-UTF-8 directory: {e}");
+    }
     let r = run_hook_suggest_payload(
         serde_json::json!({
             "tool_name": "Bash",

@@ -379,7 +379,6 @@ else
   fail "a refused activation moved the link"
 fi
 echo "--- Task 0: bare install on an installed machine hands off to cort_upgrade ---"
-UPGRADER="$REPO_ROOT/rust/target/release/cort_upgrade"
 set +e
 bash "$INSTALL_SH" >/tmp/smoke_defer.log 2>/tmp/smoke_defer.err
 set -e
@@ -445,7 +444,7 @@ assert_pristine_skill "$KM_SKILL" "$REPO_ROOT/skills/ast-grep/SKILL.md" "the red
 # names the flag and installs nothing.
 echo "--- Task 0: upgrade flags are an error on a fresh install ---"
 FLAGS_SAVED_HOME="$HOME"; FLAGS_SAVED_XDG="$XDG_DATA_HOME"
-export HOME="$(mktemp -d)"; export XDG_DATA_HOME="$HOME/.local/share"
+HOME="$(mktemp -d)"; export HOME; export XDG_DATA_HOME="$HOME/.local/share"
 mkdir -p "$HOME/.claude/skills" "$HOME/.local/share"
 for flagset in "--keep-mine" "--defer" "--ack skill_ast_grep" "--ack=skill_ast_grep"; do
   set +e
