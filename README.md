@@ -220,8 +220,9 @@ module paths by suffix — treat its output as candidates. For the precise calle
 Every cort command appends one row to a **central, local** SQLite database at
 `$CORT_CACHE_DIR/usage.db` (default `~/.cache/cortex-ng/usage.db`). Indexing, queries, hooks,
 and usage recording contain no network work; an explicit `cort memory` command can synchronize
-reviewed facts through Turso. The separate Rust `claudecat telemetry sync` command copies structured rows into the shared
-TursoDB for cross-machine analysis; collection and queries do not wait for it.
+reviewed facts through Turso. Cross-machine upload of these rows is `cort measure`'s job alone,
+kicked in the background from cort's own hooks; queries and hooks do not wait for it. ClaudeCat
+collects nothing.
 Schema-v2 rows carry their own hashed `machine_id` and source. Pre-v2 rows retain
 `legacy_unknown` per-row attribution; their database-wide stamp is only a historical hint.
 

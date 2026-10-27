@@ -242,8 +242,9 @@ is claudecat → cort. `cort memory` owns the reviewed claim ledger and its Turs
 the local file-reading store (`cort read`/`recall`) was removed on 2026-10-23. See `docs/memory.md` for
 configuration and `docs/2026-10-18-cross-agent-memory-baseline.md` for the correction.
 
-The local `cort` index stays local, while `claudecat telemetry sync` copies structured usage
-events to the shared TursoDB without putting network work in a hook.
+The local `cort` index stays local. All measurement collection is cort's (user, 2026-10-27):
+`cort measure`, kicked in the background from cort's own hooks, uploads to cort's own database;
+ClaudeCat collects nothing, and its `claudecat telemetry sync` is retired.
 
 **Use the ledger in this repo; do not wait to be asked.** The product is only evidence if its own
 developers lean on it, and on 2026-10-27 an agent kept a next-day plan in its harness-private memory
