@@ -60,7 +60,7 @@ Five shipped commands (plus `status`/`projects`/`delete` utilities):
   (`bare` / `scoped` / `receiver` / `type`)
 - `cort memory <record|resolve|recall|status|sync|configure|import-config|import-legacy>` — reviewed project facts in a shared Turso ledger, owned by cort; see [Project memory](docs/memory.md)
 - `cort usage [days]` — local per-machine usage stats (best-effort; 1–90 days, default 30)
-- `cort measure <configure|record|sync|collect|health|status|report|show|copy-events|import-audit|cron>` — agent measurement in its own Turso database; see [Local usage recording](#local-usage-recording-offline-hook-separate-tursodb-upload)
+- `cort measure <configure|record|collect|verify|health|status|report|show|copy-events|import-audit|cron>` — agent measurement in its own Turso database; see [Local usage recording](#local-usage-recording-offline-hook-separate-tursodb-upload)
 
 `struct`, `context`, `read` and `recall` were removed on 2026-10-23 after zero invocations in 30 days
 on both machines; for those jobs use `ast-grep run`, `rg`, or open the file. `cort memory recall` is a
@@ -220,8 +220,9 @@ module paths by suffix — treat its output as candidates. For the precise calle
 Every cort command appends one row to a **central, local** SQLite database at
 `$CORT_CACHE_DIR/usage.db` (default `~/.cache/cortex-ng/usage.db`). Indexing, queries, hooks,
 and usage recording contain no network work; an explicit `cort memory` command can synchronize
-reviewed facts through Turso. The separate Rust `claudecat telemetry sync` command copies structured rows into the shared
-TursoDB for cross-machine analysis; collection and queries do not wait for it.
+reviewed facts through Turso. Cross-machine upload of these rows is `cort measure`'s job alone,
+kicked in the background from cort's own hooks; queries and hooks do not wait for it. ClaudeCat
+collects nothing.
 Schema-v2 rows carry their own hashed `machine_id` and source. Pre-v2 rows retain
 `legacy_unknown` per-row attribution; their database-wide stamp is only a historical hint.
 
@@ -269,33 +270,32 @@ become vanity. The report itself is written to the log after it is rendered, so 
 never appears in its own report.
 
 
-**Uploading these rows (`cort measure collect`, `cort measure sync`, and the event step of manual `cort measure record`).**
+**Uploading these rows (`cort measure collect` and the event step of manual `cort measure record`).**
 The hooks' `kick` is the only automatic collection trigger; the installer and upgrader remove cort's
 legacy cron entry. `cort measure cron` remains available to install or remove it manually. Background
 collection uploads batches of local `command_log` and `index_health_log` rows and writes its result to
-`measure.log`. A dead network leaves rows local for a later attempt. Both logs keep 90 days and are
-pruned when a new command is recorded, before asynchronous collection. If the machine is idle for
-more than 90 days, the final uncollected events from less than the idle interval before idling
-(`CORT_COLLECT_IDLE_SECS`, 15 minutes by default) are pruned on the next use. Events can also
-be lost if collection does not run for 90 days in a row (for example, no hook fires), or uploads
-remain refused pending a dry run for that long. Uploaded
+`measure.log`. A dead network leaves rows local for a later attempt. Both logs keep uploaded rows 90 days
+and rows not yet uploaded 180 days, pruned when a new command is recorded, before asynchronous
+collection. A row still not uploaded after 180 days (collection never ran, or uploads stayed refused
+pending a verify) is deleted and counted: `cort measure status` reports `pruned_unuploaded_rows`
+and the next collection writes the count to `measure.log`. An upload pending for more than 7 days
+shows as `upload_stalled_days` in status and as a warning line in `measure.log`. Uploaded
 events are kept remotely for good. The `command_log` event ids are claudecat's, byte for byte (alphabetical
 payload keys, rowid 0 in the hash; `rust/tests/telemetry.rs` pins them against values claudecat
 itself produced), so history it already uploaded is not uploaded twice. Because a wrong id would
 re-upload that history and a remote row cannot be taken back, a machine with no event watermark yet
-uploads nothing until `cort measure sync --dry-run` has passed for it: the dry run compares the ids
-computed here with the stored ones for the same machine and row, never pushes, and fails on any
+uploads nothing until `cort measure verify` has passed for it: verify compares the ids
+computed here with the stored ones for the same machine and row, uploads nothing, and fails on any
 mismatch or on zero overlap. Until then manual `record` still records compactions and reports
 `events.status: "refused"`; background collection writes its result to `measure.log`. A changed
-`command_log` column set voids the dry run.
+`command_log` column set voids the verification.
 
 **Copying the old history (`cort measure copy-events`).** A one-time migration of what claudecat
 already uploaded: it copies `telemetry_events` and `telemetry_project_aliases` from the
 `harnessuse` database (the one `cort memory` is configured for) into the measurement database,
-every column unchanged, `INSERT OR IGNORE`, so it is safe to re-run. The source is a separate
-replica file (`legacy-telemetry.db`, its own lock), pulled and read only: nothing is pushed to or
-deleted from `harnessuse`, and `memory.db` is not opened. The destination is pushed after each
-page of 2,000 rows, so a failure leaves a state the next run resumes from. It prints the row counts
+every column unchanged, `INSERT OR IGNORE`, so it is safe to re-run. The source is read only,
+directly from `harnessuse`: nothing is written to or deleted from it. The destination is written
+page by page (2,000 rows), so a failure leaves a state the next run resumes from. It prints the row counts
 per `(source, machine_id)` on both sides. It refuses to run when the memory and measure configs name
 the same database, never overwrites a destination row, and reports same-key rows whose columns differ
 as `conflicts` (`status: copied_with_conflicts`, exit 0) instead of hiding them behind equal counts.
@@ -306,10 +306,10 @@ health columns become a `cort_index_health` event (`machine_id` `imported:<host>
 and payload `origin` `cort-audit-md`, id keyed on the row's content), and its usage columns a row of
 `imported_usage` keyed `(day, host)`. `--project-repo` is required: that directory's git origin
 names the project. Every file is parsed before anything is written, a cell the audit could not read
-(`?`, `-`) is stored as null rather than 0, and the import syncs (push, then pull) before deciding
-what already exists, so re-running is safe and repairs a failed push. A stored usage row is never
+(`?`, `-`) is stored as null rather than 0, and each usage row is inserted directly; only a key
+collision reads that one stored row back, so re-running is safe. A stored usage row is never
 overwritten; a differing one is reported under `usage_conflicts`. Run it on one machine: two
-machines importing at once would write the same keys into two replicas.
+machines importing at once would race on the same keys.
 
 ## Install
 

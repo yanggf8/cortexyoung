@@ -3,9 +3,12 @@
 //! store receives counts and nothing else.
 
 use crate::data_dir::{data_dir, write_atomic};
+use crate::measure_progress::{self, Progress};
 use crate::measure_store::{CompactionRow, MeasureStore};
 use crate::memory_store::project_from_git_origin;
-use crate::telemetry::{upload_events, upload_health_events, TelemetryEvent, UploadInputs};
+use crate::telemetry::{
+    upload_events_with_progress, upload_health_events_with_progress, TelemetryEvent, UploadInputs,
+};
 use crate::transcript::{compactions, parse_transcript_bytes, Compaction, Step, WindowDetails};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
@@ -54,6 +57,7 @@ pub struct ScanSummary {
     pub events: Option<Value>,
     /// Health upload for this run (`None` for the existing manual record command).
     pub health: Option<Value>,
+    pub progress: Option<String>,
 }
 
 impl ScanSummary {
@@ -70,6 +74,9 @@ impl ScanSummary {
         }
         if let Some(health) = &self.health {
             v["health"] = health.clone();
+        }
+        if let Some(progress) = &self.progress {
+            v["progress"] = json!(progress);
         }
         v
     }
@@ -168,7 +175,12 @@ pub fn scan_transcripts(
     projects_dir: &Path,
     marks: &mut Watermarks,
     machine_id: &str,
+    progress: &mut Progress,
+    progress_path: &Path,
 ) -> Result<ScanSummary, String> {
+    if !progress.compactions_complete {
+        return Ok(ScanSummary::default());
+    }
     if matches!(fs::metadata(projects_dir), Err(e) if e.kind() == std::io::ErrorKind::NotFound) {
         return Ok(ScanSummary::default());
     }
@@ -198,8 +210,8 @@ pub fn scan_transcripts(
         summary.skipped_lines += parsed.skipped_lines;
         summary.unknown_type_lines += parsed.unknown_type_lines;
         for c in compactions(&parsed.steps) {
-            let owner = store.compaction_session(machine_id, &c.boundary.uuid)?;
-            if matches!(&owner, Some(s) if *s != c.boundary.session_id) {
+            let owner = progress.compactions.get(&c.boundary.uuid);
+            if matches!(owner, Some(s) if *s != c.boundary.session_id) {
                 continue;
             }
             let project_id = c.boundary.cwd.as_ref().and_then(|cwd| {
@@ -221,6 +233,10 @@ pub fn scan_transcripts(
                 post: c.post.counts(),
                 post_complete: c.post_complete,
             })?;
+            progress
+                .compactions
+                .insert(c.boundary.uuid.clone(), c.boundary.session_id.clone());
+            progress.save(progress_path)?;
             summary.compactions += 1;
         }
         next.insert(key, stamp);
@@ -310,13 +326,15 @@ pub struct RecordInputs {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecordOutcome {
-    Pushed,
-    SavedLocallyPushFailed(String),
+    Uploaded,
+    UploadFailed {
+        kind: crate::collect::ErrorKind,
+        error: String,
+    },
 }
 
-/// Local writes first (host mapping, compaction rows), then the watermarks, then the network.
-/// A failed local write returns before the watermarks move, so the next run rescans; a failed
-/// push never loses data, because the rows are already in the local replica.
+/// Store writes precede local progress. A failed write leaves the old progress in place, so the
+/// next run resends or rescans and the store's idempotent inserts absorb duplicates.
 pub fn record(store: &mut dyn MeasureStore, input: &RecordInputs) -> Result<RecordOutcome, String> {
     Ok(record_with_scan(store, input)?.1)
 }
@@ -330,48 +348,78 @@ pub fn record_with_scan(
     record_with_scan_until(store, input, || Ok(()))
 }
 
-/// [`record_with_scan`] with a checkpoint between the uploads and the push.
+/// [`record_with_scan`] with a checkpoint after the uploads.
 ///
-/// `before_push` runs once the local writes and both uploads are done. An error there returns
-/// immediately, so the push is skipped and no `RecordOutcome` is invented for a push
-/// that was never attempted; the collection worker uses it to stop a run that has spent its
+/// `before_finish` runs once the local writes and both uploads are done. An error there returns
+/// immediately; the collection worker uses it to stop a run that has spent its
 /// wall-clock budget. The scan summary does not survive that error -- the caller only needs the
-/// reason -- and nothing is lost by that: the uploads' progress lives in the replica's
-/// watermarks, which the next run revalidates, while the local state mirrors are re-derived from
-/// them.
+/// reason -- and nothing is lost by that: upload progress is saved locally after each remote page.
 pub fn record_with_scan_until(
     store: &mut dyn MeasureStore,
     input: &RecordInputs,
-    before_push: impl FnOnce() -> Result<(), String>,
+    before_finish: impl FnOnce() -> Result<(), String>,
 ) -> Result<(ScanSummary, RecordOutcome), String> {
     store.upsert_machine_host(&input.machine_id, &input.host, input.now_ms)?;
+    let progress_path = input.marks_path.with_file_name("measure-progress.json");
+    let usage_db = input
+        .events
+        .as_ref()
+        .map(|e| e.usage_db.as_path())
+        .or(input.health.as_deref());
+    let (mut progress, progress_label) =
+        measure_progress::open(store, &progress_path, &input.machine_id, usage_db)?;
     let mut marks = Watermarks::load(&input.marks_path);
-    let mut scan = scan_transcripts(store, &input.projects_dir, &mut marks, &input.machine_id)?;
-    marks.save(&input.marks_path)?;
+    let mut scan = scan_transcripts(
+        store,
+        &input.projects_dir,
+        &mut marks,
+        &input.machine_id,
+        &mut progress,
+        &progress_path,
+    )?;
+    scan.progress = Some(progress_label.into());
+    if progress.compactions_complete {
+        progress.save(&progress_path)?;
+        marks.save(&input.marks_path)?;
+    }
     // Events are independent of compactions: a refusal or failure here is reported beside the scan
     // and never fails the record (see `upload_events`).
     if let Some(events) = &input.events {
-        scan.events = Some(upload_events(store, events).to_json());
+        scan.events = Some(
+            upload_events_with_progress(store, events, &mut progress, &progress_path).to_json(),
+        );
     }
     if let Some(usage_db) = &input.health {
-        scan.health = Some(upload_health_events(store, usage_db, &input.machine_id).to_json());
+        scan.health = Some(
+            upload_health_events_with_progress(
+                store,
+                usage_db,
+                &input.machine_id,
+                &mut progress,
+                &progress_path,
+            )
+            .to_json(),
+        );
     }
-    before_push()?;
-    // Push only. A record needs nothing the other machines wrote: its dedup, watermarks and
-    // session lookups are all this machine's own rows, already in the replica. Pulling here
-    // re-downloaded the shared database on every run and spent the Turso org's 3 GB monthly
-    // embedded-sync quota by 2026-10-27, which blocks reads on every database in the org;
-    // `sync` and `report`, run by a person, still pull.
-    if let Err(e) = store.push() {
-        return Ok((scan, RecordOutcome::SavedLocallyPushFailed(e)));
+    let failure = [&scan.events, &scan.health].iter().find_map(|report| {
+        report
+            .as_ref()
+            .filter(|r| r["status"] == "failed")
+            .map(|r| r["error"].as_str().unwrap_or("upload failed").to_string())
+    });
+    if failure.is_none() {
+        before_finish()?;
     }
-    Ok((scan, RecordOutcome::Pushed))
-}
-
-/// Push then pull. `Ok` means the local replica is as current as the remote was a moment ago.
-pub fn sync(store: &mut dyn MeasureStore) -> Result<(), String> {
-    store.push().map_err(|e| format!("push failed: {e}"))?;
-    store.pull().map_err(|e| format!("pull failed: {e}"))
+    Ok((
+        scan,
+        match failure {
+            Some(error) => RecordOutcome::UploadFailed {
+                kind: crate::collect::classify_error(&error),
+                error,
+            },
+            None => RecordOutcome::Uploaded,
+        },
+    ))
 }
 
 /// Events per page when copying between stores.
@@ -410,22 +458,20 @@ fn differing_columns(a: &TelemetryEvent, b: &TelemetryEvent) -> Vec<&'static str
     out
 }
 
-/// Copy every event and alias of `from` into `to`, unchanged, `INSERT OR IGNORE`, and push `to`
-/// after each page so a failure leaves a resumable state. `from` is only pulled and read: it is
-/// never pushed to or written. A row whose key `to` already holds is never overwritten; if its
+/// Copy every event and alias of `from` into `to`, unchanged, `INSERT OR IGNORE`.
+/// `from` is only read. A row whose key `to` already holds is never overwritten; if its
 /// columns differ it is reported as a conflict.
 pub fn copy_events(
     from: &mut dyn MeasureStore,
     to: &mut dyn MeasureStore,
 ) -> Result<CopyReport, String> {
-    from.pull()
-        .map_err(|e| format!("source pull failed: {e}"))?;
-    to.pull().map_err(|e| format!("pull failed: {e}"))?;
     let mut conflicts = 0usize;
     let mut examples = Vec::new();
     let mut after: Option<(String, String)> = None;
     loop {
-        let page = from.events_page(after.clone(), COPY_PAGE)?;
+        let page = from
+            .events_page(after.clone(), COPY_PAGE)
+            .map_err(|e| format!("remote read: {e}"))?;
         let Some(last) = page.last() else { break };
         let last = (last.source.clone(), last.event_id.clone());
         after = Some(last.clone());
@@ -461,18 +507,17 @@ pub fn copy_events(
                 ));
             }
         }
-        to.push().map_err(|e| format!("push failed: {e}"))?;
     }
-    let aliases = from.aliases()?;
+    let aliases = from.aliases().map_err(|e| format!("remote read: {e}"))?;
     to.upsert_aliases(&aliases)?;
-    to.push().map_err(|e| format!("push failed: {e}"))?;
     let dest: HashMap<(String, String), usize> = to
         .event_counts()?
         .into_iter()
         .map(|(s, m, n)| ((s, m), n))
         .collect();
     let groups = from
-        .event_counts()?
+        .event_counts()
+        .map_err(|e| format!("remote read: {e}"))?
         .into_iter()
         .map(|(s, m, n)| {
             let d = dest.get(&(s.clone(), m.clone())).copied().unwrap_or(0);
@@ -484,24 +529,6 @@ pub fn copy_events(
         conflicts,
         conflict_examples: examples,
     })
-}
-
-pub fn last_sync_path() -> PathBuf {
-    data_dir().join("measure-last-sync")
-}
-
-pub fn write_last_sync(ms: i64) -> Result<(), String> {
-    let path = last_sync_path();
-    write_atomic(&path, &ms.to_string())
-        .map_err(|e| format!("cannot write {}: {e}", path.display()))
-}
-
-pub fn read_last_sync() -> Option<i64> {
-    fs::read_to_string(last_sync_path())
-        .ok()?
-        .trim()
-        .parse()
-        .ok()
 }
 
 /// First non-empty of the kernel hostname, `/etc/hostname`, `$HOSTNAME`; else `unknown`.
@@ -566,8 +593,6 @@ pub struct ReportInputs {
     pub days: i64,
     pub compaction_days: i64,
     pub now_ms: i64,
-    /// `Some(last sync text)` when this report is read from the local replica after a failed sync.
-    pub offline: Option<String>,
     /// Local collection snapshot supplied by the CLI; store-only callers may leave it absent.
     pub collection: Option<Value>,
 }
@@ -646,8 +671,7 @@ fn host_section(host: &str, machine_ids: &[String], rows: &[&CompactionRow]) -> 
     })
 }
 
-/// Reads the store as it stands; the caller decides whether to sync first and says so in
-/// `offline`. Only the compaction section exists so far.
+/// Reads the remote store as it stands. Only the compaction section exists so far.
 pub fn report(store: &mut dyn MeasureStore, input: &ReportInputs) -> Result<Value, String> {
     let since = input.now_ms - input.compaction_days * DAY_MS;
     let rows = store.compactions_since(since)?;
@@ -726,7 +750,6 @@ pub fn report(store: &mut dyn MeasureStore, input: &ReportInputs) -> Result<Valu
         })
         .collect();
     Ok(json!({
-        "offline": input.offline,
         "collection": input.collection,
         "days": input.days,
         "compactions": {
@@ -800,11 +823,11 @@ pub fn render_collection_status(value: &Value) -> String {
         .unwrap_or_else(|| "none".into());
     let batch_line = broken("batch", batch).unwrap_or_else(|| {
         format!(
-            "batch pending={} last_run={} last_ok={} push_pending={} refused={} failures={failures}{}\n",
+            "batch pending={} last_run={} last_ok={} upload_pending={} refused={} failures={failures}{}\n",
             field(batch, "pending"),
             when(batch, "last_run_ms"),
             when(batch, "last_ok_ms"),
-            batch["push_pending"].as_bool().unwrap_or(false),
+            batch["upload_pending"].as_bool().unwrap_or(false),
             batch["refused"].as_bool().unwrap_or(false),
             why(batch),
         )
@@ -819,6 +842,30 @@ pub fn render_collection_status(value: &Value) -> String {
         )
     });
     batch_line + &health_line
+}
+
+/// The `status` lean text: the collection lines, then local progress and the remote index check.
+pub fn render_status(value: &Value) -> String {
+    let mut out = render_collection_status(value);
+    out.push_str(&format!(
+        "progress={}\n",
+        value["progress"].as_str().unwrap_or("unknown")
+    ));
+    match value["remote"]["missing_indexes"].as_array() {
+        Some(missing) => {
+            let names = missing
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(",");
+            out.push_str(&format!("remote missing_indexes={names}\n"));
+        }
+        None => out.push_str(&format!(
+            "remote error={}\n",
+            value["remote"]["error"].as_str().unwrap_or("unknown")
+        )),
+    }
+    out
 }
 
 struct Paint(bool);
@@ -852,10 +899,6 @@ pub fn render_report(v: &Value, color: bool) -> String {
             out.push_str("collection:\n");
             out.push_str(&render_collection_status(collection));
         }
-        out.push('\n');
-    }
-    if let Some(when) = v["offline"].as_str() {
-        out.push_str(&p.yellow(&format!("離線：讀本機副本，最後同步於 {when}")));
         out.push('\n');
     }
     let c = &v["compactions"];

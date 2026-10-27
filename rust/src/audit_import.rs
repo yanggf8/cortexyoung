@@ -332,25 +332,18 @@ pub fn audit_health_event(row: &AuditRow, project_id: &str) -> TelemetryEvent {
     }
 }
 
-/// Write both halves of `rows` into `store` and report what happened. The caller pushes: like
-/// every other write command, the replica is written first, so a dead network loses nothing.
+/// Write both halves of `rows` into `store` and report what happened.
 ///
 /// Health rows are `INSERT OR IGNORE` (their id is a content key); a usage row whose `(day, host)`
 /// already exists is never replaced, and a differing one is reported as a conflict instead.
-/// "Already exists" is asked of the replica, so it syncs first, push then pull like every other
-/// sync: the push sends what an earlier run wrote but could not push (a re-run is how that is
-/// repaired), and the pull lets the replica see rows another import already pushed instead of
-/// inserting them again.
+/// Each usage row is inserted directly; only a key collision reads that one stored row back.
 ///
-/// Run it on one machine. Two machines importing the same rows at the same moment both see them
-/// absent and both insert; the second push then collides on the remote's keys, and nothing here
-/// reconciles two diverged replicas. The import is a one-time retirement step on one machine.
+/// Run it on one machine. The import is a one-time retirement step.
 pub fn import_audit(
     store: &mut dyn MeasureStore,
     rows: &[AuditRow],
     project_id: &str,
 ) -> Result<Value, String> {
-    crate::measure::sync(store)?;
     let events: Vec<TelemetryEvent> = rows
         .iter()
         .map(|row| audit_health_event(row, project_id))

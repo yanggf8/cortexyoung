@@ -1,3 +1,4 @@
+use cort::measure_progress::{self, Load};
 use cort::measure_store::{MeasureStore, SqliteStore};
 use cort::telemetry::{
     health_event_id, health_events, upload_events, upload_health_events, EventsReport,
@@ -68,7 +69,6 @@ fn uploaded(
             scanned,
             inserted,
             aliases: 0,
-            already_uploaded: 0,
             full_range,
             reason: reason.map(str::to_string),
             watermark: Some(watermark),
@@ -105,7 +105,12 @@ fn uploads_without_dry_run_marker() {
     put(&path, DAY, "ok");
     let mut s = store(&dir);
     uploaded(
-        upload_health_events(&mut s, &path, MACHINE),
+        upload_health_events(
+            &mut s,
+            &path,
+            MACHINE,
+            &path.with_file_name("measure-progress.json"),
+        ),
         1,
         1,
         true,
@@ -114,10 +119,14 @@ fn uploads_without_dry_run_marker() {
     );
     assert_eq!(health_count(&mut s), 1);
     assert_eq!(
-        s.event_watermark(MACHINE, SOURCE_HEALTH).unwrap(),
+        match measure_progress::load(&path.with_file_name("measure-progress.json")) {
+            Load::Loaded(p) => p
+                .watermark(MACHINE, SOURCE_HEALTH)
+                .map(|w| (w.rowid, w.fingerprint.clone())),
+            _ => None,
+        },
         Some((1, format!("{DAY}|repo")))
     );
-    assert_eq!(s.push_calls(), 0);
 }
 
 #[test]
@@ -155,7 +164,12 @@ fn uploads_while_command_source_refused() {
         EventsReport::Refused(_)
     ));
     uploaded(
-        upload_health_events(&mut s, &path, MACHINE),
+        upload_health_events(
+            &mut s,
+            &path,
+            MACHINE,
+            &path.with_file_name("measure-progress.json"),
+        ),
         1,
         1,
         true,
@@ -171,15 +185,34 @@ fn watermark_skips_uploaded_health_rows() {
     put(&path, DAY, "ok");
     let mut s = store(&dir);
     uploaded(
-        upload_health_events(&mut s, &path, MACHINE),
+        upload_health_events(
+            &mut s,
+            &path,
+            MACHINE,
+            &path.with_file_name("measure-progress.json"),
+        ),
         1,
         1,
         true,
         None,
         1,
     );
+    let floor: String = rusqlite::Connection::open(&path)
+        .unwrap()
+        .query_row(
+            "SELECT value FROM _usage_meta WHERE key='uploaded_health_rowid'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(floor, "1");
     uploaded(
-        upload_health_events(&mut s, &path, MACHINE),
+        upload_health_events(
+            &mut s,
+            &path,
+            MACHINE,
+            &path.with_file_name("measure-progress.json"),
+        ),
         0,
         0,
         false,
@@ -188,7 +221,12 @@ fn watermark_skips_uploaded_health_rows() {
     );
     put(&path, DAY + 1, "bad");
     uploaded(
-        upload_health_events(&mut s, &path, MACHINE),
+        upload_health_events(
+            &mut s,
+            &path,
+            MACHINE,
+            &path.with_file_name("measure-progress.json"),
+        ),
         1,
         1,
         false,
@@ -206,7 +244,12 @@ fn reobservation_after_replacement_is_one_event() {
     put(&old, DAY + 1, "ok");
     let mut s = store(&dir);
     uploaded(
-        upload_health_events(&mut s, &old, MACHINE),
+        upload_health_events(
+            &mut s,
+            &old,
+            MACHINE,
+            &old.with_file_name("measure-progress.json"),
+        ),
         2,
         1,
         true,
@@ -215,7 +258,12 @@ fn reobservation_after_replacement_is_one_event() {
     );
     put(&new, DAY + 2, "ok");
     uploaded(
-        upload_health_events(&mut s, &new, MACHINE),
+        upload_health_events(
+            &mut s,
+            &new,
+            MACHINE,
+            &new.with_file_name("measure-progress.json"),
+        ),
         1,
         0,
         true,
@@ -235,7 +283,12 @@ fn replacement_below_old_watermark_still_uploads() {
     }
     let mut s = store(&dir);
     uploaded(
-        upload_health_events(&mut s, &old, MACHINE),
+        upload_health_events(
+            &mut s,
+            &old,
+            MACHINE,
+            &old.with_file_name("measure-progress.json"),
+        ),
         5,
         5,
         true,
@@ -246,7 +299,12 @@ fn replacement_below_old_watermark_still_uploads() {
         put(&new, DAY + 100 + i, &format!("new{i}"));
     }
     uploaded(
-        upload_health_events(&mut s, &new, MACHINE),
+        upload_health_events(
+            &mut s,
+            &new,
+            MACHINE,
+            &new.with_file_name("measure-progress.json"),
+        ),
         3,
         3,
         true,
@@ -264,7 +322,12 @@ fn changed_row_at_watermark_reads_full_range() {
     put(&old, DAY, "old");
     let mut s = store(&dir);
     uploaded(
-        upload_health_events(&mut s, &old, MACHINE),
+        upload_health_events(
+            &mut s,
+            &old,
+            MACHINE,
+            &old.with_file_name("measure-progress.json"),
+        ),
         1,
         1,
         true,
@@ -273,7 +336,12 @@ fn changed_row_at_watermark_reads_full_range() {
     );
     put(&new, DAY + 100, "new");
     uploaded(
-        upload_health_events(&mut s, &new, MACHINE),
+        upload_health_events(
+            &mut s,
+            &new,
+            MACHINE,
+            &new.with_file_name("measure-progress.json"),
+        ),
         1,
         1,
         true,
@@ -305,7 +373,12 @@ fn null_root_is_the_empty_string() {
     );
     let mut s = store(&dir);
     uploaded(
-        upload_health_events(&mut s, &old, MACHINE),
+        upload_health_events(
+            &mut s,
+            &old,
+            MACHINE,
+            &old.with_file_name("measure-progress.json"),
+        ),
         1,
         1,
         true,
@@ -313,12 +386,22 @@ fn null_root_is_the_empty_string() {
         1,
     );
     assert_eq!(
-        s.event_watermark(MACHINE, SOURCE_HEALTH).unwrap(),
+        match measure_progress::load(&old.with_file_name("measure-progress.json")) {
+            Load::Loaded(p) => p
+                .watermark(MACHINE, SOURCE_HEALTH)
+                .map(|w| (w.rowid, w.fingerprint.clone())),
+            _ => None,
+        },
         Some((1, format!("{DAY}|")))
     );
     // A rerun with the row unchanged verifies the stored `ts|` fingerprint and reads nothing.
     uploaded(
-        upload_health_events(&mut s, &old, MACHINE),
+        upload_health_events(
+            &mut s,
+            &old,
+            MACHINE,
+            &old.with_file_name("measure-progress.json"),
+        ),
         0,
         0,
         false,
@@ -335,7 +418,12 @@ fn null_root_is_the_empty_string() {
     )
     .unwrap();
     uploaded(
-        upload_health_events(&mut s, &new, MACHINE),
+        upload_health_events(
+            &mut s,
+            &new,
+            MACHINE,
+            &new.with_file_name("measure-progress.json"),
+        ),
         1,
         0,
         true,

@@ -60,7 +60,7 @@ fn usage_value() -> Value {
             "impact": "cort impact --symbol <name> [--depth <n>] [--coverage] [-f json|lean]",
             "usage": "cort usage [days] [-f json|lean]",
             "memory": "cort memory <configure|import-config|record|resolve|recall|status|sync|import-legacy|notes> [options]",
-            "measure": "cort measure <configure|show|record|sync|collect|health|status|copy-events|import-audit|cron|report> [options]  (collect: scan and upload the batch; --background appends at most one result to measure.log (none when skipped_busy) without stdout; health: observe recently used indexes and write local index_health_log, reading indexes only, with no network; --background appends the result to measure.log without stdout; status: read local collection state, -f json|lean; cron: manual install or removal of the legacy entry, no longer installed automatically; hook kick is the only automatic collection trigger; copy-events: one-time, re-runnable, read-only copy of claudecat's uploaded events from harnessuse, never overwrites, reports same-key rows whose columns differ as conflicts; import-audit: one-time, re-runnable import of CORT-AUDIT.md's health and usage columns, never overwrites, run on one machine only; sync --dry-run compares event ids and never pushes; command_log and index_health_log keep 90 days, pruned when a new command is recorded before asynchronous collection; if the machine is idle for more than 90 days, the final uncollected events from less than the idle interval before idling (CORT_COLLECT_IDLE_SECS, 15 minutes by default) are pruned on the next use; events can also be lost if collection does not run for 90 days in a row or uploads remain refused pending a dry run for that long)",
+            "measure": "cort measure <configure|show|record|collect|verify|health|status|copy-events|import-audit|cron|report> [options]  (collect: scan and upload the batch; --background appends at most one result to measure.log (none when skipped_busy) without stdout; health: observe recently used indexes and write local index_health_log, reading indexes only, with no network; --background appends the result to measure.log without stdout; status: read local collection state, -f json|lean; cron: manual install or removal of the legacy entry, no longer installed automatically; hook kick is the only automatic collection trigger; copy-events: one-time, re-runnable, read-only copy of claudecat's uploaded events from harnessuse, never overwrites, reports same-key rows whose columns differ as conflicts; import-audit: one-time, re-runnable import of CORT-AUDIT.md's health and usage columns, never overwrites, run on one machine only; verify compares event ids and uploads nothing; command_log and index_health_log keep uploaded rows 90 days and rows not yet uploaded 180 days, pruned when a new command is recorded; rows still not uploaded after 180 days are deleted and counted in measure status (pruned_unuploaded_rows) and measure.log)",
             "hook-suggest": "cort hook-suggest  (PreToolUse hook: records one fire row and kicks collection; never speaks; not a verb to type)",
             "hook-refresh": "cort hook-refresh  (PostToolUse hook: brings this project's index up to the tree after an edit; silent, never creates an index; not a verb to type)",
             "hook-recall": "cort hook-recall --harness <h>  (SessionStart hook: reads the existing local memory replica; not a verb to type)",
@@ -2162,26 +2162,6 @@ struct MeasureArgs {
     action: MeasureAction,
 }
 
-/// Retention boundary and the first-upload gate, shown by `cort measure sync --help`.
-const SYNC_HELP: &str = "Upload usage events (command_log rows and cost reports) to the measurement database, \
-then push and pull.
-
-Retention boundary: command_log and index_health_log keep 90 days, pruned when a new command is \
-recorded, before asynchronous collection. The hook's kick is the only automatic collection trigger \
-(`cort measure collect`, `record` and `sync` also collect when run by hand); collection writes new \
-events into the local replica first and pushes afterwards, so a dead network loses nothing. Events \
-are lost only if collection does not run for 90 days in a row, or uploads stay refused that long \
-because no dry run has passed for this machine (background collection writes the refusal to \
-measure.log and `cort measure status` shows it); and if the machine is idle for more than 90 days, \
-the final uncollected events from less than the idle interval before idling \
-(CORT_COLLECT_IDLE_SECS, 15 minutes by default) are pruned on the next use. Uploaded events are \
-kept remotely for good.
-
-First upload: `cort measure record` and `cort measure sync` refuse to upload events for a machine \
-that has no event watermark yet, unless `cort measure sync --dry-run` has passed for it. The dry \
-run compares the ids computed here with the ids already stored for the same machine and row, never \
-pushes, and fails on any mismatch or when no row overlaps. Re-run it after command_log's columns change.";
-
 #[derive(Subcommand, Debug)]
 enum MeasureAction {
     Configure {
@@ -2192,12 +2172,12 @@ enum MeasureAction {
     },
     /// Local detail for one transcript (session id) or one compaction (boundary uuid).
     Show { id: String },
-    /// Read local collection state without opening the measurement store.
+    /// Read local collection state and check remote indexes.
     Status {
         #[arg(short = 'f', long = "format", default_value = "json", value_parser = ["json", "lean"])]
         format: String,
     },
-    /// Scan local transcripts into the store, then push (never pull: `sync` pulls).
+    /// Scan local transcripts and upload them to the measurement store.
     Record,
     /// Scan local transcripts and upload batch events; a kicked child appends at most one line.
     Collect {
@@ -2210,22 +2190,16 @@ enum MeasureAction {
         #[arg(long)]
         background: bool,
     },
-    /// Upload usage events (and push/pull); `--dry-run` only compares ids and never pushes.
-    #[command(long_about = SYNC_HELP)]
-    Sync {
-        /// Compare local event ids with the remote ones without uploading. A passing run is what
-        /// allows the first real upload for this machine.
-        #[arg(long)]
-        dry_run: bool,
-    },
+    /// Compare local and remote event ids; a passing run permits this machine's first upload.
+    Verify,
     /// Copy claudecat's already-uploaded events and aliases from the `harnessuse` database (the
     /// `cort memory` one) into the measurement database. One-time, re-runnable, and read-only on
-    /// the source: nothing is pushed to or deleted from it. Refuses when both configs name one database.
+    /// the source: nothing is written to or deleted from it. Refuses when both configs name one database.
     CopyEvents,
     /// Import claudecat's retired `CORT-AUDIT.md`: the health columns as `cort_index_health`
     /// events, the usage columns into `imported_usage`. One-time and re-runnable; a stored row is
     /// never overwritten, a differing one is reported as a conflict. Run it on one machine only:
-    /// two machines importing at once would insert the same keys into two replicas.
+    /// two machines importing at once would race on the same remote keys.
     ImportAudit {
         /// The audit files, all parsed before anything is written.
         #[arg(required = true)]
@@ -2289,8 +2263,23 @@ fn manual_error(error: cort::collect::ManualError, ordinary_code: &'static str) 
     CortError::new(code, json!({"message":error.message()}))
 }
 
+/// A store failure from a human-run measure command. A remote one is named by its kind only;
+/// anything the kind cannot place is not called a remote outage, and keeps its message.
+fn measure_remote_error(message: String, local: Option<Value>) -> CortError {
+    let kind = cort::measure_store::remote_error_kind(&message);
+    let (code, mut detail) = if kind == "other" {
+        ("measure_error", json!({"message": message}))
+    } else {
+        ("measure_remote_unavailable", json!({"kind": kind}))
+    };
+    if let Some(local) = local {
+        detail["local"] = local;
+    }
+    CortError::new(code, detail)
+}
+
 /// `code` is the one each command reports for an unconfigured store, checked before any lock:
-/// `measure_dry_run_failed` for `sync --dry-run`, `measure_not_configured` for `status`,
+/// `measure_verify_failed` for `verify`, `measure_not_configured` for `status`,
 /// `measure_error` everywhere else.
 fn require_measure_config(code: &'static str) -> Result<(), CortError> {
     if cort::measure_store::is_configured() {
@@ -2352,12 +2341,31 @@ fn cmd_measure(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, CortErr
                     json!({"message":"usage.db path unavailable"}),
                 )
             })?;
-            let value = cort::collect::collection_status(&paths);
+            let mut value = cort::collect::collection_status(&paths);
+            value["progress"] = json!(match cort::measure_progress::load(
+                &paths.data_dir.join("measure-progress.json")
+            ) {
+                cort::measure_progress::Load::Loaded(_) => "loaded",
+                cort::measure_progress::Load::Missing => "missing",
+                cort::measure_progress::Load::Corrupt => "corrupt",
+            });
+            match cort::measure_store::read_measure_store(|store| store.index_names()) {
+                Ok(names) => {
+                    value["remote"] = json!({
+                        "missing_indexes": cort::measure_store::missing_indexes(&names)
+                    })
+                }
+                Err(message) => {
+                    value["remote"] =
+                        json!({"error": cort::measure_store::remote_error_kind(&message)});
+                    return Err(measure_remote_error(message, Some(value)));
+                }
+            }
             if format == "lean" {
                 return Ok(Emit {
                     render_command: Some("internal-shim-lean"),
                     format: Format::Json,
-                    payload: json!({"lean": cort::measure::render_collection_status(&value)}),
+                    payload: json!({"lean": cort::measure::render_status(&value)}),
                 });
             }
             value
@@ -2433,9 +2441,15 @@ fn cmd_measure(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, CortErr
                 &cfg,
                 cort::collect::ManualMode::Write,
                 &mut |store| {
-                    let (scan, outcome) = cort::measure::record_with_scan(store, &input)
-                        .map_err(|e| (e, cort::collect::ErrorKind::Storage))?;
-                    let failure = cort::collect::classify_record(&scan, &outcome).0;
+                    let (scan, outcome) =
+                        cort::measure::record_with_scan(store, &input).map_err(|e| {
+                            let kind = cort::collect::classify_error(&e);
+                            (e, kind)
+                        })?;
+                    let failure = match &outcome {
+                        cort::measure::RecordOutcome::Uploaded => None,
+                        cort::measure::RecordOutcome::UploadFailed { kind, .. } => Some(*kind),
+                    };
                     Ok(cort::collect::ManualStep {
                         events: scan.events.clone(),
                         failure,
@@ -2446,15 +2460,13 @@ fn cmd_measure(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, CortErr
             .map_err(|e| manual_error(e, "measure_error"))?;
             warn_events(&scan);
             match outcome {
-                cort::measure::RecordOutcome::Pushed => {
-                    cort::measure::write_last_sync(usage::now_ms())
-                        .map_err(|m| CortError::new("measure_error", json!({"message":m})))?;
-                    json!({"status":"recorded","pushed":true,"scan":scan.to_json()})
+                cort::measure::RecordOutcome::Uploaded => {
+                    json!({"status":"recorded","scan":scan.to_json()})
                 }
-                cort::measure::RecordOutcome::SavedLocallyPushFailed(m) => {
+                cort::measure::RecordOutcome::UploadFailed { kind: _, error } => {
                     return Err(CortError::new(
-                        "measure_push_failed",
-                        json!({"message": format!("saved locally, push failed: {m}"), "scan": scan.to_json()}),
+                        "measure_upload_failed",
+                        json!({"message": error, "scan": scan.to_json()}),
                     ));
                 }
             }
@@ -2533,82 +2545,52 @@ fn cmd_measure(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, CortErr
             }
             summary
         }
-        MeasureAction::Sync { dry_run } => {
+        MeasureAction::Verify => {
             let Some(up) = event_inputs() else {
                 return Err(CortError::new(
                     "measure_error",
                     json!({"message":"cannot locate usage.db (HOME is unset and CORT_CACHE_DIR is not set)"}),
                 ));
             };
-            require_measure_config(if dry_run {
-                "measure_dry_run_failed"
-            } else {
-                "measure_error"
-            })?;
+            require_measure_config("measure_verify_failed")?;
             let fail = |m: String| CortError::new("measure_error", json!({"message":m}));
             let paths = cort::collect::KickPaths::current()
                 .ok_or_else(|| fail("cannot locate usage.db".into()))?;
             let cfg = cort::collect::CollectConfig::from_env();
             let now_ms = usage::now_ms();
-            if dry_run {
-                let report = cort::collect::run_manual(
-                    &mut || {
-                        cort::measure_store::open_measure_store_within_timeout(
-                            std::time::Duration::from_millis(cfg.manual_wait_ms),
-                            std::time::Duration::from_millis(cfg.net_timeout_ms),
-                        )
-                    },
-                    &paths,
-                    now_ms,
-                    &cfg,
-                    cort::collect::ManualMode::DryRun,
-                    &mut |store| {
-                        cort::telemetry::verify_events(store, &up, now_ms)
-                            .map(cort::collect::dry_run_step)
-                            .map_err(|e| (e, cort::collect::ErrorKind::Storage))
-                    },
-                )
-                .map_err(|e| manual_error(e, "measure_dry_run_failed"))?;
-                json!({"status":"dry_run_ok","pushed":false,
-                    "matched":report.matched,"local_only":report.local_only,
-                    "remote_only":report.remote_only,
-                    "verified":report.matched > 0,
-                    "note":"ids match; the next `record` or `sync` may upload events for this machine"})
-            } else {
-                let (events, synced) = cort::collect::run_manual(
-                    &mut || {
-                        cort::measure_store::open_measure_store_within_timeout(
-                            std::time::Duration::from_millis(cfg.manual_wait_ms),
-                            std::time::Duration::from_millis(cfg.net_timeout_ms),
-                        )
-                    },
-                    &paths,
-                    now_ms,
-                    &cfg,
-                    cort::collect::ManualMode::Write,
-                    &mut |store| {
-                        let events = cort::telemetry::upload_events(store, &up);
-                        Ok(cort::collect::sync_step(events, cort::measure::sync(store)))
-                    },
-                )
-                .map_err(|e| manual_error(e, "measure_error"))?;
-                synced.map_err(fail)?;
-                cort::measure::write_last_sync(usage::now_ms()).map_err(fail)?;
-                if !events.is_ok() {
-                    // An explicit sync that did not upload what it was asked to is a failure.
-                    return Err(CortError::new(
-                        "measure_events_not_uploaded",
-                        json!({"events": events.to_json()}),
-                    ));
-                }
-                json!({"status":"synced","pushed":true,"events":events.to_json()})
-            }
+            let report = cort::collect::run_manual(
+                &mut || {
+                    cort::measure_store::open_measure_store_within_timeout(
+                        std::time::Duration::from_millis(cfg.manual_wait_ms),
+                        std::time::Duration::from_millis(cfg.net_timeout_ms),
+                    )
+                },
+                &paths,
+                now_ms,
+                &cfg,
+                cort::collect::ManualMode::DryRun,
+                &mut |store| {
+                    cort::telemetry::verify_events(store, &up, now_ms)
+                        .map(cort::collect::dry_run_step)
+                        .map_err(|e| (e.clone(), cort::collect::classify_error(&e)))
+                },
+            )
+            .map_err(|e| manual_error(e, "measure_verify_failed"))?;
+            json!({"status": if report.matched > 0 {"verified"} else {"not_verified"},
+                "matched":report.matched,"local_only":report.local_only,
+                "remote_only":report.remote_only,"verified":report.matched > 0})
         }
         MeasureAction::CopyEvents => {
             let report = cort::measure_store::with_legacy_and_measure_stores(|from, to| {
                 cort::measure::copy_events(from, to)
             })
-            .map_err(|m| CortError::new("measure_copy_failed", json!({"message":m})))?;
+            .map_err(|m| {
+                if m.starts_with("remote read: ") {
+                    measure_remote_error(m, None)
+                } else {
+                    CortError::new("measure_copy_failed", json!({"message":m}))
+                }
+            })?;
             let rows = &report.groups;
             let groups: Vec<_> = rows
                 .iter()
@@ -2625,7 +2607,7 @@ fn cmd_measure(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, CortErr
                 })
                 .collect();
             json!({"status": if report.conflicts > 0 {"copied_with_conflicts"} else {"copied"},
-                "source_pushed":false,"groups":groups,
+                "groups":groups,
                 "source_rows":rows.iter().map(|r| r.2).sum::<usize>(),
                 "destination_rows":rows.iter().map(|r| r.3).sum::<usize>(),
                 "conflicts":report.conflicts,"conflict_examples":examples})
@@ -2654,22 +2636,17 @@ fn cmd_measure(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, CortErr
                     .map_err(|e| fail(format!("{}: {e}", path.display())))?;
                 rows.extend(parsed);
             }
-            let value = cort::measure_store::with_turso_store(|store| {
-                let mut value = cort::audit_import::import_audit(store, &rows, &project_id)?;
-                cort::measure::sync(store)
-                    .map_err(|e| format!("imported locally, push failed: {e}"))?;
-                cort::measure::write_last_sync(usage::now_ms())?;
-                value["pushed"] = json!(true);
-                Ok(value)
+            cort::measure_store::with_turso_store(|store| {
+                cort::audit_import::import_audit(store, &rows, &project_id)
             })
-            .map_err(fail)?;
-            value
+            .map_err(fail)?
         }
         MeasureAction::Report {
             days,
             compaction_days,
             json: as_json,
         } => {
+            require_measure_config("measure_error")?;
             let now_ms = usage::now_ms();
             // Always a value when run here, so the first section is never silently missing.
             let collection = Some(match cort::collect::KickPaths::current() {
@@ -2677,28 +2654,17 @@ fn cmd_measure(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, CortErr
                 None => json!({"unavailable": "cannot locate usage.db"}),
             });
             let value = cort::measure_store::with_turso_store(|store| {
-                let offline = match cort::measure::sync(store) {
-                    Ok(()) => {
-                        cort::measure::write_last_sync(now_ms)?;
-                        None
-                    }
-                    Err(_) => Some(
-                        cort::measure::read_last_sync()
-                            .map_or("從未同步".to_string(), cort::measure::format_utc),
-                    ),
-                };
                 cort::measure::report(
                     store,
                     &cort::measure::ReportInputs {
                         days,
                         compaction_days,
                         now_ms,
-                        offline,
                         collection,
                     },
                 )
             })
-            .map_err(|m| CortError::new("measure_error", json!({"message":m})))?;
+            .map_err(|m| measure_remote_error(m, None))?;
             if !as_json {
                 use std::io::IsTerminal;
                 let color =

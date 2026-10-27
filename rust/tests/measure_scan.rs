@@ -1,4 +1,5 @@
 use cort::measure::*;
+use cort::measure_progress::Progress;
 use cort::measure_store::{MeasureStore, SqliteStore};
 use serde_json::{json, Value};
 use std::fs::{self, File};
@@ -40,6 +41,7 @@ struct Env {
     projects: PathBuf,
     store: SqliteStore,
     marks: Watermarks,
+    progress: Progress,
 }
 
 fn env() -> Env {
@@ -47,11 +49,14 @@ fn env() -> Env {
     let projects = tmp.path().join("projects");
     fs::create_dir_all(&projects).unwrap();
     let store = SqliteStore::open(&tmp.path().join("store.db")).unwrap();
+    let mut progress = Progress::default();
+    progress.compactions_complete = true;
     Env {
         _tmp: tmp,
         projects,
         store,
         marks: Watermarks::default(),
+        progress,
     }
 }
 
@@ -68,7 +73,15 @@ fn write(path: &Path, content: &str, age_secs: u64) {
 }
 
 fn scan(e: &mut Env) -> ScanSummary {
-    scan_transcripts(&mut e.store, &e.projects, &mut e.marks, M).unwrap()
+    scan_transcripts(
+        &mut e.store,
+        &e.projects,
+        &mut e.marks,
+        M,
+        &mut e.progress,
+        &e._tmp.path().join("measure-progress.json"),
+    )
+    .unwrap()
 }
 
 fn notgit(e: &Env) -> String {
@@ -92,8 +105,18 @@ fn subagent_files_are_skipped() {
     let s = scan(&mut e);
     assert_eq!(s.files_seen, 1);
     assert_eq!(s.compactions, 1);
-    assert!(e.store.compaction_session(M, "u2").unwrap().is_none());
-    assert!(e.store.compaction_session(M, "u1").unwrap().is_some());
+    assert!(!e
+        .store
+        .compaction_owners(M)
+        .unwrap()
+        .iter()
+        .any(|(b, _)| b == "u2"));
+    assert!(e
+        .store
+        .compaction_owners(M)
+        .unwrap()
+        .iter()
+        .any(|(b, _)| b == "u1"));
 }
 
 #[test]
@@ -322,7 +345,14 @@ fn unreadable_subdirectory_is_an_error_and_keeps_watermarks() {
         println!("SKIP: permissions are not enforced (running as root?)");
         return;
     }
-    let r = scan_transcripts(&mut e.store, &e.projects, &mut e.marks, M);
+    let r = scan_transcripts(
+        &mut e.store,
+        &e.projects,
+        &mut e.marks,
+        M,
+        &mut e.progress,
+        &e._tmp.path().join("measure-progress.json"),
+    );
     fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
     assert!(r.is_err());
     assert_eq!(e.marks, before);
@@ -340,7 +370,15 @@ fn missing_projects_dir_is_empty_and_keeps_watermarks() {
     scan(&mut e);
     let before = e.marks.clone();
     let gone = e._tmp.path().join("nope");
-    let s = scan_transcripts(&mut e.store, &gone, &mut e.marks, M).unwrap();
+    let s = scan_transcripts(
+        &mut e.store,
+        &gone,
+        &mut e.marks,
+        M,
+        &mut e.progress,
+        &e._tmp.path().join("measure-progress.json"),
+    )
+    .unwrap();
     assert_eq!(s.files_seen, 0);
     assert_eq!(e.marks, before);
 }

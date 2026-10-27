@@ -48,7 +48,6 @@ fn inputs(now_ms: i64) -> ReportInputs {
         days: 7,
         compaction_days: 30,
         now_ms,
-        offline: None,
         collection: None,
     }
 }
@@ -59,7 +58,7 @@ fn report_first_section_shows_collection_state() {
     let mut input = inputs(FRI_W43_MS);
     input.collection = Some(json!({
         "batch": {"pending": 3, "last_run_ms": 123, "last_ok_ms": 120,
-            "push_pending": true, "refused": false, "failures": {}},
+            "upload_pending": true, "refused": false, "failures": {}},
         "health": {"pending": 2, "last_run_ms": 122,
             "unmapped_count": 1, "unmapped_recent": ["missing"]}
     }));
@@ -349,50 +348,29 @@ fn rec_env() -> Rec {
 }
 
 #[test]
-fn record_order_writes_before_push() {
+fn record_writes_and_moves_watermark() {
     let (_t, mut s) = store();
-    s.fail_push(true);
     let r = rec_env();
     let out = record(&mut s, &r.input).unwrap();
-    assert!(
-        matches!(&out, RecordOutcome::SavedLocallyPushFailed(m) if !m.is_empty()),
-        "{out:?}"
-    );
+    assert_eq!(out, RecordOutcome::Uploaded);
     assert_eq!(s.compactions_since(0).unwrap().len(), 1);
     let hosts = s.machine_hosts().unwrap();
     assert_eq!(hosts.len(), 1);
     assert_eq!(hosts[0].host, "box");
     assert_eq!(hosts[0].last_seen_ms, 5_000);
-    // The local writes succeeded, so the watermark moved even though the push did not.
+    // The writes succeeded, so the watermark moved.
     assert!(r.input.marks_path.exists());
 }
 
 #[test]
-fn record_pushes_when_store_accepts() {
+fn record_is_idempotent() {
     let (_t, mut s) = store();
     let r = rec_env();
-    assert_eq!(record(&mut s, &r.input).unwrap(), RecordOutcome::Pushed);
+    assert_eq!(record(&mut s, &r.input).unwrap(), RecordOutcome::Uploaded);
     assert_eq!(s.compactions_since(0).unwrap().len(), 1);
     // A second run is idempotent.
-    assert_eq!(record(&mut s, &r.input).unwrap(), RecordOutcome::Pushed);
+    assert_eq!(record(&mut s, &r.input).unwrap(), RecordOutcome::Uploaded);
     assert_eq!(s.compactions_since(0).unwrap().len(), 1);
-}
-
-#[test]
-fn offline_report_first_line() {
-    let (_t, mut s) = store();
-    let mut inp = inputs(FRI_W43_MS);
-    inp.offline = Some(format_utc(1_792_717_320_000));
-    let v = report(&mut s, &inp).unwrap();
-    let text = render_report(&v, false);
-    assert_eq!(
-        text.lines().next().unwrap(),
-        "離線：讀本機副本，最後同步於 2026-10-23 01:02 UTC"
-    );
-    let mut online = inputs(FRI_W43_MS);
-    online.offline = None;
-    let v = report(&mut s, &online).unwrap();
-    assert!(!render_report(&v, false).contains("離線"));
 }
 
 #[test]
@@ -442,7 +420,6 @@ fn record_without_config_fails_cleanly() {
         .map(|e| e.unwrap().file_name())
         .collect();
     assert!(left.is_empty(), "record left behind {left:?}");
-    assert!(!Path::new(&data.join("measure-last-sync")).exists());
 }
 
 #[test]
@@ -515,38 +492,19 @@ fn recorded_host_without_compactions_still_gets_a_section() {
 }
 
 #[test]
-fn record_surfaces_scan_summary_in_both_outcomes() {
-    for fail in [false, true] {
-        let (_t, mut s) = store();
-        s.fail_push(fail);
-        let r = rec_env();
-        let mut body = fs::read_to_string(r.input.projects_dir.join("p1/sess-1.jsonl")).unwrap();
-        body.push_str("not json\n{\"type\":\"brand-new-thing\"}\n");
-        fs::write(r.input.projects_dir.join("p1/sess-1.jsonl"), body).unwrap();
-        let (scan, outcome) = record_with_scan(&mut s, &r.input).unwrap();
-        assert_eq!(matches!(outcome, RecordOutcome::Pushed), !fail);
-        assert_eq!(
-            scan.to_json(),
-            json!({"files_seen": 1, "files_scanned": 1, "compactions": 1,
-                "skipped_lines": 1, "unknown_type_lines": 1})
-        );
-    }
-}
-
-#[test]
-fn record_pushes_and_never_pulls() {
-    // A pull per record re-downloaded the shared database on every run and spent the Turso
-    // org's embedded-sync quota (2026-10-27); a record needs nothing other machines wrote.
+fn record_surfaces_scan_summary() {
     let (_t, mut s) = store();
-    s.fail_pull(true);
     let r = rec_env();
+    let mut body = fs::read_to_string(r.input.projects_dir.join("p1/sess-1.jsonl")).unwrap();
+    body.push_str("not json\n{\"type\":\"brand-new-thing\"}\n");
+    fs::write(r.input.projects_dir.join("p1/sess-1.jsonl"), body).unwrap();
     let (scan, outcome) = record_with_scan(&mut s, &r.input).unwrap();
-    assert_eq!(outcome, RecordOutcome::Pushed);
-    assert_eq!(scan.compactions, 1);
-    assert_eq!(s.push_calls(), 1);
-    assert_eq!(s.pull_calls(), 0);
-    assert_eq!(record(&mut s, &r.input).unwrap(), RecordOutcome::Pushed);
-    assert_eq!(s.pull_calls(), 0);
+    assert_eq!(outcome, RecordOutcome::Uploaded);
+    assert_eq!(
+        scan.to_json(),
+        json!({"files_seen": 1, "files_scanned": 1, "compactions": 1,
+            "skipped_lines": 1, "unknown_type_lines": 1, "progress": "rebuilt"})
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -582,12 +540,15 @@ fn record_keeps_compactions_when_events_refuse() {
     let db = usage_db_with_rows(r._tmp.path());
     with_events(&mut r, db);
     let (scan, outcome) = record_with_scan(&mut s, &r.input).unwrap();
-    assert_eq!(outcome, RecordOutcome::Pushed);
+    assert_eq!(outcome, RecordOutcome::Uploaded);
     assert_eq!(scan.compactions, 1);
     assert_eq!(s.compactions_since(0).unwrap().len(), 1);
     let events = scan.to_json()["events"].clone();
     assert_eq!(events["status"], "refused", "{events}");
-    assert!(events["reason"].as_str().unwrap().contains("--dry-run"));
+    assert!(events["reason"]
+        .as_str()
+        .unwrap()
+        .contains("measure verify"));
     // Nothing reached the store: no events, no watermark.
     assert!(s.remote_ids("m1", "cort_command").unwrap().is_empty());
     assert_eq!(s.event_watermark("m1", "cort_command").unwrap(), None);
@@ -599,34 +560,61 @@ fn record_keeps_compactions_when_events_fail() {
     let mut r = rec_env();
     let bad = r._tmp.path().join("usage.db");
     fs::write(&bad, "this is not a sqlite file").unwrap();
-    s.set_event_watermark("m1", "cort_command", 0, "stale")
-        .unwrap(); // past the gate, so the read fails
+    let mut progress = cort::measure_progress::Progress::default();
+    progress.compactions_complete = true;
+    progress.set_watermark("m1", "cort_command", 0, "stale".into());
+    progress
+        .save(&r.input.marks_path.with_file_name("measure-progress.json"))
+        .unwrap();
     with_events(&mut r, bad);
     let (scan, outcome) = record_with_scan(&mut s, &r.input).unwrap();
-    assert_eq!(outcome, RecordOutcome::Pushed);
+    assert!(matches!(
+        outcome,
+        RecordOutcome::UploadFailed {
+            kind: cort::collect::ErrorKind::Storage,
+            ..
+        }
+    ));
     assert_eq!(s.compactions_since(0).unwrap().len(), 1);
     assert_eq!(scan.to_json()["events"]["status"], "failed");
+    let (_, again) = cort::measure::record_with_scan_until(&mut s, &r.input, || {
+        Err("run deadline exceeded".into())
+    })
+    .unwrap();
+    assert!(matches!(
+        again,
+        RecordOutcome::UploadFailed {
+            kind: cort::collect::ErrorKind::Storage,
+            ..
+        }
+    ));
 }
 
 #[test]
-fn record_uploads_events_before_the_push() {
+fn record_uploads_events() {
     let (_t, mut s) = store();
     let mut r = rec_env();
     let db = usage_db_with_rows(r._tmp.path());
-    s.set_event_watermark("m1", "cort_command", 0, "stale")
+    let mut progress = cort::measure_progress::Progress::default();
+    progress.compactions_complete = true;
+    progress.set_watermark("m1", "cort_command", 0, "stale".into());
+    progress
+        .save(&r.input.marks_path.with_file_name("measure-progress.json"))
         .unwrap();
     with_events(&mut r, db);
-    s.fail_push(true);
     let (scan, outcome) = record_with_scan(&mut s, &r.input).unwrap();
-    // Push failed, yet the event is already in the local replica and the watermark moved.
-    assert!(matches!(outcome, RecordOutcome::SavedLocallyPushFailed(_)));
+    assert_eq!(outcome, RecordOutcome::Uploaded);
     let events = scan.to_json()["events"].clone();
     assert_eq!(events["status"], "uploaded");
     assert_eq!(events["inserted"], 1);
     assert_eq!(
-        s.event_watermark("m1", "cort_command")
-            .unwrap()
-            .map(|w| w.0),
+        match cort::measure_progress::load(
+            &r.input.marks_path.with_file_name("measure-progress.json")
+        ) {
+            cort::measure_progress::Load::Loaded(p) =>
+                p.watermark("m1", "cort_command").map(|w| w.rowid),
+            _ => None,
+        },
         Some(1)
     );
 }
@@ -637,4 +625,90 @@ fn record_without_events_input_has_no_events_key() {
     let r = rec_env();
     let (scan, _) = record_with_scan(&mut s, &r.input).unwrap();
     assert!(scan.to_json().get("events").is_none());
+}
+
+#[test]
+fn a_failing_remote_read_is_an_error_not_a_zero_report() {
+    use cort::remote::{RemoteError, SqliteTransport, Transport};
+    use std::sync::Arc;
+    struct Shared(Arc<SqliteTransport>);
+    impl Transport for Shared {
+        fn post(
+            &self,
+            url: &str,
+            body: &[u8],
+            headers: &[(&str, &str)],
+        ) -> Result<Vec<u8>, RemoteError> {
+            self.0.post(url, body, headers)
+        }
+    }
+    let transport = Arc::new(SqliteTransport::new().unwrap());
+    let mut s = cort::measure_store::RemoteStore::with_transport(
+        "libsql://test.invalid",
+        "test-token",
+        Box::new(Shared(transport.clone())),
+        true,
+    )
+    .unwrap();
+    transport.fail_next_code("BLOCKED");
+    let err = report(&mut s, &inputs(FRI_W43_MS)).unwrap_err();
+    assert_eq!(cort::measure_store::remote_error_kind(&err), "blocked");
+    assert!(!err.contains("test-token"));
+}
+
+#[test]
+fn status_lean_lists_progress_and_remote_state() {
+    let ok = json!({"progress":"loaded","remote":{"missing_indexes":["a","b"]}});
+    let text = render_status(&ok);
+    assert!(text.contains("progress=loaded\n"), "{text}");
+    assert!(text.contains("remote missing_indexes=a,b\n"), "{text}");
+    let bad = json!({"progress":"missing","remote":{"error":"blocked"}});
+    let text = render_status(&bad);
+    assert!(text.contains("progress=missing\n"), "{text}");
+    assert!(text.contains("remote error=blocked\n"), "{text}");
+}
+
+fn bare_cli(args: &[&str]) -> (std::process::Output, tempfile::TempDir) {
+    let tmp = tempfile::tempdir().unwrap();
+    let (data, home, cache) = (
+        tmp.path().join("data"),
+        tmp.path().join("home"),
+        tmp.path().join("cache"),
+    );
+    for d in [&data, &home, &cache] {
+        fs::create_dir_all(d).unwrap();
+    }
+    let out = Command::new(cort_bin())
+        .args(args)
+        .env("CORT_MEMORY_DIR", &data)
+        .env("HOME", &home)
+        .env("CORT_CACHE_DIR", &cache)
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("CLAUDE_CONFIG_DIR")
+        .output()
+        .unwrap();
+    (out, tmp)
+}
+
+#[test]
+fn removed_and_unconfigured_measure_commands() {
+    let (out, _t) = bare_cli(&["measure", "sync"]);
+    assert!(!out.status.success());
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["error"], "unknown_command", "{v}");
+    assert!(v["detail"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("unrecognized subcommand 'sync'"));
+
+    for (args, code) in [
+        (&["measure", "report"][..], "measure_error"),
+        (&["measure", "status"][..], "measure_not_configured"),
+        (&["measure", "verify"][..], "measure_verify_failed"),
+    ] {
+        let (out, _t) = bare_cli(args);
+        assert!(!out.status.success());
+        let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(v["error"], code, "{args:?} {v}");
+    }
 }

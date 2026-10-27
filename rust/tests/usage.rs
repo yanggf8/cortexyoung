@@ -2,8 +2,8 @@
 
 use cort::db::project_id_for;
 use cort::usage::{
-    parse_usage_days, query_usage_at, record_command_at, render_usage_lean, CommandRecord,
-    DEFAULT_USAGE_DAYS, RETENTION_DAYS,
+    parse_usage_days, pruned_unuploaded_rows_at, query_usage_at, record_command_at,
+    render_usage_lean, uploaded_floor_at, CommandRecord, DEFAULT_USAGE_DAYS, RETENTION_DAYS,
 };
 use rusqlite::{params, Connection};
 use serde_json::Value;
@@ -644,6 +644,7 @@ fn daily_prune_throttle_runs_at_most_once_per_day() {
         None,
         None,
     );
+    uploaded_floor_at(&path, "cort_command", 1).unwrap();
     let mut first = rec("first");
     first.bytes_out = 1;
     record_command_at(&path, &first);
@@ -680,6 +681,191 @@ fn daily_prune_throttle_runs_at_most_once_per_day() {
         )
         .unwrap();
     assert_eq!(leftover_b, 1, "second prune same day must be throttled");
+}
+
+#[test]
+fn prune_uses_uploaded_floor_and_counts_hard_limit_loss() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("usage.db");
+    seed_schema(&path);
+    let db = Connection::open(&path).unwrap();
+    insert_log(
+        &db,
+        NOW_MS - (RETENTION_DAYS + 1) * DAY_MS,
+        None,
+        "uploaded_old",
+        "ok",
+        0,
+        0,
+        None,
+        None,
+    );
+    insert_log(
+        &db,
+        NOW_MS - (RETENTION_DAYS + 1) * DAY_MS,
+        None,
+        "pending_old",
+        "ok",
+        0,
+        0,
+        None,
+        None,
+    );
+    insert_log(
+        &db,
+        NOW_MS - 181 * DAY_MS,
+        None,
+        "pending_lost",
+        "ok",
+        0,
+        0,
+        None,
+        None,
+    );
+    uploaded_floor_at(&path, "cort_command", 1).unwrap();
+    record_command_at(&path, &rec("fresh"));
+    let commands: Vec<String> = db
+        .prepare("SELECT command FROM command_log ORDER BY id")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .map(|row| row.unwrap())
+        .collect();
+    assert_eq!(commands, ["pending_old", "fresh"]);
+    assert_eq!(pruned_unuploaded_rows_at(&path), Some(1));
+    cort::collect::log_prune_loss(dir.path(), &path).unwrap();
+    cort::collect::log_prune_loss(dir.path(), &path).unwrap();
+    let log = fs::read_to_string(dir.path().join("measure.log")).unwrap();
+    assert_eq!(
+        log.lines().collect::<Vec<_>>(),
+        ["warning: pruned 1 unuploaded rows"]
+    );
+}
+
+/// A loss that cannot be counted is not taken: the batch rolls back and its rows stay for the
+/// next prune.
+#[test]
+fn uncountable_hard_limit_loss_keeps_the_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("usage.db");
+    seed_schema(&path);
+    let db = Connection::open(&path).unwrap();
+    insert_log(
+        &db,
+        NOW_MS - 181 * DAY_MS,
+        None,
+        "pending_lost",
+        "ok",
+        0,
+        0,
+        None,
+        None,
+    );
+    db.execute_batch(
+        "CREATE TRIGGER no_loss_count BEFORE INSERT ON _usage_meta
+         WHEN NEW.key = 'pruned_unuploaded_rows' BEGIN
+            SELECT RAISE(ABORT, 'counter blocked');
+         END;",
+    )
+    .unwrap();
+    record_command_at(&path, &rec("fresh"));
+    let commands: Vec<String> = db
+        .prepare("SELECT command FROM command_log ORDER BY id")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .map(|row| row.unwrap())
+        .collect();
+    assert_eq!(commands, ["pending_lost", "fresh"]);
+    assert_eq!(pruned_unuploaded_rows_at(&path), None);
+    db.execute_batch("DROP TRIGGER no_loss_count").unwrap();
+    db.execute("DELETE FROM _usage_meta WHERE key = 'LAST_PRUNE_DAY'", [])
+        .unwrap();
+    record_command_at(&path, &rec("later"));
+    assert_eq!(pruned_unuploaded_rows_at(&path), Some(1));
+}
+
+/// A loss counted on the first table survives an error on the second: the deleted rows cannot be
+/// counted on a later run.
+#[test]
+fn hard_limit_loss_survives_a_later_prune_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("usage.db");
+    seed_schema(&path);
+    let db = Connection::open(&path).unwrap();
+    insert_log(
+        &db,
+        NOW_MS - 181 * DAY_MS,
+        None,
+        "pending_lost",
+        "ok",
+        0,
+        0,
+        None,
+        None,
+    );
+    db.execute(
+        "INSERT INTO index_health_log (ts, machine_id, machine_source, local_project_id, status)
+         VALUES (?1, 'machine', 'test', 'local', 'ok')",
+        [NOW_MS - 181 * DAY_MS],
+    )
+    .unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER no_health_delete BEFORE DELETE ON index_health_log BEGIN
+            SELECT RAISE(ABORT, 'prune blocked');
+         END;",
+    )
+    .unwrap();
+    record_command_at(&path, &rec("fresh"));
+    let commands: Vec<String> = db
+        .prepare("SELECT command FROM command_log ORDER BY id")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .map(|row| row.unwrap())
+        .collect();
+    assert_eq!(commands, ["fresh"]);
+    assert_eq!(pruned_unuploaded_rows_at(&path), Some(1));
+}
+
+#[test]
+fn missing_upload_floor_keeps_rows_until_hard_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("usage.db");
+    seed_schema(&path);
+    let db = Connection::open(&path).unwrap();
+    insert_log(
+        &db,
+        NOW_MS - 91 * DAY_MS,
+        None,
+        "pending",
+        "ok",
+        0,
+        0,
+        None,
+        None,
+    );
+    insert_log(
+        &db,
+        NOW_MS - 181 * DAY_MS,
+        None,
+        "lost",
+        "ok",
+        0,
+        0,
+        None,
+        None,
+    );
+    record_command_at(&path, &rec("fresh"));
+    let commands: Vec<String> = db
+        .prepare("SELECT command FROM command_log ORDER BY id")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .map(|row| row.unwrap())
+        .collect();
+    assert_eq!(commands, ["pending", "fresh"]);
+    assert_eq!(pruned_unuploaded_rows_at(&path), Some(1));
 }
 
 /// §10 clock going backwards does not mass-prune.

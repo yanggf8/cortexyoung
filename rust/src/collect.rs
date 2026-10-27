@@ -301,9 +301,11 @@ pub struct CollectState {
     pub last_run_ms: Option<i64>,
     pub last_ok_ms: Option<i64>,
     pub failures: BTreeMap<String, Failure>,
-    pub push_pending: bool,
-    pub uploaded_through_id: i64,
-    pub health_uploaded_through_id: i64,
+    #[serde(alias = "push_pending")]
+    pub upload_pending: bool,
+    pub pending_since_ms: Option<i64>,
+    #[serde(skip)]
+    pub progress_path: Option<PathBuf>,
     pub refused: bool,
 }
 
@@ -346,15 +348,25 @@ pub fn collection_status(paths: &KickPaths) -> Value {
     let counters = kick_counters_at(&paths.usage_db);
     let pending_error = counters.is_none().then_some("usage_db_unreadable");
     let batch = match read_state::<CollectState>(&batch_path) {
-        Ok(batch) => json!({
-            "pending": counters.as_ref().map(|c| batch_pending(&batch, c)),
-            "pending_error": pending_error,
-            "last_run_ms": batch.last_run_ms,
-            "last_ok_ms": batch.last_ok_ms,
-            "push_pending": batch.push_pending,
-            "refused": batch.refused,
-            "failures": batch.failures,
-        }),
+        Ok(mut batch) => {
+            batch.progress_path = Some(paths.data_dir.join("measure-progress.json"));
+            if batch.upload_pending {
+                batch
+                    .pending_since_ms
+                    .get_or_insert_with(crate::usage::now_ms);
+            }
+            json!({
+                "pending": counters.as_ref().map(|c| batch_pending(&batch, c)),
+                "pending_error": pending_error,
+                "last_run_ms": batch.last_run_ms,
+                "last_ok_ms": batch.last_ok_ms,
+                "upload_pending": batch.upload_pending,
+                "pending_since_ms": batch.pending_since_ms,
+                "upload_stalled_days": batch.stalled_days(crate::usage::now_ms()),
+                "refused": batch.refused,
+                "failures": batch.failures,
+            })
+        }
         Err(error) => json!({"pending": null, "state_error": error}),
     };
     let health = match read_state::<HealthState>(&health_path) {
@@ -367,7 +379,8 @@ pub fn collection_status(paths: &KickPaths) -> Value {
         }),
         Err(error) => json!({"pending": null, "state_error": error}),
     };
-    let mut value = json!({"no_local_state": no_local_state, "batch": batch, "health": health});
+    let mut value = json!({"no_local_state": no_local_state, "batch": batch, "health": health,
+        "pruned_unuploaded_rows": crate::usage::pruned_unuploaded_rows_at(&paths.usage_db).unwrap_or(0)});
     for lane in ["batch", "health"] {
         if value[lane]["pending_error"].is_null() {
             if let Some(map) = value[lane].as_object_mut() {
@@ -380,10 +393,31 @@ pub fn collection_status(paths: &KickPaths) -> Value {
 
 impl CollectState {
     pub fn load(path: &Path) -> Self {
-        fs::read_to_string(path)
+        let mut state: Self = fs::read_to_string(path)
             .ok()
             .and_then(|text| serde_json::from_str(&text).ok())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        state.progress_path = Some(path.with_file_name("measure-progress.json"));
+        if state.upload_pending {
+            state
+                .pending_since_ms
+                .get_or_insert_with(crate::usage::now_ms);
+        }
+        state
+    }
+
+    fn mark_pending(&mut self, now_ms: i64) {
+        self.upload_pending = true;
+        self.pending_since_ms.get_or_insert(now_ms);
+    }
+
+    fn stalled_days(&self, now_ms: i64) -> Option<i64> {
+        self.upload_pending
+            .then(|| {
+                self.pending_since_ms
+                    .map(|since| now_ms.saturating_sub(since).max(0) / 86_400_000)
+            })
+            .flatten()
     }
 
     pub fn save(&self, path: &Path) -> Result<(), String> {
@@ -458,7 +492,15 @@ pub fn log_collect_run(data_dir: &Path, run: &CollectRun, now_ms: i64) -> Result
     } else if summary["scan"]["events"]["status"] == "refused" {
         summary["scan"]["events"] = json!({"status":"refused"});
     }
-    append_measure_log(data_dir, &summary.to_string())
+    append_measure_log(data_dir, &summary.to_string())?;
+    if let Some(days) =
+        CollectState::load(&data_dir.join("measure-collect-state.json")).stalled_days(now_ms)
+    {
+        if days > 7 {
+            append_measure_log(data_dir, &format!("warning: upload stalled {days} days"))?;
+        }
+    }
+    Ok(())
 }
 
 fn collect_failure(state: &mut CollectState, harness: &str, now_ms: i64, kind: ErrorKind) {
@@ -531,7 +573,7 @@ fn arm_collect_watchdog(
                         .with_error(message);
                         let _ = log_collect_run(&data_dir, &run, now_ms);
                         collect_failure(&mut state, &harness, now_ms, ErrorKind::Network);
-                        state.push_pending = true;
+                        state.mark_pending(now_ms);
                         let _ = state.save(&path);
                     }));
                     let _ = done_tx.send(());
@@ -552,47 +594,26 @@ fn finish_collect_state(
     health: Option<&Value>,
 ) {
     if let Some(report) = events {
-        if report["status"] == "uploaded" {
-            if let Some(id) = report["watermark"].as_i64() {
-                state.uploaded_through_id = id;
-            }
-        }
         state.refused = report["status"] == "refused";
     }
-    if let Some(report) = health {
-        if report["status"] == "uploaded" {
-            if let Some(id) = report["watermark"].as_i64() {
-                state.health_uploaded_through_id = id;
-            }
-        }
-    }
+    let _ = health;
     if let Some(kind) = kind {
         collect_failure(state, harness, now_ms, kind);
     } else {
         state.failures.remove(harness);
-        state.push_pending = false;
         state.last_ok_ms = Some(now_ms);
+        // A refusal is the persistent state `refused` records, not pending work: keeping the lane
+        // pending would make every kick due and rewrite the host row on each one.
+        state.upload_pending = false;
+        state.pending_since_ms = None;
     }
 }
 
-/// The first failed upload wins over a later push failure for both batch and manual record.
-pub fn classify_record(
-    scan: &measure::ScanSummary,
-    outcome: &RecordOutcome,
-) -> (Option<ErrorKind>, Option<String>) {
-    let upload_error = [&scan.events, &scan.health].iter().find_map(|report| {
-        report
-            .as_ref()
-            .filter(|r| r["status"] == "failed")
-            .map(|r| r["error"].as_str().unwrap_or("upload failed").to_string())
-    });
-    match (upload_error, outcome) {
-        (Some(error), _) => (Some(ErrorKind::Storage), Some(error)),
-        (None, RecordOutcome::Pushed) => (None, None),
-        (None, RecordOutcome::SavedLocallyPushFailed(error)) => (
-            Some(ErrorKind::Network),
-            Some(format!("push failed: {error}")),
-        ),
+pub fn classify_error(error: &str) -> ErrorKind {
+    if crate::network_timeout::network_failure(error) {
+        ErrorKind::Network
+    } else {
+        ErrorKind::Storage
     }
 }
 
@@ -658,27 +679,6 @@ pub fn dry_run_step(report: crate::telemetry::DryRun) -> ManualStep<crate::telem
         value: report,
         events: None,
         failure,
-    }
-}
-
-/// A manual sync fails on a failed upload (storage) or a failed push/pull (network). A refused
-/// upload is the persistent state `refused` records, not a failure, so a sync whose replica work
-/// succeeded still clears `push_pending`; the CLI reports the refusal on its own.
-pub fn sync_step(
-    events: telemetry::EventsReport,
-    synced: Result<(), String>,
-) -> ManualStep<(telemetry::EventsReport, Result<(), String>)> {
-    let failure = if matches!(events, telemetry::EventsReport::Failed(_)) {
-        Some(ErrorKind::Storage)
-    } else if synced.is_err() {
-        Some(ErrorKind::Network)
-    } else {
-        None
-    };
-    ManualStep {
-        events: Some(events.to_json()),
-        failure,
-        value: (events, synced),
     }
 }
 
@@ -749,7 +749,7 @@ fn manual_lock(path: &Path, wait: Duration, now_ms: i64) -> Result<fs::File, Man
 }
 
 /// Hold the collection lock, then open the bounded measure store and update shared collection
-/// state around a manual record, sync, or dry run. The caller supplies the original CLI operation.
+/// state around a manual record or verify. The caller supplies the original CLI operation.
 pub fn run_manual<T>(
     store_opener: &mut dyn FnMut() -> Result<Box<dyn MeasureStore>, OpenError>,
     paths: &KickPaths,
@@ -770,12 +770,9 @@ pub fn run_manual<T>(
     if matches!(mode, ManualMode::Write) {
         let counters = crate::usage::kick_counters_at(&paths.usage_db);
         if let Some(ref counters) = counters {
-            let (command, health) = batch_cursors(&state, counters);
             state.instance_id = Some(counters.instance_id.clone());
-            state.uploaded_through_id = command;
-            state.health_uploaded_through_id = health;
         }
-        state.push_pending = true;
+        state.mark_pending(now_ms);
         state.last_run_ms = Some(now_ms);
         if counters.is_none() {
             finish_collect_state(
@@ -814,7 +811,7 @@ pub fn run_manual<T>(
     };
     // The manual action is one opaque store operation owned by the CLI, so opening the store is
     // its last checkpoint this layer can see: a caller whose limit is already gone must not start
-    // the network work. The background path additionally stops between the uploads and the push.
+    // the network work. The background path additionally stops after the uploads.
     if deadline.expired() {
         if matches!(mode, ManualMode::Write) {
             finish_collect_state(
@@ -915,7 +912,16 @@ fn background_collect_with(
         Some(watchdog),
     );
     log_collect_run(&paths.data_dir, &run, now_ms)?;
+    log_prune_loss(&paths.data_dir, &paths.usage_db)?;
     Ok(run)
+}
+
+pub fn log_prune_loss(data_dir: &Path, usage_db: &Path) -> Result<(), String> {
+    if let Some((lost, total)) = crate::usage::unlogged_pruned_rows_at(usage_db) {
+        append_measure_log(data_dir, &format!("warning: pruned {lost} unuploaded rows"))?;
+        let _ = crate::usage::mark_pruned_rows_logged_at(usage_db, total);
+    }
+    Ok(())
 }
 
 fn run_collect_inner(
@@ -964,7 +970,7 @@ fn run_collect_inner(
     let refused_before = state.refused;
     let Some(counters) = crate::usage::kick_counters_at(&paths.usage_db) else {
         state.last_run_ms = Some(now_ms);
-        state.push_pending = true;
+        state.mark_pending(now_ms);
         collect_failure(&mut state, harness, now_ms, ErrorKind::Storage);
         let _ = state.save(&state_path);
         return collect_run(
@@ -976,11 +982,8 @@ fn run_collect_inner(
         )
         .with_error("usage_db_unreadable");
     };
-    let (command_cursor, health_cursor) = batch_cursors(&state, &counters);
     state.instance_id = Some(counters.instance_id);
-    state.uploaded_through_id = command_cursor;
-    state.health_uploaded_through_id = health_cursor;
-    state.push_pending = true;
+    state.mark_pending(now_ms);
     state.last_run_ms = Some(now_ms);
     if let Err(e) = state.save(&state_path) {
         return collect_run(
@@ -1044,7 +1047,7 @@ fn run_collect_inner(
         }
     };
     // The opener's bootstrap is a network operation; if it alone spent the budget, stop before
-    // the transcript scan rather than running a batch that cannot be pushed.
+    // the transcript scan rather than running a batch that cannot be uploaded.
     if deadline.expired() {
         drop(store);
         if let Some(claim) = &claim {
@@ -1078,9 +1081,7 @@ fn run_collect_inner(
     };
     // The second checkpoint: uploads are inside the record call, so the stop has to be handed to
     // it. `stopped` tells a deadline stop apart from a storage error raised before the checkpoint.
-    // The run stops with the state exactly as the pre-open save left it: `push_pending` stays
-    // true, and what the uploads already did lives in the replica's watermarks, which the next
-    // run revalidates instead of trusting this file's cursors.
+    // A deadline keeps pending state; successful pages have already saved their progress.
     let mut stopped = false;
     let result = measure::record_with_scan_until(store.as_mut(), &input, || {
         if deadline.expired() {
@@ -1092,11 +1093,12 @@ fn run_collect_inner(
     });
     let (scan, kind, error) = match result {
         Err(e) if stopped => (None, Some(ErrorKind::Network), Some(e)),
-        Err(e) => (None, Some(ErrorKind::Storage), Some(e)),
+        Err(e) => (None, Some(classify_error(&e)), Some(e)),
         Ok((scan, outcome)) => {
-            // Uploads happen command, then health, then push (no pull). The first failed stage
-            // supplies the category (and the message) even when a later stage also fails.
-            let (kind, error) = classify_record(&scan, &outcome);
+            let (kind, error) = match outcome {
+                RecordOutcome::Uploaded => (None, None),
+                RecordOutcome::UploadFailed { kind, error } => (Some(kind), Some(error)),
+            };
             (Some(scan), kind, error)
         }
     };
@@ -1160,18 +1162,32 @@ pub fn batch_cursors(state: &CollectState, counters: &KickCounters) -> (i64, i64
     if state.instance_id.as_deref() != Some(counters.instance_id.as_str()) {
         return (0, 0);
     }
+    let Some(crate::measure_progress::Load::Loaded(progress)) = state
+        .progress_path
+        .as_deref()
+        .map(crate::measure_progress::load)
+    else {
+        return (0, 0);
+    };
+    let machine = crate::usage::machine_id();
+    let command = progress
+        .watermark(machine, crate::telemetry::SOURCE_COMMAND)
+        .map_or(0, |mark| mark.rowid.max(0));
+    let health = progress
+        .watermark(machine, crate::telemetry::SOURCE_HEALTH)
+        .map_or(0, |mark| mark.rowid.max(0));
     (
         // Compared against every row, not just the non-`measure` ones: the cursor counts the
         // `measure` rows the last batch copied too, so it legitimately sits past max_command_id.
-        if state.uploaded_through_id > counters.max_any_command_id {
+        if command > counters.max_any_command_id {
             0
         } else {
-            state.uploaded_through_id
+            command
         },
-        if state.health_uploaded_through_id > counters.max_health_id {
+        if health > counters.max_health_id {
             0
         } else {
-            state.health_uploaded_through_id
+            health
         },
     )
 }
@@ -1224,7 +1240,9 @@ pub fn batch_due(
         return false;
     }
     let pending = batch_pending(state, counters);
-    state.push_pending || pending >= cfg.batch_rows || (pending >= 1 && elapsed >= cfg.idle_due_ms)
+    state.upload_pending
+        || pending >= cfg.batch_rows
+        || (pending >= 1 && elapsed >= cfg.idle_due_ms)
 }
 
 pub fn batch_pending(state: &CollectState, counters: &KickCounters) -> i64 {
@@ -1368,7 +1386,7 @@ mod watchdog_tests {
         assert!(line["error"].as_str().unwrap().starts_with("watchdog:"));
         let state = CollectState::load(&dir.path().join("data/measure-collect-state.json"));
         assert_eq!(state.failures["codex"].count, 1);
-        assert!(state.push_pending);
+        assert!(state.upload_pending);
     }
 
     #[test]
@@ -1377,8 +1395,8 @@ mod watchdog_tests {
         let state_path = dir.path().join("measure-collect-state.json");
         let mut state = CollectState {
             instance_id: Some("original-instance".into()),
-            uploaded_through_id: 42,
-            health_uploaded_through_id: 27,
+            upload_pending: true,
+            pending_since_ms: Some(123),
             refused: true,
             last_run_ms: Some(123),
             last_ok_ms: Some(100),
@@ -1420,7 +1438,12 @@ mod watchdog_tests {
         .unwrap();
         assert_eq!(exits.load(Ordering::SeqCst), 1);
         let lines = fs::read_to_string(dir.path().join("measure.log")).unwrap();
-        assert_eq!(lines.lines().count(), 1);
+        assert_eq!(lines.lines().count(), 2);
+        assert!(lines
+            .lines()
+            .nth(1)
+            .unwrap()
+            .starts_with("warning: upload stalled "));
         let line: Value = serde_json::from_str(lines.lines().next().unwrap()).unwrap();
         assert_eq!(line["lane"], "batch");
         assert_eq!(line["outcome"], "failed");
@@ -1432,11 +1455,7 @@ mod watchdog_tests {
         assert!(line["scan"].is_null());
         let saved = CollectState::load(&state_path);
         assert_eq!(saved.instance_id, state.instance_id);
-        assert_eq!(saved.uploaded_through_id, state.uploaded_through_id);
-        assert_eq!(
-            saved.health_uploaded_through_id,
-            state.health_uploaded_through_id
-        );
+        assert_eq!(saved.pending_since_ms, state.pending_since_ms);
         assert_eq!(saved.refused, state.refused);
         assert_eq!(saved.last_run_ms, state.last_run_ms);
         assert_eq!(saved.last_ok_ms, state.last_ok_ms);
@@ -1447,7 +1466,7 @@ mod watchdog_tests {
             saved.failures["codex"].last_failed_ms,
             line["ts_ms"].as_i64().unwrap()
         );
-        assert!(saved.push_pending);
+        assert!(saved.upload_pending);
     }
 
     #[test]

@@ -1,8 +1,21 @@
 use cort::collect::{
-    batch_cursors, batch_due, health_cursor, health_due, min_interval_ms, CollectConfig,
-    CollectState, Failure, HealthState,
+    batch_cursors, batch_due, batch_pending, health_cursor, health_due, min_interval_ms,
+    CollectConfig, CollectState, Failure, HealthState,
 };
+use cort::measure_progress::Progress;
 use cort::usage::KickCounters;
+
+fn cursors(s: &mut CollectState, command: i64, health: i64) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("measure-progress.json");
+    let mut progress = Progress::default();
+    let machine = cort::usage::machine_id();
+    progress.set_watermark(machine, "cort_command", command, "fingerprint".into());
+    progress.set_watermark(machine, "cort_index_health", health, "fingerprint".into());
+    progress.save(&path).unwrap();
+    s.progress_path = Some(path);
+    dir
+}
 
 const NOW: i64 = 1_800_000_000_000;
 
@@ -38,6 +51,41 @@ fn defaults_match_spec() {
     assert_eq!(c.run_deadline_ms, 600_000);
     assert_eq!(c.manual_wait_ms, 60_000);
     assert_eq!(c.root_timeout_ms, 30_000);
+}
+
+#[test]
+fn remote_errors_are_classified_by_prefix() {
+    assert_eq!(
+        cort::collect::classify_error("remote unavailable: blocked"),
+        cort::collect::ErrorKind::Network
+    );
+    assert_eq!(
+        cort::collect::classify_error("disk I/O error"),
+        cort::collect::ErrorKind::Storage
+    );
+}
+
+#[test]
+fn old_pending_state_loads_with_a_start_time() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("measure-collect-state.json");
+    std::fs::write(&path, r#"{"push_pending":true,"uploaded_through_id":42}"#).unwrap();
+    let state = CollectState::load(&path);
+    assert!(state.upload_pending);
+    assert!(state.pending_since_ms.is_some());
+    assert_eq!(state.instance_id, None);
+}
+
+#[test]
+fn missing_and_corrupt_progress_reset_cursors() {
+    let mut state = state(900_000);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("measure-progress.json");
+    state.progress_path = Some(path.clone());
+    assert_eq!(batch_cursors(&state, &counters(9, 9)), (0, 0));
+    std::fs::write(path, "{broken").unwrap();
+    assert_eq!(batch_cursors(&state, &counters(9, 9)), (0, 0));
+    assert_eq!(batch_pending(&state, &counters(9, 9)), 18);
 }
 
 #[test]
@@ -114,9 +162,9 @@ fn idle_rule() {
 }
 
 #[test]
-fn push_pending_due_with_zero_pending() {
+fn upload_pending_due_with_zero_pending() {
     let mut s = state(300_000);
-    s.push_pending = true;
+    s.upload_pending = true;
     assert!(batch_due(
         &s,
         &counters(0, 0),
@@ -142,7 +190,7 @@ fn refused_excludes_command_pending() {
 #[test]
 fn rewound_cursor_counts_all_rows_as_pending() {
     let mut s = state(900_000);
-    s.uploaded_through_id = 101;
+    let _progress = cursors(&mut s, 101, 0);
     assert!(batch_due(
         &s,
         &counters(100, 1),
@@ -176,8 +224,7 @@ fn backoff_is_per_harness() {
 #[test]
 fn instance_change_resets_cursors() {
     let mut s = state(900_000);
-    s.uploaded_through_id = 40;
-    s.health_uploaded_through_id = 20;
+    let _progress = cursors(&mut s, 40, 20);
     s.instance_id = Some("db-old".into());
     let c = counters(40, 20);
     assert_eq!(batch_cursors(&s, &c), (0, 0));
@@ -206,8 +253,7 @@ fn instance_change_resets_cursors() {
 #[test]
 fn rewind_resets_cursors() {
     let mut s = state(900_000);
-    s.uploaded_through_id = 101;
-    s.health_uploaded_through_id = 10;
+    let _progress = cursors(&mut s, 101, 10);
     let c = counters(100, 10);
     assert_eq!(batch_cursors(&s, &c), (0, 10));
     assert!(batch_due(
@@ -237,8 +283,7 @@ fn rewind_resets_cursors() {
 #[test]
 fn health_watermark_rewind_resets_to_zero() {
     let mut s = state(900_000);
-    s.uploaded_through_id = 5;
-    s.health_uploaded_through_id = 10;
+    let _progress = cursors(&mut s, 5, 10);
     assert_eq!(batch_cursors(&s, &counters(100, 5)), (5, 0));
 }
 
@@ -266,7 +311,7 @@ fn extreme_past_last_run_is_due_not_stalled() {
 #[test]
 fn watermark_past_trailing_measure_rows_is_not_a_rewind() {
     let mut s = state(3_600_000);
-    s.uploaded_through_id = 13;
+    let _progress = cursors(&mut s, 13, 0);
     let c = KickCounters {
         instance_id: "db-a".into(),
         max_command_id: 10,
@@ -274,7 +319,7 @@ fn watermark_past_trailing_measure_rows_is_not_a_rewind() {
         max_health_id: 0,
     };
     assert_eq!(batch_cursors(&s, &c), (13, 0));
-    assert!(!s.push_pending);
+    assert!(!s.upload_pending);
     assert!(!batch_due(
         &s,
         &c,
@@ -287,7 +332,7 @@ fn watermark_past_trailing_measure_rows_is_not_a_rewind() {
 #[test]
 fn cursor_past_every_row_is_still_a_rewind() {
     let mut s = state(900_000);
-    s.uploaded_through_id = 20;
+    let _progress = cursors(&mut s, 20, 0);
     let c = KickCounters {
         instance_id: "db-a".into(),
         max_command_id: 10,
@@ -381,9 +426,8 @@ fn state_roundtrip_and_corrupt_file_is_default() {
             last_failed_ms: NOW,
         },
     );
-    s.push_pending = true;
-    s.uploaded_through_id = 8;
-    s.health_uploaded_through_id = 9;
+    s.upload_pending = true;
+    let _progress = cursors(&mut s, 8, 9);
     s.refused = true;
     let h = HealthState {
         instance_id: Some("db-a".into()),
@@ -392,15 +436,19 @@ fn state_roundtrip_and_corrupt_file_is_default() {
         unmapped_count: 6,
         unmapped_recent: vec!["p1".into(), "p2".into()],
     };
-    assert_eq!(CollectState::load(&collect_path), CollectState::default());
+    assert!(!CollectState::load(&collect_path).upload_pending);
     assert_eq!(HealthState::load(&health_path), HealthState::default());
     s.save(&collect_path).unwrap();
     h.save(&health_path).unwrap();
-    assert_eq!(CollectState::load(&collect_path), s);
+    let saved = CollectState::load(&collect_path);
+    assert_eq!(saved.instance_id, s.instance_id);
+    assert_eq!(saved.failures, s.failures);
+    assert_eq!(saved.upload_pending, s.upload_pending);
+    assert_eq!(saved.refused, s.refused);
     assert_eq!(HealthState::load(&health_path), h);
     std::fs::write(&collect_path, "{").unwrap();
     std::fs::write(&health_path, "{").unwrap();
-    assert_eq!(CollectState::load(&collect_path), CollectState::default());
+    assert!(!CollectState::load(&collect_path).upload_pending);
     assert_eq!(HealthState::load(&health_path), HealthState::default());
     assert!(s.save(dir.path()).is_err());
     assert!(h.save(dir.path()).is_err());
@@ -431,7 +479,7 @@ fn future_last_run_does_not_stall_either_lane() {
     let ahead = state(-3_600_000);
     assert!(batch_due(&ahead, &counters(2_000, 0), "codex", NOW, &cfg));
     let mut pushing = state(-3_600_000);
-    pushing.push_pending = true;
+    pushing.upload_pending = true;
     assert!(batch_due(&pushing, &counters(0, 0), "codex", NOW, &cfg));
     let health = HealthState {
         instance_id: Some("db-a".into()),

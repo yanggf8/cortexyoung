@@ -1,6 +1,7 @@
 use cort::audit_import::{ImportedUsage, ImportedUsageOutcome};
 use cort::collect::{
-    run_collect, CollectConfig, CollectRun, CollectState, ErrorKind, Failure, KickPaths,
+    batch_cursors, run_collect, CollectConfig, CollectRun, CollectState, ErrorKind, Failure,
+    KickPaths,
 };
 use cort::measure_store::{CompactionRow, MachineHost, MeasureStore, OpenError, SqliteStore};
 use cort::telemetry::TelemetryEvent;
@@ -70,6 +71,21 @@ fn state(paths: &KickPaths) -> CollectState {
     assert!(path.exists(), "state file missing");
     CollectState::load(&path)
 }
+fn uploaded(paths: &KickPaths) -> (i64, i64) {
+    batch_cursors(
+        &state(paths),
+        &cort::usage::kick_counters_at(&paths.usage_db).unwrap(),
+    )
+}
+fn verified_empty_command_source(paths: &KickPaths) {
+    let mut progress = cort::measure_progress::Progress::default();
+    progress.compactions_complete = true;
+    progress.watermarks_checked = true;
+    progress.set_watermark(cort::usage::machine_id(), "cort_command", 0, "stale".into());
+    progress
+        .save(&paths.data_dir.join("measure-progress.json"))
+        .unwrap();
+}
 fn command(paths: &KickPaths) {
     record_command_at(
         &paths.usage_db,
@@ -113,18 +129,10 @@ fn health(paths: &KickPaths) {
     )
     .unwrap();
 }
-fn run(
-    paths: &KickPaths,
-    db: &Path,
-    harness: &str,
-    push_fail: bool,
-    pull_fail: bool,
-) -> CollectRun {
+fn run(paths: &KickPaths, db: &Path, harness: &str) -> CollectRun {
     run_collect(
         &mut || {
-            let mut store = SqliteStore::open(db).map_err(OpenError::Other)?;
-            store.fail_push(push_fail);
-            store.fail_pull(pull_fail);
+            let store = SqliteStore::open(db).map_err(OpenError::Other)?;
             Ok(Box::new(store) as Box<dyn MeasureStore>)
         },
         paths,
@@ -171,7 +179,7 @@ fn deadline_stops_between_phases() {
             .unwrap()
             .is_empty());
         let s = state(paths);
-        assert!(s.push_pending);
+        assert!(s.upload_pending);
         assert_eq!(s.last_ok_ms, None);
         assert_eq!(s.failures["codex"].count, 1);
         assert_eq!(s.failures["codex"].last_error_kind, "network");
@@ -231,7 +239,7 @@ impl MeasureStore for SlowFirstWrite {
 
     forward_to_inner! {
         upsert_compaction(row: &CompactionRow) -> Result<(), String>;
-        compaction_session(machine_id: &str, boundary_uuid: &str) -> Result<Option<String>, String>;
+        compaction_owners(machine_id: &str) -> Result<Vec<(String, String)>, String>;
         compactions_since(since_ms: i64) -> Result<Vec<CompactionRow>, String>;
         machine_hosts() -> Result<Vec<MachineHost>, String>;
         upsert_imported_usage(rows: &[ImportedUsage]) -> Result<ImportedUsageOutcome, String>;
@@ -239,22 +247,18 @@ impl MeasureStore for SlowFirstWrite {
         insert_events(events: &[TelemetryEvent]) -> Result<usize, String>;
         remote_ids(machine_id: &str, source: &str) -> Result<HashMap<i64, String>, String>;
         remote_payload(machine_id: &str, source: &str, event_id: &str) -> Result<Option<String>, String>;
-        remote_payloads_without_time(machine_id: &str, source: &str) -> Result<Vec<String>, String>;
-        remote_payloads_in_range(machine_id: &str, source: &str, min_ms: i64, max_ms: i64) -> Result<Vec<String>, String>;
         event_watermark(machine_id: &str, source: &str) -> Result<Option<(i64, String)>, String>;
-        set_event_watermark(machine_id: &str, source: &str, max_rowid: i64, row_fingerprint: &str) -> Result<(), String>;
         upsert_aliases(rows: &[(String, String, String)]) -> Result<(), String>;
         aliases() -> Result<Vec<(String, String, String)>, String>;
         events_page(after: Option<(String, String)>, limit: usize) -> Result<Vec<TelemetryEvent>, String>;
         events_in_key_range(first: &(String, String), last: &(String, String)) -> Result<Vec<TelemetryEvent>, String>;
         event_counts() -> Result<Vec<(String, String, usize)>, String>;
-        push() -> Result<(), String>;
-        pull() -> Result<(), String>;
+        index_names() -> Result<Vec<String>, String>;
     }
 }
 
 #[test]
-fn deadline_after_uploads_skips_the_push() {
+fn deadline_after_uploads_still_fails_the_run() {
     sandbox(|paths, db| {
         command(paths);
         health(paths);
@@ -290,19 +294,19 @@ fn deadline_after_uploads_skips_the_push() {
         );
         // A stop before the push is a network failure with the push still owed, not a success.
         let s = state(paths);
-        assert!(s.push_pending);
+        assert!(s.upload_pending);
         assert_eq!(s.last_ok_ms, None);
         assert_eq!(s.failures["codex"].last_error_kind, "network");
     });
 }
 
 #[test]
-fn push_pending_persisted_before_replica_write() {
+fn upload_pending_persisted_before_remote_write() {
     sandbox(|paths, db| {
         command(paths);
         let mut opener = || {
             let s = state(paths);
-            assert!(s.push_pending);
+            assert!(s.upload_pending);
             assert_eq!(s.last_run_ms, Some(NOW));
             Ok(Box::new(SqliteStore::open(db).unwrap()) as Box<dyn MeasureStore>)
         };
@@ -315,49 +319,98 @@ fn push_pending_persisted_before_replica_write() {
             false,
         );
         assert_eq!(result.outcome, "ok");
-        assert!(!state(paths).push_pending);
+        assert!(!state(paths).upload_pending);
     });
 }
 
 #[test]
-fn push_failure_keeps_push_pending_and_counts_harness() {
+fn network_failure_keeps_upload_pending_and_counts_harness() {
     sandbox(|paths, db| {
         command(paths);
         health(paths);
-        let result = run(paths, db, "codex", true, false);
+        assert_eq!(run(paths, db, "codex").outcome, "ok");
+        let result = run_collect(
+            &mut || Err(OpenError::Network("remote unavailable: blocked".into())),
+            paths,
+            "codex",
+            NOW,
+            &CollectConfig::from_lookup(|_| None),
+            false,
+        );
         assert_eq!(
             (result.outcome, result.error_kind),
             ("failed", Some(ErrorKind::Network))
         );
         assert!(result.summary["error"]
             .as_str()
-            .is_some_and(|e| e.starts_with("push failed: ")));
+            .is_some_and(|e| e.starts_with("remote unavailable: ")));
         let s = state(paths);
-        assert!(s.push_pending);
+        assert!(s.upload_pending);
         assert_eq!(s.failures["codex"].count, 1);
         assert_eq!(s.failures["codex"].last_error_kind, "network");
         assert_eq!(s.failures["codex"].last_failed_ms, NOW);
-        assert_eq!(s.last_ok_ms, None);
-        // The health row reached the replica before the push failed; the cursor follows the
-        // replica's watermark, not the run's outcome.
-        assert_eq!(result.summary["scan"]["health"]["status"], "uploaded");
-        assert_eq!(s.health_uploaded_through_id, 1);
+        assert_eq!(s.last_ok_ms, Some(NOW));
+        // A failed retry retains the successful page's progress.
+        assert_eq!(uploaded(paths).1, 1);
     });
 }
 
 #[test]
-fn success_clears_push_pending_and_only_that_harness() {
+fn pending_age_survives_failure_warns_and_clears_on_success() {
     sandbox(|paths, db| {
-        command(paths);
+        health(paths);
+        verified_empty_command_source(paths);
+        let initial = CollectState {
+            upload_pending: true,
+            pending_since_ms: Some(NOW - 8 * 86_400_000),
+            ..Default::default()
+        };
+        initial.save(&state_path(paths)).unwrap();
+        let failed = run_collect(
+            &mut || Err(OpenError::Network("remote unavailable: blocked".into())),
+            paths,
+            "codex",
+            NOW,
+            &CollectConfig::from_lookup(|_| None),
+            false,
+        );
+        assert_eq!(state(paths).pending_since_ms, initial.pending_since_ms);
+        cort::collect::log_collect_run(&paths.data_dir, &failed, NOW).unwrap();
+        let log = fs::read_to_string(paths.data_dir.join("measure.log")).unwrap();
+        assert!(log.contains("warning: upload stalled 8 days"), "{log}");
+        let completed = run(paths, db, "codex");
+        assert_eq!(completed.outcome, "ok");
+        let done = state(paths);
+        assert!(!done.upload_pending, "{done:?} {}", completed.summary);
+        assert_eq!(done.pending_since_ms, None);
+    });
+}
+
+#[test]
+fn success_clears_upload_pending_and_only_that_harness() {
+    sandbox(|paths, db| {
+        health(paths);
+        verified_empty_command_source(paths);
         for _ in 0..2 {
-            assert_eq!(run(paths, db, "codex", true, false).outcome, "failed");
+            assert_eq!(
+                run_collect(
+                    &mut || Err(OpenError::Network("remote unavailable: blocked".into())),
+                    paths,
+                    "codex",
+                    NOW,
+                    &CollectConfig::from_lookup(|_| None),
+                    false,
+                )
+                .outcome,
+                "failed"
+            );
         }
         assert_eq!(state(paths).failures["codex"].count, 2);
-        let ok = run(paths, db, "claude-code", false, false);
+        let ok = run(paths, db, "claude-code");
         assert_eq!(ok.outcome, "ok");
         assert_eq!(ok.summary["error"], serde_json::Value::Null);
         let s = state(paths);
-        assert!(!s.push_pending);
+        assert!(!s.upload_pending, "{s:?} {}", ok.summary);
         assert_eq!(s.last_ok_ms, Some(NOW));
         assert_eq!(s.failures["codex"].count, 2);
         assert!(!s.failures.contains_key("claude-code"));
@@ -371,24 +424,21 @@ fn instance_change_resets_and_reuploads_nothing_twice() {
         health(paths);
         let mut s = CollectState {
             instance_id: Some("old-instance".into()),
-            uploaded_through_id: 500,
-            health_uploaded_through_id: 500,
             ..CollectState::default()
         };
         s.save(&state_path(paths)).unwrap();
-        assert_eq!(run(paths, db, "codex", false, false).outcome, "ok");
+        assert_eq!(run(paths, db, "codex").outcome, "ok");
         s = state(paths);
         assert_ne!(s.instance_id.as_deref(), Some("old-instance"));
-        assert_eq!(s.uploaded_through_id, 0); // command upload awaits a dry-run marker
-        assert_eq!(s.health_uploaded_through_id, 1);
+        assert_eq!(uploaded(paths), (0, 1)); // command upload awaits a dry-run marker
         let mut store = SqliteStore::open(db).unwrap();
         let first = store.event_counts().unwrap();
-        assert_eq!(run(paths, db, "codex", false, false).outcome, "ok");
+        assert_eq!(run(paths, db, "codex").outcome, "ok");
         assert_eq!(
             SqliteStore::open(db).unwrap().event_counts().unwrap(),
             first
         );
-        assert_eq!(state(paths).health_uploaded_through_id, 1);
+        assert_eq!(uploaded(paths).1, 1);
     });
 }
 
@@ -414,7 +464,7 @@ fn lock_file_names_holder() {
             .outcome,
             "ok"
         );
-        assert!(!state(paths).push_pending);
+        assert!(!state(paths).upload_pending);
     });
 }
 
@@ -442,7 +492,7 @@ fn busy_store_is_skipped_not_failed() {
         );
         assert_eq!(result.outcome, "skipped_busy");
         let after = state(paths);
-        assert!(after.push_pending);
+        assert!(after.upload_pending);
         assert_eq!(after.failures["codex"].count, 2);
         assert_eq!(after.last_run_ms, Some(NOW));
     });
@@ -453,15 +503,14 @@ fn refused_is_not_failure() {
     sandbox(|paths, db| {
         command(paths);
         health(paths);
-        let result = run(paths, db, "codex", false, false);
+        let result = run(paths, db, "codex");
         assert_eq!(result.outcome, "ok");
         assert!(result.refused);
         let s = state(paths);
         assert!(s.refused);
-        assert!(!s.push_pending);
+        assert!(!s.upload_pending);
         assert!(s.failures.is_empty());
-        assert_eq!(s.uploaded_through_id, 0);
-        assert_eq!(s.health_uploaded_through_id, 1);
+        assert_eq!(uploaded(paths), (0, 1));
         let counts = SqliteStore::open(db).unwrap().event_counts().unwrap();
         assert!(counts
             .iter()
@@ -490,20 +539,6 @@ fn skipped_busy_when_collect_lock_held() {
         assert_eq!(result.outcome, "skipped_busy");
         assert!(!called);
         assert!(!state_path(paths).exists());
-    });
-}
-
-#[test]
-fn a_collect_run_never_pulls() {
-    // A failing pull cannot touch a run that never pulls: it pushes, succeeds, and clears
-    // `push_pending` (see `record_pushes_and_never_pulls`).
-    sandbox(|paths, db| {
-        command(paths);
-        let result = run(paths, db, "codex", false, true);
-        assert_eq!((result.outcome, result.error_kind), ("ok", None));
-        let s = state(paths);
-        assert!(!s.push_pending);
-        assert!(!s.failures.contains_key("codex"));
     });
 }
 
@@ -553,7 +588,7 @@ fn unreadable_usage_db_records_storage_failure() {
         assert!(!called);
         assert_eq!(result.summary["error"], "usage_db_unreadable");
         let s = state(paths);
-        assert!(s.push_pending);
+        assert!(s.upload_pending);
         assert_eq!(s.failures["codex"].last_error_kind, "storage");
     });
 }
@@ -576,7 +611,7 @@ fn opener_error_records_other_failure() {
         );
         assert_eq!(result.summary["error"], "test");
         let s = state(paths);
-        assert!(s.push_pending);
+        assert!(s.upload_pending);
         assert_eq!(s.failures["codex"].last_error_kind, "other");
     });
 }
@@ -599,21 +634,20 @@ fn bootstrap_timeout_records_network_failure() {
         );
         assert_eq!(result.summary["error"], "network timeout after 120s");
         let s = state(paths);
-        assert!(s.push_pending);
+        assert!(s.upload_pending);
         assert_eq!(s.failures["codex"].last_error_kind, "network");
     });
 }
 
 #[test]
-fn upload_failure_precedes_push_failure_in_classification() {
+fn upload_failure_is_classified_as_storage() {
     sandbox(|paths, db| {
         command(paths);
         let mut opener = || {
             // Counters were read already; losing the source now makes both upload reports fail.
             fs::remove_file(&paths.usage_db).unwrap();
             fs::create_dir(&paths.usage_db).unwrap();
-            let mut store = SqliteStore::open(db).unwrap();
-            store.fail_push(true);
+            let store = SqliteStore::open(db).unwrap();
             Ok(Box::new(store) as Box<dyn MeasureStore>)
         };
         let result = run_collect(
@@ -639,7 +673,7 @@ fn upload_failure_precedes_push_failure_in_classification() {
             .as_str()
             .is_some_and(|e| !e.is_empty()));
         let s = state(paths);
-        assert!(s.push_pending);
+        assert!(s.upload_pending);
         assert_eq!(s.failures["codex"].last_error_kind, "storage");
     });
 }
@@ -677,9 +711,9 @@ fn unopenable_admission_lock_is_not_an_upgrade() {
         command(paths);
         // A directory where the admission lock file belongs: no upgrader could hold it either.
         fs::create_dir(paths.cache_dir.join(".upgrade-admission.lock")).unwrap();
-        let result = run(paths, db, "codex", false, false);
+        let result = run(paths, db, "codex");
         assert_eq!((result.outcome, result.error_kind), ("ok", None));
-        assert!(!state(paths).push_pending);
+        assert!(!state(paths).upload_pending);
     });
 }
 
@@ -727,7 +761,7 @@ fn refusal_is_not_failure_and_logs_on_transition_only() {
     sandbox(|paths, db| {
         command(paths);
         for iteration in 0..3 {
-            let result = run(paths, db, "codex", false, false);
+            let result = run(paths, db, "codex");
             assert_eq!(result.outcome, "ok");
             assert!(result.refused);
             assert_eq!(result.refused_changed, iteration == 0);
@@ -759,7 +793,7 @@ fn refusal_is_not_failure_and_logs_on_transition_only() {
                 .to_string(),
         )
         .unwrap();
-        let result = run(paths, db, "codex", false, false);
+        let result = run(paths, db, "codex");
         assert!(!result.refused);
         assert!(result.refused_changed);
         cort::collect::log_collect_run(&paths.data_dir, &result, NOW).unwrap();
@@ -793,10 +827,17 @@ fn background_busy_is_silent() {
 // The harness reaches run_collect as an argument. Reading CORT_COLLECT_HARNESS is the CLI's job,
 // covered in collect_cli.rs by background_failure_line_carries_error and the foreground test.
 #[test]
-fn push_failure_lands_in_the_named_harness_bucket() {
-    sandbox(|paths, db| {
+fn network_failure_lands_in_the_named_harness_bucket() {
+    sandbox(|paths, _db| {
         command(paths);
-        let result = run(paths, db, "codex", true, false);
+        let result = run_collect(
+            &mut || Err(OpenError::Network("remote unavailable: blocked".into())),
+            paths,
+            "codex",
+            NOW,
+            &CollectConfig::from_lookup(|_| None),
+            false,
+        );
         assert_eq!(result.outcome, "failed");
         assert_eq!(state(paths).failures["codex"].count, 1);
     });

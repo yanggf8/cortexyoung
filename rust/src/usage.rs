@@ -10,6 +10,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub const USAGE_SCHEMA_VERSION: i64 = 2;
 pub const RETENTION_DAYS: i64 = 90;
+const UNUPLOADED_RETENTION_DAYS: i64 = 180;
 pub const DEFAULT_USAGE_DAYS: i64 = 30;
 const RECORD_BUSY_MS: u64 = 25;
 const DAY_MS: i64 = 86_400_000;
@@ -23,6 +24,8 @@ const LAST_PRUNE_KEY: &str = "LAST_PRUNE_DAY";
 const VERSION_KEY: &str = "USAGE_SCHEMA_VERSION";
 const MACHINE_KEY: &str = "MACHINE_ID";
 const MACHINE_SOURCE_KEY: &str = "MACHINE_ID_SOURCE";
+const PRUNED_UNUPLOADED_KEY: &str = "pruned_unuploaded_rows";
+const LOGGED_PRUNED_KEY: &str = "logged_pruned_unuploaded_rows";
 pub const INSTANCE_KEY: &str = "INSTANCE_ID";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,7 +36,7 @@ pub struct KickCounters {
     pub max_command_id: i64,
     /// `MAX(id)` over **every** `command_log` row, `measure` included: the highest rowid that
     /// exists at all. A cursor is only a rewind when it is past *this*, because
-    /// `uploaded_through_id` is the highest local rowid already copied -- and the copy takes
+    /// The command watermark is the highest local rowid already uploaded, including
     /// `measure` rows with it, so a cursor that is legitimately ahead of `max_command_id` is the
     /// normal state right after a batch, not evidence of a restored database.
     pub max_any_command_id: i64,
@@ -1146,6 +1149,61 @@ fn meta(conn: &Connection, key: &str) -> rusqlite::Result<Option<String>> {
     }
 }
 
+pub fn uploaded_floor_at(path: &Path, source: &str, rowid: i64) -> Result<(), String> {
+    let key = match source {
+        crate::telemetry::SOURCE_COMMAND => "uploaded_command_rowid",
+        crate::telemetry::SOURCE_HEALTH => "uploaded_health_rowid",
+        _ => return Err("unknown upload source".into()),
+    };
+    let conn = Connection::open(path).map_err(|e| e.to_string())?;
+    conn.busy_timeout(Duration::from_millis(RECORD_BUSY_MS))
+        .map_err(|e| e.to_string())?;
+    conn.execute(
+        "INSERT INTO _usage_meta (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![key, rowid.max(0).to_string()],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub fn pruned_unuploaded_rows_at(path: &Path) -> Option<i64> {
+    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+    meta(&conn, PRUNED_UNUPLOADED_KEY)
+        .ok()
+        .flatten()?
+        .parse()
+        .ok()
+}
+
+pub fn unlogged_pruned_rows_at(path: &Path) -> Option<(i64, i64)> {
+    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+    let total = meta(&conn, PRUNED_UNUPLOADED_KEY)
+        .ok()
+        .flatten()?
+        .parse::<i64>()
+        .ok()?;
+    let logged = meta(&conn, LOGGED_PRUNED_KEY)
+        .ok()
+        .flatten()
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(0);
+    (total > logged).then_some((total - logged, total))
+}
+
+pub fn mark_pruned_rows_logged_at(path: &Path, total: i64) -> Result<(), String> {
+    let conn = Connection::open(path).map_err(|e| e.to_string())?;
+    conn.busy_timeout(Duration::from_millis(RECORD_BUSY_MS))
+        .map_err(|e| e.to_string())?;
+    conn.execute(
+        "INSERT INTO _usage_meta (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![LOGGED_PRUNED_KEY, total.to_string()],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// Stored usage-schema version, read-only. `None` = file missing, unreadable, or key absent;
 /// the CALLER maps missing-file to Absent and the rest to Unreadable (that distinction lives
 /// in diagnosis, not here). The SQL stays where the table is defined, so upgrade.rs never
@@ -1155,6 +1213,34 @@ pub fn read_schema_version(path: &Path) -> Option<String> {
     meta(&conn, VERSION_KEY).ok()?
 }
 
+/// Deletes one batch of rows never uploaded and adds them to the loss counter in one transaction:
+/// a deleted row cannot be counted later, so the two commit together or not at all.
+fn prune_unuploaded_batch(
+    conn: &Connection,
+    sql: &str,
+    age: i64,
+    floor: i64,
+) -> rusqlite::Result<usize> {
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    let batch = (|| {
+        let n = conn.execute(sql, params![age, floor, PRUNE_BATCH])?;
+        if n > 0 {
+            conn.execute(
+                "INSERT INTO _usage_meta (key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET
+                     value = CAST(CAST(value AS INTEGER) + CAST(excluded.value AS INTEGER) AS TEXT)",
+                params![PRUNED_UNUPLOADED_KEY, n.to_string()],
+            )?;
+        }
+        conn.execute_batch("COMMIT")?;
+        Ok(n)
+    })();
+    if batch.is_err() {
+        let _ = conn.execute_batch("ROLLBACK");
+    }
+    batch
+}
+
 fn prune_best_effort(conn: &Connection, now: i64) {
     let today = utc_day(now);
     let last = meta(conn, LAST_PRUNE_KEY).ok().flatten();
@@ -1162,17 +1248,32 @@ fn prune_best_effort(conn: &Connection, now: i64) {
         return;
     }
     let cutoff = now.saturating_sub(RETENTION_DAYS * DAY_MS);
-    for sql in [
-        "DELETE FROM command_log WHERE id IN (
-            SELECT id FROM command_log WHERE ts < ?1 LIMIT ?2)",
-        "DELETE FROM index_health_log WHERE id IN (
-            SELECT id FROM index_health_log WHERE ts < ?1 LIMIT ?2)",
+    let hard_cutoff = now.saturating_sub(UNUPLOADED_RETENTION_DAYS * DAY_MS);
+    for (table, floor_key) in [
+        ("command_log", "uploaded_command_rowid"),
+        ("index_health_log", "uploaded_health_rowid"),
     ] {
-        loop {
-            match conn.execute(sql, params![cutoff, PRUNE_BATCH]) {
-                Ok(0) => break,
-                Ok(_) => continue,
-                Err(_) => return,
+        let floor = meta(conn, floor_key)
+            .ok()
+            .flatten()
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(0);
+        for (age, relation, count_loss) in [(cutoff, "<=", false), (hard_cutoff, ">", true)] {
+            let sql = format!(
+                "DELETE FROM {table} WHERE id IN (
+                SELECT id FROM {table} WHERE ts < ?1 AND id {relation} ?2 LIMIT ?3)"
+            );
+            loop {
+                let deleted = if count_loss {
+                    prune_unuploaded_batch(conn, &sql, age, floor)
+                } else {
+                    conn.execute(&sql, params![age, floor, PRUNE_BATCH])
+                };
+                match deleted {
+                    Ok(0) => break,
+                    Ok(_) => {}
+                    Err(_) => return,
+                }
             }
         }
     }

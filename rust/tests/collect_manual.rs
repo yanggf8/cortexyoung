@@ -116,7 +116,7 @@ fn manual_busy_times_out_with_holder() {
     sandbox(|paths, _| {
         fs::write(
             &paths.measure_config,
-            r#"{"url":"libsql://unused.invalid","token":"test"}"#,
+            r#"{"url":"libsql://127.0.0.1:1","token":"test"}"#,
         )
         .unwrap();
         let mut holder =
@@ -124,11 +124,7 @@ fn manual_busy_times_out_with_holder() {
                 .unwrap();
         use std::io::Write;
         writeln!(holder, "pid=4242 started_ms={NOW}").unwrap();
-        for args in [
-            &["measure", "record"][..],
-            &["measure", "sync"][..],
-            &["measure", "sync", "--dry-run"][..],
-        ] {
+        for args in [&["measure", "record"][..], &["measure", "verify"][..]] {
             let start = std::time::Instant::now();
             let output = cort_cli(paths, args);
             assert!(!output.status.success());
@@ -200,8 +196,7 @@ fn manual_failure_counts_manual_only() {
         before.save(&state_path(paths)).unwrap();
         let failed: Result<(), _> = run_manual(
             &mut || {
-                let mut store = SqliteStore::open(db).map_err(OpenError::Other)?;
-                store.fail_push(true);
+                let store = SqliteStore::open(db).map_err(OpenError::Other)?;
                 Ok(Box::new(store) as Box<dyn MeasureStore>)
             },
             paths,
@@ -209,13 +204,8 @@ fn manual_failure_counts_manual_only() {
             &config(),
             ManualMode::Write,
             &mut |store| {
-                cort::measure::sync(store)
-                    .map(|()| ManualStep {
-                        value: (),
-                        events: None,
-                        failure: None,
-                    })
-                    .map_err(|error| (error, ErrorKind::Network))
+                let _ = store;
+                Err(("push failed: x".to_string(), ErrorKind::Network))
             },
         );
         assert!(failed.unwrap_err().message().starts_with("push failed:"));
@@ -228,7 +218,7 @@ fn manual_failure_counts_manual_only() {
             &config(),
             ManualMode::Write,
             &mut |store| {
-                cort::measure::sync(store).unwrap();
+                let _ = store;
                 Ok(ManualStep {
                     value: (),
                     events: None,
@@ -280,7 +270,6 @@ fn dry_run_pass_clears_refused_and_stamp() {
         let events = cort::telemetry::cort_events(&paths.usage_db, None).unwrap();
         let mut seeded = SqliteStore::open(db).unwrap();
         seeded.insert_events(&events).unwrap();
-        seeded.push().unwrap();
         drop(seeded);
         run_manual(
             &mut opener(db),
@@ -298,7 +287,7 @@ fn dry_run_pass_clears_refused_and_stamp() {
         .unwrap();
         before = state(paths);
         assert!(!before.refused);
-        assert!(!before.push_pending);
+        assert!(!before.upload_pending);
         assert!(!stamp.exists());
     });
 }
@@ -325,10 +314,10 @@ fn record_scan_shape_survives_run_manual() {
             },
         )
         .unwrap();
-        let output = json!({"status":"recorded","pushed":true,"scan":result.to_json()});
+        let output = json!({"status":"recorded","scan":result.to_json()});
         assert_eq!(
             output,
-            json!({"status":"recorded","pushed":true,"scan":{
+            json!({"status":"recorded","scan":{
                 "files_seen":0,"files_scanned":0,"compactions":0,"skipped_lines":0,"unknown_type_lines":0
             }})
         );
@@ -417,57 +406,11 @@ fn dry_run_without_matches_keeps_refusal() {
 }
 
 #[test]
-fn manual_sync_refusal_is_not_a_failure() {
-    sandbox(|paths, db| {
-        let (events, synced) = run_manual(
-            &mut opener(db),
-            paths,
-            NOW,
-            &config(),
-            ManualMode::Write,
-            &mut |_| {
-                Ok(cort::collect::sync_step(
-                    cort::telemetry::EventsReport::Refused("not verified".into()),
-                    Ok(()),
-                ))
-            },
-        )
-        .unwrap();
-        // The CLI still fails this sync with measure_events_not_uploaded; only the state differs.
-        assert!(!events.is_ok());
-        assert!(synced.is_ok());
-        let after = state(paths);
-        assert!(after.refused);
-        assert!(!after.push_pending);
-        assert!(!after.failures.contains_key("manual"));
-        let failed = |events, synced| cort::collect::sync_step(events, synced).failure;
-        assert_eq!(
-            failed(
-                cort::telemetry::EventsReport::Failed("disk".into()),
-                Err("push failed: x".into())
-            ),
-            Some(ErrorKind::Storage)
-        );
-        assert_eq!(
-            failed(
-                cort::telemetry::EventsReport::Refused("not verified".into()),
-                Err("push failed: x".into())
-            ),
-            Some(ErrorKind::Network)
-        );
-    });
-}
-
-#[test]
 fn unconfigured_keeps_each_command_code() {
     sandbox(|paths, _| {
         for (args, code) in [
             (&["measure", "record"][..], "measure_error"),
-            (&["measure", "sync"][..], "measure_error"),
-            (
-                &["measure", "sync", "--dry-run"][..],
-                "measure_dry_run_failed",
-            ),
+            (&["measure", "verify"][..], "measure_verify_failed"),
         ] {
             let output = cort_cli(paths, args);
             assert!(!output.status.success());
@@ -505,7 +448,7 @@ fn manual_deadline_stops_after_the_opener() {
         assert_eq!(error.code(), "measure_error");
         assert!(error.message().contains("run deadline exceeded after"));
         let after = state(paths);
-        assert!(after.push_pending);
+        assert!(after.upload_pending);
         assert_eq!(after.failures["manual"].last_error_kind, "network");
         assert!(
             cort::upgrade::try_exclusive_lock(&paths.data_dir.join("measure-collect.lock")).is_ok()
@@ -526,7 +469,7 @@ fn manual_bootstrap_timeout_is_a_network_failure() {
         );
         assert_eq!(result.unwrap_err().code(), "measure_error");
         let after = state(paths);
-        assert!(after.push_pending);
+        assert!(after.upload_pending);
         assert_eq!(after.failures["manual"].last_error_kind, "network");
     });
 }

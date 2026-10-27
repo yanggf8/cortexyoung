@@ -65,6 +65,10 @@ gwebcdb 的 `crates/bridge-core/src/turso.rs` 已經用 Rust 直連 Turso，`pri
   - 伺服器回的錯誤訊息只寫進 log，不進入 JSON 輸出或 hook 注入的文字。
 - 每個語句的結果都帶 `affected_row_count`，呼叫端負責檢查（第 5.1、5.2 節）。
 - 逾時：ureq 的總逾時。要測一次「接受連線後不回應」的假伺服器，確認逾時涵蓋整個請求。
+  - 例外：ureq 2 的 DNS 解析是同步的，不受總逾時限制（`ureq-2.12.1/src/stream.rs:364` 自己寫了
+    TODO）。DNS 卡住時，只能等系統 resolver 放棄或被 watchdog 結束。所以 SessionStart 的預算
+    （第 5.3 節）在 DNS 卡住時，outcome 不會是 `remote_timeout`；C3b 若要嚴格守住預算，就要在背景
+    執行緒做解析、加上期限。
 
 ### 3.2 交易：Hrana `batch` 加步驟條件
 
@@ -108,6 +112,17 @@ gwebcdb 的 `crates/bridge-core/src/turso.rs` 已經用 Rust 直連 Turso，`pri
 5. 最後一定 `DROP TABLE`，失敗路徑也要；殘留的空表無害，下次的步驟 0 會清掉。
 
 每個 POST 都會關閉 stream，所以跨連線的 busy 排除不驗，交給上面的重試兜底。
+
+**探測結果**（2026-10-27 19:2x 台灣時間，`cort-measure`，`rust/tests/remote_probe.rs`）：全部通過。
+- 步驟 1：步 1 成功；步 2 分類為 `constraint`；`COMMIT` 被跳過；`ROLLBACK` 執行了。
+- 步驟 2：事後重新插入 k=1 成功，代表伺服器回滾了 batch。
+- 步驟 3：沒有 `COMMIT` 就 `close`，k=2 沒有留下。
+- 步驟 4：被忽略的 `INSERT OR IGNORE` 回 `affected_row_count=0`、`rows_written=0`、`rows_read=0`，**不計入
+  writes**。
+- 步驟 5：探測結束後，`sqlite_master` 中已沒有 `cort_spike_tx`。
+
+所以 `transaction()` 不必限制在冪等的語句組；但「每個語句組都必須可以重跑」的要求仍然成立，因為逾時時
+無法得知是否已提交。
 
 **探測通過前**，`transaction()` 只能用在冪等的語句組（`OR IGNORE`／`OR REPLACE`／`MAX` upsert）。
 
@@ -311,8 +326,8 @@ gwebcdb 的 `crates/bridge-core/src/turso.rs` 已經用 Rust 直連 Turso，`pri
   - 例外是進度重建與 full-range 重送，一次最多約 20 萬列的寫入嘗試。
   - **C2b 第一次在每台機器上跑時，進度檔不存在**。解封前讀不到遠端水位，所以會歸零重送，約 20 萬列／台。
     這是搬遷成本，不是故障。
-  - 被忽略的列算不算 writes，看第 3.2 節探測的第 4 步：不算，就可以忽略；算，就收緊 full-range 的
-    觸發條件，並把 C2b 的首次部署排到解封之後（解封後能種回水位）。
+  - 第 3.2 節的探測顯示，被忽略的列不計入 writes（`rows_written=0`）。所以重送已在遠端的列，成本
+    幾乎是零；只有真正新的列才計費。full-range 的觸發條件不必收緊。
 - **SessionStart**：讀整個專案的 ledger（目前不到 20 列），加上 notes 名稱（有索引時約 15 列）。
   一個月不到 10 萬列。
 - **記憶檔上傳**：零 reads，只有重建時讀一次自己的分區。

@@ -66,8 +66,8 @@ fn busy_store_opens_nothing() {
             Ok(())
         })
         .expect("hold measure lock");
-        let replica_root = data.path().join("turso-measure");
-        for entry in fs::read_dir(replica_root).expect("lock directory") {
+        let lock_root = data.path().join("locks/turso-measure");
+        for entry in fs::read_dir(lock_root).expect("lock directory") {
             let entry = entry.expect("database directory");
             let files: Vec<_> = fs::read_dir(entry.path())
                 .expect("database directory entries")
