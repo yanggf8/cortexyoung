@@ -341,6 +341,7 @@
 - [x] 2026-10-27 19:0x 台灣時間：兩台部署 master `61dc8ce4`（集中式設計 C0：`cort memory notes sync` 改名為 `cort memory notes upload`，行為不變，背景上傳的 log 改為 `memory-upload.log`）。部署前兩台都沒有舊的背景上傳進程在跑。NUC11i5 live `cort-e6aa61028597`，Thinkpade15 live `cort-7351d3ffdb54`；兩台 shim 與 hooks 都是 current，crontab 0 行；`notes upload --dry-run` 兩台都回 `complete: true`，舊的 `notes sync` 已被 CLI 拒絕。
 - [x] 2026-10-28 05:00 台灣時間（21:00Z）兩台部署 master `7efcb906`（NUC11i5 `cort-7eba51c63d92`、Thinkpade15 `cort-0fc297f04ce5`）：集中式設計 C1–C2b，量測改為直連遠端、不再有副本與 `cort measure sync`（改用 `cort measure verify`）；兩台 `measure status` 皆 `missing_indexes: []`、`progress: loaded`，手動 collect 成功。
 - [x] 2026-10-28 05:57 台灣時間（21:57Z）兩台部署 master `3ea01b2d`（NUC11i5 `cort-d9bf80d803f3`、Thinkpade15 `cort-62bcdcc10ecc`）：背景收集讀 usage.db 最多等 2 秒寫鎖，不再誤報 `usage_db_unreadable`（`ba553899`）；新增 `cort measure verify --new-machine`，給從未上傳過的機器做首次上傳證明（`3ea01b2d`）。兩台手動 collect 成功、`refused: false`、`missing_indexes: []`。
+- [x] 2026-10-28 05:58 台灣時間（21:58Z）i5940R3070 部署 master `3ea01b2d`，經 aib 由該機自行安裝（#973 指示、#974 回報）：live `cort-3c219c2b9f78`，`install.sh --check` OK；`cort measure verify --new-machine` 回 `verified`（local 2559、machines 1、`new_machine: true`）；首次上傳由 hook 觸發的背景 collect 送出 2561 筆，手動 collect 再送 5 筆（watermark 2566）、無重複；`measure status` `refused: false`、`upload_pending: false`、`missing_indexes: []`。這是第三台上傳量測的機器。
 - [ ] 隔天：遠端兩台都有昨天的快照、事件持續增加、無重複；壓縮列有新增。
 - [ ] 移除 `~/.cargo/bin/claudecat`（兩台）。
 - [ ] **問使用者後**才清 `harnessuse` 的 `telemetry_events` 與 alias。
