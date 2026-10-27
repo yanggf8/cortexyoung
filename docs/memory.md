@@ -13,7 +13,7 @@ remains shared across machines. Each machine must configure the same Turso URL a
 `remote: ok` says this invocation read the shared database. `CORT_MEMORY_PROJECT` can override
 Git origin for a project without one; the earlier `CLAUDECAT_MEMORY_PROJECT` spelling is accepted during migration.
 Network calls use `CORT_COLLECT_NET_TIMEOUT_SECS` (default 120 seconds) as their deadline.
-`notes upload`, `list`, and `show` wait up to `CORT_MEMORY_LOCK_WAIT_SECS` (default 30 seconds, fractions allowed) for `memory.lock`.
+`notes upload` waits up to `CORT_MEMORY_LOCK_WAIT_SECS` (default 30 seconds, fractions allowed) for `memory.lock`; `list` and `show` read the shared database without that lock.
 
 The shared ledger database is `harnessuse` (`turso://harnessuse-yanggf8.aws-ap-northeast-1.turso.io`,
 native TYPE Turso, shared with `telemetry_events`); mint its token with
@@ -55,6 +55,14 @@ The edit hook kicks `cort memory notes upload --background` for Claude Code memo
 
 `cort memory notes` is opt-in per project per machine. After `notes opt-in --root .`,
 `notes upload` uploads Claude Code `projects/*/memory/*.md` files for opted-in projects.
+Its private `notes-uploaded.json` file records each uploaded note's full key and SHA-256. A normal upload plans from this file without reading the remote notes table; if the file is missing or invalid, upload reads this machine's rows once to recover tombstones. Failed recovery is reported as `tombstones_unknown` and retried on the next upload. While the old
+replica directory still exists, an older `cort` on the same machine may write these rows without
+updating the file, so every upload reads this machine's rows instead (`state: rebuilt_legacy_replica`).
+The file cannot tell that it was restored from an older copy: a note deleted after that copy was
+made gets no tombstone. Delete `notes-uploaded.json` instead of restoring it; the next upload
+rebuilds it from the remote.
+The same applies after the shared database is recreated: the file still lists the old uploads, so
+only edited notes would return until it is deleted.
 The secret screen is coarse and fail-closed; it is not a privacy guarantee. Run
 `cort memory notes upload --dry-run` to list what would be uploaded before uploading.
 Claude Code's SessionStart context lists up to 15 unreviewed note names from other machines for this project, without their bodies.

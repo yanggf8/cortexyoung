@@ -2064,8 +2064,20 @@ fn cmd_memory(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError
                     )
                 }
             }
-            NotesAction::List { root } => cort::memory_store::notes_list(&root),
-            NotesAction::Show { note_id } => cort::memory_store::notes_show(&note_id),
+            NotesAction::List { root } => {
+                return Ok(Emit {
+                    render_command: None,
+                    format: Format::Json,
+                    payload: cort::memory_store::notes_list(&root).map_err(memory_read_error)?,
+                })
+            }
+            NotesAction::Show { note_id } => {
+                return Ok(Emit {
+                    render_command: None,
+                    format: Format::Json,
+                    payload: cort::memory_store::notes_show(&note_id).map_err(memory_read_error)?,
+                })
+            }
         }
         .map_err(memory_error)?,
         MemoryAction::Configure { url, token_stdin } => {

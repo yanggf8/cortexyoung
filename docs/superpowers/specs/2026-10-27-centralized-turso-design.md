@@ -265,6 +265,13 @@ gwebcdb 的 `crates/bridge-core/src/turso.rs` 已經用 Rust 直連 Turso，`pri
     `(machine, harness, project)`）；
   - 讀不到時，把 `tombstones_unknown: true` 存進本機檔、顯示在 `notes status`，之後每次上傳都再試一次
     那個讀取，直到成功。已刪的記憶內容不會無聲地一直留在遠端。
+- 過渡期（C3a-2 補上）：只要舊副本目錄還在，同一台機器上的舊版 cort 可能經副本寫這些列、卻不更新本機檔，
+  所以每次上傳都改成讀一次自己的分區再規劃（`state: rebuilt_legacy_replica`）；第 8.4 節刪掉副本目錄後才回到
+  零讀取。
+- schema 不用 marker 記住（C3a-2 補上）：建表與索引的 DDL 放在「有寫入的那次上傳」的第一個交易最前面，所以
+  沒有東西要寫時照樣零請求，而同一個 URL 的資料庫被重建後，下一次寫入會自動補回表。`notes list`／`show`
+  不跑 DDL。
+- 本機檔從舊備份還原時無從察覺，那之後刪掉的 note 不會有 tombstone；要重建就刪掉本機檔，不要還原。
 - tombstone 只來自完整讀到結尾的目錄。
 - 觸發方式照舊：編輯記憶檔時由 hook 啟動，加上每 30 分鐘一次，都在背景跑，hook 不等它。
 

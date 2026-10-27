@@ -198,6 +198,8 @@ fn log(
         "ts": timestamp(), "trigger": trigger, "pass": pass, "outcome": outcome,
         "counts": counts.map(|c| json!({"upserts":c["upserts"], "tombstones":c["tombstones"], "unchanged":c["unchanged"], "skipped_secret":c["skipped_secret"]})),
         "host_written": result.and_then(|r| r.get("host_written")),
+        "tombstone_skipped": result.and_then(|r| r.get("tombstone_skipped")),
+        "tombstones_unknown": result.and_then(|r| r.get("tombstones_unknown")),
         "error": error, "elapsed_ms": elapsed_ms, "machine_id": crate::usage::machine_id(),
     });
     let _ = crate::collect::append_log(data_dir, "memory-upload.log", &line.to_string());
@@ -482,16 +484,15 @@ mod tests {
                 fs::write(dir.join("notes-upload.pending"), "1").unwrap();
             }
             Ok(
-                json!({"counts":{"upserts":1,"tombstones":0,"unchanged":0,"skipped_secret":0},"host_written":true}),
+                json!({"counts":{"upserts":1,"tombstones":0,"unchanged":0,"skipped_secret":0},"host_written":true,
+                    "tombstone_skipped":0,"tombstones_unknown":false}),
             )
         });
         assert_eq!(passes, 2);
-        assert_eq!(
-            fs::read_to_string(dir.join("memory-upload.log"))
-                .unwrap()
-                .lines()
-                .count(),
-            2
-        );
+        let log = fs::read_to_string(dir.join("memory-upload.log")).unwrap();
+        assert_eq!(log.lines().count(), 2);
+        let first: Value = serde_json::from_str(log.lines().next().unwrap()).unwrap();
+        assert_eq!(first["tombstone_skipped"], 0);
+        assert_eq!(first["tombstones_unknown"], false);
     }
 }

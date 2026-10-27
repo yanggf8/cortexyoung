@@ -2,12 +2,12 @@
 //! The local file is a sync replica and must never be opened with rusqlite or the Turso CLI.
 
 use crate::memory::{self, MemoryEntry, MemoryLedger, MemoryRecall};
-use crate::network_timeout::NetworkGuard;
 use crate::remote::{Cell, ErrorKind, RemoteDb, Stmt, Transport, UreqTransport};
 use crate::{notes, notes_upload, usage};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -320,49 +320,6 @@ pub(crate) fn runtime() -> Result<tokio::runtime::Runtime, String> {
         .map_err(|e| e.to_string())
 }
 
-fn network_guard() -> NetworkGuard {
-    NetworkGuard::new(Duration::from_millis(
-        crate::collect::CollectConfig::from_env().net_timeout_ms,
-    ))
-}
-
-async fn open_network(config: &Config) -> Result<(turso::sync::Database, NetworkGuard), String> {
-    let mut net = network_guard();
-    let db = net.run(open_replica(config, "memory.db")).await?;
-    Ok((db, net))
-}
-
-async fn open_replica(config: &Config, file: &str) -> Result<turso::sync::Database, String> {
-    open_replica_in(SUBDIR, config, file).await
-}
-
-/// Open (creating) a sync replica at `data_dir()/<subdir>/<digest(url)>/<file>`.
-pub(crate) async fn open_replica_in(
-    subdir: &str,
-    config: &Config,
-    file: &str,
-) -> Result<turso::sync::Database, String> {
-    let dir = crate::data_dir::data_dir()
-        .join(subdir)
-        .join(digest(&config.url));
-    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).map_err(|e| e.to_string())?;
-    }
-    let path = dir.join(file);
-    turso::sync::Builder::new_remote(&path.to_string_lossy())
-        .with_remote_url(&config.url)
-        .with_auth_token(&config.token)
-        // turso 0.9.0-pre.1 `sync::Builder::bootstrap_if_empty(bool)`: download schema and data
-        // when the local replica is empty. It already defaults to true; stated so a fresh
-        // machine's first open pulls the remote instead of starting a divergent database.
-        .bootstrap_if_empty(true)
-        .build()
-        .await
-        .map_err(|e| format!("cannot open Turso sync replica: {e}"))
-}
 async fn read_existing_ledger(
     conn: &turso::Connection,
     project: &str,
@@ -659,8 +616,13 @@ pub fn notes_opt_in(root: &Path, opt_in: bool) -> Result<Value, String> {
 
 pub fn notes_status() -> Result<Value, String> {
     let opted_in = notes_upload::read_opt_in(&notes_upload::opt_in_path())?;
+    let state = config()
+        .ok()
+        .and_then(|config| load_notes_state(&notes_state_path(), &config, usage::machine_id()));
     Ok(
-        json!({"opted_in":opted_in,"memory_configured":config().is_ok(),"claude_home":claude_home()?,"machine":notes_machine()}),
+        json!({"opted_in":opted_in,"memory_configured":config().is_ok(),"claude_home":claude_home()?,"machine":notes_machine(),
+            "tombstones_unknown":state.as_ref().is_none_or(|s| s.tombstones_unknown),
+            "uploaded_notes":state.as_ref().map_or(0, |s| s.notes.len())}),
     )
 }
 
@@ -678,13 +640,196 @@ fn notes_now() -> Result<String, String> {
     ))
 }
 
+const NOTES_HARNESS: &str = "claude-code";
+const NOTES_EXISTING: &str = "SELECT project, source_dir, file_name, sha256, deleted FROM harness_notes WHERE machine = ? AND harness = ?";
+const NOTES_UPSERT: &str = "INSERT INTO harness_notes (project, machine, harness, source_dir, file_name, note_id, sha256, title, description, kind, body, deleted, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?) ON CONFLICT(project, machine, harness, source_dir, file_name) DO UPDATE SET note_id=excluded.note_id, sha256=excluded.sha256, title=excluded.title, description=excluded.description, kind=excluded.kind, body=excluded.body, deleted=0, updated_at=excluded.updated_at";
+const NOTES_TOMBSTONE: &str = "UPDATE harness_notes SET deleted=1, body='', title=NULL, description=NULL, kind=NULL, updated_at=? WHERE project=? AND machine=? AND harness=? AND source_dir=? AND file_name=? AND sha256=?";
+const NOTES_HOST: &str = "INSERT INTO harness_machines (machine, host, updated_at) VALUES (?, ?, ?) ON CONFLICT(machine) DO UPDATE SET host=excluded.host, updated_at=excluded.updated_at WHERE host<>excluded.host";
+const NOTES_LIST: &str = "SELECT n.project, n.machine, n.harness, n.source_dir, n.file_name, n.note_id, n.sha256, n.title, n.description, n.kind, n.updated_at, m.host FROM harness_notes n LEFT JOIN harness_machines m ON m.machine=n.machine WHERE n.project=? AND n.deleted=0 ORDER BY n.updated_at DESC, n.machine, n.harness, n.source_dir, n.file_name";
+const NOTES_SHOW: &str = "SELECT n.project, n.machine, n.harness, n.source_dir, n.file_name, n.note_id, n.sha256, n.title, n.description, n.kind, n.updated_at, m.host, n.body FROM harness_notes n LEFT JOIN harness_machines m ON m.machine=n.machine WHERE n.note_id=? AND n.deleted=0";
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct UploadedNote {
+    project: String,
+    harness: String,
+    source_dir: String,
+    file_name: String,
+    sha256: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct NotesUploaded {
+    version: u8,
+    database: String,
+    machine: String,
+    host: String,
+    tombstones_unknown: bool,
+    notes: Vec<UploadedNote>,
+}
+
+impl NotesUploaded {
+    fn empty(config: &Config, machine: &str) -> Self {
+        Self {
+            version: 1,
+            database: crate::measure_store::database_identity(&config.url),
+            machine: machine.into(),
+            host: String::new(),
+            tombstones_unknown: false,
+            notes: Vec::new(),
+        }
+    }
+    fn existing(&self) -> Vec<notes_upload::ExistingRow> {
+        self.notes
+            .iter()
+            .map(|n| notes_upload::ExistingRow {
+                project: n.project.clone(),
+                source_dir: n.source_dir.clone(),
+                file_name: n.file_name.clone(),
+                sha256: n.sha256.clone(),
+                deleted: false,
+            })
+            .collect()
+    }
+    fn remove(&mut self, project: &str, source_dir: &str, file_name: &str) {
+        self.notes.retain(|n| {
+            n.project != project
+                || n.source_dir != source_dir
+                || n.file_name != file_name
+                || n.harness != NOTES_HARNESS
+        });
+    }
+}
+
+fn notes_state_path() -> PathBuf {
+    crate::data_dir::data_dir().join("notes-uploaded.json")
+}
+
+fn load_notes_state(path: &Path, config: &Config, machine: &str) -> Option<NotesUploaded> {
+    if fs::symlink_metadata(path).ok()?.file_type().is_symlink() {
+        return None;
+    }
+    let body = fs::read_to_string(path).ok()?;
+    let state: NotesUploaded = serde_json::from_str(&body).ok()?;
+    (state.version == 1
+        && state.database == crate::measure_store::database_identity(&config.url)
+        && state.machine == machine)
+        .then_some(state)
+}
+
+fn save_notes_state(path: &Path, state: &NotesUploaded) -> Result<(), String> {
+    let body = serde_json::to_string(state).map_err(|e| e.to_string())?;
+    write_private_bytes(path, body.as_bytes(), "notes upload state")
+}
+
+fn write_private_bytes(path: &Path, body: &[u8], label: &str) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    if fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err(format!("{label} must not be a symlink"));
+    }
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| e.to_string())?
+            .as_nanos();
+        let tmp = path.with_extension(format!("{}.{}.tmp", std::process::id(), stamp));
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(&tmp)
+            .map_err(|e| e.to_string())?;
+        file.write_all(body).map_err(|e| e.to_string())?;
+        file.sync_all().map_err(|e| e.to_string())?;
+        fs::rename(&tmp, path).map_err(|e| e.to_string())?;
+    }
+    #[cfg(not(unix))]
+    crate::data_dir::write_atomic(path, &String::from_utf8_lossy(body))
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn notes_db(config: &Config) -> Result<RemoteDb, String> {
+    let timeout = Duration::from_millis(crate::collect::CollectConfig::from_env().net_timeout_ms);
+    RemoteDb::new(
+        &config.url,
+        &config.token,
+        Box::new(UreqTransport { timeout }),
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// The notes tables and indexes. They ride at the front of the first transaction of a run that
+/// writes, so a run with nothing to write sends nothing, and a database recreated at the same URL
+/// gets its tables back on the next write instead of being remembered as initialized.
+const NOTES_SCHEMA: [&str; 6] = [
+    notes_upload::CREATE_TABLE,
+    notes_upload::CREATE_MACHINES,
+    notes_upload::CREATE_INDEX,
+    notes_upload::CREATE_MACHINE_INDEX,
+    notes_upload::CREATE_ID_INDEX,
+    notes_upload::CREATE_PROJECT_TIME_INDEX,
+];
+
+/// Read this machine's own rows. An upload creates the table first, because a database with no
+/// notes table holds no rows to recover and must not leave `tombstones_unknown` set; a dry run
+/// writes nothing, so it reads only.
+fn remote_existing(
+    db: &RemoteDb,
+    machine: &str,
+    create: bool,
+) -> Result<Vec<notes_upload::ExistingRow>, ErrorKind> {
+    let select = Stmt::new(
+        NOTES_EXISTING,
+        vec![Cell::Text(machine.into()), Cell::Text(NOTES_HARNESS.into())],
+    );
+    let mut stmts = Vec::new();
+    if create {
+        stmts.push(Stmt::new(notes_upload::CREATE_TABLE, vec![]));
+    }
+    stmts.push(select);
+    let rows = db
+        .pipeline(&stmts)
+        .map_err(|e| e.kind)?
+        .pop()
+        .ok_or(ErrorKind::Sql)?
+        .rows;
+    rows.iter()
+        .map(|r| {
+            let string = |i| match r.get(i) {
+                Some(Cell::Text(s)) => Ok(s.clone()),
+                _ => Err(ErrorKind::Sql),
+            };
+            Ok(notes_upload::ExistingRow {
+                project: string(0)?,
+                source_dir: string(1)?,
+                file_name: string(2)?,
+                sha256: string(3)?,
+                deleted: match r.get(4) {
+                    Some(Cell::Int(n)) => *n != 0,
+                    _ => return Err(ErrorKind::Sql),
+                },
+            })
+        })
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
 fn notes_upload_output(
     plan: notes_upload::Plan,
     complete: bool,
     dry_run: bool,
     verbose: bool,
-    replica: Option<&str>,
+    planned_from: &str,
     host_written: bool,
+    tombstone_skipped: usize,
+    state: &str,
+    tombstones_unknown: bool,
+    read_error: Option<ErrorKind>,
 ) -> Value {
     let counts = &plan.counts;
     let mut result = json!({
@@ -694,14 +839,18 @@ fn notes_upload_output(
             "skipped_other":counts.skipped_other,"skipped_secret":counts.skipped_secret,
             "unchanged":counts.unchanged,"upserts":counts.upserts,"tombstones":counts.tombstones},
         "listing":if dry_run || verbose {plan.listing.lines().map(str::to_owned).collect::<Vec<_>>()} else {Vec::new()},
-        "complete":complete,"pushed":!dry_run,"pulled":!dry_run,"machine":notes_machine(),
-        "host_written":host_written
+        "complete":complete,"uploaded":!dry_run,"machine":notes_machine(),
+        "host_written":host_written,"tombstone_skipped":tombstone_skipped,
+        "state":state,"tombstones_unknown":tombstones_unknown
     });
     if dry_run {
-        result["planned_from"] = json!("local_replica");
+        result["planned_from"] = json!(planned_from);
+        if let Some(kind) = read_error {
+            result["remote"] = json!(kind.as_str());
+        }
     }
-    if let Some(replica) = replica {
-        result["replica"] = json!(replica);
+    if let Some(kind) = read_error {
+        result["rebuild_read_error"] = json!(kind.as_str());
     }
     if !complete {
         result["tombstones_suppressed"] = json!("incomplete_scan");
@@ -716,117 +865,366 @@ pub fn notes_upload(dry_run: bool, verbose: bool, lock_wait: Duration) -> Result
     let prepared = notes_upload::prepare(&report, Path::new("/"), &opted_in, notes::project_for);
     if dry_run && !config_path().exists() {
         let plan = notes_upload::plan(&prepared, &[]);
-        return Ok(notes_upload_output(
+        let mut result = notes_upload_output(
             plan,
             report.complete,
             true,
             verbose,
-            Some("not_configured"),
+            "none",
             false,
+            0,
+            "rebuilt",
+            true,
+            None,
+        );
+        result["remote"] = json!("not_configured");
+        return Ok(result);
+    }
+    with_notes_lock(lock_wait, |config| {
+        let db = notes_db(&config)?;
+        // An old replica directory means an older cort on this machine may still write these rows
+        // through the replica without updating the state file, so the state cannot be trusted alone
+        // until §8.4 removes that directory.
+        let legacy_replica = old_lock_dir(&crate::data_dir::data_dir(), SUBDIR, &config).is_dir();
+        notes_upload_with(
+            &prepared,
+            report.complete,
+            dry_run,
+            verbose,
+            &config.url,
+            usage::machine_id(),
+            &crate::measure::host_name(),
+            &db,
+            &notes_state_path(),
+            legacy_replica,
+        )
+    })
+}
+
+/// Test seam: the scan and transport are supplied without touching a real memory directory.
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn notes_upload_with(
+    prepared: &notes_upload::Prepared,
+    complete: bool,
+    dry_run: bool,
+    verbose: bool,
+    url: &str,
+    machine: &str,
+    host: &str,
+    db: &RemoteDb,
+    state_path: &Path,
+    force_rebuild: bool,
+) -> Result<Value, String> {
+    let config = Config {
+        url: url.into(),
+        token: String::new(),
+    };
+    let loaded = load_notes_state(state_path, &config, machine);
+    let valid = loaded.is_some();
+    let mut state = loaded.unwrap_or_else(|| NotesUploaded::empty(&config, machine));
+    let mut read_error = None;
+    let mut planned_from = "local_state";
+    let mut state_label = "loaded";
+    let existing = if valid && !state.tombstones_unknown && !force_rebuild {
+        state.existing()
+    } else {
+        match remote_existing(db, machine, !dry_run) {
+            Ok(rows) => {
+                state.notes = rows
+                    .iter()
+                    .filter(|r| !r.deleted)
+                    .map(|r| UploadedNote {
+                        project: r.project.clone(),
+                        harness: NOTES_HARNESS.into(),
+                        source_dir: r.source_dir.clone(),
+                        file_name: r.file_name.clone(),
+                        sha256: r.sha256.clone(),
+                    })
+                    .collect();
+                state.tombstones_unknown = false;
+                planned_from = "remote";
+                state_label = if force_rebuild && valid {
+                    "rebuilt_legacy_replica"
+                } else if valid {
+                    "rebuilt_tombstones_unknown"
+                } else {
+                    "rebuilt"
+                };
+                rows
+            }
+            Err(kind) => {
+                read_error = Some(kind);
+                state.tombstones_unknown = true;
+                planned_from = if valid { "local_state" } else { "none" };
+                state_label = if valid { "loaded" } else { "rebuilt" };
+                state.existing()
+            }
+        }
+    };
+    let plan = notes_upload::plan(prepared, &existing);
+    if dry_run {
+        return Ok(notes_upload_output(
+            plan,
+            complete,
+            true,
+            verbose,
+            planned_from,
+            false,
+            0,
+            state_label,
+            state.tombstones_unknown,
+            read_error,
         ));
     }
-    let now = if dry_run { None } else { Some(notes_now()?) };
-    with_notes_lock(lock_wait, |config| {
-        runtime()?.block_on(async {
-            let machine = usage::machine_id();
-            let harness = "claude-code";
-            if dry_run {
-                // Only a replica the guards refuse to open read-only is "absent". A read that fails on
-                // an open replica is an error, never a plan computed against nothing.
-                let (existing, absent) = match open_guarded_replica(&config).await {
-                    Ok(db) => {
-                        let conn = db.connect().await.map_err(|e| e.to_string())?;
-                        (
-                            notes_upload::existing_rows(&conn, machine, harness).await?,
-                            false,
-                        )
-                    }
-                    Err(_) => (Vec::new(), true),
-                };
-                let plan = notes_upload::plan(&prepared, &existing);
-                return Ok(notes_upload_output(
-                    plan,
-                    report.complete,
-                    true,
-                    verbose,
-                    absent.then_some("absent"),
-                    false,
-                ));
-            }
-            let (db, mut net) = open_network(&config).await?;
-            let conn = db.connect().await.map_err(|e| e.to_string())?;
-            notes_upload::ensure_notes_schema(&conn).await?;
-            net.run(db.push()).await?;
-            net.run(db.pull()).await?;
-            let existing = notes_upload::existing_rows(&conn, machine, harness).await?;
-            let plan = notes_upload::plan(&prepared, &existing);
-            let host_written = notes_upload::apply(
-                &conn,
-                machine,
-                &crate::measure::host_name(),
-                harness,
-                now.as_deref().unwrap_or_default(),
-                &plan,
-            )
-            .await?;
-            net.run(db.push()).await?;
-            Ok(notes_upload_output(
-                plan,
-                report.complete,
-                false,
-                verbose,
-                None,
-                host_written,
+    let now = notes_now()?;
+    let host = notes::sanitize(host, Some(64));
+    let host_changed = state.host != host;
+    let hashes: BTreeMap<_, _> = existing
+        .iter()
+        .map(|r| ((&r.project, &r.source_dir, &r.file_name), &r.sha256))
+        .collect();
+    enum Change<'a> {
+        Upsert(&'a notes_upload::Upload),
+        Tombstone(&'a notes_upload::Tombstone, String),
+    }
+    let mut changes: Vec<_> = plan.upserts.iter().map(Change::Upsert).collect();
+    for tombstone in &plan.tombstones {
+        let hash = hashes
+            .get(&(
+                &tombstone.project,
+                &tombstone.source_dir,
+                &tombstone.file_name,
             ))
-        })
-    })
-}
-
-pub fn notes_list(root: &Path) -> Result<Value, String> {
-    let project = project_from_git_origin(root)?;
-    with_notes_lock(notes_lock_wait(), |config| {
-        runtime()?.block_on(async {
-        let (db, _net) = open_network(&config).await?;
-        let conn = db.connect().await.map_err(|e| e.to_string())?;
-        let rows = notes_upload::list(&conn, &project).await?;
-        let rows: Vec<_> = rows.into_iter().map(|row| json!({
-            "note_id":row.note_id,"machine":row.machine,"host":row.host,"this_machine":row.machine == usage::machine_id(),
-            "file_name":row.file_name,"title":row.title,"description":row.description,
-            "kind":row.kind,"updated_at":row.updated_at
-        })).collect();
-        Ok(json!({"rows":rows,"reading":"harness memory from other machines' agents, uploaded unreviewed; not checked against source"}))
-    })
-    })
-}
-
-pub fn notes_show(note_id: &str) -> Result<Value, String> {
-    with_notes_lock(notes_lock_wait(), |config| {
-        runtime()?.block_on(async {
-            let (db, _net) = open_network(&config).await?;
-            let conn = db.connect().await.map_err(|e| e.to_string())?;
-            let found = notes_upload::show(&conn, note_id)
-                .await?
-                .ok_or_else(|| format!("unknown note id: {note_id}"))?;
-            let row = found.note;
-            let body: String = found
-                .body
-                .chars()
-                .map(|c| {
-                    if c.is_control() && c != '\n' && c != '\t' {
-                        ' '
-                    } else {
-                        c
+            .ok_or_else(|| {
+                format!(
+                    "missing tombstone hash: {}/{}/{}",
+                    tombstone.project, tombstone.source_dir, tombstone.file_name
+                )
+            })?;
+        changes.push(Change::Tombstone(tombstone, (*hash).clone()));
+    }
+    let mut chunks: Vec<Vec<Change<'_>>> = Vec::new();
+    let mut chunk = Vec::new();
+    let mut bytes = 0usize;
+    for change in changes {
+        let size = match &change {
+            Change::Upsert(n) => n.body.len(),
+            Change::Tombstone(_, _) => 0,
+        };
+        let limit = if chunks.is_empty() {
+            50 - NOTES_SCHEMA.len() - usize::from(host_changed)
+        } else {
+            50
+        };
+        if !chunk.is_empty() && (chunk.len() == limit || bytes + size > 256 * 1024) {
+            chunks.push(std::mem::take(&mut chunk));
+            bytes = 0;
+        }
+        bytes += size;
+        chunk.push(change);
+    }
+    if !chunk.is_empty() {
+        chunks.push(chunk);
+    }
+    if chunks.is_empty() && host_changed {
+        chunks.push(Vec::new());
+    }
+    let mut host_written = false;
+    let mut tombstone_skipped = 0;
+    for (index, chunk) in chunks.iter().enumerate() {
+        let mut stmts = Vec::new();
+        if index == 0 {
+            stmts.extend(NOTES_SCHEMA.iter().map(|sql| Stmt::new(*sql, vec![])));
+        }
+        if index == 0 && host_changed {
+            stmts.push(Stmt::new(
+                NOTES_HOST,
+                vec![
+                    Cell::Text(machine.into()),
+                    Cell::Text(host.clone()),
+                    Cell::Text(now.clone()),
+                ],
+            ));
+        }
+        for change in chunk {
+            match change {
+                Change::Upsert(n) => stmts.push(Stmt::new(
+                    NOTES_UPSERT,
+                    vec![
+                        Cell::Text(n.project.clone()),
+                        Cell::Text(machine.into()),
+                        Cell::Text(NOTES_HARNESS.into()),
+                        Cell::Text(n.source_dir.clone()),
+                        Cell::Text(n.file_name.clone()),
+                        Cell::Text(notes_upload::note_id(
+                            &n.project,
+                            machine,
+                            NOTES_HARNESS,
+                            &n.source_dir,
+                            &n.file_name,
+                        )),
+                        Cell::Text(n.sha256.clone()),
+                        opt_cell(&n.title),
+                        opt_cell(&n.description),
+                        opt_cell(&n.kind),
+                        Cell::Text(n.body.clone()),
+                        Cell::Text(now.clone()),
+                    ],
+                )),
+                Change::Tombstone(t, hash) => stmts.push(Stmt::new(
+                    NOTES_TOMBSTONE,
+                    vec![
+                        Cell::Text(now.clone()),
+                        Cell::Text(t.project.clone()),
+                        Cell::Text(machine.into()),
+                        Cell::Text(NOTES_HARNESS.into()),
+                        Cell::Text(t.source_dir.clone()),
+                        Cell::Text(t.file_name.clone()),
+                        Cell::Text(hash.clone()),
+                    ],
+                )),
+            }
+        }
+        let results = db
+            .transaction(&stmts)
+            .map_err(|e| format!("remote: {}", e.kind.as_str()))?;
+        let schema = if index == 0 { NOTES_SCHEMA.len() } else { 0 };
+        let offset = schema + usize::from(index == 0 && host_changed);
+        if index == 0 && host_changed {
+            host_written = results[schema].affected_row_count == 1;
+            state.host = host.clone();
+        }
+        for (change, result) in chunk.iter().zip(results.iter().skip(offset)) {
+            match change {
+                Change::Upsert(n) => {
+                    if result.affected_row_count != 1 {
+                        return Err(format!(
+                            "upsert affected 0 rows: {}/{}/{}",
+                            n.project, n.source_dir, n.file_name
+                        ));
                     }
-                })
-                .collect();
-            Ok(
-                json!({"note_id":row.note_id,"project":row.project,"machine":row.machine,"host":row.host,
-            "harness":row.harness,"source_dir":row.source_dir,"file_name":row.file_name,
-            "title":row.title,"description":row.description,"kind":row.kind,
-            "updated_at":row.updated_at,"body":body}),
-            )
+                    state.remove(&n.project, &n.source_dir, &n.file_name);
+                    state.notes.push(UploadedNote {
+                        project: n.project.clone(),
+                        harness: NOTES_HARNESS.into(),
+                        source_dir: n.source_dir.clone(),
+                        file_name: n.file_name.clone(),
+                        sha256: n.sha256.clone(),
+                    });
+                }
+                Change::Tombstone(t, _) => {
+                    // The remote row holds other content or is gone: not ours to bury.
+                    if result.affected_row_count == 0 {
+                        tombstone_skipped += 1;
+                    }
+                    state.remove(&t.project, &t.source_dir, &t.file_name);
+                }
+            }
+        }
+        save_notes_state(state_path, &state)?;
+    }
+    if chunks.is_empty() {
+        save_notes_state(state_path, &state)?;
+    }
+    Ok(notes_upload_output(
+        plan,
+        complete,
+        false,
+        verbose,
+        planned_from,
+        host_written,
+        tombstone_skipped,
+        state_label,
+        state.tombstones_unknown,
+        read_error,
+    ))
+}
+
+fn opt_cell(value: &Option<String>) -> Cell {
+    value.as_ref().map_or(Cell::Null, |s| Cell::Text(s.clone()))
+}
+
+fn notes_read_db() -> Result<RemoteDb, LedgerError> {
+    let config = config().map_err(LedgerError::Message)?;
+    notes_db(&config).map_err(LedgerError::Message)
+}
+
+fn remote_text(row: &[Cell], index: usize) -> Result<String, LedgerError> {
+    match row.get(index) {
+        Some(Cell::Text(s)) => Ok(s.clone()),
+        _ => Err(LedgerError::Message("invalid remote notes row".into())),
+    }
+}
+
+fn remote_optional(row: &[Cell], index: usize) -> Result<Option<String>, LedgerError> {
+    match row.get(index) {
+        Some(Cell::Text(s)) => Ok(Some(s.clone())),
+        Some(Cell::Null) => Ok(None),
+        _ => Err(LedgerError::Message("invalid remote notes row".into())),
+    }
+}
+
+pub fn notes_list(root: &Path) -> Result<Value, LedgerError> {
+    let project = project_from_git_origin(root).map_err(LedgerError::Message)?;
+    let db = notes_read_db()?;
+    notes_list_with(&db, &project)
+}
+
+#[doc(hidden)]
+pub fn notes_list_with(db: &RemoteDb, project: &str) -> Result<Value, LedgerError> {
+    let result = db
+        .execute(NOTES_LIST, vec![Cell::Text(project.into())])
+        .map_err(|e| LedgerError::Remote(e.kind))?;
+    let rows: Result<Vec<_>, LedgerError> = result.rows.iter().map(|row| {
+        let machine = remote_text(row, 1)?;
+        Ok(json!({"note_id":remote_text(row,5)?,"machine":machine,"host":remote_optional(row,11)?,
+            "this_machine":machine==usage::machine_id(),"file_name":remote_text(row,4)?,
+            "title":remote_optional(row,7)?,"description":remote_optional(row,8)?,
+            "kind":remote_optional(row,9)?,"updated_at":remote_text(row,10)?}))
+    }).collect();
+    Ok(
+        json!({"rows":rows?,"reading":"harness memory from other machines' agents, uploaded unreviewed; not checked against source"}),
+    )
+}
+
+pub fn notes_show(note_id: &str) -> Result<Value, LedgerError> {
+    let db = notes_read_db()?;
+    notes_show_with(&db, note_id)
+}
+
+#[doc(hidden)]
+pub fn notes_show_with(db: &RemoteDb, note_id: &str) -> Result<Value, LedgerError> {
+    let result = db
+        .execute(NOTES_SHOW, vec![Cell::Text(note_id.into())])
+        .map_err(|e| LedgerError::Remote(e.kind))?;
+    if result.rows.len() > 1 {
+        return Err(LedgerError::Message(format!(
+            "note id {note_id} matches more than one note"
+        )));
+    }
+    let row = result
+        .rows
+        .first()
+        .ok_or_else(|| LedgerError::Message(format!("unknown note id: {note_id}")))?;
+    let body: String = remote_text(row, 12)?
+        .chars()
+        .map(|c| {
+            if c.is_control() && c != '\n' && c != '\t' {
+                ' '
+            } else {
+                c
+            }
         })
-    })
+        .collect();
+    Ok(
+        json!({"note_id":remote_text(row,5)?,"project":remote_text(row,0)?,
+        "machine":remote_text(row,1)?,"host":remote_optional(row,11)?,
+        "harness":remote_text(row,2)?,"source_dir":remote_text(row,3)?,
+        "file_name":remote_text(row,4)?,"title":remote_optional(row,7)?,
+        "description":remote_optional(row,8)?,"kind":remote_optional(row,9)?,
+        "updated_at":remote_text(row,10)?,"body":body}),
+    )
 }
 
 /// Whether two stored bodies describe the same claim. A client that predates the machine stamp

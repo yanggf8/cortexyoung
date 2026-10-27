@@ -1,4 +1,4 @@
-//! Reviewable upload of scanned harness notes into the local Turso replica.
+//! Reviewable upload of scanned harness notes into the shared database.
 
 use crate::notes::{self, Decoded, ScanReport, ScanStatus};
 use sha2::{Digest, Sha256};
@@ -8,6 +8,10 @@ use std::path::{Path, PathBuf};
 
 pub const CREATE_TABLE: &str = "CREATE TABLE IF NOT EXISTS harness_notes (project TEXT NOT NULL, machine TEXT NOT NULL, harness TEXT NOT NULL, source_dir TEXT NOT NULL, file_name TEXT NOT NULL, note_id TEXT NOT NULL, sha256 TEXT NOT NULL, title TEXT, description TEXT, kind TEXT, body TEXT NOT NULL, deleted INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL, PRIMARY KEY (project, machine, harness, source_dir, file_name))";
 pub const CREATE_INDEX: &str = "CREATE INDEX IF NOT EXISTS harness_notes_by_project ON harness_notes (project, machine, deleted, updated_at)";
+pub const CREATE_MACHINE_INDEX: &str = "CREATE INDEX IF NOT EXISTS harness_notes_by_machine ON harness_notes (machine, harness, project)";
+pub const CREATE_ID_INDEX: &str =
+    "CREATE INDEX IF NOT EXISTS harness_notes_by_id ON harness_notes (note_id)";
+pub const CREATE_PROJECT_TIME_INDEX: &str = "CREATE INDEX IF NOT EXISTS harness_notes_by_project_time ON harness_notes (project, deleted, updated_at)";
 pub const CREATE_MACHINES: &str = "CREATE TABLE IF NOT EXISTS harness_machines (machine TEXT PRIMARY KEY, host TEXT NOT NULL, updated_at TEXT NOT NULL)";
 
 pub async fn ensure_notes_schema(conn: &turso::Connection) -> Result<(), String> {
@@ -17,6 +21,13 @@ pub async fn ensure_notes_schema(conn: &turso::Connection) -> Result<(), String>
     conn.execute(CREATE_INDEX, ())
         .await
         .map_err(|e| e.to_string())?;
+    for sql in [
+        CREATE_MACHINE_INDEX,
+        CREATE_ID_INDEX,
+        CREATE_PROJECT_TIME_INDEX,
+    ] {
+        conn.execute(sql, ()).await.map_err(|e| e.to_string())?;
+    }
     conn.execute(CREATE_MACHINES, ())
         .await
         .map_err(|e| e.to_string())?;
@@ -304,90 +315,6 @@ pub fn note_id(
         .collect()
 }
 
-pub async fn existing_rows(
-    conn: &turso::Connection,
-    machine: &str,
-    harness: &str,
-) -> Result<Vec<ExistingRow>, String> {
-    if !table_exists(conn).await? {
-        return Ok(Vec::new());
-    }
-    let mut rows = conn.query("SELECT project, source_dir, file_name, sha256, deleted FROM harness_notes WHERE machine = ? AND harness = ?", (machine, harness)).await.map_err(|e| e.to_string())?;
-    let mut out = Vec::new();
-    while let Some(row) = rows.next().await.map_err(|e| e.to_string())? {
-        out.push(ExistingRow {
-            project: row.get(0).map_err(|e| e.to_string())?,
-            source_dir: row.get(1).map_err(|e| e.to_string())?,
-            file_name: row.get(2).map_err(|e| e.to_string())?,
-            sha256: row.get(3).map_err(|e| e.to_string())?,
-            deleted: row.get::<i64>(4).map_err(|e| e.to_string())? != 0,
-        });
-    }
-    Ok(out)
-}
-
-pub async fn apply(
-    conn: &turso::Connection,
-    machine: &str,
-    host: &str,
-    harness: &str,
-    now_rfc3339: &str,
-    plan: &Plan,
-) -> Result<bool, String> {
-    conn.execute("BEGIN IMMEDIATE", ())
-        .await
-        .map_err(|e| e.to_string())?;
-    let result = async {
-        let host = notes::sanitize(host, Some(64));
-        let host_written = conn.execute(
-            "INSERT INTO harness_machines (machine, host, updated_at) VALUES (?, ?, ?) ON CONFLICT(machine) DO UPDATE SET host=excluded.host, updated_at=excluded.updated_at WHERE host<>excluded.host",
-            (machine, host.as_str(), now_rfc3339),
-        ).await.map_err(|e| e.to_string())? != 0;
-        for note in &plan.upserts {
-            let id = note_id(&note.project, machine, harness, &note.source_dir, &note.file_name);
-            conn.execute("INSERT INTO harness_notes (project, machine, harness, source_dir, file_name, note_id, sha256, title, description, kind, body, deleted, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?) ON CONFLICT(project, machine, harness, source_dir, file_name) DO UPDATE SET note_id=excluded.note_id, sha256=excluded.sha256, title=excluded.title, description=excluded.description, kind=excluded.kind, body=excluded.body, deleted=0, updated_at=excluded.updated_at", turso::params![note.project.as_str(), machine, harness, note.source_dir.as_str(), note.file_name.as_str(), id.as_str(), note.sha256.as_str(), note.title.as_deref(), note.description.as_deref(), note.kind.as_deref(), note.body.as_str(), now_rfc3339]).await.map_err(|e| e.to_string())?;
-        }
-        for row in &plan.tombstones {
-            conn.execute("UPDATE harness_notes SET deleted=1, body='', sha256='', title=NULL, description=NULL, kind=NULL, updated_at=? WHERE project=? AND machine=? AND harness=? AND source_dir=? AND file_name=? AND deleted=0", (now_rfc3339, row.project.as_str(), machine, harness, row.source_dir.as_str(), row.file_name.as_str())).await.map_err(|e| e.to_string())?;
-        }
-        Ok::<bool, String>(host_written)
-    }.await;
-    let host_written = match result {
-        Ok(written) => written,
-        Err(error) => {
-            let _ = conn.execute("ROLLBACK", ()).await;
-            return Err(error);
-        }
-    };
-    if let Err(error) = conn.execute("COMMIT", ()).await {
-        let _ = conn.execute("ROLLBACK", ()).await;
-        return Err(error.to_string());
-    }
-    Ok(host_written)
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NoteRow {
-    pub project: String,
-    pub machine: String,
-    pub host: Option<String>,
-    pub harness: String,
-    pub source_dir: String,
-    pub file_name: String,
-    pub note_id: String,
-    pub sha256: String,
-    pub title: Option<String>,
-    pub description: Option<String>,
-    pub kind: Option<String>,
-    pub updated_at: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NoteWithBody {
-    pub note: NoteRow,
-    pub body: String,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NoteBrief {
     pub note_id: String,
@@ -458,76 +385,6 @@ async fn named_table_exists(conn: &turso::Connection, name: &str) -> Result<bool
 
 async fn table_exists(conn: &turso::Connection) -> Result<bool, String> {
     named_table_exists(conn, "harness_notes").await
-}
-
-fn read_note(row: &turso::Row) -> Result<NoteRow, String> {
-    Ok(NoteRow {
-        project: row.get(0).map_err(|e| e.to_string())?,
-        machine: row.get(1).map_err(|e| e.to_string())?,
-        host: row.get(11).map_err(|e| e.to_string())?,
-        harness: row.get(2).map_err(|e| e.to_string())?,
-        source_dir: row.get(3).map_err(|e| e.to_string())?,
-        file_name: row.get(4).map_err(|e| e.to_string())?,
-        note_id: row.get(5).map_err(|e| e.to_string())?,
-        sha256: row.get(6).map_err(|e| e.to_string())?,
-        title: row.get(7).map_err(|e| e.to_string())?,
-        description: row.get(8).map_err(|e| e.to_string())?,
-        kind: row.get(9).map_err(|e| e.to_string())?,
-        updated_at: row.get(10).map_err(|e| e.to_string())?,
-    })
-}
-
-pub async fn list(conn: &turso::Connection, project: &str) -> Result<Vec<NoteRow>, String> {
-    if !table_exists(conn).await? {
-        return Ok(Vec::new());
-    }
-    let host = if named_table_exists(conn, "harness_machines").await? {
-        "m.host"
-    } else {
-        "NULL"
-    };
-    let join = if host == "m.host" {
-        "LEFT JOIN harness_machines m ON m.machine=n.machine"
-    } else {
-        ""
-    };
-    let sql = format!("SELECT n.project, n.machine, n.harness, n.source_dir, n.file_name, n.note_id, n.sha256, n.title, n.description, n.kind, n.updated_at, {host} FROM harness_notes n {join} WHERE n.project=? AND n.deleted=0 ORDER BY n.updated_at DESC, n.machine, n.harness, n.source_dir, n.file_name");
-    let mut rows = conn
-        .query(&sql, (project,))
-        .await
-        .map_err(|e| e.to_string())?;
-    let mut out = Vec::new();
-    while let Some(row) = rows.next().await.map_err(|e| e.to_string())? {
-        out.push(read_note(&row)?);
-    }
-    Ok(out)
-}
-
-pub async fn show(conn: &turso::Connection, id: &str) -> Result<Option<NoteWithBody>, String> {
-    if !table_exists(conn).await? {
-        return Ok(None);
-    }
-    let has_hosts = named_table_exists(conn, "harness_machines").await?;
-    let host = if has_hosts { "m.host" } else { "NULL" };
-    let join = if has_hosts {
-        "LEFT JOIN harness_machines m ON m.machine=n.machine"
-    } else {
-        ""
-    };
-    let sql = format!("SELECT n.project, n.machine, n.harness, n.source_dir, n.file_name, n.note_id, n.sha256, n.title, n.description, n.kind, n.updated_at, {host}, n.body FROM harness_notes n {join} WHERE n.note_id=? AND n.deleted=0");
-    let mut rows = conn.query(&sql, (id,)).await.map_err(|e| e.to_string())?;
-    let Some(row) = rows.next().await.map_err(|e| e.to_string())? else {
-        return Ok(None);
-    };
-    let found = NoteWithBody {
-        note: read_note(&row)?,
-        body: row.get(12).map_err(|e| e.to_string())?,
-    };
-    // note_id is a 48-bit prefix: refuse a collision rather than show the wrong note.
-    if rows.next().await.map_err(|e| e.to_string())?.is_some() {
-        return Err(format!("note id {id} matches more than one note"));
-    }
-    Ok(Some(found))
 }
 
 pub fn opt_in_path() -> PathBuf {

@@ -185,23 +185,17 @@ fn notes_lock_wait_is_bounded_before_network() {
         .open(path)
         .unwrap();
     lock.lock().unwrap();
-    for args in [
-        &["memory", "notes", "upload"][..],
-        &["memory", "notes", "list"][..],
-        &["memory", "notes", "show", "x"][..],
-    ] {
-        let (output, value, elapsed) = fixture.run(args, "1");
-        assert!(!output.status.success(), "{value}");
-        assert_eq!(value["error"], "memory_error", "{value}");
-        assert!(
-            value["detail"]["message"]
-                .as_str()
-                .unwrap()
-                .starts_with("memory.lock busy after "),
-            "{value}"
-        );
-        assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
-    }
+    let (output, value, elapsed) = fixture.run(&["memory", "notes", "upload"], "1");
+    assert!(!output.status.success(), "{value}");
+    assert_eq!(value["error"], "memory_error", "{value}");
+    assert!(
+        value["detail"]["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("memory.lock busy after "),
+        "{value}"
+    );
+    assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
 }
 
 fn bounded_failure(output: &Output, value: &Value, elapsed: Duration) {
@@ -212,7 +206,7 @@ fn bounded_failure(output: &Output, value: &Value, elapsed: Duration) {
     assert!(!message.starts_with("memory.lock busy after "), "{value}");
     // The server accepts and never answers, so only the deadline can end the call. An earlier
     // refusal would mean this test no longer exercises the bound at all.
-    assert!(message.contains("network timeout after "), "{value}");
+    assert!(message.contains("remote: timeout"), "{value}");
 }
 
 #[test]
@@ -287,7 +281,7 @@ fn sub_second_lock_wait_is_reported_as_given() {
         .open(path)
         .unwrap();
     lock.lock().unwrap();
-    let (output, value, elapsed) = fixture.run(&["memory", "notes", "list"], "0.5");
+    let (output, value, elapsed) = fixture.run(&["memory", "notes", "upload"], "0.5");
     assert!(!output.status.success(), "{value}");
     assert_eq!(
         value["detail"]["message"], "memory.lock busy after 500ms",

@@ -103,6 +103,8 @@ fn opt_in_out_and_status() {
     let (_, status) = f.run(&["status"]);
     assert_eq!(status["opted_in"][0], project);
     assert_eq!(status["memory_configured"], false);
+    assert_eq!(status["tombstones_unknown"], true);
+    assert_eq!(status["uploaded_notes"], 0);
     assert_eq!(status["claude_home"], f.claude.to_str().unwrap());
     let (out, opted) = f.run(&["opt-out"]);
     assert!(out.status.success());
@@ -125,10 +127,10 @@ fn dry_run_screens_notes_without_configuration() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert_eq!(report["replica"], "not_configured");
-    assert_eq!(report["planned_from"], "local_replica");
-    assert_eq!(report["pushed"], false);
-    assert_eq!(report["pulled"], false);
+    assert_eq!(report["planned_from"], "none");
+    assert_eq!(report["uploaded"], false);
+    assert_eq!(report["tombstones_unknown"], true);
+    assert_eq!(report["tombstone_skipped"], 0);
     assert_eq!(report["host_written"], false);
     let listing = report["listing"]
         .as_array()
