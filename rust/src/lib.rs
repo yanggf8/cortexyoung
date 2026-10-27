@@ -25,6 +25,7 @@ pub mod notes;
 pub mod notes_kick;
 pub mod notes_upload;
 pub mod pack;
+pub mod remote;
 pub mod render;
 pub mod scan;
 pub mod settings;

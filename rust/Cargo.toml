@@ -30,6 +30,7 @@ path = "src/bin/cort_upgrade.rs"
 rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+ureq = { version = "2", default-features = false, features = ["tls"] }
 sha2 = "0.11"
 clap = { version = "4", features = ["derive"] }
 # The scan hot path runs the rule pack in-process (src/scan.rs); the CLI stays only for
