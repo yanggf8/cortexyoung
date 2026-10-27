@@ -345,3 +345,10 @@ fn timeout_while_reading_body() {
     assert_eq!(err.kind, ErrorKind::Timeout);
     worker.join().unwrap();
 }
+
+/// The turso client builds its TLS config with `ClientConfig::builder()`, which panics when more
+/// than one rustls provider is compiled in; that panic hung every replica test (C1, e7ea29d6).
+#[test]
+fn rustls_has_one_process_provider() {
+    let _ = rustls::ClientConfig::builder();
+}

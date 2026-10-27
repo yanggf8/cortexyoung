@@ -2,6 +2,7 @@
 
 use serde_json::{json, Value};
 use std::fmt;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -195,6 +196,78 @@ pub trait Transport {
     ) -> Result<Vec<u8>, RemoteError>;
 }
 
+/// TLS for [`UreqTransport`], pinned to aws-lc-rs with `builder_with_provider`, so nothing here
+/// depends on a process-wide provider and nothing compiles in a second one (see `Cargo.toml`).
+struct AwsLcTls(Arc<rustls::ClientConfig>);
+
+fn tls() -> Result<Arc<AwsLcTls>, RemoteError> {
+    // Only a built config is cached, so a failure is retried on the next request.
+    static TLS: OnceLock<Arc<AwsLcTls>> = OnceLock::new();
+    if let Some(tls) = TLS.get() {
+        return Ok(tls.clone());
+    }
+    let builder = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .map_err(|_| RemoteError::new(ErrorKind::Unreachable, "TLS configuration failed"))?;
+    let roots = rustls::RootCertStore {
+        roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+    };
+    let config = builder.with_root_certificates(roots).with_no_client_auth();
+    Ok(TLS
+        .get_or_init(|| Arc::new(AwsLcTls(Arc::new(config))))
+        .clone())
+}
+
+struct TlsStream(rustls::StreamOwned<rustls::ClientConnection, Box<dyn ureq::ReadWrite>>);
+
+impl ureq::ReadWrite for TlsStream {
+    fn socket(&self) -> Option<&std::net::TcpStream> {
+        self.0.get_ref().socket()
+    }
+}
+impl std::io::Read for TlsStream {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.0.read(buf)
+    }
+}
+impl std::io::Write for TlsStream {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.write(buf)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.flush()
+    }
+}
+impl fmt::Debug for TlsStream {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("TlsStream")
+    }
+}
+
+impl ureq::TlsConnector for AwsLcTls {
+    fn connect(
+        &self,
+        dns_name: &str,
+        mut io: Box<dyn ureq::ReadWrite>,
+    ) -> Result<Box<dyn ureq::ReadWrite>, ureq::Error> {
+        // ureq's errors can only be built from an io::Error outside the crate; a handshake that
+        // stalls keeps its TimedOut kind and classifies as Timeout.
+        let host = match dns_name.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
+            Some(bare) => bare,
+            None => dns_name,
+        };
+        let name = rustls::pki_types::ServerName::try_from(host.to_owned()).map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid TLS server name")
+        })?;
+        let mut session = rustls::ClientConnection::new(self.0.clone(), name)
+            .map_err(|_| std::io::Error::other("TLS session setup failed"))?;
+        session.complete_io(&mut io)?;
+        Ok(Box::new(TlsStream(rustls::StreamOwned::new(session, io))))
+    }
+}
+
 /// HTTP transport. ureq 2 resolves DNS synchronously, outside its overall timeout.
 pub struct UreqTransport {
     pub timeout: Duration,
@@ -207,7 +280,8 @@ impl Transport for UreqTransport {
         headers: &[(&str, &str)],
     ) -> Result<Vec<u8>, RemoteError> {
         use std::io::Read;
-        let mut request = ureq::post(url).timeout(self.timeout);
+        let agent = ureq::AgentBuilder::new().tls_connector(tls()?).build();
+        let mut request = agent.post(url).timeout(self.timeout);
         for (key, value) in headers {
             request = request.set(key, value);
         }

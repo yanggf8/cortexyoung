@@ -631,6 +631,7 @@ dependencies = [
  "globset",
  "ignore",
  "rusqlite",
+ "rustls",
  "serde",
  "serde_json",
  "sha2",
@@ -640,6 +641,7 @@ dependencies = [
  "turso",
  "turso_sync_engine",
  "ureq",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -2194,7 +2196,6 @@ dependencies = [
  "aws-lc-rs",
  "log",
  "once_cell",
- "ring",
  "rustls-pki-types",
  "rustls-webpki",
  "subtle",
@@ -3429,10 +3430,7 @@ dependencies = [
  "base64",
  "log",
  "once_cell",
- "rustls",
- "rustls-pki-types",
  "url",
- "webpki-roots 0.26.11",
 ]
 
 [[package]]
@@ -3572,15 +3570,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "81941cd78d0c92026c33e5e01312845a4cb1e9af3407f9134b100dd03144103e"
 dependencies = [
  "unicode-ident",
-]
-
-[[package]]
-name = "webpki-roots"
-version = "0.26.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "521bc38abb08001b01866da9f51eb7c5d647a19260e00054a8c7fd5f9e57f7a9"
-dependencies = [
- "webpki-roots 1.0.10",
 ]
 
 [[package]]
