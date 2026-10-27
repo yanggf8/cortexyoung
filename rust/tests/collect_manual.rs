@@ -298,7 +298,7 @@ fn dry_run_pass_clears_refused_and_stamp() {
         .unwrap();
         before = state(paths);
         assert!(!before.refused);
-        assert!(!before.push_pending);
+        assert!(!before.upload_pending);
         assert!(!stamp.exists());
     });
 }
@@ -438,7 +438,8 @@ fn manual_sync_refusal_is_not_a_failure() {
         assert!(synced.is_ok());
         let after = state(paths);
         assert!(after.refused);
-        assert!(!after.push_pending);
+        assert!(!after.upload_pending);
+        assert!(after.pending_since_ms.is_none());
         assert!(!after.failures.contains_key("manual"));
         let failed = |events, synced| cort::collect::sync_step(events, synced).failure;
         assert_eq!(
@@ -505,7 +506,7 @@ fn manual_deadline_stops_after_the_opener() {
         assert_eq!(error.code(), "measure_error");
         assert!(error.message().contains("run deadline exceeded after"));
         let after = state(paths);
-        assert!(after.push_pending);
+        assert!(after.upload_pending);
         assert_eq!(after.failures["manual"].last_error_kind, "network");
         assert!(
             cort::upgrade::try_exclusive_lock(&paths.data_dir.join("measure-collect.lock")).is_ok()
@@ -526,7 +527,7 @@ fn manual_bootstrap_timeout_is_a_network_failure() {
         );
         assert_eq!(result.unwrap_err().code(), "measure_error");
         let after = state(paths);
-        assert!(after.push_pending);
+        assert!(after.upload_pending);
         assert_eq!(after.failures["manual"].last_error_kind, "network");
     });
 }

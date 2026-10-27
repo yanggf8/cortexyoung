@@ -274,12 +274,12 @@ never appears in its own report.
 The hooks' `kick` is the only automatic collection trigger; the installer and upgrader remove cort's
 legacy cron entry. `cort measure cron` remains available to install or remove it manually. Background
 collection uploads batches of local `command_log` and `index_health_log` rows and writes its result to
-`measure.log`. A dead network leaves rows local for a later attempt. Both logs keep 90 days and are
-pruned when a new command is recorded, before asynchronous collection. If the machine is idle for
-more than 90 days, the final uncollected events from less than the idle interval before idling
-(`CORT_COLLECT_IDLE_SECS`, 15 minutes by default) are pruned on the next use. Events can also
-be lost if collection does not run for 90 days in a row (for example, no hook fires), or uploads
-remain refused pending a dry run for that long. Uploaded
+`measure.log`. A dead network leaves rows local for a later attempt. Both logs keep uploaded rows 90 days
+and rows not yet uploaded 180 days, pruned when a new command is recorded, before asynchronous
+collection. A row still not uploaded after 180 days (collection never ran, or uploads stayed refused
+pending a dry run) is deleted and counted: `cort measure status` reports `pruned_unuploaded_rows`
+and the next collection writes the count to `measure.log`. An upload pending for more than 7 days
+shows as `upload_stalled_days` in status and as a warning line in `measure.log`. Uploaded
 events are kept remotely for good. The `command_log` event ids are claudecat's, byte for byte (alphabetical
 payload keys, rowid 0 in the hash; `rust/tests/telemetry.rs` pins them against values claudecat
 itself produced), so history it already uploaded is not uploaded twice. Because a wrong id would

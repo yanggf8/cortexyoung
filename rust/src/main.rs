@@ -60,7 +60,7 @@ fn usage_value() -> Value {
             "impact": "cort impact --symbol <name> [--depth <n>] [--coverage] [-f json|lean]",
             "usage": "cort usage [days] [-f json|lean]",
             "memory": "cort memory <configure|import-config|record|resolve|recall|status|sync|import-legacy|notes> [options]",
-            "measure": "cort measure <configure|show|record|sync|collect|health|status|copy-events|import-audit|cron|report> [options]  (collect: scan and upload the batch; --background appends at most one result to measure.log (none when skipped_busy) without stdout; health: observe recently used indexes and write local index_health_log, reading indexes only, with no network; --background appends the result to measure.log without stdout; status: read local collection state, -f json|lean; cron: manual install or removal of the legacy entry, no longer installed automatically; hook kick is the only automatic collection trigger; copy-events: one-time, re-runnable, read-only copy of claudecat's uploaded events from harnessuse, never overwrites, reports same-key rows whose columns differ as conflicts; import-audit: one-time, re-runnable import of CORT-AUDIT.md's health and usage columns, never overwrites, run on one machine only; sync --dry-run compares event ids and never pushes; command_log and index_health_log keep 90 days, pruned when a new command is recorded before asynchronous collection; if the machine is idle for more than 90 days, the final uncollected events from less than the idle interval before idling (CORT_COLLECT_IDLE_SECS, 15 minutes by default) are pruned on the next use; events can also be lost if collection does not run for 90 days in a row or uploads remain refused pending a dry run for that long)",
+            "measure": "cort measure <configure|show|record|sync|collect|health|status|copy-events|import-audit|cron|report> [options]  (collect: scan and upload the batch; --background appends at most one result to measure.log (none when skipped_busy) without stdout; health: observe recently used indexes and write local index_health_log, reading indexes only, with no network; --background appends the result to measure.log without stdout; status: read local collection state, -f json|lean; cron: manual install or removal of the legacy entry, no longer installed automatically; hook kick is the only automatic collection trigger; copy-events: one-time, re-runnable, read-only copy of claudecat's uploaded events from harnessuse, never overwrites, reports same-key rows whose columns differ as conflicts; import-audit: one-time, re-runnable import of CORT-AUDIT.md's health and usage columns, never overwrites, run on one machine only; sync --dry-run compares event ids and never pushes; command_log and index_health_log keep uploaded rows 90 days and rows not yet uploaded 180 days, pruned when a new command is recorded; rows still not uploaded after 180 days are deleted and counted in measure status (pruned_unuploaded_rows) and measure.log)",
             "hook-suggest": "cort hook-suggest  (PreToolUse hook: records one fire row and kicks collection; never speaks; not a verb to type)",
             "hook-refresh": "cort hook-refresh  (PostToolUse hook: brings this project's index up to the tree after an edit; silent, never creates an index; not a verb to type)",
             "hook-recall": "cort hook-recall --harness <h>  (SessionStart hook: reads the existing local memory replica; not a verb to type)",
@@ -2433,9 +2433,15 @@ fn cmd_measure(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, CortErr
                 &cfg,
                 cort::collect::ManualMode::Write,
                 &mut |store| {
-                    let (scan, outcome) = cort::measure::record_with_scan(store, &input)
-                        .map_err(|e| (e, cort::collect::ErrorKind::Storage))?;
-                    let failure = cort::collect::classify_record(&scan, &outcome).0;
+                    let (scan, outcome) =
+                        cort::measure::record_with_scan(store, &input).map_err(|e| {
+                            let kind = cort::collect::classify_error(&e);
+                            (e, kind)
+                        })?;
+                    let failure = match &outcome {
+                        cort::measure::RecordOutcome::Uploaded => None,
+                        cort::measure::RecordOutcome::UploadFailed { kind, .. } => Some(*kind),
+                    };
                     Ok(cort::collect::ManualStep {
                         events: scan.events.clone(),
                         failure,
@@ -2446,15 +2452,15 @@ fn cmd_measure(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, CortErr
             .map_err(|e| manual_error(e, "measure_error"))?;
             warn_events(&scan);
             match outcome {
-                cort::measure::RecordOutcome::Pushed => {
+                cort::measure::RecordOutcome::Uploaded => {
                     cort::measure::write_last_sync(usage::now_ms())
                         .map_err(|m| CortError::new("measure_error", json!({"message":m})))?;
                     json!({"status":"recorded","pushed":true,"scan":scan.to_json()})
                 }
-                cort::measure::RecordOutcome::SavedLocallyPushFailed(m) => {
+                cort::measure::RecordOutcome::UploadFailed { kind: _, error } => {
                     return Err(CortError::new(
-                        "measure_push_failed",
-                        json!({"message": format!("saved locally, push failed: {m}"), "scan": scan.to_json()}),
+                        "measure_upload_failed",
+                        json!({"message": error, "scan": scan.to_json()}),
                     ));
                 }
             }

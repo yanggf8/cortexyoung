@@ -326,8 +326,11 @@ pub struct RecordInputs {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecordOutcome {
-    Pushed,
-    SavedLocallyPushFailed(String),
+    Uploaded,
+    UploadFailed {
+        kind: crate::collect::ErrorKind,
+        error: String,
+    },
 }
 
 /// Store writes precede local progress. A failed write leaves the old progress in place, so the
@@ -345,17 +348,16 @@ pub fn record_with_scan(
     record_with_scan_until(store, input, || Ok(()))
 }
 
-/// [`record_with_scan`] with a checkpoint between the uploads and the push.
+/// [`record_with_scan`] with a checkpoint after the uploads.
 ///
-/// `before_push` runs once the local writes and both uploads are done. An error there returns
-/// immediately, so the push is skipped and no `RecordOutcome` is invented for a push
-/// that was never attempted; the collection worker uses it to stop a run that has spent its
+/// `before_finish` runs once the local writes and both uploads are done. An error there returns
+/// immediately; the collection worker uses it to stop a run that has spent its
 /// wall-clock budget. The scan summary does not survive that error -- the caller only needs the
 /// reason -- and nothing is lost by that: upload progress is saved locally after each remote page.
 pub fn record_with_scan_until(
     store: &mut dyn MeasureStore,
     input: &RecordInputs,
-    before_push: impl FnOnce() -> Result<(), String>,
+    before_finish: impl FnOnce() -> Result<(), String>,
 ) -> Result<(ScanSummary, RecordOutcome), String> {
     store.upsert_machine_host(&input.machine_id, &input.host, input.now_ms)?;
     let progress_path = input.marks_path.with_file_name("measure-progress.json");
@@ -399,16 +401,25 @@ pub fn record_with_scan_until(
             .to_json(),
         );
     }
-    before_push()?;
-    // Push only. A record needs nothing the other machines wrote: its dedup, watermarks and
-    // session lookups are all this machine's own rows, already in the replica. Pulling here
-    // re-downloaded the shared database on every run and spent the Turso org's 3 GB monthly
-    // embedded-sync quota by 2026-10-27, which blocks reads on every database in the org;
-    // `sync` and `report`, run by a person, still pull.
-    if let Err(e) = store.push() {
-        return Ok((scan, RecordOutcome::SavedLocallyPushFailed(e)));
+    let failure = [&scan.events, &scan.health].iter().find_map(|report| {
+        report
+            .as_ref()
+            .filter(|r| r["status"] == "failed")
+            .map(|r| r["error"].as_str().unwrap_or("upload failed").to_string())
+    });
+    if failure.is_none() {
+        before_finish()?;
     }
-    Ok((scan, RecordOutcome::Pushed))
+    Ok((
+        scan,
+        match failure {
+            Some(error) => RecordOutcome::UploadFailed {
+                kind: crate::collect::classify_error(&error),
+                error,
+            },
+            None => RecordOutcome::Uploaded,
+        },
+    ))
 }
 
 /// Push then pull. `Ok` means the local replica is as current as the remote was a moment ago.
@@ -843,11 +854,11 @@ pub fn render_collection_status(value: &Value) -> String {
         .unwrap_or_else(|| "none".into());
     let batch_line = broken("batch", batch).unwrap_or_else(|| {
         format!(
-            "batch pending={} last_run={} last_ok={} push_pending={} refused={} failures={failures}{}\n",
+            "batch pending={} last_run={} last_ok={} upload_pending={} refused={} failures={failures}{}\n",
             field(batch, "pending"),
             when(batch, "last_run_ms"),
             when(batch, "last_ok_ms"),
-            batch["push_pending"].as_bool().unwrap_or(false),
+            batch["upload_pending"].as_bool().unwrap_or(false),
             batch["refused"].as_bool().unwrap_or(false),
             why(batch),
         )

@@ -405,6 +405,7 @@ fn health_rows_pruned_with_command_log() {
     let prune_at = NOW_MS + DAY_MS;
     health_row(&conn, prune_at - 91 * DAY_MS);
     health_row(&conn, prune_at - 89 * DAY_MS);
+    cort::usage::uploaded_floor_at(&path, "cort_index_health", 1).unwrap();
     drop(conn);
     record_command_at(&path, &record("impact", prune_at));
     let conn = Connection::open(&path).unwrap();

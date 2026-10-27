@@ -198,6 +198,15 @@ fn watermark_skips_uploaded_health_rows() {
         None,
         1,
     );
+    let floor: String = rusqlite::Connection::open(&path)
+        .unwrap()
+        .query_row(
+            "SELECT value FROM _usage_meta WHERE key='uploaded_health_rowid'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(floor, "1");
     uploaded(
         upload_health_events(
             &mut s,

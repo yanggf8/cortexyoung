@@ -104,6 +104,7 @@ fn status_reports_both_lanes() {
             health_pending(&health, &counters)
         );
         assert_eq!(value["batch"]["last_run_ms"], 123);
+        assert_eq!(value["pruned_unuploaded_rows"], 0);
         // A readable usage.db leaves no error field behind, not even a null one.
         assert!(value["batch"].get("pending_error").is_none(), "{value}");
         assert!(value["health"].get("pending_error").is_none(), "{value}");
@@ -137,6 +138,25 @@ fn status_reports_both_lanes() {
         };
         assert!(lines.contains(&format!("last_run={}", utc(123))), "{lines}");
         assert!(!lines.contains("last_run_ms="), "{lines}");
+    });
+}
+
+#[test]
+fn status_reports_whole_stalled_days() {
+    sandbox(|paths| {
+        configured(paths);
+        command(&paths.usage_db);
+        let state = CollectState {
+            upload_pending: true,
+            pending_since_ms: Some(cort::usage::now_ms() - 8 * 86_400_000),
+            ..Default::default()
+        };
+        state
+            .save(&paths.data_dir.join("measure-collect-state.json"))
+            .unwrap();
+        let value = collection_status(paths);
+        assert_eq!(value["batch"]["upload_pending"], true);
+        assert_eq!(value["batch"]["upload_stalled_days"], 8);
     });
 }
 

@@ -165,7 +165,7 @@ fn loaded_progress_collects_with_zero_store_reads() {
     store.reads = 0;
     let (second, outcome) = record_with_scan(&mut store, &input).unwrap();
     assert_eq!(second.progress.as_deref(), Some("loaded"));
-    assert_eq!(outcome, RecordOutcome::Pushed);
+    assert_eq!(outcome, RecordOutcome::Uploaded);
     assert_eq!(store.reads, 0);
 }
 

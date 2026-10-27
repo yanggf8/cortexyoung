@@ -59,7 +59,7 @@ fn report_first_section_shows_collection_state() {
     let mut input = inputs(FRI_W43_MS);
     input.collection = Some(json!({
         "batch": {"pending": 3, "last_run_ms": 123, "last_ok_ms": 120,
-            "push_pending": true, "refused": false, "failures": {}},
+            "upload_pending": true, "refused": false, "failures": {}},
         "health": {"pending": 2, "last_run_ms": 122,
             "unmapped_count": 1, "unmapped_recent": ["missing"]}
     }));
@@ -349,15 +349,12 @@ fn rec_env() -> Rec {
 }
 
 #[test]
-fn record_order_writes_before_push() {
+fn record_writes_without_push() {
     let (_t, mut s) = store();
     s.fail_push(true);
     let r = rec_env();
     let out = record(&mut s, &r.input).unwrap();
-    assert!(
-        matches!(&out, RecordOutcome::SavedLocallyPushFailed(m) if !m.is_empty()),
-        "{out:?}"
-    );
+    assert_eq!(out, RecordOutcome::Uploaded);
     assert_eq!(s.compactions_since(0).unwrap().len(), 1);
     let hosts = s.machine_hosts().unwrap();
     assert_eq!(hosts.len(), 1);
@@ -371,10 +368,10 @@ fn record_order_writes_before_push() {
 fn record_pushes_when_store_accepts() {
     let (_t, mut s) = store();
     let r = rec_env();
-    assert_eq!(record(&mut s, &r.input).unwrap(), RecordOutcome::Pushed);
+    assert_eq!(record(&mut s, &r.input).unwrap(), RecordOutcome::Uploaded);
     assert_eq!(s.compactions_since(0).unwrap().len(), 1);
     // A second run is idempotent.
-    assert_eq!(record(&mut s, &r.input).unwrap(), RecordOutcome::Pushed);
+    assert_eq!(record(&mut s, &r.input).unwrap(), RecordOutcome::Uploaded);
     assert_eq!(s.compactions_since(0).unwrap().len(), 1);
 }
 
@@ -524,7 +521,7 @@ fn record_surfaces_scan_summary_in_both_outcomes() {
         body.push_str("not json\n{\"type\":\"brand-new-thing\"}\n");
         fs::write(r.input.projects_dir.join("p1/sess-1.jsonl"), body).unwrap();
         let (scan, outcome) = record_with_scan(&mut s, &r.input).unwrap();
-        assert_eq!(matches!(outcome, RecordOutcome::Pushed), !fail);
+        assert_eq!(outcome, RecordOutcome::Uploaded);
         assert_eq!(
             scan.to_json(),
             json!({"files_seen": 1, "files_scanned": 1, "compactions": 1,
@@ -534,18 +531,18 @@ fn record_surfaces_scan_summary_in_both_outcomes() {
 }
 
 #[test]
-fn record_pushes_and_never_pulls() {
+fn record_never_pushes_or_pulls() {
     // A pull per record re-downloaded the shared database on every run and spent the Turso
     // org's embedded-sync quota (2026-10-27); a record needs nothing other machines wrote.
     let (_t, mut s) = store();
     s.fail_pull(true);
     let r = rec_env();
     let (scan, outcome) = record_with_scan(&mut s, &r.input).unwrap();
-    assert_eq!(outcome, RecordOutcome::Pushed);
+    assert_eq!(outcome, RecordOutcome::Uploaded);
     assert_eq!(scan.compactions, 1);
-    assert_eq!(s.push_calls(), 1);
+    assert_eq!(s.push_calls(), 0);
     assert_eq!(s.pull_calls(), 0);
-    assert_eq!(record(&mut s, &r.input).unwrap(), RecordOutcome::Pushed);
+    assert_eq!(record(&mut s, &r.input).unwrap(), RecordOutcome::Uploaded);
     assert_eq!(s.pull_calls(), 0);
 }
 
@@ -582,7 +579,7 @@ fn record_keeps_compactions_when_events_refuse() {
     let db = usage_db_with_rows(r._tmp.path());
     with_events(&mut r, db);
     let (scan, outcome) = record_with_scan(&mut s, &r.input).unwrap();
-    assert_eq!(outcome, RecordOutcome::Pushed);
+    assert_eq!(outcome, RecordOutcome::Uploaded);
     assert_eq!(scan.compactions, 1);
     assert_eq!(s.compactions_since(0).unwrap().len(), 1);
     let events = scan.to_json()["events"].clone();
@@ -607,13 +604,30 @@ fn record_keeps_compactions_when_events_fail() {
         .unwrap();
     with_events(&mut r, bad);
     let (scan, outcome) = record_with_scan(&mut s, &r.input).unwrap();
-    assert_eq!(outcome, RecordOutcome::Pushed);
+    assert!(matches!(
+        outcome,
+        RecordOutcome::UploadFailed {
+            kind: cort::collect::ErrorKind::Storage,
+            ..
+        }
+    ));
     assert_eq!(s.compactions_since(0).unwrap().len(), 1);
     assert_eq!(scan.to_json()["events"]["status"], "failed");
+    let (_, again) = cort::measure::record_with_scan_until(&mut s, &r.input, || {
+        Err("run deadline exceeded".into())
+    })
+    .unwrap();
+    assert!(matches!(
+        again,
+        RecordOutcome::UploadFailed {
+            kind: cort::collect::ErrorKind::Storage,
+            ..
+        }
+    ));
 }
 
 #[test]
-fn record_uploads_events_before_the_push() {
+fn record_uploads_events_without_push() {
     let (_t, mut s) = store();
     let mut r = rec_env();
     let db = usage_db_with_rows(r._tmp.path());
@@ -626,8 +640,7 @@ fn record_uploads_events_before_the_push() {
     with_events(&mut r, db);
     s.fail_push(true);
     let (scan, outcome) = record_with_scan(&mut s, &r.input).unwrap();
-    // Push failed, yet the event is already in the local replica and the watermark moved.
-    assert!(matches!(outcome, RecordOutcome::SavedLocallyPushFailed(_)));
+    assert_eq!(outcome, RecordOutcome::Uploaded);
     let events = scan.to_json()["events"].clone();
     assert_eq!(events["status"], "uploaded");
     assert_eq!(events["inserted"], 1);

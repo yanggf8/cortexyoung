@@ -927,6 +927,9 @@ fn upload_pages(
         let last_rowid = last.rowid.ok_or("event without a rowid")?;
         let current = (config.fingerprint)(config.usage_db, last_rowid)?
             .ok_or("watermark row vanished while uploading")?;
+        // A prune hint only: failing to write it keeps rows longer, the safe direction, so it
+        // never fails an upload that already landed.
+        let _ = crate::usage::uploaded_floor_at(config.usage_db, config.source, last_rowid);
         progress.set_watermark(config.machine, config.source, last_rowid, current);
         progress.save(path)?;
         watermark = Some(last_rowid);

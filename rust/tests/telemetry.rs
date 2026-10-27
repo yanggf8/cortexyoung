@@ -804,8 +804,8 @@ fn help_states_the_retention_boundary() {
         .unwrap();
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(text.contains("sync --dry-run"), "{text}");
-    assert!(text.contains("90 days in a row"), "{text}");
-    assert!(text.contains("idle for more than 90 days"), "{text}");
+    assert!(text.contains("rows not yet uploaded 180 days"), "{text}");
+    assert!(text.contains("pruned_unuploaded_rows"), "{text}");
     assert!(!text.contains("record not running"), "{text}");
 }
 
@@ -958,6 +958,15 @@ fn upload_pages_through_a_large_range() {
         "{r:?}"
     );
     assert_eq!(wm(&fx, "mach-A"), Some(10_000_004_500));
+    let floor: String = Connection::open(fx.p("v2/usage.db"))
+        .unwrap()
+        .query_row(
+            "SELECT value FROM _usage_meta WHERE key='uploaded_command_rowid'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(floor, "10000004500");
 }
 
 #[test]
