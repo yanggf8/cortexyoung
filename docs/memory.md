@@ -56,6 +56,7 @@ is inferred from a successful sync alone.
 `notes sync` uploads Claude Code `projects/*/memory/*.md` files for opted-in projects.
 The secret screen is coarse and fail-closed; it is not a privacy guarantee. Run
 `cort memory notes sync --dry-run` to list what would be uploaded before syncing.
+Claude Code's SessionStart context lists up to 15 unreviewed note names from other machines for this project, without their bodies.
 
 ## Review, record, recall
 

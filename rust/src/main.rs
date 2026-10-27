@@ -1122,28 +1122,33 @@ fn cmd_hook_recall(args: &[String], usage: &mut UsageEvent) -> Result<Emit, Cort
     usage.project_id = std::fs::canonicalize(&root)
         .ok()
         .and_then(|p| p.to_str().map(project_id_for));
-    let (outcome, content, count) = if parsed.is_none() {
-        ("failed", None, 0)
+    let (outcome, content, count, notes_count) = if parsed.is_none() {
+        ("failed", None, 0, 0)
     } else {
         match cort::memory_store::recall_local(&root) {
-            Ok((recall, omitted)) => {
-                match cort::hook_recall::render_with_omitted(recall, omitted) {
-                    Some((text, count)) => ("injected", Some(text), count),
-                    None => ("none", None, 0),
+            Ok((recall, omitted, notes, total)) => {
+                match cort::hook_recall::render_with_notes(recall, omitted, &notes, total) {
+                    Some((text, count, notes_count)) => {
+                        ("injected", Some(text), count, notes_count)
+                    }
+                    None => ("none", None, 0, 0),
                 }
             }
-            Err(cort::memory_store::LocalRecallError::NotConfigured) => ("not_configured", None, 0),
-            Err(cort::memory_store::LocalRecallError::NoReplica) => ("no_replica", None, 0),
-            Err(cort::memory_store::LocalRecallError::UnsyncedReplica) => {
-                ("unsynced_replica", None, 0)
+            Err(cort::memory_store::LocalRecallError::NotConfigured) => {
+                ("not_configured", None, 0, 0)
             }
-            Err(cort::memory_store::LocalRecallError::Busy) => ("busy", None, 0),
-            Err(cort::memory_store::LocalRecallError::Failed) => ("failed", None, 0),
+            Err(cort::memory_store::LocalRecallError::NoReplica) => ("no_replica", None, 0, 0),
+            Err(cort::memory_store::LocalRecallError::UnsyncedReplica) => {
+                ("unsynced_replica", None, 0, 0)
+            }
+            Err(cort::memory_store::LocalRecallError::Busy) => ("busy", None, 0, 0),
+            Err(cort::memory_store::LocalRecallError::Failed) => ("failed", None, 0, 0),
         }
     };
     let mut row = hook_row(outcome, &harness, differs.as_deref(), model);
     if outcome == "injected" {
         row["entries"] = json!(count);
+        row["notes"] = json!(notes_count);
     }
     usage.args_summary = row.to_string();
     let payload = content

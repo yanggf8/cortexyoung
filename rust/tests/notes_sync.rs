@@ -209,9 +209,56 @@ fn sql_round_trip_tombstone_and_read_paths() {
         };
         let prepared = prepare(&report, temp.path(), &opted);
         let plan = notes_sync::plan(&prepared, &[]);
-        notes_sync::apply(&conn, "machine1", "claude", "2026-01-01T00:00:00Z", &plan)
+        assert!(notes_sync::apply(
+            &conn,
+            "machine1",
+            "NUC11i5",
+            "claude",
+            "2026-01-01T00:00:00Z",
+            &plan
+        )
+        .await
+        .unwrap());
+        assert!(!notes_sync::apply(
+            &conn,
+            "machine1",
+            "NUC11i5",
+            "claude",
+            "2026-01-01T00:00:01Z",
+            &notes_sync::plan(
+                &prepared,
+                &notes_sync::existing_rows(&conn, "machine1", "claude")
+                    .await
+                    .unwrap()
+            )
+        )
+        .await
+        .unwrap());
+        assert!(notes_sync::apply(
+            &conn,
+            "machine1",
+            "New\n\u{202e}Host",
+            "claude",
+            "2026-01-01T00:00:02Z",
+            &notes_sync::plan(
+                &prepared,
+                &notes_sync::existing_rows(&conn, "machine1", "claude")
+                    .await
+                    .unwrap()
+            )
+        )
+        .await
+        .unwrap());
+        let mut host_row = conn
+            .query(
+                "SELECT host, updated_at FROM harness_machines WHERE machine='machine1'",
+                (),
+            )
             .await
             .unwrap();
+        let host_row = host_row.next().await.unwrap().unwrap();
+        assert_eq!(host_row.get::<String>(0).unwrap(), "New Host");
+        assert_eq!(host_row.get::<String>(1).unwrap(), "2026-01-01T00:00:02Z");
         let rows = notes_sync::existing_rows(&conn, "machine1", "claude")
             .await
             .unwrap();
@@ -222,10 +269,30 @@ fn sql_round_trip_tombstone_and_read_paths() {
             notes_sync::show(&conn, &id).await.unwrap().unwrap().body,
             "hello"
         );
-        notes_sync::apply(&conn, "machine2", "claude", "2026-01-02T00:00:00Z", &plan)
-            .await
-            .unwrap();
-        assert_eq!(notes_sync::list(&conn, "p").await.unwrap().len(), 2);
+        assert_eq!(
+            notes_sync::show(&conn, &id)
+                .await
+                .unwrap()
+                .unwrap()
+                .note
+                .host
+                .as_deref(),
+            Some("New Host")
+        );
+        notes_sync::apply(
+            &conn,
+            "machine2",
+            "Other",
+            "claude",
+            "2026-01-02T00:00:00Z",
+            &plan,
+        )
+        .await
+        .unwrap();
+        let note_rows = notes_sync::list(&conn, "p").await.unwrap();
+        assert_eq!(note_rows.len(), 2);
+        assert_eq!(note_rows[0].host.as_deref(), Some("Other"));
+        assert_eq!(note_rows[1].host.as_deref(), Some("New Host"));
         let absent = ScanReport {
             complete: true,
             listed_dirs: listed(&["-project"]),
@@ -235,6 +302,7 @@ fn sql_round_trip_tombstone_and_read_paths() {
         notes_sync::apply(
             &conn,
             "machine1",
+            "New Host",
             "claude",
             "2026-01-03T00:00:00Z",
             &tombstone,
@@ -254,6 +322,18 @@ fn sql_round_trip_tombstone_and_read_paths() {
         assert_eq!(row.get::<String>(0).unwrap(), "");
         assert_eq!(row.get::<String>(1).unwrap(), "");
         assert_eq!(row.get::<Option<String>>(2).unwrap(), None);
+    });
+}
+
+#[test]
+fn missing_notes_table_is_read_only_and_empty() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(async {
+        let db = turso::Builder::new_local(":memory:").build().await.unwrap();
+        let conn = db.connect().unwrap();
+        assert_eq!(notes_sync::other_machine_briefs(&conn, "p", "this", 15).await.unwrap(), (vec![], 0));
+        let mut rows = conn.query("SELECT name FROM sqlite_master WHERE name='harness_notes' OR name='harness_machines'", ()).await.unwrap();
+        assert!(rows.next().await.unwrap().is_none());
     });
 }
 

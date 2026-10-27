@@ -182,8 +182,9 @@ including comments that belong to other owners; that is a test, because it was a
 **A third event, for Claude Code only: `SessionStart` runs `cort hook-recall`** (2026-10-27). Agents did
 not recall the ledger unprompted, so recall is pushed at session start, resume, clear and compaction:
 the active entries for the project go into `additionalContext`, newest first, capped at 20 entries and
-6000 bytes. It reads only an existing, already-synced local replica -- never push, pull or bootstrap,
-a try-lock that gives up, and a refusal (`unsynced_replica`) for every replica state in which turso
+6000 bytes. It also lists other machines' harness notes for the project -- names and hosts
+only, never bodies, capped at 15 and 2000 bytes, and labelled unreviewed. It reads only an existing,
+already-synced local replica -- never push, pull or bootstrap, a try-lock that gives up, and a refusal (`unsynced_replica`) for every replica state in which turso
 would pull or write at open -- and records one `usage.db` row per run. Codex and Kimi are not wired:
 no `SessionStart` payload of theirs has been intercepted, and `settings::events_for` is the one place
 that says which harness gets which event.

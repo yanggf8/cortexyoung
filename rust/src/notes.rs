@@ -907,7 +907,7 @@ fn nonempty(value: String) -> Option<String> {
     }
 }
 
-fn sanitize(value: &str, cap: Option<usize>) -> String {
+pub(crate) fn sanitize(value: &str, cap: Option<usize>) -> String {
     let replaced: String = value
         .chars()
         .map(|c| if c.is_control() || matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}') { ' ' } else { c })

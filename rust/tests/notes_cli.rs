@@ -129,6 +129,7 @@ fn dry_run_screens_notes_without_configuration() {
     assert_eq!(report["planned_from"], "local_replica");
     assert_eq!(report["pushed"], false);
     assert_eq!(report["pulled"], false);
+    assert_eq!(report["host_written"], false);
     let listing = report["listing"]
         .as_array()
         .unwrap()

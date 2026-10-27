@@ -1,10 +1,15 @@
 //! Session-start context from the existing local memory replica.
 
 use crate::memory::MemoryRecall;
+use crate::notes_sync::NoteBrief;
 
 const MAX_ENTRIES: usize = 20;
 const MAX_BYTES: usize = 6000;
+/// Other machines' notes listed at session start, on a budget separate from the ledger's.
+pub const MAX_NOTES: usize = 15;
+const MAX_NOTE_BYTES: usize = 2000;
 const HEADER: &str = "cort memory: local replica (may be behind the shared database; `cort memory recall \"<topic>\"` refreshes)";
+const NOTES_HEADER: &str = "unreviewed harness notes from other machines (not checked against source; read one with `cort memory notes show <id>`):";
 
 pub fn render(recall: MemoryRecall) -> Option<(String, usize)> {
     render_with_omitted(recall, 0)
@@ -63,4 +68,44 @@ pub fn render_with_omitted(recall: MemoryRecall, pre_omitted: usize) -> Option<(
         out.push_str(&format!("\n... {omitted} entries left out"));
     }
     Some((out, shown))
+}
+
+pub fn render_with_notes(
+    recall: MemoryRecall,
+    omitted: usize,
+    notes: &[NoteBrief],
+    total: usize,
+) -> Option<(String, usize, usize)> {
+    let ledger = render_with_omitted(recall, omitted);
+    if notes.is_empty() {
+        return ledger.map(|(text, entries)| (text, entries, 0));
+    }
+    let (mut text, entries) = ledger.unwrap_or_else(|| (HEADER.to_string(), 0));
+    let mut section = format!("\n{NOTES_HEADER}");
+    let mut shown = 0;
+    for note in notes.iter().take(MAX_NOTES) {
+        let host = note
+            .host
+            .as_deref()
+            .filter(|h| !h.is_empty())
+            .unwrap_or_else(|| note.machine.get(..8).unwrap_or(&note.machine));
+        let line = format!(
+            "\n- {} [{}] {} ({})",
+            crate::notes::sanitize(&note.note_id, Some(64)),
+            crate::notes::sanitize(host, Some(64)),
+            crate::notes::sanitize(&note.file_name, Some(80)),
+            crate::notes::sanitize(&note.updated_at, Some(64)),
+        );
+        // Keep room for the count suffix, including large totals.
+        if section.len() + line.len() + 64 > MAX_NOTE_BYTES {
+            break;
+        }
+        section.push_str(&line);
+        shown += 1;
+    }
+    if total > shown {
+        section.push_str(&format!("\n... {} more notes", total - shown));
+    }
+    text.push_str(&section);
+    Some((text, entries, shown))
 }

@@ -1,3 +1,4 @@
+use cort::notes_sync;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -59,6 +60,64 @@ fn seed_replica(path: &Path, url: &str, project: &str, entry: bool) {
     mark_synced(path);
 }
 
+fn seed_notes(path: &Path, url: &str, project: &str, hosts: bool) {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let db = turso::sync::Builder::new_remote(path.to_str().unwrap())
+            .with_remote_url(url).with_auth_token("test")
+            .bootstrap_if_empty(false).build().await.unwrap();
+        let conn = db.connect().await.unwrap();
+        if hosts {
+            notes_sync::ensure_notes_schema(&conn).await.unwrap();
+            conn.execute("INSERT INTO harness_machines (machine,host,updated_at) VALUES ('remote-machine','NUC11i5','2026-10-27')", ()).await.unwrap();
+        } else {
+            conn.execute(notes_sync::CREATE_TABLE, ()).await.unwrap();
+            conn.execute(notes_sync::CREATE_INDEX, ()).await.unwrap();
+        }
+        for i in 0..18 {
+            let id = format!("note-{i:02}");
+            let machine = if i == 1 { "nohost-machine" } else { "remote-machine" };
+            let file = if i == 0 { "bad\n\u{202e}name.md".to_string() } else { format!("file-{i:02}.md") };
+            conn.execute("INSERT INTO harness_notes (project,machine,harness,source_dir,file_name,note_id,sha256,body,updated_at) VALUES (?,?,?,?,?,?,'hash','body',?)", turso::params![project,machine,"claude-code","source",file.as_str(),id.as_str(),format!("2026-10-27T00:{:02}:00Z", 59-i).as_str()]).await.unwrap();
+        }
+        // Newest of all, so each would lead the list if the filter let it through. `CORT_MACHINE_ID`
+        // is hashed into the id the hook compares against, so this machine's row stores the hash.
+        let own: String = Sha256::digest(b"local-machine").iter().map(|b| format!("{b:02x}")).collect();
+        for (project, machine, deleted, id) in [(project,&own[..16],0,"own"),(project,"remote-machine",1,"deleted"),("other-project","remote-machine",0,"other")] {
+            conn.execute("INSERT INTO harness_notes (project,machine,harness,source_dir,file_name,note_id,sha256,body,deleted,updated_at) VALUES (?,?, 'claude-code','source',?,?,'hash','body',?,'2026-10-27T01:00:00Z')", (project,machine,id,id,deleted)).await.unwrap();
+        }
+    });
+    mark_synced(path);
+}
+
+fn git_repo(root: &Path) -> PathBuf {
+    let repo = root.join("repo");
+    fs::create_dir(&repo).unwrap();
+    assert!(Command::new("git")
+        .arg("init")
+        .arg(&repo)
+        .output()
+        .unwrap()
+        .status
+        .success());
+    assert!(Command::new("git")
+        .args([
+            "remote",
+            "add",
+            "origin",
+            "https://example.com/team/project.git"
+        ])
+        .current_dir(&repo)
+        .output()
+        .unwrap()
+        .status
+        .success());
+    repo
+}
+
 fn file_hashes(dir: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
     fs::read_dir(dir)
         .unwrap()
@@ -98,6 +157,7 @@ fn run_with_project(
         .env("CORT_MEMORY_DIR", data)
         .env("CORT_CACHE_DIR", cache)
         .env("HOME", root)
+        .env("CORT_MACHINE_ID", "local-machine")
         .current_dir(root)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -223,11 +283,13 @@ fn existing_replica_does_not_contact_unreachable_remote() {
             .unwrap();
     });
     mark_synced(&path);
+    let before = file_hashes(path.parent().unwrap());
     let (out, elapsed) = run(&data, &cache, root, &json!({"cwd":root}).to_string());
     assert!(out.status.success());
     assert!(out.stdout.is_empty());
     assert!(elapsed < Duration::from_secs(3));
     assert_eq!(outcome(&cache)["hook"], "none");
+    assert_eq!(file_hashes(path.parent().unwrap()), before);
 }
 
 #[test]
@@ -449,6 +511,93 @@ fn payload_cwd_resolves_project_from_git_origin() {
 }
 
 #[test]
+fn other_machine_notes_are_local_filtered_and_capped() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let repo = git_repo(root);
+    let data = root.join("data");
+    let cache = root.join("cache");
+    let listener = match TcpListener::bind("127.0.0.1:0") {
+        Ok(listener) => listener,
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            eprintln!("SKIP: sandbox prohibits binding a local TCP listener: {e}");
+            return;
+        }
+        Err(e) => panic!("cannot bind local TCP listener: {e}"),
+    };
+    listener.set_nonblocking(true).unwrap();
+    let url = format!("libsql://{}", listener.local_addr().unwrap());
+    configured_url(&data, &url);
+    let path = replica_url(&data, &url);
+    let project = cort::memory_store::project_from_git_origin(&repo).unwrap();
+    let ledger_project: String = Sha256::digest(b"test-project")
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    seed_replica(&path, &url, &ledger_project, false);
+    seed_notes(&path, &url, &project, true);
+    let before = file_hashes(path.parent().unwrap());
+    let payload = json!({"cwd":repo}).to_string();
+    let (out, _) = run(&data, &cache, root, &payload);
+    assert!(out.status.success());
+    let response: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let context = response["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    assert!(context.starts_with("cort memory: local replica"));
+    assert!(context.contains("unreviewed harness notes from other machines"));
+    assert!(
+        context.contains("- note-00 [NUC11i5] bad name.md"),
+        "{context}"
+    );
+    assert!(
+        context.contains("- note-01 [nohost-m] file-01.md"),
+        "{context}"
+    );
+    assert!(!context.contains("\u{202e}"));
+    assert!(!context.contains("\nname.md"));
+    assert!(!context.contains("- own ["));
+    assert!(!context.contains("deleted"));
+    assert!(!context.contains("other.md"));
+    assert!(context.contains("... 3 more notes"), "{context}");
+    assert!(context.len() <= 2000 + "cort memory: local replica (may be behind the shared database; `cort memory recall \"<topic>\"` refreshes)".len());
+    assert_eq!(outcome(&cache)["hook"], "injected");
+    assert_eq!(outcome(&cache)["entries"], 0);
+    assert_eq!(outcome(&cache)["notes"], 15);
+    assert_eq!(file_hashes(path.parent().unwrap()), before);
+    assert_no_connection(&listener);
+}
+
+#[test]
+fn missing_host_table_falls_back_without_creating_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let repo = git_repo(root);
+    let data = root.join("data");
+    let cache = root.join("cache");
+    configured(&data);
+    let path = replica(&data);
+    let project = cort::memory_store::project_from_git_origin(&repo).unwrap();
+    let ledger_project: String = Sha256::digest(b"test-project")
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    seed_replica(&path, URL, &ledger_project, false);
+    seed_notes(&path, URL, &project, false);
+    let before = file_hashes(path.parent().unwrap());
+    let (out, _) = run(&data, &cache, root, &json!({"cwd":repo}).to_string());
+    assert!(out.status.success());
+    let context = serde_json::from_slice::<Value>(&out.stdout).unwrap()["hookSpecificOutput"]
+        ["additionalContext"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(context.contains("[remote-m]"), "{context}");
+    assert_eq!(outcome(&cache)["notes"], 15);
+    assert_eq!(file_hashes(path.parent().unwrap()), before);
+}
+
+#[test]
 fn render_orders_and_caps_entries() {
     use cort::memory::{MemoryEntry, MemoryHit, MemoryRecall};
     let hits = (0..30)
@@ -527,4 +676,82 @@ fn render_orders_and_caps_entries() {
     .unwrap();
     assert_eq!(count, 20);
     assert!(short.contains("10 entries left out"));
+}
+
+#[test]
+fn a_failing_notes_query_leaves_the_ledger_outcome_alone() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let repo = git_repo(root);
+    let data = root.join("data");
+    let cache = root.join("cache");
+    configured(&data);
+    let path = replica(&data);
+    let ledger_project: String = Sha256::digest(b"test-project")
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    seed_replica(&path, URL, &ledger_project, true);
+    // A harness_notes table the briefs query cannot read: the SELECT fails, not the table check.
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let db = turso::sync::Builder::new_remote(path.to_str().unwrap())
+            .with_remote_url(URL)
+            .with_auth_token("test")
+            .bootstrap_if_empty(false)
+            .build()
+            .await
+            .unwrap();
+        let conn = db.connect().await.unwrap();
+        conn.execute("CREATE TABLE harness_notes (project TEXT)", ())
+            .await
+            .unwrap();
+    });
+    let (out, _) = run(&data, &cache, root, &json!({"cwd":repo}).to_string());
+    assert!(out.status.success());
+    let context = serde_json::from_slice::<Value>(&out.stdout).unwrap()["hookSpecificOutput"]
+        ["additionalContext"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(context.contains("[key] claim"), "{context}");
+    assert!(!context.contains("unreviewed harness notes"), "{context}");
+    assert_eq!(outcome(&cache)["hook"], "injected");
+    assert_eq!(outcome(&cache)["entries"], 1);
+    assert_eq!(outcome(&cache)["notes"], 0);
+}
+
+#[test]
+fn notes_section_byte_cap_binds_before_the_count_cap() {
+    use cort::memory::MemoryRecall;
+    use cort::notes_sync::NoteBrief;
+    let notes: Vec<NoteBrief> = (0..15)
+        .map(|i| NoteBrief {
+            note_id: format!("note-{i:02}"),
+            machine: "remote-machine".into(),
+            host: Some("NUC11i5".into()),
+            file_name: format!("{i:02}{}", "é".repeat(200)),
+            updated_at: "2026-10-27T00:00:00Z".into(),
+        })
+        .collect();
+    let recall = MemoryRecall {
+        ledger_status: "present".into(),
+        sync_status: None,
+        hits: Vec::new(),
+    };
+    let (text, entries, shown) =
+        cort::hook_recall::render_with_notes(recall, 0, &notes, 20).unwrap();
+    assert_eq!(entries, 0);
+    assert!(shown > 0 && shown < 15, "{shown}");
+    let section = &text[text.find("unreviewed harness notes").unwrap()..];
+    assert!(section.len() <= 2000, "{}", section.len());
+    assert!(
+        section.ends_with(&format!("... {} more notes", 20 - shown)),
+        "{section}"
+    );
+    // The file name is capped at 80 characters, so no line carries the full 202.
+    assert!(!section.contains(&"é".repeat(81)));
 }

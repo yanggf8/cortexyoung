@@ -354,7 +354,9 @@ async fn read_existing_ledger(
 
 /// A session hook reads only a locally synced replica. The metadata guard excludes the
 /// legacy open path that pulls remotely even with bootstrap disabled.
-pub fn recall_local(root: &Path) -> Result<(MemoryRecall, usize), LocalRecallError> {
+pub fn recall_local(
+    root: &Path,
+) -> Result<(MemoryRecall, usize, Vec<notes_sync::NoteBrief>, usize), LocalRecallError> {
     let config = config().map_err(|_| {
         if fs::symlink_metadata(config_path()).is_ok() {
             LocalRecallError::Failed
@@ -388,7 +390,19 @@ pub fn recall_local(root: &Path) -> Result<(MemoryRecall, usize), LocalRecallErr
             let ledger = read_existing_ledger(&conn, &project)
                 .await
                 .map_err(|_| LocalRecallError::Failed)?;
-            Ok(memory::recall_ledger_for_hook(root, &ledger))
+            let (recall, omitted) = memory::recall_ledger_for_hook(root, &ledger);
+            let (briefs, total) = match project_from_git_origin(root) {
+                Ok(notes_project) => notes_sync::other_machine_briefs(
+                    &conn,
+                    &notes_project,
+                    usage::machine_id(),
+                    crate::hook_recall::MAX_NOTES,
+                )
+                .await
+                .unwrap_or_default(),
+                Err(_) => (Vec::new(), 0),
+            };
+            Ok((recall, omitted, briefs, total))
         })
 }
 
@@ -512,6 +526,7 @@ fn notes_sync_output(
     dry_run: bool,
     verbose: bool,
     replica: Option<&str>,
+    host_written: bool,
 ) -> Value {
     let counts = &plan.counts;
     let mut result = json!({
@@ -521,7 +536,8 @@ fn notes_sync_output(
             "skipped_other":counts.skipped_other,"skipped_secret":counts.skipped_secret,
             "unchanged":counts.unchanged,"upserts":counts.upserts,"tombstones":counts.tombstones},
         "listing":if dry_run || verbose {plan.listing.lines().map(str::to_owned).collect::<Vec<_>>()} else {Vec::new()},
-        "complete":complete,"pushed":!dry_run,"pulled":!dry_run,"machine":notes_machine()
+        "complete":complete,"pushed":!dry_run,"pulled":!dry_run,"machine":notes_machine(),
+        "host_written":host_written
     });
     if dry_run {
         result["planned_from"] = json!("local_replica");
@@ -548,6 +564,7 @@ pub fn notes_sync(dry_run: bool, verbose: bool, lock_wait: Duration) -> Result<V
             true,
             verbose,
             Some("not_configured"),
+            false,
         ));
     }
     let now = if dry_run { None } else { Some(notes_now()?) };
@@ -575,6 +592,7 @@ pub fn notes_sync(dry_run: bool, verbose: bool, lock_wait: Duration) -> Result<V
                     true,
                     verbose,
                     absent.then_some("absent"),
+                    false,
                 ));
             }
             let (db, mut net) = open_network(&config).await?;
@@ -584,9 +602,10 @@ pub fn notes_sync(dry_run: bool, verbose: bool, lock_wait: Duration) -> Result<V
             net.run(db.pull()).await?;
             let existing = notes_sync::existing_rows(&conn, machine, harness).await?;
             let plan = notes_sync::plan(&prepared, &existing);
-            notes_sync::apply(
+            let host_written = notes_sync::apply(
                 &conn,
                 machine,
+                &crate::measure::host_name(),
                 harness,
                 now.as_deref().unwrap_or_default(),
                 &plan,
@@ -599,6 +618,7 @@ pub fn notes_sync(dry_run: bool, verbose: bool, lock_wait: Duration) -> Result<V
                 false,
                 verbose,
                 None,
+                host_written,
             ))
         })
     })
@@ -612,7 +632,7 @@ pub fn notes_list(root: &Path) -> Result<Value, String> {
         let conn = db.connect().await.map_err(|e| e.to_string())?;
         let rows = notes_sync::list(&conn, &project).await?;
         let rows: Vec<_> = rows.into_iter().map(|row| json!({
-            "note_id":row.note_id,"machine":row.machine,"this_machine":row.machine == usage::machine_id(),
+            "note_id":row.note_id,"machine":row.machine,"host":row.host,"this_machine":row.machine == usage::machine_id(),
             "file_name":row.file_name,"title":row.title,"description":row.description,
             "kind":row.kind,"updated_at":row.updated_at
         })).collect();
@@ -642,7 +662,7 @@ pub fn notes_show(note_id: &str) -> Result<Value, String> {
                 })
                 .collect();
             Ok(
-                json!({"note_id":row.note_id,"project":row.project,"machine":row.machine,
+                json!({"note_id":row.note_id,"project":row.project,"machine":row.machine,"host":row.host,
             "harness":row.harness,"source_dir":row.source_dir,"file_name":row.file_name,
             "title":row.title,"description":row.description,"kind":row.kind,
             "updated_at":row.updated_at,"body":body}),
