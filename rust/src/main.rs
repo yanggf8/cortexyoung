@@ -59,7 +59,7 @@ fn usage_value() -> Value {
             "delete": "cort delete [root]",
             "impact": "cort impact --symbol <name> [--depth <n>] [--coverage] [-f json|lean]",
             "usage": "cort usage [days] [-f json|lean]",
-            "memory": "cort memory <configure|import-config|record|resolve|recall|status|sync|import-legacy> [options]",
+            "memory": "cort memory <configure|import-config|record|resolve|recall|status|sync|import-legacy|notes> [options]",
             "measure": "cort measure <configure|show|record|sync|collect|health|status|copy-events|import-audit|cron|report> [options]  (collect: scan and upload the batch; --background appends at most one result to measure.log (none when skipped_busy) without stdout; health: observe recently used indexes and write local index_health_log, reading indexes only, with no network; --background appends the result to measure.log without stdout; status: read local collection state, -f json|lean; cron: manual install or removal of the legacy entry, no longer installed automatically; hook kick is the only automatic collection trigger; copy-events: one-time, re-runnable, read-only copy of claudecat's uploaded events from harnessuse, never overwrites, reports same-key rows whose columns differ as conflicts; import-audit: one-time, re-runnable import of CORT-AUDIT.md's health and usage columns, never overwrites, run on one machine only; sync --dry-run compares event ids and never pushes; command_log and index_health_log keep 90 days, pruned when a new command is recorded before asynchronous collection; if the machine is idle for more than 90 days, the final uncollected events from less than the idle interval before idling (CORT_COLLECT_IDLE_SECS, 15 minutes by default) are pruned on the next use; events can also be lost if collection does not run for 90 days in a row or uploads remain refused pending a dry run for that long)",
             "hook-suggest": "cort hook-suggest  (PreToolUse hook: records one fire row and kicks collection; never speaks; not a verb to type)",
             "hook-refresh": "cort hook-refresh  (PostToolUse hook: brings this project's index up to the tree after an edit; silent, never creates an index; not a verb to type)",
@@ -81,42 +81,55 @@ fn usage_value() -> Value {
 /// cannot be added to the parser without appearing here. clap's own `render_usage` folds every
 /// optional argument into `[OPTIONS]`, which hides exactly the options a caller is looking for.
 fn memory_usage_value() -> Value {
-    let commands: serde_json::Map<String, Value> = MemoryArgs::command()
-        .get_subcommands()
-        .map(|verb| {
-            let mut parts = vec![format!("cort memory {}", verb.get_name())];
-            for arg in verb.get_arguments() {
-                let id = arg.get_id().as_str().to_uppercase();
-                let choices: Vec<String> = arg
-                    .get_possible_values()
-                    .iter()
-                    .map(|v| v.get_name().to_string())
-                    .collect();
-                let value = if choices.is_empty() {
-                    format!("<{id}>")
-                } else {
-                    format!("<{}>", choices.join("|"))
-                };
-                let takes_value = !matches!(
-                    arg.get_action(),
-                    clap::ArgAction::SetTrue | clap::ArgAction::SetFalse | clap::ArgAction::Count
+    fn command_usage(verb: &clap::Command, prefix: &str) -> String {
+        let mut parts = vec![format!("{prefix} {}", verb.get_name())];
+        for arg in verb.get_arguments() {
+            let id = arg.get_id().as_str().to_uppercase();
+            let choices: Vec<String> = arg
+                .get_possible_values()
+                .iter()
+                .map(|v| v.get_name().to_string())
+                .collect();
+            let value = if choices.is_empty() {
+                format!("<{id}>")
+            } else {
+                format!("<{}>", choices.join("|"))
+            };
+            let takes_value = !matches!(
+                arg.get_action(),
+                clap::ArgAction::SetTrue | clap::ArgAction::SetFalse | clap::ArgAction::Count
+            );
+            let text = match arg.get_long() {
+                Some(long) if takes_value => format!("--{long} {value}"),
+                Some(long) => format!("--{long}"),
+                None => value,
+            };
+            let text = if matches!(arg.get_action(), clap::ArgAction::Append) {
+                format!("{text}...")
+            } else {
+                text
+            };
+            let required = arg.is_required_set() && arg.get_default_values().is_empty();
+            parts.push(if required { text } else { format!("[{text}]") });
+        }
+        parts.join(" ")
+    }
+    let command = MemoryArgs::command();
+    let mut commands = serde_json::Map::new();
+    for verb in command.get_subcommands() {
+        commands.insert(
+            verb.get_name().to_string(),
+            json!(command_usage(verb, "cort memory")),
+        );
+        if verb.get_name() == "notes" {
+            for sub in verb.get_subcommands() {
+                commands.insert(
+                    format!("notes {}", sub.get_name()),
+                    json!(command_usage(sub, "cort memory notes")),
                 );
-                let text = match arg.get_long() {
-                    Some(long) if takes_value => format!("--{long} {value}"),
-                    Some(long) => format!("--{long}"),
-                    None => value,
-                };
-                let text = if matches!(arg.get_action(), clap::ArgAction::Append) {
-                    format!("{text}...")
-                } else {
-                    text
-                };
-                let required = arg.is_required_set() && arg.get_default_values().is_empty();
-                parts.push(if required { text } else { format!("[{text}]") });
             }
-            (verb.get_name().to_string(), json!(parts.join(" ")))
-        })
-        .collect();
+        }
+    }
     json!({
         "usage": "cort memory <command> [options]",
         "commands": commands,
@@ -567,6 +580,11 @@ struct MemoryArgs {
 
 #[derive(Subcommand, Debug)]
 enum MemoryAction {
+    /// Opt in, inspect, and synchronize Claude Code harness notes.
+    Notes {
+        #[command(subcommand)]
+        action: NotesAction,
+    },
     Configure {
         #[arg(long)]
         url: String,
@@ -627,6 +645,32 @@ enum MemoryAction {
     ImportLegacy {
         #[arg(long, default_value = ".")]
         root: PathBuf,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum NotesAction {
+    OptIn {
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+    },
+    OptOut {
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+    },
+    Status,
+    Sync {
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        verbose: bool,
+    },
+    List {
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+    },
+    Show {
+        note_id: String,
     },
 }
 
@@ -1983,6 +2027,17 @@ fn cmd_usage(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, CortError
 fn cmd_memory(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError> {
     let a = MemoryArgs::try_parse_from(args.iter()).map_err(clap_fail)?;
     let value = match a.action {
+        MemoryAction::Notes { action } => match action {
+            NotesAction::OptIn { root } => cort::memory_store::notes_opt_in(&root, true),
+            NotesAction::OptOut { root } => cort::memory_store::notes_opt_in(&root, false),
+            NotesAction::Status => cort::memory_store::notes_status(),
+            NotesAction::Sync { dry_run, verbose } => {
+                cort::memory_store::notes_sync(dry_run, verbose)
+            }
+            NotesAction::List { root } => cort::memory_store::notes_list(&root),
+            NotesAction::Show { note_id } => cort::memory_store::notes_show(&note_id),
+        }
+        .map_err(memory_error)?,
         MemoryAction::Configure { url, token_stdin } => {
             if !token_stdin {
                 return Err(CortError::new(

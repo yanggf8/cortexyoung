@@ -48,6 +48,13 @@ cort memory configure --url <Turso URL> --token-stdin
 Run it on each machine before switching agent instructions. No cross-machine behavioral result
 is inferred from a successful sync alone.
 
+## Harness notes
+
+`cort memory notes` is opt-in per project per machine. After `notes opt-in --root .`,
+`notes sync` uploads Claude Code `projects/*/memory/*.md` files for opted-in projects.
+The secret screen is coarse and fail-closed; it is not a privacy guarantee. Run
+`cort memory notes sync --dry-run` to list what would be uploaded before syncing.
+
 ## Review, record, recall
 
 ```sh

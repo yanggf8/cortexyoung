@@ -2,7 +2,9 @@
 //! The local file is a sync replica and must never be opened with rusqlite or the Turso CLI.
 
 use crate::memory::{self, MemoryEntry, MemoryLedger, MemoryRecall};
+use crate::{notes, notes_sync, usage};
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
@@ -316,11 +318,8 @@ pub fn recall_local(root: &Path) -> Result<(MemoryRecall, usize), LocalRecallErr
             LocalRecallError::NotConfigured
         }
     })?;
-    let dir = crate::data_dir::data_dir()
-        .join(SUBDIR)
-        .join(digest(&config.url));
-    let path = dir.join("memory.db");
-    if !path.is_file() {
+    let dir = replica_dir(&config);
+    if !dir.join("memory.db").is_file() {
         return Err(LocalRecallError::NoReplica);
     }
     let lock = OpenOptions::new()
@@ -333,6 +332,34 @@ pub fn recall_local(root: &Path) -> Result<(MemoryRecall, usize), LocalRecallErr
         Ok(()) => {}
         Err(fs::TryLockError::WouldBlock) => return Err(LocalRecallError::Busy),
         Err(fs::TryLockError::Error(_)) => return Err(LocalRecallError::Failed),
+    }
+    runtime()
+        .map_err(|_| LocalRecallError::Failed)?
+        .block_on(async {
+            // The replica guards answer first, as before the open was factored out, so a
+            // project that cannot be resolved does not mask an unsynced replica.
+            let db = open_guarded_replica(&config).await?;
+            let project = project(root).map_err(|_| LocalRecallError::Failed)?;
+            let conn = db.connect().await.map_err(|_| LocalRecallError::Failed)?;
+            let ledger = read_existing_ledger(&conn, &project)
+                .await
+                .map_err(|_| LocalRecallError::Failed)?;
+            Ok(memory::recall_ledger_for_hook(root, &ledger))
+        })
+}
+
+fn replica_dir(config: &Config) -> PathBuf {
+    crate::data_dir::data_dir()
+        .join(SUBDIR)
+        .join(digest(&config.url))
+}
+
+/// Caller holds memory.lock. Refuse any state in which Turso might write or pull at open.
+async fn open_guarded_replica(config: &Config) -> Result<turso::sync::Database, LocalRecallError> {
+    let dir = replica_dir(config);
+    let path = dir.join("memory.db");
+    if !path.is_file() {
+        return Err(LocalRecallError::NoReplica);
     }
     // Read under the lock, so a writer cannot change the metadata between this check and the open.
     let info_path = dir.join("memory.db-info");
@@ -368,23 +395,13 @@ pub fn recall_local(root: &Path) -> Result<(MemoryRecall, usize), LocalRecallErr
     {
         return Err(LocalRecallError::UnsyncedReplica);
     }
-    let project = project(root).map_err(|_| LocalRecallError::Failed)?;
-    runtime()
-        .map_err(|_| LocalRecallError::Failed)?
-        .block_on(async {
-            let db = turso::sync::Builder::new_remote(&path.to_string_lossy())
-                .with_remote_url(&config.url)
-                .with_auth_token(&config.token)
-                .bootstrap_if_empty(false)
-                .build()
-                .await
-                .map_err(|_| LocalRecallError::Failed)?;
-            let conn = db.connect().await.map_err(|_| LocalRecallError::Failed)?;
-            let ledger = read_existing_ledger(&conn, &project)
-                .await
-                .map_err(|_| LocalRecallError::Failed)?;
-            Ok(memory::recall_ledger_for_hook(root, &ledger))
-        })
+    turso::sync::Builder::new_remote(&path.to_string_lossy())
+        .with_remote_url(&config.url)
+        .with_auth_token(&config.token)
+        .bootstrap_if_empty(false)
+        .build()
+        .await
+        .map_err(|_| LocalRecallError::Failed)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -394,6 +411,200 @@ pub enum LocalRecallError {
     UnsyncedReplica,
     Busy,
     Failed,
+}
+
+fn notes_machine() -> Value {
+    json!({"id":usage::machine_id(),"source":usage::machine_id_source()})
+}
+
+fn claude_home() -> Result<PathBuf, String> {
+    crate::measure::claude_projects_dir()
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| "Claude projects directory has no parent".to_string())
+}
+
+pub fn notes_opt_in(root: &Path, opt_in: bool) -> Result<Value, String> {
+    let project = project_from_git_origin(root)?;
+    let path = notes_sync::opt_in_path();
+    let mut projects = notes_sync::read_opt_in(&path)?;
+    if opt_in {
+        projects.insert(project.clone());
+    } else {
+        projects.remove(&project);
+    }
+    notes_sync::write_opt_in(&path, &projects)?;
+    let mut result = json!({"status":if opt_in {"opted_in"} else {"opted_out"},"project":project,"opt_in_file":path});
+    if !opt_in {
+        result["remote_rows"] = json!("kept");
+    }
+    Ok(result)
+}
+
+pub fn notes_status() -> Result<Value, String> {
+    let opted_in = notes_sync::read_opt_in(&notes_sync::opt_in_path())?;
+    Ok(
+        json!({"opted_in":opted_in,"memory_configured":config().is_ok(),"claude_home":claude_home()?,"machine":notes_machine()}),
+    )
+}
+
+fn notes_now() -> Result<String, String> {
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_secs() as i64;
+    let (year, month, day) = usage::civil_from_unix_days(seconds.div_euclid(86_400));
+    let hour = seconds.rem_euclid(86_400) / 3_600;
+    let minute = seconds.rem_euclid(3_600) / 60;
+    let second = seconds.rem_euclid(60);
+    Ok(format!(
+        "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z"
+    ))
+}
+
+fn notes_sync_output(
+    plan: notes_sync::Plan,
+    complete: bool,
+    dry_run: bool,
+    verbose: bool,
+    replica: Option<&str>,
+) -> Value {
+    let counts = &plan.counts;
+    let mut result = json!({
+        "dry_run":dry_run,
+        "counts":{"scanned":counts.scanned,"upload":counts.upload,"unresolved":counts.unresolved,
+            "not_opted_in":counts.not_opted_in,"skipped_size":counts.skipped_size,
+            "skipped_other":counts.skipped_other,"skipped_secret":counts.skipped_secret,
+            "unchanged":counts.unchanged,"upserts":counts.upserts,"tombstones":counts.tombstones},
+        "listing":if dry_run || verbose {plan.listing.lines().map(str::to_owned).collect::<Vec<_>>()} else {Vec::new()},
+        "complete":complete,"pushed":!dry_run,"pulled":!dry_run,"machine":notes_machine()
+    });
+    if dry_run {
+        result["planned_from"] = json!("local_replica");
+    }
+    if let Some(replica) = replica {
+        result["replica"] = json!(replica);
+    }
+    if !complete {
+        result["tombstones_suppressed"] = json!("incomplete_scan");
+    }
+    result
+}
+
+pub fn notes_sync(dry_run: bool, verbose: bool) -> Result<Value, String> {
+    // The whole scan and eligibility screen run before any store lock or network operation.
+    let report = notes::scan(&claude_home()?);
+    let opted_in = notes_sync::read_opt_in(&notes_sync::opt_in_path())?;
+    let prepared = notes_sync::prepare(&report, Path::new("/"), &opted_in, notes::project_for);
+    if dry_run && !config_path().exists() {
+        let plan = notes_sync::plan(&prepared, &[]);
+        return Ok(notes_sync_output(
+            plan,
+            report.complete,
+            true,
+            verbose,
+            Some("not_configured"),
+        ));
+    }
+    let now = if dry_run { None } else { Some(notes_now()?) };
+    with_store_lock(|config| {
+        runtime()?.block_on(async {
+            let machine = usage::machine_id();
+            let harness = "claude-code";
+            if dry_run {
+                // Only a replica the guards refuse to open read-only is "absent". A read that fails on
+                // an open replica is an error, never a plan computed against nothing.
+                let (existing, absent) = match open_guarded_replica(&config).await {
+                    Ok(db) => {
+                        let conn = db.connect().await.map_err(|e| e.to_string())?;
+                        (
+                            notes_sync::existing_rows(&conn, machine, harness).await?,
+                            false,
+                        )
+                    }
+                    Err(_) => (Vec::new(), true),
+                };
+                let plan = notes_sync::plan(&prepared, &existing);
+                return Ok(notes_sync_output(
+                    plan,
+                    report.complete,
+                    true,
+                    verbose,
+                    absent.then_some("absent"),
+                ));
+            }
+            let db = open(&config).await?;
+            let conn = db.connect().await.map_err(|e| e.to_string())?;
+            notes_sync::ensure_notes_schema(&conn).await?;
+            db.push().await.map_err(|e| e.to_string())?;
+            db.pull().await.map_err(|e| e.to_string())?;
+            let existing = notes_sync::existing_rows(&conn, machine, harness).await?;
+            let plan = notes_sync::plan(&prepared, &existing);
+            notes_sync::apply(
+                &conn,
+                machine,
+                harness,
+                now.as_deref().unwrap_or_default(),
+                &plan,
+            )
+            .await?;
+            db.push().await.map_err(|e| e.to_string())?;
+            Ok(notes_sync_output(
+                plan,
+                report.complete,
+                false,
+                verbose,
+                None,
+            ))
+        })
+    })
+}
+
+pub fn notes_list(root: &Path) -> Result<Value, String> {
+    let project = project_from_git_origin(root)?;
+    with_store_lock(|config| {
+        runtime()?.block_on(async {
+        let db = open(&config).await?;
+        let conn = db.connect().await.map_err(|e| e.to_string())?;
+        let rows = notes_sync::list(&conn, &project).await?;
+        let rows: Vec<_> = rows.into_iter().map(|row| json!({
+            "note_id":row.note_id,"machine":row.machine,"this_machine":row.machine == usage::machine_id(),
+            "file_name":row.file_name,"title":row.title,"description":row.description,
+            "kind":row.kind,"updated_at":row.updated_at
+        })).collect();
+        Ok(json!({"rows":rows,"reading":"harness memory from other machines' agents, uploaded unreviewed; not checked against source"}))
+    })
+    })
+}
+
+pub fn notes_show(note_id: &str) -> Result<Value, String> {
+    with_store_lock(|config| {
+        runtime()?.block_on(async {
+            let db = open(&config).await?;
+            let conn = db.connect().await.map_err(|e| e.to_string())?;
+            let found = notes_sync::show(&conn, note_id)
+                .await?
+                .ok_or_else(|| format!("unknown note id: {note_id}"))?;
+            let row = found.note;
+            let body: String = found
+                .body
+                .chars()
+                .map(|c| {
+                    if c.is_control() && c != '\n' && c != '\t' {
+                        ' '
+                    } else {
+                        c
+                    }
+                })
+                .collect();
+            Ok(
+                json!({"note_id":row.note_id,"project":row.project,"machine":row.machine,
+            "harness":row.harness,"source_dir":row.source_dir,"file_name":row.file_name,
+            "title":row.title,"description":row.description,"kind":row.kind,
+            "updated_at":row.updated_at,"body":body}),
+            )
+        })
+    })
 }
 
 async fn ensure_schema(conn: &turso::Connection) -> Result<(), String> {

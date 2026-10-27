@@ -279,6 +279,13 @@ fn memory_help_lists_each_memory_verb_with_its_options() {
                 "configure",
                 "import-config",
                 "import-legacy",
+                "notes",
+                "notes list",
+                "notes opt-in",
+                "notes opt-out",
+                "notes show",
+                "notes status",
+                "notes sync",
                 "recall",
                 "record",
                 "resolve",
@@ -286,6 +293,10 @@ fn memory_help_lists_each_memory_verb_with_its_options() {
                 "sync"
             ]
         );
+        assert!(commands["notes sync"]
+            .as_str()
+            .unwrap()
+            .contains("--dry-run"));
         for (verb, synopsis) in commands {
             assert!(
                 synopsis

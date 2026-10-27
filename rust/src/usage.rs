@@ -1246,7 +1246,7 @@ fn utc_day(ms: i64) -> String {
 }
 
 /// Howard Hinnant civil_from_days; `days` is days since 1970-01-01 UTC.
-fn civil_from_unix_days(days: i64) -> (i32, u32, u32) {
+pub(crate) fn civil_from_unix_days(days: i64) -> (i32, u32, u32) {
     let z = days + 719468;
     let era = z.div_euclid(146097);
     let doe = (z - era * 146097) as u32;
