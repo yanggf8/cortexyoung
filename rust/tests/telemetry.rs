@@ -453,14 +453,12 @@ fn dry_run_counts_local_only_and_remote_only() {
 }
 
 #[test]
-fn verify_never_pushes_and_writes_the_marker() {
+fn verify_writes_the_marker() {
     let fx = Fx::new();
     let mut s = store(&fx);
     seed_one_per_machine(&mut s, &fx);
-    s.fail_push(true); // would blow up if verify pushed
     let report = verify_events(&mut s, &inputs(&fx), 42).unwrap();
     assert_eq!(report.matched, 3);
-    assert_eq!(s.push_calls(), 0);
     let marker: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(fx.p("verified.json")).unwrap()).unwrap();
     assert_eq!(marker["machine_id"], "mach-A");
@@ -479,17 +477,16 @@ fn failed_verify_leaves_no_marker() {
 }
 
 #[test]
-fn upload_refuses_without_watermark_or_passing_dry_run() {
+fn upload_refuses_without_watermark_or_passing_verify() {
     let fx = Fx::new();
     let mut s = store(&fx);
     let report = upload_events(&mut s, &inputs(&fx));
     assert!(
-        matches!(&report, EventsReport::Refused(r) if r.contains("--dry-run")),
+        matches!(&report, EventsReport::Refused(r) if r.contains("measure verify")),
         "{report:?}"
     );
     assert_eq!(held(&mut s), 0);
     assert_eq!(s.event_watermark("mach-A", "cort_command").unwrap(), None);
-    assert_eq!(s.push_calls(), 0);
 }
 
 #[test]
@@ -803,7 +800,7 @@ fn help_states_the_retention_boundary() {
         .output()
         .unwrap();
     let text = String::from_utf8_lossy(&out.stdout);
-    assert!(text.contains("sync --dry-run"), "{text}");
+    assert!(text.contains("verify compares event ids"), "{text}");
     assert!(text.contains("rows not yet uploaded 180 days"), "{text}");
     assert!(text.contains("pruned_unuploaded_rows"), "{text}");
     assert!(!text.contains("record not running"), "{text}");

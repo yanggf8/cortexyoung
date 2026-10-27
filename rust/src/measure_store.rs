@@ -107,8 +107,47 @@ pub trait MeasureStore {
     ) -> Result<Vec<TelemetryEvent>, String>;
     /// `(source, machine_id, rows)` for every group, counted by the database.
     fn event_counts(&mut self) -> Result<Vec<(String, String, usize)>, String>;
-    fn push(&mut self) -> Result<(), String>;
-    fn pull(&mut self) -> Result<(), String>;
+    /// Names of indexes currently present in the database.
+    fn index_names(&mut self) -> Result<Vec<String>, String>;
+}
+
+pub fn missing_indexes(present: &[String]) -> Vec<String> {
+    MEASURE_SCHEMA
+        .iter()
+        .filter(|sql| sql.starts_with("CREATE INDEX ") || sql.starts_with("CREATE UNIQUE INDEX "))
+        .filter_map(|sql| {
+            let mut words = sql.split_whitespace().skip_while(|w| *w != "INDEX").skip(1);
+            let first = words.next()?;
+            if first == "IF" {
+                words.nth(2)
+            } else {
+                Some(first)
+            }
+        })
+        .filter(|name| !present.iter().any(|have| have == name))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Classify the safe display string emitted by a store operation.
+pub fn remote_error_kind(message: &str) -> &'static str {
+    let error = message.strip_prefix("remote read: ").unwrap_or(message);
+    let error = error.strip_prefix(REMOTE_PREFIX).unwrap_or(error);
+    if error.starts_with("network timeout") || error.starts_with("timeout") {
+        "timeout"
+    } else if error.starts_with("blocked") {
+        "blocked"
+    } else if error.starts_with("unauthorized") {
+        "unauthorized"
+    } else if error.starts_with("unreachable") {
+        "unreachable"
+    } else if error.starts_with("busy") {
+        "busy"
+    } else if error.starts_with("sql") || error.starts_with("constraint") {
+        "sql"
+    } else {
+        "other"
+    }
 }
 
 /// Every CREATE statement; the remote store runs them when its local version marker is missing.
@@ -220,6 +259,8 @@ const COUNT_EVENTS: &str = "SELECT source, machine_id, COUNT(*) FROM telemetry_e
 const SELECT_IMPORTED_USAGE: &str =
     "SELECT day, host, commands_window, core_window, deep_window, commands_7d, deep_7d, \
      decline_top, window_days FROM imported_usage ORDER BY day, host";
+const SELECT_IMPORTED_ONE: &str = "SELECT day, host, commands_window, core_window, deep_window, commands_7d, deep_7d, decline_top, window_days FROM imported_usage WHERE day = ? AND host = ?";
+const SELECT_INDEX_NAMES: &str = "SELECT name FROM sqlite_master WHERE type='index'";
 const INSERT_IMPORTED_USAGE: &str = "INSERT INTO imported_usage (day, host, commands_window, \
     core_window, deep_window, commands_7d, deep_7d, decline_top, window_days) \
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)";
@@ -450,14 +491,10 @@ fn alias_cells(r: &(String, String, String)) -> Vec<Cell> {
     ]
 }
 
-/// A plain SQLite file implementing the store; `push`/`pull` have nothing to sync.
+/// A plain SQLite file implementing the store.
 pub struct SqliteStore {
     conn: rusqlite::Connection,
     fail_write: bool,
-    fail_push: bool,
-    fail_pull: bool,
-    pushes: usize,
-    pulls: usize,
 }
 
 fn sql_err(e: rusqlite::Error) -> String {
@@ -473,36 +510,12 @@ impl SqliteStore {
         Ok(Self {
             conn,
             fail_write: false,
-            fail_push: false,
-            fail_pull: false,
-            pushes: 0,
-            pulls: 0,
         })
-    }
-
-    /// Test hook: make `push` return an error while keeping local data.
-    pub fn fail_push(&mut self, fail: bool) {
-        self.fail_push = fail;
-    }
-
-    /// Test hook: make `pull` return an error.
-    pub fn fail_pull(&mut self, fail: bool) {
-        self.fail_pull = fail;
     }
 
     /// Test hook: reject writes while leaving stored rows intact.
     pub fn fail_write(&mut self, fail: bool) {
         self.fail_write = fail;
-    }
-
-    /// Test hook: how many times `push` was called (failed or not).
-    pub fn push_calls(&self) -> usize {
-        self.pushes
-    }
-
-    /// Test hook: how many times `pull` was called (failed or not).
-    pub fn pull_calls(&self) -> usize {
-        self.pulls
     }
 
     fn query(&self, sql: &str, params: Vec<Cell>, cols: usize) -> Result<Vec<Vec<Cell>>, String> {
@@ -598,31 +611,46 @@ impl MeasureStore for SqliteStore {
         &mut self,
         rows: &[ImportedUsage],
     ) -> Result<ImportedUsageOutcome, String> {
-        let mut known: HashMap<(String, String), ImportedUsage> = self
-            .query(SELECT_IMPORTED_USAGE, vec![], 9)?
-            .iter()
-            .map(|r| imported_usage_from_cells(r))
-            .collect::<Result<Vec<_>, String>>()?
-            .into_iter()
-            .map(|u| ((u.day.clone(), u.host.clone()), u))
-            .collect();
         let mut outcome = ImportedUsageOutcome::default();
         for row in rows {
-            let key = (row.day.clone(), row.host.clone());
-            if let Some(existing) = known.get(&key) {
-                if existing == row {
-                    outcome.unchanged += 1;
-                } else {
-                    outcome.conflicts.push(ImportedUsageConflict {
-                        existing: existing.clone(),
-                        incoming: row.clone(),
-                    });
-                }
-                continue;
+            if self.fail_write {
+                return Err("write failed (fail_write set)".into());
             }
-            self.exec(INSERT_IMPORTED_USAGE, imported_usage_cells(row))?;
-            known.insert(key, row.clone());
-            outcome.inserted += 1;
+            let params: Vec<rusqlite::types::Value> = imported_usage_cells(row)
+                .into_iter()
+                .map(to_sqlite)
+                .collect();
+            match self
+                .conn
+                .execute(INSERT_IMPORTED_USAGE, rusqlite::params_from_iter(params))
+            {
+                Ok(_) => outcome.inserted += 1,
+                Err(rusqlite::Error::SqliteFailure(code, _))
+                    if code.code == rusqlite::ErrorCode::ConstraintViolation =>
+                {
+                    let existing = self
+                        .query(
+                            SELECT_IMPORTED_ONE,
+                            vec![Cell::Text(row.day.clone()), Cell::Text(row.host.clone())],
+                            9,
+                        )?
+                        .first()
+                        .map(|cells| imported_usage_from_cells(cells))
+                        .transpose()?
+                        .ok_or_else(|| {
+                            "constraint without existing imported usage row".to_string()
+                        })?;
+                    if existing == *row {
+                        outcome.unchanged += 1;
+                    } else {
+                        outcome.conflicts.push(ImportedUsageConflict {
+                            existing,
+                            incoming: row.clone(),
+                        });
+                    }
+                }
+                Err(error) => return Err(sql_err(error)),
+            }
         }
         Ok(outcome)
     }
@@ -753,20 +781,14 @@ impl MeasureStore for SqliteStore {
             .collect()
     }
 
-    fn push(&mut self) -> Result<(), String> {
-        self.pushes += 1;
-        if self.fail_push {
-            return Err("push failed (fail_push set)".into());
-        }
-        Ok(())
-    }
-
-    fn pull(&mut self) -> Result<(), String> {
-        self.pulls += 1;
-        if self.fail_pull {
-            return Err("pull failed (fail_pull set)".into());
-        }
-        Ok(())
+    fn index_names(&mut self) -> Result<Vec<String>, String> {
+        self.query(SELECT_INDEX_NAMES, vec![], 1)?
+            .iter()
+            .map(|row| match &row[0] {
+                Cell::Text(name) => Ok(name.clone()),
+                _ => Err("invalid index name".into()),
+            })
+            .collect()
     }
 }
 
@@ -1047,31 +1069,37 @@ impl MeasureStore for RemoteStore {
         &mut self,
         rows: &[ImportedUsage],
     ) -> Result<ImportedUsageOutcome, String> {
-        let mut known: HashMap<(String, String), ImportedUsage> = self
-            .query(SELECT_IMPORTED_USAGE, vec![], 9)?
-            .iter()
-            .map(|r| imported_usage_from_cells(r))
-            .collect::<Result<Vec<_>, String>>()?
-            .into_iter()
-            .map(|u| ((u.day.clone(), u.host.clone()), u))
-            .collect();
         let mut outcome = ImportedUsageOutcome::default();
         for row in rows {
-            let key = (row.day.clone(), row.host.clone());
-            if let Some(existing) = known.get(&key) {
-                if existing == row {
-                    outcome.unchanged += 1;
-                } else {
-                    outcome.conflicts.push(ImportedUsageConflict {
-                        existing: existing.clone(),
-                        incoming: row.clone(),
-                    });
+            match self
+                .db
+                .execute(INSERT_IMPORTED_USAGE, imported_usage_cells(row))
+            {
+                Ok(_) => outcome.inserted += 1,
+                Err(error) if error.kind == ErrorKind::Constraint => {
+                    let existing = self
+                        .query(
+                            SELECT_IMPORTED_ONE,
+                            vec![Cell::Text(row.day.clone()), Cell::Text(row.host.clone())],
+                            9,
+                        )?
+                        .first()
+                        .map(|cells| imported_usage_from_cells(cells))
+                        .transpose()?
+                        .ok_or_else(|| {
+                            "constraint without existing imported usage row".to_string()
+                        })?;
+                    if existing == *row {
+                        outcome.unchanged += 1;
+                    } else {
+                        outcome.conflicts.push(ImportedUsageConflict {
+                            existing,
+                            incoming: row.clone(),
+                        });
+                    }
                 }
-                continue;
+                Err(error) => return Err(self.error(error)),
             }
-            self.exec(INSERT_IMPORTED_USAGE, imported_usage_cells(row))?;
-            known.insert(key, row.clone());
-            outcome.inserted += 1;
         }
         Ok(outcome)
     }
@@ -1192,16 +1220,32 @@ impl MeasureStore for RemoteStore {
             .collect()
     }
 
-    // C2b removes these trait methods and their call sites.
-    fn push(&mut self) -> Result<(), String> {
-        Ok(())
-    }
-    fn pull(&mut self) -> Result<(), String> {
-        Ok(())
+    fn index_names(&mut self) -> Result<Vec<String>, String> {
+        self.query(SELECT_INDEX_NAMES, vec![], 1)?
+            .iter()
+            .map(|row| match &row[0] {
+                Cell::Text(name) => Ok(name.clone()),
+                _ => Err("invalid index name".into()),
+            })
+            .collect()
     }
 }
 
 /// Open the configured remote database under `measure.lock` and run `f` against it.
+/// The one remote read `measure status` makes: read-only, so it never creates the schema it is
+/// checking for, and without `measure.lock`, because a read needs no exclusion and a status must
+/// not wait behind a running collection. The network bound is at most `STATUS_NET_TIMEOUT`.
+pub fn read_measure_store<T>(
+    f: impl FnOnce(&mut dyn MeasureStore) -> Result<T, String>,
+) -> Result<T, String> {
+    let config = config()?;
+    let mut store =
+        RemoteStore::open_read_only(&config, default_net_timeout().min(STATUS_NET_TIMEOUT))?;
+    f(&mut store)
+}
+
+const STATUS_NET_TIMEOUT: Duration = Duration::from_secs(10);
+
 pub fn with_turso_store<T>(
     f: impl FnOnce(&mut dyn MeasureStore) -> Result<T, String>,
 ) -> Result<T, String> {

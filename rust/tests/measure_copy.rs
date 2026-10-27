@@ -1,5 +1,6 @@
 use cort::measure::copy_events;
-use cort::measure_store::{MeasureStore, SqliteStore};
+use cort::measure_store::{MeasureStore, RemoteStore, SqliteStore};
+use cort::remote::SqliteTransport;
 use cort::telemetry::TelemetryEvent;
 use std::fs;
 use std::io::Write;
@@ -126,8 +127,6 @@ fn copy_never_writes_to_source() {
     let before = fs::read(&path).unwrap();
     copy_events(&mut from, &mut to).unwrap();
     assert_eq!(fs::read(&path).unwrap(), before);
-    assert_eq!(from.push_calls(), 0);
-    assert!(to.push_calls() > 0);
 }
 
 #[test]
@@ -206,28 +205,35 @@ fn copy_copies_aliases_verbatim() {
 }
 
 #[test]
-fn destination_push_failure_is_returned_and_rerun_completes() {
+fn failed_remote_source_read_is_tagged_and_writes_nothing() {
     let dir = tempfile::tempdir().unwrap();
-    let (mut from, mut to) = (open(&dir, "from.db"), open(&dir, "to.db"));
-    seed(&mut from);
-    to.fail_push(true);
+    let transport = std::sync::Arc::new(SqliteTransport::new().unwrap());
+    let mut from = RemoteStore::with_transport(
+        "libsql://test.invalid",
+        "test-token",
+        Box::new(Shared(transport.clone())),
+        true,
+    )
+    .unwrap();
+    let mut to = open(&dir, "to.db");
+    transport.fail_next_code("BLOCKED");
     let err = copy_events(&mut from, &mut to).unwrap_err();
-    assert!(err.contains("push"), "{err}");
-    assert_eq!(from.push_calls(), 0);
-    to.fail_push(false);
-    let report = copy_events(&mut from, &mut to).unwrap().groups;
-    assert_eq!(report.iter().map(|r| r.2).sum::<usize>(), 6);
-    assert_eq!(report.iter().map(|r| r.3).sum::<usize>(), 6);
+    assert!(err.starts_with("remote read: "), "{err}");
+    assert_eq!(cort::measure_store::remote_error_kind(&err), "blocked");
+    assert!(all(&mut to).is_empty());
 }
 
-#[test]
-fn source_pull_failure_is_returned() {
-    let dir = tempfile::tempdir().unwrap();
-    let (mut from, mut to) = (open(&dir, "from.db"), open(&dir, "to.db"));
-    seed(&mut from);
-    from.fail_pull(true);
-    assert!(copy_events(&mut from, &mut to).is_err());
-    assert!(all(&mut to).is_empty());
+struct Shared(std::sync::Arc<SqliteTransport>);
+
+impl cort::remote::Transport for Shared {
+    fn post(
+        &self,
+        url: &str,
+        body: &[u8],
+        headers: &[(&str, &str)],
+    ) -> Result<Vec<u8>, cort::remote::RemoteError> {
+        self.0.post(url, body, headers)
+    }
 }
 
 fn cort_bin() -> PathBuf {

@@ -183,17 +183,6 @@ fn store_lock_serializes_two_holders() {
 }
 
 #[test]
-fn push_failure_is_returned() {
-    let (_d, mut s) = store();
-    s.upsert_compaction(&row("s1", 1)).unwrap();
-    s.fail_push(true);
-    assert!(s.push().is_err());
-    assert_eq!(s.compactions_since(0).unwrap().len(), 1);
-    s.fail_push(false);
-    assert!(s.push().is_ok());
-}
-
-#[test]
 fn write_failure_keeps_existing_rows() {
     let (_d, mut s) = store();
     s.upsert_compaction(&row("s1", 1)).unwrap();

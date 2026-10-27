@@ -262,7 +262,7 @@ fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool, Stri
 }
 
 /// The column names `SELECT rowid, * FROM command_log` returns, joined. They decide every payload
-/// (hence every id), so the dry-run marker records them: a changed schema voids the verification.
+/// (hence every id), so the verify marker records them: a changed schema voids the verification.
 pub fn command_log_columns(usage_db: &Path) -> Result<String, String> {
     let conn = open_readonly(usage_db)?;
     let stmt = conn
@@ -708,7 +708,7 @@ pub fn dry_run(store: &mut dyn MeasureStore, local: &[TelemetryEvent]) -> Result
 pub struct UploadInputs {
     pub usage_db: PathBuf,
     pub cost_dir: PathBuf,
-    /// Local file written by a successful dry-run; see [`verify_events`].
+    /// Local file written by a successful `measure verify`; see [`verify_events`].
     pub marker_path: PathBuf,
     /// The machine running this, whose events watermark is kept (rows in a carried-over usage.db
     /// stamped with another machine still upload under their own `machine_id`).
@@ -749,14 +749,13 @@ fn marker_valid(input: &UploadInputs) -> bool {
         && command_log_columns(&input.usage_db).is_ok_and(|c| v["columns"] == c.as_str())
 }
 
-/// Pull, compare every local `cort_command` event with the remote, and on success write the
-/// marker that lets the first real upload through. Never pushes.
+/// Compare every local `cort_command` event with the remote, and on success write the
+/// marker that lets the first real upload through.
 pub fn verify_events(
     store: &mut dyn MeasureStore,
     input: &UploadInputs,
     now_ms: i64,
 ) -> Result<DryRun, String> {
-    store.pull().map_err(|e| format!("pull failed: {e}"))?;
     let local = cort_events(&input.usage_db, None)?;
     let report = dry_run(store, &local)?;
     if report.matched > 0 {
@@ -986,8 +985,8 @@ fn try_upload(
     let (cursor, reason, watermark) = upload_cursor(progress, &config)?;
     if watermark.is_none() && !marker_valid(input) {
         return Ok(EventsReport::Refused(format!(
-            "no event watermark for machine {machine} and no passing dry-run: run `cort \
-             measure sync --dry-run` once; nothing was uploaded"
+            "no event watermark for machine {machine} and no passing verify: run `cort \
+             measure verify` once; nothing was uploaded"
         )));
     }
     let full_range = cursor.is_none();

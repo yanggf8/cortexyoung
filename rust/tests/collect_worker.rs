@@ -129,18 +129,10 @@ fn health(paths: &KickPaths) {
     )
     .unwrap();
 }
-fn run(
-    paths: &KickPaths,
-    db: &Path,
-    harness: &str,
-    push_fail: bool,
-    pull_fail: bool,
-) -> CollectRun {
+fn run(paths: &KickPaths, db: &Path, harness: &str) -> CollectRun {
     run_collect(
         &mut || {
-            let mut store = SqliteStore::open(db).map_err(OpenError::Other)?;
-            store.fail_push(push_fail);
-            store.fail_pull(pull_fail);
+            let store = SqliteStore::open(db).map_err(OpenError::Other)?;
             Ok(Box::new(store) as Box<dyn MeasureStore>)
         },
         paths,
@@ -261,13 +253,12 @@ impl MeasureStore for SlowFirstWrite {
         events_page(after: Option<(String, String)>, limit: usize) -> Result<Vec<TelemetryEvent>, String>;
         events_in_key_range(first: &(String, String), last: &(String, String)) -> Result<Vec<TelemetryEvent>, String>;
         event_counts() -> Result<Vec<(String, String, usize)>, String>;
-        push() -> Result<(), String>;
-        pull() -> Result<(), String>;
+        index_names() -> Result<Vec<String>, String>;
     }
 }
 
 #[test]
-fn deadline_after_uploads_skips_the_push() {
+fn deadline_after_uploads_still_fails_the_run() {
     sandbox(|paths, db| {
         command(paths);
         health(paths);
@@ -337,7 +328,7 @@ fn network_failure_keeps_upload_pending_and_counts_harness() {
     sandbox(|paths, db| {
         command(paths);
         health(paths);
-        assert_eq!(run(paths, db, "codex", false, false).outcome, "ok");
+        assert_eq!(run(paths, db, "codex").outcome, "ok");
         let result = run_collect(
             &mut || Err(OpenError::Network("remote unavailable: blocked".into())),
             paths,
@@ -387,7 +378,7 @@ fn pending_age_survives_failure_warns_and_clears_on_success() {
         cort::collect::log_collect_run(&paths.data_dir, &failed, NOW).unwrap();
         let log = fs::read_to_string(paths.data_dir.join("measure.log")).unwrap();
         assert!(log.contains("warning: upload stalled 8 days"), "{log}");
-        let completed = run(paths, db, "codex", false, false);
+        let completed = run(paths, db, "codex");
         assert_eq!(completed.outcome, "ok");
         let done = state(paths);
         assert!(!done.upload_pending, "{done:?} {}", completed.summary);
@@ -415,7 +406,7 @@ fn success_clears_upload_pending_and_only_that_harness() {
             );
         }
         assert_eq!(state(paths).failures["codex"].count, 2);
-        let ok = run(paths, db, "claude-code", false, false);
+        let ok = run(paths, db, "claude-code");
         assert_eq!(ok.outcome, "ok");
         assert_eq!(ok.summary["error"], serde_json::Value::Null);
         let s = state(paths);
@@ -436,13 +427,13 @@ fn instance_change_resets_and_reuploads_nothing_twice() {
             ..CollectState::default()
         };
         s.save(&state_path(paths)).unwrap();
-        assert_eq!(run(paths, db, "codex", false, false).outcome, "ok");
+        assert_eq!(run(paths, db, "codex").outcome, "ok");
         s = state(paths);
         assert_ne!(s.instance_id.as_deref(), Some("old-instance"));
         assert_eq!(uploaded(paths), (0, 1)); // command upload awaits a dry-run marker
         let mut store = SqliteStore::open(db).unwrap();
         let first = store.event_counts().unwrap();
-        assert_eq!(run(paths, db, "codex", false, false).outcome, "ok");
+        assert_eq!(run(paths, db, "codex").outcome, "ok");
         assert_eq!(
             SqliteStore::open(db).unwrap().event_counts().unwrap(),
             first
@@ -512,7 +503,7 @@ fn refused_is_not_failure() {
     sandbox(|paths, db| {
         command(paths);
         health(paths);
-        let result = run(paths, db, "codex", false, false);
+        let result = run(paths, db, "codex");
         assert_eq!(result.outcome, "ok");
         assert!(result.refused);
         let s = state(paths);
@@ -548,19 +539,6 @@ fn skipped_busy_when_collect_lock_held() {
         assert_eq!(result.outcome, "skipped_busy");
         assert!(!called);
         assert!(!state_path(paths).exists());
-    });
-}
-
-#[test]
-fn a_collect_run_never_pulls() {
-    // A failing pull cannot touch a write-only collection run.
-    sandbox(|paths, db| {
-        command(paths);
-        let result = run(paths, db, "codex", false, true);
-        assert_eq!((result.outcome, result.error_kind), ("ok", None));
-        let s = state(paths);
-        assert!(!s.upload_pending);
-        assert!(!s.failures.contains_key("codex"));
     });
 }
 
@@ -733,7 +711,7 @@ fn unopenable_admission_lock_is_not_an_upgrade() {
         command(paths);
         // A directory where the admission lock file belongs: no upgrader could hold it either.
         fs::create_dir(paths.cache_dir.join(".upgrade-admission.lock")).unwrap();
-        let result = run(paths, db, "codex", false, false);
+        let result = run(paths, db, "codex");
         assert_eq!((result.outcome, result.error_kind), ("ok", None));
         assert!(!state(paths).upload_pending);
     });
@@ -783,7 +761,7 @@ fn refusal_is_not_failure_and_logs_on_transition_only() {
     sandbox(|paths, db| {
         command(paths);
         for iteration in 0..3 {
-            let result = run(paths, db, "codex", false, false);
+            let result = run(paths, db, "codex");
             assert_eq!(result.outcome, "ok");
             assert!(result.refused);
             assert_eq!(result.refused_changed, iteration == 0);
@@ -815,7 +793,7 @@ fn refusal_is_not_failure_and_logs_on_transition_only() {
                 .to_string(),
         )
         .unwrap();
-        let result = run(paths, db, "codex", false, false);
+        let result = run(paths, db, "codex");
         assert!(!result.refused);
         assert!(result.refused_changed);
         cort::collect::log_collect_run(&paths.data_dir, &result, NOW).unwrap();

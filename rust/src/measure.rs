@@ -422,12 +422,6 @@ pub fn record_with_scan_until(
     ))
 }
 
-/// Push then pull. `Ok` means the local replica is as current as the remote was a moment ago.
-pub fn sync(store: &mut dyn MeasureStore) -> Result<(), String> {
-    store.push().map_err(|e| format!("push failed: {e}"))?;
-    store.pull().map_err(|e| format!("pull failed: {e}"))
-}
-
 /// Events per page when copying between stores.
 const COPY_PAGE: usize = 2000;
 /// How many conflicting keys a [`CopyReport`] names.
@@ -464,22 +458,20 @@ fn differing_columns(a: &TelemetryEvent, b: &TelemetryEvent) -> Vec<&'static str
     out
 }
 
-/// Copy every event and alias of `from` into `to`, unchanged, `INSERT OR IGNORE`, and push `to`
-/// after each page so a failure leaves a resumable state. `from` is only pulled and read: it is
-/// never pushed to or written. A row whose key `to` already holds is never overwritten; if its
+/// Copy every event and alias of `from` into `to`, unchanged, `INSERT OR IGNORE`.
+/// `from` is only read. A row whose key `to` already holds is never overwritten; if its
 /// columns differ it is reported as a conflict.
 pub fn copy_events(
     from: &mut dyn MeasureStore,
     to: &mut dyn MeasureStore,
 ) -> Result<CopyReport, String> {
-    from.pull()
-        .map_err(|e| format!("source pull failed: {e}"))?;
-    to.pull().map_err(|e| format!("pull failed: {e}"))?;
     let mut conflicts = 0usize;
     let mut examples = Vec::new();
     let mut after: Option<(String, String)> = None;
     loop {
-        let page = from.events_page(after.clone(), COPY_PAGE)?;
+        let page = from
+            .events_page(after.clone(), COPY_PAGE)
+            .map_err(|e| format!("remote read: {e}"))?;
         let Some(last) = page.last() else { break };
         let last = (last.source.clone(), last.event_id.clone());
         after = Some(last.clone());
@@ -515,18 +507,17 @@ pub fn copy_events(
                 ));
             }
         }
-        to.push().map_err(|e| format!("push failed: {e}"))?;
     }
-    let aliases = from.aliases()?;
+    let aliases = from.aliases().map_err(|e| format!("remote read: {e}"))?;
     to.upsert_aliases(&aliases)?;
-    to.push().map_err(|e| format!("push failed: {e}"))?;
     let dest: HashMap<(String, String), usize> = to
         .event_counts()?
         .into_iter()
         .map(|(s, m, n)| ((s, m), n))
         .collect();
     let groups = from
-        .event_counts()?
+        .event_counts()
+        .map_err(|e| format!("remote read: {e}"))?
         .into_iter()
         .map(|(s, m, n)| {
             let d = dest.get(&(s.clone(), m.clone())).copied().unwrap_or(0);
@@ -538,24 +529,6 @@ pub fn copy_events(
         conflicts,
         conflict_examples: examples,
     })
-}
-
-pub fn last_sync_path() -> PathBuf {
-    data_dir().join("measure-last-sync")
-}
-
-pub fn write_last_sync(ms: i64) -> Result<(), String> {
-    let path = last_sync_path();
-    write_atomic(&path, &ms.to_string())
-        .map_err(|e| format!("cannot write {}: {e}", path.display()))
-}
-
-pub fn read_last_sync() -> Option<i64> {
-    fs::read_to_string(last_sync_path())
-        .ok()?
-        .trim()
-        .parse()
-        .ok()
 }
 
 /// First non-empty of the kernel hostname, `/etc/hostname`, `$HOSTNAME`; else `unknown`.
@@ -620,8 +593,6 @@ pub struct ReportInputs {
     pub days: i64,
     pub compaction_days: i64,
     pub now_ms: i64,
-    /// `Some(last sync text)` when this report is read from the local replica after a failed sync.
-    pub offline: Option<String>,
     /// Local collection snapshot supplied by the CLI; store-only callers may leave it absent.
     pub collection: Option<Value>,
 }
@@ -700,8 +671,7 @@ fn host_section(host: &str, machine_ids: &[String], rows: &[&CompactionRow]) -> 
     })
 }
 
-/// Reads the store as it stands; the caller decides whether to sync first and says so in
-/// `offline`. Only the compaction section exists so far.
+/// Reads the remote store as it stands. Only the compaction section exists so far.
 pub fn report(store: &mut dyn MeasureStore, input: &ReportInputs) -> Result<Value, String> {
     let since = input.now_ms - input.compaction_days * DAY_MS;
     let rows = store.compactions_since(since)?;
@@ -780,7 +750,6 @@ pub fn report(store: &mut dyn MeasureStore, input: &ReportInputs) -> Result<Valu
         })
         .collect();
     Ok(json!({
-        "offline": input.offline,
         "collection": input.collection,
         "days": input.days,
         "compactions": {
@@ -875,6 +844,30 @@ pub fn render_collection_status(value: &Value) -> String {
     batch_line + &health_line
 }
 
+/// The `status` lean text: the collection lines, then local progress and the remote index check.
+pub fn render_status(value: &Value) -> String {
+    let mut out = render_collection_status(value);
+    out.push_str(&format!(
+        "progress={}\n",
+        value["progress"].as_str().unwrap_or("unknown")
+    ));
+    match value["remote"]["missing_indexes"].as_array() {
+        Some(missing) => {
+            let names = missing
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(",");
+            out.push_str(&format!("remote missing_indexes={names}\n"));
+        }
+        None => out.push_str(&format!(
+            "remote error={}\n",
+            value["remote"]["error"].as_str().unwrap_or("unknown")
+        )),
+    }
+    out
+}
+
 struct Paint(bool);
 
 impl Paint {
@@ -906,10 +899,6 @@ pub fn render_report(v: &Value, color: bool) -> String {
             out.push_str("collection:\n");
             out.push_str(&render_collection_status(collection));
         }
-        out.push('\n');
-    }
-    if let Some(when) = v["offline"].as_str() {
-        out.push_str(&p.yellow(&format!("離線：讀本機副本，最後同步於 {when}")));
         out.push('\n');
     }
     let c = &v["compactions"];

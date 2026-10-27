@@ -682,27 +682,6 @@ pub fn dry_run_step(report: crate::telemetry::DryRun) -> ManualStep<crate::telem
     }
 }
 
-/// A manual sync fails on a failed upload (storage) or a failed push/pull (network). A refused
-/// upload is the persistent state `refused` records, not a failure, so a sync whose replica work
-/// succeeded still clears `upload_pending`; the CLI reports the refusal on its own.
-pub fn sync_step(
-    events: telemetry::EventsReport,
-    synced: Result<(), String>,
-) -> ManualStep<(telemetry::EventsReport, Result<(), String>)> {
-    let failure = if matches!(events, telemetry::EventsReport::Failed(_)) {
-        Some(ErrorKind::Storage)
-    } else if synced.is_err() {
-        Some(ErrorKind::Network)
-    } else {
-        None
-    };
-    ManualStep {
-        events: Some(events.to_json()),
-        failure,
-        value: (events, synced),
-    }
-}
-
 #[derive(Debug)]
 pub enum ManualError {
     Busy(String),
@@ -770,7 +749,7 @@ fn manual_lock(path: &Path, wait: Duration, now_ms: i64) -> Result<fs::File, Man
 }
 
 /// Hold the collection lock, then open the bounded measure store and update shared collection
-/// state around a manual record, sync, or dry run. The caller supplies the original CLI operation.
+/// state around a manual record or verify. The caller supplies the original CLI operation.
 pub fn run_manual<T>(
     store_opener: &mut dyn FnMut() -> Result<Box<dyn MeasureStore>, OpenError>,
     paths: &KickPaths,
@@ -832,7 +811,7 @@ pub fn run_manual<T>(
     };
     // The manual action is one opaque store operation owned by the CLI, so opening the store is
     // its last checkpoint this layer can see: a caller whose limit is already gone must not start
-    // the network work. The background path additionally stops between the uploads and the push.
+    // the network work. The background path additionally stops after the uploads.
     if deadline.expired() {
         if matches!(mode, ManualMode::Write) {
             finish_collect_state(
@@ -1068,7 +1047,7 @@ fn run_collect_inner(
         }
     };
     // The opener's bootstrap is a network operation; if it alone spent the budget, stop before
-    // the transcript scan rather than running a batch that cannot be pushed.
+    // the transcript scan rather than running a batch that cannot be uploaded.
     if deadline.expired() {
         drop(store);
         if let Some(claim) = &claim {

@@ -61,8 +61,6 @@ impl MeasureStore for Counted {
         upsert_imported_usage(rows: &[ImportedUsage]) -> Result<ImportedUsageOutcome, String>;
         insert_events(events: &[TelemetryEvent]) -> Result<usize, String>;
         upsert_aliases(rows: &[(String, String, String)]) -> Result<(), String>;
-        push() -> Result<(), String>;
-        pull() -> Result<(), String>;
     }
     read! {
         compactions_since(since_ms: i64) -> Result<Vec<CompactionRow>, String>;
@@ -74,6 +72,7 @@ impl MeasureStore for Counted {
         events_page(after: Option<(String, String)>, limit: usize) -> Result<Vec<TelemetryEvent>, String>;
         events_in_key_range(first: &(String, String), last: &(String, String)) -> Result<Vec<TelemetryEvent>, String>;
         event_counts() -> Result<Vec<(String, String, usize)>, String>;
+        index_names() -> Result<Vec<String>, String>;
     }
 }
 

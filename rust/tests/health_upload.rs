@@ -127,7 +127,6 @@ fn uploads_without_dry_run_marker() {
         },
         Some((1, format!("{DAY}|repo")))
     );
-    assert_eq!(s.push_calls(), 0);
 }
 
 #[test]

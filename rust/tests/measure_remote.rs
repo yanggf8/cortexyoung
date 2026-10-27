@@ -213,3 +213,132 @@ fn timeout_error_keeps_network_prefix_and_hides_token() {
     assert!(error.contains("timeout"));
     assert!(!error.contains("secret-test-token"));
 }
+
+struct SharedTransport(Arc<SqliteTransport>);
+
+impl Transport for SharedTransport {
+    fn post(
+        &self,
+        url: &str,
+        body: &[u8],
+        headers: &[(&str, &str)],
+    ) -> Result<Vec<u8>, RemoteError> {
+        self.0.post(url, body, headers)
+    }
+}
+
+/// A store whose transport the test keeps, so it can inject a failure after the schema exists.
+fn failing_store() -> (RemoteStore, Arc<SqliteTransport>) {
+    let transport = Arc::new(SqliteTransport::new().unwrap());
+    let store = RemoteStore::with_transport(
+        "libsql://test.invalid",
+        "test-token",
+        Box::new(SharedTransport(transport.clone())),
+        true,
+    )
+    .unwrap();
+    (store, transport)
+}
+
+fn usage(day: &str, host: &str, commands: i64) -> ImportedUsage {
+    ImportedUsage {
+        day: day.into(),
+        host: host.into(),
+        commands_window: Some(commands),
+        core_window: None,
+        deep_window: None,
+        commands_7d: None,
+        deep_7d: None,
+        decline_top: None,
+        window_days: 7,
+    }
+}
+
+#[test]
+fn imported_usage_reads_only_the_colliding_row() {
+    let (mut store, sql) = store(true);
+    let first = usage("2026-10-01", "a", 1);
+    store
+        .upsert_imported_usage(&[first.clone(), usage("2026-10-02", "a", 2)])
+        .unwrap();
+    sql.lock().unwrap().clear();
+    let outcome = store
+        .upsert_imported_usage(&[
+            first,
+            usage("2026-10-02", "a", 99),
+            usage("2026-10-03", "a", 3),
+        ])
+        .unwrap();
+    assert_eq!(
+        (outcome.inserted, outcome.unchanged, outcome.conflicts.len()),
+        (1, 1, 1)
+    );
+    let seen = sql.lock().unwrap();
+    assert!(
+        seen.iter().all(|s| !s.contains("ORDER BY day, host")),
+        "no whole-table pre-read: {seen:?}"
+    );
+    // One single-row read per collision, none for the clean insert.
+    assert_eq!(
+        seen.iter()
+            .filter(|s| s.starts_with("SELECT") && s.contains("FROM imported_usage"))
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn imported_usage_returns_a_non_constraint_error_unclassified() {
+    let (mut store, transport) = failing_store();
+    transport.fail_next_code("BLOCKED");
+    let error = store
+        .upsert_imported_usage(&[usage("2026-10-01", "a", 1)])
+        .unwrap_err();
+    assert_eq!(cort::measure_store::remote_error_kind(&error), "blocked");
+    assert!(!error.contains("test-token"));
+}
+
+#[test]
+fn index_names_report_what_the_schema_creates() {
+    let (mut store, _) = store(true);
+    let names = store.index_names().unwrap();
+    assert!(cort::measure_store::missing_indexes(&names).is_empty());
+    assert_eq!(
+        cort::measure_store::missing_indexes(&[]),
+        [
+            "compactions_time",
+            "telemetry_events_source_time",
+            "telemetry_events_source_machine_time"
+        ],
+        "an empty database misses every index the schema creates"
+    );
+    let partial: Vec<String> = names
+        .into_iter()
+        .filter(|n| n != "compactions_time")
+        .collect();
+    assert_eq!(
+        cort::measure_store::missing_indexes(&partial),
+        vec!["compactions_time".to_string()]
+    );
+}
+
+#[test]
+fn remote_error_kind_maps_every_store_error_shape() {
+    use cort::measure_store::remote_error_kind as kind;
+    for (message, expected) in [
+        ("network timeout after 5s (timeout)", "timeout"),
+        ("remote unavailable: blocked", "blocked"),
+        (
+            "remote read: remote unavailable: unauthorized",
+            "unauthorized",
+        ),
+        ("remote unavailable: unreachable", "unreachable"),
+        ("remote unavailable: busy", "busy"),
+        ("network timeout after 5s (timeout at step 1)", "timeout"),
+        ("sql at step 2", "sql"),
+        ("constraint at step 1", "sql"),
+        ("something else", "other"),
+    ] {
+        assert_eq!(kind(message), expected, "{message}");
+    }
+}

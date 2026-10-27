@@ -373,34 +373,15 @@ fn two_files_union() {
 }
 
 #[test]
-fn import_syncs_before_it_reads_what_exists() {
-    // "Already exists" is asked of the replica; a replica that could not catch up with the remote
-    // must not decide it, so a failed pull writes nothing. The push comes first, as in every sync.
+fn a_non_constraint_error_is_returned_as_is() {
+    // Only a key collision is read back and classified; any other failure surfaces unchanged and
+    // leaves the table empty.
     let (_t, mut s) = store();
     let rows = parse_audit_md(&audit_md()).unwrap();
-    s.fail_pull(true);
+    s.fail_write(true);
     let err = import_audit(&mut s, &rows, "p").unwrap_err();
-    assert!(err.contains("pull failed"), "{err}");
-    assert_eq!(s.push_calls(), 1, "push runs before the pull");
+    assert!(err.contains("write failed"), "{err}");
     assert!(s.imported_usage().unwrap().is_empty());
-    assert!(s.events_page(None, 100).unwrap().is_empty());
-}
-
-#[test]
-fn rerun_after_a_failed_push_pushes_first() {
-    // The CLI writes the replica, then pushes. When that push fails the re-run is the repair, so
-    // it must push what is pending before anything else -- and write nothing while it cannot.
-    let (_t, mut s) = store();
-    let rows = parse_audit_md(&audit_md()).unwrap();
-    s.fail_push(true);
-    let err = import_audit(&mut s, &rows, "p").unwrap_err();
-    assert!(err.contains("push failed"), "{err}");
-    assert!(s.imported_usage().unwrap().is_empty());
-
-    s.fail_push(false);
-    let report = import_audit(&mut s, &rows, "p").unwrap();
-    assert_eq!(s.push_calls(), 2);
-    assert_eq!(report["usage_inserted"], 5);
 }
 
 #[test]
