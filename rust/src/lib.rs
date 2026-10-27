@@ -20,6 +20,8 @@ pub mod measure;
 pub mod measure_store;
 pub mod memory;
 pub mod memory_store;
+pub mod notes;
+pub mod notes_sync;
 pub mod pack;
 pub mod render;
 pub mod scan;
