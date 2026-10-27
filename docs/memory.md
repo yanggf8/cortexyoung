@@ -13,6 +13,8 @@ remains shared across machines. Each machine must configure the same Turso URL a
 `sync_status: synced` says this invocation pushed and pulled, not that no other machine can
 write afterward. `CORT_MEMORY_PROJECT` can override Git origin for a project without one;
 the earlier `CLAUDECAT_MEMORY_PROJECT` spelling is accepted during migration.
+Network calls use `CORT_COLLECT_NET_TIMEOUT_SECS` (default 120 seconds) as their deadline.
+`notes sync`, `list`, and `show` wait up to `CORT_MEMORY_LOCK_WAIT_SECS` (default 30 seconds, fractions allowed) for `memory.lock`.
 
 The shared ledger database is `harnessuse` (`turso://harnessuse-yanggf8.aws-ap-northeast-1.turso.io`,
 native TYPE Turso, shared with `telemetry_events`); mint its token with

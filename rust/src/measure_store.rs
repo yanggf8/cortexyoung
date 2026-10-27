@@ -7,6 +7,9 @@
 
 use crate::audit_import::{ImportedUsage, ImportedUsageConflict, ImportedUsageOutcome};
 use crate::memory_store::{self, Config};
+#[cfg(test)]
+use crate::network_timeout::POISONED;
+use crate::network_timeout::{guarded, timed_out, with_timeout, NetworkGuard};
 use crate::telemetry::TelemetryEvent;
 use std::collections::HashMap;
 use std::fs;
@@ -945,15 +948,6 @@ fn default_net_timeout() -> Duration {
     Duration::from_millis(crate::collect::CollectConfig::from_env().net_timeout_ms)
 }
 
-const TIMEOUT_PREFIX: &str = "network timeout after ";
-
-/// Returned instead of touching the network once an earlier operation on the same store timed out.
-const POISONED: &str = "network disabled after a timeout; open the store again";
-
-fn timed_out(message: &str) -> bool {
-    message.starts_with(TIMEOUT_PREFIX)
-}
-
 /// A bootstrap that hit its limit is a network failure; any other open failure stays `Other`,
 /// as before the limit existed.
 fn open_error(message: String) -> OpenError {
@@ -962,80 +956,6 @@ fn open_error(message: String) -> OpenError {
     } else {
         OpenError::Other(message)
     }
-}
-
-/// Run one network future under `limit`. The turso client retries on its own schedule, and a
-/// collect run has no other way to reclaim a process that hangs in it (cron is being removed, so
-/// nothing else will), which is why the bound is owned here and not by the client. Whole seconds,
-/// truncated, in the message.
-fn with_timeout<T, E: std::fmt::Display>(
-    rt: &tokio::runtime::Runtime,
-    limit: Duration,
-    fut: impl std::future::Future<Output = Result<T, E>>,
-) -> Result<T, String> {
-    // The timeout future itself arms a timer, which only works inside the runtime's context, so
-    // it is created by the async block rather than before `block_on`.
-    match rt.block_on(async { tokio::time::timeout(limit, fut).await }) {
-        Ok(Ok(value)) => Ok(value),
-        Ok(Err(error)) => Err(error.to_string()),
-        Err(_) => Err(format!("{TIMEOUT_PREFIX}{}s", limit.as_secs())),
-    }
-}
-
-/// One store's network limit and the flag that outlives it, which is not reusable after a
-/// timeout.
-///
-/// Reusing it would mean pushing on top of a sync engine whose in-flight future was dropped
-/// mid-operation, and nothing here knows what that left half-done. Reopening instead is always
-/// safe: every local write reached the replica before the network call, `push_pending` stays true
-/// in the collection state, and the next run's push is idempotent (the events are keyed and
-/// `INSERT OR IGNORE`d, and the watermark is revalidated).
-#[derive(Debug, Clone, Copy)]
-struct NetworkGuard {
-    limit: Duration,
-    poisoned: bool,
-}
-
-impl NetworkGuard {
-    fn new(limit: Duration) -> Self {
-        Self {
-            limit,
-            poisoned: false,
-        }
-    }
-
-    fn limit(&self) -> Duration {
-        self.limit
-    }
-
-    /// `Err` once a previous operation timed out; the store must be reopened instead.
-    fn check(&self) -> Result<(), String> {
-        if self.poisoned {
-            Err(POISONED.to_string())
-        } else {
-            Ok(())
-        }
-    }
-
-    fn observe<T>(&mut self, result: &Result<T, String>) {
-        if matches!(result, Err(message) if timed_out(message)) {
-            self.poisoned = true;
-        }
-    }
-}
-
-/// Every network operation of an open store: refuse once poisoned, bound by the limit, poison on
-/// a timeout. One function so the check and the poisoning cannot be wired to one call and not
-/// the other.
-fn guarded<T, E: std::fmt::Display>(
-    net: &mut NetworkGuard,
-    rt: &tokio::runtime::Runtime,
-    fut: impl std::future::Future<Output = Result<T, E>>,
-) -> Result<T, String> {
-    net.check()?;
-    let result = with_timeout(rt, net.limit(), fut);
-    net.observe(&result);
-    result
 }
 
 /// The Turso sync replica as a [`MeasureStore`]. `push`/`pull` talk to the network.

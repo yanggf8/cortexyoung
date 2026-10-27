@@ -2031,9 +2031,11 @@ fn cmd_memory(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError
             NotesAction::OptIn { root } => cort::memory_store::notes_opt_in(&root, true),
             NotesAction::OptOut { root } => cort::memory_store::notes_opt_in(&root, false),
             NotesAction::Status => cort::memory_store::notes_status(),
-            NotesAction::Sync { dry_run, verbose } => {
-                cort::memory_store::notes_sync(dry_run, verbose)
-            }
+            NotesAction::Sync { dry_run, verbose } => cort::memory_store::notes_sync(
+                dry_run,
+                verbose,
+                cort::memory_store::notes_lock_wait(),
+            ),
             NotesAction::List { root } => cort::memory_store::notes_list(&root),
             NotesAction::Show { note_id } => cort::memory_store::notes_show(&note_id),
         }

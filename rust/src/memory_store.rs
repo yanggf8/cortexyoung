@@ -2,6 +2,7 @@
 //! The local file is a sync replica and must never be opened with rusqlite or the Turso CLI.
 
 use crate::memory::{self, MemoryEntry, MemoryLedger, MemoryRecall};
+use crate::network_timeout::NetworkGuard;
 use crate::{notes, notes_sync, usage};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -229,6 +230,49 @@ pub(crate) fn runtime() -> Result<tokio::runtime::Runtime, String> {
 
 async fn open(config: &Config) -> Result<turso::sync::Database, String> {
     open_replica(config, "memory.db").await
+}
+
+/// Read the ledger after a best-effort push and pull. After a timeout the in-flight future was
+/// dropped, possibly in the middle of a pull's replace-base apply, so that handle is not read
+/// again: the replica is reopened through the same guards `hook-recall` uses, which refuse the
+/// half-applied state that the next ordinary open recovers. turso has no awaitable close, so a
+/// write the dropped pull had already queued can still land while the guards run; that ends in a
+/// refusal here, never in a read through the old handle.
+async fn read_after_sync(
+    config: &Config,
+    db: turso::sync::Database,
+    conn: turso::Connection,
+    net: &NetworkGuard,
+    project: &str,
+) -> Result<MemoryLedger, String> {
+    if net.check().is_ok() {
+        return read_ledger(&conn, project).await;
+    }
+    drop(conn);
+    drop(db);
+    let db = open_guarded_replica(config).await.map_err(|reason| {
+        format!("network timeout during sync, then the local replica was refused for a read ({reason:?})")
+    })?;
+    let conn = db.connect().await.map_err(|e| e.to_string())?;
+    read_ledger(&conn, project).await
+}
+
+fn network_guard() -> NetworkGuard {
+    NetworkGuard::new(Duration::from_millis(
+        crate::collect::CollectConfig::from_env().net_timeout_ms,
+    ))
+}
+
+async fn open_network(config: &Config) -> Result<(turso::sync::Database, NetworkGuard), String> {
+    let mut net = network_guard();
+    let db = net.run(open(config)).await?;
+    Ok((db, net))
+}
+
+/// Keep the context even on a timeout: "saved locally but push failed" is what tells the caller
+/// the write is not lost, and a timeout is when that matters most.
+fn network_context(error: String, context: &str) -> String {
+    format!("{context}: {error}")
 }
 
 async fn open_replica(config: &Config, file: &str) -> Result<turso::sync::Database, String> {
@@ -491,7 +535,7 @@ fn notes_sync_output(
     result
 }
 
-pub fn notes_sync(dry_run: bool, verbose: bool) -> Result<Value, String> {
+pub fn notes_sync(dry_run: bool, verbose: bool, lock_wait: Duration) -> Result<Value, String> {
     // The whole scan and eligibility screen run before any store lock or network operation.
     let report = notes::scan(&claude_home()?);
     let opted_in = notes_sync::read_opt_in(&notes_sync::opt_in_path())?;
@@ -507,7 +551,7 @@ pub fn notes_sync(dry_run: bool, verbose: bool) -> Result<Value, String> {
         ));
     }
     let now = if dry_run { None } else { Some(notes_now()?) };
-    with_store_lock(|config| {
+    with_notes_lock(lock_wait, |config| {
         runtime()?.block_on(async {
             let machine = usage::machine_id();
             let harness = "claude-code";
@@ -533,11 +577,11 @@ pub fn notes_sync(dry_run: bool, verbose: bool) -> Result<Value, String> {
                     absent.then_some("absent"),
                 ));
             }
-            let db = open(&config).await?;
+            let (db, mut net) = open_network(&config).await?;
             let conn = db.connect().await.map_err(|e| e.to_string())?;
             notes_sync::ensure_notes_schema(&conn).await?;
-            db.push().await.map_err(|e| e.to_string())?;
-            db.pull().await.map_err(|e| e.to_string())?;
+            net.run(db.push()).await?;
+            net.run(db.pull()).await?;
             let existing = notes_sync::existing_rows(&conn, machine, harness).await?;
             let plan = notes_sync::plan(&prepared, &existing);
             notes_sync::apply(
@@ -548,7 +592,7 @@ pub fn notes_sync(dry_run: bool, verbose: bool) -> Result<Value, String> {
                 &plan,
             )
             .await?;
-            db.push().await.map_err(|e| e.to_string())?;
+            net.run(db.push()).await?;
             Ok(notes_sync_output(
                 plan,
                 report.complete,
@@ -562,9 +606,9 @@ pub fn notes_sync(dry_run: bool, verbose: bool) -> Result<Value, String> {
 
 pub fn notes_list(root: &Path) -> Result<Value, String> {
     let project = project_from_git_origin(root)?;
-    with_store_lock(|config| {
+    with_notes_lock(notes_lock_wait(), |config| {
         runtime()?.block_on(async {
-        let db = open(&config).await?;
+        let (db, _net) = open_network(&config).await?;
         let conn = db.connect().await.map_err(|e| e.to_string())?;
         let rows = notes_sync::list(&conn, &project).await?;
         let rows: Vec<_> = rows.into_iter().map(|row| json!({
@@ -578,9 +622,9 @@ pub fn notes_list(root: &Path) -> Result<Value, String> {
 }
 
 pub fn notes_show(note_id: &str) -> Result<Value, String> {
-    with_store_lock(|config| {
+    with_notes_lock(notes_lock_wait(), |config| {
         runtime()?.block_on(async {
-            let db = open(&config).await?;
+            let (db, _net) = open_network(&config).await?;
             let conn = db.connect().await.map_err(|e| e.to_string())?;
             let found = notes_sync::show(&conn, note_id)
                 .await?
@@ -687,6 +731,28 @@ fn with_lock<T>(
 fn with_store_lock<T>(action: impl FnOnce(Config) -> Result<T, String>) -> Result<T, String> {
     with_named_lock("memory.lock", action)
 }
+
+pub fn notes_lock_wait() -> Duration {
+    std::env::var("CORT_MEMORY_LOCK_WAIT_SECS")
+        .ok()
+        .and_then(|value| value.trim().parse::<f64>().ok())
+        .filter(|seconds| *seconds > 0.0)
+        .and_then(|seconds| Duration::try_from_secs_f64(seconds).ok())
+        .unwrap_or(Duration::from_secs(30))
+}
+
+fn with_notes_lock<T>(
+    wait: Duration,
+    action: impl FnOnce(Config) -> Result<T, String>,
+) -> Result<T, String> {
+    let config = config()?;
+    let _lock =
+        lock_in_within(SUBDIR, &config, "memory.lock", wait).map_err(|error| match error {
+            LockWait::TimedOut => format!("memory.lock busy after {wait:?}"),
+            LockWait::Failed(message) => message,
+        })?;
+    action(config)
+}
 fn with_named_lock<T>(
     name: &str,
     action: impl FnOnce(Config) -> Result<T, String>,
@@ -763,12 +829,12 @@ pub fn recall(root: &Path, query: &str) -> Result<MemoryRecall, String> {
     with_lock(
         |config, project| {
             runtime()?.block_on(async {
-                let db = open(&config).await?;
+                let (db, mut net) = open_network(&config).await?;
                 let conn = db.connect().await.map_err(|e| e.to_string())?;
                 ensure_schema(&conn).await?;
-                let pushed = db.push().await.is_ok();
-                let pulled = db.pull().await.is_ok();
-                let ledger = read_ledger(&conn, &project).await?;
+                let pushed = net.run(db.push()).await.is_ok();
+                let pulled = net.check().is_ok() && net.run(db.pull()).await.is_ok();
+                let ledger = read_after_sync(&config, db, conn, &net, &project).await?;
                 let present = !ledger.entries.is_empty();
                 let status = if pushed && pulled {
                     "synced"
@@ -792,12 +858,12 @@ pub fn status(root: &Path) -> Result<MemoryStatus, String> {
     with_lock(
         |config, project| {
             runtime()?.block_on(async {
-                let db = open(&config).await?;
+                let (db, mut net) = open_network(&config).await?;
                 let conn = db.connect().await.map_err(|e| e.to_string())?;
                 ensure_schema(&conn).await?;
-                let pushed = db.push().await.is_ok();
-                let pulled = db.pull().await.is_ok();
-                let ledger = read_ledger(&conn, &project).await?;
+                let pushed = net.run(db.push()).await.is_ok();
+                let pulled = net.check().is_ok() && net.run(db.pull()).await.is_ok();
+                let ledger = read_after_sync(&config, db, conn, &net, &project).await?;
                 let active = memory::active_entries(&ledger);
                 let mut by_key = std::collections::BTreeMap::<String, Vec<String>>::new();
                 for entry in &active {
@@ -847,9 +913,9 @@ pub fn resolve(
     with_lock(
         |config, project| {
             runtime()?.block_on(async {
-                let db = open(&config).await?;
-                db.push().await.map_err(|e| e.to_string())?;
-                db.pull().await.map_err(|e| e.to_string())?;
+                let (db, mut net) = open_network(&config).await?;
+                net.run(db.push()).await?;
+                net.run(db.pull()).await?;
                 let conn = db.connect().await.map_err(|e| e.to_string())?;
                 let ledger = read_ledger(&conn, &project).await?;
                 let active_ids: std::collections::HashSet<_> = memory::active_entries(&ledger)
@@ -863,8 +929,8 @@ pub fn resolve(
                     return Err("--supersedes must name every active id for this key exactly once; inspect memory status".into());
                 }
                 insert(&conn, &project, &entry).await?;
-                db.push().await.map_err(|e| format!("resolution saved locally but push failed; retry sync: {e}"))?;
-                db.pull().await.map_err(|e| format!("resolution pushed but pull failed: {e}"))?;
+                net.run(db.push()).await.map_err(|e| network_context(e, "resolution saved locally but push failed; retry sync"))?;
+                net.run(db.pull()).await.map_err(|e| network_context(e, "resolution pushed but pull failed"))?;
                 let after = read_ledger(&conn, &project).await?;
                 if memory::active_entries(&after)
                     .iter()
@@ -893,13 +959,13 @@ pub fn record(
     with_lock(
         |config, project| {
             runtime()?.block_on(async {
-                let db = open(&config).await?;
-                db.push()
+                let (db, mut net) = open_network(&config).await?;
+                net.run(db.push())
                     .await
-                    .map_err(|e| format!("pending local writes could not sync: {e}"))?;
-                db.pull()
-                    .await
-                    .map_err(|e| format!("cannot pull latest memory before recording: {e}"))?;
+                    .map_err(|e| network_context(e, "pending local writes could not sync"))?;
+                net.run(db.pull()).await.map_err(|e| {
+                    network_context(e, "cannot pull latest memory before recording")
+                })?;
                 let conn = db.connect().await.map_err(|e| e.to_string())?;
                 let ledger = read_ledger(&conn, &project).await?;
                 let active = memory::active_entries(&ledger);
@@ -916,12 +982,12 @@ pub fn record(
                     _ => {}
                 }
                 insert(&conn, &project, &entry).await?;
-                db.push().await.map_err(|e| {
-                    format!("record saved locally but Turso push failed; retry sync: {e}")
+                net.run(db.push()).await.map_err(|e| {
+                    network_context(e, "record saved locally but Turso push failed; retry sync")
                 })?;
-                db.pull()
+                net.run(db.pull())
                     .await
-                    .map_err(|e| format!("record pushed, but post-write pull failed: {e}"))?;
+                    .map_err(|e| network_context(e, "record pushed, but post-write pull failed"))?;
                 let after = read_ledger(&conn, &project).await?;
                 if memory::active_entries(&after)
                     .iter()
@@ -945,11 +1011,11 @@ pub fn sync(root: &Path) -> Result<String, String> {
     with_lock(
         |config, project| {
             runtime()?.block_on(async {
-                let db = open(&config).await?;
+                let (db, mut net) = open_network(&config).await?;
                 let conn = db.connect().await.map_err(|e| e.to_string())?;
                 ensure_schema(&conn).await?;
-                db.push().await.map_err(|e| e.to_string())?;
-                db.pull().await.map_err(|e| e.to_string())?;
+                net.run(db.push()).await?;
+                net.run(db.pull()).await?;
                 let ledger = read_ledger(&conn, &project).await?;
                 Ok(format!(
                     "synced {} project memory entries",
@@ -969,9 +1035,9 @@ pub fn import_legacy(root: &Path) -> Result<usize, String> {
     with_lock(
         |config, project| {
             runtime()?.block_on(async {
-                let db = open(&config).await?;
-                db.push().await.map_err(|e| e.to_string())?;
-                db.pull().await.map_err(|e| e.to_string())?;
+                let (db, mut net) = open_network(&config).await?;
+                net.run(db.push()).await?;
+                net.run(db.pull()).await?;
                 let conn = db.connect().await.map_err(|e| e.to_string())?;
                 let current = read_ledger(&conn, &project).await?;
                 let existing: std::collections::HashSet<_> =
@@ -983,9 +1049,9 @@ pub fn import_legacy(root: &Path) -> Result<usize, String> {
                         count += 1;
                     }
                 }
-                db.push()
-                    .await
-                    .map_err(|e| format!("import saved locally but Turso push failed: {e}"))?;
+                net.run(db.push()).await.map_err(|e| {
+                    network_context(e, "import saved locally but Turso push failed")
+                })?;
                 Ok(count)
             })
         },
