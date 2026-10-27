@@ -110,10 +110,13 @@ kick 不開量測副本、不起 tokio、不碰網路。
 ### 2. 批次收集：`cort measure collect`
 
 做現在 `measure record` 做的事（Task 3 的 transcript 掃描、Task 6 的 `cort_command` 事件上傳、
-push/pull），在 `measure.lock` 底下跑，外加第 4 節的 `cort_index_health` 上傳。
+push），在 `measure.lock` 底下跑，外加第 4 節的 `cort_index_health` 上傳。**只推不拉**（2026-10-27）：
+每次收集都 pull，等於把共用資料庫反覆整份下載，四天用光 Turso 帳號每月 3 GB 的 embedded syncs 配額
+（`cort-measure` 一庫佔 2.8 GB），而配額用盡會封鎖整個帳號所有資料庫的讀取。收集只需要本機自己的
+資料列；`cort measure sync`、`report` 由人執行時才 pull。
 
 - 單一執行鎖 `measure-collect.lock`（拿不到就安靜退出，不寫 log）。
-- **時間上限**：每個網路操作（開副本的 bootstrap、push、pull）包在 120 秒逾時裡；整次執行上限 10
+- **時間上限**：每個網路操作（開副本的 bootstrap、push）包在 120 秒逾時裡；整次執行上限 10
   分鐘（都可覆寫）。逾時記成 `network` 失敗、正常結束程序、放掉所有鎖——cron 拿掉之後沒有別的機制
   會替卡住的程序收尾，所以不能依賴 turso client 自己的逾時。**`measure.lock` 的等待也有上限**（背景與手
   動都是 60 秒，可覆寫）：現有的 `memory_store::lock_in` 是無期限阻塞的 `flock`，持有 `measure-collect.lock`
@@ -147,7 +150,7 @@ push/pull），在 `measure.lock` 底下跑，外加第 4 節的 `cort_index_hea
   寫副本、推進水位與 `*_uploaded_through_id`；push 成功之後才把 `push_pending` 清成 false。任一步
   之間當機，下次一定看得到「欠 push」，最壞是多 push 一次（push 本身是冪等的）。
 - **成敗依結構化結果判斷，不看 exit code**：
-  - push、pull、副本讀寫、網路失敗 → 失敗：這次觸發它的 harness 那一筆 `count += 1`，記
+  - push、副本讀寫、網路失敗 → 失敗：這次觸發它的 harness 那一筆 `count += 1`，記
     `last_error_kind`；`push_pending` 維持 true（見寫入順序）。
   - `cort_command` 被 dry-run 閘門拒絕**不是失敗**，是持續性的狀態：`refused = true`，這個來源不計入
     pending；其他工作（transcript 掃描、`cort_index_health` 上傳、push）照常做、照常算成功。

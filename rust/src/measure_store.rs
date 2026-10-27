@@ -513,6 +513,7 @@ pub struct SqliteStore {
     fail_push: bool,
     fail_pull: bool,
     pushes: usize,
+    pulls: usize,
 }
 
 fn sql_err(e: rusqlite::Error) -> String {
@@ -530,6 +531,7 @@ impl SqliteStore {
             fail_push: false,
             fail_pull: false,
             pushes: 0,
+            pulls: 0,
         })
     }
 
@@ -546,6 +548,11 @@ impl SqliteStore {
     /// Test hook: how many times `push` was called (failed or not).
     pub fn push_calls(&self) -> usize {
         self.pushes
+    }
+
+    /// Test hook: how many times `pull` was called (failed or not).
+    pub fn pull_calls(&self) -> usize {
+        self.pulls
     }
 
     fn query(&self, sql: &str, params: Vec<Cell>, cols: usize) -> Result<Vec<Vec<Cell>>, String> {
@@ -856,6 +863,7 @@ impl MeasureStore for SqliteStore {
     }
 
     fn pull(&mut self) -> Result<(), String> {
+        self.pulls += 1;
         if self.fail_pull {
             return Err("pull failed (fail_pull set)".into());
         }

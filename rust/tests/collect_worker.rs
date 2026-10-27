@@ -494,20 +494,16 @@ fn skipped_busy_when_collect_lock_held() {
 }
 
 #[test]
-fn pull_failure_is_network_and_keeps_pending() {
+fn a_collect_run_never_pulls() {
+    // A failing pull cannot touch a run that never pulls: it pushes, succeeds, and clears
+    // `push_pending` (see `record_pushes_and_never_pulls`).
     sandbox(|paths, db| {
         command(paths);
         let result = run(paths, db, "codex", false, true);
-        assert_eq!(
-            (result.outcome, result.error_kind),
-            ("failed", Some(ErrorKind::Network))
-        );
-        assert!(result.summary["error"]
-            .as_str()
-            .is_some_and(|e| e.starts_with("pull failed: ")));
+        assert_eq!((result.outcome, result.error_kind), ("ok", None));
         let s = state(paths);
-        assert!(s.push_pending);
-        assert_eq!(s.failures["codex"].count, 1);
+        assert!(!s.push_pending);
+        assert!(!s.failures.contains_key("codex"));
     });
 }
 

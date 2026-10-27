@@ -2197,7 +2197,7 @@ enum MeasureAction {
         #[arg(short = 'f', long = "format", default_value = "json", value_parser = ["json", "lean"])]
         format: String,
     },
-    /// Scan local transcripts into the store, then push and pull.
+    /// Scan local transcripts into the store, then push (never pull: `sync` pulls).
     Record,
     /// Scan local transcripts and upload batch events; a kicked child appends at most one line.
     Collect {
@@ -2450,12 +2450,6 @@ fn cmd_measure(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, CortErr
                     cort::measure::write_last_sync(usage::now_ms())
                         .map_err(|m| CortError::new("measure_error", json!({"message":m})))?;
                     json!({"status":"recorded","pushed":true,"scan":scan.to_json()})
-                }
-                cort::measure::RecordOutcome::PushedPullFailed(m) => {
-                    return Err(CortError::new(
-                        "measure_pull_failed",
-                        json!({"message": format!("pushed, but pull failed: {m}"), "scan": scan.to_json()}),
-                    ));
                 }
                 cort::measure::RecordOutcome::SavedLocallyPushFailed(m) => {
                     return Err(CortError::new(

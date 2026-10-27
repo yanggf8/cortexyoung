@@ -312,18 +312,13 @@ pub struct RecordInputs {
 pub enum RecordOutcome {
     Pushed,
     SavedLocallyPushFailed(String),
-    /// The push landed but the pull did not; the scan summary must still reach the caller.
-    PushedPullFailed(String),
 }
 
 /// Local writes first (host mapping, compaction rows), then the watermarks, then the network.
 /// A failed local write returns before the watermarks move, so the next run rescans; a failed
 /// push never loses data, because the rows are already in the local replica.
 pub fn record(store: &mut dyn MeasureStore, input: &RecordInputs) -> Result<RecordOutcome, String> {
-    match record_with_scan(store, input)?.1 {
-        RecordOutcome::PushedPullFailed(e) => Err(format!("pushed, but pull failed: {e}")),
-        other => Ok(other),
-    }
+    Ok(record_with_scan(store, input)?.1)
 }
 
 /// [`record`], also handing back what the scan saw. The summary is local only: it is printed to
@@ -338,7 +333,7 @@ pub fn record_with_scan(
 /// [`record_with_scan`] with a checkpoint between the uploads and the push.
 ///
 /// `before_push` runs once the local writes and both uploads are done. An error there returns
-/// immediately, so the push and pull are skipped and no `RecordOutcome` is invented for a push
+/// immediately, so the push is skipped and no `RecordOutcome` is invented for a push
 /// that was never attempted; the collection worker uses it to stop a run that has spent its
 /// wall-clock budget. The scan summary does not survive that error -- the caller only needs the
 /// reason -- and nothing is lost by that: the uploads' progress lives in the replica's
@@ -362,11 +357,13 @@ pub fn record_with_scan_until(
         scan.health = Some(upload_health_events(store, usage_db, &input.machine_id).to_json());
     }
     before_push()?;
+    // Push only. A record needs nothing the other machines wrote: its dedup, watermarks and
+    // session lookups are all this machine's own rows, already in the replica. Pulling here
+    // re-downloaded the shared database on every run and spent the Turso org's 3 GB monthly
+    // embedded-sync quota by 2026-10-27, which blocks reads on every database in the org;
+    // `sync` and `report`, run by a person, still pull.
     if let Err(e) = store.push() {
         return Ok((scan, RecordOutcome::SavedLocallyPushFailed(e)));
-    }
-    if let Err(e) = store.pull() {
-        return Ok((scan, RecordOutcome::PushedPullFailed(e)));
     }
     Ok((scan, RecordOutcome::Pushed))
 }

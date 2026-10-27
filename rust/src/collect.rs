@@ -575,7 +575,7 @@ fn finish_collect_state(
     }
 }
 
-/// The first failed upload wins over later push/pull failures for both batch and manual record.
+/// The first failed upload wins over a later push failure for both batch and manual record.
 pub fn classify_record(
     scan: &measure::ScanSummary,
     outcome: &RecordOutcome,
@@ -592,10 +592,6 @@ pub fn classify_record(
         (None, RecordOutcome::SavedLocallyPushFailed(error)) => (
             Some(ErrorKind::Network),
             Some(format!("push failed: {error}")),
-        ),
-        (None, RecordOutcome::PushedPullFailed(error)) => (
-            Some(ErrorKind::Network),
-            Some(format!("pull failed: {error}")),
         ),
     }
 }
@@ -1098,7 +1094,7 @@ fn run_collect_inner(
         Err(e) if stopped => (None, Some(ErrorKind::Network), Some(e)),
         Err(e) => (None, Some(ErrorKind::Storage), Some(e)),
         Ok((scan, outcome)) => {
-            // Uploads happen command, then health, then push, then pull. The first failed stage
+            // Uploads happen command, then health, then push (no pull). The first failed stage
             // supplies the category (and the message) even when a later stage also fails.
             let (kind, error) = classify_record(&scan, &outcome);
             (Some(scan), kind, error)

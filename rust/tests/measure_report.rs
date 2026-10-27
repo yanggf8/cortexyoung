@@ -534,21 +534,19 @@ fn record_surfaces_scan_summary_in_both_outcomes() {
 }
 
 #[test]
-fn record_pull_failure_still_returns_scan() {
+fn record_pushes_and_never_pulls() {
+    // A pull per record re-downloaded the shared database on every run and spent the Turso
+    // org's embedded-sync quota (2026-10-27); a record needs nothing other machines wrote.
     let (_t, mut s) = store();
     s.fail_pull(true);
     let r = rec_env();
     let (scan, outcome) = record_with_scan(&mut s, &r.input).unwrap();
-    assert!(
-        matches!(&outcome, RecordOutcome::PushedPullFailed(m) if !m.is_empty()),
-        "{outcome:?}"
-    );
+    assert_eq!(outcome, RecordOutcome::Pushed);
     assert_eq!(scan.compactions, 1);
-    assert_eq!(scan.files_scanned, 1);
-    // The plain wrapper keeps its old contract: a pull failure is an error.
-    assert!(record(&mut s, &r.input)
-        .unwrap_err()
-        .contains("pull failed"));
+    assert_eq!(s.push_calls(), 1);
+    assert_eq!(s.pull_calls(), 0);
+    assert_eq!(record(&mut s, &r.input).unwrap(), RecordOutcome::Pushed);
+    assert_eq!(s.pull_calls(), 0);
 }
 
 // ---------------------------------------------------------------------------------------------
