@@ -408,7 +408,7 @@ pub fn codex_cwd_line(line: &str) -> Option<String> {
     e.get("payload")?.get("cwd")?.as_str().map(project_of_cwd)
 }
 
-fn jsonl_files(dir: &Path, depth: usize) -> Vec<std::path::PathBuf> {
+pub(crate) fn jsonl_files(dir: &Path, depth: usize) -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
     let Ok(entries) = std::fs::read_dir(dir) else {
         return out;

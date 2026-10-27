@@ -14,6 +14,7 @@ pub mod recall;
 pub mod stream;
 pub mod summary;
 pub mod time;
+pub mod uptake;
 pub mod verify;
 
 pub const ESTIMATOR: &str = "ascii/4 + non-ascii*1 (v1)";
