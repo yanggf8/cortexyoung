@@ -476,6 +476,104 @@ fn failed_verify_leaves_no_marker() {
     assert!(!fx.p("verified.json").exists());
 }
 
+/// A machine that never uploaded proves its first upload by absence: no row in either database.
+#[test]
+fn new_machine_verify_opens_the_gate_only_when_nothing_is_remote() {
+    let fx = Fx::new();
+    let mut s = store(&fx);
+    let mut legacy = SqliteStore::open(&fx.p("legacy.db")).unwrap();
+    let found = verify_new_machine(&mut s, &mut legacy, &inputs(&fx), 42).unwrap();
+    assert_eq!(found.machines, 3, "{found:?}");
+    let marker: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(fx.p("verified.json")).unwrap()).unwrap();
+    assert_eq!(marker["machine_id"], "mach-A");
+    assert_eq!(marker["new_machine"], true);
+    assert_eq!(held(&mut s), 0, "verification writes nothing remote");
+    let report = upload_events(&mut s, &inputs(&fx));
+    assert!(
+        matches!(report, EventsReport::Uploaded { .. }),
+        "{report:?}"
+    );
+}
+
+/// One row in the legacy database or in the measurement store means a history exists, so the
+/// overlap proof is required instead.
+#[test]
+fn new_machine_verify_refuses_when_any_row_is_remote() {
+    for seeded_legacy in [true, false] {
+        let fx = Fx::new();
+        let mut s = store(&fx);
+        let mut legacy = SqliteStore::open(&fx.p("legacy.db")).unwrap();
+        if seeded_legacy {
+            seed_one_per_machine(&mut legacy, &fx);
+        } else {
+            seed_one_per_machine(&mut s, &fx);
+        }
+        let error = verify_new_machine(&mut s, &mut legacy, &inputs(&fx), 1).unwrap_err();
+        assert!(error.starts_with("not a new machine"), "{error}");
+        assert!(error.contains("without --new-machine"), "{error}");
+        assert!(!fx.p("verified.json").exists());
+    }
+}
+
+/// Absence is counted in rows, not in parsed ids: a stored row whose payload has no usable `id`
+/// still means a history exists for that machine.
+#[test]
+fn new_machine_verify_counts_rows_with_unparsable_payloads() {
+    let fx = Fx::new();
+    let mut s = store(&fx);
+    let mut legacy = SqliteStore::open(&fx.p("legacy.db")).unwrap();
+    let mut junk = fx.events("v2")[0].clone();
+    junk.payload = "not json".into();
+    junk.event_id = "junk".into();
+    legacy.insert_events(&[junk]).unwrap();
+    assert!(legacy
+        .remote_ids("mach-A", "cort_command")
+        .unwrap()
+        .is_empty());
+    let error = verify_new_machine(&mut s, &mut legacy, &inputs(&fx), 1).unwrap_err();
+    assert!(
+        error.contains("mach-A (0 in the measurement store, 1 in the legacy database)"),
+        "{error}"
+    );
+    assert!(!fx.p("verified.json").exists());
+}
+
+/// Nothing local proves nothing: an empty usage.db is refused rather than passed vacuously.
+#[test]
+fn new_machine_verify_refuses_an_empty_usage_db() {
+    let fx = Fx::new();
+    let empty = fx.p("empty.db");
+    Connection::open(&empty)
+        .unwrap()
+        .execute_batch(V2_SCHEMA)
+        .unwrap();
+    let mut s = store(&fx);
+    let mut legacy = SqliteStore::open(&fx.p("legacy.db")).unwrap();
+    let input = UploadInputs {
+        usage_db: empty,
+        ..inputs(&fx)
+    };
+    let error = verify_new_machine(&mut s, &mut legacy, &input, 1).unwrap_err();
+    assert!(error.starts_with("no local cort_command events"), "{error}");
+    assert!(!fx.p("verified.json").exists());
+}
+
+/// A legacy database that cannot be read is an error named as such, and writes no marker.
+#[test]
+fn new_machine_verify_names_a_failed_legacy_read() {
+    let fx = Fx::new();
+    let mut s = store(&fx);
+    let mut legacy = SqliteStore::open(&fx.p("legacy.db")).unwrap();
+    Connection::open(fx.p("legacy.db"))
+        .unwrap()
+        .execute_batch("DROP TABLE telemetry_events")
+        .unwrap();
+    let error = verify_new_machine(&mut s, &mut legacy, &inputs(&fx), 1).unwrap_err();
+    assert!(error.starts_with("legacy read: "), "{error}");
+    assert!(!fx.p("verified.json").exists());
+}
+
 #[test]
 fn upload_refuses_without_watermark_or_passing_verify() {
     let fx = Fx::new();

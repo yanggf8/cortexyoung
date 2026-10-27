@@ -67,6 +67,7 @@ impl MeasureStore for Counted {
         machine_hosts() -> Result<Vec<MachineHost>, String>;
         imported_usage() -> Result<Vec<ImportedUsage>, String>;
         remote_ids(machine_id: &str, source: &str) -> Result<HashMap<i64, String>, String>;
+        event_count(machine_id: &str, source: &str) -> Result<usize, String>;
         remote_payload(machine_id: &str, source: &str, event_id: &str) -> Result<Option<String>, String>;
         aliases() -> Result<Vec<(String, String, String)>, String>;
         events_page(after: Option<(String, String)>, limit: usize) -> Result<Vec<TelemetryEvent>, String>;

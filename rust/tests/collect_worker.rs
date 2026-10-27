@@ -246,6 +246,7 @@ impl MeasureStore for SlowFirstWrite {
         imported_usage() -> Result<Vec<ImportedUsage>, String>;
         insert_events(events: &[TelemetryEvent]) -> Result<usize, String>;
         remote_ids(machine_id: &str, source: &str) -> Result<HashMap<i64, String>, String>;
+        event_count(machine_id: &str, source: &str) -> Result<usize, String>;
         remote_payload(machine_id: &str, source: &str, event_id: &str) -> Result<Option<String>, String>;
         event_watermark(machine_id: &str, source: &str) -> Result<Option<(i64, String)>, String>;
         upsert_aliases(rows: &[(String, String, String)]) -> Result<(), String>;

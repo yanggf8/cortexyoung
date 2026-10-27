@@ -286,7 +286,10 @@ itself produced), so history it already uploaded is not uploaded twice. Because 
 re-upload that history and a remote row cannot be taken back, a machine with no event watermark yet
 uploads nothing until `cort measure verify` has passed for it: verify compares the ids
 computed here with the stored ones for the same machine and row, uploads nothing, and fails on any
-mismatch or on zero overlap. Until then manual `record` still records compactions and reports
+mismatch or on zero overlap. A machine that never uploaded can have no overlap, so it runs
+`cort measure verify --new-machine` instead: that passes only when none of its machine ids has a
+row in the measurement database or in claudecat's database (the one `cort memory` is configured
+for, and a different database), which is where an earlier upload of its history would be. Until then manual `record` still records compactions and reports
 `events.status: "refused"`; background collection writes its result to `measure.log`. A changed
 `command_log` column set voids the verification.
 

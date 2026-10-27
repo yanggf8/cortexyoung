@@ -76,6 +76,9 @@ pub trait MeasureStore {
         machine_id: &str,
         source: &str,
     ) -> Result<HashMap<i64, String>, String>;
+    /// How many rows the store holds for this machine and source, counted in SQL: unlike
+    /// `remote_ids`, a row whose payload has no usable `id` still counts.
+    fn event_count(&mut self, machine_id: &str, source: &str) -> Result<usize, String>;
     /// The stored payload of one event, for a mismatch report.
     fn remote_payload(
         &mut self,
@@ -237,6 +240,8 @@ const INSERT_EVENT: &str = "INSERT OR IGNORE INTO telemetry_events (source, even
 const SELECT_REMOTE: &str =
     "SELECT event_id, CASE WHEN json_valid(payload) THEN json_extract(payload, '$.id') END \
      FROM telemetry_events WHERE source = ? AND machine_id = ?";
+const COUNT_MACHINE_EVENTS: &str =
+    "SELECT COUNT(*) FROM telemetry_events WHERE source = ? AND machine_id = ?";
 const SELECT_PAYLOAD: &str =
     "SELECT payload FROM telemetry_events WHERE source = ? AND machine_id = ? AND event_id = ?";
 const SELECT_WATERMARK: &str =
@@ -691,6 +696,18 @@ impl MeasureStore for SqliteStore {
         Ok(inserted)
     }
 
+    fn event_count(&mut self, machine_id: &str, source: &str) -> Result<usize, String> {
+        let rows = self.query(
+            COUNT_MACHINE_EVENTS,
+            vec![Cell::Text(source.into()), Cell::Text(machine_id.into())],
+            1,
+        )?;
+        match rows.first().map(|row| &row[0]) {
+            Some(Cell::Int(n)) => usize::try_from(*n).map_err(|_| "negative event count".into()),
+            _ => Err("invalid event count".into()),
+        }
+    }
+
     fn remote_ids(
         &mut self,
         machine_id: &str,
@@ -1130,6 +1147,18 @@ impl MeasureStore for RemoteStore {
         Ok(inserted)
     }
 
+    fn event_count(&mut self, machine_id: &str, source: &str) -> Result<usize, String> {
+        let rows = self.query(
+            COUNT_MACHINE_EVENTS,
+            vec![Cell::Text(source.into()), Cell::Text(machine_id.into())],
+            1,
+        )?;
+        match rows.first().map(|row| &row[0]) {
+            Some(Cell::Int(n)) => usize::try_from(*n).map_err(|_| "negative event count".into()),
+            _ => Err("invalid event count".into()),
+        }
+    }
+
     fn remote_ids(
         &mut self,
         machine_id: &str,
@@ -1232,6 +1261,25 @@ impl MeasureStore for RemoteStore {
 }
 
 /// Open the configured remote database under `measure.lock` and run `f` against it.
+/// The legacy (claudecat) database `cort memory` is configured for, opened read-only for
+/// `measure verify --new-machine`. Refuses when both configs name one database: absence there
+/// would be absence in the measurement store, counted twice and proving nothing more.
+pub fn open_legacy_read_only() -> Result<Box<dyn MeasureStore>, String> {
+    let memory_config = memory_store::load_config()?;
+    let measure_config = config()?;
+    if same_database(&memory_config.url, &measure_config.url) {
+        return Err(format!(
+            "the memory config and the measure config name the same database ({}); the legacy \
+             check needs claudecat's database",
+            database_identity(&memory_config.url)
+        ));
+    }
+    Ok(Box::new(RemoteStore::open_read_only(
+        &memory_config,
+        default_net_timeout(),
+    )?))
+}
+
 /// The one remote read `measure status` makes: read-only, so it never creates the schema it is
 /// checking for, and without `measure.lock`, because a read needs no exclusion and a status must
 /// not wait behind a running collection. The network bound is at most `STATUS_NET_TIMEOUT`.
