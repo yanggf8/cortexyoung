@@ -39,6 +39,13 @@ jobs:
       - name: toolchain versions
         run: rustc --version && cargo --version
 
+      # Caches dependency builds in rust/target, the directory install.sh builds into, so the two
+      # from-scratch compiles (installer release, then clippy/test debug) stop dominating the run.
+      # rust-cache drops this workspace's own crates before saving, so cort is always rebuilt.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust -> target
+
       # Installs the pinned ast-grep 0.45.3 and builds+installs cort. It has to come before the
       # tests: several of them resolve the real binary on purpose. This is also the end-to-end
       # check that the installer works from a clean clone.
@@ -90,6 +97,10 @@ jobs:
 
       - name: ensure rustfmt + clippy
         run: rustup component add rustfmt clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: evals -> target
 
       - name: rustfmt
         working-directory: evals
