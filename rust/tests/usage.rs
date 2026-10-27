@@ -1779,3 +1779,29 @@ fn the_usage_report_carries_the_hook_census_and_the_lean_says_what_cannot_close(
         "absent from some runs is absent from every run after: {empty}"
     );
 }
+
+/// usage.db is a rollback-journal database, so a commit in progress blocks readers. The hook's
+/// read gives up at the record wait; a worker's read waits the lock out instead of reporting
+/// `usage_db_unreadable`.
+#[test]
+fn a_worker_reads_counters_through_a_held_write_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("usage.db");
+    seed_schema(&path);
+    let writer = Connection::open(&path).unwrap();
+    writer.execute_batch("BEGIN EXCLUSIVE").unwrap();
+    assert!(
+        cort::usage::kick_counters_at(&path).is_none(),
+        "the hook's read must not wait on a held lock"
+    );
+    let reader = std::thread::spawn({
+        let path = path.clone();
+        move || cort::usage::kick_counters_within(&path, cort::usage::WORKER_BUSY)
+    });
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    writer.execute_batch("COMMIT").unwrap();
+    assert!(
+        reader.join().unwrap().is_some(),
+        "a worker waits out a commit instead of reading usage.db as unreadable"
+    );
+}
