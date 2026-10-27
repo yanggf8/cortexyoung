@@ -1,15 +1,13 @@
-//! Compaction measurement rows, stored in a Turso database of their own.
+//! Compaction measurement rows, stored in a remote Turso database.
 //!
 //! Two implementations of one trait: [`SqliteStore`] is a plain rusqlite file (tests, and any
-//! caller that wants the logic without a network), and the Turso store behind
-//! [`with_turso_store`] is a sync replica that must only be opened through the `turso` crate.
-//! Both run the same [`MEASURE_SCHEMA`] and the same SQL text.
+//! caller that wants the logic without a network), and [`RemoteStore`] uses Hrana HTTP.
+//! Both use the same [`MEASURE_SCHEMA`] and SQL text.
 
 use crate::audit_import::{ImportedUsage, ImportedUsageConflict, ImportedUsageOutcome};
 use crate::memory_store::{self, Config};
-#[cfg(test)]
-use crate::network_timeout::POISONED;
-use crate::network_timeout::{guarded, timed_out, with_timeout, NetworkGuard};
+use crate::network_timeout::{network_failure, REMOTE_PREFIX};
+use crate::remote::{Cell, ErrorKind, RemoteDb, RemoteError, Stmt, Transport, UreqTransport};
 use crate::telemetry::TelemetryEvent;
 use std::collections::HashMap;
 use std::fs;
@@ -141,7 +139,7 @@ pub trait MeasureStore {
     fn pull(&mut self) -> Result<(), String>;
 }
 
-/// Every CREATE statement; both implementations run all of them on open.
+/// Every CREATE statement; the remote store runs them when its local version marker is missing.
 pub const MEASURE_SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS compactions (
         machine_id TEXT NOT NULL,
@@ -192,8 +190,8 @@ pub const MEASURE_SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS telemetry_events (source TEXT NOT NULL, event_id TEXT NOT NULL, machine_id TEXT NOT NULL, machine_source TEXT NOT NULL, project_id TEXT, time_ms INTEGER, payload TEXT NOT NULL, PRIMARY KEY (source, event_id))",
     "CREATE TABLE IF NOT EXISTS telemetry_project_aliases (machine_id TEXT NOT NULL, local_project_id TEXT NOT NULL, shared_project_id TEXT NOT NULL, PRIMARY KEY (machine_id, local_project_id, shared_project_id))",
     "CREATE INDEX IF NOT EXISTS telemetry_events_source_time ON telemetry_events (source, time_ms)",
-    // Highest local rowid already uploaded, per machine and source: what keeps the hourly sync from
-    // reading the whole remote table.
+    "CREATE INDEX IF NOT EXISTS telemetry_events_source_machine_time ON telemetry_events (source, machine_id, time_ms)",
+    // Highest local rowid already uploaded, per machine and source.
     "CREATE TABLE IF NOT EXISTS event_watermarks (
         machine_id TEXT NOT NULL,
         source TEXT NOT NULL,
@@ -268,14 +266,6 @@ const EVENT_CHUNK: usize = 2000;
 
 fn select_since() -> String {
     format!("SELECT {COMPACTION_COLUMNS} FROM compactions WHERE time_ms >= ? ORDER BY time_ms, machine_id, boundary_uuid")
-}
-
-/// A column value neutral between rusqlite and turso, so row <-> SQL mapping is written once.
-#[derive(Debug, Clone, PartialEq)]
-enum Cell {
-    Null,
-    Int(i64),
-    Text(String),
 }
 
 fn opt_int(v: Option<i64>) -> Cell {
@@ -510,6 +500,7 @@ fn alias_cells(r: &(String, String, String)) -> Vec<Cell> {
 /// A plain SQLite file implementing the store; `push`/`pull` have nothing to sync.
 pub struct SqliteStore {
     conn: rusqlite::Connection,
+    fail_write: bool,
     fail_push: bool,
     fail_pull: bool,
     pushes: usize,
@@ -528,6 +519,7 @@ impl SqliteStore {
         }
         Ok(Self {
             conn,
+            fail_write: false,
             fail_push: false,
             fail_pull: false,
             pushes: 0,
@@ -543,6 +535,11 @@ impl SqliteStore {
     /// Test hook: make `pull` return an error.
     pub fn fail_pull(&mut self, fail: bool) {
         self.fail_pull = fail;
+    }
+
+    /// Test hook: reject writes while leaving stored rows intact.
+    pub fn fail_write(&mut self, fail: bool) {
+        self.fail_write = fail;
     }
 
     /// Test hook: how many times `push` was called (failed or not).
@@ -579,6 +576,9 @@ impl SqliteStore {
     }
 
     fn exec(&self, sql: &str, params: Vec<Cell>) -> Result<(), String> {
+        if self.fail_write {
+            return Err("write failed (fail_write set)".into());
+        }
         let params: Vec<rusqlite::types::Value> = params.into_iter().map(to_sqlite).collect();
         self.conn
             .execute(sql, rusqlite::params_from_iter(params))
@@ -687,6 +687,9 @@ impl MeasureStore for SqliteStore {
     }
 
     fn insert_events(&mut self, events: &[TelemetryEvent]) -> Result<usize, String> {
+        if self.fail_write && !events.is_empty() {
+            return Err("write failed (fail_write set)".into());
+        }
         let mut inserted = 0usize;
         for chunk in events.chunks(EVENT_CHUNK) {
             self.conn.execute_batch("BEGIN").map_err(sql_err)?;
@@ -872,6 +875,7 @@ impl MeasureStore for SqliteStore {
 }
 
 const SUBDIR: &str = "turso-measure";
+const MEASURE_SCHEMA_VERSION: u32 = 2;
 
 pub(crate) fn config_path() -> PathBuf {
     crate::data_dir::data_dir().join("turso-measure.json")
@@ -918,19 +922,19 @@ pub fn with_measure_lock<T>(action: impl FnOnce() -> Result<T, String>) -> Resul
 #[derive(Debug)]
 pub enum OpenError {
     Busy,
-    /// The replica bootstrap ran out of its network limit.
+    /// Opening the remote database ran out of its network limit.
     Network(String),
     Other(String),
 }
 
-/// Open the configured replica while holding `measure.lock` for the returned store's lifetime,
+/// Open the configured remote database while holding `measure.lock` for the returned store's lifetime,
 /// bounding each network operation by the configured `CORT_COLLECT_NET_TIMEOUT_SECS`.
 pub fn open_measure_store_within(wait: Duration) -> Result<Box<dyn MeasureStore>, OpenError> {
     open_measure_store_within_timeout(wait, default_net_timeout())
 }
 
 /// [`open_measure_store_within`] with the caller's network limit, so a collect run bounds the
-/// replica bootstrap by the same value the run's own configuration names.
+/// schema setup by the same value the run's own configuration names.
 pub fn open_measure_store_within_timeout(
     wait: Duration,
     net_timeout: Duration,
@@ -943,154 +947,163 @@ pub fn open_measure_store_within_timeout(
                 memory_store::LockWait::Failed(message) => OpenError::Other(message),
             }
         })?;
-    let mut store = TursoStore::open(&config, net_timeout).map_err(open_error)?;
+    let mut store = RemoteStore::open(&config, net_timeout).map_err(open_error)?;
     store._lock = Some(lock);
     Ok(Box::new(store))
 }
 
 /// The network bound for paths outside a collect run (`report`, `import-audit`, `copy-events`):
-/// the same configured default, because a hung bootstrap or push is the same hazard there.
-/// Nothing about their output or error codes changes; only a call that would have hung forever
-/// now returns its existing error path.
+/// the same configured default for every HTTP request.
 fn default_net_timeout() -> Duration {
     Duration::from_millis(crate::collect::CollectConfig::from_env().net_timeout_ms)
 }
 
-/// A bootstrap that hit its limit is a network failure; any other open failure stays `Other`,
-/// as before the limit existed.
+/// A schema request that timed out or found the remote unavailable is a network failure; other
+/// open failures stay `Other`.
 fn open_error(message: String) -> OpenError {
-    if timed_out(&message) {
+    if network_failure(&message) {
         OpenError::Network(message)
     } else {
         OpenError::Other(message)
     }
 }
 
-/// The Turso sync replica as a [`MeasureStore`]. `push`/`pull` talk to the network.
-struct TursoStore {
-    rt: tokio::runtime::Runtime,
-    db: turso::sync::Database,
-    conn: turso::Connection,
-    net: NetworkGuard,
-    // Last field drops last, after the connection and runtime have finished using the replica.
-    _lock: Option<fs::File>,
+/// Direct Hrana store for the measurement database.
+pub struct RemoteStore {
+    db: RemoteDb,
+    net_timeout: Duration,
+    _lock: Option<memory_store::StoreLock>,
 }
 
-fn tv(c: Cell) -> turso::Value {
-    match c {
-        Cell::Null => turso::Value::Null,
-        Cell::Int(i) => turso::Value::Integer(i),
-        Cell::Text(s) => turso::Value::Text(s),
-    }
-}
-
-fn te(e: turso::Error) -> String {
-    e.to_string()
-}
-
-async fn turso_exec(conn: &turso::Connection, sql: &str, params: Vec<Cell>) -> Result<(), String> {
-    conn.execute(sql, turso::params_from_iter(params.into_iter().map(tv)))
-        .await
-        .map_err(te)?;
-    Ok(())
-}
-
-async fn turso_query(
-    conn: &turso::Connection,
-    sql: &str,
-    params: Vec<Cell>,
-    cols: usize,
-) -> Result<Vec<Vec<Cell>>, String> {
-    let mut rows = conn
-        .query(sql, turso::params_from_iter(params.into_iter().map(tv)))
-        .await
-        .map_err(te)?;
-    let mut out = Vec::new();
-    while let Some(row) = rows.next().await.map_err(te)? {
-        let mut cells = Vec::with_capacity(cols);
-        for i in 0..cols {
-            cells.push(match row.get_value(i).map_err(te)? {
-                turso::Value::Null => Cell::Null,
-                turso::Value::Integer(i) => Cell::Int(i),
-                turso::Value::Text(t) => Cell::Text(t),
-                other => return Err(format!("unexpected column type {other:?}")),
-            });
-        }
-        out.push(cells);
-    }
-    Ok(out)
-}
-
-async fn turso_insert_events(
-    conn: &turso::Connection,
-    events: &[TelemetryEvent],
-) -> Result<usize, String> {
-    let mut inserted = 0usize;
-    for chunk in events.chunks(EVENT_CHUNK) {
-        conn.execute("BEGIN", ()).await.map_err(te)?;
-        for e in chunk {
-            let params = turso::params_from_iter(event_cells(e).into_iter().map(tv));
-            match conn.execute(INSERT_EVENT, params).await {
-                Ok(n) => inserted += n as usize,
-                Err(err) => {
-                    let _ = conn.execute("ROLLBACK", ()).await;
-                    return Err(te(err));
-                }
-            }
-        }
-        if let Err(e) = conn.execute("COMMIT", ()).await {
-            let _ = conn.execute("ROLLBACK", ()).await;
-            return Err(te(e));
-        }
-    }
-    Ok(inserted)
-}
-
-impl TursoStore {
-    fn open(config: &Config, net_timeout: Duration) -> Result<Self, String> {
-        Self::open_replica(SUBDIR, config, "measure.db", true, net_timeout)
-    }
-
-    /// `create_schema = false` opens a replica of somebody else's database without issuing a
-    /// single statement of ours against it.
-    ///
-    /// The whole bootstrap -- download, connect, schema -- is one network operation and shares
-    /// the store's limit, so a first open on a fresh machine cannot outlive it.
-    fn open_replica(
-        subdir: &str,
+impl RemoteStore {
+    fn connect(
         config: &Config,
-        file: &str,
-        create_schema: bool,
         net_timeout: Duration,
+        transport: Box<dyn Transport>,
     ) -> Result<Self, String> {
-        let rt = memory_store::runtime()?;
-        let (db, conn) = with_timeout(&rt, net_timeout, async {
-            let db = memory_store::open_replica_in(subdir, config, file).await?;
-            let conn = db.connect().await.map_err(te)?;
-            if create_schema {
-                for stmt in MEASURE_SCHEMA {
-                    conn.execute(stmt, ()).await.map_err(te)?;
-                }
-            }
-            Ok::<_, String>((db, conn))
-        })?;
+        let db = RemoteDb::new(&config.url, &config.token, transport).map_err(|e| e.to_string())?;
         Ok(Self {
-            rt,
             db,
-            conn,
-            net: NetworkGuard::new(net_timeout),
+            net_timeout,
             _lock: None,
         })
     }
+
+    fn open(config: &Config, net_timeout: Duration) -> Result<Self, String> {
+        let marker = memory_store::lock_dir(SUBDIR, config)
+            .join(format!("schema-v{MEASURE_SCHEMA_VERSION}.ok"));
+        Self::open_with_marker(
+            config,
+            net_timeout,
+            Box::new(UreqTransport {
+                timeout: net_timeout,
+            }),
+            &marker,
+        )
+    }
+
+    fn open_with_marker(
+        config: &Config,
+        net_timeout: Duration,
+        transport: Box<dyn Transport>,
+        marker: &Path,
+    ) -> Result<Self, String> {
+        let store = Self::connect(config, net_timeout, transport)?;
+        if !marker.exists() {
+            store.initialize_schema()?;
+            if let Some(parent) = marker.parent() {
+                fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            let temporary = marker.with_extension("tmp");
+            fs::write(&temporary, b"ok\n").map_err(|e| e.to_string())?;
+            fs::rename(&temporary, marker).map_err(|e| e.to_string())?;
+        }
+        Ok(store)
+    }
+
+    fn open_read_only(config: &Config, net_timeout: Duration) -> Result<Self, String> {
+        Self::open_read_only_with_transport(
+            config,
+            net_timeout,
+            Box::new(UreqTransport {
+                timeout: net_timeout,
+            }),
+        )
+    }
+
+    fn open_read_only_with_transport(
+        config: &Config,
+        net_timeout: Duration,
+        transport: Box<dyn Transport>,
+    ) -> Result<Self, String> {
+        Self::connect(config, net_timeout, transport)
+    }
+
+    /// Test seam for exercising the same SQL through an injected Hrana transport.
+    #[doc(hidden)]
+    pub fn with_transport(
+        url: &str,
+        token: &str,
+        transport: Box<dyn Transport>,
+        create_schema: bool,
+    ) -> Result<Self, String> {
+        let config = Config {
+            url: url.into(),
+            token: token.into(),
+        };
+        if create_schema {
+            let store = Self::connect(&config, default_net_timeout(), transport)?;
+            store.initialize_schema()?;
+            Ok(store)
+        } else {
+            Self::open_read_only_with_transport(&config, default_net_timeout(), transport)
+        }
+    }
+
+    fn initialize_schema(&self) -> Result<(), String> {
+        for statement in MEASURE_SCHEMA {
+            self.exec(statement, vec![])?;
+        }
+        Ok(())
+    }
+
+    fn error(&self, error: RemoteError) -> String {
+        if error.kind == ErrorKind::Timeout {
+            format!(
+                "network timeout after {}s ({error})",
+                self.net_timeout.as_secs()
+            )
+        } else if matches!(
+            error.kind,
+            ErrorKind::Blocked | ErrorKind::Unauthorized | ErrorKind::Unreachable | ErrorKind::Busy
+        ) {
+            format!("{REMOTE_PREFIX}{error}")
+        } else {
+            error.to_string()
+        }
+    }
+
+    fn exec(&self, sql: &str, params: Vec<Cell>) -> Result<(), String> {
+        self.db.execute(sql, params).map_err(|e| self.error(e))?;
+        Ok(())
+    }
+
+    fn query(&self, sql: &str, params: Vec<Cell>, cols: usize) -> Result<Vec<Vec<Cell>>, String> {
+        let rows = self
+            .db
+            .execute(sql, params)
+            .map_err(|e| self.error(e))?
+            .rows;
+        if rows.iter().any(|row| row.len() != cols) {
+            return Err(format!("expected {cols} columns in remote row"));
+        }
+        Ok(rows)
+    }
 }
 
-impl MeasureStore for TursoStore {
+impl MeasureStore for RemoteStore {
     fn upsert_compaction(&mut self, row: &CompactionRow) -> Result<(), String> {
-        self.rt.block_on(turso_exec(
-            &self.conn,
-            UPSERT_COMPACTION,
-            compaction_cells(row),
-        ))
+        self.exec(UPSERT_COMPACTION, compaction_cells(row))
     }
 
     fn compaction_session(
@@ -1098,26 +1111,19 @@ impl MeasureStore for TursoStore {
         machine_id: &str,
         boundary_uuid: &str,
     ) -> Result<Option<String>, String> {
-        let rows = self.rt.block_on(turso_query(
-            &self.conn,
+        let rows = self.query(
             SELECT_SESSION,
             vec![
                 Cell::Text(machine_id.into()),
                 Cell::Text(boundary_uuid.into()),
             ],
             1,
-        ))?;
+        )?;
         rows.first().map(|r| text(&r[0])).transpose()
     }
 
     fn compactions_since(&mut self, since_ms: i64) -> Result<Vec<CompactionRow>, String> {
-        self.rt
-            .block_on(turso_query(
-                &self.conn,
-                &select_since(),
-                vec![Cell::Int(since_ms)],
-                21,
-            ))?
+        self.query(&select_since(), vec![Cell::Int(since_ms)], 21)?
             .iter()
             .map(|r| compaction_from_cells(r))
             .collect()
@@ -1129,20 +1135,18 @@ impl MeasureStore for TursoStore {
         host: &str,
         seen_ms: i64,
     ) -> Result<(), String> {
-        self.rt.block_on(turso_exec(
-            &self.conn,
+        self.exec(
             UPSERT_HOST,
             vec![
                 Cell::Text(machine_id.into()),
                 Cell::Text(host.into()),
                 Cell::Int(seen_ms),
             ],
-        ))
+        )
     }
 
     fn machine_hosts(&mut self) -> Result<Vec<MachineHost>, String> {
-        self.rt
-            .block_on(turso_query(&self.conn, SELECT_HOSTS, vec![], 3))?
+        self.query(SELECT_HOSTS, vec![], 3)?
             .iter()
             .map(|r| host_from_cells(r))
             .collect()
@@ -1152,10 +1156,8 @@ impl MeasureStore for TursoStore {
         &mut self,
         rows: &[ImportedUsage],
     ) -> Result<ImportedUsageOutcome, String> {
-        let known_rows =
-            self.rt
-                .block_on(turso_query(&self.conn, SELECT_IMPORTED_USAGE, vec![], 9))?;
-        let mut known: HashMap<(String, String), ImportedUsage> = known_rows
+        let mut known: HashMap<(String, String), ImportedUsage> = self
+            .query(SELECT_IMPORTED_USAGE, vec![], 9)?
             .iter()
             .map(|r| imported_usage_from_cells(r))
             .collect::<Result<Vec<_>, String>>()?
@@ -1176,11 +1178,7 @@ impl MeasureStore for TursoStore {
                 }
                 continue;
             }
-            self.rt.block_on(turso_exec(
-                &self.conn,
-                INSERT_IMPORTED_USAGE,
-                imported_usage_cells(row),
-            ))?;
+            self.exec(INSERT_IMPORTED_USAGE, imported_usage_cells(row))?;
             known.insert(key, row.clone());
             outcome.inserted += 1;
         }
@@ -1188,15 +1186,29 @@ impl MeasureStore for TursoStore {
     }
 
     fn imported_usage(&mut self) -> Result<Vec<ImportedUsage>, String> {
-        self.rt
-            .block_on(turso_query(&self.conn, SELECT_IMPORTED_USAGE, vec![], 9))?
+        self.query(SELECT_IMPORTED_USAGE, vec![], 9)?
             .iter()
             .map(|r| imported_usage_from_cells(r))
             .collect()
     }
 
     fn insert_events(&mut self, events: &[TelemetryEvent]) -> Result<usize, String> {
-        self.rt.block_on(turso_insert_events(&self.conn, events))
+        let mut inserted = 0usize;
+        for chunk in events.chunks(EVENT_CHUNK) {
+            let stmts: Vec<_> = chunk
+                .iter()
+                .map(|event| Stmt::new(INSERT_EVENT, event_cells(event)))
+                .collect();
+            let results = self
+                .db
+                .transaction(&stmts)
+                .map_err(|error| self.error(error))?;
+            inserted += results
+                .iter()
+                .map(|result| result.affected_row_count as usize)
+                .sum::<usize>();
+        }
+        Ok(inserted)
     }
 
     fn remote_ids(
@@ -1204,12 +1216,11 @@ impl MeasureStore for TursoStore {
         machine_id: &str,
         source: &str,
     ) -> Result<HashMap<i64, String>, String> {
-        let rows = self.rt.block_on(turso_query(
-            &self.conn,
+        let rows = self.query(
             SELECT_REMOTE,
             vec![Cell::Text(source.into()), Cell::Text(machine_id.into())],
             2,
-        ))?;
+        )?;
         remote_map(&rows)
     }
 
@@ -1219,8 +1230,7 @@ impl MeasureStore for TursoStore {
         source: &str,
         event_id: &str,
     ) -> Result<Option<String>, String> {
-        let rows = self.rt.block_on(turso_query(
-            &self.conn,
+        let rows = self.query(
             SELECT_PAYLOAD,
             vec![
                 Cell::Text(source.into()),
@@ -1228,7 +1238,7 @@ impl MeasureStore for TursoStore {
                 Cell::Text(event_id.into()),
             ],
             1,
-        ))?;
+        )?;
         rows.first().map(|r| text(&r[0])).transpose()
     }
 
@@ -1239,16 +1249,14 @@ impl MeasureStore for TursoStore {
         machine_id: &str,
         source: &str,
     ) -> Result<Vec<String>, String> {
-        self.rt
-            .block_on(turso_query(
-                &self.conn,
-                SELECT_NO_TIME,
-                vec![Cell::Text(source.into()), Cell::Text(machine_id.into())],
-                1,
-            ))?
-            .iter()
-            .map(|r| text(&r[0]))
-            .collect()
+        self.query(
+            SELECT_NO_TIME,
+            vec![Cell::Text(source.into()), Cell::Text(machine_id.into())],
+            1,
+        )?
+        .iter()
+        .map(|r| text(&r[0]))
+        .collect()
     }
 
     fn remote_payloads_in_range(
@@ -1258,16 +1266,14 @@ impl MeasureStore for TursoStore {
         min_ms: i64,
         max_ms: i64,
     ) -> Result<Vec<String>, String> {
-        self.rt
-            .block_on(turso_query(
-                &self.conn,
-                SELECT_RANGE,
-                range_params(machine_id, source, min_ms, max_ms),
-                1,
-            ))?
-            .iter()
-            .map(|r| text(&r[0]))
-            .collect()
+        self.query(
+            SELECT_RANGE,
+            range_params(machine_id, source, min_ms, max_ms),
+            1,
+        )?
+        .iter()
+        .map(|r| text(&r[0]))
+        .collect()
     }
 
     fn event_watermark(
@@ -1275,12 +1281,11 @@ impl MeasureStore for TursoStore {
         machine_id: &str,
         source: &str,
     ) -> Result<Option<(i64, String)>, String> {
-        let rows = self.rt.block_on(turso_query(
-            &self.conn,
+        let rows = self.query(
             SELECT_WATERMARK,
             vec![Cell::Text(machine_id.into()), Cell::Text(source.into())],
             2,
-        ))?;
+        )?;
         rows.first()
             .map(|r| Ok((int(&r[0])?, text(&r[1])?)))
             .transpose()
@@ -1293,8 +1298,7 @@ impl MeasureStore for TursoStore {
         max_rowid: i64,
         row_fingerprint: &str,
     ) -> Result<(), String> {
-        self.rt.block_on(turso_exec(
-            &self.conn,
+        self.exec(
             UPSERT_WATERMARK,
             vec![
                 Cell::Text(machine_id.into()),
@@ -1302,20 +1306,18 @@ impl MeasureStore for TursoStore {
                 Cell::Int(max_rowid),
                 Cell::Text(row_fingerprint.into()),
             ],
-        ))
+        )
     }
 
     fn upsert_aliases(&mut self, rows: &[(String, String, String)]) -> Result<(), String> {
         for r in rows {
-            self.rt
-                .block_on(turso_exec(&self.conn, INSERT_ALIAS, alias_cells(r)))?;
+            self.exec(INSERT_ALIAS, alias_cells(r))?;
         }
         Ok(())
     }
 
     fn aliases(&mut self) -> Result<Vec<(String, String, String)>, String> {
-        self.rt
-            .block_on(turso_query(&self.conn, SELECT_ALIASES, vec![], 3))?
+        self.query(SELECT_ALIASES, vec![], 3)?
             .iter()
             .map(|r| alias_from_cells(r))
             .collect()
@@ -1327,8 +1329,7 @@ impl MeasureStore for TursoStore {
         limit: usize,
     ) -> Result<Vec<TelemetryEvent>, String> {
         let (sql, params) = events_page_query(after, limit);
-        self.rt
-            .block_on(turso_query(&self.conn, sql, params, 7))?
+        self.query(sql, params, 7)?
             .iter()
             .map(|r| event_from_cells(r))
             .collect()
@@ -1339,47 +1340,34 @@ impl MeasureStore for TursoStore {
         first: &(String, String),
         last: &(String, String),
     ) -> Result<Vec<TelemetryEvent>, String> {
-        self.rt
-            .block_on(turso_query(
-                &self.conn,
-                SELECT_EVENTS_IN_RANGE,
-                range_key_params(first, last),
-                7,
-            ))?
+        self.query(SELECT_EVENTS_IN_RANGE, range_key_params(first, last), 7)?
             .iter()
             .map(|r| event_from_cells(r))
             .collect()
     }
 
     fn event_counts(&mut self) -> Result<Vec<(String, String, usize)>, String> {
-        self.rt
-            .block_on(turso_query(&self.conn, COUNT_EVENTS, vec![], 3))?
+        self.query(COUNT_EVENTS, vec![], 3)?
             .iter()
             .map(|r| count_from_cells(r))
             .collect()
     }
 
+    // C2b removes these trait methods and their call sites.
     fn push(&mut self) -> Result<(), String> {
-        let db = &self.db;
-        guarded(&mut self.net, &self.rt, async move {
-            db.push().await.map_err(te)
-        })
+        Ok(())
     }
-
     fn pull(&mut self) -> Result<(), String> {
-        let db = &self.db;
-        guarded(&mut self.net, &self.rt, async move {
-            db.pull().await.map(|_| ()).map_err(te)
-        })
+        Ok(())
     }
 }
 
-/// Open the configured replica under `measure.lock` and run `f` against it.
+/// Open the configured remote database under `measure.lock` and run `f` against it.
 pub fn with_turso_store<T>(
     f: impl FnOnce(&mut dyn MeasureStore) -> Result<T, String>,
 ) -> Result<T, String> {
     with_config_lock(|config| {
-        let mut store = TursoStore::open(&config, default_net_timeout())?;
+        let mut store = RemoteStore::open(&config, default_net_timeout())?;
         f(&mut store)
     })
 }
@@ -1409,10 +1397,8 @@ pub fn same_database(a: &str, b: &str) -> bool {
     database_identity(a) == database_identity(b)
 }
 
-/// Run `f(source, destination)` where `source` is a replica of the `cort memory` database
-/// (`harnessuse`) kept in its own `legacy-telemetry.db`, and `destination` is the measure store.
-/// The source has its own lock, so a copy does not block `cort memory`; neither `memory.db` nor
-/// the source's schema is touched. Both configs are read before any file or lock is created.
+/// Run `f(source, destination)` with a read-only memory source and the measure database.
+/// Both configs are read before any file or lock is created.
 pub fn with_legacy_and_measure_stores<T>(
     f: impl FnOnce(&mut dyn MeasureStore, &mut dyn MeasureStore) -> Result<T, String>,
 ) -> Result<T, String> {
@@ -1432,14 +1418,8 @@ pub fn with_legacy_and_measure_stores<T>(
             "legacy-telemetry.lock",
         )?;
         let net_timeout = default_net_timeout();
-        let mut to = TursoStore::open(&config, net_timeout)?;
-        let mut from = TursoStore::open_replica(
-            memory_store::SUBDIR,
-            &memory_config,
-            "legacy-telemetry.db",
-            false,
-            net_timeout,
-        )?;
+        let mut to = RemoteStore::open(&config, net_timeout)?;
+        let mut from = RemoteStore::open_read_only(&memory_config, net_timeout)?;
         f(&mut from, &mut to)
     })
 }
@@ -1448,79 +1428,135 @@ pub fn with_legacy_and_measure_stores<T>(
 mod tests {
     use super::*;
 
-    /// A network future that never finishes is abandoned at the limit; one that finishes first
-    /// keeps its own value or error.
     #[test]
-    fn turso_timeout_wraps_future() {
-        let rt = memory_store::runtime().unwrap();
-        let started = std::time::Instant::now();
-        let error = with_timeout(
-            &rt,
-            Duration::from_millis(50),
-            std::future::pending::<Result<(), String>>(),
-        )
-        .unwrap_err();
-        assert!(error.starts_with("network timeout after "), "{error}");
-        assert!(started.elapsed() < Duration::from_secs(1));
-        // The message names whole seconds, truncated.
-        let error = with_timeout(
-            &rt,
+    fn schema_marker_follows_successful_ddl_and_skips_repeat() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("schema-v2.ok");
+        let config = Config {
+            url: "libsql://test.invalid".into(),
+            token: "test".into(),
+        };
+        let failing = crate::remote::SqliteTransport::new().unwrap();
+        failing.fail_next_status(500);
+        assert!(RemoteStore::open_with_marker(
+            &config,
             Duration::from_secs(1),
-            std::future::pending::<Result<(), String>>(),
+            Box::new(failing),
+            &marker
         )
-        .unwrap_err();
-        assert_eq!(error, "network timeout after 1s");
-        assert_eq!(
-            with_timeout(&rt, Duration::from_millis(50), async { Ok::<_, String>(7) }),
-            Ok(7)
-        );
-        assert_eq!(
-            with_timeout(&rt, Duration::from_millis(50), async {
-                Err::<u8, _>("boom".to_string())
-            }),
-            Err("boom".to_string())
-        );
-    }
-
-    /// The flag that refuses network work after a timeout. A store cannot be opened without a
-    /// network in this test, so the guard's own contract is what is checked.
-    /// The collector counts a bootstrap that hit its limit as a network failure.
-    #[test]
-    fn bootstrap_timeout_opens_as_network() {
-        assert!(matches!(
-            open_error("network timeout after 120s".into()),
-            OpenError::Network(_)
-        ));
-        assert!(matches!(
-            open_error("cannot open Turso sync replica: bad url".into()),
-            OpenError::Other(_)
-        ));
+        .is_err());
+        assert!(!marker.exists());
+        let working = crate::remote::SqliteTransport::new().unwrap();
+        let mut store = RemoteStore::open_with_marker(
+            &config,
+            Duration::from_secs(1),
+            Box::new(working),
+            &marker,
+        )
+        .unwrap();
+        assert!(marker.exists());
+        assert!(store.event_counts().is_ok());
+        let fresh = crate::remote::SqliteTransport::new().unwrap();
+        let mut skipped = RemoteStore::open_with_marker(
+            &config,
+            Duration::from_secs(1),
+            Box::new(fresh),
+            &marker,
+        )
+        .unwrap();
+        assert!(skipped.event_counts().is_err());
     }
 
     #[test]
-    fn poisoned_store_refuses_network() {
-        let mut guard = NetworkGuard::new(Duration::from_secs(120));
-        assert_eq!(guard.check(), Ok(()));
-        guard.observe::<()>(&Err("network timeout after 120s".to_string()));
-        assert_eq!(guard.check(), Err(POISONED.to_string()));
-        // An ordinary network error leaves the store usable; only a dropped future poisons it.
-        let mut guard = NetworkGuard::new(Duration::from_secs(120));
-        guard.observe::<()>(&Err("connection refused".to_string()));
-        guard.observe::<()>(&Ok(()));
-        assert_eq!(guard.check(), Ok(()));
-        // The path push and pull take: after a timeout the next operation is never polled.
-        let rt = memory_store::runtime().unwrap();
-        let mut net = NetworkGuard::new(Duration::from_millis(50));
-        let refused = guarded(&mut net, &rt, async { Err::<(), _>("connection refused") });
-        assert_eq!(refused, Err("connection refused".to_string()));
-        let hung = guarded(&mut net, &rt, std::future::pending::<Result<(), String>>());
-        assert_eq!(hung, Err("network timeout after 0s".to_string()));
-        let after = guarded(&mut net, &rt, async {
-            panic!("a poisoned store reached the network");
-            #[allow(unreachable_code)]
-            Ok::<(), String>(())
-        });
-        assert_eq!(after, Err(POISONED.to_string()));
+    fn unavailable_remote_opens_as_network() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            url: "libsql://test.invalid".into(),
+            token: "test".into(),
+        };
+        for status in [403, 401, 500, 503] {
+            let failing = crate::remote::SqliteTransport::new().unwrap();
+            failing.fail_next_status(status);
+            let error = RemoteStore::open_with_marker(
+                &config,
+                Duration::from_secs(1),
+                Box::new(failing),
+                &dir.path().join("new/schema.ok"),
+            )
+            .err()
+            .unwrap();
+            assert!(
+                matches!(open_error(error), OpenError::Network(_)),
+                "status {status}"
+            );
+        }
+        // The quota block (403 with a BLOCKED code) and a busy remote are network failures too.
+        for code in ["BLOCKED", "SQLITE_BUSY"] {
+            let failing = crate::remote::SqliteTransport::new().unwrap();
+            failing.fail_next_code(code);
+            let error = RemoteStore::open_with_marker(
+                &config,
+                Duration::from_secs(1),
+                Box::new(failing),
+                &dir.path().join("new/schema.ok"),
+            )
+            .err()
+            .unwrap();
+            assert!(
+                matches!(open_error(error), OpenError::Network(_)),
+                "code {code}"
+            );
+        }
+        let failing = crate::remote::SqliteTransport::new().unwrap();
+        failing.fail_next_status(418);
+        let error = RemoteStore::open_with_marker(
+            &config,
+            Duration::from_secs(1),
+            Box::new(failing),
+            &dir.path().join("new/schema.ok"),
+        )
+        .err()
+        .unwrap();
+        assert!(matches!(open_error(error), OpenError::Other(_)));
+        let working = crate::remote::SqliteTransport::new().unwrap();
+        RemoteStore::open_with_marker(
+            &config,
+            Duration::from_secs(1),
+            Box::new(working),
+            &dir.path().join("new/schema.ok"),
+        )
+        .unwrap();
+        assert!(dir.path().join("new/schema.ok").exists());
+    }
+
+    #[test]
+    fn growing_event_queries_use_indexes() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        for ddl in MEASURE_SCHEMA {
+            conn.execute_batch(ddl).unwrap();
+        }
+        for (name, sql, args) in [
+            ("SELECT_REMOTE", SELECT_REMOTE, 2),
+            ("SELECT_RANGE", SELECT_RANGE, 4),
+            ("SELECT_NO_TIME", SELECT_NO_TIME, 2),
+            ("COUNT_EVENTS", COUNT_EVENTS, 0),
+        ] {
+            let explain = format!("EXPLAIN QUERY PLAN {sql}");
+            let mut statement = conn.prepare(&explain).unwrap();
+            let params = vec![rusqlite::types::Value::Null; args];
+            let lines: Vec<String> = statement
+                .query_map(rusqlite::params_from_iter(params), |row| row.get(3))
+                .unwrap()
+                .map(|result| result.unwrap())
+                .collect();
+            for line in &lines {
+                println!("{name}: {line}");
+                assert!(
+                    !line.contains("SCAN telemetry_events") || line.contains("USING"),
+                    "unbounded event scan: {name}: {line}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -1534,7 +1570,7 @@ mod tests {
         assert!(untouched);
     }
 
-    /// The copy's paging and counting SQL must also run on Turso's engine.
+    /// Source and destination URLs with the same host name must be refused.
     #[test]
     fn database_identity_ignores_scheme_case_slash_and_path() {
         assert!(same_database("libsql://x.turso.io", "turso://X.turso.io/"));
@@ -1558,187 +1594,5 @@ mod tests {
         assert_eq!(database_identity("https://[::1]:8080/p"), "[::1]");
         assert!(same_database("http://[::1]:1", "http://[::1]:2/x"));
         assert!(!same_database("http://[::1]", "http://[::2]"));
-    }
-
-    #[test]
-    fn copy_sql_runs_on_turso_local() {
-        let rt = memory_store::runtime().unwrap();
-        rt.block_on(async {
-            let db = turso::Builder::new_local(":memory:").build().await.unwrap();
-            let conn = db.connect().unwrap();
-            for stmt in MEASURE_SCHEMA {
-                conn.execute(stmt, ()).await.unwrap();
-            }
-            let mk = |source: &str, id: &str| TelemetryEvent {
-                source: source.into(),
-                event_id: id.into(),
-                machine_id: "m".into(),
-                machine_source: "env".into(),
-                project_id: None,
-                time_ms: None,
-                payload: "{}".into(),
-                rowid: None,
-            };
-            let events = [mk("a", "2"), mk("a", "1"), mk("b", "1")];
-            assert_eq!(turso_insert_events(&conn, &events).await.unwrap(), 3);
-            let (sql, params) = events_page_query(Some(("a".into(), "1".into())), 5);
-            let rows = turso_query(&conn, sql, params, 7).await.unwrap();
-            let got: Vec<_> = rows.iter().map(|r| event_from_cells(r).unwrap()).collect();
-            assert_eq!(got, vec![mk("a", "2"), mk("b", "1")]);
-            let range = turso_query(
-                &conn,
-                SELECT_EVENTS_IN_RANGE,
-                range_key_params(&("a".into(), "2".into()), &("b".into(), "1".into())),
-                7,
-            )
-            .await
-            .unwrap();
-            let range: Vec<_> = range.iter().map(|r| event_from_cells(r).unwrap()).collect();
-            assert_eq!(range, vec![mk("a", "2"), mk("b", "1")]);
-            let counts = turso_query(&conn, COUNT_EVENTS, vec![], 3).await.unwrap();
-            let counts: Vec<_> = counts
-                .iter()
-                .map(|r| count_from_cells(r).unwrap())
-                .collect();
-            assert_eq!(
-                counts,
-                vec![
-                    ("a".to_string(), "m".to_string(), 2),
-                    ("b".to_string(), "m".to_string(), 1)
-                ]
-            );
-        });
-    }
-
-    /// The shared SQL text must run on Turso's engine too, not only on SQLite.
-    #[test]
-    fn shared_sql_runs_on_turso_local() {
-        let rt = memory_store::runtime().unwrap();
-        rt.block_on(async {
-            let db = turso::Builder::new_local(":memory:").build().await.unwrap();
-            let conn = db.connect().unwrap();
-            for stmt in MEASURE_SCHEMA {
-                conn.execute(stmt, ()).await.unwrap();
-            }
-            let mk = |session: &str, t: i64| CompactionRow {
-                machine_id: "m".into(),
-                boundary_uuid: "b".into(),
-                session_id: session.into(),
-                time_ms: t,
-                project_id: None,
-                trigger: "auto".into(),
-                pre_tokens: Some(5),
-                post_tokens: None,
-                pre: WindowCounts::default(),
-                post: WindowCounts {
-                    tool_calls: 3,
-                    ..Default::default()
-                },
-                post_complete: true,
-            };
-            turso_exec(&conn, UPSERT_COMPACTION, compaction_cells(&mk("s1", 1)))
-                .await
-                .unwrap();
-            turso_exec(&conn, UPSERT_COMPACTION, compaction_cells(&mk("s2", 2)))
-                .await
-                .unwrap();
-            let rows = turso_query(&conn, &select_since(), vec![Cell::Int(0)], 21)
-                .await
-                .unwrap();
-            assert_eq!(rows.len(), 1);
-            assert_eq!(compaction_from_cells(&rows[0]).unwrap(), mk("s2", 2));
-            for seen in [500, 900, 700] {
-                let p = vec![
-                    Cell::Text("m".into()),
-                    Cell::Text("h".into()),
-                    Cell::Int(seen),
-                ];
-                turso_exec(&conn, UPSERT_HOST, p).await.unwrap();
-            }
-            let hosts = turso_query(&conn, SELECT_HOSTS, vec![], 3).await.unwrap();
-            assert_eq!(host_from_cells(&hosts[0]).unwrap().last_seen_ms, 900);
-            // Events: chunked transaction, INSERT OR IGNORE counting, watermark that never lowers.
-            let ev = |id: &str, rowid: i64| TelemetryEvent {
-                source: "cort_command".into(),
-                event_id: id.into(),
-                machine_id: "m".into(),
-                machine_source: "env".into(),
-                project_id: None,
-                time_ms: Some(1),
-                payload: format!("{{\"id\":{rowid}}}"),
-                rowid: Some(rowid),
-            };
-            let batch = vec![ev("a", 1), ev("b", 2)];
-            assert_eq!(turso_insert_events(&conn, &batch).await.unwrap(), 2);
-            let mut junk = ev("j", 4);
-            junk.payload = "not json".into(); // json_valid must keep it from failing the query
-            let again = vec![ev("b", 2), ev("c", 3), junk];
-            assert_eq!(turso_insert_events(&conn, &again).await.unwrap(), 2);
-            let rows = turso_query(
-                &conn,
-                SELECT_REMOTE,
-                vec![Cell::Text("cort_command".into()), Cell::Text("m".into())],
-                2,
-            )
-            .await
-            .unwrap();
-            assert_eq!(remote_map(&rows).unwrap().len(), 3);
-            let ranged = turso_query(
-                &conn,
-                SELECT_RANGE,
-                range_params("m", "cort_command", 0, 5),
-                1,
-            )
-            .await
-            .unwrap();
-            assert_eq!(ranged.len(), 4);
-            let outside = turso_query(
-                &conn,
-                SELECT_RANGE,
-                range_params("m", "cort_command", 2, 5),
-                1,
-            )
-            .await
-            .unwrap();
-            assert!(outside.is_empty());
-            let mut notime = ev("n", 5);
-            notime.time_ms = None;
-            turso_insert_events(&conn, &[notime]).await.unwrap();
-            let none_rows = turso_query(
-                &conn,
-                SELECT_NO_TIME,
-                vec![Cell::Text("cort_command".into()), Cell::Text("m".into())],
-                1,
-            )
-            .await
-            .unwrap();
-            assert_eq!(none_rows.len(), 1);
-            for mark in [10, 4] {
-                let p = vec![
-                    Cell::Text("m".into()),
-                    Cell::Text("cort_command".into()),
-                    Cell::Int(mark),
-                    Cell::Text(format!("id{mark}")),
-                ];
-                turso_exec(&conn, UPSERT_WATERMARK, p).await.unwrap();
-            }
-            let w = turso_query(
-                &conn,
-                SELECT_WATERMARK,
-                vec![Cell::Text("m".into()), Cell::Text("cort_command".into())],
-                2,
-            )
-            .await
-            .unwrap();
-            // Replaced, not raised: a recreated usage.db restarts its rowids.
-            assert_eq!(int(&w[0][0]).unwrap(), 4);
-            assert_eq!(text(&w[0][1]).unwrap(), "id4");
-            let alias = ("m".to_string(), "l".to_string(), "s".to_string());
-            for _ in 0..2 {
-                turso_exec(&conn, INSERT_ALIAS, alias_cells(&alias))
-                    .await
-                    .unwrap();
-            }
-        });
     }
 }

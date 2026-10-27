@@ -782,25 +782,63 @@ fn with_named_lock<T>(
     action(config)
 }
 
-/// Take an exclusive flock on `data_dir()/<subdir>/<digest(url)>/<name>`; released on drop.
-pub(crate) fn lock_in(subdir: &str, config: &Config, name: &str) -> Result<fs::File, String> {
-    let lock_path = lock_path(subdir, config, name);
-    fs::create_dir_all(lock_path.parent().unwrap()).map_err(|e| e.to_string())?;
-    let lock = OpenOptions::new()
+/// Hold the lock under `locks/`, plus its old location while that directory exists.
+pub(crate) struct StoreLock {
+    _old: Option<fs::File>,
+    _new: fs::File,
+}
+
+fn old_lock_dir(base: &Path, subdir: &str, config: &Config) -> PathBuf {
+    base.join(subdir).join(digest(&config.url))
+}
+
+pub(crate) fn lock_dir(subdir: &str, config: &Config) -> PathBuf {
+    lock_dir_in(&crate::data_dir::data_dir(), subdir, config)
+}
+
+fn lock_dir_in(base: &Path, subdir: &str, config: &Config) -> PathBuf {
+    base.join("locks").join(subdir).join(digest(&config.url))
+}
+
+fn open_lock(path: &Path) -> Result<fs::File, String> {
+    fs::create_dir_all(path.parent().ok_or("lock path has no parent")?)
+        .map_err(|e| e.to_string())?;
+    OpenOptions::new()
         .create(true)
         .write(true)
         .truncate(false)
-        .open(&lock_path)
-        .map_err(|e| e.to_string())?;
-    lock.lock().map_err(|e| e.to_string())?;
-    Ok(lock)
+        .open(path)
+        .map_err(|e| e.to_string())
 }
 
-fn lock_path(subdir: &str, config: &Config, name: &str) -> PathBuf {
-    crate::data_dir::data_dir()
-        .join(subdir)
-        .join(digest(&config.url))
-        .join(name)
+fn open_old_lock(path: &Path) -> Result<fs::File, String> {
+    OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(path)
+        .map_err(|e| e.to_string())
+}
+
+pub(crate) fn lock_in(subdir: &str, config: &Config, name: &str) -> Result<StoreLock, String> {
+    lock_in_at(&crate::data_dir::data_dir(), subdir, config, name)
+}
+
+fn lock_in_at(base: &Path, subdir: &str, config: &Config, name: &str) -> Result<StoreLock, String> {
+    let old_dir = old_lock_dir(base, subdir, config);
+    let old = if old_dir.is_dir() {
+        let file = open_old_lock(&old_dir.join(name))?;
+        file.lock().map_err(|e| e.to_string())?;
+        Some(file)
+    } else {
+        None
+    };
+    let new = open_lock(&lock_dir_in(base, subdir, config).join(name))?;
+    new.lock().map_err(|e| e.to_string())?;
+    Ok(StoreLock {
+        _old: old,
+        _new: new,
+    })
 }
 
 #[derive(Debug)]
@@ -815,33 +853,86 @@ pub(crate) fn lock_in_within(
     config: &Config,
     name: &str,
     wait: Duration,
-) -> Result<fs::File, LockWait> {
-    let lock_path = lock_path(subdir, config, name);
-    fs::create_dir_all(
-        lock_path
-            .parent()
-            .ok_or_else(|| LockWait::Failed("lock path has no parent".into()))?,
-    )
-    .map_err(|e| LockWait::Failed(e.to_string()))?;
-    let lock = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(false)
-        .open(&lock_path)
-        .map_err(|e| LockWait::Failed(e.to_string()))?;
+) -> Result<StoreLock, LockWait> {
+    lock_in_within_at(&crate::data_dir::data_dir(), subdir, config, name, wait)
+}
+
+fn lock_in_within_at(
+    base: &Path,
+    subdir: &str,
+    config: &Config,
+    name: &str,
+    wait: Duration,
+) -> Result<StoreLock, LockWait> {
     let start = Instant::now();
-    loop {
-        match lock.try_lock() {
-            Ok(()) => return Ok(lock),
-            Err(fs::TryLockError::WouldBlock) => {
-                if start.elapsed() >= wait {
-                    return Err(LockWait::TimedOut);
+    let acquire = |file: fs::File| -> Result<fs::File, LockWait> {
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Ok(file),
+                Err(fs::TryLockError::WouldBlock) if start.elapsed() >= wait => {
+                    return Err(LockWait::TimedOut)
                 }
+                Err(fs::TryLockError::WouldBlock) => {}
+                Err(fs::TryLockError::Error(e)) => return Err(LockWait::Failed(e.to_string())),
             }
-            Err(fs::TryLockError::Error(e)) => return Err(LockWait::Failed(e.to_string())),
+            std::thread::sleep(Duration::from_millis(50));
         }
-        // As in acquire_upgrade_locks: polling can overshoot the deadline by one 50 ms interval.
-        std::thread::sleep(Duration::from_millis(50));
+    };
+    let old_dir = old_lock_dir(base, subdir, config);
+    let old = if old_dir.is_dir() {
+        Some(acquire(
+            open_old_lock(&old_dir.join(name)).map_err(LockWait::Failed)?,
+        )?)
+    } else {
+        None
+    };
+    let new = acquire(
+        open_lock(&lock_dir_in(base, subdir, config).join(name)).map_err(LockWait::Failed)?,
+    )?;
+    Ok(StoreLock {
+        _old: old,
+        _new: new,
+    })
+}
+
+#[cfg(test)]
+mod lock_tests {
+    use super::*;
+
+    #[test]
+    fn lock_transition_uses_new_path_and_holds_existing_old_path() {
+        let data = tempfile::tempdir().unwrap();
+        let base = data.path();
+        let config = Config {
+            url: "libsql://lock.invalid".into(),
+            token: "test".into(),
+        };
+        let old_dir = old_lock_dir(base, "turso-measure", &config);
+        let new_path = lock_dir_in(base, "turso-measure", &config).join("measure.lock");
+        let guard = lock_in_at(base, "turso-measure", &config, "measure.lock").unwrap();
+        assert!(new_path.exists());
+        assert!(!old_dir.exists());
+        drop(guard);
+
+        fs::create_dir_all(&old_dir).unwrap();
+        let guard = lock_in_at(base, "turso-measure", &config, "measure.lock").unwrap();
+        let old = open_old_lock(&old_dir.join("measure.lock")).unwrap();
+        let new = open_lock(&new_path).unwrap();
+        assert!(matches!(old.try_lock(), Err(fs::TryLockError::WouldBlock)));
+        assert!(matches!(new.try_lock(), Err(fs::TryLockError::WouldBlock)));
+        drop(guard);
+        assert!(old.try_lock().is_ok());
+        assert!(new.try_lock().is_ok());
+        assert!(matches!(
+            lock_in_within_at(
+                base,
+                "turso-measure",
+                &config,
+                "measure.lock",
+                Duration::from_millis(0)
+            ),
+            Err(LockWait::TimedOut)
+        ));
     }
 }
 

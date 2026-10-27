@@ -176,7 +176,7 @@ fn store_lock_serializes_two_holders() {
     assert!(b_entered >= a_released, "B entered before A released");
     assert!(dir
         .path()
-        .join("turso-measure")
+        .join("locks/turso-measure")
         .read_dir()
         .unwrap()
         .any(|d| d.unwrap().path().join("measure.lock").exists()));
@@ -191,4 +191,36 @@ fn push_failure_is_returned() {
     assert_eq!(s.compactions_since(0).unwrap().len(), 1);
     s.fail_push(false);
     assert!(s.push().is_ok());
+}
+
+#[test]
+fn write_failure_keeps_existing_rows() {
+    let (_d, mut s) = store();
+    s.upsert_compaction(&row("s1", 1)).unwrap();
+    s.fail_write(true);
+    assert!(s.upsert_compaction(&row("s2", 2)).is_err());
+    assert_eq!(s.compactions_since(0).unwrap(), vec![row("s1", 1)]);
+    s.fail_write(false);
+    s.upsert_compaction(&row("s2", 2)).unwrap();
+}
+
+#[test]
+fn write_failure_rejects_events() {
+    let (_d, mut s) = store();
+    let event = cort::telemetry::TelemetryEvent {
+        source: "cort_command".into(),
+        event_id: "1".into(),
+        machine_id: "machine".into(),
+        machine_source: "test".into(),
+        project_id: None,
+        time_ms: Some(1),
+        payload: "{\"id\":1}".into(),
+        rowid: None,
+    };
+    s.fail_write(true);
+    assert!(s.insert_events(std::slice::from_ref(&event)).is_err());
+    assert!(s.insert_events(&[]).is_ok());
+    assert!(s.event_counts().unwrap().is_empty());
+    s.fail_write(false);
+    assert_eq!(s.insert_events(&[event]).unwrap(), 1);
 }

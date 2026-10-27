@@ -10,11 +10,19 @@ pub(crate) fn timed_out(message: &str) -> bool {
     message.starts_with(TIMEOUT_PREFIX)
 }
 
+/// Prefix of a direct-remote failure that is the network's, not the store's: blocked, refused,
+/// unreachable or busy after retries.
+pub(crate) const REMOTE_PREFIX: &str = "remote unavailable: ";
+
+/// Whether `message` is a network failure: a timeout, or a remote that could not serve.
+pub(crate) fn network_failure(message: &str) -> bool {
+    timed_out(message) || message.starts_with(REMOTE_PREFIX)
+}
+
 /// Run one network future under `limit`. The turso client retries on its own schedule, and a
 /// process that hangs in it has no other way to be reclaimed (there is no cron and the hook only
 /// kicks), which is why the bound is owned here and not by the client. Whole seconds, truncated,
-/// in the message. The timeout arms a timer, which only works inside a runtime, so callers outside
-/// one go through `with_timeout`.
+/// in the message. The timeout arms a timer inside the caller's runtime.
 pub(crate) async fn with_timeout_async<T, E: std::fmt::Display>(
     limit: Duration,
     fut: impl Future<Output = Result<T, E>>,
@@ -24,14 +32,6 @@ pub(crate) async fn with_timeout_async<T, E: std::fmt::Display>(
         Ok(Err(error)) => Err(error.to_string()),
         Err(_) => Err(format!("{TIMEOUT_PREFIX}{}s", limit.as_secs())),
     }
-}
-
-pub(crate) fn with_timeout<T, E: std::fmt::Display>(
-    rt: &tokio::runtime::Runtime,
-    limit: Duration,
-    fut: impl Future<Output = Result<T, E>>,
-) -> Result<T, String> {
-    rt.block_on(with_timeout_async(limit, fut))
 }
 
 /// One store's network limit and the flag that outlives it, which is not reusable after a
@@ -79,12 +79,4 @@ impl NetworkGuard {
         self.observe(&result);
         result
     }
-}
-
-pub(crate) fn guarded<T, E: std::fmt::Display>(
-    net: &mut NetworkGuard,
-    rt: &tokio::runtime::Runtime,
-    fut: impl Future<Output = Result<T, E>>,
-) -> Result<T, String> {
-    rt.block_on(net.run(fut))
 }
