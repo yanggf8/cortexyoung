@@ -8,7 +8,7 @@
 //!   cort-evals summarize     <rows.json>... [--strict]
 //!   cort-evals demand        [--claude-dir DIR] [--codex-dir DIR] [--exclude a,b]
 //!                            [--show] [--out FILE]
-//!   cort-evals memory-uptake [--claude-dir DIR] [--since RFC3339] [--private DIR] [--out FILE]
+//!   cort-evals memory-uptake [--claude-dir DIR] [--since RFC3339] [--out FILE] [--private DIR [--sample N] [--seed S]]
 //!   cort-evals cost-audit    --since UTC --until UTC [--claude-dir DIR] [--out FILE]
 //!   cort-evals cost-collect  [--day YYYY-MM-DD] [--claude-dir DIR]
 //!                            [--out-dir DIR] [--force]
@@ -100,7 +100,14 @@ const DEMAND_FLAGS: &[&str] = &[
     "--out",
     "--show",
 ];
-const UPTAKE_FLAGS: &[&str] = &["--claude-dir", "--since", "--private", "--out"];
+const UPTAKE_FLAGS: &[&str] = &[
+    "--claude-dir",
+    "--since",
+    "--private",
+    "--out",
+    "--sample",
+    "--seed",
+];
 
 const USAGE_TOP: &str =
     "usage: cort-evals <run-agents|verify-impact|summarize|demand|memory-uptake|recall-exp|cost-audit|cost-collect|cost-trial|gate-audit> [options]";
@@ -109,7 +116,7 @@ const USAGE_VERIFY_IMPACT: &str =
     "usage: cort-evals verify-impact --repo DIR --symbols A,B [--depth N]";
 const USAGE_SUMMARIZE: &str = "usage: cort-evals summarize [--strict] rows.json [rows.json...]";
 const USAGE_DEMAND: &str = "usage: cort-evals demand [--claude-dir DIR] [--codex-dir DIR] [--exclude a,b,c] [--out FILE] [--show]";
-const USAGE_UPTAKE: &str = "usage: cort-evals memory-uptake [--claude-dir DIR] [--since RFC3339] [--private DIR] [--out FILE]  (aggregate-only report; --private stores readable window detail outside git)";
+const USAGE_UPTAKE: &str = "usage: cort-evals memory-uptake [--claude-dir DIR] [--since RFC3339] [--out FILE] [--private DIR [--sample N] [--seed S]]  (aggregate-only report; --private stores readable detail outside git)";
 const USAGE_COST_AUDIT: &str = "usage: cort-evals cost-audit --since YYYY-MM-DDTHH:MM:SSZ --until YYYY-MM-DDTHH:MM:SSZ [--claude-dir DIR] [--out FILE]  (read-only Claude Code cost census; no model calls)";
 const USAGE_COST_COLLECT: &str = "usage: cort-evals cost-collect [--day YYYY-MM-DD | --days 1..90] [--claude-dir DIR] [--out-dir DIR] [--force]  (persist daily aggregates before transcript retention deletes them; default last seven complete UTC days, skipping existing files; no model calls)";
 const USAGE_COST_TRIAL: &str = "usage: cort-evals cost-trial --file PAIRS.json  (summarize one paired, full-task hypothesis; no model calls)";
@@ -840,10 +847,21 @@ fn uptake_main(argv: &[String]) -> Result<(), String> {
     let dir = at(argv, "--claude-dir", &default_dir);
     let since = at(argv, "--since", "");
     let private = at(argv, "--private", "");
-    let report = cort_evals::uptake::scan(
+    if private.is_empty() && argv.iter().any(|a| a == "--sample" || a == "--seed") {
+        return Err("--sample and --seed require --private".into());
+    }
+    let n_rest = at(argv, "--sample", "0")
+        .parse::<usize>()
+        .map_err(|_| "--sample must be a non-negative whole number".to_string())?;
+    let seed = at(argv, "--seed", "0")
+        .parse::<u64>()
+        .map_err(|_| "--seed must be a non-negative whole number".to_string())?;
+    let report = cort_evals::uptake::scan_sample(
         Path::new(&dir),
         (!since.is_empty()).then_some(since.as_str()),
         (!private.is_empty()).then_some(Path::new(&private)),
+        n_rest,
+        seed,
     )?;
     let body = serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?;
     let out = at(argv, "--out", "");

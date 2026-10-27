@@ -26,6 +26,10 @@ const CORRECTIONS: &[&str] = &[
     "we decided",
     "i told you",
 ];
+const REVIEWER_PROMPT: &str = include_str!("../prompts/memory-uptake-reviewer.md");
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
 
 #[derive(Clone, Debug)]
 struct Entry {
@@ -383,23 +387,42 @@ fn leaves(v: &Value) -> String {
     walk(v, &mut out);
     out
 }
-fn event_texts(e: &Value) -> Vec<(&'static str, String)> {
+/// One turn's speaker, text, and tool id: the call's own id on a `tool_call`, the id it answers on
+/// a `tool_result`. Text is trimmed at the end and empty turns are dropped here, so the scanner's
+/// turn counter and the packet's turn numbers are one sequence.
+type Part = (&'static str, String, Option<String>);
+fn event_texts(e: &Value) -> Vec<Part> {
     let content = &e["message"]["content"];
+    let id = |v: &Value| v.as_str().map(String::from);
+    let mut out: Vec<Part> = Vec::new();
     match row_type(e) {
         "user" => {
             if let Some((_, raw)) = demand::claude_user_line(&e.to_string()) {
-                return vec![("user", demand::own_words(&raw))];
+                out.push(("user", demand::own_words(&raw), None));
+            } else if let Some(s) = content.as_str() {
+                // Text the harness put in a user row: summaries, command output, reminders.
+                out.push(("harness", s.into(), None));
+            } else if let Some(parts) = content.as_array() {
+                for part in parts {
+                    match part.get("type").and_then(Value::as_str) {
+                        Some("tool_result") => out.push((
+                            "tool_result",
+                            leaves(&part["content"]),
+                            id(&part["tool_use_id"]),
+                        )),
+                        Some("text") => {
+                            if let Some(s) = part["text"].as_str() {
+                                out.push(("harness", s.into(), None));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            } else if !content.is_null() {
+                out.push(("harness", leaves(content), None));
             }
-            if let Some(s) = content.as_str() {
-                return vec![("history", s.into())];
-            }
-            if !content.is_null() {
-                return vec![("tool_result", leaves(content))];
-            }
-            Vec::new()
         }
         "assistant" => {
-            let mut out = Vec::new();
             if let Some(parts) = content.as_array() {
                 for part in parts {
                     match part.get("type").and_then(Value::as_str) {
@@ -409,20 +432,42 @@ fn event_texts(e: &Value) -> Vec<(&'static str, String)> {
                                 .or_else(|| part.get("thinking"))
                                 .and_then(Value::as_str)
                             {
-                                out.push(("assistant_text", s.into()));
+                                let kind = if part["type"] == "thinking" {
+                                    "thinking"
+                                } else {
+                                    "assistant_text"
+                                };
+                                out.push((kind, s.into(), None));
                             }
                         }
-                        Some("tool_use") => out.push(("tool_call", leaves(&part["input"]))),
+                        // The same parts `tool_calls` keeps, so the two stay aligned.
+                        Some("tool_use") => {
+                            if let (Some(name), Some(input)) = (
+                                part["name"].as_str().filter(|n| !n.is_empty()),
+                                part.get("input"),
+                            ) {
+                                out.push((
+                                    "tool_call",
+                                    format!("{name} {}", leaves(input)),
+                                    id(&part["id"]),
+                                ));
+                            }
+                        }
                         _ => {}
                     }
                 }
             } else if let Some(s) = content.as_str() {
-                out.push(("assistant_text", s.into()));
+                out.push(("assistant_text", s.into(), None));
             }
-            out
         }
-        _ => Vec::new(),
+        _ => {}
     }
+    out.into_iter()
+        .filter_map(|(kind, text, id)| {
+            let text = text.trim_end();
+            (!text.is_empty()).then(|| (kind, text.to_string(), id))
+        })
+        .collect()
 }
 /// What the model could read in a row, lowercased once per file. Hook stdout is harness metadata
 /// (a hook's context arrives as its own attachment), and our own earlier injection is the same
@@ -431,7 +476,7 @@ fn visible_text(e: &Value) -> String {
     let text = match row_type(e) {
         "assistant" => event_texts(e)
             .into_iter()
-            .map(|(_, t)| t)
+            .map(|(_, t, _)| t)
             .collect::<Vec<_>>()
             .join("\n"),
         "user" => leaves(&e["message"]["content"]),
@@ -466,7 +511,7 @@ fn tool_calls(e: &Value) -> Vec<(&str, &Value, &str)> {
                     (p.get("type").and_then(Value::as_str) == Some("tool_use"))
                         .then(|| {
                             Some((
-                                p.get("name")?.as_str()?,
+                                p.get("name")?.as_str().filter(|n| !n.is_empty())?,
                                 p.get("input")?,
                                 p.get("id").and_then(Value::as_str).unwrap_or(""),
                             ))
@@ -634,6 +679,109 @@ fn reset_at(rows: &[Value], start: usize) -> usize {
 fn entry_id(salt: &[u8; 32], cwd: &str, key: &str) -> String {
     hash(salt, &format!("{cwd}\0{key}"))
 }
+fn cut_text(text: &str, limit: usize, lines: Option<usize>) -> (String, bool) {
+    let line_end = lines
+        .and_then(|n| n.checked_sub(1))
+        .and_then(|n| text.match_indices('\n').nth(n).map(|(i, _)| i))
+        .unwrap_or(text.len());
+    let end = line_end.min(text.len());
+    if end == text.len() && text.len() <= limit {
+        return (text.into(), false);
+    }
+    let budget = limit.saturating_sub(" …[cut]".len());
+    let mut boundary = end.min(budget);
+    while !text.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    (format!("{} …[cut]", &text[..boundary]), true)
+}
+const PACKET_CAP: usize = 60_000;
+/// No kept turn is cut below this, so every kept turn can still be quoted.
+const TURN_FLOOR: usize = 200;
+/// The packet keeps every turn up to the last candidate (or the first 40) and every user turn
+/// after it, plus the result each candidate tool call got, matched by tool id. Past the byte cap
+/// it drops tool results first, then tool calls, then the agent's own words, latest first within
+/// each class; the injection, user turns, candidate turns and their results are never dropped.
+/// If those alone still exceed the cap, the longest of them are cut in place, down to
+/// `TURN_FLOOR` bytes each; only then may the packet stay above the cap.
+fn packet_turns(mut turns: Vec<Value>, candidates: &BTreeSet<usize>) -> (Vec<Value>, usize, bool) {
+    let mut elided = 0;
+    let mut truncated = false;
+    let turn_of = |t: &Value| t["turn"].as_u64().unwrap_or(0) as usize;
+    let len_of = |t: &Value| t["text"].as_str().unwrap_or("").len();
+    // A candidate tool call keeps the result it got back: that is what the agent then saw.
+    let calls: BTreeSet<String> = turns
+        .iter()
+        .filter(|t| t["speaker"] == "tool_call" && candidates.contains(&turn_of(t)))
+        .filter_map(|t| t["_id"].as_str().map(String::from))
+        .collect();
+    let mut protected = candidates.clone();
+    for t in &turns {
+        if t["speaker"] == "tool_result" && t["_id"].as_str().is_some_and(|id| calls.contains(id)) {
+            protected.insert(turn_of(t));
+        }
+    }
+    // A candidate call without an id keeps the next result, unless another call comes first.
+    for (i, t) in turns.iter().enumerate() {
+        if t["speaker"] == "tool_call" && t["_id"].is_null() && candidates.contains(&turn_of(t)) {
+            if let Some(r) = turns[i + 1..]
+                .iter()
+                .take_while(|r| r["speaker"] != "tool_call")
+                .find(|r| r["speaker"] == "tool_result")
+            {
+                protected.insert(turn_of(r));
+            }
+        }
+    }
+    let boundary = candidates.last().copied().unwrap_or(40);
+    turns.retain(|t| {
+        let keep =
+            turn_of(t) <= boundary || t["speaker"] == "user" || protected.contains(&turn_of(t));
+        elided += usize::from(!keep);
+        keep
+    });
+    let mut bytes: usize = turns.iter().map(len_of).sum();
+    if bytes > PACKET_CAP {
+        truncated = true;
+        for class in [
+            &["tool_result", "harness"][..],
+            &["tool_call"],
+            &["assistant_text", "thinking"],
+        ] {
+            for i in (0..turns.len()).rev() {
+                if bytes <= PACKET_CAP {
+                    break;
+                }
+                let speaker = turns[i]["speaker"].as_str().unwrap_or("");
+                if class.contains(&speaker) && !protected.contains(&turn_of(&turns[i])) {
+                    bytes -= len_of(&turns[i]);
+                    turns.remove(i);
+                    elided += 1;
+                }
+            }
+        }
+        // Still over: cut the longest kept turns in place, never the injection.
+        while bytes > PACKET_CAP {
+            let Some(i) = (0..turns.len())
+                .filter(|&i| turns[i]["speaker"] != "injection" && len_of(&turns[i]) > TURN_FLOOR)
+                .max_by_key(|&i| len_of(&turns[i]))
+            else {
+                break;
+            };
+            let old = len_of(&turns[i]);
+            let target = old.saturating_sub(bytes - PACKET_CAP).max(TURN_FLOOR);
+            let (cut, _) = cut_text(turns[i]["text"].as_str().unwrap_or(""), target, None);
+            bytes = bytes - old + cut.len();
+            turns[i]["text"] = json!(cut);
+        }
+    }
+    for t in &mut turns {
+        if let Some(o) = t.as_object_mut() {
+            o.remove("_id");
+        }
+    }
+    (turns, elided, truncated)
+}
 struct Window<'a> {
     rows: &'a [Value],
     visible: &'a [String],
@@ -649,7 +797,8 @@ fn scan_window(
     salt: &[u8; 32],
     claude_dir: &Path,
     want_detail: bool,
-) -> (Counts, Option<Value>) {
+    injected_text: &str,
+) -> (Counts, Option<Value>, Option<Value>) {
     let (rows, start, session) = (w.rows, w.start, w.session);
     let mut counts = Counts {
         windows: 1,
@@ -700,16 +849,35 @@ fn scan_window(
     let mut consumed = BTreeSet::new();
     let mut events = Vec::new();
     let mut turn = 0usize;
+    let mut packet_turns_raw =
+        want_detail.then(|| vec![json!({"turn":0,"speaker":"injection","text":injected_text})]);
+    let mut candidate_turns = BTreeSet::new();
     for (idx, e) in rows.iter().enumerate().take(w.end).skip(start + 1) {
         let timestamp = e["timestamp"].as_str().unwrap_or("");
-        for (kind, text) in event_texts(e) {
-            if text.is_empty() {
-                continue;
-            }
+        let mut call_turns = Vec::new();
+        for (kind, text, part_id) in event_texts(e) {
             turn += 1;
-            let lower = text.to_ascii_lowercase();
+            if kind == "tool_call" {
+                call_turns.push(turn);
+            }
+            if let Some(packet) = packet_turns_raw.as_mut() {
+                // A per-turn cut is marked in the text itself; `truncated` means the packet cap.
+                let (text, _) = cut_text(
+                    &text,
+                    if kind == "tool_result" { 600 } else { 2_000 },
+                    (kind == "tool_result").then_some(5),
+                );
+                // `_id` pairs a call with its result while trimming; it never leaves this file.
+                packet.push(json!({"turn":turn,"speaker":kind,"text":text,"_id":part_id}));
+            }
+            let matching_text = if kind == "tool_call" {
+                text.split_once(' ').map_or("", |(_, input)| input)
+            } else {
+                &text
+            };
+            let lower = matching_text.to_ascii_lowercase();
             let mut hits = Vec::new();
-            if kind == "assistant_text" || kind == "tool_call" {
+            if matches!(kind, "assistant_text" | "thinking" | "tool_call") {
                 for (id, token) in &candidates {
                     if !seen.contains(token)
                         && lower.contains(token.as_str())
@@ -732,6 +900,7 @@ fn scan_window(
                 hits.push("m3");
             }
             if want_detail && !hits.is_empty() {
+                candidate_turns.insert(turn);
                 events
                     .push(json!({"timestamp":timestamp,"turn":turn,"kind":kind,"candidates":hits}));
             }
@@ -747,7 +916,8 @@ fn scan_window(
                 }
             }
         }
-        for (name, input, use_id) in tool_calls(e) {
+        for (call_index, (name, input, use_id)) in tool_calls(e).into_iter().enumerate() {
+            let call_turn = call_turns.get(call_index).copied().unwrap_or(turn);
             let mut hits = Vec::new();
             if name == "Bash" {
                 let (use_it, status, contribution) =
@@ -786,7 +956,8 @@ fn scan_window(
                 }
             }
             if want_detail && !hits.is_empty() {
-                events.push(json!({"timestamp":timestamp,"turn":turn,"kind":"tool_call","tool":name,"candidates":hits}));
+                candidate_turns.insert(call_turn);
+                events.push(json!({"timestamp":timestamp,"turn":call_turn,"kind":"tool_call","tool":name,"candidates":hits}));
             }
         }
         if row_type(e) != "assistant" {
@@ -804,14 +975,18 @@ fn scan_window(
     counts.m2_listed_windows = usize::from(counts.m2_listed > 0);
     counts.m3_windows = usize::from(counts.m3 > 0);
     if !want_detail {
-        return (counts, None);
+        return (counts, None, None);
     }
+    let (turns, elided_turns, truncated) =
+        packet_turns(packet_turns_raw.unwrap_or_default(), &candidate_turns);
+    let packet = json!({"source":w.source,"entries":injection.entries.iter().zip(&entry_ids).map(|(e,id)| json!({"id":id,"key":e.key,"claim":e.claim})).collect::<Vec<_>>(),
+        "turns":turns,"elided_turns":elided_turns,"truncated":truncated});
     let detail = json!({"session":session,"source":w.source,"timestamp":rows[start]["timestamp"],"cwd":cwd,"project_id":hash(salt, cwd),
         "entries":injection.entries.iter().zip(&entry_ids).map(|(e, id)| json!({"id":id,"key":e.key,"claim":e.claim,"source":e.source,"line":e.line,"evidence_status":e.evidence_status,"partial":e.partial,"tokens":e.tokens})).collect::<Vec<_>>(),
         "notes":injection.notes.iter().map(|n| json!({"id":n.id,"opaque_id":hash(salt,&format!("note\0{}",n.id)),"file_name":n.file_name})).collect::<Vec<_>>(),
         "entries_left_out":injection.entries_left_out,"notes_left_out":injection.notes_left_out,"instruction_files_absent":absent,
         "events":events,"counts":counts.json()});
-    (counts, Some(detail))
+    (counts, Some(detail), Some(packet))
 }
 /// One SessionStart run: the hook_success rows of one source, until a SessionStart context
 /// attachment or a conversation turn closes it.
@@ -853,6 +1028,15 @@ pub fn scan(
     since: Option<&str>,
     private: Option<&Path>,
 ) -> Result<Value, String> {
+    scan_sample(claude_dir, since, private, 0, 0)
+}
+pub fn scan_sample(
+    claude_dir: &Path,
+    since: Option<&str>,
+    private: Option<&Path>,
+    n_rest: usize,
+    seed: u64,
+) -> Result<Value, String> {
     let since_ms = since.map(time::parse_since).transpose()?;
     if !claude_dir.is_dir() {
         return Err("--claude-dir is not a directory".into());
@@ -876,6 +1060,7 @@ pub fn scan(
     let mut unconfirmed = 0usize;
     let mut recall_runs = 0usize;
     let mut by_source: BTreeMap<String, Counts> = BTreeMap::new();
+    let mut packets = Vec::new();
     let mut min_ts: Option<i64> = None;
     let mut max_ts: Option<i64> = None;
     // `--since` keeps what is dated at or after it; an undated item is counted, never guessed.
@@ -972,17 +1157,38 @@ pub fn scan(
                 source: &source,
                 other_attachment: &other,
             };
-            let (counts, detail) = scan_window(
+            let (counts, detail, packet) = scan_window(
                 &window,
                 &parse_injection(ours),
                 &salt,
                 &claude_dir,
                 detail_file.is_some(),
+                ours,
             );
             by_source.entry(source).or_default().add(&counts);
+            let window_id = hash(&salt, &format!("{}\0{i}", path.display()));
             if let (Some(file), Some(mut detail)) = (detail_file.as_mut(), detail) {
-                detail["window_id"] = json!(hash(&salt, &format!("{}\0{i}", path.display())));
+                detail["window_id"] = json!(window_id);
                 writeln!(file, "{detail}").map_err(|e| format!("windows.jsonl: {e}"))?;
+            }
+            if let Some(mut packet) = packet {
+                let stratum = if counts.u1_consumption > 0 {
+                    "consumption"
+                } else if counts.u2
+                    + counts.u2_lookup
+                    + counts.u3
+                    + counts.m1
+                    + counts.m2
+                    + counts.m3
+                    > 0
+                {
+                    "candidate"
+                } else {
+                    "rest"
+                };
+                packet["window_id"] = json!(window_id);
+                packet["stratum"] = json!(stratum);
+                packets.push(packet);
             }
         }
         // Only an event in which our hook ran can owe an injection; the others ran someone else's.
@@ -1012,12 +1218,69 @@ pub fn scan(
         .into_iter()
         .map(|(source, counts)| (source, counts.json()))
         .collect::<BTreeMap<_, _>>();
+    let sample = if let Some(dir) = private.as_ref() {
+        let mut groups: BTreeMap<String, Vec<Value>> = BTreeMap::new();
+        for packet in packets {
+            let stratum = packet["stratum"].as_str().unwrap_or("rest").to_string();
+            groups.entry(stratum).or_default().push(packet);
+        }
+        let mut rest = groups.remove("rest").unwrap_or_default();
+        let rest_population = rest.len();
+        rest.sort_by_cached_key(|packet| {
+            let mut h = Sha256::new();
+            h.update(seed.to_string().as_bytes());
+            h.update([0]);
+            h.update(packet["window_id"].as_str().unwrap_or("").as_bytes());
+            hex(&h.finalize())
+        });
+        rest.truncate(n_rest);
+        let taken = rest.len();
+        let rest_weight = (taken > 0).then(|| rest_population as f64 / taken as f64);
+        let mut file = private_file(&dir.join("packets.jsonl"), false)
+            .map_err(|e| format!("packets.jsonl: {e}"))?;
+        let mut strata = serde_json::Map::new();
+        for name in ["consumption", "candidate", "rest"] {
+            let mut group = if name == "rest" {
+                std::mem::take(&mut rest)
+            } else {
+                groups.remove(name).unwrap_or_default()
+            };
+            let population = if name == "rest" {
+                rest_population
+            } else {
+                group.len()
+            };
+            let sampled = group.len();
+            let weight = if name == "rest" {
+                rest_weight
+            } else {
+                (sampled > 0).then_some(1.0)
+            };
+            strata.insert(
+                name.into(),
+                json!({"population":population,"sampled":sampled,"weight":weight}),
+            );
+            for packet in &mut group {
+                packet["weight"] = json!(weight);
+                writeln!(file, "{packet}").map_err(|e| format!("packets.jsonl: {e}"))?;
+            }
+        }
+        let mut prompt = private_file(&dir.join("reviewer-prompt.md"), false)
+            .map_err(|e| format!("reviewer-prompt.md: {e}"))?;
+        prompt
+            .write_all(REVIEWER_PROMPT.as_bytes())
+            .map_err(|e| format!("reviewer-prompt.md: {e}"))?;
+        let digest = hex(&Sha256::digest(REVIEWER_PROMPT.as_bytes()));
+        json!({"seed":seed,"n_rest":n_rest,"strata":strata,"prompt_sha256":digest})
+    } else {
+        Value::Null
+    };
     Ok(
         json!({"method":UPTAKE_METHOD,"since":since,"scan_bounds":{"first":min_ts.map(time::format_utc),"last":max_ts.map(time::format_utc)},
         "machine":{"id":cort::usage::machine_id(),"source":cort::usage::machine_id_source()},
         "files":{"read":files,"scanned":scanned,"unreadable":unreadable,"malformed_lines_in_scanned":malformed},"undated_skipped":{"windows":undated_windows,"hook_runs":undated_runs},
         "hook_recall_runs":recall_runs,"unconfirmed_hook_runs":unconfirmed,
-        "total":total.json(),"by_source":sources,
+        "total":total.json(),"by_source":sources,"sample":sample,
         "salt":if private.is_some() { "persistent_private" } else { "ephemeral; ids are not comparable across runs" }}),
     )
 }

@@ -1,5 +1,6 @@
-use cort_evals::uptake::scan;
+use cort_evals::uptake::{scan, scan_sample};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -618,4 +619,481 @@ fn a_refused_private_directory_is_never_created_and_the_salt_is_reused() {
         .permissions()
         .mode();
     assert_eq!(mode & 0o077, 0);
+}
+
+fn packets(dir: &Path) -> Vec<Value> {
+    fs::read_to_string(dir.join("packets.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+#[test]
+fn strata_priority_and_seeded_rest_sample() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path().join("transcripts");
+    let private = tmp.path().join("private");
+    let text = format!("{HEADER}\n- [key] `garnet_signal` (src/a.rs:3, source_unchanged)");
+    let mut rows = Vec::new();
+    for i in 0..8 {
+        rows.push(hook(0, "startup", &text));
+        rows.push(attach(1, &text, "", tmp.path()));
+        if i == 0 {
+            rows.push(tool(2, "Bash", json!({"command":"cort memory recall key"})));
+            rows.push(assistant(3, "garnet_signal"));
+        } else if i == 1 {
+            rows.push(assistant(2, "garnet_signal"));
+        } else {
+            rows.push(assistant(2, &format!("ordinary {i}")));
+        }
+    }
+    write(&rows, &root, "one.jsonl");
+    let first = scan_sample(&root, None, Some(&private), 2, 0).unwrap();
+    let first_packets = packets(&private);
+    assert_eq!(first["sample"]["strata"]["consumption"]["population"], 1);
+    assert_eq!(first["sample"]["strata"]["candidate"]["population"], 1);
+    assert_eq!(first["sample"]["strata"]["rest"]["population"], 6);
+    assert_eq!(first["sample"]["strata"]["rest"]["sampled"], 2);
+    assert_eq!(first["sample"]["strata"]["rest"]["weight"], 3.0);
+    assert_eq!(first_packets[0]["stratum"], "consumption");
+    assert_eq!(first_packets[1]["stratum"], "candidate");
+    assert_eq!(first_packets[0]["weight"], 1.0);
+    // Compared as sets: a different seed must choose different windows, not merely reorder them.
+    let ids = |rows: &[Value]| -> std::collections::BTreeSet<String> {
+        rows.iter()
+            .filter(|p| p["stratum"] == "rest")
+            .map(|p| p["window_id"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let selected = ids(&first_packets);
+    scan_sample(&root, None, Some(&private), 2, 0).unwrap();
+    assert_eq!(selected, ids(&packets(&private)));
+    scan_sample(&root, None, Some(&private), 2, 1).unwrap();
+    assert_ne!(selected, ids(&packets(&private)));
+    let public = first.to_string();
+    for packet in &first_packets {
+        assert!(!public.contains(packet["window_id"].as_str().unwrap()));
+    }
+    for secret in ["garnet_signal", "ordinary 7", "key", "src/a.rs"] {
+        assert!(!public.contains(secret), "{secret}");
+    }
+    let prompt = fs::read("prompts/memory-uptake-reviewer.md").unwrap();
+    assert_eq!(
+        first["sample"]["prompt_sha256"],
+        Sha256::digest(&prompt)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    );
+    assert_eq!(
+        fs::read(private.join("reviewer-prompt.md")).unwrap(),
+        prompt
+    );
+    use std::os::unix::fs::PermissionsExt;
+    for name in ["packets.jsonl", "reviewer-prompt.md"] {
+        assert_eq!(
+            fs::metadata(private.join(name))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
+}
+
+#[test]
+fn packet_turns_match_events_and_keep_user_after_candidate() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path().join("transcripts");
+    let private = tmp.path().join("private");
+    let text = format!("{HEADER}\n- [key] `garnet_signal` (src/a.rs:3, source_unchanged)");
+    let long_result = (1..=8)
+        .map(|n| format!("line{n} {}", "é".repeat(80)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    write(
+        &[
+            hook(0, "startup", &text),
+            attach(1, &text, "", tmp.path()),
+            user(2, "Please work on this"),
+            row(
+                "assistant",
+                3,
+                json!({"message":{"content":[
+                {"type":"thinking","thinking":"I should inspect the source"},
+                {"type":"text","text":"I will check"}]}}),
+            ),
+            row(
+                "user",
+                4,
+                json!({"message":{"content":[{"type":"tool_result","content":long_result}]}}),
+            ),
+            tool(5, "Read", json!({"file_path":"src/a.rs"})),
+            assistant(5, "later assistant text"),
+            user(6, "Please finish"),
+        ],
+        &root,
+        "one.jsonl",
+    );
+    scan_sample(&root, None, Some(&private), 0, 0).unwrap();
+    let packet = &packets(&private)[0];
+    let turns = packet["turns"].as_array().unwrap();
+    assert_eq!(
+        turns[0],
+        json!({"turn":0,"speaker":"injection","text":text})
+    );
+    assert!(turns.iter().any(|t| t["speaker"] == "thinking"));
+    assert_eq!(
+        turns.iter().find(|t| t["speaker"] == "tool_call").unwrap()["text"],
+        "Read src/a.rs"
+    );
+    let result = turns
+        .iter()
+        .find(|t| t["speaker"] == "tool_result")
+        .unwrap();
+    assert!(result["text"].as_str().unwrap().lines().count() <= 5);
+    assert!(result["text"].as_str().unwrap().len() <= 600);
+    assert!(result["text"].as_str().unwrap().ends_with(" …[cut]"));
+    assert!(turns.iter().any(|t| t["text"] == "Please finish"));
+    assert!(!turns.iter().any(|t| t["text"] == "later assistant text"));
+    assert_eq!(packet["elided_turns"], 1);
+    let detail: Value = serde_json::from_str(
+        fs::read_to_string(private.join("windows.jsonl"))
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap(),
+    )
+    .unwrap();
+    for event in detail["events"].as_array().unwrap() {
+        let turn = event["turn"].as_u64().unwrap();
+        let at = turns.iter().find(|t| t["turn"] == turn);
+        assert_eq!(
+            at.map(|t| &t["speaker"]),
+            Some(&event["kind"]),
+            "event turn {turn}"
+        );
+    }
+}
+
+#[test]
+fn packet_cap_keeps_candidates_and_drops_the_latest_others() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path().join("transcripts");
+    let private = tmp.path().join("private");
+    let text = format!("{HEADER}\n- [key] `garnet_signal` (src/a.rs:3, source_unchanged)");
+    let mut rows = vec![hook(0, "startup", &text), attach(1, &text, "", tmp.path())];
+    for _ in 0..35 {
+        rows.push(assistant(2, &"x".repeat(1900)));
+    }
+    rows.push(user(3, "keep this user turn"));
+    rows.push(assistant(4, "garnet_signal"));
+    write(&rows, &root, "one.jsonl");
+    scan_sample(&root, None, Some(&private), 0, 0).unwrap();
+    let packet = &packets(&private)[0];
+    assert_eq!(packet["truncated"], true);
+    assert!(packet["elided_turns"].as_u64().unwrap() > 0);
+    let turns = packet["turns"].as_array().unwrap();
+    assert!(turns.iter().any(|t| t["text"] == "keep this user turn"));
+    assert!(
+        turns
+            .iter()
+            .map(|t| t["text"].as_str().unwrap().len())
+            .sum::<usize>()
+            <= 60_000
+    );
+    assert!(turns.iter().any(|t| t["turn"] == 1));
+    assert!(turns.iter().any(|t| t["turn"] == 37));
+    assert!(!turns.iter().any(|t| t["turn"] == 35));
+}
+
+#[test]
+fn thinking_is_agent_reuse_and_keeps_its_speaker() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path().join("transcripts");
+    let private = tmp.path().join("private");
+    let text = format!("{HEADER}\n- [key] `garnet_signal` (src/a.rs:3, source_unchanged)");
+    write(
+        &[
+            hook(0, "startup", &text),
+            attach(1, &text, "", tmp.path()),
+            row(
+                "assistant",
+                2,
+                json!({"message":{"content":[{"type":"thinking","thinking":"I remember garnet_signal"}]}}),
+            ),
+        ],
+        &root,
+        "one.jsonl",
+    );
+    let report = scan_sample(&root, None, Some(&private), 0, 0).unwrap();
+    assert_eq!(report["total"]["u2"]["events"], 1);
+    let packet = &packets(&private)[0];
+    assert_eq!(packet["stratum"], "candidate");
+    assert_eq!(packet["turns"][1]["speaker"], "thinking");
+    let detail: Value = serde_json::from_str(
+        fs::read_to_string(private.join("windows.jsonl"))
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(detail["events"][0]["turn"], packet["turns"][1]["turn"]);
+}
+
+#[test]
+fn sample_without_private_is_rejected() {
+    let tmp = tempdir().unwrap();
+    for flag in ["--sample", "--seed"] {
+        let result = std::process::Command::new(env!("CARGO_BIN_EXE_cort-evals"))
+            .args([
+                "memory-uptake",
+                "--claude-dir",
+                tmp.path().to_str().unwrap(),
+                flag,
+                "1",
+            ])
+            .output()
+            .unwrap();
+        assert!(!result.status.success(), "{flag}");
+        assert!(String::from_utf8_lossy(&result.stderr).contains("require --private"));
+    }
+}
+
+#[test]
+fn a_cut_turn_is_marked_in_place_and_harness_text_is_not_a_tool_artifact() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path().join("transcripts");
+    let private = tmp.path().join("private");
+    let text = format!("{HEADER}\n- [key] `garnet_signal` (src/a.rs:3, source_unchanged)");
+    let long = (0..9)
+        .map(|i| format!("line {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    write(
+        &[
+            hook(0, "startup", &text),
+            attach(1, &text, "", tmp.path()),
+            row(
+                "user",
+                2,
+                json!({"message":{"content":[
+                    {"type":"tool_result","tool_use_id":"t1","content":long},
+                    {"type":"text","text":"harness note"}
+                ]}}),
+            ),
+            assistant(3, "garnet_signal"),
+        ],
+        &root,
+        "one.jsonl",
+    );
+    scan_sample(&root, None, Some(&private), 0, 0).unwrap();
+    let packet = &packets(&private)[0];
+    assert_eq!(packet["truncated"], false);
+    let turns = packet["turns"].as_array().unwrap();
+    assert!(turns[1]["text"].as_str().unwrap().ends_with(" …[cut]"));
+    assert!(!turns[1]["text"].as_str().unwrap().contains("line 5"));
+    assert_eq!(turns[2]["text"], "harness note");
+    assert_eq!(turns[2]["speaker"], "harness");
+}
+
+#[test]
+fn the_cap_drops_tool_results_before_the_agents_words() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path().join("transcripts");
+    let private = tmp.path().join("private");
+    let text = format!("{HEADER}\n- [key] `garnet_signal` (src/a.rs:3, source_unchanged)");
+    let mut rows = vec![hook(0, "startup", &text), attach(1, &text, "", tmp.path())];
+    for i in 0..60 {
+        rows.push(row(
+            "user",
+            2,
+            json!({"message":{"content":[{"type":"tool_result","tool_use_id":format!("t{i}"),"content":"y".repeat(700)}]}}),
+        ));
+    }
+    for _ in 0..20 {
+        rows.push(assistant(3, &"z".repeat(1900)));
+    }
+    rows.push(assistant(4, "now garnet_signal"));
+    write(&rows, &root, "one.jsonl");
+    scan_sample(&root, None, Some(&private), 0, 0).unwrap();
+    let packet = &packets(&private)[0];
+    assert_eq!(packet["truncated"], true);
+    let turns = packet["turns"].as_array().unwrap();
+    let count = |speaker: &str| turns.iter().filter(|t| t["speaker"] == speaker).count();
+    assert_eq!(count("assistant_text"), 21);
+    assert!(count("tool_result") < 60);
+    assert!(turns.iter().any(|t| t["text"] == "now garnet_signal"));
+}
+
+#[test]
+fn a_candidate_call_keeps_its_result_past_the_last_candidate() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path().join("transcripts");
+    let private = tmp.path().join("private");
+    let text = format!("{HEADER}\n- [key] claim (src/a.rs:3, source_unchanged)");
+    write(
+        &[
+            hook(0, "startup", &text),
+            attach(1, &text, "", tmp.path()),
+            row(
+                "assistant",
+                2,
+                json!({"message":{"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"cort memory recall topic"}}]}}),
+            ),
+            row(
+                "user",
+                3,
+                json!({"message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"recall answer"}]}}),
+            ),
+            assistant(4, "after the result"),
+        ],
+        &root,
+        "one.jsonl",
+    );
+    scan_sample(&root, None, Some(&private), 0, 0).unwrap();
+    let turns = packets(&private)[0]["turns"].as_array().unwrap().clone();
+    assert!(turns.iter().any(|t| t["text"] == "recall answer"));
+    assert!(!turns.iter().any(|t| t["text"] == "after the result"));
+}
+
+fn call(second: usize, id: &str, command: &str) -> Value {
+    row(
+        "assistant",
+        second,
+        json!({"message":{"content":[{"type":"tool_use","id":id,"name":"Bash","input":{"command":command}}]}}),
+    )
+}
+fn result(second: usize, id: &str, body: &str) -> Value {
+    row(
+        "user",
+        second,
+        json!({"message":{"content":[{"type":"tool_result","tool_use_id":id,"content":body}]}}),
+    )
+}
+
+#[test]
+fn a_candidate_call_keeps_its_own_result_not_the_next_one() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path().join("transcripts");
+    let private = tmp.path().join("private");
+    let text = format!("{HEADER}\n- [key] claim (src/a.rs:3, source_unchanged)");
+    write(
+        &[
+            hook(0, "startup", &text),
+            attach(1, &text, "", tmp.path()),
+            call(2, "t1", "cort memory recall topic"),
+            call(3, "t2", "ls"),
+            result(4, "t2", "listing of t2"),
+            result(5, "t1", "recall answer of t1"),
+        ],
+        &root,
+        "one.jsonl",
+    );
+    scan_sample(&root, None, Some(&private), 0, 0).unwrap();
+    let turns = packets(&private)[0]["turns"].as_array().unwrap().clone();
+    assert!(turns.iter().any(|t| t["text"] == "recall answer of t1"));
+    assert!(!turns.iter().any(|t| t["text"] == "listing of t2"));
+    assert!(turns.iter().all(|t| t.get("_id").is_none()));
+}
+
+#[test]
+fn protected_turns_alone_are_cut_in_place_to_fit_the_cap() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path().join("transcripts");
+    let private = tmp.path().join("private");
+    let tags = (0..40).map(|i| format!("`tag_{i:02}`")).collect::<Vec<_>>();
+    let text = format!(
+        "{HEADER}\n- [key] {} (src/a.rs:3, source_unchanged)",
+        tags.join(" ")
+    );
+    let mut rows = vec![hook(0, "startup", &text), attach(1, &text, "", tmp.path())];
+    for i in 0..40 {
+        rows.push(assistant(2, &format!("tag_{i:02} {}", "w".repeat(1890))));
+    }
+    write(&rows, &root, "one.jsonl");
+    scan_sample(&root, None, Some(&private), 0, 0).unwrap();
+    let packet = &packets(&private)[0];
+    let turns = packet["turns"].as_array().unwrap();
+    assert_eq!(packet["truncated"], true);
+    assert_eq!(turns.len(), 41);
+    let bytes: usize = turns
+        .iter()
+        .map(|t| t["text"].as_str().unwrap().len())
+        .sum();
+    assert!(bytes <= 60_000, "{bytes}");
+    assert!(turns
+        .iter()
+        .all(|t| t["text"].as_str().unwrap().len() >= 190));
+}
+
+#[test]
+fn a_whitespace_only_turn_takes_no_number() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path().join("transcripts");
+    let private = tmp.path().join("private");
+    let text = format!("{HEADER}\n- [key] `garnet_signal` (src/a.rs:3, source_unchanged)");
+    write(
+        &[
+            hook(0, "startup", &text),
+            attach(1, &text, "", tmp.path()),
+            assistant(2, "  \n"),
+            assistant(3, "garnet_signal"),
+        ],
+        &root,
+        "one.jsonl",
+    );
+    scan_sample(&root, None, Some(&private), 0, 0).unwrap();
+    let turns = packets(&private)[0]["turns"].as_array().unwrap().clone();
+    assert_eq!(turns.len(), 2);
+    assert_eq!(turns[1]["turn"], 1);
+    assert_eq!(turns[1]["text"], "garnet_signal");
+}
+
+#[test]
+fn an_id_less_candidate_call_keeps_the_next_result_and_a_nameless_part_takes_no_turn() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path().join("transcripts");
+    let private = tmp.path().join("private");
+    let text = format!("{HEADER}\n- [key] claim (src/a.rs:3, source_unchanged)");
+    write(
+        &[
+            hook(0, "startup", &text),
+            attach(1, &text, "", tmp.path()),
+            row(
+                "assistant",
+                2,
+                json!({"message":{"content":[
+                    {"type":"tool_use","name":"","input":{}},
+                    {"type":"tool_use","name":"Bash","input":{"command":"cort memory recall topic"}}
+                ]}}),
+            ),
+            row(
+                "user",
+                3,
+                json!({"message":{"content":[{"type":"tool_result","content":"recall answer"}]}}),
+            ),
+            assistant(4, "after the result"),
+        ],
+        &root,
+        "one.jsonl",
+    );
+    scan_sample(&root, None, Some(&private), 0, 0).unwrap();
+    let turns = packets(&private)[0]["turns"].as_array().unwrap().clone();
+    assert_eq!(turns[1]["turn"], 1);
+    assert_eq!(turns[1]["speaker"], "tool_call");
+    assert!(turns.iter().any(|t| t["text"] == "recall answer"));
+    assert!(!turns.iter().any(|t| t["text"] == "after the result"));
+    let detail: Value = serde_json::from_str(
+        fs::read_to_string(private.join("windows.jsonl"))
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(detail["events"][0]["turn"], 1);
 }
