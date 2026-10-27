@@ -43,6 +43,28 @@ impl Fixture {
             .unwrap()
             .status
             .success());
+        fs::write(root.join("decision.md"), "a decision\n").unwrap();
+        assert!(Command::new("git")
+            .current_dir(&root)
+            .args(["add", "decision.md"])
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .current_dir(&root)
+            .args([
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "-m",
+                "source"
+            ])
+            .output()
+            .unwrap()
+            .status
+            .success());
         fs::write(
             data.join("turso-memory.json"),
             json!({"url":url,"token":"test"}).to_string(),
@@ -121,7 +143,7 @@ impl SilentServer {
             Err(error) => panic!("cannot bind local listener: {error}"),
         };
         listener.set_nonblocking(true).unwrap();
-        let url = format!("http://{}", listener.local_addr().unwrap());
+        let url = format!("https://{}", listener.local_addr().unwrap());
         let stop = Arc::new(AtomicBool::new(false));
         let done = Arc::clone(&stop);
         let thread = std::thread::spawn(move || {
@@ -206,21 +228,51 @@ fn silent_server_bounds_notes_upload_and_releases_lock() {
 }
 
 #[test]
-fn silent_server_bounds_sync_and_recall() {
+fn silent_server_bounds_check_and_recall() {
     let Some(server) = SilentServer::new() else {
         return;
     };
     let fixture = Fixture::new(server.url.clone());
-    let (output, value, elapsed) = fixture.run(&["memory", "sync"], "1");
-    bounded_failure(&output, &value, elapsed);
+    let (output, value, elapsed) = fixture.run(&["memory", "check"], "1");
+    assert!(!output.status.success(), "{value}");
+    assert!(elapsed < Duration::from_secs(10));
+    assert_eq!(value["error"], "memory_remote_unavailable");
+    assert_eq!(value["detail"].as_object().unwrap().len(), 2);
+    assert_eq!(
+        value["detail"]["message"],
+        format!("remote: {}", value["detail"]["remote"].as_str().unwrap())
+    );
     let (output, value, elapsed) = fixture.run(&["memory", "recall", "x"], "1");
     assert!(elapsed < Duration::from_secs(10), "{elapsed:?}: {value}");
-    if output.status.success() {
-        assert_eq!(value["sync_status"], "offline_or_pending", "{value}");
-    } else {
-        // A fresh replica times out while bootstrapping, before the best-effort push.
-        bounded_failure(&output, &value, elapsed);
-    }
+    assert!(!output.status.success(), "{value}");
+    assert_eq!(value["error"], "memory_remote_unavailable");
+}
+
+#[test]
+fn record_failure_is_not_recorded_and_sync_is_rejected() {
+    let fixture = Fixture::new("turso://127.0.0.1:9".into());
+    let (output, value, elapsed) = fixture.run(
+        &[
+            "memory",
+            "record",
+            "--key",
+            "choice",
+            "--claim",
+            "A",
+            "--source",
+            "decision.md",
+            "--line",
+            "1",
+        ],
+        "1",
+    );
+    assert!(!output.status.success(), "{value}");
+    assert!(elapsed < Duration::from_secs(10));
+    assert_eq!(value["error"], "memory_not_recorded");
+    let kind = value["detail"]["kind"].as_str().unwrap();
+    assert_eq!(value["detail"]["message"], format!("not recorded: {kind}; nothing was saved locally; re-run the same command when the database is reachable"));
+    let (output, value, _) = fixture.run(&["memory", "sync"], "1");
+    assert!(!output.status.success(), "{value}");
 }
 
 #[test]
@@ -242,60 +294,4 @@ fn sub_second_lock_wait_is_reported_as_given() {
         "{value}"
     );
     assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
-}
-
-/// A replica that already synced opens without the network, so the deadline fires on the
-/// best-effort push or pull instead; the read after it must still answer from local entries.
-#[test]
-fn synced_replica_answers_locally_after_a_sync_timeout() {
-    let Some(server) = SilentServer::new() else {
-        return;
-    };
-    let fixture = Fixture::new(server.url.clone());
-    let path = fixture.lock_path().with_file_name("memory.db");
-    fs::create_dir_all(path.parent().unwrap()).unwrap();
-    // The id `CORT_MEMORY_PROJECT=deadline-test` resolves to.
-    let project: String = Sha256::digest(b"deadline-test")
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    runtime.block_on(async {
-        let db = turso::sync::Builder::new_remote(path.to_str().unwrap())
-            .with_remote_url(&fixture.url)
-            .with_auth_token("test")
-            .bootstrap_if_empty(false)
-            .build()
-            .await
-            .unwrap();
-        let conn = db.connect().await.unwrap();
-        conn.execute("CREATE TABLE project_memory (project TEXT NOT NULL, id TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY (project,id))", ())
-            .await
-            .unwrap();
-        let body = json!({"id":"id-1","key":"deadline","claim":"deadline claim","source":"docs/decision.md","source_line":1,"source_sha256":"missing","recorded_at":"2026-10-27","supersedes":null}).to_string();
-        conn.execute(
-            "INSERT INTO project_memory (project,id,body) VALUES (?,?,?)",
-            (project.as_str(), "id-1", body.as_str()),
-        )
-        .await
-        .unwrap();
-    });
-    let info = path.with_file_name("memory.db-info");
-    let mut metadata: Value = serde_json::from_slice(&fs::read(&info).unwrap()).unwrap();
-    metadata["synced_revision"] = json!({"type":"v1","revision":"test-revision"});
-    fs::write(info, metadata.to_string()).unwrap();
-
-    let (output, value, elapsed) = fixture.run(&["memory", "recall", "deadline"], "1");
-    assert!(output.status.success(), "{value}");
-    assert!(elapsed < Duration::from_secs(10), "{elapsed:?}: {value}");
-    assert_eq!(value["sync_status"], "offline_or_pending", "{value}");
-    assert_eq!(value["hits"][0]["id"], "id-1", "{value}");
-    let (output, value, elapsed) = fixture.run(&["memory", "status"], "1");
-    assert!(output.status.success(), "{value}");
-    assert!(elapsed < Duration::from_secs(10), "{elapsed:?}: {value}");
-    assert_eq!(value["sync_status"], "offline_or_pending", "{value}");
-    assert_eq!(value["total_entries"], 1, "{value}");
 }

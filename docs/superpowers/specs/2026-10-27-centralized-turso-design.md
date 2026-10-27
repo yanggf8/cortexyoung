@@ -228,6 +228,13 @@ gwebcdb 的 `crates/bridge-core/src/turso.rs` 已經用 Rust 直連 Turso，`pri
   - **寫入成功、但寫後重讀失敗**（例如讀取被封鎖）：`committed_unverified: <kind>`，exit code 不是 0，
     印出寫入的 id，請人在可讀時跑 `memory check` 確認。這時不能說「沒記錄」。
   - 成功，或 conflict。
+- 寫入本身逾時、連不上，或回 `sql`（回應無法解碼、形狀不對，或 5xx 的 body 帶 `SQLITE_*` 碼）時
+  （`timeout`／`unreachable`／`sql`），請求可能已經提交，所以先重讀那個 id 再決定（C3a-1 補上）：
+  - 讀到那個 id，就當作已提交，照常檢查 conflict；
+  - 讀不到那個 id，就是「寫入失敗」；
+  - 重讀也失敗時回 `outcome unknown: <kind>`，exit code 不是 0，印出 id，請人先用 `memory recall` 查過再
+    重跑。這時「沒記錄」與「已提交」都不能說。
+  - 寫入前的預讀失敗時，還沒有送出任何寫入，一律算「寫入失敗」。離線時最常走到的就是這一條。
 - 不增加本機待寫佇列。安全網是 `record` 原有的規則：來源行必須已經 commit。
 - `memory check`：
   - 讀得到時，印 entry 數與 conflict；

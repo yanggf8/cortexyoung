@@ -3,6 +3,7 @@
 
 use crate::memory::{self, MemoryEntry, MemoryLedger, MemoryRecall};
 use crate::network_timeout::NetworkGuard;
+use crate::remote::{Cell, ErrorKind, RemoteDb, Stmt, Transport, UreqTransport};
 use crate::{notes, notes_upload, usage};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -24,10 +25,101 @@ pub struct MemoryStatus {
     pub project_id: String,
     pub project_id_source: &'static str,
     pub database_url: String,
-    pub sync_status: &'static str,
+    pub remote: &'static str,
     pub total_entries: usize,
     pub active_entries: usize,
     pub conflicts: Vec<MemoryConflict>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum LedgerError {
+    Message(String),
+    Remote(ErrorKind),
+    NotRecorded {
+        kind: ErrorKind,
+    },
+    CommittedUnverified {
+        id: Option<String>,
+        kind: ErrorKind,
+    },
+    OutcomeUnknown {
+        id: Option<String>,
+        key: Option<String>,
+        kind: ErrorKind,
+    },
+    SupersedesMissing {
+        superseded: Vec<String>,
+    },
+    Conflict {
+        id: String,
+        key: String,
+        active_ids: Vec<String>,
+    },
+}
+
+impl From<String> for LedgerError {
+    fn from(value: String) -> Self {
+        Self::Message(value)
+    }
+}
+
+impl From<&str> for LedgerError {
+    fn from(value: &str) -> Self {
+        Self::Message(value.into())
+    }
+}
+
+pub struct Ledger {
+    db: RemoteDb,
+}
+
+impl Ledger {
+    pub fn open() -> Result<Self, LedgerError> {
+        let config = config()?;
+        let timeout =
+            Duration::from_millis(crate::collect::CollectConfig::from_env().net_timeout_ms);
+        Self::with_transport(
+            &config.url,
+            &config.token,
+            Box::new(UreqTransport { timeout }),
+        )
+    }
+
+    #[doc(hidden)]
+    pub fn with_transport(
+        url: &str,
+        token: &str,
+        transport: Box<dyn Transport>,
+    ) -> Result<Self, LedgerError> {
+        Ok(Self {
+            db: RemoteDb::new(url, token, transport).map_err(|e| LedgerError::Remote(e.kind))?,
+        })
+    }
+
+    fn read_bodies(&self, project: &str) -> Result<Vec<String>, LedgerError> {
+        let results = self
+            .db
+            .pipeline(&[
+                Stmt::new(CREATE_TABLE, vec![]),
+                Stmt::new(
+                    "SELECT body FROM project_memory WHERE project = ?",
+                    vec![Cell::Text(project.into())],
+                ),
+            ])
+            .map_err(|e| LedgerError::Remote(e.kind))?;
+        results[1]
+            .rows
+            .iter()
+            .map(|row| match row.first() {
+                Some(Cell::Text(body)) => Ok(body.clone()),
+                _ => Err(LedgerError::Message("invalid remote memory row".into())),
+            })
+            .collect()
+    }
+
+    pub fn read(&self, project: &str) -> Result<MemoryLedger, LedgerError> {
+        ledger_from_bodies(self.read_bodies(project)?).map_err(LedgerError::Message)
+    }
 }
 
 #[derive(Deserialize, Serialize)]
@@ -228,35 +320,6 @@ pub(crate) fn runtime() -> Result<tokio::runtime::Runtime, String> {
         .map_err(|e| e.to_string())
 }
 
-async fn open(config: &Config) -> Result<turso::sync::Database, String> {
-    open_replica(config, "memory.db").await
-}
-
-/// Read the ledger after a best-effort push and pull. After a timeout the in-flight future was
-/// dropped, possibly in the middle of a pull's replace-base apply, so that handle is not read
-/// again: the replica is reopened through the same guards `hook-recall` uses, which refuse the
-/// half-applied state that the next ordinary open recovers. turso has no awaitable close, so a
-/// write the dropped pull had already queued can still land while the guards run; that ends in a
-/// refusal here, never in a read through the old handle.
-async fn read_after_sync(
-    config: &Config,
-    db: turso::sync::Database,
-    conn: turso::Connection,
-    net: &NetworkGuard,
-    project: &str,
-) -> Result<MemoryLedger, String> {
-    if net.check().is_ok() {
-        return read_ledger(&conn, project).await;
-    }
-    drop(conn);
-    drop(db);
-    let db = open_guarded_replica(config).await.map_err(|reason| {
-        format!("network timeout during sync, then the local replica was refused for a read ({reason:?})")
-    })?;
-    let conn = db.connect().await.map_err(|e| e.to_string())?;
-    read_ledger(&conn, project).await
-}
-
 fn network_guard() -> NetworkGuard {
     NetworkGuard::new(Duration::from_millis(
         crate::collect::CollectConfig::from_env().net_timeout_ms,
@@ -265,14 +328,8 @@ fn network_guard() -> NetworkGuard {
 
 async fn open_network(config: &Config) -> Result<(turso::sync::Database, NetworkGuard), String> {
     let mut net = network_guard();
-    let db = net.run(open(config)).await?;
+    let db = net.run(open_replica(config, "memory.db")).await?;
     Ok((db, net))
-}
-
-/// Keep the context even on a timeout: "saved locally but push failed" is what tells the caller
-/// the write is not lost, and a timeout is when that matters most.
-fn network_context(error: String, context: &str) -> String {
-    format!("{context}: {error}")
 }
 
 async fn open_replica(config: &Config, file: &str) -> Result<turso::sync::Database, String> {
@@ -306,11 +363,6 @@ pub(crate) async fn open_replica_in(
         .await
         .map_err(|e| format!("cannot open Turso sync replica: {e}"))
 }
-async fn read_ledger(conn: &turso::Connection, project: &str) -> Result<MemoryLedger, String> {
-    ensure_schema(conn).await?;
-    read_existing_ledger(conn, project).await
-}
-
 async fn read_existing_ledger(
     conn: &turso::Connection,
     project: &str,
@@ -322,9 +374,17 @@ async fn read_existing_ledger(
         )
         .await
         .map_err(|e| e.to_string())?;
-    let mut ledger = MemoryLedger::default();
+    let mut bodies = Vec::new();
     while let Some(row) = rows.next().await.map_err(|e| e.to_string())? {
         let body: String = row.get(0).map_err(|e| e.to_string())?;
+        bodies.push(body);
+    }
+    ledger_from_bodies(bodies)
+}
+
+fn ledger_from_bodies(bodies: Vec<String>) -> Result<MemoryLedger, String> {
+    let mut ledger = MemoryLedger::default();
+    for body in bodies {
         ledger.entries.push(
             serde_json::from_str(&body).map_err(|e| format!("invalid remote memory row: {e}"))?,
         );
@@ -350,6 +410,104 @@ async fn read_existing_ledger(
     }
     memory::validate(&ledger)?;
     Ok(ledger)
+}
+
+fn not_recorded_read(error: LedgerError) -> LedgerError {
+    match error {
+        LedgerError::Remote(kind) => LedgerError::NotRecorded { kind },
+        other => other,
+    }
+}
+
+/// Whether a failed write may still have committed. Timeout and Unreachable can arrive after the
+/// server applied the statement; so can `Sql`, which also names an undecodable or mis-shaped
+/// response and a 5xx whose body carries an `SQLITE_*` code. The other kinds are refusals the
+/// server reports before or instead of applying it.
+fn outcome_unknown(kind: ErrorKind) -> bool {
+    matches!(
+        kind,
+        ErrorKind::Timeout | ErrorKind::Unreachable | ErrorKind::Sql
+    )
+}
+
+fn entry_args(project: &str, entry: &MemoryEntry) -> Result<Vec<Cell>, LedgerError> {
+    let body = serde_json::to_string(entry).map_err(|e| LedgerError::Message(e.to_string()))?;
+    Ok(vec![
+        Cell::Text(project.into()),
+        Cell::Text(entry.id.clone()),
+        Cell::Text(body),
+    ])
+}
+
+impl Ledger {
+    fn write_checked(
+        &self,
+        project: &str,
+        entry: &MemoryEntry,
+        sql: &str,
+        args: Vec<Cell>,
+        superseded: &[String],
+        resolution: bool,
+    ) -> Result<(), LedgerError> {
+        match self.db.execute(sql, args) {
+            Ok(result) if result.affected_row_count == 1 => {}
+            Ok(result) if result.affected_row_count == 0 => {
+                return if superseded.is_empty() {
+                    Err(LedgerError::Message("insert affected no row".into()))
+                } else {
+                    Err(LedgerError::SupersedesMissing {
+                        superseded: superseded.to_vec(),
+                    })
+                };
+            }
+            Ok(_) => {
+                return Err(LedgerError::Message(
+                    "insert affected more than one row".into(),
+                ))
+            }
+            Err(error) if outcome_unknown(error.kind) => match self.read(project) {
+                Ok(after) if after.entries.iter().any(|item| item.id == entry.id) => {}
+                Ok(_) => return Err(LedgerError::NotRecorded { kind: error.kind }),
+                Err(_) => {
+                    return Err(LedgerError::OutcomeUnknown {
+                        id: Some(entry.id.clone()),
+                        key: Some(entry.key.clone()),
+                        kind: error.kind,
+                    })
+                }
+            },
+            Err(error) => return Err(LedgerError::NotRecorded { kind: error.kind }),
+        }
+        let after = match self.read(project) {
+            Ok(after) => after,
+            Err(LedgerError::Remote(kind)) => {
+                return Err(LedgerError::CommittedUnverified {
+                    id: Some(entry.id.clone()),
+                    kind,
+                })
+            }
+            Err(LedgerError::Message(message)) => {
+                return Err(LedgerError::Message(format!(
+                    "{} was committed, but the ledger read back is invalid: {message}",
+                    entry.id
+                )))
+            }
+            Err(other) => return Err(other),
+        };
+        let active_ids: Vec<_> = memory::active_entries(&after)
+            .into_iter()
+            .filter(|item| item.key == entry.key)
+            .map(|item| item.id.clone())
+            .collect();
+        if (resolution && active_ids.len() != 1) || (!resolution && active_ids.len() > 1) {
+            return Err(LedgerError::Conflict {
+                id: entry.id.clone(),
+                key: entry.key.clone(),
+                active_ids,
+            });
+        }
+        Ok(())
+    }
 }
 
 /// A session hook reads only a locally synced replica. The metadata guard excludes the
@@ -671,48 +829,6 @@ pub fn notes_show(note_id: &str) -> Result<Value, String> {
     })
 }
 
-async fn ensure_schema(conn: &turso::Connection) -> Result<(), String> {
-    conn.execute(CREATE_TABLE, ())
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-async fn insert(
-    conn: &turso::Connection,
-    project: &str,
-    entry: &MemoryEntry,
-) -> Result<(), String> {
-    let body = serde_json::to_string(entry).map_err(|e| e.to_string())?;
-    let inserted = conn
-        .execute(
-            "INSERT OR IGNORE INTO project_memory (project, id, body) VALUES (?, ?, ?)",
-            (project, entry.id.as_str(), body.as_str()),
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-    if inserted == 0 {
-        let mut rows = conn
-            .query(
-                "SELECT body FROM project_memory WHERE project = ? AND id = ?",
-                (project, entry.id.as_str()),
-            )
-            .await
-            .map_err(|e| e.to_string())?;
-        let old: String = rows
-            .next()
-            .await
-            .map_err(|e| e.to_string())?
-            .ok_or("memory id conflict without an existing row")?
-            .get(0)
-            .map_err(|e| e.to_string())?;
-        if !same_claim(&old, &body) {
-            return Err("memory id collision with different content".into());
-        }
-    }
-    Ok(())
-}
-
 /// Whether two stored bodies describe the same claim. A client that predates the machine stamp
 /// drops it when it re-serializes a row, so the same id can legitimately arrive with and without
 /// it. Only that absence is forgiven: two stamps that are both present must agree, and everything
@@ -738,20 +854,6 @@ fn same_claim(a: &str, b: &str) -> bool {
     x == y
 }
 
-fn with_lock<T>(
-    action: impl FnOnce(Config, String) -> Result<T, String>,
-    root: &Path,
-) -> Result<T, String> {
-    with_store_lock(|config| {
-        let project = project(root)?;
-        action(config, project)
-    })
-}
-
-fn with_store_lock<T>(action: impl FnOnce(Config) -> Result<T, String>) -> Result<T, String> {
-    with_named_lock("memory.lock", action)
-}
-
 pub fn notes_lock_wait() -> Duration {
     std::env::var("CORT_MEMORY_LOCK_WAIT_SECS")
         .ok()
@@ -773,15 +875,6 @@ fn with_notes_lock<T>(
         })?;
     action(config)
 }
-fn with_named_lock<T>(
-    name: &str,
-    action: impl FnOnce(Config) -> Result<T, String>,
-) -> Result<T, String> {
-    let config = config()?;
-    let _lock = lock_in("turso-memory", &config, name)?;
-    action(config)
-}
-
 /// Hold the lock under `locks/`, plus its old location while that directory exists.
 pub(crate) struct StoreLock {
     _old: Option<fs::File>,
@@ -936,74 +1029,55 @@ mod lock_tests {
     }
 }
 
-pub fn recall(root: &Path, query: &str) -> Result<MemoryRecall, String> {
-    with_lock(
-        |config, project| {
-            runtime()?.block_on(async {
-                let (db, mut net) = open_network(&config).await?;
-                let conn = db.connect().await.map_err(|e| e.to_string())?;
-                ensure_schema(&conn).await?;
-                let pushed = net.run(db.push()).await.is_ok();
-                let pulled = net.check().is_ok() && net.run(db.pull()).await.is_ok();
-                let ledger = read_after_sync(&config, db, conn, &net, &project).await?;
-                let present = !ledger.entries.is_empty();
-                let status = if pushed && pulled {
-                    "synced"
-                } else {
-                    "offline_or_pending"
-                };
-                Ok(memory::recall_ledger(
-                    root,
-                    query,
-                    &ledger,
-                    present,
-                    Some(status.into()),
-                ))
-            })
-        },
-        root,
-    )
+pub fn recall(root: &Path, query: &str) -> Result<MemoryRecall, LedgerError> {
+    let ledger = Ledger::open()?;
+    recall_with(root, query, &ledger)
 }
 
-pub fn status(root: &Path) -> Result<MemoryStatus, String> {
-    with_lock(
-        |config, project| {
-            runtime()?.block_on(async {
-                let (db, mut net) = open_network(&config).await?;
-                let conn = db.connect().await.map_err(|e| e.to_string())?;
-                ensure_schema(&conn).await?;
-                let pushed = net.run(db.push()).await.is_ok();
-                let pulled = net.check().is_ok() && net.run(db.pull()).await.is_ok();
-                let ledger = read_after_sync(&config, db, conn, &net, &project).await?;
-                let active = memory::active_entries(&ledger);
-                let mut by_key = std::collections::BTreeMap::<String, Vec<String>>::new();
-                for entry in &active {
-                    by_key
-                        .entry(entry.key.clone())
-                        .or_default()
-                        .push(entry.id.clone());
-                }
-                let conflicts = by_key
-                    .into_iter()
-                    .filter(|(_, ids)| ids.len() > 1)
-                    .map(|(key, active_ids)| MemoryConflict { key, active_ids })
-                    .collect();
-                Ok(MemoryStatus {
-                    project_id: project,
-                    project_id_source: project_source(),
-                    database_url: config.url,
-                    sync_status: if pushed && pulled {
-                        "synced"
-                    } else {
-                        "offline_or_pending"
-                    },
-                    total_entries: ledger.entries.len(),
-                    active_entries: active.len(),
-                    conflicts,
-                })
-            })
-        },
-        root,
+pub fn recall_with(root: &Path, query: &str, ledger: &Ledger) -> Result<MemoryRecall, LedgerError> {
+    let entries = ledger.read(&project(root)?)?;
+    let present = !entries.entries.is_empty();
+    Ok(memory::recall_ledger(root, query, &entries, present, None))
+}
+
+fn conflicts(ledger: &MemoryLedger) -> Vec<MemoryConflict> {
+    let mut by_key = std::collections::BTreeMap::<String, Vec<String>>::new();
+    for entry in memory::active_entries(ledger) {
+        by_key
+            .entry(entry.key.clone())
+            .or_default()
+            .push(entry.id.clone());
+    }
+    by_key
+        .into_iter()
+        .filter(|(_, ids)| ids.len() > 1)
+        .map(|(key, active_ids)| MemoryConflict { key, active_ids })
+        .collect()
+}
+
+pub fn status(root: &Path) -> Result<MemoryStatus, LedgerError> {
+    let config = config()?;
+    let ledger = Ledger::open()?;
+    let project = project(root)?;
+    let entries = ledger.read(&project)?;
+    Ok(MemoryStatus {
+        project_id: project,
+        project_id_source: project_source(),
+        database_url: config.url,
+        remote: "ok",
+        total_entries: entries.entries.len(),
+        active_entries: memory::active_entries(&entries).len(),
+        conflicts: conflicts(&entries),
+    })
+}
+
+pub fn check(root: &Path) -> Result<Value, LedgerError> {
+    let ledger = Ledger::open()?;
+    let project = project(root)?;
+    let entries = ledger.read(&project)?;
+    Ok(
+        json!({"remote":"ok","project_id":project,"total_entries":entries.entries.len(),
+        "active_entries":memory::active_entries(&entries).len(),"conflicts":conflicts(&entries)}),
     )
 }
 
@@ -1014,47 +1088,52 @@ pub fn resolve(
     source: &Path,
     line: usize,
     supersedes: &[String],
-) -> Result<MemoryEntry, String> {
+) -> Result<MemoryEntry, LedgerError> {
+    resolve_with(root, key, claim, source, line, supersedes, &Ledger::open()?)
+}
+
+pub fn resolve_with(
+    root: &Path,
+    key: &str,
+    claim: &str,
+    source: &Path,
+    line: usize,
+    supersedes: &[String],
+    ledger: &Ledger,
+) -> Result<MemoryEntry, LedgerError> {
     if supersedes.len() < 2 {
         return Err("resolution needs at least two active ids".into());
     }
-    let mut entry = memory::new_entry(root, key, claim, source, line, None)?;
+    let entry = memory::new_entry(root, key, claim, source, line, None)?;
     require_committed_source(root, source)?;
+    resolve_entry(root, entry, supersedes, ledger)
+}
+
+fn resolve_entry(
+    root: &Path,
+    mut entry: MemoryEntry,
+    supersedes: &[String],
+    ledger: &Ledger,
+) -> Result<MemoryEntry, LedgerError> {
     entry.resolves = supersedes.to_vec();
-    with_lock(
-        |config, project| {
-            runtime()?.block_on(async {
-                let (db, mut net) = open_network(&config).await?;
-                net.run(db.push()).await?;
-                net.run(db.pull()).await?;
-                let conn = db.connect().await.map_err(|e| e.to_string())?;
-                let ledger = read_ledger(&conn, &project).await?;
-                let active_ids: std::collections::HashSet<_> = memory::active_entries(&ledger)
-                    .into_iter()
-                    .filter(|item| item.key == entry.key)
-                    .map(|item| item.id.as_str())
-                    .collect();
-                let requested: std::collections::HashSet<_> =
-                    supersedes.iter().map(String::as_str).collect();
-                if active_ids.len() < 2 || requested.len() != supersedes.len() || requested != active_ids {
-                    return Err("--supersedes must name every active id for this key exactly once; inspect memory status".into());
-                }
-                insert(&conn, &project, &entry).await?;
-                net.run(db.push()).await.map_err(|e| network_context(e, "resolution saved locally but push failed; retry sync"))?;
-                net.run(db.pull()).await.map_err(|e| network_context(e, "resolution pushed but pull failed"))?;
-                let after = read_ledger(&conn, &project).await?;
-                if memory::active_entries(&after)
-                    .iter()
-                    .filter(|item| item.key == entry.key)
-                    .count() != 1
-                {
-                    return Err("resolution pushed but a concurrent conflict remains; inspect memory status".into());
-                }
-                Ok(entry)
-            })
-        },
-        root,
-    )
+    let project = project(root)?;
+    let before = ledger.read(&project).map_err(not_recorded_read)?;
+    let active_ids: std::collections::HashSet<_> = memory::active_entries(&before)
+        .into_iter()
+        .filter(|item| item.key == entry.key)
+        .map(|item| item.id.as_str())
+        .collect();
+    let requested: std::collections::HashSet<_> = supersedes.iter().map(String::as_str).collect();
+    if active_ids.len() < 2 || requested.len() != supersedes.len() || requested != active_ids {
+        return Err(LedgerError::Message("--supersedes must name every active id for this key exactly once; inspect memory status".into()));
+    }
+    let placeholders = vec!["?"; supersedes.len()].join(", ");
+    let sql = format!("INSERT OR IGNORE INTO project_memory (project, id, body) SELECT ?, ?, ? WHERE (SELECT COUNT(*) FROM project_memory WHERE project = ? AND id IN ({placeholders})) = {}", supersedes.len());
+    let mut args = entry_args(&project, &entry)?;
+    args.push(Cell::Text(project.clone()));
+    args.extend(supersedes.iter().cloned().map(Cell::Text));
+    ledger.write_checked(&project, &entry, &sql, args, supersedes, true)?;
+    Ok(entry)
 }
 
 pub fn record(
@@ -1064,110 +1143,160 @@ pub fn record(
     source: &Path,
     line: usize,
     supersedes: Option<&str>,
-) -> Result<MemoryEntry, String> {
+) -> Result<MemoryEntry, LedgerError> {
+    record_with(root, key, claim, source, line, supersedes, &Ledger::open()?)
+}
+
+pub fn record_with(
+    root: &Path,
+    key: &str,
+    claim: &str,
+    source: &Path,
+    line: usize,
+    supersedes: Option<&str>,
+    ledger: &Ledger,
+) -> Result<MemoryEntry, LedgerError> {
     let entry = memory::new_entry(root, key, claim, source, line, supersedes)?;
     require_committed_source(root, source)?;
-    with_lock(
-        |config, project| {
-            runtime()?.block_on(async {
-                let (db, mut net) = open_network(&config).await?;
-                net.run(db.push())
-                    .await
-                    .map_err(|e| network_context(e, "pending local writes could not sync"))?;
-                net.run(db.pull()).await.map_err(|e| {
-                    network_context(e, "cannot pull latest memory before recording")
-                })?;
-                let conn = db.connect().await.map_err(|e| e.to_string())?;
-                let ledger = read_ledger(&conn, &project).await?;
-                let active = memory::active_entries(&ledger);
-                if active.iter().filter(|e| e.key == entry.key).count() > 1 {
-                    return Err("conflicting active entries for this key".into());
-                }
-                match supersedes {
-                    Some(id) if !active.iter().any(|e| e.id == id && e.key == entry.key) => {
-                        return Err("superseded id must be the active entry for the same key".into())
-                    }
-                    None if active.iter().any(|e| e.key == entry.key) => {
-                        return Err("an active entry has this key; pass --supersedes".into())
-                    }
-                    _ => {}
-                }
-                insert(&conn, &project, &entry).await?;
-                net.run(db.push()).await.map_err(|e| {
-                    network_context(e, "record saved locally but Turso push failed; retry sync")
-                })?;
-                net.run(db.pull())
-                    .await
-                    .map_err(|e| network_context(e, "record pushed, but post-write pull failed"))?;
-                let after = read_ledger(&conn, &project).await?;
-                if memory::active_entries(&after)
-                    .iter()
-                    .filter(|item| item.key == entry.key)
-                    .count()
-                    > 1
-                {
-                    return Err(
-                        "record pushed, but concurrent active claims conflict; inspect recall"
-                            .into(),
-                    );
-                }
-                Ok(entry)
-            })
-        },
-        root,
-    )
+    record_entry(root, entry, supersedes, ledger)
 }
 
-pub fn sync(root: &Path) -> Result<String, String> {
-    with_lock(
-        |config, project| {
-            runtime()?.block_on(async {
-                let (db, mut net) = open_network(&config).await?;
-                let conn = db.connect().await.map_err(|e| e.to_string())?;
-                ensure_schema(&conn).await?;
-                net.run(db.push()).await?;
-                net.run(db.pull()).await?;
-                let ledger = read_ledger(&conn, &project).await?;
-                Ok(format!(
-                    "synced {} project memory entries",
-                    ledger.entries.len()
-                ))
-            })
-        },
-        root,
-    )
+fn record_entry(
+    root: &Path,
+    entry: MemoryEntry,
+    supersedes: Option<&str>,
+    ledger: &Ledger,
+) -> Result<MemoryEntry, LedgerError> {
+    let project = project(root)?;
+    let before = ledger.read(&project).map_err(not_recorded_read)?;
+    let active = memory::active_entries(&before);
+    if active.iter().filter(|e| e.key == entry.key).count() > 1 {
+        return Err(LedgerError::Message(
+            "conflicting active entries for this key".into(),
+        ));
+    }
+    match supersedes {
+        Some(id) if !active.iter().any(|e| e.id == id && e.key == entry.key) => {
+            return Err(LedgerError::Message(
+                "superseded id must be the active entry for the same key".into(),
+            ))
+        }
+        None if active.iter().any(|e| e.key == entry.key) => {
+            return Err(LedgerError::Message(
+                "an active entry has this key; pass --supersedes".into(),
+            ))
+        }
+        _ => {}
+    }
+    let mut args = entry_args(&project, &entry)?;
+    let (sql, old) = match supersedes {
+        Some(id) => {
+            args.push(Cell::Text(project.clone()));
+            args.push(Cell::Text(id.into()));
+            ("INSERT OR IGNORE INTO project_memory (project, id, body) SELECT ?, ?, ? WHERE EXISTS (SELECT 1 FROM project_memory WHERE project = ? AND id = ?)", vec![id.to_string()])
+        }
+        None => (
+            "INSERT OR IGNORE INTO project_memory (project, id, body) VALUES (?, ?, ?)",
+            Vec::new(),
+        ),
+    };
+    ledger.write_checked(&project, &entry, sql, args, &old, false)?;
+    Ok(entry)
 }
 
-pub fn import_legacy(root: &Path) -> Result<usize, String> {
+pub fn import_legacy(root: &Path) -> Result<usize, LedgerError> {
+    let ledger = Ledger::open()?;
+    import_legacy_with(root, &ledger)
+}
+
+pub fn import_legacy_with(root: &Path, ledger: &Ledger) -> Result<usize, LedgerError> {
     if !memory::ledger_path(root).exists() {
         return Err("no legacy .claudecat/memory.json to import".into());
     }
     let legacy = memory::load(root)?;
-    with_lock(
-        |config, project| {
-            runtime()?.block_on(async {
-                let (db, mut net) = open_network(&config).await?;
-                net.run(db.push()).await?;
-                net.run(db.pull()).await?;
-                let conn = db.connect().await.map_err(|e| e.to_string())?;
-                let current = read_ledger(&conn, &project).await?;
-                let existing: std::collections::HashSet<_> =
-                    current.entries.iter().map(|e| e.id.as_str()).collect();
-                let mut count = 0;
-                for entry in &legacy.entries {
-                    insert(&conn, &project, entry).await?;
-                    if !existing.contains(entry.id.as_str()) {
-                        count += 1;
-                    }
-                }
-                net.run(db.push()).await.map_err(|e| {
-                    network_context(e, "import saved locally but Turso push failed")
-                })?;
-                Ok(count)
+    if legacy.entries.is_empty() {
+        return Ok(0);
+    }
+    let project = project(root)?;
+    let before = ledger.read(&project).map_err(not_recorded_read)?;
+    let existing: std::collections::HashSet<_> =
+        before.entries.iter().map(|e| e.id.as_str()).collect();
+    let chunks: Vec<_> = legacy.entries.chunks(50).collect();
+    // A chunk whose outcome is unknown (`outcome_unknown`) is settled by the reread below.
+    let mut unknown = None;
+    for (written, chunk) in chunks.iter().enumerate() {
+        let statements = chunk
+            .iter()
+            .map(|entry| {
+                Ok(Stmt::new(
+                    "INSERT OR IGNORE INTO project_memory (project, id, body) VALUES (?, ?, ?)",
+                    entry_args(&project, entry)?,
+                ))
             })
-        },
-        root,
-    )
+            .collect::<Result<Vec<_>, LedgerError>>()?;
+        match ledger.db.transaction(&statements) {
+            Ok(_) => {}
+            Err(error) if outcome_unknown(error.kind) => {
+                unknown = Some(error.kind);
+                break;
+            }
+            Err(error) if written == 0 => {
+                return Err(LedgerError::NotRecorded { kind: error.kind })
+            }
+            Err(error) => {
+                return Err(LedgerError::Message(format!(
+                    "legacy import stopped after {written} of {} batches ({}); re-run import-legacy, it is idempotent",
+                    chunks.len(),
+                    error.kind.as_str()
+                )))
+            }
+        }
+    }
+    let after_bodies = match ledger.read_bodies(&project) {
+        Ok(bodies) => bodies,
+        Err(LedgerError::Remote(kind)) => {
+            return Err(match unknown {
+                Some(kind) => LedgerError::OutcomeUnknown {
+                    id: None,
+                    key: None,
+                    kind,
+                },
+                None => LedgerError::CommittedUnverified { id: None, kind },
+            })
+        }
+        Err(other) => return Err(other),
+    };
+    ledger_from_bodies(after_bodies.clone()).map_err(LedgerError::Message)?;
+    let stored: std::collections::HashMap<String, String> = after_bodies
+        .into_iter()
+        .map(|body| {
+            let entry: MemoryEntry = serde_json::from_str(&body)
+                .map_err(|e| LedgerError::Message(format!("invalid remote memory row: {e}")))?;
+            Ok((entry.id, body))
+        })
+        .collect::<Result<_, LedgerError>>()?;
+    let mut count = 0;
+    for entry in &legacy.entries {
+        let body = serde_json::to_string(entry).map_err(|e| LedgerError::Message(e.to_string()))?;
+        match stored.get(entry.id.as_str()) {
+            Some(old) if same_claim(old, &body) => {
+                if !existing.contains(entry.id.as_str()) {
+                    count += 1;
+                }
+            }
+            Some(_) => {
+                return Err(LedgerError::Message(
+                    "memory id collision with different content".into(),
+                ))
+            }
+            None => {
+                return Err(LedgerError::Message(
+                    "legacy import incomplete; re-run import-legacy".into(),
+                ))
+            }
+        }
+    }
+    Ok(count)
 }
 
 #[cfg(test)]
@@ -1188,62 +1317,85 @@ mod tests {
     }
 
     #[test]
-    fn turso_rows_isolate_projects_and_preserve_supersession() {
-        runtime().unwrap().block_on(async {
-            let db = turso::Builder::new_local(":memory:").build().await.unwrap();
-            let conn = db.connect().unwrap();
-            read_ledger(&conn, "project-a").await.unwrap();
-            let first = MemoryEntry {
-                id: "first".into(),
-                key: "choice".into(),
-                claim: "A".into(),
-                source: "decision.md".into(),
-                source_line: 1,
-                source_sha256: "hash".into(),
-                source_line_sha256: None,
-                recorded_at: "1".into(),
-                supersedes: None,
-                resolves: Vec::new(),
-                recorded_machine: None,
-                recorded_machine_source: None,
-            };
-            let mut second = first.clone();
-            second.id = "second".into();
-            second.claim = "B".into();
-            second.recorded_at = "0".into(); // a different machine may have a slow clock
-            second.supersedes = Some("first".into());
-            insert(&conn, "project-a", &first).await.unwrap();
-            insert(&conn, "project-a", &first).await.unwrap();
-            let mut collision = first.clone();
-            collision.claim = "tampered".into();
-            assert!(insert(&conn, "project-a", &collision).await.is_err());
-            // An older client re-serializes a row without the stamp: same claim, same id, both
-            // directions.
-            let mut stamped = first.clone();
-            stamped.recorded_machine = Some("machine-a".into());
-            stamped.recorded_machine_source = Some("etc-machine-id".into());
-            insert(&conn, "project-a", &stamped).await.unwrap();
-            stamped.id = "stamped".into();
-            insert(&conn, "project-c", &stamped).await.unwrap();
-            let mut unstamped = stamped.clone();
-            unstamped.recorded_machine = None;
-            unstamped.recorded_machine_source = None;
-            insert(&conn, "project-c", &unstamped).await.unwrap();
-            // Two present stamps that disagree are two writers claiming one id: a replay or a
-            // collision, never an older client. Same claim or not, it is refused.
-            let mut restamped = stamped.clone();
-            restamped.recorded_machine = Some("machine-b".into());
-            assert!(insert(&conn, "project-c", &restamped).await.is_err());
-            restamped.claim = "tampered".into();
-            assert!(insert(&conn, "project-c", &restamped).await.is_err());
-            insert(&conn, "project-a", &second).await.unwrap();
-            insert(&conn, "project-b", &first).await.unwrap();
-            let a = read_ledger(&conn, "project-a").await.unwrap();
-            let b = read_ledger(&conn, "project-b").await.unwrap();
-            assert_eq!(a.entries.len(), 2);
-            assert_eq!(memory::active_entries(&a)[0].claim, "B");
-            assert_eq!(b.entries.len(), 1);
-            assert_eq!(b.entries[0].claim, "A");
-        });
+    fn remote_rows_isolate_projects_and_preserve_supersession() {
+        let ledger = Ledger::with_transport(
+            "https://example.test",
+            "test",
+            Box::new(crate::remote::SqliteTransport::new().unwrap()),
+        )
+        .unwrap();
+        let insert = |project: &str, entry: &MemoryEntry| -> Result<(), String> {
+            let body = serde_json::to_string(entry).map_err(|e| e.to_string())?;
+            ledger
+                .db
+                .execute(
+                    "INSERT OR IGNORE INTO project_memory (project, id, body) VALUES (?, ?, ?)",
+                    entry_args(project, entry).map_err(|e| format!("{e:?}"))?,
+                )
+                .map_err(|e| e.kind.as_str().to_string())?;
+            let rows = ledger.read_bodies(project).map_err(|e| format!("{e:?}"))?;
+            let stored = rows
+                .into_iter()
+                .find(|row| {
+                    serde_json::from_str::<MemoryEntry>(row).is_ok_and(|e| e.id == entry.id)
+                })
+                .ok_or("memory id conflict without an existing row")?;
+            if !same_claim(&stored, &body) {
+                return Err("memory id collision with different content".into());
+            }
+            Ok(())
+        };
+        ledger.read("project-a").unwrap();
+        let first = MemoryEntry {
+            id: "first".into(),
+            key: "choice".into(),
+            claim: "A".into(),
+            source: "decision.md".into(),
+            source_line: 1,
+            source_sha256: "hash".into(),
+            source_line_sha256: None,
+            recorded_at: "1".into(),
+            supersedes: None,
+            resolves: Vec::new(),
+            recorded_machine: None,
+            recorded_machine_source: None,
+        };
+        let mut second = first.clone();
+        second.id = "second".into();
+        second.claim = "B".into();
+        second.recorded_at = "0".into(); // a different machine may have a slow clock
+        second.supersedes = Some("first".into());
+        insert("project-a", &first).unwrap();
+        insert("project-a", &first).unwrap();
+        let mut collision = first.clone();
+        collision.claim = "tampered".into();
+        assert!(insert("project-a", &collision).is_err());
+        // An older client re-serializes a row without the stamp: same claim, same id, both
+        // directions.
+        let mut stamped = first.clone();
+        stamped.recorded_machine = Some("machine-a".into());
+        stamped.recorded_machine_source = Some("etc-machine-id".into());
+        insert("project-a", &stamped).unwrap();
+        stamped.id = "stamped".into();
+        insert("project-c", &stamped).unwrap();
+        let mut unstamped = stamped.clone();
+        unstamped.recorded_machine = None;
+        unstamped.recorded_machine_source = None;
+        insert("project-c", &unstamped).unwrap();
+        // Two present stamps that disagree are two writers claiming one id: a replay or a
+        // collision, never an older client. Same claim or not, it is refused.
+        let mut restamped = stamped.clone();
+        restamped.recorded_machine = Some("machine-b".into());
+        assert!(insert("project-c", &restamped).is_err());
+        restamped.claim = "tampered".into();
+        assert!(insert("project-c", &restamped).is_err());
+        insert("project-a", &second).unwrap();
+        insert("project-b", &first).unwrap();
+        let a = ledger.read("project-a").unwrap();
+        let b = ledger.read("project-b").unwrap();
+        assert_eq!(a.entries.len(), 2);
+        assert_eq!(memory::active_entries(&a)[0].claim, "B");
+        assert_eq!(b.entries.len(), 1);
+        assert_eq!(b.entries[0].claim, "A");
     }
 }

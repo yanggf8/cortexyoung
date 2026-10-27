@@ -280,7 +280,13 @@ impl Transport for UreqTransport {
         headers: &[(&str, &str)],
     ) -> Result<Vec<u8>, RemoteError> {
         use std::io::Read;
-        let agent = ureq::AgentBuilder::new().tls_connector(tls()?).build();
+        // ureq 2.12's per-request timeout does not bound the TCP connect: that waits for the
+        // agent's `timeout_connect` (30 s by default), which a blackholed address reaches in
+        // full (strace on 2026-10-28: `poll(..., 29999)` under a 1 s request timeout).
+        let agent = ureq::AgentBuilder::new()
+            .tls_connector(tls()?)
+            .timeout_connect(self.timeout)
+            .build();
         let mut request = agent.post(url).timeout(self.timeout);
         for (key, value) in headers {
             request = request.set(key, value);

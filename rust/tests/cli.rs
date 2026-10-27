@@ -249,7 +249,7 @@ fn every_spelling_of_help_reaches_the_same_usage_and_none_of_them_is_an_error() 
     }
 }
 
-/// `memory` has eight verbs and their options, none of which fit on the one line the top-level
+/// `memory` has its own verbs and options, none of which fit on the one line the top-level
 /// usage gives it, so `cort memory --help` used to answer with the whole top-level usage. The
 /// memory usage is rendered from the parser itself, so a verb or option cannot drift out of it.
 #[test]
@@ -276,6 +276,7 @@ fn memory_help_lists_each_memory_verb_with_its_options() {
         assert_eq!(
             verbs,
             [
+                "check",
                 "configure",
                 "import-config",
                 "import-legacy",
@@ -290,7 +291,6 @@ fn memory_help_lists_each_memory_verb_with_its_options() {
                 "record",
                 "resolve",
                 "status",
-                "sync"
             ]
         );
         assert!(commands["notes upload"]

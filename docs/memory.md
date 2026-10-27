@@ -10,9 +10,8 @@ The memory connection, local sync replica, and lock now live under
 `$CORT_MEMORY_DIR` or `${XDG_DATA_HOME:-$HOME/.local/share}/cortexyoung/memory`. This directory
 is durable data, separate from `CORT_CACHE_DIR`'s rebuildable code indexes. The remote table
 remains shared across machines. Each machine must configure the same Turso URL and token;
-`sync_status: synced` says this invocation pushed and pulled, not that no other machine can
-write afterward. `CORT_MEMORY_PROJECT` can override Git origin for a project without one;
-the earlier `CLAUDECAT_MEMORY_PROJECT` spelling is accepted during migration.
+`remote: ok` says this invocation read the shared database. `CORT_MEMORY_PROJECT` can override
+Git origin for a project without one; the earlier `CLAUDECAT_MEMORY_PROJECT` spelling is accepted during migration.
 Network calls use `CORT_COLLECT_NET_TIMEOUT_SECS` (default 120 seconds) as their deadline.
 `notes upload`, `list`, and `show` wait up to `CORT_MEMORY_LOCK_WAIT_SECS` (default 30 seconds, fractions allowed) for `memory.lock`.
 
@@ -33,7 +32,7 @@ The config import transfers credentials, not unsynced local rows.
 
 ```sh
 cort memory import-config --from "$HOME/.local/share/claudecat/turso-memory.json"
-cort memory sync --root .
+cort memory check --root .
 cort memory status --root .
 ```
 

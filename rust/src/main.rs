@@ -638,7 +638,7 @@ enum MemoryAction {
         #[arg(long)]
         json: bool,
     },
-    Sync {
+    Check {
         #[arg(long, default_value = ".")]
         root: PathBuf,
     },
@@ -2095,7 +2095,7 @@ fn cmd_memory(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError
             supersedes,
         } => serde_json::to_value(
             cort::memory_store::record(&root, &key, &claim, &source, line, supersedes.as_deref())
-                .map_err(memory_error)?,
+                .map_err(memory_ledger_error)?,
         )
         .unwrap_or(Value::Null),
         MemoryAction::Resolve {
@@ -2107,7 +2107,7 @@ fn cmd_memory(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError
             supersedes,
         } => serde_json::to_value(
             cort::memory_store::resolve(&root, &key, &claim, &source, line, &supersedes)
-                .map_err(memory_error)?,
+                .map_err(memory_ledger_error)?,
         )
         .unwrap_or(Value::Null),
         MemoryAction::Recall {
@@ -2119,10 +2119,11 @@ fn cmd_memory(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError
             usage.project_id = Some(cort::memory_store::project(&root).map_err(memory_error)?);
             usage.args_summary = json!({"v":1,"harness_declared":harness}).to_string();
             let mut report = serde_json::to_value(
-                cort::memory_store::recall(&root, &query).map_err(memory_error)?,
+                cort::memory_store::recall(&root, &query).map_err(memory_read_error)?,
             )
             .unwrap_or(Value::Null);
             report["harness_declared"] = json!(harness);
+            report["remote"] = json!("ok");
             report["machine"] = json!({
                 "id": cort::usage::machine_id(),
                 "source": cort::usage::machine_id_source(),
@@ -2130,14 +2131,14 @@ fn cmd_memory(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError
             report
         }
         MemoryAction::Status { root, json: _ } => {
-            serde_json::to_value(cort::memory_store::status(&root).map_err(memory_error)?)
+            serde_json::to_value(cort::memory_store::status(&root).map_err(memory_read_error)?)
                 .unwrap_or(Value::Null)
         }
-        MemoryAction::Sync { root } => {
-            json!({"status":cort::memory_store::sync(&root).map_err(memory_error)?})
+        MemoryAction::Check { root } => {
+            cort::memory_store::check(&root).map_err(memory_read_error)?
         }
         MemoryAction::ImportLegacy { root } => {
-            json!({"imported":cort::memory_store::import_legacy(&root).map_err(memory_error)?})
+            json!({"imported":cort::memory_store::import_legacy(&root).map_err(memory_ledger_error)?})
         }
     };
     Ok(Emit {
@@ -2149,6 +2150,87 @@ fn cmd_memory(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError
 
 fn memory_error(message: String) -> CortError {
     CortError::new("memory_error", json!({"message":message}))
+}
+
+fn memory_read_error(error: cort::memory_store::LedgerError) -> CortError {
+    use cort::memory_store::LedgerError;
+    match error {
+        LedgerError::Remote(kind) => CortError::new(
+            "memory_remote_unavailable",
+            json!({"remote":kind.as_str(),"message":format!("remote: {}",kind.as_str())}),
+        ),
+        other => memory_ledger_error(other),
+    }
+}
+
+fn memory_ledger_error(error: cort::memory_store::LedgerError) -> CortError {
+    use cort::memory_store::LedgerError;
+    match error {
+        LedgerError::Message(message) => memory_error(message),
+        LedgerError::Remote(kind) | LedgerError::NotRecorded { kind } => CortError::new(
+            "memory_not_recorded",
+            json!({"kind":kind.as_str(),
+                "message":format!("not recorded: {}; nothing was saved locally; re-run the same command when the database is reachable",kind.as_str())}),
+        ),
+        LedgerError::CommittedUnverified { id: Some(id), kind } => CortError::new(
+            "memory_committed_unverified",
+            json!({"id":id,"kind":kind.as_str(),
+                "message":format!("committed_unverified: {}; {id} was written but could not be read back; run `cort memory check` when the database is readable",kind.as_str())}),
+        ),
+        LedgerError::CommittedUnverified { id: None, kind } => CortError::new(
+            "memory_committed_unverified",
+            json!({"kind":kind.as_str(),
+                "message":format!("committed_unverified: {}; import may have written rows but could not be checked; re-running import-legacy is safe because it is idempotent",kind.as_str())}),
+        ),
+        LedgerError::OutcomeUnknown {
+            id: Some(id),
+            key: Some(key),
+            kind,
+        } => CortError::new(
+            "memory_outcome_unknown",
+            json!({"id":id,"key":key,"kind":kind.as_str(),
+                "message":format!("outcome unknown: {}; {id} may or may not have been written; run `cort memory recall \"{key}\"` before re-running",kind.as_str())}),
+        ),
+        LedgerError::OutcomeUnknown { id: None, kind, .. } => CortError::new(
+            "memory_outcome_unknown",
+            json!({"kind":kind.as_str(),
+                "message":format!("outcome unknown: {}; import may or may not have written rows; re-running import-legacy is safe because it is idempotent",kind.as_str())}),
+        ),
+        LedgerError::OutcomeUnknown { .. } => memory_error("invalid memory outcome".into()),
+        LedgerError::SupersedesMissing { superseded } => {
+            // Affected 0 proves only that the condition failed: for a resolution, that at least
+            // one of the ids is missing, not which.
+            let message = match superseded.as_slice() {
+                [one] => format!(
+                    "supersedes_missing: {one} is not in the shared database; nothing was recorded"
+                ),
+                many => format!(
+                    "supersedes_missing: not all of {} are in the shared database; nothing was recorded",
+                    many.join(", ")
+                ),
+            };
+            let detail = if superseded.len() == 1 {
+                json!({"superseded":superseded[0],"message":message})
+            } else {
+                json!({"superseded":superseded,"message":message})
+            };
+            CortError::new("memory_supersedes_missing", detail)
+        }
+        LedgerError::Conflict {
+            id,
+            key,
+            active_ids,
+        } => {
+            let message = format!(
+                "conflict: {id} was recorded, but key \"{key}\" now has {} active entries; settle them with `cort memory resolve`",
+                active_ids.len()
+            );
+            CortError::new(
+                "memory_conflict",
+                json!({"id":id,"key":key,"active_ids":active_ids,"message":message}),
+            )
+        }
+    }
 }
 
 #[derive(Parser, Debug)]
