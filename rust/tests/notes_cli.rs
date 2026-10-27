@@ -15,11 +15,14 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         let temp = tempfile::tempdir().unwrap();
-        let repo = temp.path().join("demo");
-        let other = temp.path().join("other");
-        let claude = temp.path().join("claude");
-        let memory = temp.path().join("memory-data");
-        let home = temp.path().join("home");
+        // macOS tempdirs live under /var, a symlink to /private/var; the decode walk refuses a
+        // symlink, as Claude Code never records one in a real cwd. Encode the real path.
+        let root = temp.path().canonicalize().unwrap();
+        let repo = root.join("demo");
+        let other = root.join("other");
+        let claude = root.join("claude");
+        let memory = root.join("memory-data");
+        let home = root.join("home");
         for path in [&repo, &other, &claude, &memory, &home] {
             fs::create_dir_all(path).unwrap();
         }

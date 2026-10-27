@@ -48,11 +48,15 @@ fn scan_reports_missing_and_undecodable_inputs() {
     let memory = temp.path().join("projects/-demo/memory");
     mkdir(&memory);
     fs::write(memory.join("bad.md"), [0xff]).unwrap();
-    #[cfg(unix)]
+    // APFS refuses a name that is not UTF-8 (EILSEQ), so only Linux can make one.
+    #[cfg(target_os = "linux")]
     {
         use std::os::unix::ffi::OsStringExt;
         let name = std::ffi::OsString::from_vec(b"bad\xff.md".to_vec());
         fs::write(memory.join(name), b"valid").unwrap();
+    }
+    #[cfg(unix)]
+    {
         std::os::unix::fs::symlink(&memory, temp.path().join("projects/-linked")).unwrap();
         std::os::unix::fs::symlink(&memory, temp.path().join("projects/-other/memory")).ok();
     }
@@ -61,12 +65,13 @@ fn scan_reports_missing_and_undecodable_inputs() {
     assert!(report.notes.iter().any(|note| note.file_name == "bad.md"
         && note.status == ScanStatus::SkippedEncoding
         && note.bytes.is_none()));
+    #[cfg(target_os = "linux")]
+    assert!(report
+        .notes
+        .iter()
+        .any(|note| note.status == ScanStatus::SkippedName));
     #[cfg(unix)]
     {
-        assert!(report
-            .notes
-            .iter()
-            .any(|note| note.status == ScanStatus::SkippedName));
         assert!(report
             .notes
             .iter()
