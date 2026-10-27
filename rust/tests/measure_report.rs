@@ -528,7 +528,7 @@ fn record_surfaces_scan_summary_in_both_outcomes() {
         assert_eq!(
             scan.to_json(),
             json!({"files_seen": 1, "files_scanned": 1, "compactions": 1,
-                "skipped_lines": 1, "unknown_type_lines": 1})
+                "skipped_lines": 1, "unknown_type_lines": 1, "progress": "rebuilt"})
         );
     }
 }
@@ -599,8 +599,12 @@ fn record_keeps_compactions_when_events_fail() {
     let mut r = rec_env();
     let bad = r._tmp.path().join("usage.db");
     fs::write(&bad, "this is not a sqlite file").unwrap();
-    s.set_event_watermark("m1", "cort_command", 0, "stale")
-        .unwrap(); // past the gate, so the read fails
+    let mut progress = cort::measure_progress::Progress::default();
+    progress.compactions_complete = true;
+    progress.set_watermark("m1", "cort_command", 0, "stale".into());
+    progress
+        .save(&r.input.marks_path.with_file_name("measure-progress.json"))
+        .unwrap();
     with_events(&mut r, bad);
     let (scan, outcome) = record_with_scan(&mut s, &r.input).unwrap();
     assert_eq!(outcome, RecordOutcome::Pushed);
@@ -613,7 +617,11 @@ fn record_uploads_events_before_the_push() {
     let (_t, mut s) = store();
     let mut r = rec_env();
     let db = usage_db_with_rows(r._tmp.path());
-    s.set_event_watermark("m1", "cort_command", 0, "stale")
+    let mut progress = cort::measure_progress::Progress::default();
+    progress.compactions_complete = true;
+    progress.set_watermark("m1", "cort_command", 0, "stale".into());
+    progress
+        .save(&r.input.marks_path.with_file_name("measure-progress.json"))
         .unwrap();
     with_events(&mut r, db);
     s.fail_push(true);
@@ -624,9 +632,13 @@ fn record_uploads_events_before_the_push() {
     assert_eq!(events["status"], "uploaded");
     assert_eq!(events["inserted"], 1);
     assert_eq!(
-        s.event_watermark("m1", "cort_command")
-            .unwrap()
-            .map(|w| w.0),
+        match cort::measure_progress::load(
+            &r.input.marks_path.with_file_name("measure-progress.json")
+        ) {
+            cort::measure_progress::Load::Loaded(p) =>
+                p.watermark("m1", "cort_command").map(|w| w.rowid),
+            _ => None,
+        },
         Some(1)
     );
 }

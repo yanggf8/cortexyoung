@@ -3,6 +3,7 @@
 //! The fixtures below are built here, written to disk, and were fed to `claudecat::telemetry::scan`
 //! to obtain the golden (payload, id) pairs asserted further down. See `dump_fixtures`.
 
+use cort::measure_progress::{self, Load, Progress};
 use cort::measure_store::{MeasureStore, SqliteStore};
 use cort::telemetry::*;
 use rusqlite::{params, Connection};
@@ -528,7 +529,6 @@ fn missing_watermark_full_range_inserts_no_duplicates() {
             scanned: 6,
             inserted: 3,
             aliases: 0,
-            already_uploaded: 3,
             full_range: true,
             reason: None,
             watermark: Some(9_000_000_000)
@@ -539,6 +539,7 @@ fn missing_watermark_full_range_inserts_no_duplicates() {
     // and the primary key keeps it duplicate-free.
     let mut again = SqliteStore::open(&fx.p("again.db")).unwrap();
     again.insert_events(&fx.events("v2")).unwrap();
+    fs::remove_file(fx.p("measure-progress.json")).unwrap();
     let r2 = upload_events(&mut again, &inputs(&fx));
     assert!(
         matches!(
@@ -561,7 +562,7 @@ fn watermark_skips_already_uploaded() {
     seed_one_per_machine(&mut s, &fx);
     verify_events(&mut s, &inputs(&fx), 1).unwrap();
     upload_events(&mut s, &inputs(&fx));
-    assert_eq!(wm(&mut s, "mach-A"), Some(9_000_000_000));
+    assert_eq!(wm(&fx, "mach-A"), Some(9_000_000_000));
     // Nothing new: nothing read, nothing inserted.
     let idle = upload_events(&mut s, &inputs(&fx));
     assert_eq!(
@@ -570,7 +571,6 @@ fn watermark_skips_already_uploaded() {
             scanned: 0,
             inserted: 0,
             aliases: 0,
-            already_uploaded: 0,
             full_range: false,
             reason: None,
             watermark: Some(9_000_000_000)
@@ -592,7 +592,6 @@ fn watermark_skips_already_uploaded() {
             scanned: 1,
             inserted: 1,
             aliases: 0,
-            already_uploaded: 0,
             full_range: false,
             reason: None,
             watermark: Some(9_000_000_001)
@@ -603,17 +602,16 @@ fn watermark_skips_already_uploaded() {
 
 #[test]
 fn watermark_set_replaces_so_a_recreated_db_can_restart_lower() {
-    let fx = Fx::new();
-    let mut s = store(&fx);
-    s.set_event_watermark("m", "cort_command", 10, "id10")
-        .unwrap();
-    s.set_event_watermark("m", "cort_command", 5, "id5")
-        .unwrap();
+    let mut progress = Progress::default();
+    progress.set_watermark("m", "cort_command", 10, "id10".into());
+    progress.set_watermark("m", "cort_command", 5, "id5".into());
     assert_eq!(
-        s.event_watermark("m", "cort_command").unwrap(),
-        Some((5, "id5".to_string()))
+        progress
+            .watermark("m", "cort_command")
+            .map(|w| (w.rowid, w.fingerprint.as_str())),
+        Some((5, "id5"))
     );
-    assert_eq!(s.event_watermark("m", "cost_daily").unwrap(), None);
+    assert!(progress.watermark("m", "cost_daily").is_none());
 }
 
 #[test]
@@ -811,10 +809,11 @@ fn help_states_the_retention_boundary() {
     assert!(!text.contains("record not running"), "{text}");
 }
 
-fn wm(s: &mut SqliteStore, machine: &str) -> Option<i64> {
-    s.event_watermark(machine, "cort_command")
-        .unwrap()
-        .map(|w| w.0)
+fn wm(fx: &Fx, machine: &str) -> Option<i64> {
+    match measure_progress::load(&fx.p("measure-progress.json")) {
+        Load::Loaded(progress) => progress.watermark(machine, "cort_command").map(|w| w.rowid),
+        _ => None,
+    }
 }
 
 /// Replace `usage.db` by a brand-new file holding rows `(id, command)` for machine mach-A.
@@ -837,7 +836,7 @@ fn uploaded_s(fx: &Fx) -> SqliteStore {
     seed_one_per_machine(&mut s, fx);
     verify_events(&mut s, &inputs(fx), 1).unwrap();
     upload_events(&mut s, &inputs(fx));
-    assert_eq!(wm(&mut s, "mach-A"), Some(9_000_000_000));
+    assert_eq!(wm(fx, "mach-A"), Some(9_000_000_000));
     s
 }
 
@@ -853,13 +852,12 @@ fn replaced_db_with_restarted_rowids_is_read_in_full() {
             scanned: 3,
             inserted: 3,
             aliases: 0,
-            already_uploaded: 0,
             full_range: true,
             reason: Some("watermark_row_missing".into()),
             watermark: Some(3)
         }
     );
-    assert_eq!(wm(&mut s, "mach-A"), Some(3));
+    assert_eq!(wm(&fx, "mach-A"), Some(3));
     assert_eq!(stored(&fx), 9);
 }
 
@@ -959,7 +957,7 @@ fn upload_pages_through_a_large_range() {
         ),
         "{r:?}"
     );
-    assert_eq!(wm(&mut s, "mach-A"), Some(10_000_004_500));
+    assert_eq!(wm(&fx, "mach-A"), Some(10_000_004_500));
 }
 
 #[test]
@@ -1010,7 +1008,6 @@ fn schema_change_in_same_db_continues_after_watermark() {
             scanned: 2,
             inserted: 2,
             aliases: 0,
-            already_uploaded: 0,
             full_range: false,
             reason: None,
             watermark: Some(9_000_000_011)
@@ -1024,7 +1021,7 @@ fn schema_change_in_same_db_continues_after_watermark() {
 }
 
 #[test]
-fn schema_change_then_pruned_watermark_does_not_reupload() {
+fn schema_change_then_pruned_watermark_resends_full_range() {
     let fx = Fx::new();
     let mut s = uploaded_s(&fx);
     assert_eq!(stored(&fx), 6);
@@ -1048,15 +1045,14 @@ fn schema_change_then_pruned_watermark_does_not_reupload() {
         r,
         EventsReport::Uploaded {
             scanned: 7,
-            inserted: 2,
+            inserted: 7,
             aliases: 0,
-            already_uploaded: 5,
             full_range: true,
             reason: Some("watermark_row_missing".into()),
             watermark: Some(9_000_000_011)
         }
     );
-    assert_eq!(stored(&fx), 8, "only the new rows were added");
+    assert_eq!(stored(&fx), 13, "changed payloads have new ids");
 }
 
 #[test]
@@ -1080,7 +1076,6 @@ fn same_millisecond_same_command_distinct_rows_both_upload_in_full_range() {
             EventsReport::Uploaded {
                 scanned: 2,
                 inserted: 1,
-                already_uploaded: 1,
                 ..
             }
         ),
@@ -1090,39 +1085,42 @@ fn same_millisecond_same_command_distinct_rows_both_upload_in_full_range() {
 }
 
 /// Make the watermark point at a rowid the database does not have, as the 90-day prune would.
-fn lose_watermark_row(s: &mut SqliteStore) {
-    s.set_event_watermark("mach-A", "cort_command", 9_000_000_500, "gone")
-        .unwrap();
+fn lose_watermark_row(fx: &Fx) {
+    let path = fx.p("measure-progress.json");
+    let Load::Loaded(mut progress) = measure_progress::load(&path) else {
+        panic!("missing progress")
+    };
+    progress.set_watermark("mach-A", "cort_command", 9_000_000_500, "gone".into());
+    progress.save(&path).unwrap();
 }
 
 #[test]
-fn float_ts_row_is_not_reuploaded_after_column_add_and_pruned_watermark() {
+fn float_ts_row_is_resent_after_column_add_and_pruned_watermark() {
     let fx = Fx::new();
     let mut s = uploaded_s(&fx); // includes the float-ts row (no time_ms), id 9000000000
     Connection::open(fx.p("v2/usage.db"))
         .unwrap()
         .execute_batch("ALTER TABLE command_log ADD COLUMN extra TEXT")
         .unwrap();
-    lose_watermark_row(&mut s);
+    lose_watermark_row(&fx);
     let r = upload_events(&mut s, &inputs(&fx));
     assert!(
         matches!(
             &r,
             EventsReport::Uploaded {
                 scanned: 6,
-                inserted: 0,
-                already_uploaded: 6,
+                inserted: 6,
                 full_range: true,
                 ..
             }
         ),
         "{r:?}"
     );
-    assert_eq!(stored(&fx), 6);
+    assert_eq!(stored(&fx), 12);
 }
 
 #[test]
-fn schema_column_removed_then_pruned_watermark_does_not_reupload() {
+fn schema_column_removed_then_pruned_watermark_resends_full_range() {
     let fx = Fx::new();
     let mut s = uploaded_s(&fx);
     // The remote payloads carry `read_source`; the local table no longer has it.
@@ -1132,22 +1130,21 @@ fn schema_column_removed_then_pruned_watermark_does_not_reupload() {
         .unwrap();
     let local = cort_events(&fx.p("v2/usage.db"), None).unwrap();
     assert!(local.iter().all(|e| !e.payload.contains("read_source")));
-    lose_watermark_row(&mut s);
+    lose_watermark_row(&fx);
     let r = upload_events(&mut s, &inputs(&fx));
     assert!(
         matches!(
             &r,
             EventsReport::Uploaded {
                 scanned: 6,
-                inserted: 0,
-                already_uploaded: 6,
+                inserted: 6,
                 full_range: true,
                 ..
             }
         ),
         "{r:?}"
     );
-    assert_eq!(stored(&fx), 6);
+    assert_eq!(stored(&fx), 12);
 }
 
 #[test]
@@ -1161,17 +1158,10 @@ fn simultaneous_add_and_remove_is_the_documented_unmatched_case() {
              ALTER TABLE command_log ADD COLUMN extra TEXT",
         )
         .unwrap();
-    lose_watermark_row(&mut s);
+    lose_watermark_row(&fx);
     let r = upload_events(&mut s, &inputs(&fx));
     assert!(
-        matches!(
-            &r,
-            EventsReport::Uploaded {
-                already_uploaded: 0,
-                inserted: 6,
-                ..
-            }
-        ),
+        matches!(&r, EventsReport::Uploaded { inserted: 6, .. }),
         "{r:?}"
     );
 }

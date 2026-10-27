@@ -58,15 +58,15 @@ fn compaction_upsert_replaces_same_key() {
 }
 
 #[test]
-fn compaction_session_reports_first_writer() {
+fn compaction_owners_are_scoped_to_machine() {
     let (_d, mut s) = store();
-    assert_eq!(s.compaction_session("m1", "b1").unwrap(), None);
+    assert!(s.compaction_owners("m1").unwrap().is_empty());
     s.upsert_compaction(&row("s1", 1)).unwrap();
     assert_eq!(
-        s.compaction_session("m1", "b1").unwrap().as_deref(),
-        Some("s1")
+        s.compaction_owners("m1").unwrap(),
+        vec![("b1".into(), "s1".into())]
     );
-    assert_eq!(s.compaction_session("m2", "b1").unwrap(), None);
+    assert!(s.compaction_owners("m2").unwrap().is_empty());
 }
 
 #[test]

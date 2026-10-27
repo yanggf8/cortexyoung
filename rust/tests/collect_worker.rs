@@ -231,7 +231,7 @@ impl MeasureStore for SlowFirstWrite {
 
     forward_to_inner! {
         upsert_compaction(row: &CompactionRow) -> Result<(), String>;
-        compaction_session(machine_id: &str, boundary_uuid: &str) -> Result<Option<String>, String>;
+        compaction_owners(machine_id: &str) -> Result<Vec<(String, String)>, String>;
         compactions_since(since_ms: i64) -> Result<Vec<CompactionRow>, String>;
         machine_hosts() -> Result<Vec<MachineHost>, String>;
         upsert_imported_usage(rows: &[ImportedUsage]) -> Result<ImportedUsageOutcome, String>;
@@ -239,10 +239,7 @@ impl MeasureStore for SlowFirstWrite {
         insert_events(events: &[TelemetryEvent]) -> Result<usize, String>;
         remote_ids(machine_id: &str, source: &str) -> Result<HashMap<i64, String>, String>;
         remote_payload(machine_id: &str, source: &str, event_id: &str) -> Result<Option<String>, String>;
-        remote_payloads_without_time(machine_id: &str, source: &str) -> Result<Vec<String>, String>;
-        remote_payloads_in_range(machine_id: &str, source: &str, min_ms: i64, max_ms: i64) -> Result<Vec<String>, String>;
         event_watermark(machine_id: &str, source: &str) -> Result<Option<(i64, String)>, String>;
-        set_event_watermark(machine_id: &str, source: &str, max_rowid: i64, row_fingerprint: &str) -> Result<(), String>;
         upsert_aliases(rows: &[(String, String, String)]) -> Result<(), String>;
         aliases() -> Result<Vec<(String, String, String)>, String>;
         events_page(after: Option<(String, String)>, limit: usize) -> Result<Vec<TelemetryEvent>, String>;

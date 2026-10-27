@@ -84,8 +84,8 @@ fn remote_store_runs_shared_sql_through_hrana() {
         post_complete: true,
     };
     assert_eq!(
-        store.compaction_session("machine", "boundary").unwrap(),
-        None
+        store.compaction_owners("machine").unwrap(),
+        Vec::<(String, String)>::new()
     );
     store.upsert_compaction(&first).unwrap();
     let mut second = first.clone();
@@ -93,8 +93,8 @@ fn remote_store_runs_shared_sql_through_hrana() {
     second.time_ms = 20;
     store.upsert_compaction(&second).unwrap();
     assert_eq!(
-        store.compaction_session("machine", "boundary").unwrap(),
-        Some("session-2".into())
+        store.compaction_owners("machine").unwrap(),
+        vec![("boundary".into(), "session-2".into())]
     );
     assert_eq!(store.compactions_since(15).unwrap(), vec![second]);
     assert!(store.compactions_since(21).unwrap().is_empty());
@@ -115,16 +115,6 @@ fn remote_store_runs_shared_sql_through_hrana() {
     assert_eq!(
         store.remote_payload("machine", "a", "1").unwrap(),
         Some(events[0].payload.clone())
-    );
-    assert_eq!(
-        store
-            .remote_payloads_in_range("machine", "a", 2, 3)
-            .unwrap(),
-        vec![events[1].payload.clone()]
-    );
-    assert_eq!(
-        store.remote_payloads_without_time("machine", "b").unwrap(),
-        vec![events[2].payload.clone()]
     );
     assert_eq!(store.events_page(None, 2).unwrap(), events[..2]);
     assert_eq!(
@@ -153,16 +143,7 @@ fn remote_store_runs_shared_sql_through_hrana() {
         .any(|stmt| stmt == "BEGIN TRANSACTION"));
 
     assert_eq!(store.event_watermark("machine", "a").unwrap(), None);
-    store
-        .set_event_watermark("machine", "a", 10, "fingerprint-10")
-        .unwrap();
-    store
-        .set_event_watermark("machine", "a", 4, "fingerprint-4")
-        .unwrap();
-    assert_eq!(
-        store.event_watermark("machine", "a").unwrap(),
-        Some((4, "fingerprint-4".into()))
-    );
+    assert_eq!(store.event_watermark("machine", "a").unwrap(), None);
 
     let alias = ("machine".into(), "local".into(), "shared".into());
     store

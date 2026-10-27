@@ -20,6 +20,7 @@
 
 use crate::data_dir::write_atomic;
 use crate::measure::format_utc;
+use crate::measure_progress::{self, Progress};
 use crate::measure_store::MeasureStore;
 use crate::usage::health_rows_after_at;
 use rusqlite::types::ValueRef;
@@ -319,7 +320,7 @@ pub fn row_fingerprint(usage_db: &Path, rowid: i64) -> Result<Option<String>, St
 }
 
 /// Raw `ts|root` for the health watermark. SQL NULL root is the empty string.
-fn health_row_fingerprint(usage_db: &Path, rowid: i64) -> Result<Option<String>, String> {
+pub fn health_row_fingerprint(usage_db: &Path, rowid: i64) -> Result<Option<String>, String> {
     if !usage_db.exists() {
         return Ok(None);
     }
@@ -777,9 +778,6 @@ pub enum EventsReport {
         scanned: usize,
         inserted: usize,
         aliases: usize,
-        /// Rows of a full-range read that were already stored (possibly under an older schema) and
-        /// were therefore not inserted.
-        already_uploaded: usize,
         /// Everything was read, not just the rows after the watermark: either there was no
         /// watermark yet (verified by dry-run) or `reason` says why it could not be trusted.
         full_range: bool,
@@ -806,112 +804,21 @@ impl EventsReport {
                 scanned,
                 inserted,
                 aliases,
-                already_uploaded,
                 full_range,
                 reason,
                 watermark,
             } => json!({"status":"uploaded","scanned":scanned,"inserted":inserted,
-                "aliases":aliases,"already_uploaded":already_uploaded,"full_range":full_range,"reason":reason,"watermark":watermark}),
+                "aliases":aliases,"full_range":full_range,"reason":reason,"watermark":watermark}),
             EventsReport::Refused(r) => json!({"status":"refused","reason":r}),
             EventsReport::Failed(e) => json!({"status":"failed","error":e}),
         }
     }
 }
 
-/// `ts|command` as rendered JSON: the cheap candidate key for matching a local row to a stored one.
-fn identity(fields: &BTreeMap<String, J>) -> Option<String> {
-    Some(format!(
-        "{}|{}",
-        fields.get("ts")?.render(),
-        fields.get("command")?.render()
-    ))
-}
-
-/// Split a page of a full-range read into the rows still to insert and a count of those already
-/// stored.
-///
-/// After a schema change a retained row's id no longer equals the id it was uploaded under, so
-/// `INSERT OR IGNORE` cannot recognise it. A local row L counts as uploaded iff some stored payload
-/// P of the same machine matches it: P is a SUBSET of L (every key of P is in L with an equal
-/// value, which covers columns added since) or L is a subset of P (columns removed since); same
-/// schema is plain equality. `(ts, command)` merely picks candidates; it is never enough on its
-/// own, because two sessions can fire the same command in the same millisecond and those are
-/// distinct events (the payload's `id` and the other columns tell them apart).
-///
-/// Candidates come from stored rows whose `time_ms` lies in the page's time range, plus -- when
-/// the page has a row without a usable `time_ms` (a non-integer `ts`) -- the machine's stored rows
-/// with NULL `time_ms`.
-///
-/// Known limit: a schema change that adds AND removes columns between the upload and this read
-/// leaves each side with a key the other lacks, so neither is a subset and those rows upload again.
-fn drop_uploaded(
-    store: &mut dyn MeasureStore,
-    page: &[TelemetryEvent],
-) -> Result<(Vec<TelemetryEvent>, usize), String> {
-    let mut ranges: BTreeMap<&str, (i64, i64)> = BTreeMap::new();
-    let mut needs_untimed: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
-    for e in page {
-        match e.time_ms {
-            Some(t) => {
-                let r = ranges.entry(&e.machine_id).or_insert((t, t));
-                r.0 = r.0.min(t);
-                r.1 = r.1.max(t);
-            }
-            None => {
-                needs_untimed.insert(&e.machine_id);
-            }
-        }
-    }
-    let mut stored: HashMap<(String, String), Vec<BTreeMap<String, J>>> = HashMap::new();
-    let mut keep = |machine: &str, payloads: Vec<String>| {
-        for payload in payloads {
-            if let Ok(J::Obj(fields)) = serde_json::from_str::<J>(&payload) {
-                if let Some(key) = identity(&fields) {
-                    stored
-                        .entry((machine.to_string(), key))
-                        .or_default()
-                        .push(fields);
-                }
-            }
-        }
-    };
-    for (machine, (lo, hi)) in &ranges {
-        keep(
-            machine,
-            store.remote_payloads_in_range(machine, SOURCE_COMMAND, *lo, *hi)?,
-        );
-    }
-    for machine in &needs_untimed {
-        keep(
-            machine,
-            store.remote_payloads_without_time(machine, SOURCE_COMMAND)?,
-        );
-    }
-    let subset = |a: &BTreeMap<String, J>, b: &BTreeMap<String, J>| {
-        a.iter().all(|(k, v)| b.get(k) == Some(v))
-    };
-    let mut fresh = Vec::with_capacity(page.len());
-    let mut known = 0usize;
-    for e in page {
-        let uploaded = match serde_json::from_str::<J>(&e.payload) {
-            Ok(J::Obj(local)) => identity(&local)
-                .and_then(|k| stored.get(&(e.machine_id.clone(), k)))
-                .is_some_and(|cands| cands.iter().any(|p| subset(p, &local) || subset(&local, p))),
-            _ => false,
-        };
-        if uploaded {
-            known += 1;
-        } else {
-            fresh.push(e.clone());
-        }
-    }
-    Ok((fresh, known))
-}
-
 /// Rows read and inserted per page of an upload.
 const PAGE: usize = 2000;
 
-/// Write new events into the store's local replica (the caller pushes). Never returns an error and
+/// Write new events into the store. Never returns an error and
 /// never panics: a refusal or a failure is a value, so the compaction record beside it still runs.
 ///
 /// With a watermark, the row at that rowid must still be the same row (same raw `ts` and
@@ -921,22 +828,52 @@ const PAGE: usize = 2000;
 /// not re-gated: see [`marker_valid`]. With no watermark, the whole file is read, but only if
 /// [`verify_events`] has passed for this machine and column layout.
 pub fn upload_events(store: &mut dyn MeasureStore, input: &UploadInputs) -> EventsReport {
-    match try_upload(store, input) {
+    let path = input.marker_path.with_file_name("measure-progress.json");
+    let result = measure_progress::open(store, &path, &input.machine_id, Some(&input.usage_db))
+        .and_then(|(mut progress, _)| try_upload(store, input, &mut progress, &path));
+    match result {
         Ok(r) => r,
         Err(e) => EventsReport::Failed(e),
     }
 }
 
-/// Copy local health observations to the store replica without the command dry-run gate.
+pub fn upload_events_with_progress(
+    store: &mut dyn MeasureStore,
+    input: &UploadInputs,
+    progress: &mut Progress,
+    path: &Path,
+) -> EventsReport {
+    try_upload(store, input, progress, path).unwrap_or_else(EventsReport::Failed)
+}
+
+/// Copy local health observations to the store without the command dry-run gate. `progress_path`
+/// is the progress file to use. Production collection goes through `record_with_scan_until`
+/// instead; usage.db lives in the cache directory, so the path is never derived from it.
 pub fn upload_health_events(
     store: &mut dyn MeasureStore,
     usage_db: &Path,
     machine_id: &str,
+    progress_path: &Path,
 ) -> EventsReport {
-    match try_upload_health(store, usage_db, machine_id) {
+    let path = progress_path;
+    let result = measure_progress::open(store, path, machine_id, Some(usage_db)).and_then(
+        |(mut progress, _)| try_upload_health(store, usage_db, machine_id, &mut progress, path),
+    );
+    match result {
         Ok(report) => report,
         Err(error) => EventsReport::Failed(error),
     }
+}
+
+pub fn upload_health_events_with_progress(
+    store: &mut dyn MeasureStore,
+    usage_db: &Path,
+    machine_id: &str,
+    progress: &mut Progress,
+    path: &Path,
+) -> EventsReport {
+    try_upload_health(store, usage_db, machine_id, progress, path)
+        .unwrap_or_else(EventsReport::Failed)
 }
 
 type Fingerprint = fn(&Path, i64) -> Result<Option<String>, String>;
@@ -949,7 +886,6 @@ struct UploadSource<'a> {
     source: &'static str,
     fingerprint: Fingerprint,
     read_page: EventPage,
-    compare_old_command_schema: bool,
 }
 
 fn health_events_page(
@@ -960,63 +896,54 @@ fn health_events_page(
     health_events(path, after.unwrap_or(0), limit)
 }
 
-fn upload_cursor(
-    store: &mut dyn MeasureStore,
-    config: &UploadSource<'_>,
-) -> Result<WatermarkCheck, String> {
-    let stored = store.event_watermark(config.machine, config.source)?;
+fn upload_cursor(progress: &Progress, config: &UploadSource<'_>) -> Result<WatermarkCheck, String> {
+    let stored = progress.watermark(config.machine, config.source);
     let (cursor, reason) = match &stored {
-        Some((rowid, prior)) => match (config.fingerprint)(config.usage_db, *rowid)? {
-            Some(current) if current == *prior => (Some(*rowid), None),
+        Some(prior) => match (config.fingerprint)(config.usage_db, prior.rowid)? {
+            Some(current) if current == prior.fingerprint => (Some(prior.rowid), None),
             Some(_) => (None, Some("watermark_row_changed".into())),
             None => (None, Some("watermark_row_missing".into())),
         },
         None => (None, None),
     };
-    Ok((cursor, reason, stored.map(|(rowid, _)| rowid)))
+    Ok((cursor, reason, stored.map(|prior| prior.rowid)))
 }
 
 fn upload_pages(
     store: &mut dyn MeasureStore,
     config: &UploadSource<'_>,
+    progress: &mut Progress,
+    path: &Path,
     mut cursor: Option<i64>,
     mut watermark: Option<i64>,
-) -> Result<(usize, usize, usize, Option<i64>), String> {
-    let full_range = cursor.is_none();
+) -> Result<(usize, usize, Option<i64>), String> {
     let mut scanned = 0;
     let mut inserted = 0;
-    let mut already_uploaded = 0;
     loop {
         let page = (config.read_page)(config.usage_db, cursor, PAGE)?;
         let Some(last) = page.last() else { break };
         scanned += page.len();
-        let fresh = if config.compare_old_command_schema && full_range {
-            let (fresh, known) = drop_uploaded(store, &page)?;
-            already_uploaded += known;
-            fresh
-        } else {
-            page.clone()
-        };
-        if !fresh.is_empty() {
-            inserted += store.insert_events(&fresh)?;
-        }
+        inserted += store.insert_events(&page)?;
         let last_rowid = last.rowid.ok_or("event without a rowid")?;
         let current = (config.fingerprint)(config.usage_db, last_rowid)?
             .ok_or("watermark row vanished while uploading")?;
-        store.set_event_watermark(config.machine, config.source, last_rowid, &current)?;
+        progress.set_watermark(config.machine, config.source, last_rowid, current);
+        progress.save(path)?;
         watermark = Some(last_rowid);
         cursor = Some(last_rowid);
         if page.len() < PAGE {
             break;
         }
     }
-    Ok((scanned, inserted, already_uploaded, watermark))
+    Ok((scanned, inserted, watermark))
 }
 
 fn try_upload_health(
     store: &mut dyn MeasureStore,
     usage_db: &Path,
     machine: &str,
+    progress: &mut Progress,
+    path: &Path,
 ) -> Result<EventsReport, String> {
     let config = UploadSource {
         usage_db,
@@ -1024,24 +951,27 @@ fn try_upload_health(
         source: SOURCE_HEALTH,
         fingerprint: health_row_fingerprint,
         read_page: health_events_page,
-        compare_old_command_schema: false,
     };
-    let (cursor, reason, watermark) = upload_cursor(store, &config)?;
+    let (cursor, reason, watermark) = upload_cursor(progress, &config)?;
     let full_range = cursor.is_none();
-    let (scanned, inserted, already_uploaded, watermark) =
-        upload_pages(store, &config, cursor, watermark)?;
+    let (scanned, inserted, watermark) =
+        upload_pages(store, &config, progress, path, cursor, watermark)?;
     Ok(EventsReport::Uploaded {
         scanned,
         inserted,
         aliases: 0,
-        already_uploaded,
         full_range,
         reason,
         watermark,
     })
 }
 
-fn try_upload(store: &mut dyn MeasureStore, input: &UploadInputs) -> Result<EventsReport, String> {
+fn try_upload(
+    store: &mut dyn MeasureStore,
+    input: &UploadInputs,
+    progress: &mut Progress,
+    path: &Path,
+) -> Result<EventsReport, String> {
     let machine = input.machine_id.as_str();
     let config = UploadSource {
         usage_db: &input.usage_db,
@@ -1049,9 +979,8 @@ fn try_upload(store: &mut dyn MeasureStore, input: &UploadInputs) -> Result<Even
         source: SOURCE_COMMAND,
         fingerprint: row_fingerprint,
         read_page: cort_events_page,
-        compare_old_command_schema: true,
     };
-    let (cursor, reason, watermark) = upload_cursor(store, &config)?;
+    let (cursor, reason, watermark) = upload_cursor(progress, &config)?;
     if watermark.is_none() && !marker_valid(input) {
         return Ok(EventsReport::Refused(format!(
             "no event watermark for machine {machine} and no passing dry-run: run `cort \
@@ -1068,9 +997,9 @@ fn try_upload(store: &mut dyn MeasureStore, input: &UploadInputs) -> Result<Even
         scanned += cost.len();
         inserted += store.insert_events(&cost)?;
     }
-    // The shared pager advances the watermark only after each page reaches the replica.
-    let (page_scanned, page_inserted, already_uploaded, watermark) =
-        upload_pages(store, &config, cursor, watermark)?;
+    // The shared pager advances local progress only after each remote page succeeds.
+    let (page_scanned, page_inserted, watermark) =
+        upload_pages(store, &config, progress, path, cursor, watermark)?;
     scanned += page_scanned;
     inserted += page_inserted;
     // Every run, over the whole file: an index or git origin may have appeared since the events
@@ -1081,7 +1010,6 @@ fn try_upload(store: &mut dyn MeasureStore, input: &UploadInputs) -> Result<Even
         scanned,
         inserted,
         aliases: aliases.len(),
-        already_uploaded,
         full_range,
         reason,
         watermark,

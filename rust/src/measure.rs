@@ -3,9 +3,12 @@
 //! store receives counts and nothing else.
 
 use crate::data_dir::{data_dir, write_atomic};
+use crate::measure_progress::{self, Progress};
 use crate::measure_store::{CompactionRow, MeasureStore};
 use crate::memory_store::project_from_git_origin;
-use crate::telemetry::{upload_events, upload_health_events, TelemetryEvent, UploadInputs};
+use crate::telemetry::{
+    upload_events_with_progress, upload_health_events_with_progress, TelemetryEvent, UploadInputs,
+};
 use crate::transcript::{compactions, parse_transcript_bytes, Compaction, Step, WindowDetails};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
@@ -54,6 +57,7 @@ pub struct ScanSummary {
     pub events: Option<Value>,
     /// Health upload for this run (`None` for the existing manual record command).
     pub health: Option<Value>,
+    pub progress: Option<String>,
 }
 
 impl ScanSummary {
@@ -70,6 +74,9 @@ impl ScanSummary {
         }
         if let Some(health) = &self.health {
             v["health"] = health.clone();
+        }
+        if let Some(progress) = &self.progress {
+            v["progress"] = json!(progress);
         }
         v
     }
@@ -168,7 +175,12 @@ pub fn scan_transcripts(
     projects_dir: &Path,
     marks: &mut Watermarks,
     machine_id: &str,
+    progress: &mut Progress,
+    progress_path: &Path,
 ) -> Result<ScanSummary, String> {
+    if !progress.compactions_complete {
+        return Ok(ScanSummary::default());
+    }
     if matches!(fs::metadata(projects_dir), Err(e) if e.kind() == std::io::ErrorKind::NotFound) {
         return Ok(ScanSummary::default());
     }
@@ -198,8 +210,8 @@ pub fn scan_transcripts(
         summary.skipped_lines += parsed.skipped_lines;
         summary.unknown_type_lines += parsed.unknown_type_lines;
         for c in compactions(&parsed.steps) {
-            let owner = store.compaction_session(machine_id, &c.boundary.uuid)?;
-            if matches!(&owner, Some(s) if *s != c.boundary.session_id) {
+            let owner = progress.compactions.get(&c.boundary.uuid);
+            if matches!(owner, Some(s) if *s != c.boundary.session_id) {
                 continue;
             }
             let project_id = c.boundary.cwd.as_ref().and_then(|cwd| {
@@ -221,6 +233,10 @@ pub fn scan_transcripts(
                 post: c.post.counts(),
                 post_complete: c.post_complete,
             })?;
+            progress
+                .compactions
+                .insert(c.boundary.uuid.clone(), c.boundary.session_id.clone());
+            progress.save(progress_path)?;
             summary.compactions += 1;
         }
         next.insert(key, stamp);
@@ -314,9 +330,8 @@ pub enum RecordOutcome {
     SavedLocallyPushFailed(String),
 }
 
-/// Local writes first (host mapping, compaction rows), then the watermarks, then the network.
-/// A failed local write returns before the watermarks move, so the next run rescans; a failed
-/// push never loses data, because the rows are already in the local replica.
+/// Store writes precede local progress. A failed write leaves the old progress in place, so the
+/// next run resends or rescans and the store's idempotent inserts absorb duplicates.
 pub fn record(store: &mut dyn MeasureStore, input: &RecordInputs) -> Result<RecordOutcome, String> {
     Ok(record_with_scan(store, input)?.1)
 }
@@ -336,25 +351,53 @@ pub fn record_with_scan(
 /// immediately, so the push is skipped and no `RecordOutcome` is invented for a push
 /// that was never attempted; the collection worker uses it to stop a run that has spent its
 /// wall-clock budget. The scan summary does not survive that error -- the caller only needs the
-/// reason -- and nothing is lost by that: the uploads' progress lives in the replica's
-/// watermarks, which the next run revalidates, while the local state mirrors are re-derived from
-/// them.
+/// reason -- and nothing is lost by that: upload progress is saved locally after each remote page.
 pub fn record_with_scan_until(
     store: &mut dyn MeasureStore,
     input: &RecordInputs,
     before_push: impl FnOnce() -> Result<(), String>,
 ) -> Result<(ScanSummary, RecordOutcome), String> {
     store.upsert_machine_host(&input.machine_id, &input.host, input.now_ms)?;
+    let progress_path = input.marks_path.with_file_name("measure-progress.json");
+    let usage_db = input
+        .events
+        .as_ref()
+        .map(|e| e.usage_db.as_path())
+        .or(input.health.as_deref());
+    let (mut progress, progress_label) =
+        measure_progress::open(store, &progress_path, &input.machine_id, usage_db)?;
     let mut marks = Watermarks::load(&input.marks_path);
-    let mut scan = scan_transcripts(store, &input.projects_dir, &mut marks, &input.machine_id)?;
-    marks.save(&input.marks_path)?;
+    let mut scan = scan_transcripts(
+        store,
+        &input.projects_dir,
+        &mut marks,
+        &input.machine_id,
+        &mut progress,
+        &progress_path,
+    )?;
+    scan.progress = Some(progress_label.into());
+    if progress.compactions_complete {
+        progress.save(&progress_path)?;
+        marks.save(&input.marks_path)?;
+    }
     // Events are independent of compactions: a refusal or failure here is reported beside the scan
     // and never fails the record (see `upload_events`).
     if let Some(events) = &input.events {
-        scan.events = Some(upload_events(store, events).to_json());
+        scan.events = Some(
+            upload_events_with_progress(store, events, &mut progress, &progress_path).to_json(),
+        );
     }
     if let Some(usage_db) = &input.health {
-        scan.health = Some(upload_health_events(store, usage_db, &input.machine_id).to_json());
+        scan.health = Some(
+            upload_health_events_with_progress(
+                store,
+                usage_db,
+                &input.machine_id,
+                &mut progress,
+                &progress_path,
+            )
+            .to_json(),
+        );
     }
     before_push()?;
     // Push only. A record needs nothing the other machines wrote: its dedup, watermarks and

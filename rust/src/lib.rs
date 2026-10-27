@@ -17,6 +17,7 @@ pub mod incremental;
 pub mod indexer;
 pub mod install;
 pub mod measure;
+pub mod measure_progress;
 pub mod measure_store;
 pub mod memory;
 pub mod memory_store;

@@ -49,12 +49,8 @@ pub struct MachineHost {
 pub trait MeasureStore {
     /// Insert, or replace the row with the same `(machine_id, boundary_uuid)`.
     fn upsert_compaction(&mut self, row: &CompactionRow) -> Result<(), String>;
-    /// The session that already owns this boundary, if any.
-    fn compaction_session(
-        &mut self,
-        machine_id: &str,
-        boundary_uuid: &str,
-    ) -> Result<Option<String>, String>;
+    /// Uploaded boundary owners for one machine, used to rebuild lost local progress.
+    fn compaction_owners(&mut self, machine_id: &str) -> Result<Vec<(String, String)>, String>;
     fn compactions_since(&mut self, since_ms: i64) -> Result<Vec<CompactionRow>, String>;
     /// Record that `host` was seen for `machine_id`; the latest `seen_ms` wins.
     fn upsert_machine_host(
@@ -87,35 +83,11 @@ pub trait MeasureStore {
         source: &str,
         event_id: &str,
     ) -> Result<Option<String>, String>;
-    /// Payloads of this machine's stored events whose `time_ms` lies in `[min_ms, max_ms]`.
-    /// Payloads of this machine's stored events that have no `time_ms`.
-    fn remote_payloads_without_time(
-        &mut self,
-        machine_id: &str,
-        source: &str,
-    ) -> Result<Vec<String>, String>;
-    fn remote_payloads_in_range(
-        &mut self,
-        machine_id: &str,
-        source: &str,
-        min_ms: i64,
-        max_ms: i64,
-    ) -> Result<Vec<String>, String>;
     fn event_watermark(
         &mut self,
         machine_id: &str,
         source: &str,
     ) -> Result<Option<(i64, String)>, String>;
-    /// Replace the watermark: the highest local rowid uploaded and a fingerprint of that row's raw
-    /// `ts` and `command`. The fingerprint lets the next run notice that `usage.db` was replaced
-    /// under the same rowids; it ignores the column set, so a schema change does not trip it.
-    fn set_event_watermark(
-        &mut self,
-        machine_id: &str,
-        source: &str,
-        max_rowid: i64,
-        row_fingerprint: &str,
-    ) -> Result<(), String>;
     fn upsert_aliases(&mut self, rows: &[(String, String, String)]) -> Result<(), String>;
     /// Every alias row as `(machine_id, local_project_id, shared_project_id)`.
     fn aliases(&mut self) -> Result<Vec<(String, String, String)>, String>;
@@ -191,7 +163,7 @@ pub const MEASURE_SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS telemetry_project_aliases (machine_id TEXT NOT NULL, local_project_id TEXT NOT NULL, shared_project_id TEXT NOT NULL, PRIMARY KEY (machine_id, local_project_id, shared_project_id))",
     "CREATE INDEX IF NOT EXISTS telemetry_events_source_time ON telemetry_events (source, time_ms)",
     "CREATE INDEX IF NOT EXISTS telemetry_events_source_machine_time ON telemetry_events (source, machine_id, time_ms)",
-    // Highest local rowid already uploaded, per machine and source.
+    // Legacy watermarks, read only when rebuilding lost local progress.
     "CREATE TABLE IF NOT EXISTS event_watermarks (
         machine_id TEXT NOT NULL,
         source TEXT NOT NULL,
@@ -215,8 +187,8 @@ const UPSERT_COMPACTION: &str = "INSERT OR REPLACE INTO compactions (machine_id,
     post_tool_calls, post_rereads, post_repeated_commands, post_transcript_lookups, \
     post_human_messages, post_corrections, post_complete) \
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
-const SELECT_SESSION: &str =
-    "SELECT session_id FROM compactions WHERE machine_id = ? AND boundary_uuid = ?";
+const SELECT_COMPACTION_OWNERS: &str =
+    "SELECT boundary_uuid, session_id FROM compactions WHERE machine_id = ?";
 const UPSERT_HOST: &str = "INSERT INTO machine_hosts (machine_id, host, last_seen_ms) \
     VALUES (?, ?, ?) ON CONFLICT (machine_id, host) DO UPDATE SET \
     last_seen_ms = MAX(last_seen_ms, excluded.last_seen_ms)";
@@ -226,20 +198,10 @@ const INSERT_EVENT: &str = "INSERT OR IGNORE INTO telemetry_events (source, even
 const SELECT_REMOTE: &str =
     "SELECT event_id, CASE WHEN json_valid(payload) THEN json_extract(payload, '$.id') END \
      FROM telemetry_events WHERE source = ? AND machine_id = ?";
-const SELECT_RANGE: &str =
-    "SELECT payload FROM telemetry_events WHERE source = ? AND machine_id = ? \
-    AND time_ms >= ? AND time_ms <= ?";
-const SELECT_NO_TIME: &str =
-    "SELECT payload FROM telemetry_events WHERE source = ? AND machine_id = ? \
-    AND time_ms IS NULL";
 const SELECT_PAYLOAD: &str =
     "SELECT payload FROM telemetry_events WHERE source = ? AND machine_id = ? AND event_id = ?";
 const SELECT_WATERMARK: &str =
     "SELECT max_rowid, row_fingerprint FROM event_watermarks WHERE machine_id = ? AND source = ?";
-const UPSERT_WATERMARK: &str =
-    "INSERT INTO event_watermarks (machine_id, source, max_rowid, row_fingerprint) \
-    VALUES (?, ?, ?, ?) ON CONFLICT (machine_id, source) DO UPDATE SET \
-    max_rowid = excluded.max_rowid, row_fingerprint = excluded.row_fingerprint";
 const INSERT_ALIAS: &str = "INSERT OR IGNORE INTO telemetry_project_aliases \
     (machine_id, local_project_id, shared_project_id) VALUES (?, ?, ?)";
 const SELECT_ALIASES: &str =
@@ -480,15 +442,6 @@ fn commit_or_rollback(commit: Result<(), String>, rollback: impl FnOnce()) -> Re
     commit
 }
 
-fn range_params(machine_id: &str, source: &str, min_ms: i64, max_ms: i64) -> Vec<Cell> {
-    vec![
-        Cell::Text(source.into()),
-        Cell::Text(machine_id.into()),
-        Cell::Int(min_ms),
-        Cell::Int(max_ms),
-    ]
-}
-
 fn alias_cells(r: &(String, String, String)) -> Vec<Cell> {
     vec![
         Cell::Text(r.0.clone()),
@@ -600,20 +553,15 @@ impl MeasureStore for SqliteStore {
         self.exec(UPSERT_COMPACTION, compaction_cells(row))
     }
 
-    fn compaction_session(
-        &mut self,
-        machine_id: &str,
-        boundary_uuid: &str,
-    ) -> Result<Option<String>, String> {
-        let rows = self.query(
-            SELECT_SESSION,
-            vec![
-                Cell::Text(machine_id.into()),
-                Cell::Text(boundary_uuid.into()),
-            ],
-            1,
-        )?;
-        rows.first().map(|r| text(&r[0])).transpose()
+    fn compaction_owners(&mut self, machine_id: &str) -> Result<Vec<(String, String)>, String> {
+        self.query(
+            SELECT_COMPACTION_OWNERS,
+            vec![Cell::Text(machine_id.into())],
+            2,
+        )?
+        .iter()
+        .map(|r| Ok((text(&r[0])?, text(&r[1])?)))
+        .collect()
     }
 
     fn compactions_since(&mut self, since_ms: i64) -> Result<Vec<CompactionRow>, String> {
@@ -746,40 +694,6 @@ impl MeasureStore for SqliteStore {
         rows.first().map(|r| text(&r[0])).transpose()
     }
 
-    /// Payloads of this machine's stored events whose `time_ms` lies in `[min_ms, max_ms]`.
-    /// Payloads of this machine's stored events that have no `time_ms`.
-    fn remote_payloads_without_time(
-        &mut self,
-        machine_id: &str,
-        source: &str,
-    ) -> Result<Vec<String>, String> {
-        self.query(
-            SELECT_NO_TIME,
-            vec![Cell::Text(source.into()), Cell::Text(machine_id.into())],
-            1,
-        )?
-        .iter()
-        .map(|r| text(&r[0]))
-        .collect()
-    }
-
-    fn remote_payloads_in_range(
-        &mut self,
-        machine_id: &str,
-        source: &str,
-        min_ms: i64,
-        max_ms: i64,
-    ) -> Result<Vec<String>, String> {
-        self.query(
-            SELECT_RANGE,
-            range_params(machine_id, source, min_ms, max_ms),
-            1,
-        )?
-        .iter()
-        .map(|r| text(&r[0]))
-        .collect()
-    }
-
     fn event_watermark(
         &mut self,
         machine_id: &str,
@@ -793,24 +707,6 @@ impl MeasureStore for SqliteStore {
         rows.first()
             .map(|r| Ok((int(&r[0])?, text(&r[1])?)))
             .transpose()
-    }
-
-    fn set_event_watermark(
-        &mut self,
-        machine_id: &str,
-        source: &str,
-        max_rowid: i64,
-        row_fingerprint: &str,
-    ) -> Result<(), String> {
-        self.exec(
-            UPSERT_WATERMARK,
-            vec![
-                Cell::Text(machine_id.into()),
-                Cell::Text(source.into()),
-                Cell::Int(max_rowid),
-                Cell::Text(row_fingerprint.into()),
-            ],
-        )
     }
 
     fn upsert_aliases(&mut self, rows: &[(String, String, String)]) -> Result<(), String> {
@@ -1106,20 +1002,15 @@ impl MeasureStore for RemoteStore {
         self.exec(UPSERT_COMPACTION, compaction_cells(row))
     }
 
-    fn compaction_session(
-        &mut self,
-        machine_id: &str,
-        boundary_uuid: &str,
-    ) -> Result<Option<String>, String> {
-        let rows = self.query(
-            SELECT_SESSION,
-            vec![
-                Cell::Text(machine_id.into()),
-                Cell::Text(boundary_uuid.into()),
-            ],
-            1,
-        )?;
-        rows.first().map(|r| text(&r[0])).transpose()
+    fn compaction_owners(&mut self, machine_id: &str) -> Result<Vec<(String, String)>, String> {
+        self.query(
+            SELECT_COMPACTION_OWNERS,
+            vec![Cell::Text(machine_id.into())],
+            2,
+        )?
+        .iter()
+        .map(|r| Ok((text(&r[0])?, text(&r[1])?)))
+        .collect()
     }
 
     fn compactions_since(&mut self, since_ms: i64) -> Result<Vec<CompactionRow>, String> {
@@ -1242,40 +1133,6 @@ impl MeasureStore for RemoteStore {
         rows.first().map(|r| text(&r[0])).transpose()
     }
 
-    /// Payloads of this machine's stored events whose `time_ms` lies in `[min_ms, max_ms]`.
-    /// Payloads of this machine's stored events that have no `time_ms`.
-    fn remote_payloads_without_time(
-        &mut self,
-        machine_id: &str,
-        source: &str,
-    ) -> Result<Vec<String>, String> {
-        self.query(
-            SELECT_NO_TIME,
-            vec![Cell::Text(source.into()), Cell::Text(machine_id.into())],
-            1,
-        )?
-        .iter()
-        .map(|r| text(&r[0]))
-        .collect()
-    }
-
-    fn remote_payloads_in_range(
-        &mut self,
-        machine_id: &str,
-        source: &str,
-        min_ms: i64,
-        max_ms: i64,
-    ) -> Result<Vec<String>, String> {
-        self.query(
-            SELECT_RANGE,
-            range_params(machine_id, source, min_ms, max_ms),
-            1,
-        )?
-        .iter()
-        .map(|r| text(&r[0]))
-        .collect()
-    }
-
     fn event_watermark(
         &mut self,
         machine_id: &str,
@@ -1289,24 +1146,6 @@ impl MeasureStore for RemoteStore {
         rows.first()
             .map(|r| Ok((int(&r[0])?, text(&r[1])?)))
             .transpose()
-    }
-
-    fn set_event_watermark(
-        &mut self,
-        machine_id: &str,
-        source: &str,
-        max_rowid: i64,
-        row_fingerprint: &str,
-    ) -> Result<(), String> {
-        self.exec(
-            UPSERT_WATERMARK,
-            vec![
-                Cell::Text(machine_id.into()),
-                Cell::Text(source.into()),
-                Cell::Int(max_rowid),
-                Cell::Text(row_fingerprint.into()),
-            ],
-        )
     }
 
     fn upsert_aliases(&mut self, rows: &[(String, String, String)]) -> Result<(), String> {
@@ -1537,8 +1376,6 @@ mod tests {
         }
         for (name, sql, args) in [
             ("SELECT_REMOTE", SELECT_REMOTE, 2),
-            ("SELECT_RANGE", SELECT_RANGE, 4),
-            ("SELECT_NO_TIME", SELECT_NO_TIME, 2),
             ("COUNT_EVENTS", COUNT_EVENTS, 0),
         ] {
             let explain = format!("EXPLAIN QUERY PLAN {sql}");
