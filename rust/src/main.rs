@@ -580,7 +580,7 @@ struct MemoryArgs {
 
 #[derive(Subcommand, Debug)]
 enum MemoryAction {
-    /// Opt in, inspect, and synchronize Claude Code harness notes.
+    /// Opt in, inspect, and upload Claude Code harness notes.
     Notes {
         #[command(subcommand)]
         action: NotesAction,
@@ -659,7 +659,7 @@ enum NotesAction {
         root: PathBuf,
     },
     Status,
-    Sync {
+    Upload {
         #[arg(long)]
         dry_run: bool,
         #[arg(long)]
@@ -2048,7 +2048,7 @@ fn cmd_memory(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError
             NotesAction::OptIn { root } => cort::memory_store::notes_opt_in(&root, true),
             NotesAction::OptOut { root } => cort::memory_store::notes_opt_in(&root, false),
             NotesAction::Status => cort::memory_store::notes_status(),
-            NotesAction::Sync {
+            NotesAction::Upload {
                 dry_run,
                 verbose,
                 background,
@@ -2057,7 +2057,7 @@ fn cmd_memory(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError
                     cort::notes_kick::run_background();
                     Ok(json!({}))
                 } else {
-                    cort::memory_store::notes_sync(
+                    cort::memory_store::notes_upload(
                         dry_run,
                         verbose,
                         cort::memory_store::notes_lock_wait(),
@@ -2782,7 +2782,7 @@ fn main() {
             .any(|a| a == "--background" || a.starts_with("--background="));
     let background_notes = args.first().is_some_and(|a| a == "memory")
         && args.get(1).is_some_and(|a| a == "notes")
-        && args.get(2).is_some_and(|a| a == "sync")
+        && args.get(2).is_some_and(|a| a == "upload")
         && args.iter().any(|a| a == "--background");
     let background_measure = background_measure || background_notes;
     if wants_help(&args) {

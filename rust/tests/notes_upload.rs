@@ -1,5 +1,5 @@
 use cort::notes::{ScanReport, ScanStatus, ScannedNote};
-use cort::notes_sync::{self, ExistingRow};
+use cort::notes_upload::{self, ExistingRow};
 use std::collections::BTreeSet;
 use std::fs;
 
@@ -27,8 +27,8 @@ fn prepare(
     report: &ScanReport,
     root: &std::path::Path,
     opted: &BTreeSet<String>,
-) -> notes_sync::Prepared {
-    notes_sync::prepare(report, root, opted, |_| Ok("p".into()))
+) -> notes_upload::Prepared {
+    notes_upload::prepare(report, root, opted, |_| Ok("p".into()))
 }
 
 fn existing(dir: &str, file: &str, sha: &str, deleted: bool) -> ExistingRow {
@@ -91,7 +91,7 @@ fn dispositions_and_safe_tombstone_scope() {
         ),
         (1, 1, 1, 1, 1)
     );
-    let plan = notes_sync::plan(
+    let plan = notes_upload::plan(
         &prepared,
         &[
             existing("-project", "big.md", "old", false),
@@ -122,7 +122,7 @@ fn unresolved_ambiguous_and_incomplete_never_tombstone() {
             row("-project", "c.md", ScanStatus::Read, Some("c")),
         ],
     };
-    let prepared = notes_sync::prepare(&report, temp.path(), &opted, |path| {
+    let prepared = notes_upload::prepare(&report, temp.path(), &opted, |path| {
         if path.ends_with("project") {
             Err("no origin".into())
         } else {
@@ -136,7 +136,7 @@ fn unresolved_ambiguous_and_incomplete_never_tombstone() {
         listed_dirs: listed(&["-project"]),
         notes: vec![row("-project", "kept.md", ScanStatus::Read, Some("kept"))],
     };
-    let plan = notes_sync::plan(
+    let plan = notes_upload::plan(
         &prepare(&incomplete, temp.path(), &opted),
         &[existing("-project", "gone.md", "old", false)],
     );
@@ -162,17 +162,17 @@ fn unchanged_and_deleted_rows() {
         notes: vec![row("-project", "a.md", ScanStatus::Read, Some("a"))],
     };
     let prepared = prepare(&report, temp.path(), &opted);
-    let unchanged = notes_sync::plan(&prepared, &[existing("-project", "a.md", "hash-a", false)]);
+    let unchanged = notes_upload::plan(&prepared, &[existing("-project", "a.md", "hash-a", false)]);
     assert_eq!(unchanged.counts.unchanged, 1);
     assert!(unchanged.upserts.is_empty());
-    let resurrect = notes_sync::plan(&prepared, &[existing("-project", "a.md", "hash-a", true)]);
+    let resurrect = notes_upload::plan(&prepared, &[existing("-project", "a.md", "hash-a", true)]);
     assert_eq!(resurrect.upserts.len(), 1);
     assert_eq!(
-        notes_sync::note_id("p", "m", "h", "-project", "a.md"),
-        notes_sync::note_id("p", "m", "h", "-project", "a.md")
+        notes_upload::note_id("p", "m", "h", "-project", "a.md"),
+        notes_upload::note_id("p", "m", "h", "-project", "a.md")
     );
     assert_eq!(
-        notes_sync::note_id("p", "m", "h", "-project", "a.md").len(),
+        notes_upload::note_id("p", "m", "h", "-project", "a.md").len(),
         12
     );
 }
@@ -181,11 +181,11 @@ fn unchanged_and_deleted_rows() {
 fn opt_in_file_is_local_and_sorted() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("state/notes-opt-in");
-    assert!(notes_sync::read_opt_in(&path).unwrap().is_empty());
+    assert!(notes_upload::read_opt_in(&path).unwrap().is_empty());
     let set = BTreeSet::from(["z".into(), "a".into()]);
-    notes_sync::write_opt_in(&path, &set).unwrap();
+    notes_upload::write_opt_in(&path, &set).unwrap();
     assert_eq!(fs::read_to_string(&path).unwrap(), "a\nz\n");
-    assert_eq!(notes_sync::read_opt_in(&path).unwrap(), set);
+    assert_eq!(notes_upload::read_opt_in(&path).unwrap(), set);
 }
 
 #[test]
@@ -194,13 +194,13 @@ fn sql_round_trip_tombstone_and_read_paths() {
     runtime.block_on(async {
         let db = turso::Builder::new_local(":memory:").build().await.unwrap();
         let conn = db.connect().unwrap();
-        assert!(notes_sync::list(&conn, "p").await.unwrap().is_empty());
-        assert!(notes_sync::show(&conn, "id").await.unwrap().is_none());
-        assert!(notes_sync::existing_rows(&conn, "m", "h")
+        assert!(notes_upload::list(&conn, "p").await.unwrap().is_empty());
+        assert!(notes_upload::show(&conn, "id").await.unwrap().is_none());
+        assert!(notes_upload::existing_rows(&conn, "m", "h")
             .await
             .unwrap()
             .is_empty());
-        notes_sync::ensure_notes_schema(&conn).await.unwrap();
+        notes_upload::ensure_notes_schema(&conn).await.unwrap();
         let (temp, opted) = fixture();
         let report = ScanReport {
             complete: true,
@@ -208,8 +208,8 @@ fn sql_round_trip_tombstone_and_read_paths() {
             notes: vec![row("-project", "a.md", ScanStatus::Read, Some("hello"))],
         };
         let prepared = prepare(&report, temp.path(), &opted);
-        let plan = notes_sync::plan(&prepared, &[]);
-        assert!(notes_sync::apply(
+        let plan = notes_upload::plan(&prepared, &[]);
+        assert!(notes_upload::apply(
             &conn,
             "machine1",
             "NUC11i5",
@@ -219,30 +219,30 @@ fn sql_round_trip_tombstone_and_read_paths() {
         )
         .await
         .unwrap());
-        assert!(!notes_sync::apply(
+        assert!(!notes_upload::apply(
             &conn,
             "machine1",
             "NUC11i5",
             "claude",
             "2026-01-01T00:00:01Z",
-            &notes_sync::plan(
+            &notes_upload::plan(
                 &prepared,
-                &notes_sync::existing_rows(&conn, "machine1", "claude")
+                &notes_upload::existing_rows(&conn, "machine1", "claude")
                     .await
                     .unwrap()
             )
         )
         .await
         .unwrap());
-        assert!(notes_sync::apply(
+        assert!(notes_upload::apply(
             &conn,
             "machine1",
             "New\n\u{202e}Host",
             "claude",
             "2026-01-01T00:00:02Z",
-            &notes_sync::plan(
+            &notes_upload::plan(
                 &prepared,
-                &notes_sync::existing_rows(&conn, "machine1", "claude")
+                &notes_upload::existing_rows(&conn, "machine1", "claude")
                     .await
                     .unwrap()
             )
@@ -259,18 +259,18 @@ fn sql_round_trip_tombstone_and_read_paths() {
         let host_row = host_row.next().await.unwrap().unwrap();
         assert_eq!(host_row.get::<String>(0).unwrap(), "New Host");
         assert_eq!(host_row.get::<String>(1).unwrap(), "2026-01-01T00:00:02Z");
-        let rows = notes_sync::existing_rows(&conn, "machine1", "claude")
+        let rows = notes_upload::existing_rows(&conn, "machine1", "claude")
             .await
             .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].sha256, "hash-hello");
-        let id = notes_sync::note_id("p", "machine1", "claude", "-project", "a.md");
+        let id = notes_upload::note_id("p", "machine1", "claude", "-project", "a.md");
         assert_eq!(
-            notes_sync::show(&conn, &id).await.unwrap().unwrap().body,
+            notes_upload::show(&conn, &id).await.unwrap().unwrap().body,
             "hello"
         );
         assert_eq!(
-            notes_sync::show(&conn, &id)
+            notes_upload::show(&conn, &id)
                 .await
                 .unwrap()
                 .unwrap()
@@ -279,7 +279,7 @@ fn sql_round_trip_tombstone_and_read_paths() {
                 .as_deref(),
             Some("New Host")
         );
-        notes_sync::apply(
+        notes_upload::apply(
             &conn,
             "machine2",
             "Other",
@@ -289,7 +289,7 @@ fn sql_round_trip_tombstone_and_read_paths() {
         )
         .await
         .unwrap();
-        let note_rows = notes_sync::list(&conn, "p").await.unwrap();
+        let note_rows = notes_upload::list(&conn, "p").await.unwrap();
         assert_eq!(note_rows.len(), 2);
         assert_eq!(note_rows[0].host.as_deref(), Some("Other"));
         assert_eq!(note_rows[1].host.as_deref(), Some("New Host"));
@@ -298,8 +298,8 @@ fn sql_round_trip_tombstone_and_read_paths() {
             listed_dirs: listed(&["-project"]),
             notes: vec![row("-project", "other.md", ScanStatus::SkippedSize, None)],
         };
-        let tombstone = notes_sync::plan(&prepare(&absent, temp.path(), &opted), &rows);
-        notes_sync::apply(
+        let tombstone = notes_upload::plan(&prepare(&absent, temp.path(), &opted), &rows);
+        notes_upload::apply(
             &conn,
             "machine1",
             "New Host",
@@ -309,8 +309,8 @@ fn sql_round_trip_tombstone_and_read_paths() {
         )
         .await
         .unwrap();
-        assert!(notes_sync::show(&conn, &id).await.unwrap().is_none());
-        assert_eq!(notes_sync::list(&conn, "p").await.unwrap().len(), 1);
+        assert!(notes_upload::show(&conn, &id).await.unwrap().is_none());
+        assert_eq!(notes_upload::list(&conn, "p").await.unwrap().len(), 1);
         let mut raw = conn
             .query(
                 "SELECT body, sha256, title FROM harness_notes WHERE note_id=?",
@@ -331,7 +331,7 @@ fn missing_notes_table_is_read_only_and_empty() {
     runtime.block_on(async {
         let db = turso::Builder::new_local(":memory:").build().await.unwrap();
         let conn = db.connect().unwrap();
-        assert_eq!(notes_sync::other_machine_briefs(&conn, "p", "this", 15).await.unwrap(), (vec![], 0));
+        assert_eq!(notes_upload::other_machine_briefs(&conn, "p", "this", 15).await.unwrap(), (vec![], 0));
         let mut rows = conn.query("SELECT name FROM sqlite_master WHERE name='harness_notes' OR name='harness_machines'", ()).await.unwrap();
         assert!(rows.next().await.unwrap().is_none());
     });
@@ -348,7 +348,7 @@ fn tombstones_follow_listed_directories_not_rows() {
         listed_dirs: listed(&["-project"]),
         notes: vec![row("-linked", "", ScanStatus::SkippedSymlink, None)],
     };
-    let plan = notes_sync::plan(
+    let plan = notes_upload::plan(
         &prepare(&report, temp.path(), &opted),
         &[
             existing("-project", "emptied.md", "old", false),

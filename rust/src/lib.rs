@@ -23,7 +23,7 @@ pub mod memory_store;
 mod network_timeout;
 pub mod notes;
 pub mod notes_kick;
-pub mod notes_sync;
+pub mod notes_upload;
 pub mod pack;
 pub mod render;
 pub mod scan;

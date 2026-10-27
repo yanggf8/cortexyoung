@@ -14,7 +14,7 @@ remains shared across machines. Each machine must configure the same Turso URL a
 write afterward. `CORT_MEMORY_PROJECT` can override Git origin for a project without one;
 the earlier `CLAUDECAT_MEMORY_PROJECT` spelling is accepted during migration.
 Network calls use `CORT_COLLECT_NET_TIMEOUT_SECS` (default 120 seconds) as their deadline.
-`notes sync`, `list`, and `show` wait up to `CORT_MEMORY_LOCK_WAIT_SECS` (default 30 seconds, fractions allowed) for `memory.lock`.
+`notes upload`, `list`, and `show` wait up to `CORT_MEMORY_LOCK_WAIT_SECS` (default 30 seconds, fractions allowed) for `memory.lock`.
 
 The shared ledger database is `harnessuse` (`turso://harnessuse-yanggf8.aws-ap-northeast-1.turso.io`,
 native TYPE Turso, shared with `telemetry_events`); mint its token with
@@ -52,12 +52,12 @@ is inferred from a successful sync alone.
 
 ## Harness notes
 
-The edit hook kicks `cort memory notes sync --background` for Claude Code memory files; a used machine also kicks it every `CORT_NOTES_SYNC_INTERVAL_SECS` (default 1800 seconds). `CORT_NOTES_SYNC_DEADLINE_SECS` bounds a background run (default 600 seconds). Hooks never wait for network work. Each pass appends a JSON line to `memory-sync.log` under `CORT_MEMORY_DIR` (or the default memory data directory).
+The edit hook kicks `cort memory notes upload --background` for Claude Code memory files; a used machine also kicks it every `CORT_NOTES_UPLOAD_INTERVAL_SECS` (default 1800 seconds). `CORT_NOTES_UPLOAD_DEADLINE_SECS` bounds a background run (default 600 seconds). Hooks never wait for network work. Each pass appends a JSON line to `memory-upload.log` under `CORT_MEMORY_DIR` (or the default memory data directory).
 
 `cort memory notes` is opt-in per project per machine. After `notes opt-in --root .`,
-`notes sync` uploads Claude Code `projects/*/memory/*.md` files for opted-in projects.
+`notes upload` uploads Claude Code `projects/*/memory/*.md` files for opted-in projects.
 The secret screen is coarse and fail-closed; it is not a privacy guarantee. Run
-`cort memory notes sync --dry-run` to list what would be uploaded before syncing.
+`cort memory notes upload --dry-run` to list what would be uploaded before uploading.
 Claude Code's SessionStart context lists up to 15 unreviewed note names from other machines for this project, without their bodies.
 
 ## Review, record, recall

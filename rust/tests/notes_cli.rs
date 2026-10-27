@@ -119,7 +119,7 @@ fn dry_run_screens_notes_without_configuration() {
     f.note(&f.repo, "secret.md", "password: Abcdef12345!\n");
     f.note(&f.other, "other.md", "Another project note.\n");
     assert!(f.run(&["opt-in"]).0.status.success());
-    let (out, report) = f.run(&["sync", "--dry-run"]);
+    let (out, report) = f.run(&["upload", "--dry-run"]);
     assert!(
         out.status.success(),
         "{}",
@@ -161,7 +161,7 @@ fn dry_run_screens_notes_without_configuration() {
 #[test]
 fn unconfigured_network_and_reads_fail_as_memory_error() {
     let f = Fixture::new();
-    for args in [&["sync"][..], &["list"][..], &["show", "abcdef"][..]] {
+    for args in [&["upload"][..], &["list"][..], &["show", "abcdef"][..]] {
         let (out, error) = f.run(args);
         assert!(!out.status.success(), "{args:?}");
         assert_eq!(error["error"], "memory_error", "{error}");

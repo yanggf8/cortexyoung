@@ -1,4 +1,4 @@
-//! Cheap notes-sync admission in hooks; network work belongs to the detached child.
+//! Cheap notes-upload admission in hooks; network work belongs to the detached child.
 
 use crate::data_dir::write_atomic;
 use serde_json::{json, Value};
@@ -6,7 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-pub const TRIGGER_ENV: &str = "CORT_NOTES_SYNC_TRIGGER";
+pub const TRIGGER_ENV: &str = "CORT_NOTES_UPLOAD_TRIGGER";
 const DEFAULT_INTERVAL_SECS: i64 = 1800;
 const PENDING_RETRY_MS: i64 = 60_000;
 
@@ -23,7 +23,7 @@ impl NotesKickPaths {
         Self {
             data_dir: crate::data_dir::data_dir(),
             memory_config: crate::memory_store::config_path(),
-            opt_in: crate::notes_sync::opt_in_path(),
+            opt_in: crate::notes_upload::opt_in_path(),
             claude_projects: crate::measure::claude_projects_dir(),
             cache_dir: crate::db::cache_dir(),
         }
@@ -36,7 +36,7 @@ pub struct NotesKickConfig {
 
 impl NotesKickConfig {
     pub fn from_env() -> Self {
-        let secs = std::env::var("CORT_NOTES_SYNC_INTERVAL_SECS")
+        let secs = std::env::var("CORT_NOTES_UPLOAD_INTERVAL_SECS")
             .ok()
             .and_then(|s| s.parse::<i64>().ok())
             .filter(|n| *n > 0)
@@ -57,7 +57,7 @@ impl NotesSpawner for DetachedNotesSpawner {
     fn spawn(&mut self, trigger: &str) -> std::io::Result<()> {
         let mut command = std::process::Command::new(std::env::current_exe()?);
         command
-            .args(["memory", "notes", "sync", "--background"])
+            .args(["memory", "notes", "upload", "--background"])
             .env(TRIGGER_ENV, trigger);
         crate::heal::spawn_detached(command)
     }
@@ -100,14 +100,14 @@ pub fn kick_at(
         Ok(guard) => guard,
         Err(_) => return "upgrade",
     };
-    let pending = paths.data_dir.join("notes-sync.pending");
-    let stamp = paths.data_dir.join("notes-sync.spawned");
+    let pending = paths.data_dir.join("notes-upload.pending");
+    let stamp = paths.data_dir.join("notes-upload.spawned");
     let previous = fs::read_to_string(&stamp)
         .ok()
         .and_then(|s| s.trim().parse::<i64>().ok());
     // A marker left behind counts as an edit: a child that had already passed its last pending
     // check when that edit arrived exits without it, so the next hook of any kind picks it up.
-    // Unlike a direct edit it waits PENDING_RETRY_MS after the last spawn, so a sync that keeps
+    // Unlike a direct edit it waits PENDING_RETRY_MS after the last spawn, so an upload that keeps
     // failing fast (network down) is retried once a minute rather than by every hook.
     let pending_due = pending.is_file()
         && !previous
@@ -130,13 +130,13 @@ pub fn kick_at(
             "busy"
         }
     };
-    match crate::upgrade::try_exclusive_lock(&paths.data_dir.join("notes-sync.lock")) {
+    match crate::upgrade::try_exclusive_lock(&paths.data_dir.join("notes-upload.lock")) {
         Ok(lock) => drop(lock),
         Err(crate::upgrade::LockError::AdmissionBusy) => return busy(),
         Err(_) => return "stamp_failed",
     }
     let _kick =
-        match crate::upgrade::try_exclusive_lock(&paths.data_dir.join("notes-sync.kick.lock")) {
+        match crate::upgrade::try_exclusive_lock(&paths.data_dir.join("notes-upload.kick.lock")) {
             Ok(lock) => lock,
             Err(crate::upgrade::LockError::AdmissionBusy) => return busy(),
             Err(_) => return "stamp_failed",
@@ -200,14 +200,14 @@ fn log(
         "host_written": result.and_then(|r| r.get("host_written")),
         "error": error, "elapsed_ms": elapsed_ms, "machine_id": crate::usage::machine_id(),
     });
-    let _ = crate::collect::append_log(data_dir, "memory-sync.log", &line.to_string());
+    let _ = crate::collect::append_log(data_dir, "memory-upload.log", &line.to_string());
 }
 
 pub fn run_background() {
     let data_dir = crate::data_dir::data_dir();
     let trigger = std::env::var(TRIGGER_ENV).unwrap_or_else(|_| "unknown".to_string());
     run_background_at(&data_dir, &trigger, true, &mut || {
-        crate::memory_store::notes_sync(false, false, Duration::from_secs(5))
+        crate::memory_store::notes_upload(false, false, Duration::from_secs(5))
     });
 }
 
@@ -215,7 +215,7 @@ fn run_background_at(
     data_dir: &Path,
     trigger: &str,
     watchdog: bool,
-    sync: &mut dyn FnMut() -> Result<Value, String>,
+    upload: &mut dyn FnMut() -> Result<Value, String>,
 ) {
     let started = Instant::now();
     if fs::create_dir_all(data_dir).is_err() {
@@ -230,12 +230,12 @@ fn run_background_at(
         );
         return;
     }
-    let _lock = match crate::upgrade::try_exclusive_lock(&data_dir.join("notes-sync.lock")) {
+    let _lock = match crate::upgrade::try_exclusive_lock(&data_dir.join("notes-upload.lock")) {
         Ok(lock) => lock,
         Err(crate::upgrade::LockError::AdmissionBusy) => {
             // A sibling spawned in the same window won the run lock, possibly after scanning; the
             // edit this child was spawned for must still reach it as one more pass.
-            let pending = data_dir.join("notes-sync.pending");
+            let pending = data_dir.join("notes-upload.pending");
             if trigger == "edit" && !pending.is_file() {
                 let _ = write_atomic(&pending, "1");
             }
@@ -263,7 +263,7 @@ fn run_background_at(
             return;
         }
     };
-    let deadline = std::env::var("CORT_NOTES_SYNC_DEADLINE_SECS")
+    let deadline = std::env::var("CORT_NOTES_UPLOAD_DEADLINE_SECS")
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
         .filter(|n| *n > 0)
@@ -272,7 +272,7 @@ fn run_background_at(
     let watchdog_trigger = trigger.to_string();
     if watchdog {
         let _ = std::thread::Builder::new()
-            .name("notes-sync-watchdog".into())
+            .name("notes-upload-watchdog".into())
             .spawn(move || {
                 std::thread::sleep(Duration::from_secs(deadline));
                 log(
@@ -287,11 +287,11 @@ fn run_background_at(
                 std::process::exit(0);
             });
     }
-    let pending = data_dir.join("notes-sync.pending");
+    let pending = data_dir.join("notes-upload.pending");
     for pass in 1..=3 {
         let _ = fs::remove_file(&pending);
         let pass_start = Instant::now();
-        match sync() {
+        match upload() {
             Ok(value) => log(
                 data_dir,
                 trigger,
@@ -411,18 +411,19 @@ mod tests {
         let memory = p.claude_projects.join("one/memory");
         fs::create_dir_all(&memory).unwrap();
         fs::create_dir_all(&p.data_dir).unwrap();
-        let lock = crate::upgrade::try_exclusive_lock(&p.data_dir.join("notes-sync.lock")).unwrap();
+        let lock =
+            crate::upgrade::try_exclusive_lock(&p.data_dir.join("notes-upload.lock")).unwrap();
         let mut spawn = FakeSpawner::default();
         let cfg = NotesKickConfig { interval_ms: 1000 };
         assert_eq!(kick_at(&p, None, 1000, &cfg, &mut spawn), "busy");
-        assert!(!p.data_dir.join("notes-sync.pending").exists());
+        assert!(!p.data_dir.join("notes-upload.pending").exists());
         assert_eq!(
             kick_at(&p, Some(&memory.join("note.md")), 1000, &cfg, &mut spawn),
             "busy"
         );
-        assert!(p.data_dir.join("notes-sync.pending").exists());
+        assert!(p.data_dir.join("notes-upload.pending").exists());
         drop(lock);
-        // Left behind by a child that finished: the next interval-only hook syncs it, unthrottled.
+        // Left behind by a child that finished: the next interval-only hook uploads it, unthrottled.
         assert_eq!(kick_at(&p, None, 1001, &cfg, &mut spawn), "spawned_edit");
         assert_eq!(spawn.calls, ["edit"]);
     }
@@ -443,7 +444,7 @@ mod tests {
         p.data_dir = temp.path().join("data");
         fs::create_dir_all(&p.data_dir).unwrap();
         let lock =
-            crate::upgrade::try_exclusive_lock(&p.data_dir.join("notes-sync.kick.lock")).unwrap();
+            crate::upgrade::try_exclusive_lock(&p.data_dir.join("notes-upload.kick.lock")).unwrap();
         assert_eq!(kick_at(&p, None, 1000, &cfg, &mut spawn), "busy");
         drop(lock);
         assert!(spawn.calls.is_empty());
@@ -461,7 +462,7 @@ mod tests {
             interval_ms: 3_600_000,
         };
         let mut spawn = FakeSpawner::default();
-        let pending = p.data_dir.join("notes-sync.pending");
+        let pending = p.data_dir.join("notes-upload.pending");
         fs::write(&pending, "1").unwrap();
         assert_eq!(kick_at(&p, None, 1_000, &cfg, &mut spawn), "spawned_edit");
         // The child failed fast and a hook left the marker again: no respawn inside the minute.
@@ -478,7 +479,7 @@ mod tests {
         run_background_at(dir, "edit", false, &mut || {
             passes += 1;
             if passes == 1 {
-                fs::write(dir.join("notes-sync.pending"), "1").unwrap();
+                fs::write(dir.join("notes-upload.pending"), "1").unwrap();
             }
             Ok(
                 json!({"counts":{"upserts":1,"tombstones":0,"unchanged":0,"skipped_secret":0},"host_written":true}),
@@ -486,7 +487,7 @@ mod tests {
         });
         assert_eq!(passes, 2);
         assert_eq!(
-            fs::read_to_string(dir.join("memory-sync.log"))
+            fs::read_to_string(dir.join("memory-upload.log"))
                 .unwrap()
                 .lines()
                 .count(),

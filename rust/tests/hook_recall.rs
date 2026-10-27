@@ -1,4 +1,4 @@
-use cort::notes_sync;
+use cort::notes_upload;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -71,11 +71,11 @@ fn seed_notes(path: &Path, url: &str, project: &str, hosts: bool) {
             .bootstrap_if_empty(false).build().await.unwrap();
         let conn = db.connect().await.unwrap();
         if hosts {
-            notes_sync::ensure_notes_schema(&conn).await.unwrap();
+            notes_upload::ensure_notes_schema(&conn).await.unwrap();
             conn.execute("INSERT INTO harness_machines (machine,host,updated_at) VALUES ('remote-machine','NUC11i5','2026-10-27')", ()).await.unwrap();
         } else {
-            conn.execute(notes_sync::CREATE_TABLE, ()).await.unwrap();
-            conn.execute(notes_sync::CREATE_INDEX, ()).await.unwrap();
+            conn.execute(notes_upload::CREATE_TABLE, ()).await.unwrap();
+            conn.execute(notes_upload::CREATE_INDEX, ()).await.unwrap();
         }
         for i in 0..18 {
             let id = format!("note-{i:02}");
@@ -727,7 +727,7 @@ fn a_failing_notes_query_leaves_the_ledger_outcome_alone() {
 #[test]
 fn notes_section_byte_cap_binds_before_the_count_cap() {
     use cort::memory::MemoryRecall;
-    use cort::notes_sync::NoteBrief;
+    use cort::notes_upload::NoteBrief;
     let notes: Vec<NoteBrief> = (0..15)
         .map(|i| NoteBrief {
             note_id: format!("note-{i:02}"),

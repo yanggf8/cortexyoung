@@ -46,7 +46,7 @@ impl Fixture {
     }
 
     fn lines(&self) -> Vec<Value> {
-        fs::read_to_string(self.data.join("memory-sync.log"))
+        fs::read_to_string(self.data.join("memory-upload.log"))
             .unwrap()
             .lines()
             .map(|s| serde_json::from_str(s).unwrap())
@@ -74,7 +74,7 @@ fn output_with_stdin(mut command: Command, payload: &str) -> Output {
 fn background_without_config_is_silent_and_logs_error() {
     let f = Fixture::new();
     let out = f
-        .command(&["memory", "notes", "sync", "--background"])
+        .command(&["memory", "notes", "upload", "--background"])
         .output()
         .unwrap();
     assert!(out.status.success());
@@ -87,22 +87,22 @@ fn background_without_config_is_silent_and_logs_error() {
 #[test]
 fn background_with_held_run_lock_logs_busy() {
     let f = Fixture::new();
-    let lock = cort::upgrade::try_exclusive_lock(&f.data.join("notes-sync.lock")).unwrap();
+    let lock = cort::upgrade::try_exclusive_lock(&f.data.join("notes-upload.lock")).unwrap();
     let out = f
-        .command(&["memory", "notes", "sync", "--background"])
-        .env("CORT_NOTES_SYNC_TRIGGER", "edit")
+        .command(&["memory", "notes", "upload", "--background"])
+        .env("CORT_NOTES_UPLOAD_TRIGGER", "edit")
         .output()
         .unwrap();
     assert!(out.status.success());
     assert!(out.stdout.is_empty() && out.stderr.is_empty());
     assert_eq!(f.lines()[0]["outcome"], "busy");
     // The sibling holding the run lock may have scanned before this edit: leave it one more pass.
-    assert!(f.data.join("notes-sync.pending").is_file());
+    assert!(f.data.join("notes-upload.pending").is_file());
     drop(lock);
 }
 
 #[test]
-fn background_repeats_when_a_pending_edit_arrives_during_sync() {
+fn background_repeats_when_a_pending_edit_arrives_during_upload() {
     let f = Fixture::new();
     let url = "https://example.invalid";
     fs::write(
@@ -116,12 +116,12 @@ fn background_repeats_when_a_pending_edit_arrives_during_sync() {
     fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
     let memory_lock = cort::upgrade::try_exclusive_lock(&lock_path).unwrap();
     let child = f
-        .command(&["memory", "notes", "sync", "--background"])
+        .command(&["memory", "notes", "upload", "--background"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    let run_lock_path = f.data.join("notes-sync.lock");
+    let run_lock_path = f.data.join("notes-upload.lock");
     let mut running = false;
     for _ in 0..200 {
         if matches!(
@@ -135,7 +135,7 @@ fn background_repeats_when_a_pending_edit_arrives_during_sync() {
     }
     assert!(running, "background child never acquired run lock");
     std::thread::sleep(Duration::from_millis(100));
-    fs::write(f.data.join("notes-sync.pending"), "1").unwrap();
+    fs::write(f.data.join("notes-upload.pending"), "1").unwrap();
     let out = child.wait_with_output().unwrap();
     assert!(out.status.success());
     assert!(out.stdout.is_empty() && out.stderr.is_empty());
@@ -162,10 +162,10 @@ fn hook_refresh_kicks_memory_edit_without_an_index_and_records_tag() {
         &payload.to_string(),
     );
     assert!(out.status.success());
-    assert!(f.data.join("notes-sync.spawned").exists());
+    assert!(f.data.join("notes-upload.spawned").exists());
     // The detached child must finish inside the tempdir, or it recreates `data` after cleanup.
     for _ in 0..500 {
-        if f.data.join("memory-sync.log").is_file() {
+        if f.data.join("memory-upload.log").is_file() {
             break;
         }
         std::thread::sleep(Duration::from_millis(10));

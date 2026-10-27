@@ -164,7 +164,7 @@ fn notes_lock_wait_is_bounded_before_network() {
         .unwrap();
     lock.lock().unwrap();
     for args in [
-        &["memory", "notes", "sync"][..],
+        &["memory", "notes", "upload"][..],
         &["memory", "notes", "list"][..],
         &["memory", "notes", "show", "x"][..],
     ] {
@@ -194,13 +194,13 @@ fn bounded_failure(output: &Output, value: &Value, elapsed: Duration) {
 }
 
 #[test]
-fn silent_server_bounds_notes_sync_and_releases_lock() {
+fn silent_server_bounds_notes_upload_and_releases_lock() {
     let Some(server) = SilentServer::new() else {
         return;
     };
     let fixture = Fixture::new(server.url.clone());
     for _ in 0..2 {
-        let (output, value, elapsed) = fixture.run(&["memory", "notes", "sync"], "1");
+        let (output, value, elapsed) = fixture.run(&["memory", "notes", "upload"], "1");
         bounded_failure(&output, &value, elapsed);
     }
 }

@@ -1,4 +1,4 @@
-//! Reviewable synchronization of scanned harness notes into the local Turso replica.
+//! Reviewable upload of scanned harness notes into the local Turso replica.
 
 use crate::notes::{self, Decoded, ScanReport, ScanStatus};
 use sha2::{Digest, Sha256};

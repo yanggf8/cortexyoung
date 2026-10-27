@@ -259,14 +259,14 @@ alone, where no other machine or harness can read it, until the user asked why.
 - A harness-private memory is for how one agent works, never the only copy of a project fact.
 
 **Harness notes are a second, unreviewed table beside the ledger** (2026-10-27). `cort memory notes
-sync` copies Claude Code's `projects/*/memory/*.md` into `harness_notes` in the same Turso database,
+upload` copies Claude Code's `projects/*/memory/*.md` into `harness_notes` in the same Turso database,
 for projects opted in per machine with `cort memory notes opt-in`; `list`/`show` read other
 machines' notes. They are never claims: nothing checks them against source. `hook-refresh` on note
-edits and the interval kick run `notes sync --background` without making hooks wait; results go to
-`memory-sync.log` in the memory data directory. The secret screen in
+edits and the interval kick run `notes upload --background` without making hooks wait; results go to
+`memory-upload.log` in the memory data directory. The secret screen in
 `rust/src/notes.rs` is coarse and fail-closed -- tuned on this machine's 680 real notes, where it
 first dropped 605 (frontmatter `originSessionId`, `sk-` inside slugs, `auth.rs::x` paths) and now
-drops one -- so read `sync --dry-run` before the first real sync on a machine. Tombstones come only
+drops one -- so read `upload --dry-run` before the first real upload on a machine. Tombstones come only
 from a memory directory read to the end, and the local replica is the only state: there is no
 separate state file to lose.
 

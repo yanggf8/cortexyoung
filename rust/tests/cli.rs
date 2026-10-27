@@ -285,7 +285,7 @@ fn memory_help_lists_each_memory_verb_with_its_options() {
                 "notes opt-out",
                 "notes show",
                 "notes status",
-                "notes sync",
+                "notes upload",
                 "recall",
                 "record",
                 "resolve",
@@ -293,7 +293,7 @@ fn memory_help_lists_each_memory_verb_with_its_options() {
                 "sync"
             ]
         );
-        assert!(commands["notes sync"]
+        assert!(commands["notes upload"]
             .as_str()
             .unwrap()
             .contains("--dry-run"));

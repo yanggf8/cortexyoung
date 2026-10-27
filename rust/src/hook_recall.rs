@@ -1,7 +1,7 @@
 //! Session-start context from the existing local memory replica.
 
 use crate::memory::MemoryRecall;
-use crate::notes_sync::NoteBrief;
+use crate::notes_upload::NoteBrief;
 
 const MAX_ENTRIES: usize = 20;
 const MAX_BYTES: usize = 6000;

@@ -3,7 +3,7 @@
 
 use crate::memory::{self, MemoryEntry, MemoryLedger, MemoryRecall};
 use crate::network_timeout::NetworkGuard;
-use crate::{notes, notes_sync, usage};
+use crate::{notes, notes_upload, usage};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -356,7 +356,7 @@ async fn read_existing_ledger(
 /// legacy open path that pulls remotely even with bootstrap disabled.
 pub fn recall_local(
     root: &Path,
-) -> Result<(MemoryRecall, usize, Vec<notes_sync::NoteBrief>, usize), LocalRecallError> {
+) -> Result<(MemoryRecall, usize, Vec<notes_upload::NoteBrief>, usize), LocalRecallError> {
     let config = config().map_err(|_| {
         if fs::symlink_metadata(config_path()).is_ok() {
             LocalRecallError::Failed
@@ -392,7 +392,7 @@ pub fn recall_local(
                 .map_err(|_| LocalRecallError::Failed)?;
             let (recall, omitted) = memory::recall_ledger_for_hook(root, &ledger);
             let (briefs, total) = match project_from_git_origin(root) {
-                Ok(notes_project) => notes_sync::other_machine_briefs(
+                Ok(notes_project) => notes_upload::other_machine_briefs(
                     &conn,
                     &notes_project,
                     usage::machine_id(),
@@ -484,14 +484,14 @@ fn claude_home() -> Result<PathBuf, String> {
 
 pub fn notes_opt_in(root: &Path, opt_in: bool) -> Result<Value, String> {
     let project = project_from_git_origin(root)?;
-    let path = notes_sync::opt_in_path();
-    let mut projects = notes_sync::read_opt_in(&path)?;
+    let path = notes_upload::opt_in_path();
+    let mut projects = notes_upload::read_opt_in(&path)?;
     if opt_in {
         projects.insert(project.clone());
     } else {
         projects.remove(&project);
     }
-    notes_sync::write_opt_in(&path, &projects)?;
+    notes_upload::write_opt_in(&path, &projects)?;
     let mut result = json!({"status":if opt_in {"opted_in"} else {"opted_out"},"project":project,"opt_in_file":path});
     if !opt_in {
         result["remote_rows"] = json!("kept");
@@ -500,7 +500,7 @@ pub fn notes_opt_in(root: &Path, opt_in: bool) -> Result<Value, String> {
 }
 
 pub fn notes_status() -> Result<Value, String> {
-    let opted_in = notes_sync::read_opt_in(&notes_sync::opt_in_path())?;
+    let opted_in = notes_upload::read_opt_in(&notes_upload::opt_in_path())?;
     Ok(
         json!({"opted_in":opted_in,"memory_configured":config().is_ok(),"claude_home":claude_home()?,"machine":notes_machine()}),
     )
@@ -520,8 +520,8 @@ fn notes_now() -> Result<String, String> {
     ))
 }
 
-fn notes_sync_output(
-    plan: notes_sync::Plan,
+fn notes_upload_output(
+    plan: notes_upload::Plan,
     complete: bool,
     dry_run: bool,
     verbose: bool,
@@ -551,14 +551,14 @@ fn notes_sync_output(
     result
 }
 
-pub fn notes_sync(dry_run: bool, verbose: bool, lock_wait: Duration) -> Result<Value, String> {
+pub fn notes_upload(dry_run: bool, verbose: bool, lock_wait: Duration) -> Result<Value, String> {
     // The whole scan and eligibility screen run before any store lock or network operation.
     let report = notes::scan(&claude_home()?);
-    let opted_in = notes_sync::read_opt_in(&notes_sync::opt_in_path())?;
-    let prepared = notes_sync::prepare(&report, Path::new("/"), &opted_in, notes::project_for);
+    let opted_in = notes_upload::read_opt_in(&notes_upload::opt_in_path())?;
+    let prepared = notes_upload::prepare(&report, Path::new("/"), &opted_in, notes::project_for);
     if dry_run && !config_path().exists() {
-        let plan = notes_sync::plan(&prepared, &[]);
-        return Ok(notes_sync_output(
+        let plan = notes_upload::plan(&prepared, &[]);
+        return Ok(notes_upload_output(
             plan,
             report.complete,
             true,
@@ -579,14 +579,14 @@ pub fn notes_sync(dry_run: bool, verbose: bool, lock_wait: Duration) -> Result<V
                     Ok(db) => {
                         let conn = db.connect().await.map_err(|e| e.to_string())?;
                         (
-                            notes_sync::existing_rows(&conn, machine, harness).await?,
+                            notes_upload::existing_rows(&conn, machine, harness).await?,
                             false,
                         )
                     }
                     Err(_) => (Vec::new(), true),
                 };
-                let plan = notes_sync::plan(&prepared, &existing);
-                return Ok(notes_sync_output(
+                let plan = notes_upload::plan(&prepared, &existing);
+                return Ok(notes_upload_output(
                     plan,
                     report.complete,
                     true,
@@ -597,12 +597,12 @@ pub fn notes_sync(dry_run: bool, verbose: bool, lock_wait: Duration) -> Result<V
             }
             let (db, mut net) = open_network(&config).await?;
             let conn = db.connect().await.map_err(|e| e.to_string())?;
-            notes_sync::ensure_notes_schema(&conn).await?;
+            notes_upload::ensure_notes_schema(&conn).await?;
             net.run(db.push()).await?;
             net.run(db.pull()).await?;
-            let existing = notes_sync::existing_rows(&conn, machine, harness).await?;
-            let plan = notes_sync::plan(&prepared, &existing);
-            let host_written = notes_sync::apply(
+            let existing = notes_upload::existing_rows(&conn, machine, harness).await?;
+            let plan = notes_upload::plan(&prepared, &existing);
+            let host_written = notes_upload::apply(
                 &conn,
                 machine,
                 &crate::measure::host_name(),
@@ -612,7 +612,7 @@ pub fn notes_sync(dry_run: bool, verbose: bool, lock_wait: Duration) -> Result<V
             )
             .await?;
             net.run(db.push()).await?;
-            Ok(notes_sync_output(
+            Ok(notes_upload_output(
                 plan,
                 report.complete,
                 false,
@@ -630,7 +630,7 @@ pub fn notes_list(root: &Path) -> Result<Value, String> {
         runtime()?.block_on(async {
         let (db, _net) = open_network(&config).await?;
         let conn = db.connect().await.map_err(|e| e.to_string())?;
-        let rows = notes_sync::list(&conn, &project).await?;
+        let rows = notes_upload::list(&conn, &project).await?;
         let rows: Vec<_> = rows.into_iter().map(|row| json!({
             "note_id":row.note_id,"machine":row.machine,"host":row.host,"this_machine":row.machine == usage::machine_id(),
             "file_name":row.file_name,"title":row.title,"description":row.description,
@@ -646,7 +646,7 @@ pub fn notes_show(note_id: &str) -> Result<Value, String> {
         runtime()?.block_on(async {
             let (db, _net) = open_network(&config).await?;
             let conn = db.connect().await.map_err(|e| e.to_string())?;
-            let found = notes_sync::show(&conn, note_id)
+            let found = notes_upload::show(&conn, note_id)
                 .await?
                 .ok_or_else(|| format!("unknown note id: {note_id}"))?;
             let row = found.note;
