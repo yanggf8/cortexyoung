@@ -47,10 +47,14 @@ pub fn spawn_args(lane: Lane) -> [&'static str; 3] {
 /// land between the two pieces. A short write is returned as an error instead -- the partial line
 /// stays in the file, but nothing is appended to it later.
 pub fn append_measure_log(data_dir: &Path, line: &str) -> Result<(), String> {
+    append_log(data_dir, "measure.log", line)
+}
+
+pub fn append_log(data_dir: &Path, file_name: &str, line: &str) -> Result<(), String> {
     use std::io::Write;
 
     fs::create_dir_all(data_dir).map_err(|e| e.to_string())?;
-    let path = data_dir.join("measure.log");
+    let path = data_dir.join(file_name);
     let mut file = fs::OpenOptions::new()
         .create(true)
         .append(true)

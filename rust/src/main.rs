@@ -664,6 +664,8 @@ enum NotesAction {
         dry_run: bool,
         #[arg(long)]
         verbose: bool,
+        #[arg(long, hide = true)]
+        background: bool,
     },
     List {
         #[arg(long, default_value = ".")]
@@ -909,10 +911,31 @@ fn cmd_hook_refresh(args: &[String], usage: &mut UsageEvent) -> Result<Emit, Cor
         .as_ref()
         .and_then(model_of_payload)
         .map(str::to_string);
+    let edited = parsed
+        .as_ref()
+        .and_then(|v| v.get("tool_input"))
+        .and_then(|i| i.get("file_path"))
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from);
+    let stated_cwd = parsed
+        .as_ref()
+        .and_then(|v| v.get("cwd"))
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from);
+    let edited_for_notes = edited.as_ref().map(|p| {
+        if p.is_relative() {
+            stated_cwd.clone().unwrap_or_else(cwd).join(p)
+        } else {
+            p.clone()
+        }
+    });
+    let notes = cort::notes_kick::kick(edited_for_notes.as_deref());
     // Every return from here on knows its harness, so every one kicks collection; `kick`
     // does its own upgrade check, which is why the stand-down below kicks too.
     let quiet = |outcome: &str, usage: &mut UsageEvent| {
-        usage.args_summary = hook_args_tag(
+        let row = hook_args_tag(
             &hook_args(
                 outcome,
                 &harness,
@@ -922,6 +945,7 @@ fn cmd_hook_refresh(args: &[String], usage: &mut UsageEvent) -> Result<Emit, Cor
             "collect",
             cort::collect::kick(&harness),
         );
+        usage.args_summary = hook_args_tag(&row, "notes", notes);
         Ok(Emit {
             payload: json!({}),
             format: Format::Lean,
@@ -951,19 +975,6 @@ fn cmd_hook_refresh(args: &[String], usage: &mut UsageEvent) -> Result<Emit, Cor
     // Kimi, MultiEdit and NotebookEdit were never captured -- all of those fall through to the
     // payload's own `cwd`, which the harness asserts, and then to the process's, which it merely
     // inherited.
-    let edited = parsed
-        .as_ref()
-        .and_then(|v| v.get("tool_input"))
-        .and_then(|i| i.get("file_path"))
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from);
-    let stated_cwd = parsed
-        .as_ref()
-        .and_then(|v| v.get("cwd"))
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from);
     // A path decides on its own. Falling back to cwd when an explicit path owns no index would
     // refresh a project that was never edited.
     //
@@ -1008,8 +1019,8 @@ fn cmd_hook_refresh(args: &[String], usage: &mut UsageEvent) -> Result<Emit, Cor
             );
             row["reindexed"] = json!(r.files_reindexed);
             row["removed"] = json!(r.files_removed);
-            usage.args_summary =
-                hook_args_tag(&row.to_string(), "collect", cort::collect::kick(&harness));
+            let row = hook_args_tag(&row.to_string(), "collect", cort::collect::kick(&harness));
+            usage.args_summary = hook_args_tag(&row, "notes", notes);
             Ok(Emit {
                 payload: json!({}),
                 format: Format::Lean,
@@ -1025,8 +1036,8 @@ fn cmd_hook_refresh(args: &[String], usage: &mut UsageEvent) -> Result<Emit, Cor
                 model.as_deref(),
             );
             row["reasons"] = json!(reasons);
-            usage.args_summary =
-                hook_args_tag(&row.to_string(), "collect", cort::collect::kick(&harness));
+            let row = hook_args_tag(&row.to_string(), "collect", cort::collect::kick(&harness));
+            usage.args_summary = hook_args_tag(&row, "notes", notes);
             Ok(Emit {
                 payload: json!({}),
                 format: Format::Lean,
@@ -1092,7 +1103,8 @@ fn cmd_hook_suggest(args: &[String], usage: &mut UsageEvent) -> Result<Emit, Cor
         hook_tool_label(&v),
     );
     // External resource gate hook point: claudecat's gate hands off here, fail-open, before kick.
-    usage.args_summary = hook_args_tag(&row, "collect", cort::collect::kick(&harness));
+    let row = hook_args_tag(&row, "collect", cort::collect::kick(&harness));
+    usage.args_summary = hook_args_tag(&row, "notes", cort::notes_kick::kick(None));
     quiet()
 }
 
@@ -2036,11 +2048,22 @@ fn cmd_memory(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError
             NotesAction::OptIn { root } => cort::memory_store::notes_opt_in(&root, true),
             NotesAction::OptOut { root } => cort::memory_store::notes_opt_in(&root, false),
             NotesAction::Status => cort::memory_store::notes_status(),
-            NotesAction::Sync { dry_run, verbose } => cort::memory_store::notes_sync(
+            NotesAction::Sync {
                 dry_run,
                 verbose,
-                cort::memory_store::notes_lock_wait(),
-            ),
+                background,
+            } => {
+                if background {
+                    cort::notes_kick::run_background();
+                    Ok(json!({}))
+                } else {
+                    cort::memory_store::notes_sync(
+                        dry_run,
+                        verbose,
+                        cort::memory_store::notes_lock_wait(),
+                    )
+                }
+            }
             NotesAction::List { root } => cort::memory_store::notes_list(&root),
             NotesAction::Show { note_id } => cort::memory_store::notes_show(&note_id),
         }
@@ -2763,6 +2786,11 @@ fn main() {
         && args
             .iter()
             .any(|a| a == "--background" || a.starts_with("--background="));
+    let background_notes = args.first().is_some_and(|a| a == "memory")
+        && args.get(1).is_some_and(|a| a == "notes")
+        && args.get(2).is_some_and(|a| a == "sync")
+        && args.iter().any(|a| a == "--background");
+    let background_measure = background_measure || background_notes;
     if wants_help(&args) {
         let usage = if args.first().is_some_and(|a| a == "memory") {
             memory_usage_value()

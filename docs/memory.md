@@ -52,6 +52,8 @@ is inferred from a successful sync alone.
 
 ## Harness notes
 
+The edit hook kicks `cort memory notes sync --background` for Claude Code memory files; a used machine also kicks it every `CORT_NOTES_SYNC_INTERVAL_SECS` (default 1800 seconds). `CORT_NOTES_SYNC_DEADLINE_SECS` bounds a background run (default 600 seconds). Hooks never wait for network work. Each pass appends a JSON line to `memory-sync.log` under `CORT_MEMORY_DIR` (or the default memory data directory).
+
 `cort memory notes` is opt-in per project per machine. After `notes opt-in --root .`,
 `notes sync` uploads Claude Code `projects/*/memory/*.md` files for opted-in projects.
 The secret screen is coarse and fail-closed; it is not a privacy guarantee. Run
