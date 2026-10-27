@@ -4,7 +4,7 @@ use crate::data_dir::{data_dir, write_atomic};
 use crate::measure::{self, RecordInputs, RecordOutcome};
 use crate::measure_store::{MeasureStore, OpenError};
 use crate::telemetry::{self, UploadInputs};
-use crate::usage::{kick_counters_at, KickCounters};
+use crate::usage::KickCounters;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -345,7 +345,7 @@ pub fn collection_status(paths: &KickPaths) -> Value {
     let batch_path = paths.data_dir.join("measure-collect-state.json");
     let health_path = paths.data_dir.join("measure-health-state.json");
     let no_local_state = !batch_path.exists() && !health_path.exists();
-    let counters = kick_counters_at(&paths.usage_db);
+    let counters = crate::usage::kick_counters_within(&paths.usage_db, crate::usage::WORKER_BUSY);
     let pending_error = counters.is_none().then_some("usage_db_unreadable");
     let batch = match read_state::<CollectState>(&batch_path) {
         Ok(mut batch) => {
@@ -768,7 +768,8 @@ pub fn run_manual<T>(
     let state_path = paths.data_dir.join("measure-collect-state.json");
     let mut state = CollectState::load(&state_path);
     if matches!(mode, ManualMode::Write) {
-        let counters = crate::usage::kick_counters_at(&paths.usage_db);
+        let counters =
+            crate::usage::kick_counters_within(&paths.usage_db, crate::usage::WORKER_BUSY);
         if let Some(ref counters) = counters {
             state.instance_id = Some(counters.instance_id.clone());
         }
@@ -968,7 +969,9 @@ fn run_collect_inner(
     let state_path = paths.data_dir.join("measure-collect-state.json");
     let mut state = CollectState::load(&state_path);
     let refused_before = state.refused;
-    let Some(counters) = crate::usage::kick_counters_at(&paths.usage_db) else {
+    let Some(counters) =
+        crate::usage::kick_counters_within(&paths.usage_db, crate::usage::WORKER_BUSY)
+    else {
         state.last_run_ms = Some(now_ms);
         state.mark_pending(now_ms);
         collect_failure(&mut state, harness, now_ms, ErrorKind::Storage);

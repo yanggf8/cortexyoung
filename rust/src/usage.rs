@@ -87,11 +87,11 @@ fn read_health_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HealthRow> {
     })
 }
 
+/// Only collection workers read health rows, so they wait out a commit like `kick_counters_within`.
 fn open_health_read(path: &Path) -> Result<Connection, String> {
     let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(|e| e.to_string())?;
-    conn.busy_timeout(Duration::from_millis(RECORD_BUSY_MS))
-        .map_err(|e| e.to_string())?;
+    conn.busy_timeout(WORKER_BUSY).map_err(|e| e.to_string())?;
     Ok(conn)
 }
 
@@ -211,11 +211,21 @@ pub fn touched_project_ids_at(path: &Path, after_id: i64) -> Result<(Vec<String>
     Ok((ids, max_id))
 }
 
-/// Read the two watermarks without creating or migrating a database.
+/// Read the two watermarks without creating or migrating a database. This is the hook's read, so
+/// it waits no longer than a record does; a busy database reads as unknown.
 pub fn kick_counters_at(path: &Path) -> Option<KickCounters> {
+    kick_counters_within(path, Duration::from_millis(RECORD_BUSY_MS))
+}
+
+/// How long a collection worker or a person's command waits on usage.db's write lock. usage.db is
+/// a rollback-journal database, so every recorded command blocks readers for the length of its
+/// commit; 25 ms lost that race on about four in ten background runs (2026-10-28).
+pub const WORKER_BUSY: Duration = Duration::from_secs(2);
+
+/// [`kick_counters_at`] with the caller's wait on the write lock.
+pub fn kick_counters_within(path: &Path, busy: Duration) -> Option<KickCounters> {
     let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
-    conn.busy_timeout(Duration::from_millis(RECORD_BUSY_MS))
-        .ok()?;
+    conn.busy_timeout(busy).ok()?;
     let objects: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE name IN (

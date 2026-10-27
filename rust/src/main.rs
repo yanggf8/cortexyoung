@@ -60,7 +60,7 @@ fn usage_value() -> Value {
             "impact": "cort impact --symbol <name> [--depth <n>] [--coverage] [-f json|lean]",
             "usage": "cort usage [days] [-f json|lean]",
             "memory": "cort memory <configure|import-config|record|resolve|recall|status|sync|import-legacy|notes> [options]",
-            "measure": "cort measure <configure|show|record|collect|verify|health|status|copy-events|import-audit|cron|report> [options]  (collect: scan and upload the batch; --background appends at most one result to measure.log (none when skipped_busy) without stdout; health: observe recently used indexes and write local index_health_log, reading indexes only, with no network; --background appends the result to measure.log without stdout; status: read local collection state, -f json|lean; cron: manual install or removal of the legacy entry, no longer installed automatically; hook kick is the only automatic collection trigger; copy-events: one-time, re-runnable, read-only copy of claudecat's uploaded events from harnessuse, never overwrites, reports same-key rows whose columns differ as conflicts; import-audit: one-time, re-runnable import of CORT-AUDIT.md's health and usage columns, never overwrites, run on one machine only; verify compares event ids and uploads nothing; command_log and index_health_log keep uploaded rows 90 days and rows not yet uploaded 180 days, pruned when a new command is recorded; rows still not uploaded after 180 days are deleted and counted in measure status (pruned_unuploaded_rows) and measure.log)",
+            "measure": "cort measure <configure|show|record|collect|verify|health|status|copy-events|import-audit|cron|report> [options]  (collect: scan and upload the batch; --background appends at most one result to measure.log (none when skipped_busy) without stdout; health: observe recently used indexes and write local index_health_log, reading indexes only, with no network; --background appends the result to measure.log without stdout; status: read local collection state, -f json|lean; cron: manual install or removal of the legacy entry, no longer installed automatically; hook kick is the only automatic collection trigger; copy-events: one-time, re-runnable, read-only copy of claudecat's uploaded events from harnessuse, never overwrites, reports same-key rows whose columns differ as conflicts; import-audit: one-time, re-runnable import of CORT-AUDIT.md's health and usage columns, never overwrites, run on one machine only; verify compares event ids and uploads nothing, and verify --new-machine passes a machine with no remote rows in either database; command_log and index_health_log keep uploaded rows 90 days and rows not yet uploaded 180 days, pruned when a new command is recorded; rows still not uploaded after 180 days are deleted and counted in measure status (pruned_unuploaded_rows) and measure.log)",
             "hook-suggest": "cort hook-suggest  (PreToolUse hook: records one fire row and kicks collection; never speaks; not a verb to type)",
             "hook-refresh": "cort hook-refresh  (PostToolUse hook: brings this project's index up to the tree after an edit; silent, never creates an index; not a verb to type)",
             "hook-recall": "cort hook-recall --harness <h>  (SessionStart hook: reads the existing local memory replica; not a verb to type)",
@@ -2191,7 +2191,12 @@ enum MeasureAction {
         background: bool,
     },
     /// Compare local and remote event ids; a passing run permits this machine's first upload.
-    Verify,
+    Verify {
+        /// For a machine that never uploaded: pass only when no remote row exists for its machine
+        /// ids, in the measurement database or in claudecat's (`cort memory`'s) database.
+        #[arg(long)]
+        new_machine: bool,
+    },
     /// Copy claudecat's already-uploaded events and aliases from the `harnessuse` database (the
     /// `cort memory` one) into the measurement database. One-time, re-runnable, and read-only on
     /// the source: nothing is written to or deleted from it. Refuses when both configs name one database.
@@ -2545,7 +2550,7 @@ fn cmd_measure(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, CortErr
             }
             summary
         }
-        MeasureAction::Verify => {
+        MeasureAction::Verify { new_machine } => {
             let Some(up) = event_inputs() else {
                 return Err(CortError::new(
                     "measure_error",
@@ -2558,27 +2563,54 @@ fn cmd_measure(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, CortErr
                 .ok_or_else(|| fail("cannot locate usage.db".into()))?;
             let cfg = cort::collect::CollectConfig::from_env();
             let now_ms = usage::now_ms();
-            let report = cort::collect::run_manual(
-                &mut || {
-                    cort::measure_store::open_measure_store_within_timeout(
-                        std::time::Duration::from_millis(cfg.manual_wait_ms),
-                        std::time::Duration::from_millis(cfg.net_timeout_ms),
-                    )
-                },
-                &paths,
-                now_ms,
-                &cfg,
-                cort::collect::ManualMode::DryRun,
-                &mut |store| {
-                    cort::telemetry::verify_events(store, &up, now_ms)
-                        .map(cort::collect::dry_run_step)
-                        .map_err(|e| (e.clone(), cort::collect::classify_error(&e)))
-                },
-            )
-            .map_err(|e| manual_error(e, "measure_verify_failed"))?;
-            json!({"status": if report.matched > 0 {"verified"} else {"not_verified"},
+            let mut opener = || {
+                cort::measure_store::open_measure_store_within_timeout(
+                    std::time::Duration::from_millis(cfg.manual_wait_ms),
+                    std::time::Duration::from_millis(cfg.net_timeout_ms),
+                )
+            };
+            if new_machine {
+                // Opened first, and it sends nothing: a missing or same-database memory config
+                // fails here, before the measurement store is reached.
+                let mut legacy = cort::measure_store::open_legacy_read_only()
+                    .map_err(|m| CortError::new("measure_verify_failed", json!({"message":m})))?;
+                let report = cort::collect::run_manual(
+                    &mut opener,
+                    &paths,
+                    now_ms,
+                    &cfg,
+                    cort::collect::ManualMode::DryRun,
+                    &mut |store| {
+                        cort::telemetry::verify_new_machine(store, legacy.as_mut(), &up, now_ms)
+                            .map(|value| cort::collect::ManualStep {
+                                value,
+                                events: None,
+                                failure: None,
+                            })
+                            .map_err(|e| (e.clone(), cort::collect::classify_error(&e)))
+                    },
+                )
+                .map_err(|e| manual_error(e, "measure_verify_failed"))?;
+                json!({"status":"verified","new_machine":true,
+                    "local":report.local,"machines":report.machines,"verified":true})
+            } else {
+                let report = cort::collect::run_manual(
+                    &mut opener,
+                    &paths,
+                    now_ms,
+                    &cfg,
+                    cort::collect::ManualMode::DryRun,
+                    &mut |store| {
+                        cort::telemetry::verify_events(store, &up, now_ms)
+                            .map(cort::collect::dry_run_step)
+                            .map_err(|e| (e.clone(), cort::collect::classify_error(&e)))
+                    },
+                )
+                .map_err(|e| manual_error(e, "measure_verify_failed"))?;
+                json!({"status": if report.matched > 0 {"verified"} else {"not_verified"},
                 "matched":report.matched,"local_only":report.local_only,
                 "remote_only":report.remote_only,"verified":report.matched > 0})
+            }
         }
         MeasureAction::CopyEvents => {
             let report = cort::measure_store::with_legacy_and_measure_stores(|from, to| {

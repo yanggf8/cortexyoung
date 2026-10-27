@@ -749,6 +749,76 @@ fn marker_valid(input: &UploadInputs) -> bool {
         && command_log_columns(&input.usage_db).is_ok_and(|c| v["columns"] == c.as_str())
 }
 
+/// What [`verify_new_machine`] found: how many local events it checked, for how many machine ids.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewMachine {
+    pub local: usize,
+    pub machines: usize,
+}
+
+/// The first-upload proof for a machine that never uploaded. [`verify_events`] proves the ids by
+/// overlap, which such a machine can never have; here the proof is absence. The gate exists so an
+/// id that differs from claudecat's never uploads a history twice, and a history needs somewhere
+/// to be: so every machine id among the local `cort_command` events must have no row in the
+/// measurement store and none in `legacy`, the claudecat database an earlier upload of that history
+/// would have gone to. One row in either refuses, and the overlap check is the way forward. On
+/// success it writes the same marker [`verify_events`] does.
+pub fn verify_new_machine(
+    store: &mut dyn MeasureStore,
+    legacy: &mut dyn MeasureStore,
+    input: &UploadInputs,
+    now_ms: i64,
+) -> Result<NewMachine, String> {
+    let local = cort_events(&input.usage_db, None)?;
+    let mut machines: std::collections::BTreeSet<&str> = local
+        .iter()
+        .filter(|e| e.source == SOURCE_COMMAND)
+        .map(|e| e.machine_id.as_str())
+        .collect();
+    // Absence proves something only about what was looked at: an empty or missing usage.db would
+    // pass for anything, and the marker is written for this machine, so this machine is checked
+    // whether or not its rows are here yet.
+    if machines.is_empty() {
+        return Err(format!(
+            "no local cort_command events in {}; nothing to prove absence for",
+            input.usage_db.display()
+        ));
+    }
+    machines.insert(input.machine_id.as_str());
+    let mut present = Vec::new();
+    for machine in &machines {
+        let here = store.event_count(machine, SOURCE_COMMAND)?;
+        let there = legacy
+            .event_count(machine, SOURCE_COMMAND)
+            .map_err(|e| format!("legacy read: {e}"))?;
+        if here > 0 || there > 0 {
+            present.push(format!(
+                "{machine} ({here} in the measurement store, {there} in the legacy database)"
+            ));
+        }
+    }
+    if !present.is_empty() {
+        return Err(format!(
+            "not a new machine: remote rows exist for {}; run `cort measure verify` without \
+             --new-machine, which proves the ids by overlap",
+            present.join(", ")
+        ));
+    }
+    let marker = json!({
+        "machine_id": input.machine_id,
+        "columns": command_log_columns(&input.usage_db)?,
+        "verified_ms": now_ms,
+        "matched": 0,
+        "new_machine": true,
+    });
+    write_atomic(&input.marker_path, &marker.to_string())
+        .map_err(|e| format!("cannot write {}: {e}", input.marker_path.display()))?;
+    Ok(NewMachine {
+        local: local.len(),
+        machines: machines.len(),
+    })
+}
+
 /// Compare every local `cort_command` event with the remote, and on success write the
 /// marker that lets the first real upload through.
 pub fn verify_events(

@@ -690,6 +690,59 @@ fn bare_cli(args: &[&str]) -> (std::process::Output, tempfile::TempDir) {
     (out, tmp)
 }
 
+/// `--new-machine` needs claudecat's database as the second witness, and checks for it before any
+/// request: a missing memory config, or one naming the measurement database, fails offline.
+#[test]
+fn new_machine_verify_needs_a_separate_legacy_database() {
+    for memory_url in [None, Some("libsql://127.0.0.1:1")] {
+        let tmp = tempfile::tempdir().unwrap();
+        let (data, home, cache) = (
+            tmp.path().join("data"),
+            tmp.path().join("home"),
+            tmp.path().join("cache"),
+        );
+        for d in [&data, &home, &cache] {
+            fs::create_dir_all(d).unwrap();
+        }
+        let config = r#"{"url":"libsql://127.0.0.1:1","token":"test"}"#;
+        fs::write(data.join("turso-measure.json"), config).unwrap();
+        if let Some(url) = memory_url {
+            fs::write(
+                data.join("turso-memory.json"),
+                format!(r#"{{"url":"{url}","token":"test"}}"#),
+            )
+            .unwrap();
+        }
+        let started = std::time::Instant::now();
+        let out = Command::new(cort_bin())
+            .args(["measure", "verify", "--new-machine"])
+            .env("CORT_MEMORY_DIR", &data)
+            .env("HOME", &home)
+            .env("CORT_CACHE_DIR", &cache)
+            .env_remove("XDG_DATA_HOME")
+            .env_remove("CLAUDE_CONFIG_DIR")
+            .output()
+            .unwrap();
+        assert!(!out.status.success());
+        let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(v["error"], "measure_verify_failed", "{v}");
+        if memory_url.is_some() {
+            assert!(
+                v["detail"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("name the same database"),
+                "{v}"
+            );
+        }
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "failed before any request"
+        );
+        assert!(!data.join("measure-events-verified.json").exists());
+    }
+}
+
 #[test]
 fn removed_and_unconfigured_measure_commands() {
     let (out, _t) = bare_cli(&["measure", "sync"]);

@@ -619,7 +619,7 @@ pub fn run_health_with_origin(
         });
     }
 
-    let counters = crate::usage::kick_counters_at(&paths.usage_db)
+    let counters = crate::usage::kick_counters_within(&paths.usage_db, crate::usage::WORKER_BUSY)
         .ok_or_else(|| "usage_db_unreadable".to_string())?;
     let state_path = paths.data_dir.join("measure-health-state.json");
     let mut state = HealthState::load(&state_path);
