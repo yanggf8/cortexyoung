@@ -42,8 +42,8 @@ Markdown.
 
 `{"window_id":"...","used":"explicit|implicit|no","opportunity":{"answer":"yes|no|unclear","turn":null},"reason":"...","evidence":[{"turn":1,"speaker":"assistant_text","quote":"verbatim substring"}]}`
 
-`opportunity.turn` is a turn number present in this packet, or null. `evidence` is either a
-non-empty array of quotes or the literal string `"inferred"`, never an empty array.
+`opportunity.turn` is a turn number present in this packet and never 0, or null. `evidence` is
+either a non-empty array of quotes or the literal string `"inferred"`, never an empty array.
 
 ## Definitions
 

@@ -124,7 +124,7 @@ result.
 its outcome; `cort-evals` counts how often the walk is actually wanted (`demand`)
 and grades every reported edge against file text (`verify-impact`). Features are gated
 until `cort` wins on both token count and success rate — [`evals/README.md`](evals/README.md).
-`cort-evals memory-uptake` scans SessionStart memory exposures and reports mechanical candidates as designed in [memory uptake](docs/superpowers/specs/2026-10-27-memory-uptake-design.md).
+`cort-evals memory-uptake` scans SessionStart memory exposures and reports mechanical candidates as designed in [memory uptake](docs/superpowers/specs/2026-10-27-memory-uptake-design.md). With `--private DIR --sample N --seed S` it also writes owner-only numbered-turn packets and the committed reviewer prompt; `--private DIR --judged FILE` validates a reviewer's quotes against those packets, reports reasons by basis and stratum, and holds `findings_publishable` false until a human has answered all ten rows of `audit.jsonl`.
 
 繁體中文版(僅此段): [Token cost · 台灣中文](docs/token-cost.zh-TW.md)
 

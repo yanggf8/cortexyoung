@@ -30,6 +30,9 @@ const REVIEWER_PROMPT: &str = include_str!("../prompts/memory-uptake-reviewer.md
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
+pub(crate) fn sha256(bytes: &[u8]) -> String {
+    hex(&Sha256::digest(bytes))
+}
 
 #[derive(Clone, Debug)]
 struct Entry {
@@ -148,7 +151,7 @@ fn new_salt() -> Result<[u8; 32], String> {
 }
 /// Private detail is readable text, so it is owner-only, including a file an earlier run left
 /// with wider permissions.
-fn private_file(path: &Path, create_new: bool) -> std::io::Result<fs::File> {
+pub(crate) fn private_file(path: &Path, create_new: bool) -> std::io::Result<fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
     let mut options = fs::OpenOptions::new();
     options.write(true).mode(0o600);
@@ -191,7 +194,7 @@ fn outside_git(dir: &Path) -> Result<(), String> {
 }
 /// The check runs on the nearest existing ancestor before anything is created, so a refusal
 /// leaves nothing behind, and again on the created directory, which a symlink may have moved.
-fn private_dir(path: &Path) -> Result<PathBuf, String> {
+pub(crate) fn private_dir(path: &Path) -> Result<PathBuf, String> {
     let mut probe = path;
     let existing = loop {
         if probe.exists() {
@@ -1270,7 +1273,7 @@ pub fn scan_sample(
         prompt
             .write_all(REVIEWER_PROMPT.as_bytes())
             .map_err(|e| format!("reviewer-prompt.md: {e}"))?;
-        let digest = hex(&Sha256::digest(REVIEWER_PROMPT.as_bytes()));
+        let digest = sha256(REVIEWER_PROMPT.as_bytes());
         json!({"seed":seed,"n_rest":n_rest,"strata":strata,"prompt_sha256":digest})
     } else {
         Value::Null

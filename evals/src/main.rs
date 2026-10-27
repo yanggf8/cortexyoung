@@ -8,7 +8,7 @@
 //!   cort-evals summarize     <rows.json>... [--strict]
 //!   cort-evals demand        [--claude-dir DIR] [--codex-dir DIR] [--exclude a,b]
 //!                            [--show] [--out FILE]
-//!   cort-evals memory-uptake [--claude-dir DIR] [--since RFC3339] [--out FILE] [--private DIR [--sample N] [--seed S]]
+//!   cort-evals memory-uptake [--claude-dir DIR] [--since RFC3339] [--out FILE] [--private DIR [--sample N] [--seed S]] [--judged FILE [--audit-seed S]]
 //!   cort-evals cost-audit    --since UTC --until UTC [--claude-dir DIR] [--out FILE]
 //!   cort-evals cost-collect  [--day YYYY-MM-DD] [--claude-dir DIR]
 //!                            [--out-dir DIR] [--force]
@@ -107,6 +107,8 @@ const UPTAKE_FLAGS: &[&str] = &[
     "--out",
     "--sample",
     "--seed",
+    "--judged",
+    "--audit-seed",
 ];
 
 const USAGE_TOP: &str =
@@ -116,7 +118,7 @@ const USAGE_VERIFY_IMPACT: &str =
     "usage: cort-evals verify-impact --repo DIR --symbols A,B [--depth N]";
 const USAGE_SUMMARIZE: &str = "usage: cort-evals summarize [--strict] rows.json [rows.json...]";
 const USAGE_DEMAND: &str = "usage: cort-evals demand [--claude-dir DIR] [--codex-dir DIR] [--exclude a,b,c] [--out FILE] [--show]";
-const USAGE_UPTAKE: &str = "usage: cort-evals memory-uptake [--claude-dir DIR] [--since RFC3339] [--out FILE] [--private DIR [--sample N] [--seed S]]  (aggregate-only report; --private stores readable detail outside git)";
+const USAGE_UPTAKE: &str = "usage: cort-evals memory-uptake [--claude-dir DIR] [--since RFC3339] [--out FILE] [--private DIR [--sample N] [--seed S]] [--judged FILE [--audit-seed S]]  (aggregate-only report; --private stores readable detail outside git)";
 const USAGE_COST_AUDIT: &str = "usage: cort-evals cost-audit --since YYYY-MM-DDTHH:MM:SSZ --until YYYY-MM-DDTHH:MM:SSZ [--claude-dir DIR] [--out FILE]  (read-only Claude Code cost census; no model calls)";
 const USAGE_COST_COLLECT: &str = "usage: cort-evals cost-collect [--day YYYY-MM-DD | --days 1..90] [--claude-dir DIR] [--out-dir DIR] [--force]  (persist daily aggregates before transcript retention deletes them; default last seven complete UTC days, skipping existing files; no model calls)";
 const USAGE_COST_TRIAL: &str = "usage: cort-evals cost-trial --file PAIRS.json  (summarize one paired, full-task hypothesis; no model calls)";
@@ -842,11 +844,51 @@ fn demand_main(argv: &[String]) -> Result<(), String> {
 
 fn uptake_main(argv: &[String]) -> Result<(), String> {
     guard_options(argv, UPTAKE_FLAGS, USAGE_UPTAKE)?;
+    // Every uptake flag takes a value; a missing one would fall back to a default and change the
+    // mode (a bare `--judged` used to scan transcripts instead).
+    for (i, a) in argv.iter().enumerate() {
+        if UPTAKE_FLAGS.contains(&a.as_str())
+            && argv
+                .get(i + 1)
+                .is_none_or(|v| v.is_empty() || v.starts_with("--"))
+        {
+            return Err(format!("{a} needs a value"));
+        }
+    }
+    let private = at(argv, "--private", "");
+    let judged = at(argv, "--judged", "");
+    if !judged.is_empty() && private.is_empty() {
+        return Err("--judged requires --private".into());
+    }
+    if !judged.is_empty() {
+        // The merge reads packets only; a scan flag here would be silently ignored.
+        if let Some(flag) = argv
+            .iter()
+            .find(|a| ["--claude-dir", "--since", "--sample", "--seed"].contains(&a.as_str()))
+        {
+            return Err(format!("{flag} does not apply with --judged"));
+        }
+        let audit_seed = has(argv, "--audit-seed")
+            .then(|| at(argv, "--audit-seed", "").parse::<u64>())
+            .transpose()
+            .map_err(|_| "--audit-seed must be a non-negative whole number".to_string())?;
+        let report =
+            cort_evals::uptake_judge::judge(Path::new(&private), Path::new(&judged), audit_seed)?;
+        let body = serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?;
+        let out = at(argv, "--out", "");
+        if !out.is_empty() {
+            std::fs::write(&out, format!("{body}\n")).map_err(|e| format!("--out: {e}"))?;
+        }
+        println!("{body}");
+        return Ok(());
+    }
+    if argv.iter().any(|a| a == "--audit-seed") {
+        return Err("--audit-seed requires --judged".into());
+    }
     let home = std::env::var("HOME").unwrap_or_default();
     let default_dir = format!("{home}/.claude/projects");
     let dir = at(argv, "--claude-dir", &default_dir);
     let since = at(argv, "--since", "");
-    let private = at(argv, "--private", "");
     if private.is_empty() && argv.iter().any(|a| a == "--sample" || a == "--seed") {
         return Err("--sample and --seed require --private".into());
     }

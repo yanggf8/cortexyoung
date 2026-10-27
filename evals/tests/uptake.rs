@@ -669,8 +669,13 @@ fn strata_priority_and_seeded_rest_sample() {
     let selected = ids(&first_packets);
     scan_sample(&root, None, Some(&private), 2, 0).unwrap();
     assert_eq!(selected, ids(&packets(&private)));
-    scan_sample(&root, None, Some(&private), 2, 1).unwrap();
-    assert_ne!(selected, ids(&packets(&private)));
+    // Window ids are salted at random, so any one other seed picks the same 2 of 6 with
+    // probability 1/15; across twenty seeds the chance that all agree is negligible.
+    let differs = (1..=20).any(|seed| {
+        scan_sample(&root, None, Some(&private), 2, seed).unwrap();
+        ids(&packets(&private)) != selected
+    });
+    assert!(differs);
     let public = first.to_string();
     for packet in &first_packets {
         assert!(!public.contains(packet["window_id"].as_str().unwrap()));
