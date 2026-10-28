@@ -30,8 +30,8 @@ path = "src/bin/cort_upgrade.rs"
 rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# No `tls` feature: it enables rustls's `ring` beside the `aws-lc-rs` the turso client uses, and
-# with two providers compiled in every `ClientConfig::builder()` in the process panics.
+# No `tls` feature: it enables rustls's `ring` beside `aws-lc-rs`. Keep exactly one
+# crypto provider compiled in so `ClientConfig::builder()` cannot panic.
 ureq = { version = "2", default-features = false }
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "logging", "std", "tls12"] }
 webpki-roots = "1"
@@ -50,12 +50,6 @@ ignore = "0.4"
 # comments elsewhere in the file -- the same "everything else survives byte-identical" guarantee
 # settings.rs already holds for the JSON side. It is what `cargo` itself uses to edit Cargo.toml.
 toml_edit = "0.25"
-# Project memory owns its cross-machine sync replica and provider connection in this crate.
-turso = { version = "0.9.0-pre.1", default-features = false, features = ["sync", "pure-rust-crypto"] }
-turso_sync_engine = "=0.9.0-pre.1"
-# `time` is what makes `tokio::time::timeout` exist: every network operation of the measurement
-# replica is bounded by it (the turso client's own retries can outlast a collector).
-tokio = { version = "1", features = ["rt-multi-thread", "time"] }
 
 [dev-dependencies]
 tempfile = "3"

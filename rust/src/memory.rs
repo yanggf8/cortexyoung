@@ -1,5 +1,5 @@
 //! Reviewed memory entries, source checks, and explicit import of the older Git JSON ledger.
-//! The active database and sync replica are owned by `memory_store`.
+//! `memory_store` reads and writes the shared database.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -240,7 +240,7 @@ pub(crate) fn recall_ledger_for_hook(root: &Path, ledger: &MemoryLedger) -> (Mem
         "",
         ledger,
         !ledger.entries.is_empty(),
-        Some("local_replica".into()),
+        Some("shared_database".into()),
         Some(20),
     )
 }

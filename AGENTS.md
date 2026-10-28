@@ -242,7 +242,7 @@ every edit for as long as a disk misbehaved.
 **Ownership correction (2026-10-19): cortexyoung owns the Claude Code continuity goal and the
 memory database client.** The 2026-10-18 recommendation confused shared database synchronization
 with ownership of memory behavior; the user intended only the former. The dependency direction
-is claudecat → cort. `cort memory` owns the reviewed claim ledger and its Turso sync replica;
+is claudecat → cort. `cort memory` owns the reviewed claim ledger in the shared Turso database;
 the local file-reading store (`cort read`/`recall`) was removed on 2026-10-23. See `docs/memory.md` for
 configuration and `docs/2026-10-18-cross-agent-memory-baseline.md` for the correction.
 
@@ -272,8 +272,8 @@ edits and the interval kick run `notes upload --background` without making hooks
 `rust/src/notes.rs` is coarse and fail-closed -- tuned on this machine's 680 real notes, where it
 first dropped 605 (frontmatter `originSessionId`, `sk-` inside slugs, `auth.rs::x` paths) and now
 drops one -- so read `upload --dry-run` before the first real upload on a machine. Tombstones come only
-from a memory directory read to the end, and the local replica is the only state: there is no
-separate state file to lose.
+from a memory directory read to the end. `notes-uploaded.json` tracks uploads locally; if it is
+missing or invalid, an upload reads this machine's rows from the shared database to recover tombstones.
 
 ## claudecat (separate repo)
 

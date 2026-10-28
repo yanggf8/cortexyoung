@@ -1,4 +1,4 @@
-//! Durable cort data. The memory replica belongs in a data directory, not the rebuildable index cache.
+//! Durable cort data, including memory credentials, locks, and upload state.
 
 use std::fs;
 use std::io::{self, Write};

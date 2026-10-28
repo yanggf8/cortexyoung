@@ -10,9 +10,14 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 pub const UPTAKE_METHOD: &str = "uptake-v1";
-// These strings are copied from rust/src/hook_recall.rs; evals does not import cort's renderer.
-const HEADER: &str = "cort memory: local replica (may be behind the shared database; `cort memory recall \"<topic>\"` refreshes)";
+const OLD_HEADER: &str = "cort memory: local replica (may be behind the shared database; `cort memory recall \"<topic>\"` refreshes)";
+const HEADER: &str = cort::hook_recall::HEADER;
 const NOTES_HEADER: &str = "unreviewed harness notes from other machines (not checked against source; read one with `cort memory notes show <id>`):";
+const NOTICE_PREFIX: &str = "cort memory: the shared database could not be read at session start (";
+
+fn is_memory_context(text: &str) -> bool {
+    text.starts_with(HEADER) || text.starts_with(OLD_HEADER)
+}
 const CORRECTIONS: &[&str] = &[
     "不是",
     "不對",
@@ -491,7 +496,7 @@ fn visible_text(e: &Value) -> String {
                 .map(|v| {
                     v.iter()
                         .filter_map(Value::as_str)
-                        .filter(|s| !s.starts_with(HEADER))
+                        .filter(|s| !is_memory_context(s) && !s.starts_with(NOTICE_PREFIX))
                         .collect::<Vec<_>>()
                         .join("\n")
                 })
@@ -1090,7 +1095,8 @@ pub fn scan_sample(
         // A file our hook never ran in holds no exposure and no hook run to confirm. The probe
         // stops before the header's first quote, which JSON escapes in the raw line.
         let probe = HEADER.split('"').next().unwrap_or(HEADER);
-        if !raw.contains(probe) && !raw.contains("hook-recall") {
+        let old_probe = OLD_HEADER.split('"').next().unwrap_or(OLD_HEADER);
+        if !raw.contains(probe) && !raw.contains(old_probe) && !raw.contains("hook-recall") {
             continue;
         }
         scanned += 1;
@@ -1119,10 +1125,15 @@ pub fn scan_sample(
                 .as_array()
                 .map(|v| v.iter().filter_map(Value::as_str).collect())
                 .unwrap_or_default();
-            let Some(ours) = contents.iter().find(|s| s.starts_with(HEADER)) else {
+            let event = closes.get(&i).copied();
+            if contents.iter().any(|s| s.starts_with(NOTICE_PREFIX)) {
+                if let Some(j) = event {
+                    events[j].confirmed = true;
+                }
+            }
+            let Some(ours) = contents.iter().find(|s| is_memory_context(s)) else {
                 continue;
             };
-            let event = closes.get(&i).copied();
             if let Some(j) = event {
                 events[j].confirmed = true;
             }

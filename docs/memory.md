@@ -6,20 +6,21 @@ normalized Git origin project key as the earlier ClaudeCat client. A correction 
 entry and explicitly supersedes it. Recall reports whether each cited source file still has the
 same bytes; a matching hash is not proof that the claim follows from its source line.
 
-The memory connection, local sync replica, and lock now live under
-`$CORT_MEMORY_DIR` or `${XDG_DATA_HOME:-$HOME/.local/share}/cortexyoung/memory`. This directory
-is durable data, separate from `CORT_CACHE_DIR`'s rebuildable code indexes. The remote table
-remains shared across machines. Each machine must configure the same Turso URL and token;
+Memory credentials, upload state, and locks live under `$CORT_MEMORY_DIR` or
+`${XDG_DATA_HOME:-$HOME/.local/share}/cortexyoung/memory`. This directory holds
+durable local data, separate from `CORT_CACHE_DIR`'s rebuildable code indexes. The ledger
+is read and written directly in the shared database. Each machine must configure the same Turso URL and token;
 `remote: ok` says this invocation read the shared database. `CORT_MEMORY_PROJECT` can override
 Git origin for a project without one; the earlier `CLAUDECAT_MEMORY_PROJECT` spelling is accepted during migration.
-Network calls use `CORT_COLLECT_NET_TIMEOUT_SECS` (default 120 seconds) as their deadline.
+Manual memory commands and notes upload use `CORT_COLLECT_NET_TIMEOUT_SECS` (default 120 seconds)
+as their network deadline; SessionStart has its own 2.5-second dispatch deadline.
 `notes upload` waits up to `CORT_MEMORY_LOCK_WAIT_SECS` (default 30 seconds, fractions allowed) for `memory.lock`; `list` and `show` read the shared database without that lock.
 
 The shared ledger database is `harnessuse` (`turso://harnessuse-yanggf8.aws-ap-northeast-1.turso.io`,
 native TYPE Turso, shared with `telemetry_events`); mint its token with
 `turso db tokens create harnessuse`. Older credentials name `cortex-v5` on a different account;
-that database carries a code-index `chunks_fts` table the sync engine cannot open (fts5), so
-configuring against it fails before any network work — see
+that database carries a code-index `chunks_fts` table that blocked the old sync engine (fts5).
+Use `harnessuse` for this ledger — see
 `docs/2026-10-19-memory-deployment-harnessuse.md`.
 
 ## Move an existing machine
@@ -37,17 +38,18 @@ cort memory status --root .
 ```
 
 If `CLAUDECAT_DATA_DIR` was customized, use its `turso-memory.json` path. The import creates
-a private cort config and a fresh cort replica; it does not delete ClaudeCat's files or copy
-the remote rows into another table. `sync` pulls the same remote ledger into the cort-owned
-replica. To configure a new machine, pass the token only through stdin:
+a private cort config; it does not delete ClaudeCat's files or copy remote rows.
+`cort memory check` reads the shared database and reports its project id, total and active entry
+counts, and conflicts. To configure a new machine, pass the token only through stdin:
 
 ```sh
 cort memory configure --url <Turso URL> --token-stdin
 ```
 
-`cort memory status` reports the project id, sync status, number of entries, and conflicts.
-Run it on each machine before switching agent instructions. No cross-machine behavioral result
-is inferred from a successful sync alone.
+`cort memory status` reports the project id, database URL, `remote: ok`, total and active entry
+counts, and conflicts. A failed read returns an error with `remote: <kind>` instead.
+Run it on each machine before switching agent instructions. A successful read confirms access to
+the shared database; it does not establish agent answer quality.
 
 ## Harness notes
 
@@ -139,5 +141,5 @@ a second configured machine, recall `memory ownership` and confirm exactly one a
 running a pre-`63f7de3f` cort has no stamp fields to read; upgrade it first. Fresh Claude Code
 and Codex sessions must then be graded on the
 same frozen questions, including a superseded claim, stale source, and false pasted report.
-A sync succeeds or a hook fires without proving the later answer is correct. The ordered
+A successful remote read or a hook fire does not prove the later answer is correct. The ordered
 experiment and product priorities are in `docs/2026-10-20-direction-after-collection.md`.

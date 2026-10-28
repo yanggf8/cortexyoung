@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use tempfile::tempdir;
 
 const HEADER: &str = "cort memory: local replica (may be behind the shared database; `cort memory recall \"<topic>\"` refreshes)";
+const CURRENT_HEADER: &str = cort::hook_recall::HEADER;
 const NOTES: &str = "unreviewed harness notes from other machines (not checked against source; read one with `cort memory notes show <id>`):";
 fn row(kind: &str, second: usize, extra: Value) -> Value {
     let mut v =
@@ -68,6 +69,30 @@ fn memory_note(root: &Path) -> String {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(&path, "note").unwrap();
     path.to_string_lossy().into_owned()
+}
+
+#[test]
+fn both_memory_headers_count_but_remote_notice_does_not() {
+    let tmp = tempdir().unwrap();
+    let transcript = tmp.path().join("transcripts");
+    let project = tmp.path().join("project");
+    fs::create_dir_all(&project).unwrap();
+    for (name, text) in [
+        ("old", format!("{HEADER}\n- [old] claim (src/a.rs:1, source_unchanged)")),
+        ("current", format!("{CURRENT_HEADER}\n- [current] claim (src/a.rs:1, source_unchanged)")),
+        ("notice", "cort memory: the shared database could not be read at session start (remote_timeout); run `cort memory recall \"<topic>\"` when you need it".to_string()),
+    ] {
+        write(
+            &[hook(0, "startup", &text), attach(1, &text, "other hook", &project)],
+            &transcript,
+            &format!("{name}.jsonl"),
+        );
+    }
+    let report = scan(&transcript, None, None).unwrap();
+    assert_eq!(report["total"]["windows"], 2);
+    assert_eq!(report["total"]["distinct_sessions"], 2);
+    assert_eq!(report["unconfirmed_hook_runs"], 0);
+    assert_eq!(report["files"]["scanned"], 3);
 }
 #[test]
 fn attachment_windows_and_private_detail() {

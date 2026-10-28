@@ -8,7 +8,7 @@ const MAX_BYTES: usize = 6000;
 /// Other machines' notes listed at session start, on a budget separate from the ledger's.
 pub const MAX_NOTES: usize = 15;
 const MAX_NOTE_BYTES: usize = 2000;
-const HEADER: &str = "cort memory (shared database, read at session start; `cort memory recall \"<topic>\"` searches it)";
+pub const HEADER: &str = "cort memory (shared database, read at session start; `cort memory recall \"<topic>\"` searches it)";
 const NOTES_HEADER: &str = "unreviewed harness notes from other machines (not checked against source; read one with `cort memory notes show <id>`):";
 
 pub fn render(recall: MemoryRecall) -> Option<(String, usize)> {

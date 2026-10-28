@@ -14,8 +14,8 @@ same hooks — with three things, in this order:
      Codex or Kimi sees none of it. Bringing it into the same reviewed ledger is the next step; the
      ledger is project-scoped until then.
 
-   This is the repository's long-term goal; `cort memory` owns the ledger, its Turso sync replica and
-   its CLI. It does not yet capture conversations or recall unprompted. See
+   This is the repository's long-term goal; `cort memory` owns the shared ledger and
+   its CLI. It does not yet capture conversations; Claude Code receives reviewed entries at SessionStart. See
    [Project memory](docs/memory.md) and the
    [baseline and ownership correction](docs/2026-10-18-cross-agent-memory-baseline.md).
 2. **Measurement of how agents actually work** (`cort measure`). The primary metric is what a
@@ -33,7 +33,7 @@ same hooks — with three things, in this order:
 
 | Concern | Owner | How |
 |---|---|---|
-| Agent and project memory: the reviewed ledger, its Turso sync replica and its CLI | cort | `cort memory`. The only owner; ClaudeCat may call cort, never keep a second ledger. |
+| Agent and project memory: the reviewed shared ledger and its CLI | cort | `cort memory`. The only owner; ClaudeCat may call cort, never keep a second ledger. |
 | Measurement of how agents work: collection and analysis | cort | `cort measure`, kicked from cort's own hooks into cort's own Turso database. ClaudeCat collects nothing; `claudecat telemetry sync` and its daily `CORT-AUDIT.md` audit are retired. |
 | Code helpers: the local index, `impact`, repairing the index after an edit | cort | `cort index`, `cort impact`, the `PostToolUse` hook. |
 | The hooks on Claude Code, Codex and Kimi | cort | `PreToolUse` and `PostToolUse` record each call and kick collection; they stay silent, exit 0 and never wait. |
@@ -58,7 +58,7 @@ Five shipped commands (plus `status`/`projects`/`delete` utilities):
   depth 3, accepting a comma-separated batch. In `lean`, each row carries the dependent's definition
   line *and* the site that ties it to the seed (`@626`), tagged with the shape that attached it
   (`bare` / `scoped` / `receiver` / `type`)
-- `cort memory <record|resolve|recall|status|sync|configure|import-config|import-legacy>` — reviewed project facts in a shared Turso ledger, owned by cort; see [Project memory](docs/memory.md)
+- `cort memory <record|resolve|recall|status|check|configure|import-config|import-legacy>` — reviewed project facts in a shared Turso ledger, owned by cort; see [Project memory](docs/memory.md)
 - `cort usage [days]` — local per-machine usage stats (best-effort; 1–90 days, default 30)
 - `cort measure <configure|record|collect|verify|health|status|report|show|copy-events|import-audit|cron>` — agent measurement in its own Turso database; see [Local usage recording](#local-usage-recording-offline-hook-separate-tursodb-upload)
 
@@ -218,9 +218,10 @@ module paths by suffix — treat its output as candidates. For the precise calle
 ## Local usage recording (offline hook, separate TursoDB upload)
 
 Every cort command appends one row to a **central, local** SQLite database at
-`$CORT_CACHE_DIR/usage.db` (default `~/.cache/cortex-ng/usage.db`). Indexing, queries, hooks,
-and usage recording contain no network work; an explicit `cort memory` command can synchronize
-reviewed facts through Turso. Cross-machine upload of these rows is `cort measure`'s job alone,
+`$CORT_CACHE_DIR/usage.db` (default `~/.cache/cortex-ng/usage.db`). Code indexing, code queries,
+and local usage recording contain no network work. Explicit `cort memory` commands read or write
+reviewed facts in the shared Turso database, and Claude Code's SessionStart hook reads it.
+Cross-machine upload of usage rows is `cort measure`'s job alone,
 kicked in the background from cort's own hooks; queries and hooks do not wait for it. ClaudeCat
 collects nothing.
 Schema-v2 rows carry their own hashed `machine_id` and source. Pre-v2 rows retain
@@ -396,10 +397,9 @@ one-time `partial_drain_first_upgrade` note — the 30s drain cannot prove
 exclusion of workers running pre-lock binaries — and marks itself done only
 after a fully successful run.
 
-Why the installed payload is ~45M where `cort_upgrade` stays ~17M: commit
-`3fed89ed` gave `cort` the cross-machine memory sync (`turso` +
-`tokio` rt-multi-thread), and only `cort` links it — same build, same
-profile, the difference is that one dependency.
+Installed sizes (Linux x86_64 release, measured 2026-10-28): `cort` is ~22M and
+`cort_upgrade` ~15M. From commit `3fed89ed` until C4, `cort` was ~45M because it
+linked the replica client (`turso` + `tokio` rt-multi-thread); C4 removed both.
 
 ## Upgrade note — index schema v3 through v7
 
