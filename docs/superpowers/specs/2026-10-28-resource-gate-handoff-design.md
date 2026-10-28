@@ -210,3 +210,14 @@ claudecat 端：指令拆段與 kind 判斷的表格測試，至少包含：
    「有編譯在跑時下 `cargo build`」的實測，Codex 那次決定文件能不能寫「擋得到 Codex」。
 
 G1、G2 可以平行；G3 等兩包都進 master。
+
+### 進度
+
+- 2026-10-28 19:10 台灣時間（11:10Z）G1 進 master：cortexyoung `afca7e2f`（CI 四個 job 全綠；rust 901／evals
+  142 測試通過）。K3.1 Pro 程式審查（代 Muse）approve with changes，4 點已併入：`--` 之後的
+  `--help`／`--version` 屬於閘門、README／AGENTS.md 四處「從不出聲」改寫、回收檢查改用 `kill -0`（macOS
+  沒有 `/proc`）、時間斷言改成 10 秒的 fixture 對 5 秒門檻。
+- 同時 G2 進 claudecat `main`：`030cfcd`。除了設計的分類規則，另外處理 heredoc 內容（`<<EOF` 到結束行，
+  `<<-` 才去掉開頭 tab）、`#` 註解、開頭的重導向、`2>&1` 裡的 `&`、cargo 的 `-Z`／`--color` 帶值選項，
+  deny 原因裡的換行換成空白以保證一行。K3.1 Pro 審查 approve with changes，5 點已併入。
+- G3 尚未開始：兩台都還沒部署、還沒跑 `claudecat gate install`，三邊實測都還沒做。
