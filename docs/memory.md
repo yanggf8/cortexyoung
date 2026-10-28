@@ -17,7 +17,7 @@ as their network deadline; SessionStart has its own 2.5-second dispatch deadline
 `notes upload` waits up to `CORT_MEMORY_LOCK_WAIT_SECS` (default 30 seconds, fractions allowed) for `memory.lock`; `list` and `show` read the shared database without that lock.
 
 The shared ledger database is `harnessuse` (`turso://harnessuse-yanggf8.aws-ap-northeast-1.turso.io`,
-native TYPE Turso, shared with `telemetry_events`); mint its token with
+native TYPE Turso; measurement lives in `cort-measure`); mint its token with
 `turso db tokens create harnessuse`. Older credentials name `cortex-v5` on a different account;
 that database carries a code-index `chunks_fts` table that blocked the old sync engine (fts5).
 Use `harnessuse` for this ledger — see
