@@ -60,7 +60,7 @@ Five shipped commands (plus `status`/`projects`/`delete` utilities):
   (`bare` / `scoped` / `receiver` / `type`)
 - `cort memory <record|resolve|recall|status|check|configure|import-config|import-legacy>` — reviewed project facts in a shared Turso ledger, owned by cort; see [Project memory](docs/memory.md)
 - `cort usage [days]` — local per-machine usage stats (best-effort; 1–90 days, default 30)
-- `cort measure <configure|record|collect|verify|health|status|report|show|copy-events|import-audit|cron>` — agent measurement in its own Turso database; see [Local usage recording](#local-usage-recording-offline-hook-separate-tursodb-upload)
+- `cort measure <configure|record|collect|verify|health|status|report|show|cron>` — agent measurement in its own Turso database; see [Local usage recording](#local-usage-recording-offline-hook-separate-tursodb-upload)
 
 `struct`, `context`, `read` and `recall` were removed on 2026-10-23 after zero invocations in 30 days
 on both machines; for those jobs use `ast-grep run`, `rg`, or open the file. `cort memory recall` is a
@@ -289,31 +289,16 @@ uploads nothing until `cort measure verify` has passed for it: verify compares t
 computed here with the stored ones for the same machine and row, uploads nothing, and fails on any
 mismatch or on zero overlap. A machine that never uploaded can have no overlap, so it runs
 `cort measure verify --new-machine` instead: that passes only when none of its machine ids has a
-row in the measurement database or in claudecat's database (the one `cort memory` is configured
-for, and a different database), which is where an earlier upload of its history would be. Until then manual `record` still records compactions and reports
+row in the measurement database, which also holds claudecat's copied history. Until then manual `record` still records compactions and reports
 `events.status: "refused"`; background collection writes its result to `measure.log`. A changed
 `command_log` column set voids the verification.
 
-**Copying the old history (`cort measure copy-events`).** A one-time migration of what claudecat
-already uploaded: it copies `telemetry_events` and `telemetry_project_aliases` from the
-`harnessuse` database (the one `cort memory` is configured for) into the measurement database,
-every column unchanged, `INSERT OR IGNORE`, so it is safe to re-run. The source is read only,
-directly from `harnessuse`: nothing is written to or deleted from it. The destination is written
-page by page (2,000 rows), so a failure leaves a state the next run resumes from. It prints the row counts
-per `(source, machine_id)` on both sides. It refuses to run when the memory and measure configs name
-the same database, never overwrites a destination row, and reports same-key rows whose columns differ
-as `conflicts` (`status: copied_with_conflicts`, exit 0) instead of hiding them behind equal counts.
-
-**Importing the old audit table (`cort measure import-audit <PATH>... --project-repo <DIR>`).** A
-one-time import of the table claudecat's retired daily audit wrote to `CORT-AUDIT.md`. Each row's
-health columns become a `cort_index_health` event (`machine_id` `imported:<host>`, `machine_source`
-and payload `origin` `cort-audit-md`, id keyed on the row's content), and its usage columns a row of
-`imported_usage` keyed `(day, host)`. `--project-repo` is required: that directory's git origin
-names the project. Every file is parsed before anything is written, a cell the audit could not read
-(`?`, `-`) is stored as null rather than 0, and each usage row is inserted directly; only a key
-collision reads that one stored row back, so re-running is safe. A stored usage row is never
-overwritten; a differing one is reported under `usage_conflicts`. Run it on one machine: two
-machines importing at once would race on the same keys.
+**Retired imports.** `copy-events` copied claudecat's `telemetry_events` and
+`telemetry_project_aliases` from `harnessuse` into the measurement database on 2026-10-25.
+The 2026-10-28 re-check found 31,279 source rows, no conflicts, and at least as many destination
+rows in every `(source, machine_id)` group. `import-audit` imported the retired `CORT-AUDIT.md`
+on 2026-10-25. Both one-time commands were removed on 2026-10-28; the imported rows remain in
+the measurement database.
 
 ## Install
 

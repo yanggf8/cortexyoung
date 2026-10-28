@@ -227,11 +227,6 @@ pub fn session_config() -> Result<Option<(String, String)>, String> {
     config().map(|c| Some((c.url, c.token)))
 }
 
-/// The shared database connection configured for `cort memory`.
-pub(crate) fn load_config() -> Result<Config, String> {
-    config()
-}
-
 /// Legacy replica directory name, retained to find its lock and detect older clients.
 pub(crate) const SUBDIR: &str = "turso-memory";
 

@@ -79,12 +79,12 @@ fn busy_store_opens_nothing() {
 }
 
 #[test]
-fn unconfigured_store_is_other() {
+fn unconfigured_store_is_config() {
     let data = tempfile::tempdir().expect("data dir");
     in_sandbox(data.path(), || {
         let result = measure_store::open_measure_store_within(Duration::from_millis(300));
         match result {
-            Err(OpenError::Other(message)) => assert_eq!(
+            Err(OpenError::Config(message)) => assert_eq!(
                 message,
                 "Turso measurement is not configured; run `cort measure configure --url URL --token-stdin`"
             ),

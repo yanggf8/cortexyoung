@@ -209,7 +209,7 @@ fn write_failure_rejects_events() {
     s.fail_write(true);
     assert!(s.insert_events(std::slice::from_ref(&event)).is_err());
     assert!(s.insert_events(&[]).is_ok());
-    assert!(s.event_counts().unwrap().is_empty());
+    assert_eq!(s.event_count("machine", "cort_command").unwrap(), 0);
     s.fail_write(false);
     assert_eq!(s.insert_events(&[event]).unwrap(), 1);
 }

@@ -690,69 +690,123 @@ fn bare_cli(args: &[&str]) -> (std::process::Output, tempfile::TempDir) {
     (out, tmp)
 }
 
-/// `--new-machine` needs claudecat's database as the second witness, and checks for it before any
-/// request: a missing memory config, or one naming the measurement database, fails offline.
+fn configured_cli(
+    data: &Path,
+    home: &Path,
+    cache: &Path,
+    args: &[&str],
+) -> (std::process::Output, std::time::Duration) {
+    let started = std::time::Instant::now();
+    let out = Command::new(cort_bin())
+        .args(args)
+        .env("CORT_MEMORY_DIR", data)
+        .env("HOME", home)
+        .env("CORT_CACHE_DIR", cache)
+        .env("CORT_COLLECT_NET_TIMEOUT_SECS", "1")
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("CLAUDE_CONFIG_DIR")
+        .output()
+        .unwrap();
+    (out, started.elapsed())
+}
+
 #[test]
-fn new_machine_verify_needs_a_separate_legacy_database() {
-    for memory_url in [None, Some("libsql://127.0.0.1:1")] {
-        let tmp = tempfile::tempdir().unwrap();
-        let (data, home, cache) = (
-            tmp.path().join("data"),
-            tmp.path().join("home"),
-            tmp.path().join("cache"),
+fn measure_refuses_memory_database_before_open() {
+    let tmp = tempfile::tempdir().unwrap();
+    let data = tmp.path().join("data");
+    let home = tmp.path().join("home");
+    let cache = tmp.path().join("cache");
+    for path in [&data, &home, &cache] {
+        fs::create_dir_all(path).unwrap();
+    }
+    fs::write(
+        data.join("turso-measure.json"),
+        r#"{"url":"libsql://127.0.0.1:1","token":"test"}"#,
+    )
+    .unwrap();
+    fs::write(
+        data.join("turso-memory.json"),
+        r#"{"url":"turso://127.0.0.1/","token":"test"}"#,
+    )
+    .unwrap();
+    for (args, code) in [
+        (&["measure", "status"][..], "measure_error"),
+        (
+            &["measure", "verify", "--new-machine"][..],
+            "measure_verify_failed",
+        ),
+        (&["measure", "report", "--json"][..], "measure_error"),
+    ] {
+        let (out, elapsed) = configured_cli(&data, &home, &cache, args);
+        assert!(!out.status.success(), "{args:?}");
+        let value: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(value["error"], code, "{args:?} {value}");
+        assert_eq!(
+            value["detail"]["message"],
+            "the measure config names the memory database (127.0.0.1); measurement needs its own database",
+            "{args:?} {value}"
         );
-        for d in [&data, &home, &cache] {
-            fs::create_dir_all(d).unwrap();
-        }
-        let config = r#"{"url":"libsql://127.0.0.1:1","token":"test"}"#;
-        fs::write(data.join("turso-measure.json"), config).unwrap();
-        if let Some(url) = memory_url {
-            fs::write(
-                data.join("turso-memory.json"),
-                format!(r#"{{"url":"{url}","token":"test"}}"#),
-            )
-            .unwrap();
-        }
-        let started = std::time::Instant::now();
-        let out = Command::new(cort_bin())
-            .args(["measure", "verify", "--new-machine"])
-            .env("CORT_MEMORY_DIR", &data)
-            .env("HOME", &home)
-            .env("CORT_CACHE_DIR", &cache)
-            .env_remove("XDG_DATA_HOME")
-            .env_remove("CLAUDE_CONFIG_DIR")
-            .output()
-            .unwrap();
-        assert!(!out.status.success());
-        let v: Value = serde_json::from_slice(&out.stdout).unwrap();
-        assert_eq!(v["error"], "measure_verify_failed", "{v}");
-        if memory_url.is_some() {
-            assert!(
-                v["detail"]["message"]
-                    .as_str()
-                    .unwrap()
-                    .contains("name the same database"),
-                "{v}"
-            );
-        }
         assert!(
-            started.elapsed() < std::time::Duration::from_secs(5),
-            "failed before any request"
+            elapsed < std::time::Duration::from_secs(5),
+            "{args:?} {elapsed:?}"
         );
-        assert!(!data.join("measure-events-verified.json").exists());
+        assert!(!data.join("locks/turso-measure").exists());
+    }
+    assert_eq!(
+        cort::collect::classify_error(
+            "the measure config names the memory database (127.0.0.1); measurement needs its own database"
+        ),
+        cort::collect::ErrorKind::Storage
+    );
+}
+
+#[test]
+fn measure_different_or_missing_memory_config_does_not_refuse() {
+    for memory_url in [Some("libsql://other.invalid"), None, Some("malformed")] {
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path().join("data");
+        let home = tmp.path().join("home");
+        let cache = tmp.path().join("cache");
+        for path in [&data, &home, &cache] {
+            fs::create_dir_all(path).unwrap();
+        }
+        fs::write(
+            data.join("turso-measure.json"),
+            r#"{"url":"libsql://127.0.0.1:1","token":"test"}"#,
+        )
+        .unwrap();
+        if let Some(url) = memory_url {
+            let contents = if url == "malformed" {
+                "not JSON".to_string()
+            } else {
+                json!({"url":url,"token":"test"}).to_string()
+            };
+            fs::write(data.join("turso-memory.json"), contents).unwrap();
+        }
+        let (out, elapsed) = configured_cli(&data, &home, &cache, &["measure", "status"]);
+        let value: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert!(
+            !value
+                .to_string()
+                .contains("measure config names the memory database"),
+            "{memory_url:?} {value}"
+        );
+        assert!(elapsed < std::time::Duration::from_secs(5));
     }
 }
 
 #[test]
 fn removed_and_unconfigured_measure_commands() {
-    let (out, _t) = bare_cli(&["measure", "sync"]);
-    assert!(!out.status.success());
-    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(v["error"], "unknown_command", "{v}");
-    assert!(v["detail"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("unrecognized subcommand 'sync'"));
+    for removed in ["sync", "copy-events", "import-audit"] {
+        let (out, _t) = bare_cli(&["measure", removed]);
+        assert!(!out.status.success());
+        let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(v["error"], "unknown_command", "{v}");
+        assert!(v["detail"]["message"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("unrecognized subcommand '{removed}'")));
+    }
 
     for (args, code) in [
         (&["measure", "report"][..], "measure_error"),

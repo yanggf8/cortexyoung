@@ -1,4 +1,3 @@
-use cort::audit_import::{ImportedUsage, ImportedUsageOutcome};
 use cort::measure::{record_with_scan, RecordInputs, RecordOutcome};
 use cort::measure_progress::{self, Load};
 use cort::measure_store::{CompactionRow, MachineHost, MeasureStore, SqliteStore};
@@ -58,21 +57,15 @@ impl MeasureStore for Counted {
     forward! {
         upsert_compaction(row: &CompactionRow) -> Result<(), String>;
         upsert_machine_host(machine_id: &str, host: &str, seen_ms: i64) -> Result<(), String>;
-        upsert_imported_usage(rows: &[ImportedUsage]) -> Result<ImportedUsageOutcome, String>;
         insert_events(events: &[TelemetryEvent]) -> Result<usize, String>;
         upsert_aliases(rows: &[(String, String, String)]) -> Result<(), String>;
     }
     read! {
         compactions_since(since_ms: i64) -> Result<Vec<CompactionRow>, String>;
         machine_hosts() -> Result<Vec<MachineHost>, String>;
-        imported_usage() -> Result<Vec<ImportedUsage>, String>;
         remote_ids(machine_id: &str, source: &str) -> Result<HashMap<i64, String>, String>;
         event_count(machine_id: &str, source: &str) -> Result<usize, String>;
         remote_payload(machine_id: &str, source: &str, event_id: &str) -> Result<Option<String>, String>;
-        aliases() -> Result<Vec<(String, String, String)>, String>;
-        events_page(after: Option<(String, String)>, limit: usize) -> Result<Vec<TelemetryEvent>, String>;
-        events_in_key_range(first: &(String, String), last: &(String, String)) -> Result<Vec<TelemetryEvent>, String>;
-        event_counts() -> Result<Vec<(String, String, usize)>, String>;
         index_names() -> Result<Vec<String>, String>;
     }
 }

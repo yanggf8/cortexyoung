@@ -48,11 +48,7 @@ fn store(dir: &tempfile::TempDir) -> SqliteStore {
 }
 
 fn health_count(s: &mut SqliteStore) -> usize {
-    s.event_counts()
-        .unwrap()
-        .into_iter()
-        .find(|(source, machine, _)| source == SOURCE_HEALTH && machine == MACHINE)
-        .map_or(0, |(_, _, count)| count)
+    s.event_count(MACHINE, SOURCE_HEALTH).unwrap()
 }
 
 fn uploaded(

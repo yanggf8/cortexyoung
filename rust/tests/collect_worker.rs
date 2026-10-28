@@ -1,4 +1,3 @@
-use cort::audit_import::{ImportedUsage, ImportedUsageOutcome};
 use cort::collect::{
     batch_cursors, run_collect, CollectConfig, CollectRun, CollectState, ErrorKind, Failure,
     KickPaths,
@@ -242,18 +241,12 @@ impl MeasureStore for SlowFirstWrite {
         compaction_owners(machine_id: &str) -> Result<Vec<(String, String)>, String>;
         compactions_since(since_ms: i64) -> Result<Vec<CompactionRow>, String>;
         machine_hosts() -> Result<Vec<MachineHost>, String>;
-        upsert_imported_usage(rows: &[ImportedUsage]) -> Result<ImportedUsageOutcome, String>;
-        imported_usage() -> Result<Vec<ImportedUsage>, String>;
         insert_events(events: &[TelemetryEvent]) -> Result<usize, String>;
         remote_ids(machine_id: &str, source: &str) -> Result<HashMap<i64, String>, String>;
         event_count(machine_id: &str, source: &str) -> Result<usize, String>;
         remote_payload(machine_id: &str, source: &str, event_id: &str) -> Result<Option<String>, String>;
         event_watermark(machine_id: &str, source: &str) -> Result<Option<(i64, String)>, String>;
         upsert_aliases(rows: &[(String, String, String)]) -> Result<(), String>;
-        aliases() -> Result<Vec<(String, String, String)>, String>;
-        events_page(after: Option<(String, String)>, limit: usize) -> Result<Vec<TelemetryEvent>, String>;
-        events_in_key_range(first: &(String, String), last: &(String, String)) -> Result<Vec<TelemetryEvent>, String>;
-        event_counts() -> Result<Vec<(String, String, usize)>, String>;
         index_names() -> Result<Vec<String>, String>;
     }
 }
@@ -286,12 +279,12 @@ fn deadline_after_uploads_still_fails_the_run() {
             result.summary
         );
         // The stop came after the uploads: the health row reached the replica before it.
-        let counts = SqliteStore::open(db).unwrap().event_counts().unwrap();
-        assert!(
-            counts
-                .iter()
-                .any(|(source, _, count)| source == "cort_index_health" && *count == 1),
-            "{counts:?}"
+        assert_eq!(
+            SqliteStore::open(db)
+                .unwrap()
+                .event_count("collect-test-machine", "cort_index_health")
+                .unwrap(),
+            1
         );
         // A stop before the push is a network failure with the push still owed, not a success.
         let s = state(paths);
@@ -433,10 +426,15 @@ fn instance_change_resets_and_reuploads_nothing_twice() {
         assert_ne!(s.instance_id.as_deref(), Some("old-instance"));
         assert_eq!(uploaded(paths), (0, 1)); // command upload awaits a dry-run marker
         let mut store = SqliteStore::open(db).unwrap();
-        let first = store.event_counts().unwrap();
+        let first = store
+            .event_count("collect-test-machine", "cort_index_health")
+            .unwrap();
         assert_eq!(run(paths, db, "codex").outcome, "ok");
         assert_eq!(
-            SqliteStore::open(db).unwrap().event_counts().unwrap(),
+            SqliteStore::open(db)
+                .unwrap()
+                .event_count("collect-test-machine", "cort_index_health")
+                .unwrap(),
             first
         );
         assert_eq!(uploaded(paths).1, 1);
@@ -512,10 +510,13 @@ fn refused_is_not_failure() {
         assert!(!s.upload_pending);
         assert!(s.failures.is_empty());
         assert_eq!(uploaded(paths), (0, 1));
-        let counts = SqliteStore::open(db).unwrap().event_counts().unwrap();
-        assert!(counts
-            .iter()
-            .any(|(source, _, count)| source == "cort_index_health" && *count == 1));
+        assert_eq!(
+            SqliteStore::open(db)
+                .unwrap()
+                .event_count("collect-test-machine", "cort_index_health")
+                .unwrap(),
+            1
+        );
     });
 }
 

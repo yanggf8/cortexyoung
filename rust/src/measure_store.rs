@@ -4,7 +4,6 @@
 //! caller that wants the logic without a network), and [`RemoteStore`] uses Hrana HTTP.
 //! Both use the same [`MEASURE_SCHEMA`] and SQL text.
 
-use crate::audit_import::{ImportedUsage, ImportedUsageConflict, ImportedUsageOutcome};
 use crate::memory_store::{self, Config};
 use crate::network_timeout::{network_failure, REMOTE_PREFIX};
 use crate::remote::{Cell, ErrorKind, RemoteDb, RemoteError, Stmt, Transport, UreqTransport};
@@ -60,14 +59,6 @@ pub trait MeasureStore {
         seen_ms: i64,
     ) -> Result<(), String>;
     fn machine_hosts(&mut self) -> Result<Vec<MachineHost>, String>;
-    /// Insert each row whose `(day, host)` is absent. An existing row is never overwritten:
-    /// identical -> unchanged, different -> returned as a conflict `(existing, incoming)`.
-    fn upsert_imported_usage(
-        &mut self,
-        rows: &[ImportedUsage],
-    ) -> Result<ImportedUsageOutcome, String>;
-    /// Every imported usage row, ordered by `(day, host)`.
-    fn imported_usage(&mut self) -> Result<Vec<ImportedUsage>, String>;
     /// `INSERT OR IGNORE` each event; returns how many were new. One transaction per chunk.
     fn insert_events(&mut self, events: &[TelemetryEvent]) -> Result<usize, String>;
     /// Local rowid (the payload's `id`) -> event_id for what the store holds for this machine.
@@ -92,24 +83,6 @@ pub trait MeasureStore {
         source: &str,
     ) -> Result<Option<(i64, String)>, String>;
     fn upsert_aliases(&mut self, rows: &[(String, String, String)]) -> Result<(), String>;
-    /// Every alias row as `(machine_id, local_project_id, shared_project_id)`.
-    fn aliases(&mut self) -> Result<Vec<(String, String, String)>, String>;
-    /// Up to `limit` events with `(source, event_id)` strictly after `after`, ascending (keyset
-    /// pagination on the primary key). `rowid` is `None`: a stored row has no local rowid.
-    fn events_page(
-        &mut self,
-        after: Option<(String, String)>,
-        limit: usize,
-    ) -> Result<Vec<TelemetryEvent>, String>;
-    /// Every stored event whose `(source, event_id)` lies between `first` and `last` inclusive,
-    /// in the same key order `events_page` uses; there may be rows the caller did not ask about.
-    fn events_in_key_range(
-        &mut self,
-        first: &(String, String),
-        last: &(String, String),
-    ) -> Result<Vec<TelemetryEvent>, String>;
-    /// `(source, machine_id, rows)` for every group, counted by the database.
-    fn event_counts(&mut self) -> Result<Vec<(String, String, usize)>, String>;
     /// Names of indexes currently present in the database.
     fn index_names(&mut self) -> Result<Vec<String>, String>;
 }
@@ -248,27 +221,7 @@ const SELECT_WATERMARK: &str =
     "SELECT max_rowid, row_fingerprint FROM event_watermarks WHERE machine_id = ? AND source = ?";
 const INSERT_ALIAS: &str = "INSERT OR IGNORE INTO telemetry_project_aliases \
     (machine_id, local_project_id, shared_project_id) VALUES (?, ?, ?)";
-const SELECT_ALIASES: &str =
-    "SELECT machine_id, local_project_id, shared_project_id FROM telemetry_project_aliases";
-const SELECT_EVENTS_FIRST_PAGE: &str = "SELECT source, event_id, machine_id, machine_source, \
-    project_id, time_ms, payload FROM telemetry_events ORDER BY source, event_id LIMIT ?";
-const SELECT_EVENTS_AFTER: &str = "SELECT source, event_id, machine_id, machine_source, \
-    project_id, time_ms, payload FROM telemetry_events \
-    WHERE source > ? OR (source = ? AND event_id > ?) ORDER BY source, event_id LIMIT ?";
-const SELECT_EVENTS_IN_RANGE: &str = "SELECT source, event_id, machine_id, machine_source, \
-    project_id, time_ms, payload FROM telemetry_events \
-    WHERE (source > ? OR (source = ? AND event_id >= ?)) \
-    AND (source < ? OR (source = ? AND event_id <= ?)) ORDER BY source, event_id";
-const COUNT_EVENTS: &str = "SELECT source, machine_id, COUNT(*) FROM telemetry_events \
-    GROUP BY source, machine_id ORDER BY source, machine_id";
-const SELECT_IMPORTED_USAGE: &str =
-    "SELECT day, host, commands_window, core_window, deep_window, commands_7d, deep_7d, \
-     decline_top, window_days FROM imported_usage ORDER BY day, host";
-const SELECT_IMPORTED_ONE: &str = "SELECT day, host, commands_window, core_window, deep_window, commands_7d, deep_7d, decline_top, window_days FROM imported_usage WHERE day = ? AND host = ?";
 const SELECT_INDEX_NAMES: &str = "SELECT name FROM sqlite_master WHERE type='index'";
-const INSERT_IMPORTED_USAGE: &str = "INSERT INTO imported_usage (day, host, commands_window, \
-    core_window, deep_window, commands_7d, deep_7d, decline_top, window_days) \
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)";
 /// Events per transaction: a commit per row is minutes on a 130k-row first upload.
 const EVENT_CHUNK: usize = 2000;
 
@@ -383,89 +336,6 @@ fn event_cells(e: &TelemetryEvent) -> Vec<Cell> {
         opt_int(e.time_ms),
         Cell::Text(e.payload.clone()),
     ]
-}
-
-fn alias_from_cells(c: &[Cell]) -> Result<(String, String, String), String> {
-    Ok((text(&c[0])?, text(&c[1])?, text(&c[2])?))
-}
-
-fn imported_usage_cells(u: &ImportedUsage) -> Vec<Cell> {
-    vec![
-        Cell::Text(u.day.clone()),
-        Cell::Text(u.host.clone()),
-        opt_int(u.commands_window),
-        opt_int(u.core_window),
-        opt_int(u.deep_window),
-        opt_int(u.commands_7d),
-        opt_int(u.deep_7d),
-        u.decline_top.clone().map_or(Cell::Null, Cell::Text),
-        Cell::Int(u.window_days),
-    ]
-}
-
-fn imported_usage_from_cells(c: &[Cell]) -> Result<ImportedUsage, String> {
-    Ok(ImportedUsage {
-        day: text(&c[0])?,
-        host: text(&c[1])?,
-        commands_window: opt_i(&c[2])?,
-        core_window: opt_i(&c[3])?,
-        deep_window: opt_i(&c[4])?,
-        commands_7d: opt_i(&c[5])?,
-        deep_7d: opt_i(&c[6])?,
-        decline_top: match &c[7] {
-            Cell::Null => None,
-            other => Some(text(other)?),
-        },
-        window_days: int(&c[8])?,
-    })
-}
-
-fn event_from_cells(c: &[Cell]) -> Result<TelemetryEvent, String> {
-    Ok(TelemetryEvent {
-        source: text(&c[0])?,
-        event_id: text(&c[1])?,
-        machine_id: text(&c[2])?,
-        machine_source: text(&c[3])?,
-        project_id: match &c[4] {
-            Cell::Null => None,
-            other => Some(text(other)?),
-        },
-        time_ms: opt_i(&c[5])?,
-        payload: text(&c[6])?,
-        rowid: None,
-    })
-}
-
-fn events_page_query(after: Option<(String, String)>, limit: usize) -> (&'static str, Vec<Cell>) {
-    let limit = Cell::Int(limit as i64);
-    match after {
-        None => (SELECT_EVENTS_FIRST_PAGE, vec![limit]),
-        Some((source, event_id)) => (
-            SELECT_EVENTS_AFTER,
-            vec![
-                Cell::Text(source.clone()),
-                Cell::Text(source),
-                Cell::Text(event_id),
-                limit,
-            ],
-        ),
-    }
-}
-
-fn range_key_params(first: &(String, String), last: &(String, String)) -> Vec<Cell> {
-    let t = |s: &String| Cell::Text(s.clone());
-    vec![
-        t(&first.0),
-        t(&first.0),
-        t(&first.1),
-        t(&last.0),
-        t(&last.0),
-        t(&last.1),
-    ]
-}
-
-fn count_from_cells(c: &[Cell]) -> Result<(String, String, usize), String> {
-    Ok((text(&c[0])?, text(&c[1])?, int(&c[2])? as usize))
 }
 
 /// `(event_id, id)` rows, `id` being the payload's `id` key (NULL when absent) -> id -> event_id.
@@ -612,61 +482,6 @@ impl MeasureStore for SqliteStore {
             .collect()
     }
 
-    fn upsert_imported_usage(
-        &mut self,
-        rows: &[ImportedUsage],
-    ) -> Result<ImportedUsageOutcome, String> {
-        let mut outcome = ImportedUsageOutcome::default();
-        for row in rows {
-            if self.fail_write {
-                return Err("write failed (fail_write set)".into());
-            }
-            let params: Vec<rusqlite::types::Value> = imported_usage_cells(row)
-                .into_iter()
-                .map(to_sqlite)
-                .collect();
-            match self
-                .conn
-                .execute(INSERT_IMPORTED_USAGE, rusqlite::params_from_iter(params))
-            {
-                Ok(_) => outcome.inserted += 1,
-                Err(rusqlite::Error::SqliteFailure(code, _))
-                    if code.code == rusqlite::ErrorCode::ConstraintViolation =>
-                {
-                    let existing = self
-                        .query(
-                            SELECT_IMPORTED_ONE,
-                            vec![Cell::Text(row.day.clone()), Cell::Text(row.host.clone())],
-                            9,
-                        )?
-                        .first()
-                        .map(|cells| imported_usage_from_cells(cells))
-                        .transpose()?
-                        .ok_or_else(|| {
-                            "constraint without existing imported usage row".to_string()
-                        })?;
-                    if existing == *row {
-                        outcome.unchanged += 1;
-                    } else {
-                        outcome.conflicts.push(ImportedUsageConflict {
-                            existing,
-                            incoming: row.clone(),
-                        });
-                    }
-                }
-                Err(error) => return Err(sql_err(error)),
-            }
-        }
-        Ok(outcome)
-    }
-
-    fn imported_usage(&mut self) -> Result<Vec<ImportedUsage>, String> {
-        self.query(SELECT_IMPORTED_USAGE, vec![], 9)?
-            .iter()
-            .map(|r| imported_usage_from_cells(r))
-            .collect()
-    }
-
     fn insert_events(&mut self, events: &[TelemetryEvent]) -> Result<usize, String> {
         if self.fail_write && !events.is_empty() {
             return Err("write failed (fail_write set)".into());
@@ -761,43 +576,6 @@ impl MeasureStore for SqliteStore {
         Ok(())
     }
 
-    fn aliases(&mut self) -> Result<Vec<(String, String, String)>, String> {
-        self.query(SELECT_ALIASES, vec![], 3)?
-            .iter()
-            .map(|r| alias_from_cells(r))
-            .collect()
-    }
-
-    fn events_page(
-        &mut self,
-        after: Option<(String, String)>,
-        limit: usize,
-    ) -> Result<Vec<TelemetryEvent>, String> {
-        let (sql, params) = events_page_query(after, limit);
-        self.query(sql, params, 7)?
-            .iter()
-            .map(|r| event_from_cells(r))
-            .collect()
-    }
-
-    fn events_in_key_range(
-        &mut self,
-        first: &(String, String),
-        last: &(String, String),
-    ) -> Result<Vec<TelemetryEvent>, String> {
-        self.query(SELECT_EVENTS_IN_RANGE, range_key_params(first, last), 7)?
-            .iter()
-            .map(|r| event_from_cells(r))
-            .collect()
-    }
-
-    fn event_counts(&mut self) -> Result<Vec<(String, String, usize)>, String> {
-        self.query(COUNT_EVENTS, vec![], 3)?
-            .iter()
-            .map(|r| count_from_cells(r))
-            .collect()
-    }
-
     fn index_names(&mut self) -> Result<Vec<String>, String> {
         self.query(SELECT_INDEX_NAMES, vec![], 1)?
             .iter()
@@ -828,11 +606,23 @@ pub fn configure(url: &str, token: &str) -> Result<PathBuf, String> {
 }
 
 fn config() -> Result<Config, String> {
-    memory_store::read_config(
+    let measure = memory_store::read_config(
         &config_path(),
         "Turso measure config",
         "Turso measurement is not configured; run `cort measure configure --url URL --token-stdin`",
-    )
+    )?;
+    let memory_path = memory_store::config_path();
+    // A missing, unreadable, or malformed memory config cannot stop measurement. Only a
+    // readable config can establish that these two stores name the same database.
+    if let Ok(memory) = memory_store::read_config(&memory_path, "Turso memory config", "missing") {
+        let identity = database_identity(&measure.url);
+        if database_identity(&memory.url) == identity {
+            return Err(format!(
+                "the measure config names the memory database ({identity}); measurement needs its own database"
+            ));
+        }
+    }
+    Ok(measure)
 }
 
 fn with_config_lock<T>(action: impl FnOnce(Config) -> Result<T, String>) -> Result<T, String> {
@@ -857,6 +647,7 @@ pub fn with_measure_lock<T>(action: impl FnOnce() -> Result<T, String>) -> Resul
 #[derive(Debug)]
 pub enum OpenError {
     Busy,
+    Config(String),
     /// Opening the remote database ran out of its network limit.
     Network(String),
     Other(String),
@@ -874,7 +665,7 @@ pub fn open_measure_store_within_timeout(
     wait: Duration,
     net_timeout: Duration,
 ) -> Result<Box<dyn MeasureStore>, OpenError> {
-    let config = config().map_err(OpenError::Other)?;
+    let config = config().map_err(OpenError::Config)?;
     let lock =
         memory_store::lock_in_within(SUBDIR, &config, "measure.lock", wait).map_err(|error| {
             match error {
@@ -887,7 +678,7 @@ pub fn open_measure_store_within_timeout(
     Ok(Box::new(store))
 }
 
-/// The network bound for paths outside a collect run (`report`, `import-audit`, `copy-events`):
+/// The network bound for paths outside a collect run (such as `report`):
 /// the same configured default for every HTTP request.
 fn default_net_timeout() -> Duration {
     Duration::from_millis(crate::collect::CollectConfig::from_env().net_timeout_ms)
@@ -1082,52 +873,6 @@ impl MeasureStore for RemoteStore {
             .collect()
     }
 
-    fn upsert_imported_usage(
-        &mut self,
-        rows: &[ImportedUsage],
-    ) -> Result<ImportedUsageOutcome, String> {
-        let mut outcome = ImportedUsageOutcome::default();
-        for row in rows {
-            match self
-                .db
-                .execute(INSERT_IMPORTED_USAGE, imported_usage_cells(row))
-            {
-                Ok(_) => outcome.inserted += 1,
-                Err(error) if error.kind == ErrorKind::Constraint => {
-                    let existing = self
-                        .query(
-                            SELECT_IMPORTED_ONE,
-                            vec![Cell::Text(row.day.clone()), Cell::Text(row.host.clone())],
-                            9,
-                        )?
-                        .first()
-                        .map(|cells| imported_usage_from_cells(cells))
-                        .transpose()?
-                        .ok_or_else(|| {
-                            "constraint without existing imported usage row".to_string()
-                        })?;
-                    if existing == *row {
-                        outcome.unchanged += 1;
-                    } else {
-                        outcome.conflicts.push(ImportedUsageConflict {
-                            existing,
-                            incoming: row.clone(),
-                        });
-                    }
-                }
-                Err(error) => return Err(self.error(error)),
-            }
-        }
-        Ok(outcome)
-    }
-
-    fn imported_usage(&mut self) -> Result<Vec<ImportedUsage>, String> {
-        self.query(SELECT_IMPORTED_USAGE, vec![], 9)?
-            .iter()
-            .map(|r| imported_usage_from_cells(r))
-            .collect()
-    }
-
     fn insert_events(&mut self, events: &[TelemetryEvent]) -> Result<usize, String> {
         let mut inserted = 0usize;
         for chunk in events.chunks(EVENT_CHUNK) {
@@ -1212,43 +957,6 @@ impl MeasureStore for RemoteStore {
         Ok(())
     }
 
-    fn aliases(&mut self) -> Result<Vec<(String, String, String)>, String> {
-        self.query(SELECT_ALIASES, vec![], 3)?
-            .iter()
-            .map(|r| alias_from_cells(r))
-            .collect()
-    }
-
-    fn events_page(
-        &mut self,
-        after: Option<(String, String)>,
-        limit: usize,
-    ) -> Result<Vec<TelemetryEvent>, String> {
-        let (sql, params) = events_page_query(after, limit);
-        self.query(sql, params, 7)?
-            .iter()
-            .map(|r| event_from_cells(r))
-            .collect()
-    }
-
-    fn events_in_key_range(
-        &mut self,
-        first: &(String, String),
-        last: &(String, String),
-    ) -> Result<Vec<TelemetryEvent>, String> {
-        self.query(SELECT_EVENTS_IN_RANGE, range_key_params(first, last), 7)?
-            .iter()
-            .map(|r| event_from_cells(r))
-            .collect()
-    }
-
-    fn event_counts(&mut self) -> Result<Vec<(String, String, usize)>, String> {
-        self.query(COUNT_EVENTS, vec![], 3)?
-            .iter()
-            .map(|r| count_from_cells(r))
-            .collect()
-    }
-
     fn index_names(&mut self) -> Result<Vec<String>, String> {
         self.query(SELECT_INDEX_NAMES, vec![], 1)?
             .iter()
@@ -1258,26 +966,6 @@ impl MeasureStore for RemoteStore {
             })
             .collect()
     }
-}
-
-/// Open the configured remote database under `measure.lock` and run `f` against it.
-/// The legacy (claudecat) database `cort memory` is configured for, opened read-only for
-/// `measure verify --new-machine`. Refuses when both configs name one database: absence there
-/// would be absence in the measurement store, counted twice and proving nothing more.
-pub fn open_legacy_read_only() -> Result<Box<dyn MeasureStore>, String> {
-    let memory_config = memory_store::load_config()?;
-    let measure_config = config()?;
-    if same_database(&memory_config.url, &measure_config.url) {
-        return Err(format!(
-            "the memory config and the measure config name the same database ({}); the legacy \
-             check needs claudecat's database",
-            database_identity(&memory_config.url)
-        ));
-    }
-    Ok(Box::new(RemoteStore::open_read_only(
-        &memory_config,
-        default_net_timeout(),
-    )?))
 }
 
 /// The one remote read `measure status` makes: read-only, so it never creates the schema it is
@@ -1304,11 +992,10 @@ pub fn with_turso_store<T>(
 }
 
 /// The database a Turso URL names: its host, lower-cased, without scheme, userinfo, port, path,
-/// query, fragment or trailing slash. `libsql://x.turso.io` and `turso://X.turso.io/` are the same
-/// database, and so are `https://x.turso.io` and `https://x.turso.io:443`. The port is dropped on
-/// purpose: two databases that differ only by port are refused as one, which is the safe direction
-/// for a guard whose job is to stop a copy writing into its own source. A bracketed IPv6 host
-/// keeps its brackets.
+/// query, fragment or trailing slash. Ports are dropped deliberately: URLs differing only by
+/// port are treated as one database, the safe direction for the memory database guard. This
+/// identity also tracks the database in notes-uploaded.json. A bracketed IPv6 host keeps its
+/// brackets.
 pub fn database_identity(url: &str) -> String {
     let rest = url.trim().split_once("://").map_or(url.trim(), |(_, r)| r);
     let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
@@ -1321,38 +1008,6 @@ pub fn database_identity(url: &str) -> String {
         host_port.split(':').next().unwrap_or("")
     };
     host.to_ascii_lowercase()
-}
-
-/// Whether two configured URLs name the same database.
-pub fn same_database(a: &str, b: &str) -> bool {
-    database_identity(a) == database_identity(b)
-}
-
-/// Run `f(source, destination)` with a read-only memory source and the measure database.
-/// Both configs are read before any file or lock is created.
-pub fn with_legacy_and_measure_stores<T>(
-    f: impl FnOnce(&mut dyn MeasureStore, &mut dyn MeasureStore) -> Result<T, String>,
-) -> Result<T, String> {
-    let memory_config = memory_store::load_config()?;
-    let measure_config = config()?;
-    if same_database(&memory_config.url, &measure_config.url) {
-        return Err(format!(
-            "the memory config and the measure config name the same database ({}); copying a \
-             database into itself would write to the source, so nothing was opened",
-            database_identity(&memory_config.url)
-        ));
-    }
-    with_lock_for(measure_config, |config| {
-        let _legacy_lock = memory_store::lock_in(
-            memory_store::SUBDIR,
-            &memory_config,
-            "legacy-telemetry.lock",
-        )?;
-        let net_timeout = default_net_timeout();
-        let mut to = RemoteStore::open(&config, net_timeout)?;
-        let mut from = RemoteStore::open_read_only(&memory_config, net_timeout)?;
-        f(&mut from, &mut to)
-    })
 }
 
 #[cfg(test)]
@@ -1386,7 +1041,7 @@ mod tests {
         )
         .unwrap();
         assert!(marker.exists());
-        assert!(store.event_counts().is_ok());
+        assert!(store.event_count("machine", "test").is_ok());
         let fresh = crate::remote::SqliteTransport::new().unwrap();
         let mut skipped = RemoteStore::open_with_marker(
             &config,
@@ -1395,7 +1050,7 @@ mod tests {
             &marker,
         )
         .unwrap();
-        assert!(skipped.event_counts().is_err());
+        assert!(skipped.event_count("machine", "test").is_err());
     }
 
     #[test]
@@ -1466,10 +1121,7 @@ mod tests {
         for ddl in MEASURE_SCHEMA {
             conn.execute_batch(ddl).unwrap();
         }
-        for (name, sql, args) in [
-            ("SELECT_REMOTE", SELECT_REMOTE, 2),
-            ("COUNT_EVENTS", COUNT_EVENTS, 0),
-        ] {
+        for (name, sql, args) in [("SELECT_REMOTE", SELECT_REMOTE, 2)] {
             let explain = format!("EXPLAIN QUERY PLAN {sql}");
             let mut statement = conn.prepare(&explain).unwrap();
             let params = vec![rusqlite::types::Value::Null; args];
@@ -1499,29 +1151,41 @@ mod tests {
         assert!(untouched);
     }
 
-    /// Source and destination URLs with the same host name must be refused.
+    /// URL spellings for the same host produce the same database identity.
     #[test]
     fn database_identity_ignores_scheme_case_slash_and_path() {
-        assert!(same_database("libsql://x.turso.io", "turso://X.turso.io/"));
-        assert!(same_database(
-            "https://x.turso.io/v2/pipeline?a=1",
-            "libsql://x.TURSO.io"
-        ));
-        assert!(!same_database("libsql://x.turso.io", "libsql://y.turso.io"));
+        assert_eq!(
+            database_identity("libsql://x.turso.io"),
+            database_identity("turso://X.turso.io/")
+        );
+        assert_eq!(
+            database_identity("https://x.turso.io/v2/pipeline?a=1"),
+            database_identity("libsql://x.TURSO.io")
+        );
+        assert_ne!(
+            database_identity("libsql://x.turso.io"),
+            database_identity("libsql://y.turso.io")
+        );
         assert_eq!(
             database_identity(" turso://Db-Org.turso.io/ "),
             "db-org.turso.io"
         );
-        assert!(same_database(
-            "https://x.turso.io",
-            "https://x.turso.io:443"
-        ));
-        assert!(same_database(
-            "https://u:p@x.turso.io:8080/p",
-            "libsql://X.turso.io"
-        ));
+        assert_eq!(
+            database_identity("https://x.turso.io"),
+            database_identity("https://x.turso.io:443")
+        );
+        assert_eq!(
+            database_identity("https://u:p@x.turso.io:8080/p"),
+            database_identity("libsql://X.turso.io")
+        );
         assert_eq!(database_identity("https://[::1]:8080/p"), "[::1]");
-        assert!(same_database("http://[::1]:1", "http://[::1]:2/x"));
-        assert!(!same_database("http://[::1]", "http://[::2]"));
+        assert_eq!(
+            database_identity("http://[::1]:1"),
+            database_identity("http://[::1]:2/x")
+        );
+        assert_ne!(
+            database_identity("http://[::1]"),
+            database_identity("http://[::2]")
+        );
     }
 }

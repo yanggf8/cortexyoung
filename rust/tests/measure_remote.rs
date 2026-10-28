@@ -1,4 +1,3 @@
-use cort::audit_import::ImportedUsage;
 use cort::measure_store::{CompactionRow, MeasureStore, RemoteStore, WindowCounts};
 use cort::remote::{RemoteError, SqliteTransport, Transport};
 use cort::telemetry::TelemetryEvent;
@@ -116,26 +115,8 @@ fn remote_store_runs_shared_sql_through_hrana() {
         store.remote_payload("machine", "a", "1").unwrap(),
         Some(events[0].payload.clone())
     );
-    assert_eq!(store.events_page(None, 2).unwrap(), events[..2]);
-    assert_eq!(
-        store
-            .events_page(Some(("a".into(), "1".into())), 3)
-            .unwrap(),
-        events[1..]
-    );
-    assert_eq!(
-        store
-            .events_in_key_range(&("a".into(), "2".into()), &("b".into(), "3".into()))
-            .unwrap(),
-        events[1..]
-    );
-    assert_eq!(
-        store.event_counts().unwrap(),
-        vec![
-            ("a".into(), "machine".into(), 2),
-            ("b".into(), "machine".into(), 1)
-        ]
-    );
+    assert_eq!(store.event_count("machine", "a").unwrap(), 2);
+    assert_eq!(store.event_count("machine", "b").unwrap(), 1);
     assert!(sql
         .lock()
         .unwrap()
@@ -149,44 +130,7 @@ fn remote_store_runs_shared_sql_through_hrana() {
     store
         .upsert_aliases(&[alias.clone(), alias.clone()])
         .unwrap();
-    assert_eq!(store.aliases().unwrap(), vec![alias]);
-
-    let usage = ImportedUsage {
-        day: "2026-10-27".into(),
-        host: "host".into(),
-        commands_window: Some(2),
-        core_window: None,
-        deep_window: None,
-        commands_7d: None,
-        deep_7d: None,
-        decline_top: None,
-        window_days: 30,
-    };
-    assert_eq!(
-        store
-            .upsert_imported_usage(std::slice::from_ref(&usage))
-            .unwrap()
-            .inserted,
-        1
-    );
-    assert_eq!(
-        store
-            .upsert_imported_usage(std::slice::from_ref(&usage))
-            .unwrap()
-            .unchanged,
-        1
-    );
-    let mut changed = usage.clone();
-    changed.commands_window = Some(3);
-    assert_eq!(
-        store
-            .upsert_imported_usage(&[changed])
-            .unwrap()
-            .conflicts
-            .len(),
-        1
-    );
-    assert_eq!(store.imported_usage().unwrap(), vec![usage]);
+    assert_eq!(store.event_count("machine", "a").unwrap(), 2);
 }
 
 #[test]
@@ -212,90 +156,6 @@ fn timeout_error_keeps_network_prefix_and_hides_token() {
     assert!(error.starts_with("network timeout after "), "{error}");
     assert!(error.contains("timeout"));
     assert!(!error.contains("secret-test-token"));
-}
-
-struct SharedTransport(Arc<SqliteTransport>);
-
-impl Transport for SharedTransport {
-    fn post(
-        &self,
-        url: &str,
-        body: &[u8],
-        headers: &[(&str, &str)],
-    ) -> Result<Vec<u8>, RemoteError> {
-        self.0.post(url, body, headers)
-    }
-}
-
-/// A store whose transport the test keeps, so it can inject a failure after the schema exists.
-fn failing_store() -> (RemoteStore, Arc<SqliteTransport>) {
-    let transport = Arc::new(SqliteTransport::new().unwrap());
-    let store = RemoteStore::with_transport(
-        "libsql://test.invalid",
-        "test-token",
-        Box::new(SharedTransport(transport.clone())),
-        true,
-    )
-    .unwrap();
-    (store, transport)
-}
-
-fn usage(day: &str, host: &str, commands: i64) -> ImportedUsage {
-    ImportedUsage {
-        day: day.into(),
-        host: host.into(),
-        commands_window: Some(commands),
-        core_window: None,
-        deep_window: None,
-        commands_7d: None,
-        deep_7d: None,
-        decline_top: None,
-        window_days: 7,
-    }
-}
-
-#[test]
-fn imported_usage_reads_only_the_colliding_row() {
-    let (mut store, sql) = store(true);
-    let first = usage("2026-10-01", "a", 1);
-    store
-        .upsert_imported_usage(&[first.clone(), usage("2026-10-02", "a", 2)])
-        .unwrap();
-    sql.lock().unwrap().clear();
-    let outcome = store
-        .upsert_imported_usage(&[
-            first,
-            usage("2026-10-02", "a", 99),
-            usage("2026-10-03", "a", 3),
-        ])
-        .unwrap();
-    assert_eq!(
-        (outcome.inserted, outcome.unchanged, outcome.conflicts.len()),
-        (1, 1, 1)
-    );
-    let seen = sql.lock().unwrap();
-    assert!(
-        seen.iter().all(|s| !s.contains("ORDER BY day, host")),
-        "no whole-table pre-read: {seen:?}"
-    );
-    // One single-row read per collision, none for the clean insert.
-    assert_eq!(
-        seen.iter()
-            .filter(|s| s.starts_with("SELECT") && s.contains("FROM imported_usage"))
-            .count(),
-        2
-    );
-}
-
-#[test]
-fn imported_usage_returns_a_non_constraint_error_unclassified() {
-    let (mut store, transport) = failing_store();
-    transport.fail_next_code("BLOCKED");
-    let error = store
-        .upsert_imported_usage(&[usage("2026-10-01", "a", 1)])
-        .unwrap_err();
-    assert_eq!(cort::measure_store::remote_error_kind(&error), "blocked");
-    assert!(!error.contains("test-token"));
 }
 
 #[test]

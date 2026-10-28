@@ -7,7 +7,7 @@ use crate::measure_progress::{self, Progress};
 use crate::measure_store::{CompactionRow, MeasureStore};
 use crate::memory_store::project_from_git_origin;
 use crate::telemetry::{
-    upload_events_with_progress, upload_health_events_with_progress, TelemetryEvent, UploadInputs,
+    upload_events_with_progress, upload_health_events_with_progress, UploadInputs,
 };
 use crate::transcript::{compactions, parse_transcript_bytes, Compaction, Step, WindowDetails};
 use serde_json::{json, Value};
@@ -420,115 +420,6 @@ pub fn record_with_scan_until(
             None => RecordOutcome::Uploaded,
         },
     ))
-}
-
-/// Events per page when copying between stores.
-const COPY_PAGE: usize = 2000;
-/// How many conflicting keys a [`CopyReport`] names.
-const CONFLICT_EXAMPLES: usize = 5;
-
-/// What [`copy_events`] did.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CopyReport {
-    /// `(source, machine_id, rows in from, rows in to)` for each group `from` holds.
-    pub groups: Vec<(String, String, usize, usize)>,
-    /// Source rows whose key already existed in `to` with different column values (kept as is).
-    pub conflicts: usize,
-    /// The first few conflicts: `(source, event_id, names of the differing columns)`.
-    pub conflict_examples: Vec<(String, String, Vec<&'static str>)>,
-}
-
-fn differing_columns(a: &TelemetryEvent, b: &TelemetryEvent) -> Vec<&'static str> {
-    let mut out = Vec::new();
-    if a.machine_id != b.machine_id {
-        out.push("machine_id");
-    }
-    if a.machine_source != b.machine_source {
-        out.push("machine_source");
-    }
-    if a.project_id != b.project_id {
-        out.push("project_id");
-    }
-    if a.time_ms != b.time_ms {
-        out.push("time_ms");
-    }
-    if a.payload != b.payload {
-        out.push("payload");
-    }
-    out
-}
-
-/// Copy every event and alias of `from` into `to`, unchanged, `INSERT OR IGNORE`.
-/// `from` is only read. A row whose key `to` already holds is never overwritten; if its
-/// columns differ it is reported as a conflict.
-pub fn copy_events(
-    from: &mut dyn MeasureStore,
-    to: &mut dyn MeasureStore,
-) -> Result<CopyReport, String> {
-    let mut conflicts = 0usize;
-    let mut examples = Vec::new();
-    let mut after: Option<(String, String)> = None;
-    loop {
-        let page = from
-            .events_page(after.clone(), COPY_PAGE)
-            .map_err(|e| format!("remote read: {e}"))?;
-        let Some(last) = page.last() else { break };
-        let last = (last.source.clone(), last.event_id.clone());
-        after = Some(last.clone());
-        let inserted = to.insert_events(&page)?;
-        if inserted < page.len() {
-            let first = (page[0].source.clone(), page[0].event_id.clone());
-            let stored: HashMap<(String, String), TelemetryEvent> = to
-                .events_in_key_range(&first, &last)?
-                .into_iter()
-                .map(|e| ((e.source.clone(), e.event_id.clone()), e))
-                .collect();
-            let mut missing: Vec<&TelemetryEvent> = Vec::new();
-            for e in &page {
-                let Some(have) = stored.get(&(e.source.clone(), e.event_id.clone())) else {
-                    missing.push(e);
-                    continue;
-                };
-                let cols = differing_columns(e, have);
-                if !cols.is_empty() {
-                    conflicts += 1;
-                    if examples.len() < CONFLICT_EXAMPLES {
-                        examples.push((e.source.clone(), e.event_id.clone(), cols));
-                    }
-                }
-            }
-            if let Some(first_missing) = missing.first() {
-                return Err(format!(
-                    "{} event(s) were neither inserted nor already present in the destination \
-                     (first: source {:?}, event_id {:?}); the destination refused them",
-                    missing.len(),
-                    first_missing.source,
-                    first_missing.event_id
-                ));
-            }
-        }
-    }
-    let aliases = from.aliases().map_err(|e| format!("remote read: {e}"))?;
-    to.upsert_aliases(&aliases)?;
-    let dest: HashMap<(String, String), usize> = to
-        .event_counts()?
-        .into_iter()
-        .map(|(s, m, n)| ((s, m), n))
-        .collect();
-    let groups = from
-        .event_counts()
-        .map_err(|e| format!("remote read: {e}"))?
-        .into_iter()
-        .map(|(s, m, n)| {
-            let d = dest.get(&(s.clone(), m.clone())).copied().unwrap_or(0);
-            (s, m, n, d)
-        })
-        .collect();
-    Ok(CopyReport {
-        groups,
-        conflicts,
-        conflict_examples: examples,
-    })
 }
 
 /// First non-empty of the kernel hostname, `/etc/hostname`, `$HOSTNAME`; else `unknown`.

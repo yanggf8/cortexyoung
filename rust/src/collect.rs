@@ -798,6 +798,7 @@ pub fn run_manual<T>(
             ));
         }
         Err(OpenError::Network(error)) => Err((ErrorKind::Network, error)),
+        Err(OpenError::Config(error)) => Err((ErrorKind::Storage, error)),
         Err(OpenError::Other(error)) => Err((ErrorKind::Other, error)),
     };
     let mut store = match opened {
@@ -1036,6 +1037,7 @@ fn run_collect_inner(
             return collect_run("skipped_busy", harness, state.refused, None, None);
         }
         Err(OpenError::Network(e)) => Err((ErrorKind::Network, e)),
+        Err(OpenError::Config(e)) => Err((ErrorKind::Storage, e)),
         Err(OpenError::Other(e)) => Err((ErrorKind::Other, e)),
     };
     let mut store = match opened {
@@ -1329,13 +1331,17 @@ mod watchdog_tests {
     }
 
     #[test]
-    fn background_collect_logs_opener_failure_once() {
+    fn background_collect_logs_config_failure_as_storage_once() {
         let dir = tempfile::tempdir().unwrap();
         let paths = paths_with_command(dir.path());
         let cfg = CollectConfig::from_lookup(|_| None);
         // A real `process::exit` here would outlive the test and end the test binary later on.
         let run = background_collect_with(
-            &mut || Err(OpenError::Other("opener failed".into())),
+            &mut || {
+                Err(OpenError::Config(
+                    "measure config names memory database".into(),
+                ))
+            },
             &paths,
             "codex",
             1_800_000_000_000,
@@ -1348,12 +1354,14 @@ mod watchdog_tests {
         )
         .unwrap();
         assert_eq!(run.outcome, "failed");
-        assert_eq!(run.summary["error"], "opener failed");
+        assert_eq!(run.error_kind, Some(ErrorKind::Storage));
+        assert_eq!(run.summary["error"], "measure config names memory database");
         let lines = fs::read_to_string(paths.data_dir.join("measure.log")).unwrap();
         assert_eq!(lines.lines().count(), 1);
         let line: Value = serde_json::from_str(lines.lines().next().unwrap()).unwrap();
         assert_eq!(line["outcome"], "failed");
-        assert_eq!(line["error"], "opener failed");
+        assert_eq!(line["error_kind"], "storage");
+        assert_eq!(line["error"], "measure config names memory database");
     }
 
     #[test]

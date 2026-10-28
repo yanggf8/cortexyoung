@@ -758,14 +758,13 @@ pub struct NewMachine {
 
 /// The first-upload proof for a machine that never uploaded. [`verify_events`] proves the ids by
 /// overlap, which such a machine can never have; here the proof is absence. The gate exists so an
-/// id that differs from claudecat's never uploads a history twice, and a history needs somewhere
-/// to be: so every machine id among the local `cort_command` events must have no row in the
-/// measurement store and none in `legacy`, the claudecat database an earlier upload of that history
-/// would have gone to. One row in either refuses, and the overlap check is the way forward. On
+/// id that differs from claudecat's never uploads a history twice. Claudecat's history was copied
+/// into the measurement store by `copy-events` on 2026-10-25 and re-checked on 2026-10-28, so
+/// that store answers both history questions: every machine id among the local `cort_command`
+/// events must have no row there. One row refuses, and the overlap check is the way forward. On
 /// success it writes the same marker [`verify_events`] does.
 pub fn verify_new_machine(
     store: &mut dyn MeasureStore,
-    legacy: &mut dyn MeasureStore,
     input: &UploadInputs,
     now_ms: i64,
 ) -> Result<NewMachine, String> {
@@ -788,13 +787,8 @@ pub fn verify_new_machine(
     let mut present = Vec::new();
     for machine in &machines {
         let here = store.event_count(machine, SOURCE_COMMAND)?;
-        let there = legacy
-            .event_count(machine, SOURCE_COMMAND)
-            .map_err(|e| format!("legacy read: {e}"))?;
-        if here > 0 || there > 0 {
-            present.push(format!(
-                "{machine} ({here} in the measurement store, {there} in the legacy database)"
-            ));
+        if here > 0 {
+            present.push(format!("{machine} ({here} in the measurement store)"));
         }
     }
     if !present.is_empty() {

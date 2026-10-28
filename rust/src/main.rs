@@ -61,7 +61,7 @@ fn usage_value() -> Value {
             "impact": "cort impact --symbol <name> [--depth <n>] [--coverage] [-f json|lean]",
             "usage": "cort usage [days] [-f json|lean]",
             "memory": "cort memory <configure|import-config|record|resolve|recall|status|check|import-legacy|notes> [options]",
-            "measure": "cort measure <configure|show|record|collect|verify|health|status|copy-events|import-audit|cron|report> [options]  (collect: scan and upload the batch; --background appends at most one result to measure.log (none when skipped_busy) without stdout; health: observe recently used indexes and write local index_health_log, reading indexes only, with no network; --background appends the result to measure.log without stdout; status: read local collection state, -f json|lean; cron: manual install or removal of the legacy entry, no longer installed automatically; hook kick is the only automatic collection trigger; copy-events: one-time, re-runnable, read-only copy of claudecat's uploaded events from harnessuse, never overwrites, reports same-key rows whose columns differ as conflicts; import-audit: one-time, re-runnable import of CORT-AUDIT.md's health and usage columns, never overwrites, run on one machine only; verify compares event ids and uploads nothing, and verify --new-machine passes a machine with no remote rows in either database; command_log and index_health_log keep uploaded rows 90 days and rows not yet uploaded 180 days, pruned when a new command is recorded; rows still not uploaded after 180 days are deleted and counted in measure status (pruned_unuploaded_rows) and measure.log)",
+            "measure": "cort measure <configure|show|record|collect|verify|health|status|cron|report> [options]  (collect: scan and upload the batch; --background appends at most one result to measure.log (none when skipped_busy) without stdout; health: observe recently used indexes and write local index_health_log, reading indexes only, with no network; --background appends the result to measure.log without stdout; status: read local collection state, -f json|lean; cron: manual install or removal of the legacy entry, no longer installed automatically; hook kick is the only automatic collection trigger; verify compares event ids and uploads nothing, and verify --new-machine passes a machine with no remote rows in the measurement database; command_log and index_health_log keep uploaded rows 90 days and rows not yet uploaded 180 days, pruned when a new command is recorded; rows still not uploaded after 180 days are deleted and counted in measure status (pruned_unuploaded_rows) and measure.log)",
             "hook-suggest": "cort hook-suggest  (PreToolUse hook: records one fire row and kicks collection; never speaks; not a verb to type)",
             "hook-refresh": "cort hook-refresh  (PostToolUse hook: brings this project's index up to the tree after an edit; silent, never creates an index; not a verb to type)",
             "hook-recall": "cort hook-recall --harness <h>  (SessionStart hook: reads the shared memory database; not a verb to type)",
@@ -2327,25 +2327,9 @@ enum MeasureAction {
     /// Compare local and remote event ids; a passing run permits this machine's first upload.
     Verify {
         /// For a machine that never uploaded: pass only when no remote row exists for its machine
-        /// ids, in the measurement database or in claudecat's (`cort memory`'s) database.
+        /// ids in the measurement database.
         #[arg(long)]
         new_machine: bool,
-    },
-    /// Copy claudecat's already-uploaded events and aliases from the `harnessuse` database (the
-    /// `cort memory` one) into the measurement database. One-time, re-runnable, and read-only on
-    /// the source: nothing is written to or deleted from it. Refuses when both configs name one database.
-    CopyEvents,
-    /// Import claudecat's retired `CORT-AUDIT.md`: the health columns as `cort_index_health`
-    /// events, the usage columns into `imported_usage`. One-time and re-runnable; a stored row is
-    /// never overwritten, a differing one is reported as a conflict. Run it on one machine only:
-    /// two machines importing at once would race on the same remote keys.
-    ImportAudit {
-        /// The audit files, all parsed before anything is written.
-        #[arg(required = true)]
-        paths: Vec<PathBuf>,
-        /// The repository whose git origin becomes the rows' project id. No default.
-        #[arg(long)]
-        project_repo: PathBuf,
     },
     /// Manually install or remove the legacy cron entry; hooks' kick is the only automatic trigger.
     Cron {
@@ -2704,10 +2688,7 @@ fn cmd_measure(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, CortErr
                 )
             };
             if new_machine {
-                // Opened first, and it sends nothing: a missing or same-database memory config
-                // fails here, before the measurement store is reached.
-                let mut legacy = cort::measure_store::open_legacy_read_only()
-                    .map_err(|m| CortError::new("measure_verify_failed", json!({"message":m})))?;
+                // The copied history is in the measurement store; the dry run sends nothing.
                 let report = cort::collect::run_manual(
                     &mut opener,
                     &paths,
@@ -2715,7 +2696,7 @@ fn cmd_measure(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, CortErr
                     &cfg,
                     cort::collect::ManualMode::DryRun,
                     &mut |store| {
-                        cort::telemetry::verify_new_machine(store, legacy.as_mut(), &up, now_ms)
+                        cort::telemetry::verify_new_machine(store, &up, now_ms)
                             .map(|value| cort::collect::ManualStep {
                                 value,
                                 events: None,
@@ -2745,67 +2726,6 @@ fn cmd_measure(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, CortErr
                 "matched":report.matched,"local_only":report.local_only,
                 "remote_only":report.remote_only,"verified":report.matched > 0})
             }
-        }
-        MeasureAction::CopyEvents => {
-            let report = cort::measure_store::with_legacy_and_measure_stores(|from, to| {
-                cort::measure::copy_events(from, to)
-            })
-            .map_err(|m| {
-                if m.starts_with("remote read: ") {
-                    measure_remote_error(m, None)
-                } else {
-                    CortError::new("measure_copy_failed", json!({"message":m}))
-                }
-            })?;
-            let rows = &report.groups;
-            let groups: Vec<_> = rows
-                .iter()
-                .map(|(source, machine_id, src, dst)| {
-                    json!({"source":source,"machine_id":machine_id,
-                        "source_rows":src,"destination_rows":dst})
-                })
-                .collect();
-            let examples: Vec<_> = report
-                .conflict_examples
-                .iter()
-                .map(|(source, event_id, cols)| {
-                    json!({"source":source,"event_id":event_id,"differing_columns":cols})
-                })
-                .collect();
-            json!({"status": if report.conflicts > 0 {"copied_with_conflicts"} else {"copied"},
-                "groups":groups,
-                "source_rows":rows.iter().map(|r| r.2).sum::<usize>(),
-                "destination_rows":rows.iter().map(|r| r.3).sum::<usize>(),
-                "conflicts":report.conflicts,"conflict_examples":examples})
-        }
-        MeasureAction::ImportAudit {
-            paths,
-            project_repo,
-        } => {
-            let fail = |m: String| CortError::new("measure_error", json!({"message":m}));
-            let project_id =
-                cort::memory_store::project_from_git_origin(&project_repo).map_err(|e| {
-                    // `project_from_git_origin` never reads CORT_MEMORY_PROJECT, whatever its
-                    // message suggests: only the directory's own origin counts here.
-                    fail(format!(
-                        "cannot resolve a project id from {}: {e} (import-audit reads only this \
-                         directory's git origin remote)",
-                        project_repo.display()
-                    ))
-                })?;
-            // Parse every file first: one malformed row means the whole run writes nothing.
-            let mut rows = Vec::new();
-            for path in &paths {
-                let text = std::fs::read_to_string(path)
-                    .map_err(|e| fail(format!("cannot read {}: {e}", path.display())))?;
-                let parsed = cort::audit_import::parse_audit_md(&text)
-                    .map_err(|e| fail(format!("{}: {e}", path.display())))?;
-                rows.extend(parsed);
-            }
-            cort::measure_store::with_turso_store(|store| {
-                cort::audit_import::import_audit(store, &rows, &project_id)
-            })
-            .map_err(fail)?
         }
         MeasureAction::Report {
             days,
