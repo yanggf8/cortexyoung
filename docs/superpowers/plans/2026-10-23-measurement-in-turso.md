@@ -345,5 +345,6 @@
 - [x] 2026-10-28 09:30 台灣時間（01:30Z）兩台部署 master `e243ffce`（NUC11i5 `cort-79170425e007`、Thinkpade15 `cort-738002ea0ae1`）：集中式設計 C3a–C4 完成，記憶 ledger 指令直連遠端（`cort memory sync` 改名 `cort memory check`）、`notes upload` 依本機 `notes-uploaded.json` 規劃、SessionStart 的 `cort hook-recall` 上網讀共享資料庫（2.5 秒預算，兩台實測約 300 ms），turso／tokio 相依已拿掉（binary 45M → 22M）。兩台 `install.sh --check` OK、crontab 0 行、`memory check` 回 `remote: ok`（19 active／33 total）。副本目錄尚未刪（第 8.4 節另做）；i5940R3070 的指示貼在 aib #982。
 - [x] 2026-10-28 09:55 台灣時間（01:55Z）NUC11i5、Thinkpade15 完成 spec 第 8.4 節：以重建的 `70bf926e` binary 跑 `cort memory sync` 回 `synced`，本機副本與 `cort memory check` 遠端皆 34 total／19 active，量測副本 `push_pending: false`；之後刪除 `memory/turso-memory/`、`memory/turso-measure/`、`measure-transcripts.json` 與舊 binary（`turso-*.json` 設定檔保留）。刪後兩台 `notes upload` 皆 `planned_from: local_state`、measure collect 成功。i5940R3070 尚未部署 C4，也尚未做第 8.4 節。
 - [ ] 隔天：遠端兩台都有昨天的快照、事件持續增加、無重複；壓縮列有新增。
-- [ ] 移除 `~/.cargo/bin/claudecat`（兩台）。
+- [x] ~~移除 `~/.cargo/bin/claudecat`（兩台）。~~ 作廢（2026-10-28）：claudecat 已改當資源閘門，`claudecat gate` 就在這個 binary 裡，要保留。
+- [x] 2026-10-28 10:55 台灣時間（02:55Z）本機部署 master `0160dfe1`（`cort-4a28f4a28871`）：L1 讓 cort 不再讀 `harnessuse` 的 `telemetry_events`／`telemetry_project_aliases`（`verify --new-machine` 只看量測庫），移除一次性的 `copy-events`、`import-audit`；所有 measure 指令遇到量測設定指向記憶資料庫時一律拒絕。刪表前 copy-events 重跑：來源 31,279 列、衝突 0、每組目的端列數皆不少於來源；舊表最後寫入 2026-10-23。
 - [ ] **問使用者後**才清 `harnessuse` 的 `telemetry_events` 與 alias。
