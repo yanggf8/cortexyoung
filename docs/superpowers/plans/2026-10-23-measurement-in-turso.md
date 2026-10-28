@@ -342,6 +342,7 @@
 - [x] 2026-10-28 05:00 台灣時間（21:00Z）兩台部署 master `7efcb906`（NUC11i5 `cort-7eba51c63d92`、Thinkpade15 `cort-0fc297f04ce5`）：集中式設計 C1–C2b，量測改為直連遠端、不再有副本與 `cort measure sync`（改用 `cort measure verify`）；兩台 `measure status` 皆 `missing_indexes: []`、`progress: loaded`，手動 collect 成功。
 - [x] 2026-10-28 05:57 台灣時間（21:57Z）兩台部署 master `3ea01b2d`（NUC11i5 `cort-d9bf80d803f3`、Thinkpade15 `cort-62bcdcc10ecc`）：背景收集讀 usage.db 最多等 2 秒寫鎖，不再誤報 `usage_db_unreadable`（`ba553899`）；新增 `cort measure verify --new-machine`，給從未上傳過的機器做首次上傳證明（`3ea01b2d`）。兩台手動 collect 成功、`refused: false`、`missing_indexes: []`。
 - [x] 2026-10-28 05:58 台灣時間：i5940R3070（RTX 3070）部署 master `3ea01b2d`（live `cort-3c219c2b9f78`）並第一次上傳：`cort measure verify --new-machine` 回 `verified`（本機 2559 筆、1 個 machine id，遠端兩個資料庫都沒有它的列），上傳共 2566 筆、`refused: false`、`missing_indexes: []`；claudecat 排程已清（crontab 兩行已刪，無 systemd timer）。
+- [x] 2026-10-28 09:30 台灣時間（01:30Z）兩台部署 master `e243ffce`（NUC11i5 `cort-79170425e007`、Thinkpade15 `cort-738002ea0ae1`）：集中式設計 C3a–C4 完成，記憶 ledger 指令直連遠端（`cort memory sync` 改名 `cort memory check`）、`notes upload` 依本機 `notes-uploaded.json` 規劃、SessionStart 的 `cort hook-recall` 上網讀共享資料庫（2.5 秒預算，兩台實測約 300 ms），turso／tokio 相依已拿掉（binary 45M → 22M）。兩台 `install.sh --check` OK、crontab 0 行、`memory check` 回 `remote: ok`（19 active／33 total）。副本目錄尚未刪（第 8.4 節另做）；i5940R3070 的指示貼在 aib #982。
 - [ ] 隔天：遠端兩台都有昨天的快照、事件持續增加、無重複；壓縮列有新增。
 - [ ] 移除 `~/.cargo/bin/claudecat`（兩台）。
 - [ ] **問使用者後**才清 `harnessuse` 的 `telemetry_events` 與 alias。
