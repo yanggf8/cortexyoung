@@ -61,7 +61,7 @@ jobs:
 
       - name: clippy (warnings are errors)
         working-directory: rust
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
       - name: cargo test
         working-directory: rust
@@ -108,7 +108,7 @@ jobs:
 
       - name: clippy (warnings are errors)
         working-directory: evals
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
       - name: cargo test
         working-directory: evals
