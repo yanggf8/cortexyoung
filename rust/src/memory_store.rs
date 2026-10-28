@@ -1,5 +1,4 @@
-//! Cortexyoung-owned cross-machine project memory backed by the Turso Database sync SDK.
-//! The local file is a sync replica and must never be opened with rusqlite or the Turso CLI.
+//! Cortexyoung-owned cross-machine project memory backed by a shared Turso database.
 
 use crate::memory::{self, MemoryEntry, MemoryLedger, MemoryRecall};
 use crate::remote::{Cell, ErrorKind, RemoteDb, Stmt, Transport, UreqTransport};
@@ -217,6 +216,17 @@ fn config() -> Result<Config, String> {
     )
 }
 
+/// Session hook's absent config is distinct from an unreadable or malformed config.
+pub fn session_config() -> Result<Option<(String, String)>, String> {
+    let path = config_path();
+    match fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+        Ok(_) => {}
+    }
+    config().map(|c| Some((c.url, c.token)))
+}
+
 /// The `cort memory` connection, for a second replica of the same database.
 pub(crate) fn load_config() -> Result<Config, String> {
     config()
@@ -243,6 +253,19 @@ pub fn project(root: &Path) -> Result<String, String> {
         }
     }
     project_from_git_origin(root)
+}
+
+/// Resolve origin once: the ledger may use an explicit project, while notes always use origin.
+pub fn session_project_ids(root: &Path) -> Result<(String, String), String> {
+    let origin = project_from_git_origin(root).ok();
+    let ledger = ["CORT_MEMORY_PROJECT", "CLAUDECAT_MEMORY_PROJECT"]
+        .iter()
+        .find_map(|name| std::env::var(name).ok().filter(|v| !v.trim().is_empty()))
+        .map(|v| digest(v.trim()))
+        .or_else(|| origin.clone())
+        .ok_or_else(|| "project needs an origin remote or CORT_MEMORY_PROJECT".to_string())?;
+    // Without an origin, an explicit ledger project remains readable; no notes use an override.
+    Ok((ledger, origin.unwrap_or_default()))
 }
 
 /// Resolve an indexed project's identity from its own origin, ignoring the process-wide
@@ -311,32 +334,6 @@ fn require_committed_source(root: &Path, source: &Path) -> Result<(), String> {
         return Err("cloud memory source has uncommitted changes; commit it first".into());
     }
     Ok(())
-}
-
-pub(crate) fn runtime() -> Result<tokio::runtime::Runtime, String> {
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| e.to_string())
-}
-
-async fn read_existing_ledger(
-    conn: &turso::Connection,
-    project: &str,
-) -> Result<MemoryLedger, String> {
-    let mut rows = conn
-        .query(
-            "SELECT body FROM project_memory WHERE project = ?",
-            [project],
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-    let mut bodies = Vec::new();
-    while let Some(row) = rows.next().await.map_err(|e| e.to_string())? {
-        let body: String = row.get(0).map_err(|e| e.to_string())?;
-        bodies.push(body);
-    }
-    ledger_from_bodies(bodies)
 }
 
 fn ledger_from_bodies(bodies: Vec<String>) -> Result<MemoryLedger, String> {
@@ -467,123 +464,88 @@ impl Ledger {
     }
 }
 
-/// A session hook reads only a locally synced replica. The metadata guard excludes the
-/// legacy open path that pulls remotely even with bootstrap disabled.
-pub fn recall_local(
+const SESSION_NOTES: &str = "SELECT n.note_id, n.machine, m.host, n.file_name, n.updated_at FROM harness_notes n LEFT JOIN harness_machines m ON m.machine=n.machine WHERE n.project=? AND n.machine<>? AND n.deleted=0 ORDER BY n.updated_at DESC, n.machine, n.source_dir, n.file_name LIMIT 15";
+const SESSION_NOTES_COUNT: &str =
+    "SELECT COUNT(*) FROM harness_notes WHERE project=? AND machine<>? AND deleted=0";
+
+/// Read only. A notes schema error may be retried as a ledger-only request within the deadline.
+#[doc(hidden)]
+pub fn session_recall_with(
     root: &Path,
-) -> Result<(MemoryRecall, usize, Vec<notes_upload::NoteBrief>, usize), LocalRecallError> {
-    let config = config().map_err(|_| {
-        if fs::symlink_metadata(config_path()).is_ok() {
-            LocalRecallError::Failed
-        } else {
-            LocalRecallError::NotConfigured
-        }
-    })?;
-    let dir = replica_dir(&config);
-    if !dir.join("memory.db").is_file() {
-        return Err(LocalRecallError::NoReplica);
-    }
-    let lock = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(false)
-        .open(dir.join("memory.lock"))
-        .map_err(|_| LocalRecallError::Failed)?;
-    match lock.try_lock() {
-        Ok(()) => {}
-        Err(fs::TryLockError::WouldBlock) => return Err(LocalRecallError::Busy),
-        Err(fs::TryLockError::Error(_)) => return Err(LocalRecallError::Failed),
-    }
-    runtime()
-        .map_err(|_| LocalRecallError::Failed)?
-        .block_on(async {
-            // The replica guards answer first, as before the open was factored out, so a
-            // project that cannot be resolved does not mask an unsynced replica.
-            let db = open_guarded_replica(&config).await?;
-            let project = project(root).map_err(|_| LocalRecallError::Failed)?;
-            let conn = db.connect().await.map_err(|_| LocalRecallError::Failed)?;
-            let ledger = read_existing_ledger(&conn, &project)
-                .await
-                .map_err(|_| LocalRecallError::Failed)?;
-            let (recall, omitted) = memory::recall_ledger_for_hook(root, &ledger);
-            let (briefs, total) = match project_from_git_origin(root) {
-                Ok(notes_project) => notes_upload::other_machine_briefs(
-                    &conn,
-                    &notes_project,
-                    usage::machine_id(),
-                    crate::hook_recall::MAX_NOTES,
-                )
-                .await
-                .unwrap_or_default(),
-                Err(_) => (Vec::new(), 0),
-            };
-            Ok((recall, omitted, briefs, total))
-        })
-}
-
-fn replica_dir(config: &Config) -> PathBuf {
-    crate::data_dir::data_dir()
-        .join(SUBDIR)
-        .join(digest(&config.url))
-}
-
-/// Caller holds memory.lock. Refuse any state in which Turso might write or pull at open.
-async fn open_guarded_replica(config: &Config) -> Result<turso::sync::Database, LocalRecallError> {
-    let dir = replica_dir(config);
-    let path = dir.join("memory.db");
-    if !path.is_file() {
-        return Err(LocalRecallError::NoReplica);
-    }
-    // Read under the lock, so a writer cannot change the metadata between this check and the open.
-    let info_path = dir.join("memory.db-info");
-    let info = fs::read(&info_path)
-        .ok()
-        .and_then(|bytes| turso_sync_engine::types::DatabaseMetadata::load(&bytes).ok())
-        .ok_or(LocalRecallError::UnsyncedReplica)?;
-    // open_db pulls for Legacy { synced_frame_no: None }, regardless of bootstrap.
-    let safe = matches!(
-        info.synced_revision,
-        Some(turso_sync_engine::types::DatabasePullRevision::V1 { .. })
-            | Some(turso_sync_engine::types::DatabasePullRevision::Legacy {
-                synced_frame_no: Some(_),
-                ..
-            })
+    db: &RemoteDb,
+    machine: &str,
+    projects: (&str, &str),
+    started: Instant,
+) -> Result<(MemoryRecall, usize, Vec<notes_upload::NoteBrief>, usize), ErrorKind> {
+    let ledger_stmt = Stmt::new(
+        "SELECT body FROM project_memory WHERE project = ?",
+        vec![Cell::Text(projects.0.into())],
     );
-    if !safe {
-        return Err(LocalRecallError::UnsyncedReplica);
+    let note_args = || vec![Cell::Text(projects.1.into()), Cell::Text(machine.into())];
+    if Duration::from_millis(2500).saturating_sub(started.elapsed()) < Duration::from_millis(200) {
+        return Err(ErrorKind::Timeout);
     }
-    // open_db creates missing auxiliaries; require them before it runs.
-    if !dir.join("memory.db-changes").is_file() {
-        return Err(LocalRecallError::UnsyncedReplica);
-    }
-    // An interrupted replace-base apply is recovered at open (restoring files, then possibly
-    // pulling), and metadata without a saved configuration is rewritten at open: neither is a
-    // read, so leave both to the next foreground `cort memory` command.
-    if dir.join("memory.db-replace-base-apply").exists()
-        || info
-            .saved_configuration
-            .as_ref()
-            .and_then(|c| c.remote_url.as_ref())
-            .is_none()
-    {
-        return Err(LocalRecallError::UnsyncedReplica);
-    }
-    turso::sync::Builder::new_remote(&path.to_string_lossy())
-        .with_remote_url(&config.url)
-        .with_auth_token(&config.token)
-        .bootstrap_if_empty(false)
-        .build()
-        .await
-        .map_err(|_| LocalRecallError::Failed)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LocalRecallError {
-    NotConfigured,
-    NoReplica,
-    UnsyncedReplica,
-    Busy,
-    Failed,
+    let result = db.pipeline(&[
+        ledger_stmt.clone(),
+        Stmt::new(SESSION_NOTES, note_args()),
+        Stmt::new(SESSION_NOTES_COUNT, note_args()),
+    ]);
+    let (rows, notes, total) = match result {
+        Ok(mut results) => {
+            if results.len() != 3 {
+                return Err(ErrorKind::Sql);
+            }
+            let count = results.pop().ok_or(ErrorKind::Sql)?;
+            let note_rows = results.pop().ok_or(ErrorKind::Sql)?;
+            let ledger = results.pop().ok_or(ErrorKind::Sql)?;
+            let total = match count.rows.first().and_then(|r| r.first()) {
+                Some(Cell::Int(n)) if *n >= 0 => *n as usize,
+                _ => return Err(ErrorKind::Sql),
+            };
+            (ledger.rows, note_rows.rows, total)
+        }
+        Err(error) if error.kind == ErrorKind::Sql && error.step.is_some_and(|n| n >= 1) => {
+            if Duration::from_millis(2500).saturating_sub(started.elapsed())
+                < Duration::from_millis(200)
+            {
+                return Err(ErrorKind::Timeout);
+            }
+            let mut results = db.pipeline(&[ledger_stmt]).map_err(|e| e.kind)?;
+            (results.pop().ok_or(ErrorKind::Sql)?.rows, Vec::new(), 0)
+        }
+        Err(error) => return Err(error.kind),
+    };
+    let bodies = rows
+        .iter()
+        .map(|row| match row.first() {
+            Some(Cell::Text(s)) => Ok(s.clone()),
+            _ => Err(ErrorKind::Sql),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let ledger = ledger_from_bodies(bodies).map_err(|_| ErrorKind::Sql)?;
+    let (recall, omitted) = memory::recall_ledger_for_hook(root, &ledger);
+    let briefs = notes
+        .iter()
+        .map(|row| {
+            let text = |i| match row.get(i) {
+                Some(Cell::Text(s)) => Ok(s.clone()),
+                _ => Err(ErrorKind::Sql),
+            };
+            let host = match row.get(2) {
+                Some(Cell::Text(s)) => Some(s.clone()),
+                Some(Cell::Null) => None,
+                _ => return Err(ErrorKind::Sql),
+            };
+            Ok(notes_upload::NoteBrief {
+                note_id: text(0)?,
+                machine: text(1)?,
+                host,
+                file_name: text(3)?,
+                updated_at: text(4)?,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((recall, omitted, briefs, total))
 }
 
 fn notes_machine() -> Value {

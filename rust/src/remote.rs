@@ -3,7 +3,7 @@
 use serde_json::{json, Value};
 use std::fmt;
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Cell {
@@ -194,6 +194,34 @@ pub trait Transport {
         body: &[u8],
         headers: &[(&str, &str)],
     ) -> Result<Vec<u8>, RemoteError>;
+}
+
+/// Recompute the SessionStart allowance for each POST, including a ledger-only retry.
+pub struct RecallTransport {
+    pub started: Instant,
+    pub max_timeout: Duration,
+}
+
+impl Transport for RecallTransport {
+    fn post(
+        &self,
+        url: &str,
+        body: &[u8],
+        headers: &[(&str, &str)],
+    ) -> Result<Vec<u8>, RemoteError> {
+        let remaining = Duration::from_millis(2500).saturating_sub(self.started.elapsed());
+        if remaining < Duration::from_millis(200) {
+            return Err(RemoteError::new(
+                ErrorKind::Timeout,
+                "recall budget exhausted",
+            ));
+        }
+        let timeout = self
+            .max_timeout
+            .min(remaining.saturating_sub(Duration::from_millis(100)));
+        // ureq bounds connect, TLS and body reads; synchronous DNS resolution is outside it.
+        UreqTransport { timeout }.post(url, body, headers)
+    }
 }
 
 /// TLS for [`UreqTransport`], pinned to aws-lc-rs with `builder_with_provider`, so nothing here

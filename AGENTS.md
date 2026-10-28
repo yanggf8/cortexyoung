@@ -183,11 +183,15 @@ including comments that belong to other owners; that is a test, because it was a
 not recall the ledger unprompted, so recall is pushed at session start, resume, clear and compaction:
 the active entries for the project go into `additionalContext`, newest first, capped at 20 entries and
 6000 bytes. It also lists other machines' harness notes for the project -- names and hosts
-only, never bodies, capped at 15 and 2000 bytes, and labelled unreviewed. It reads only an existing,
-already-synced local replica -- never push, pull or bootstrap, a try-lock that gives up, and a refusal (`unsynced_replica`) for every replica state in which turso
-would pull or write at open -- and records one `usage.db` row per run. Codex and Kimi are not wired:
-no `SessionStart` payload of theirs has been intercepted, and `settings::events_for` is the one place
-that says which harness gets which event.
+only, never bodies, capped at 15 and 2000 bytes, and labelled unreviewed. It reads the shared
+database over the network in one pipeline (plus one ledger-only retry when the notes statements fail
+with a SQL error and at least 200 ms remain) and never writes to it or takes a local lock. The dispatch
+deadline is 2500 ms from process start; the network timeout defaults to 1500 ms, is capped at 2400 ms,
+and is also limited to the remaining deadline minus 100 ms. With under 200 ms left, it sends no request.
+On `remote_unreachable`, `remote_blocked`, or `remote_timeout`, it injects a one-line notice to retry
+`cort memory recall "<topic>"` when needed. It records one `usage.db` row on every normal return.
+Codex and Kimi are not wired: no `SessionStart` payload of theirs has been intercepted, and
+`settings::events_for` is the one place that says which harness gets which event.
 
 **Both staleness checks are one-sided, and they lean opposite ways.** The head comparison
 (`main.rs`, what `hook-suggest` read while it still judged) missed an edited-but-uncommitted tree;

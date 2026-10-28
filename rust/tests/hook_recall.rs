@@ -1,99 +1,276 @@
-use cort::notes_upload;
+use cort::remote::{RemoteDb, RemoteError, SqliteTransport, Transport};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Write;
 use std::net::TcpListener;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-const URL: &str = "libsql://127.0.0.1:9";
-
-fn replica(data: &Path) -> PathBuf {
-    replica_url(data, URL)
+struct Recording {
+    inner: Arc<SqliteTransport>,
+    read_only: Arc<AtomicBool>,
+    requests: Arc<Mutex<Vec<Vec<String>>>>,
+    delay: Duration,
+}
+impl Transport for Recording {
+    fn post(
+        &self,
+        url: &str,
+        body: &[u8],
+        headers: &[(&str, &str)],
+    ) -> Result<Vec<u8>, RemoteError> {
+        let request: Value = serde_json::from_slice(body).expect("request JSON");
+        let statements: Vec<String> = request["requests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|item| {
+                item.get("stmt")
+                    .and_then(|s| s.get("sql"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+            .collect();
+        if self.read_only.load(Ordering::SeqCst) {
+            assert!(
+                statements.iter().all(|s| s.starts_with("SELECT ")),
+                "{statements:?}"
+            );
+            self.requests.lock().unwrap().push(statements);
+            std::thread::sleep(self.delay);
+        }
+        self.inner.post(url, body, headers)
+    }
+}
+type Requests = Arc<Mutex<Vec<Vec<String>>>>;
+fn database() -> (RemoteDb, Arc<AtomicBool>, Requests) {
+    database_with_delay(Duration::ZERO)
+}
+fn database_with_delay(delay: Duration) -> (RemoteDb, Arc<AtomicBool>, Requests) {
+    let read_only = Arc::new(AtomicBool::new(false));
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let db = RemoteDb::new(
+        "turso://unit.test",
+        "test",
+        Box::new(Recording {
+            inner: Arc::new(SqliteTransport::new().unwrap()),
+            read_only: Arc::clone(&read_only),
+            requests: Arc::clone(&requests),
+            delay,
+        }),
+    )
+    .unwrap();
+    (db, read_only, requests)
+}
+fn entry(id: &str, date: &str) -> String {
+    json!({"id":id,"key":id,"claim":id,"source":"missing.md","source_line":1,
+        "source_sha256":"missing","recorded_at":date,"supersedes":null})
+    .to_string()
+}
+fn seed_ledger(db: &RemoteDb) {
+    db.execute(
+        "CREATE TABLE project_memory (project TEXT, id TEXT, body TEXT)",
+        vec![],
+    )
+    .unwrap();
+    for i in 0..25 {
+        let id = format!("id-{i:02}");
+        db.execute(
+            "INSERT INTO project_memory VALUES (?, ?, ?)",
+            vec![
+                cort::remote::Cell::Text("ledger".into()),
+                cort::remote::Cell::Text(id.clone()),
+                cort::remote::Cell::Text(entry(&id, &format!("2026-10-{i:02}"))),
+            ],
+        )
+        .unwrap();
+    }
+}
+fn seed_notes(db: &RemoteDb) {
+    db.execute("CREATE TABLE harness_notes (project TEXT, machine TEXT, source_dir TEXT, file_name TEXT, note_id TEXT, deleted INTEGER, updated_at TEXT)", vec![]).unwrap();
+    db.execute(
+        "CREATE TABLE harness_machines (machine TEXT, host TEXT)",
+        vec![],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO harness_machines VALUES ('other', 'host-one')",
+        vec![],
+    )
+    .unwrap();
+    for i in 0..19 {
+        let machine = if i == 0 {
+            "self"
+        } else if i == 1 {
+            "nohost"
+        } else {
+            "other"
+        };
+        db.execute(
+            "INSERT INTO harness_notes VALUES (?, ?, 'src', ?, ?, 0, ?)",
+            vec![
+                cort::remote::Cell::Text("origin".into()),
+                cort::remote::Cell::Text(machine.into()),
+                cort::remote::Cell::Text(format!("file-{i}")),
+                cort::remote::Cell::Text(format!("note-{i}")),
+                cort::remote::Cell::Text(format!("2026-10-27T00:{:02}:00Z", 59 - i)),
+            ],
+        )
+        .unwrap();
+    }
+}
+#[test]
+fn pipeline_reads_ledger_and_other_machine_notes_without_writes() {
+    let (db, read_only, requests) = database();
+    seed_ledger(&db);
+    seed_notes(&db);
+    read_only.store(true, Ordering::SeqCst);
+    let temp = tempfile::tempdir().unwrap();
+    let (recall, omitted, notes, total) = cort::memory_store::session_recall_with(
+        temp.path(),
+        &db,
+        "self",
+        ("ledger", "origin"),
+        Instant::now(),
+    )
+    .unwrap();
+    let (rendered, shown, note_count) =
+        cort::hook_recall::render_with_notes(recall, omitted, &notes, total).unwrap();
+    assert_eq!(shown, 20);
+    assert_eq!(note_count, 15);
+    assert_eq!(total, 18);
+    assert!(rendered.find("[id-24]").unwrap() < rendered.find("[id-23]").unwrap());
+    assert!(rendered.contains("[nohost]"));
+    assert!(rendered.contains("[host-one]"));
+    assert_eq!(requests.lock().unwrap().len(), 1);
+    assert_eq!(requests.lock().unwrap()[0].len(), 3);
+}
+#[test]
+fn missing_notes_schema_retries_ledger_and_creates_nothing() {
+    let (db, read_only, requests) = database();
+    seed_ledger(&db);
+    read_only.store(true, Ordering::SeqCst);
+    let temp = tempfile::tempdir().unwrap();
+    let (recall, _, notes, total) = cort::memory_store::session_recall_with(
+        temp.path(),
+        &db,
+        "self",
+        ("ledger", "origin"),
+        Instant::now(),
+    )
+    .unwrap();
+    assert_eq!(recall.hits.len(), 20);
+    assert!(notes.is_empty());
+    assert_eq!(total, 0);
+    assert_eq!(
+        requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(Vec::len)
+            .collect::<Vec<_>>(),
+        vec![3, 1]
+    );
+    read_only.store(false, Ordering::SeqCst);
+    let tables = db
+        .execute(
+            "SELECT name FROM sqlite_master WHERE name IN ('harness_notes','harness_machines')",
+            vec![],
+        )
+        .unwrap();
+    assert!(tables.rows.is_empty());
 }
 
-fn replica_url(data: &Path, url: &str) -> PathBuf {
-    let digest = Sha256::digest(url.as_bytes());
-    let name: String = digest.iter().map(|b| format!("{b:02x}")).collect();
-    data.join("turso-memory").join(name).join("memory.db")
+#[test]
+fn missing_host_table_keeps_ledger_and_does_not_create_host_table() {
+    let (db, read_only, requests) = database();
+    seed_ledger(&db);
+    db.execute("CREATE TABLE harness_notes (project TEXT, machine TEXT, source_dir TEXT, file_name TEXT, note_id TEXT, deleted INTEGER, updated_at TEXT)", vec![]).unwrap();
+    read_only.store(true, Ordering::SeqCst);
+    let temp = tempfile::tempdir().unwrap();
+    let (recall, _, notes, total) = cort::memory_store::session_recall_with(
+        temp.path(),
+        &db,
+        "self",
+        ("ledger", "origin"),
+        Instant::now(),
+    )
+    .unwrap();
+    assert_eq!(recall.hits.len(), 20);
+    assert!(notes.is_empty());
+    assert_eq!(total, 0);
+    assert_eq!(
+        requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(Vec::len)
+            .collect::<Vec<_>>(),
+        vec![3, 1]
+    );
+    read_only.store(false, Ordering::SeqCst);
+    let tables = db
+        .execute(
+            "SELECT name FROM sqlite_master WHERE name='harness_machines'",
+            vec![],
+        )
+        .unwrap();
+    assert!(tables.rows.is_empty());
 }
 
-fn configured(data: &Path) {
-    configured_url(data, URL);
+#[test]
+fn expired_dispatch_budget_sends_no_request() {
+    let (db, read_only, requests) = database();
+    read_only.store(true, Ordering::SeqCst);
+    let temp = tempfile::tempdir().unwrap();
+    let result = cort::memory_store::session_recall_with(
+        temp.path(),
+        &db,
+        "self",
+        ("ledger", "origin"),
+        Instant::now() - Duration::from_millis(2400),
+    );
+    assert!(matches!(result, Err(cort::remote::ErrorKind::Timeout)));
+    assert!(requests.lock().unwrap().is_empty());
 }
 
-fn configured_url(data: &Path, url: &str) {
+#[test]
+fn notes_failure_without_budget_for_retry_is_timeout() {
+    let (db, read_only, requests) = database_with_delay(Duration::from_millis(150));
+    seed_ledger(&db);
+    read_only.store(true, Ordering::SeqCst);
+    let temp = tempfile::tempdir().unwrap();
+    // 250 ms remain before the pipeline; the 150 ms response leaves under 200 ms for the retry.
+    let result = cort::memory_store::session_recall_with(
+        temp.path(),
+        &db,
+        "self",
+        ("ledger", "origin"),
+        Instant::now() - Duration::from_millis(2250),
+    );
+    assert!(matches!(result, Err(cort::remote::ErrorKind::Timeout)));
+    assert_eq!(
+        requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(Vec::len)
+            .collect::<Vec<_>>(),
+        vec![3]
+    );
+}
+fn config(data: &Path, url: &str) {
     fs::create_dir_all(data).unwrap();
     fs::write(
         data.join("turso-memory.json"),
-        json!({"url": url, "token": "test"}).to_string(),
+        json!({"url":url,"token":"test"}).to_string(),
     )
     .unwrap();
 }
-
-fn mark_synced(path: &Path) {
-    let info = path.with_file_name("memory.db-info");
-    let mut value: Value = serde_json::from_slice(&fs::read(&info).unwrap()).unwrap();
-    value["synced_revision"] = json!({"type":"v1","revision":"test-revision"});
-    fs::write(info, value.to_string()).unwrap();
-}
-
-fn seed_replica(path: &Path, url: &str, project: &str, entry: bool) {
-    fs::create_dir_all(path.parent().unwrap()).unwrap();
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    runtime.block_on(async {
-        let db = turso::sync::Builder::new_remote(path.to_str().unwrap())
-            .with_remote_url(url).with_auth_token("test")
-            .bootstrap_if_empty(false).build().await.unwrap();
-        let conn = db.connect().await.unwrap();
-        conn.execute("CREATE TABLE project_memory (project TEXT NOT NULL, id TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY (project,id))", ()).await.unwrap();
-        if entry {
-            let body = json!({"id":"id-1","key":"key","claim":"claim","source":"docs/decision.md","source_line":1,"source_sha256":"missing","recorded_at":"2026-10-27","supersedes":null}).to_string();
-            conn.execute("INSERT INTO project_memory (project,id,body) VALUES (?,?,?)", (project,"id-1",body.as_str())).await.unwrap();
-        }
-    });
-    mark_synced(path);
-}
-
-fn seed_notes(path: &Path, url: &str, project: &str, hosts: bool) {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    runtime.block_on(async {
-        let db = turso::sync::Builder::new_remote(path.to_str().unwrap())
-            .with_remote_url(url).with_auth_token("test")
-            .bootstrap_if_empty(false).build().await.unwrap();
-        let conn = db.connect().await.unwrap();
-        if hosts {
-            notes_upload::ensure_notes_schema(&conn).await.unwrap();
-            conn.execute("INSERT INTO harness_machines (machine,host,updated_at) VALUES ('remote-machine','NUC11i5','2026-10-27')", ()).await.unwrap();
-        } else {
-            conn.execute(notes_upload::CREATE_TABLE, ()).await.unwrap();
-            conn.execute(notes_upload::CREATE_INDEX, ()).await.unwrap();
-        }
-        for i in 0..18 {
-            let id = format!("note-{i:02}");
-            let machine = if i == 1 { "nohost-machine" } else { "remote-machine" };
-            let file = if i == 0 { "bad\n\u{202e}name.md".to_string() } else { format!("file-{i:02}.md") };
-            conn.execute("INSERT INTO harness_notes (project,machine,harness,source_dir,file_name,note_id,sha256,body,updated_at) VALUES (?,?,?,?,?,?,'hash','body',?)", turso::params![project,machine,"claude-code","source",file.as_str(),id.as_str(),format!("2026-10-27T00:{:02}:00Z", 59-i).as_str()]).await.unwrap();
-        }
-        // Newest of all, so each would lead the list if the filter let it through. `CORT_MACHINE_ID`
-        // is hashed into the id the hook compares against, so this machine's row stores the hash.
-        let own: String = Sha256::digest(b"local-machine").iter().map(|b| format!("{b:02x}")).collect();
-        for (project, machine, deleted, id) in [(project,&own[..16],0,"own"),(project,"remote-machine",1,"deleted"),("other-project","remote-machine",0,"other")] {
-            conn.execute("INSERT INTO harness_notes (project,machine,harness,source_dir,file_name,note_id,sha256,body,deleted,updated_at) VALUES (?,?, 'claude-code','source',?,?,'hash','body',?,'2026-10-27T01:00:00Z')", (project,machine,id,id,deleted)).await.unwrap();
-        }
-    });
-    mark_synced(path);
-}
-
-fn git_repo(root: &Path) -> PathBuf {
+fn git_repo(root: &Path) -> std::path::PathBuf {
     let repo = root.join("repo");
     fs::create_dir(&repo).unwrap();
     assert!(Command::new("git")
@@ -117,57 +294,29 @@ fn git_repo(root: &Path) -> PathBuf {
         .success());
     repo
 }
-
-fn file_hashes(dir: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
-    fs::read_dir(dir)
-        .unwrap()
-        .map(|entry| {
-            let entry = entry.unwrap();
-            let name = entry.file_name().to_string_lossy().to_string();
-            (
-                name,
-                Sha256::digest(fs::read(entry.path()).unwrap()).to_vec(),
-            )
-        })
-        .filter(|(name, _)| name != "memory.lock")
-        .collect()
-}
-
-fn assert_no_connection(listener: &TcpListener) {
-    match listener.accept() {
-        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-        other => panic!("unexpected remote connection: {other:?}"),
-    }
-}
-
-fn run(data: &Path, cache: &Path, root: &Path, stdin: &str) -> (std::process::Output, Duration) {
-    run_with_project(data, cache, root, stdin, Some("test-project"))
-}
-
-fn run_with_project(
-    data: &Path,
-    cache: &Path,
+fn run(
     root: &Path,
+    cwd: &Path,
     stdin: &str,
-    project: Option<&str>,
+    timeout: Option<&str>,
 ) -> (std::process::Output, Duration) {
-    let start = Instant::now();
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_cort"));
     cmd.args(["hook-recall", "--harness", "claude-code"])
-        .env("CORT_MEMORY_DIR", data)
-        .env("CORT_CACHE_DIR", cache)
+        .env("CORT_MEMORY_DIR", root.join("data"))
+        .env("CORT_CACHE_DIR", root.join("cache"))
+        .env("CLAUDE_CONFIG_DIR", root.join("claude"))
         .env("HOME", root)
-        .env("CORT_MACHINE_ID", "local-machine")
-        .current_dir(root)
+        .env_remove("CORT_MEMORY_PROJECT")
+        .env_remove("CLAUDECAT_MEMORY_PROJECT")
+        .env("CORT_MACHINE_ID", "self")
+        .current_dir(cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    if let Some(project) = project {
-        cmd.env("CORT_MEMORY_PROJECT", project);
-    } else {
-        cmd.env_remove("CORT_MEMORY_PROJECT")
-            .env_remove("CLAUDECAT_MEMORY_PROJECT");
+    if let Some(value) = timeout {
+        cmd.env("CORT_RECALL_TIMEOUT_MS", value);
     }
+    let started = Instant::now();
     let mut child = cmd.spawn().unwrap();
     child
         .stdin
@@ -175,428 +324,124 @@ fn run_with_project(
         .unwrap()
         .write_all(stdin.as_bytes())
         .unwrap();
-    (child.wait_with_output().unwrap(), start.elapsed())
+    (child.wait_with_output().unwrap(), started.elapsed())
 }
-
-fn outcome(cache: &Path) -> Value {
-    let db = rusqlite::Connection::open(cache.join("usage.db")).unwrap();
-    let row: String = db
-        .query_row(
-            "SELECT args_summary FROM command_log WHERE command='hook-recall' ORDER BY id DESC LIMIT 1",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    serde_json::from_str(&row).unwrap()
+fn outcome(root: &Path) -> Value {
+    let db = rusqlite::Connection::open(root.join("cache/usage.db")).unwrap();
+    let raw: String = db.query_row("SELECT args_summary FROM command_log WHERE command='hook-recall' ORDER BY id DESC LIMIT 1", [], |r| r.get(0)).unwrap();
+    serde_json::from_str(&raw).unwrap()
 }
-
+fn notice(out: &std::process::Output, kind: &str) {
+    let value: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["hookSpecificOutput"]["additionalContext"], format!("cort memory: the shared database could not be read at session start ({kind}); run `cort memory recall \"<topic>\"` when you need it"));
+}
 #[test]
-fn silent_outcomes_and_non_json() {
+fn cli_unconfigured_and_invalid_input_are_silent() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
-    let data = root.join("data");
-    let cache = root.join("cache");
-    let payload = json!({"cwd":root,"hook_event_name":"SessionStart"}).to_string();
-    let (out, _) = run(&data, &cache, root, &payload);
+    let repo = git_repo(root);
+    let payload = json!({"cwd":repo}).to_string();
+    let (out, _) = run(root, root, &payload, None);
     assert!(out.status.success());
     assert!(out.stdout.is_empty());
-    assert_eq!(outcome(&cache)["hook"], "not_configured");
-    configured(&data);
-    let (out, _) = run(&data, &cache, root, &payload);
-    assert!(out.status.success());
+    assert_eq!(outcome(root)["hook"], "not_configured");
+    config(&root.join("data"), "turso://127.0.0.1:9");
+    let (out, _) = run(root, root, "not JSON", None);
     assert!(out.stdout.is_empty());
-    assert!(!replica(&data).exists());
-    assert_eq!(outcome(&cache)["hook"], "no_replica");
-    let (out, _) = run(&data, &cache, root, "not JSON");
-    assert!(out.status.success());
-    assert!(out.stdout.is_empty());
-    assert_eq!(outcome(&cache)["hook"], "failed");
-    let census = cort::usage::hook_census_at(&cache.join("usage.db"), "hook-recall", 0).unwrap();
-    assert_eq!(census["not_configured"], 1);
-    assert_eq!(census["no_replica"], 1);
-    assert_eq!(census["failed"], 1);
-    assert!(census.keys().all(|key| !key.starts_with("unknown/")));
+    assert_eq!(outcome(root)["hook"], "failed");
 }
-
 #[cfg(unix)]
 #[test]
-fn dangling_config_symlink_is_failed() {
-    use std::os::unix::fs::symlink;
-    let temp = tempfile::tempdir().unwrap();
-    let root = temp.path();
-    let data = root.join("data");
-    let cache = root.join("cache");
-    fs::create_dir_all(&data).unwrap();
-    symlink(root.join("missing"), data.join("turso-memory.json")).unwrap();
-    let (out, _) = run(&data, &cache, root, &json!({"cwd":root}).to_string());
-    assert!(out.status.success());
-    assert!(out.stdout.is_empty());
-    assert_eq!(outcome(&cache)["hook"], "failed");
-}
-
-#[test]
-fn busy_lock_returns_quickly() {
-    let temp = tempfile::tempdir().unwrap();
-    let root = temp.path();
-    let data = root.join("data");
-    let cache = root.join("cache");
-    configured(&data);
-    let path = replica(&data);
-    let project: String = Sha256::digest(b"test-project")
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
-    seed_replica(&path, URL, &project, false);
-    let lock = fs::File::create(path.parent().unwrap().join("memory.lock")).unwrap();
-    lock.lock().unwrap();
-    let (out, elapsed) = run(&data, &cache, root, &json!({"cwd":root}).to_string());
-    assert!(out.status.success());
-    assert!(out.stdout.is_empty());
-    assert!(elapsed < Duration::from_millis(3200));
-    assert_eq!(outcome(&cache)["hook"], "busy");
-}
-
-#[test]
-fn existing_replica_does_not_contact_unreachable_remote() {
-    let temp = tempfile::tempdir().unwrap();
-    let root = temp.path();
-    let data = root.join("data");
-    let cache = root.join("cache");
-    configured(&data);
-    let path = replica(&data);
-    fs::create_dir_all(path.parent().unwrap()).unwrap();
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    runtime.block_on(async {
-        let db = turso::sync::Builder::new_remote(path.to_str().unwrap())
-            .with_remote_url(URL)
-            .with_auth_token("test")
-            .bootstrap_if_empty(false)
-            .build()
-            .await
-            .unwrap();
-        let conn = db.connect().await.unwrap();
-        conn.execute("CREATE TABLE project_memory (project TEXT NOT NULL, id TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY (project,id))", ())
-            .await
-            .unwrap();
-    });
-    mark_synced(&path);
-    let before = file_hashes(path.parent().unwrap());
-    let (out, elapsed) = run(&data, &cache, root, &json!({"cwd":root}).to_string());
-    assert!(out.status.success());
-    assert!(out.stdout.is_empty());
-    assert!(elapsed < Duration::from_secs(3));
-    assert_eq!(outcome(&cache)["hook"], "none");
-    assert_eq!(file_hashes(path.parent().unwrap()), before);
-}
-
-#[test]
-fn local_entries_emit_session_start_json_newest_first() {
-    let temp = tempfile::tempdir().unwrap();
-    let root = temp.path();
-    let data = root.join("data");
-    let cache = root.join("cache");
-    configured(&data);
-    let path = replica(&data);
-    fs::create_dir_all(path.parent().unwrap()).unwrap();
-    let project: String = Sha256::digest(b"test-project")
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    runtime.block_on(async {
-        let db = turso::sync::Builder::new_remote(path.to_str().unwrap())
-            .with_remote_url(URL)
-            .with_auth_token("test")
-            .bootstrap_if_empty(false)
-            .build()
-            .await
-            .unwrap();
-        let conn = db.connect().await.unwrap();
-        conn.execute("CREATE TABLE project_memory (project TEXT NOT NULL, id TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY (project,id))", ())
-            .await
-            .unwrap();
-        for (id, key, claim, recorded_at) in [
-            ("id-1", "older", "first claim", "2026-10-01"),
-            ("id-2", "newer", "second claim", "2026-10-27"),
-        ] {
-            let body = json!({
-                "id":id,"key":key,"claim":claim,"source":"docs/decision.md",
-                "source_line":3,"source_sha256":"missing", "recorded_at":recorded_at,
-                "supersedes":null
-            })
-            .to_string();
-            conn.execute(
-                "INSERT INTO project_memory (project,id,body) VALUES (?,?,?)",
-                (project.as_str(), id, body.as_str()),
-            )
-            .await
-            .unwrap();
-        }
-    });
-    mark_synced(&path);
-    let before = file_hashes(path.parent().unwrap());
-    let (out, elapsed) = run(&data, &cache, root, &json!({"cwd":root}).to_string());
-    assert!(out.status.success());
-    assert!(elapsed < Duration::from_secs(3));
-    let response: Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(response.as_object().unwrap().len(), 1);
-    assert_eq!(
-        response["hookSpecificOutput"]["hookEventName"],
-        "SessionStart"
-    );
-    let context = response["hookSpecificOutput"]["additionalContext"]
-        .as_str()
-        .unwrap();
-    assert!(context.starts_with("cort memory: local replica"));
-    assert!(context.contains("- [newer] second claim (docs/decision.md:3, source_missing)"));
-    assert!(context.find("[newer]").unwrap() < context.find("[older]").unwrap());
-    assert_eq!(outcome(&cache)["hook"], "injected");
-    assert_eq!(outcome(&cache)["entries"], 2);
-    assert_eq!(file_hashes(path.parent().unwrap()), before);
-}
-
-#[test]
-fn unsafe_metadata_is_rejected_before_open() {
-    let temp = tempfile::tempdir().unwrap();
-    let root = temp.path();
-    let data = root.join("data");
-    let cache = root.join("cache");
-    configured(&data);
-    let path = replica(&data);
-    let project: String = Sha256::digest(b"test-project")
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
-    seed_replica(&path, URL, &project, true);
-    let info = path.with_file_name("memory.db-info");
-    let mut value: Value = serde_json::from_slice(&fs::read(&info).unwrap()).unwrap();
-    value["synced_revision"] = json!({"type":"legacy","generation":1,"synced_frame_no":null});
-    fs::write(&info, value.to_string()).unwrap();
-    let (out, _) = run(&data, &cache, root, &json!({"cwd":root}).to_string());
-    assert!(out.stdout.is_empty());
-    assert_eq!(outcome(&cache)["hook"], "unsynced_replica");
-    fs::remove_file(info).unwrap();
-    let (out, _) = run(&data, &cache, root, &json!({"cwd":root}).to_string());
-    assert!(out.stdout.is_empty());
-    assert_eq!(outcome(&cache)["hook"], "unsynced_replica");
-}
-
-#[test]
-fn open_time_recovery_and_config_rewrite_states_are_left_alone() {
-    let temp = tempfile::tempdir().unwrap();
-    let root = temp.path();
-    let data = root.join("data");
-    let cache = root.join("cache");
-    configured(&data);
-    let path = replica(&data);
-    let project: String = Sha256::digest(b"test-project")
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
-    seed_replica(&path, URL, &project, true);
-    let (_, _) = run(&data, &cache, root, &json!({"cwd":root}).to_string());
-    assert_eq!(outcome(&cache)["hook"], "injected");
-
-    // An interrupted replace-base apply: open_db would restore files and maybe pull.
-    let marker = path.with_file_name("memory.db-replace-base-apply");
-    fs::write(&marker, "pending").unwrap();
-    let before = file_hashes(path.parent().unwrap());
-    let (out, _) = run(&data, &cache, root, &json!({"cwd":root}).to_string());
-    assert!(out.stdout.is_empty());
-    assert_eq!(outcome(&cache)["hook"], "unsynced_replica");
-    assert_eq!(file_hashes(path.parent().unwrap()), before);
-    fs::remove_file(&marker).unwrap();
-
-    // Metadata without a saved configuration: open_db would rewrite -info.
-    let info = path.with_file_name("memory.db-info");
-    let mut value: Value = serde_json::from_slice(&fs::read(&info).unwrap()).unwrap();
-    value.as_object_mut().unwrap().remove("saved_configuration");
-    fs::write(&info, value.to_string()).unwrap();
-    let before = file_hashes(path.parent().unwrap());
-    let (out, _) = run(&data, &cache, root, &json!({"cwd":root}).to_string());
-    assert!(out.stdout.is_empty());
-    assert_eq!(outcome(&cache)["hook"], "unsynced_replica");
-    assert_eq!(file_hashes(path.parent().unwrap()), before);
-}
-
-#[test]
-fn synced_and_unsynced_replicas_never_connect_or_change_files() {
-    let temp = tempfile::tempdir().unwrap();
-    let root = temp.path();
-    let data = root.join("data");
-    let cache = root.join("cache");
-    let listener = match TcpListener::bind("127.0.0.1:0") {
-        Ok(listener) => listener,
-        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-            eprintln!("SKIP: sandbox prohibits binding a local TCP listener: {e}");
-            return;
-        }
-        Err(e) => panic!("cannot bind local TCP listener: {e}"),
-    };
-    listener.set_nonblocking(true).unwrap();
-    let url = format!("libsql://{}", listener.local_addr().unwrap());
-    configured_url(&data, &url);
-    let path = replica_url(&data, &url);
-    let project: String = Sha256::digest(b"test-project")
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
-    seed_replica(&path, &url, &project, true);
-    let payload = json!({"cwd":root}).to_string();
-    let before = file_hashes(path.parent().unwrap());
-    let (out, _) = run(&data, &cache, root, &payload);
-    assert!(out.status.success());
-    assert_eq!(outcome(&cache)["hook"], "injected");
-    assert_eq!(file_hashes(path.parent().unwrap()), before);
-    assert_no_connection(&listener);
-
-    let (out, _) = run_with_project(&data, &cache, root, &payload, Some("other-project"));
-    assert!(out.stdout.is_empty());
-    assert_eq!(outcome(&cache)["hook"], "none");
-    assert_eq!(file_hashes(path.parent().unwrap()), before);
-    assert_no_connection(&listener);
-
-    let info = path.with_file_name("memory.db-info");
-    let mut value: Value = serde_json::from_slice(&fs::read(&info).unwrap()).unwrap();
-    value["synced_revision"] = json!({"type":"legacy","generation":1,"synced_frame_no":null});
-    fs::write(&info, value.to_string()).unwrap();
-    let (out, _) = run(&data, &cache, root, &payload);
-    assert!(out.stdout.is_empty());
-    assert_eq!(outcome(&cache)["hook"], "unsynced_replica");
-    assert_no_connection(&listener);
-    fs::remove_file(info).unwrap();
-    let (out, _) = run(&data, &cache, root, &payload);
-    assert!(out.stdout.is_empty());
-    assert_eq!(outcome(&cache)["hook"], "unsynced_replica");
-    assert_no_connection(&listener);
-}
-
-#[test]
-fn payload_cwd_resolves_project_from_git_origin() {
-    let temp = tempfile::tempdir().unwrap();
-    let root = temp.path();
-    let repo = root.join("repo");
-    fs::create_dir(&repo).unwrap();
-    assert!(Command::new("git")
-        .arg("init")
-        .arg(&repo)
-        .status()
-        .unwrap()
-        .success());
-    assert!(Command::new("git")
-        .args([
-            "remote",
-            "add",
-            "origin",
-            "https://example.com/team/project.git"
-        ])
-        .current_dir(&repo)
-        .status()
-        .unwrap()
-        .success());
-    let project = cort::memory_store::project_from_git_origin(&repo).unwrap();
-    let data = root.join("data");
-    let cache = root.join("cache");
-    configured(&data);
-    seed_replica(&replica(&data), URL, &project, true);
-    let (out, _) = run_with_project(&data, &cache, root, &json!({"cwd":repo}).to_string(), None);
-    assert!(out.status.success());
-    assert_eq!(outcome(&cache)["hook"], "injected");
-}
-
-#[test]
-fn other_machine_notes_are_local_filtered_and_capped() {
+fn cli_dangling_config_symlink_is_failed() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
     let repo = git_repo(root);
-    let data = root.join("data");
-    let cache = root.join("cache");
-    let listener = match TcpListener::bind("127.0.0.1:0") {
-        Ok(listener) => listener,
-        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-            eprintln!("SKIP: sandbox prohibits binding a local TCP listener: {e}");
-            return;
+    fs::create_dir(root.join("data")).unwrap();
+    std::os::unix::fs::symlink(root.join("missing"), root.join("data/turso-memory.json")).unwrap();
+    let (out, _) = run(root, root, &json!({"cwd":repo}).to_string(), None);
+    assert!(out.stdout.is_empty());
+    assert_eq!(outcome(root)["hook"], "failed");
+}
+struct SilentServer {
+    url: String,
+    stop: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+impl SilentServer {
+    fn new() -> Option<Self> {
+        let listener = match TcpListener::bind("127.0.0.1:0") {
+            Ok(l) => l,
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                eprintln!("SKIP: sandbox prohibits local listener: {e}");
+                return None;
+            }
+            Err(e) => panic!("listener: {e}"),
+        };
+        listener.set_nonblocking(true).unwrap();
+        let url = format!("https://{}", listener.local_addr().unwrap());
+        let stop = Arc::new(AtomicBool::new(false));
+        let done = Arc::clone(&stop);
+        let thread = std::thread::spawn(move || {
+            let mut streams = Vec::new();
+            while !done.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((stream, _)) => streams.push(stream),
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(10))
+                    }
+                    Err(e) => panic!("accept: {e}"),
+                }
+            }
+        });
+        Some(Self {
+            url,
+            stop,
+            thread: Some(thread),
+        })
+    }
+}
+impl Drop for SilentServer {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            thread.join().unwrap();
         }
-        Err(e) => panic!("cannot bind local TCP listener: {e}"),
+    }
+}
+#[test]
+fn cli_silent_server_times_out_and_clamps() {
+    let Some(server) = SilentServer::new() else {
+        return;
     };
-    listener.set_nonblocking(true).unwrap();
-    let url = format!("libsql://{}", listener.local_addr().unwrap());
-    configured_url(&data, &url);
-    let path = replica_url(&data, &url);
-    let project = cort::memory_store::project_from_git_origin(&repo).unwrap();
-    let ledger_project: String = Sha256::digest(b"test-project")
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
-    seed_replica(&path, &url, &ledger_project, false);
-    seed_notes(&path, &url, &project, true);
-    let before = file_hashes(path.parent().unwrap());
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let repo = git_repo(root);
+    config(&root.join("data"), &server.url);
     let payload = json!({"cwd":repo}).to_string();
-    let (out, _) = run(&data, &cache, root, &payload);
-    assert!(out.status.success());
-    let response: Value = serde_json::from_slice(&out.stdout).unwrap();
-    let context = response["hookSpecificOutput"]["additionalContext"]
-        .as_str()
-        .unwrap();
-    assert!(context.starts_with("cort memory: local replica"));
-    assert!(context.contains("unreviewed harness notes from other machines"));
-    assert!(
-        context.contains("- note-00 [NUC11i5] bad name.md"),
-        "{context}"
-    );
-    assert!(
-        context.contains("- note-01 [nohost-m] file-01.md"),
-        "{context}"
-    );
-    assert!(!context.contains("\u{202e}"));
-    assert!(!context.contains("\nname.md"));
-    assert!(!context.contains("- own ["));
-    assert!(!context.contains("deleted"));
-    assert!(!context.contains("other.md"));
-    assert!(context.contains("... 3 more notes"), "{context}");
-    assert!(context.len() <= 2000 + "cort memory: local replica (may be behind the shared database; `cort memory recall \"<topic>\"` refreshes)".len());
-    assert_eq!(outcome(&cache)["hook"], "injected");
-    assert_eq!(outcome(&cache)["entries"], 0);
-    assert_eq!(outcome(&cache)["notes"], 15);
-    assert_eq!(file_hashes(path.parent().unwrap()), before);
-    assert_no_connection(&listener);
+    for (setting, bound) in [("400", 1800), ("99999", 2950)] {
+        let (out, elapsed) = run(root, root, &payload, Some(setting));
+        assert!(out.status.success());
+        assert!(elapsed < Duration::from_millis(bound), "{elapsed:?}");
+        notice(&out, "remote_timeout");
+        assert_eq!(outcome(root)["hook"], "remote_timeout");
+    }
 }
-
 #[test]
-fn missing_host_table_falls_back_without_creating_it() {
+fn cli_unbound_port_and_payload_cwd() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
     let repo = git_repo(root);
-    let data = root.join("data");
-    let cache = root.join("cache");
-    configured(&data);
-    let path = replica(&data);
-    let project = cort::memory_store::project_from_git_origin(&repo).unwrap();
-    let ledger_project: String = Sha256::digest(b"test-project")
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
-    seed_replica(&path, URL, &ledger_project, false);
-    seed_notes(&path, URL, &project, false);
-    let before = file_hashes(path.parent().unwrap());
-    let (out, _) = run(&data, &cache, root, &json!({"cwd":repo}).to_string());
-    assert!(out.status.success());
-    let context = serde_json::from_slice::<Value>(&out.stdout).unwrap()["hookSpecificOutput"]
-        ["additionalContext"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    assert!(context.contains("[remote-m]"), "{context}");
-    assert_eq!(outcome(&cache)["notes"], 15);
-    assert_eq!(file_hashes(path.parent().unwrap()), before);
+    config(&root.join("data"), "turso://127.0.0.1:9");
+    let (out, elapsed) = run(root, root, &json!({"cwd":repo}).to_string(), Some("400"));
+    assert!(elapsed < Duration::from_millis(2700));
+    let kind = outcome(root)["hook"].as_str().unwrap().to_owned();
+    assert!(
+        kind == "remote_unreachable" || kind == "remote_timeout",
+        "{kind}"
+    );
+    notice(&out, &kind);
+    assert!(outcome(root)["hook"].as_str().is_some());
 }
-
 #[test]
 fn render_orders_and_caps_entries() {
     use cort::memory::{MemoryEntry, MemoryHit, MemoryRecall};
@@ -676,52 +521,6 @@ fn render_orders_and_caps_entries() {
     .unwrap();
     assert_eq!(count, 20);
     assert!(short.contains("10 entries left out"));
-}
-
-#[test]
-fn a_failing_notes_query_leaves_the_ledger_outcome_alone() {
-    let temp = tempfile::tempdir().unwrap();
-    let root = temp.path();
-    let repo = git_repo(root);
-    let data = root.join("data");
-    let cache = root.join("cache");
-    configured(&data);
-    let path = replica(&data);
-    let ledger_project: String = Sha256::digest(b"test-project")
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
-    seed_replica(&path, URL, &ledger_project, true);
-    // A harness_notes table the briefs query cannot read: the SELECT fails, not the table check.
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    runtime.block_on(async {
-        let db = turso::sync::Builder::new_remote(path.to_str().unwrap())
-            .with_remote_url(URL)
-            .with_auth_token("test")
-            .bootstrap_if_empty(false)
-            .build()
-            .await
-            .unwrap();
-        let conn = db.connect().await.unwrap();
-        conn.execute("CREATE TABLE harness_notes (project TEXT)", ())
-            .await
-            .unwrap();
-    });
-    let (out, _) = run(&data, &cache, root, &json!({"cwd":repo}).to_string());
-    assert!(out.status.success());
-    let context = serde_json::from_slice::<Value>(&out.stdout).unwrap()["hookSpecificOutput"]
-        ["additionalContext"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    assert!(context.contains("[key] claim"), "{context}");
-    assert!(!context.contains("unreviewed harness notes"), "{context}");
-    assert_eq!(outcome(&cache)["hook"], "injected");
-    assert_eq!(outcome(&cache)["entries"], 1);
-    assert_eq!(outcome(&cache)["notes"], 0);
 }
 
 #[test]

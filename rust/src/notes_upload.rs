@@ -14,26 +14,6 @@ pub const CREATE_ID_INDEX: &str =
 pub const CREATE_PROJECT_TIME_INDEX: &str = "CREATE INDEX IF NOT EXISTS harness_notes_by_project_time ON harness_notes (project, deleted, updated_at)";
 pub const CREATE_MACHINES: &str = "CREATE TABLE IF NOT EXISTS harness_machines (machine TEXT PRIMARY KEY, host TEXT NOT NULL, updated_at TEXT NOT NULL)";
 
-pub async fn ensure_notes_schema(conn: &turso::Connection) -> Result<(), String> {
-    conn.execute(CREATE_TABLE, ())
-        .await
-        .map_err(|e| e.to_string())?;
-    conn.execute(CREATE_INDEX, ())
-        .await
-        .map_err(|e| e.to_string())?;
-    for sql in [
-        CREATE_MACHINE_INDEX,
-        CREATE_ID_INDEX,
-        CREATE_PROJECT_TIME_INDEX,
-    ] {
-        conn.execute(sql, ()).await.map_err(|e| e.to_string())?;
-    }
-    conn.execute(CREATE_MACHINES, ())
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(())
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Upload {
     pub project: String,
@@ -322,69 +302,6 @@ pub struct NoteBrief {
     pub host: Option<String>,
     pub file_name: String,
     pub updated_at: String,
-}
-
-pub async fn other_machine_briefs(
-    conn: &turso::Connection,
-    project: &str,
-    this_machine: &str,
-    limit: usize,
-) -> Result<(Vec<NoteBrief>, usize), String> {
-    if !table_exists(conn).await? {
-        return Ok((Vec::new(), 0));
-    }
-    let has_hosts = named_table_exists(conn, "harness_machines").await?;
-    let host = if has_hosts { "m.host" } else { "NULL" };
-    let join = if has_hosts {
-        "LEFT JOIN harness_machines m ON m.machine=n.machine"
-    } else {
-        ""
-    };
-    let sql = format!("SELECT n.note_id, n.machine, {host}, n.file_name, n.updated_at FROM harness_notes n {join} WHERE n.project=? AND n.machine<>? AND n.deleted=0 ORDER BY n.updated_at DESC, n.machine, n.source_dir, n.file_name LIMIT ?");
-    let mut rows = conn
-        .query(&sql, turso::params![project, this_machine, limit as i64])
-        .await
-        .map_err(|e| e.to_string())?;
-    let mut briefs = Vec::new();
-    while let Some(row) = rows.next().await.map_err(|e| e.to_string())? {
-        briefs.push(NoteBrief {
-            note_id: row.get(0).map_err(|e| e.to_string())?,
-            machine: row.get(1).map_err(|e| e.to_string())?,
-            host: row.get(2).map_err(|e| e.to_string())?,
-            file_name: row.get(3).map_err(|e| e.to_string())?,
-            updated_at: row.get(4).map_err(|e| e.to_string())?,
-        });
-    }
-    let mut count = conn
-        .query(
-            "SELECT COUNT(*) FROM harness_notes WHERE project=? AND machine<>? AND deleted=0",
-            (project, this_machine),
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-    let total = count
-        .next()
-        .await
-        .map_err(|e| e.to_string())?
-        .ok_or("missing notes count")?
-        .get::<i64>(0)
-        .map_err(|e| e.to_string())? as usize;
-    Ok((briefs, total))
-}
-
-async fn named_table_exists(conn: &turso::Connection, name: &str) -> Result<bool, String> {
-    let mut rows = conn
-        .query(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
-            (name,),
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(rows.next().await.map_err(|e| e.to_string())?.is_some())
-}
-
-async fn table_exists(conn: &turso::Connection) -> Result<bool, String> {
-    named_table_exists(conn, "harness_notes").await
 }
 
 pub fn opt_in_path() -> PathBuf {

@@ -25,6 +25,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 // `hook-suggest` is here so its rows are recorded under their own name rather than `_unknown`:
 // whether the harness hook fires, and whether a fire is followed by an `impact` call, is the one
@@ -63,7 +64,7 @@ fn usage_value() -> Value {
             "measure": "cort measure <configure|show|record|collect|verify|health|status|copy-events|import-audit|cron|report> [options]  (collect: scan and upload the batch; --background appends at most one result to measure.log (none when skipped_busy) without stdout; health: observe recently used indexes and write local index_health_log, reading indexes only, with no network; --background appends the result to measure.log without stdout; status: read local collection state, -f json|lean; cron: manual install or removal of the legacy entry, no longer installed automatically; hook kick is the only automatic collection trigger; copy-events: one-time, re-runnable, read-only copy of claudecat's uploaded events from harnessuse, never overwrites, reports same-key rows whose columns differ as conflicts; import-audit: one-time, re-runnable import of CORT-AUDIT.md's health and usage columns, never overwrites, run on one machine only; verify compares event ids and uploads nothing, and verify --new-machine passes a machine with no remote rows in either database; command_log and index_health_log keep uploaded rows 90 days and rows not yet uploaded 180 days, pruned when a new command is recorded; rows still not uploaded after 180 days are deleted and counted in measure status (pruned_unuploaded_rows) and measure.log)",
             "hook-suggest": "cort hook-suggest  (PreToolUse hook: records one fire row and kicks collection; never speaks; not a verb to type)",
             "hook-refresh": "cort hook-refresh  (PostToolUse hook: brings this project's index up to the tree after an edit; silent, never creates an index; not a verb to type)",
-            "hook-recall": "cort hook-recall --harness <h>  (SessionStart hook: reads the existing local memory replica; not a verb to type)",
+            "hook-recall": "cort hook-recall --harness <h>  (SessionStart hook: reads the shared memory database; not a verb to type)",
             "hook-install": "cort hook-install [--all|--settings <path>] [--event pre|post|session] [--command <cmd>] [--remove|--status]  (installer-invoked hook wiring; not a verb to type)",
             "internal-shim": "cort internal-shim --cort-home <dir>  (installer-invoked: renders the $BIN_DIR/cort shim for a CORT_HOME; not a verb to type)",
             "internal-ast-grep": "cort internal-ast-grep  (installer-invoked: prints the pinned ast-grep release and its checksums as lean TSV; not a verb to type)",
@@ -682,7 +683,7 @@ fn pin_bin() -> Result<String, CortError> {
     Ok(bin)
 }
 
-fn dispatch(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError> {
+fn dispatch(args: &[String], usage: &mut UsageEvent, started: Instant) -> Result<Emit, CortError> {
     let command = args.first().map(String::as_str);
     match command {
         Some("index") => cmd_index(&args[1..], usage),
@@ -695,7 +696,7 @@ fn dispatch(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError> 
         Some("measure") => cmd_measure(&args[1..], usage),
         Some("hook-suggest") => cmd_hook_suggest(&args[1..], usage),
         Some("hook-refresh") => cmd_hook_refresh(&args[1..], usage),
-        Some("hook-recall") => cmd_hook_recall(&args[1..], usage),
+        Some("hook-recall") => cmd_hook_recall(&args[1..], usage, started),
         Some("hook-install") => cmd_hook_install(&args[1..], usage),
         Some("internal-shim") => cmd_internal_shim(&args[1..], usage),
         Some("internal-ast-grep") => cmd_internal_ast_grep(usage),
@@ -1108,8 +1109,12 @@ fn cmd_hook_suggest(args: &[String], usage: &mut UsageEvent) -> Result<Emit, Cor
     quiet()
 }
 
-/// SessionStart reads the local memory replica without network work or waiting on a writer.
-fn cmd_hook_recall(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError> {
+/// SessionStart reads shared memory without waiting on a local writer.
+fn cmd_hook_recall(
+    args: &[String],
+    usage: &mut UsageEvent,
+    started: Instant,
+) -> Result<Emit, CortError> {
     let declared = HookSuggestArgs::try_parse_from(args.iter())
         .ok()
         .and_then(|a| a.harness)
@@ -1137,7 +1142,49 @@ fn cmd_hook_recall(args: &[String], usage: &mut UsageEvent) -> Result<Emit, Cort
     let (outcome, content, count, notes_count) = if parsed.is_none() {
         ("failed", None, 0, 0)
     } else {
-        match cort::memory_store::recall_local(&root) {
+        let read = (|| {
+            let Some((url, token)) = cort::memory_store::session_config().map_err(|_| "failed")?
+            else {
+                return Err("not_configured");
+            };
+            let projects = cort::memory_store::session_project_ids(&root).map_err(|_| "failed")?;
+            let remaining = Duration::from_millis(2500).saturating_sub(started.elapsed());
+            if remaining < Duration::from_millis(200) {
+                return Err("remote_timeout");
+            }
+            let configured_ms = std::env::var("CORT_RECALL_TIMEOUT_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .filter(|n| *n > 0)
+                .unwrap_or(1500)
+                .min(2400);
+            let db = cort::remote::RemoteDb::new(
+                &url,
+                token,
+                Box::new(cort::remote::RecallTransport {
+                    started,
+                    max_timeout: Duration::from_millis(configured_ms),
+                }),
+            )
+            .map_err(|e| match e.kind {
+                cort::remote::ErrorKind::Blocked => "remote_blocked",
+                cort::remote::ErrorKind::Timeout => "remote_timeout",
+                _ => "remote_unreachable",
+            })?;
+            cort::memory_store::session_recall_with(
+                &root,
+                &db,
+                cort::usage::machine_id(),
+                (&projects.0, &projects.1),
+                started,
+            )
+            .map_err(|kind| match kind {
+                cort::remote::ErrorKind::Blocked => "remote_blocked",
+                cort::remote::ErrorKind::Timeout => "remote_timeout",
+                _ => "remote_unreachable",
+            })
+        })();
+        match read {
             Ok((recall, omitted, notes, total)) => {
                 match cort::hook_recall::render_with_notes(recall, omitted, &notes, total) {
                     Some((text, count, notes_count)) => {
@@ -1146,15 +1193,8 @@ fn cmd_hook_recall(args: &[String], usage: &mut UsageEvent) -> Result<Emit, Cort
                     None => ("none", None, 0, 0),
                 }
             }
-            Err(cort::memory_store::LocalRecallError::NotConfigured) => {
-                ("not_configured", None, 0, 0)
-            }
-            Err(cort::memory_store::LocalRecallError::NoReplica) => ("no_replica", None, 0, 0),
-            Err(cort::memory_store::LocalRecallError::UnsyncedReplica) => {
-                ("unsynced_replica", None, 0, 0)
-            }
-            Err(cort::memory_store::LocalRecallError::Busy) => ("busy", None, 0, 0),
-            Err(cort::memory_store::LocalRecallError::Failed) => ("failed", None, 0, 0),
+            Err(outcome) if outcome.starts_with("remote_") => (outcome, Some(format!("cort memory: the shared database could not be read at session start ({outcome}); run `cort memory recall \"<topic>\"` when you need it")), 0, 0),
+            Err(outcome) => (outcome, None, 0, 0),
         }
     };
     let mut row = hook_row(outcome, &harness, differs.as_deref(), model);
@@ -2835,6 +2875,7 @@ fn peek_format(args: &[String]) -> Format {
 }
 
 fn main() {
+    let started = Instant::now();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let recall_hook = args.first().is_some_and(|a| a == "hook-recall");
     let claim = Arc::new(AtomicBool::new(false));
@@ -2897,7 +2938,7 @@ fn main() {
         return;
     }
     let mut usage_ev = usage_from_args(&args);
-    match dispatch(&args, &mut usage_ev) {
+    match dispatch(&args, &mut usage_ev, started) {
         Ok(emitted) => {
             let rendered = render_emit(&emitted);
             if recall_hook

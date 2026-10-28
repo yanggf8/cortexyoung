@@ -92,13 +92,14 @@ pub const REFRESH_OUTCOMES: [&str; 8] = [
     "busy_or_failed",
 ];
 
-/// Closed outcome vocabulary for the local SessionStart memory hook.
+/// Closed outcome vocabulary for the shared database SessionStart memory hook.
 pub const RECALL_OUTCOMES: [&str; 7] = [
     "injected",
     "none",
     "not_configured",
-    "no_replica",
-    "unsynced_replica",
-    "busy",
     "failed",
+    "remote_unreachable",
+    "remote_blocked",
+    "remote_timeout",
 ];
+pub const LEGACY_RECALL_OUTCOMES: [&str; 3] = ["no_replica", "unsynced_replica", "busy"];

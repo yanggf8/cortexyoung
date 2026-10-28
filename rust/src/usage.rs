@@ -813,8 +813,13 @@ pub fn hook_census_at(
         .chain(crate::hook::LEGACY_SUGGEST_OUTCOMES.iter())
         .copied()
         .collect();
+    let recall_known: Vec<&str> = crate::hook::RECALL_OUTCOMES
+        .iter()
+        .chain(crate::hook::LEGACY_RECALL_OUTCOMES.iter())
+        .copied()
+        .collect();
     let (known, splits_decline): (&[&str], bool) = if command == "hook-recall" {
-        (&crate::hook::RECALL_OUTCOMES, false)
+        (&recall_known, false)
     } else if command == "hook-refresh" {
         (&crate::hook::REFRESH_OUTCOMES, false)
     } else {

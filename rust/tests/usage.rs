@@ -1746,7 +1746,16 @@ fn the_usage_report_carries_the_hook_census_and_the_lean_says_what_cannot_close(
         params![NOW_MS],
     )
     .unwrap();
-    for hook in ["injected", "none", "busy", "unsynced_replica"] {
+    for hook in [
+        "injected",
+        "none",
+        "no_replica",
+        "busy",
+        "unsynced_replica",
+        "remote_unreachable",
+        "remote_blocked",
+        "remote_timeout",
+    ] {
         db.execute(
             "INSERT INTO command_log (ts, project_id, command, args_summary, status, error_code, read_source, requested_content_mode, effective_content_mode, receipt_hit, index_stale, bytes_out, saved_bytes) VALUES (?1, NULL, 'hook-recall', ?2, 'ok', NULL, NULL, NULL, NULL, NULL, NULL, 0, 0)",
             params![NOW_MS, serde_json::json!({"hook":hook}).to_string()],
@@ -1760,8 +1769,17 @@ fn the_usage_report_carries_the_hook_census_and_the_lean_says_what_cannot_close(
     assert_eq!(census["no_shape/not_a_search_tool"].as_i64(), Some(1));
     assert_eq!(census["unparseable_summary"].as_i64(), Some(1));
     let recall = &report["hook_census"]["hook-recall"];
-    assert_eq!(recall["_total"], 4);
-    for hook in ["injected", "none", "busy", "unsynced_replica"] {
+    assert_eq!(recall["_total"], 8);
+    for hook in [
+        "injected",
+        "none",
+        "no_replica",
+        "busy",
+        "unsynced_replica",
+        "remote_unreachable",
+        "remote_blocked",
+        "remote_timeout",
+    ] {
         assert_eq!(recall[hook], 1);
     }
 
@@ -1770,7 +1788,7 @@ fn the_usage_report_carries_the_hook_census_and_the_lean_says_what_cannot_close(
         lean.contains("# hook_census hook-suggest total=2 status_error=0 unparseable_summary=1"),
         "the lean header names the canaries an eye can check: {lean}"
     );
-    assert!(lean.contains("# hook_census hook-recall total=4"));
+    assert!(lean.contains("# hook_census hook-recall total=8"));
 
     // And a report with no database still says the field exists.
     let empty = query_usage_at(&dir.path().join("absent.db"), 30, NOW_MS).unwrap();
