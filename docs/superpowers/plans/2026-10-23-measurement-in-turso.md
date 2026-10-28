@@ -347,4 +347,4 @@
 - [ ] 隔天：遠端兩台都有昨天的快照、事件持續增加、無重複；壓縮列有新增。
 - [x] ~~移除 `~/.cargo/bin/claudecat`（兩台）。~~ 作廢（2026-10-28）：claudecat 已改當資源閘門，`claudecat gate` 就在這個 binary 裡，要保留。
 - [x] 2026-10-28 10:55 台灣時間（02:55Z）本機部署 master `0160dfe1`（`cort-4a28f4a28871`）：L1 讓 cort 不再讀 `harnessuse` 的 `telemetry_events`／`telemetry_project_aliases`（`verify --new-machine` 只看量測庫），移除一次性的 `copy-events`、`import-audit`；所有 measure 指令遇到量測設定指向記憶資料庫時一律拒絕。刪表前 copy-events 重跑：來源 31,279 列、衝突 0、每組目的端列數皆不少於來源；舊表最後寫入 2026-10-23。
-- [ ] **問使用者後**才清 `harnessuse` 的 `telemetry_events` 與 alias。
+- [ ] 使用者 2026-10-28 決定：舊量測全部作廢、從 2026-10-28 00:00（台灣時間）重來，只量新功能（SessionStart 記憶注入、跨機器 notes、之後的 claudecat 資源閘門）。順序：M1（上傳起點 `MEASURE_START_MS`，拿掉 verify／new-machine 把關）部署後，使用者手動刪 `harnessuse` 的 `telemetry_events`、`telemetry_project_aliases`，並清空 `cort-measure` 的舊資料。
