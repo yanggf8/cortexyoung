@@ -14,7 +14,7 @@ fn line(v: Value) -> String {
 fn boundary(uuid: &str, session: &str, cwd: &str) -> String {
     line(
         json!({"type":"system","subtype":"compact_boundary","uuid":uuid,"sessionId":session,
-        "timestamp":"2026-10-22T23:37:47.345Z","cwd":cwd,
+        "timestamp":"2026-10-28T00:37:47.345Z","cwd":cwd,
         "compactMetadata":{"trigger":"auto","preTokens":358791,"postTokens":19780}}),
     )
 }
@@ -82,6 +82,23 @@ fn scan(e: &mut Env) -> ScanSummary {
         &e._tmp.path().join("measure-progress.json"),
     )
     .unwrap()
+}
+
+#[test]
+fn compaction_boundary_skips_old_and_uploads_start() {
+    let mut e = env();
+    let cwd = notgit(&e);
+    let old =
+        boundary("old", "s1", &cwd).replace("2026-10-28T00:37:47.345Z", "2026-10-27T15:59:59.999Z");
+    let start = boundary("start", "s1", &cwd)
+        .replace("2026-10-28T00:37:47.345Z", "2026-10-27T16:00:00.000Z");
+    write(&e.projects.join("p/s1.jsonl"), &(old + &start), 0);
+    let summary = scan(&mut e);
+    assert_eq!(summary.compactions, 1);
+    let rows = e.store.compactions_since(0).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].boundary_uuid, "start");
+    assert_eq!(rows[0].time_ms, cort::telemetry::MEASURE_START_MS);
 }
 
 fn notgit(e: &Env) -> String {

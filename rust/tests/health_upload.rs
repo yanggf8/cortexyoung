@@ -8,7 +8,7 @@ use cort::usage::{insert_health_row_at, record_command_at, CommandRecord, Health
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
-const DAY: i64 = 1_760_000_000_000;
+const DAY: i64 = 1_793_145_600_000;
 const MACHINE: &str = "health-machine";
 
 fn row(ts: i64, status: &str) -> HealthRow {
@@ -45,6 +45,55 @@ fn put(path: &Path, ts: i64, status: &str) {
 
 fn store(dir: &tempfile::TempDir) -> SqliteStore {
     SqliteStore::open(&db(dir, "store.db")).unwrap()
+}
+
+#[test]
+fn health_boundary_filters_before_paging_and_upload() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = db(&dir, "usage.db");
+    put(&path, cort::telemetry::MEASURE_START_MS - 1, "old");
+    put(&path, cort::telemetry::MEASURE_START_MS, "new");
+    let events = health_events(&path, 0, 1).unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].time_ms, Some(cort::telemetry::MEASURE_START_MS));
+    let mut remote = store(&dir);
+    uploaded(
+        upload_health_events(&mut remote, &path, MACHINE, &db(&dir, "progress.json")),
+        1,
+        1,
+        true,
+        None,
+        events[0].rowid.unwrap(),
+    );
+    assert_eq!(health_count(&mut remote), 1);
+}
+
+#[test]
+fn all_old_health_rows_advance_watermark() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = db(&dir, "usage.db");
+    put(&path, cort::telemetry::MEASURE_START_MS - 1, "old");
+    let mut remote = store(&dir);
+    let progress_path = db(&dir, "progress.json");
+    let report = upload_health_events(&mut remote, &path, MACHINE, &progress_path);
+    assert!(
+        matches!(
+            report,
+            EventsReport::Uploaded {
+                scanned: 0,
+                inserted: 0,
+                watermark: Some(_),
+                ..
+            }
+        ),
+        "{report:?}"
+    );
+    assert_eq!(health_count(&mut remote), 0);
+    put(&path, cort::telemetry::MEASURE_START_MS, "new");
+    assert!(matches!(
+        upload_health_events(&mut remote, &path, MACHINE, &progress_path),
+        EventsReport::Uploaded { inserted: 1, .. }
+    ));
 }
 
 fn health_count(s: &mut SqliteStore) -> usize {
@@ -126,7 +175,7 @@ fn uploads_without_dry_run_marker() {
 }
 
 #[test]
-fn uploads_while_command_source_refused() {
+fn command_and_health_upload_without_marker() {
     let dir = tempfile::tempdir().unwrap();
     let path = db(&dir, "usage.db");
     record_command_at(
@@ -152,12 +201,12 @@ fn uploads_while_command_source_refused() {
     let input = UploadInputs {
         usage_db: path.clone(),
         cost_dir: db(&dir, "cost"),
-        marker_path: db(&dir, "marker"),
+        progress_path: db(&dir, "measure-progress.json"),
         machine_id: MACHINE.into(),
     };
     assert!(matches!(
         upload_events(&mut s, &input),
-        EventsReport::Refused(_)
+        EventsReport::Uploaded { inserted: 1, .. }
     ));
     uploaded(
         upload_health_events(
@@ -365,7 +414,7 @@ fn null_root_is_the_empty_string() {
     fields.remove("ts");
     assert_eq!(
         event.event_id,
-        health_event_id(MACHINE, "2025-10-09", "", &value.to_string())
+        health_event_id(MACHINE, "2026-10-28", "", &value.to_string())
     );
     let mut s = store(&dir);
     uploaded(

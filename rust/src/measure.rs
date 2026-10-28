@@ -210,6 +210,9 @@ pub fn scan_transcripts(
         summary.skipped_lines += parsed.skipped_lines;
         summary.unknown_type_lines += parsed.unknown_type_lines;
         for c in compactions(&parsed.steps) {
+            if c.boundary.time_ms < crate::telemetry::MEASURE_START_MS {
+                continue;
+            }
             let owner = progress.compactions.get(&c.boundary.uuid);
             if matches!(owner, Some(s) if *s != c.boundary.session_id) {
                 continue;
@@ -359,7 +362,9 @@ pub fn record_with_scan_until(
     input: &RecordInputs,
     before_finish: impl FnOnce() -> Result<(), String>,
 ) -> Result<(ScanSummary, RecordOutcome), String> {
-    store.upsert_machine_host(&input.machine_id, &input.host, input.now_ms)?;
+    if input.now_ms >= crate::telemetry::MEASURE_START_MS {
+        store.upsert_machine_host(&input.machine_id, &input.host, input.now_ms)?;
+    }
     let progress_path = input.marks_path.with_file_name("measure-progress.json");
     let usage_db = input
         .events
@@ -382,7 +387,7 @@ pub fn record_with_scan_until(
         progress.save(&progress_path)?;
         marks.save(&input.marks_path)?;
     }
-    // Events are independent of compactions: a refusal or failure here is reported beside the scan
+    // Events are independent of compactions: a failure here is reported beside the scan
     // and never fails the record (see `upload_events`).
     if let Some(events) = &input.events {
         scan.events = Some(
@@ -714,12 +719,11 @@ pub fn render_collection_status(value: &Value) -> String {
         .unwrap_or_else(|| "none".into());
     let batch_line = broken("batch", batch).unwrap_or_else(|| {
         format!(
-            "batch pending={} last_run={} last_ok={} upload_pending={} refused={} failures={failures}{}\n",
+            "batch pending={} last_run={} last_ok={} upload_pending={} failures={failures}{}\n",
             field(batch, "pending"),
             when(batch, "last_run_ms"),
             when(batch, "last_ok_ms"),
             batch["upload_pending"].as_bool().unwrap_or(false),
-            batch["refused"].as_bool().unwrap_or(false),
             why(batch),
         )
     });

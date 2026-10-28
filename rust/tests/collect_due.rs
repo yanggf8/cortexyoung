@@ -174,15 +174,6 @@ fn upload_pending_due_with_zero_pending() {
     ));
 }
 
-#[test]
-fn refused_excludes_command_pending() {
-    let mut s = state(900_000);
-    s.refused = true;
-    let cfg = CollectConfig::from_lookup(|_| None);
-    assert!(!batch_due(&s, &counters(5_000, 0), "codex", NOW, &cfg));
-    assert!(batch_due(&s, &counters(5_000, 1), "codex", NOW, &cfg));
-}
-
 /// A cursor past every row's id is a rewind: it resets to 0, so the whole command term counts as
 /// pending. (The per-term clamp in `batch_due` is not defensive: a cursor may legitimately exceed
 /// `max_command_id` by the `measure` rows it already copied, so the clamp is what keeps that
@@ -428,7 +419,6 @@ fn state_roundtrip_and_corrupt_file_is_default() {
     );
     s.upload_pending = true;
     let _progress = cursors(&mut s, 8, 9);
-    s.refused = true;
     let h = HealthState {
         instance_id: Some("db-a".into()),
         health_cursor: 3,
@@ -444,7 +434,6 @@ fn state_roundtrip_and_corrupt_file_is_default() {
     assert_eq!(saved.instance_id, s.instance_id);
     assert_eq!(saved.failures, s.failures);
     assert_eq!(saved.upload_pending, s.upload_pending);
-    assert_eq!(saved.refused, s.refused);
     assert_eq!(HealthState::load(&health_path), h);
     std::fs::write(&collect_path, "{").unwrap();
     std::fs::write(&health_path, "{").unwrap();

@@ -2,8 +2,7 @@ use cort::measure::{record_with_scan, RecordInputs, RecordOutcome};
 use cort::measure_progress::{self, Load};
 use cort::measure_store::{CompactionRow, MachineHost, MeasureStore, SqliteStore};
 use cort::telemetry::{
-    command_log_columns, row_fingerprint, TelemetryEvent, UploadInputs, SOURCE_COMMAND,
-    SOURCE_HEALTH,
+    row_fingerprint, TelemetryEvent, UploadInputs, SOURCE_COMMAND, SOURCE_HEALTH,
 };
 use cort::usage::{insert_health_row_at, record_command_at, CommandRecord, HealthRow};
 use std::collections::HashMap;
@@ -140,7 +139,7 @@ fn transcript(dir: &Path, session: &str) {
     let project = dir.join("projects/p");
     fs::create_dir_all(&project).unwrap();
     let line = serde_json::json!({"type":"system","subtype":"compact_boundary","uuid":"boundary",
-        "sessionId":session,"timestamp":"2026-10-22T23:37:47.345Z",
+        "sessionId":session,"timestamp":"2026-10-28T00:37:47.345Z",
         "compactMetadata":{"trigger":"auto","preTokens":100,"postTokens":50}});
     fs::write(project.join("s.jsonl"), format!("{line}\n")).unwrap();
 }
@@ -322,19 +321,12 @@ fn loaded_progress_uploads_command_events_with_zero_store_reads() {
     let usage = tmp.path().join("usage.db");
     command(&usage);
     health(&usage);
-    let marker = tmp.path().join("measure-events-verified.json");
-    let columns = command_log_columns(&usage).unwrap();
-    fs::write(
-        &marker,
-        serde_json::json!({"machine_id": MACHINE, "columns": columns}).to_string(),
-    )
-    .unwrap();
     let mut store = store(tmp.path());
     let input = RecordInputs {
         events: Some(UploadInputs {
             usage_db: usage.clone(),
             cost_dir: tmp.path().join("cost"),
-            marker_path: marker,
+            progress_path: tmp.path().join("measure-progress.json"),
             machine_id: MACHINE.into(),
         }),
         ..inputs(tmp.path(), usage.clone())

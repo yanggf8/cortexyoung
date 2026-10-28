@@ -1,7 +1,4 @@
-//! Event sync: ids must equal the ones claudecat already uploaded, byte for byte.
-//!
-//! The fixtures below are built here, written to disk, and were fed to `claudecat::telemetry::scan`
-//! to obtain the golden (payload, id) pairs asserted further down. See `dump_fixtures`.
+//! Event upload, restart boundary, and local watermark behavior.
 
 use cort::measure_progress::{self, Load, Progress};
 use cort::measure_store::{MeasureStore, SqliteStore};
@@ -39,42 +36,42 @@ fn build_v2(path: &Path) {
     // stamped v2 row, plain
     c.execute(
         "INSERT INTO command_log (id,ts,project_id,machine_id,machine_source,command,args_summary,status,error_code,read_source,requested_content_mode,effective_content_mode,receipt_hit,index_stale,bytes_out,saved_bytes)
-         VALUES (1,1760000000000,'proj-1','mach-A','etc-machine-id','impact','--symbol foo','ok',NULL,NULL,NULL,NULL,1,0,1234,56)",
+         VALUES (1,1793116800000,'proj-1','mach-A','etc-machine-id','impact','--symbol foo','ok',NULL,NULL,NULL,NULL,1,0,1234,56)",
         [],
     )
     .unwrap();
     // NULLs, non-ASCII, quotes and control characters in text
     c.execute(
         "INSERT INTO command_log (id,ts,project_id,machine_id,machine_source,command,args_summary,status,error_code,bytes_out,saved_bytes)
-         VALUES (2,1760000001000,NULL,'mach-B','env','read',?1,'error','not_found',0,0)",
+         VALUES (2,1793116801000,NULL,'mach-B','env','read',?1,'error','not_found',0,0)",
         params!["caf\u{e9} \u{65e5}\u{672c}\u{8a9e} \"q\" \\ \n\t<&>\u{1}"],
     )
     .unwrap();
     // float, huge float, non-finite float, and a BLOB in text columns
     c.execute(
         "INSERT INTO command_log (id,ts,project_id,machine_id,machine_source,command,args_summary,status,read_source,receipt_hit,index_stale,bytes_out,saved_bytes)
-         VALUES (3,1760000002000,'proj-1','mach-A','etc-machine-id','impact','x','ok',?1,0.5,1e21,2.5,9e999)",
+         VALUES (3,1793116802000,'proj-1','mach-A','etc-machine-id','impact','x','ok',?1,0.5,1e21,2.5,9e999)",
         params![vec![0xdeu8, 0xad, 0xbe, 0xef, 0x00]],
     )
     .unwrap();
     // defaulted stamp -> legacy: machine from _usage_meta, machine columns dropped from payload
     c.execute(
         "INSERT INTO command_log (id,ts,project_id,command,args_summary,status,bytes_out,saved_bytes)
-         VALUES (7,1760000003000,'proj-2','search','legacy-default','ok',10,3)",
+         VALUES (7,1793116803000,'proj-2','search','legacy-default','ok',10,3)",
         [],
     )
     .unwrap();
     // explicit legacy_unknown stamp, more columns populated (so the removal order matters)
     c.execute(
         "INSERT INTO command_log (id,ts,project_id,machine_id,machine_source,command,args_summary,status,error_code,read_source,requested_content_mode,effective_content_mode,receipt_hit,index_stale,bytes_out,saved_bytes)
-         VALUES (9,1760000004000,'proj-2','legacy_unknown','legacy_no_stamp','read','legacy-explicit','ok','e','src','full','slice',1,1,77,5)",
+         VALUES (9,1793116804000,'proj-2','legacy_unknown','legacy_no_stamp','read','legacy-explicit','ok','e','src','full','slice',1,1,77,5)",
         [],
     )
     .unwrap();
     // large rowid, float ts (time_ms must stay None)
     c.execute(
         "INSERT INTO command_log (id,ts,project_id,machine_id,machine_source,command,args_summary,status,bytes_out,saved_bytes)
-         VALUES (9000000000,1760000005000.5,'proj-3','mach-A','etc-machine-id','x','y','ok',1,0)",
+         VALUES (9000000000,1793116805000.5,'proj-3','mach-A','etc-machine-id','x','y','ok',1,0)",
         [],
     )
     .unwrap();
@@ -85,8 +82,8 @@ fn build_pre_v2(path: &Path) {
     c.execute_batch(PRE_V2_SCHEMA).unwrap();
     c.execute_batch(
         "INSERT INTO _usage_meta VALUES ('MACHINE_ID','old-machine'),('MACHINE_ID_SOURCE','hostname');
-         INSERT INTO command_log VALUES (1,1750000000000,'p-old','impact','--symbol bar','ok',NULL,321,0);
-         INSERT INTO command_log VALUES (2,1750000001000,NULL,'read','\u{4e2d}\u{6587}','error','boom',0,12);",
+         INSERT INTO command_log VALUES (1,1793116800000,'p-old','impact','--symbol bar','ok',NULL,321,0);
+         INSERT INTO command_log VALUES (2,1793116801000,NULL,'read','\u{4e2d}\u{6587}','error','boom',0,12);",
     )
     .unwrap();
 }
@@ -96,126 +93,9 @@ const COST_FILE: &str = r#"{"zeta":1,"machine":{"source":"env","id":"cost-machin
 
 fn build_cost(dir: &Path) {
     fs::create_dir_all(dir).unwrap();
-    fs::write(dir.join("2026-10-22.json"), COST_FILE).unwrap();
+    fs::write(dir.join("2026-10-28.json"), COST_FILE).unwrap();
     fs::write(dir.join("ignored.txt"), "not json").unwrap();
 }
-
-/// Not a test: writes the fixtures to `$CORT_FIXTURE_OUT` (v2/usage.db, prev2/usage.db, cost/).
-/// Golden values below were produced by running `claudecat::telemetry::scan` on these exact
-/// files, never by reading claudecat's source. Run:
-/// `CORT_FIXTURE_OUT=<dir> cargo test --test telemetry dump_fixtures -- --ignored`
-#[test]
-#[ignore]
-fn dump_fixtures() {
-    let out = PathBuf::from(std::env::var("CORT_FIXTURE_OUT").unwrap());
-    for d in ["v2", "prev2"] {
-        fs::create_dir_all(out.join(d)).unwrap();
-    }
-    build_v2(&out.join("v2/usage.db"));
-    build_pre_v2(&out.join("prev2/usage.db"));
-    build_cost(&out.join("cost"));
-}
-
-// ---------------------------------------------------------------------------------------------
-// Golden values: what `claudecat::telemetry::scan` printed for the fixtures above.
-// Produced 2026-10-23 with a throwaway test in a local claudecat checkout (archived, never
-// committed) that called `claudecat::telemetry::scan(Some(<fx>/usage.db), Some(<absent>),
-// Some(<cost dir or absent>))` and printed `payload` and `id` per event.
-// ---------------------------------------------------------------------------------------------
-
-struct Golden {
-    fx: &'static str,
-    id: &'static str,
-    machine_id: &'static str,
-    machine_source: &'static str,
-    project_id: Option<&'static str>,
-    time_ms: Option<i64>,
-    payload: &'static str,
-}
-
-const GOLDEN: &[Golden] = &[
-    Golden {
-        fx: "v2",
-        id: "0d8f34901eec05f73e6339f0034413ea363f6b2d8294f9a51d2993615ca584d0",
-        machine_id: "mach-A",
-        machine_source: "etc-machine-id",
-        project_id: Some("proj-1"),
-        time_ms: Some(1760000000000),
-        payload: r####"{"args_summary":"--symbol foo","bytes_out":1234,"command":"impact","effective_content_mode":null,"error_code":null,"id":1,"index_stale":0,"machine_id":"mach-A","machine_source":"etc-machine-id","project_id":"proj-1","read_source":null,"receipt_hit":1,"requested_content_mode":null,"saved_bytes":56,"status":"ok","ts":1760000000000}"####,
-    },
-    Golden {
-        fx: "v2",
-        id: "5579ee2b2b4de0f01e2432e4218f6d95ddb508107869740406fd6b6142e77af8",
-        machine_id: "mach-B",
-        machine_source: "env",
-        project_id: None,
-        time_ms: Some(1760000001000),
-        payload: r####"{"args_summary":"café 日本語 \"q\" \\ \n\t<&>\u0001","bytes_out":0,"command":"read","effective_content_mode":null,"error_code":"not_found","id":2,"index_stale":null,"machine_id":"mach-B","machine_source":"env","project_id":null,"read_source":null,"receipt_hit":null,"requested_content_mode":null,"saved_bytes":0,"status":"error","ts":1760000001000}"####,
-    },
-    Golden {
-        fx: "v2",
-        id: "5465a20f2d39cb28eedb2e67c9490b3752664e47e946c066a5d8be85a21e6043",
-        machine_id: "mach-A",
-        machine_source: "etc-machine-id",
-        project_id: Some("proj-1"),
-        time_ms: Some(1760000002000),
-        payload: r####"{"args_summary":"x","bytes_out":2.5,"command":"impact","effective_content_mode":null,"error_code":null,"id":3,"index_stale":1e+21,"machine_id":"mach-A","machine_source":"etc-machine-id","project_id":"proj-1","read_source":"blob:deadbeef00","receipt_hit":0.5,"requested_content_mode":null,"saved_bytes":null,"status":"ok","ts":1760000002000}"####,
-    },
-    Golden {
-        fx: "v2",
-        id: "da4d2d890257e5aa24c4fd36b9e4396ac327ea1cbfc2a47c8ecc377aa1ffba67",
-        machine_id: "meta-machine",
-        machine_source: "env",
-        project_id: Some("proj-2"),
-        time_ms: Some(1760000003000),
-        payload: r####"{"args_summary":"legacy-default","bytes_out":10,"command":"search","effective_content_mode":null,"error_code":null,"id":7,"index_stale":null,"project_id":"proj-2","read_source":null,"receipt_hit":null,"requested_content_mode":null,"saved_bytes":3,"status":"ok","ts":1760000003000}"####,
-    },
-    Golden {
-        fx: "v2",
-        id: "2090e6398314490f415999a8dcf5eaa0d4db9d2ee1aac8f3bf566d030579857c",
-        machine_id: "meta-machine",
-        machine_source: "env",
-        project_id: Some("proj-2"),
-        time_ms: Some(1760000004000),
-        payload: r####"{"args_summary":"legacy-explicit","bytes_out":77,"command":"read","effective_content_mode":"slice","error_code":"e","id":9,"index_stale":1,"project_id":"proj-2","read_source":"src","receipt_hit":1,"requested_content_mode":"full","saved_bytes":5,"status":"ok","ts":1760000004000}"####,
-    },
-    Golden {
-        fx: "v2",
-        id: "7556a3cca579374af28c6a40034965d982c8fe423abadbbe96d3d4f5e85dff44",
-        machine_id: "mach-A",
-        machine_source: "etc-machine-id",
-        project_id: Some("proj-3"),
-        time_ms: None,
-        payload: r####"{"args_summary":"y","bytes_out":1,"command":"x","effective_content_mode":null,"error_code":null,"id":9000000000,"index_stale":null,"machine_id":"mach-A","machine_source":"etc-machine-id","project_id":"proj-3","read_source":null,"receipt_hit":null,"requested_content_mode":null,"saved_bytes":0,"status":"ok","ts":1760000005000.5}"####,
-    },
-    Golden {
-        fx: "prev2",
-        id: "5d6e04bd44090863fe5eaf2122112ddc5b1c620d0cbc40959b1dd84446921bbc",
-        machine_id: "old-machine",
-        machine_source: "hostname",
-        project_id: Some("p-old"),
-        time_ms: Some(1750000000000),
-        payload: r####"{"args_summary":"--symbol bar","bytes_out":321,"command":"impact","error_code":null,"id":1,"project_id":"p-old","saved_bytes":0,"status":"ok","ts":1750000000000}"####,
-    },
-    Golden {
-        fx: "prev2",
-        id: "55ad3f37ceb268a2c8230f4f727d989db0fd2104d34c3bebed092c09b8c49bdc",
-        machine_id: "old-machine",
-        machine_source: "hostname",
-        project_id: None,
-        time_ms: Some(1750000001000),
-        payload: r####"{"args_summary":"中文","bytes_out":0,"command":"read","error_code":"boom","id":2,"project_id":null,"saved_bytes":12,"status":"error","ts":1750000001000}"####,
-    },
-    Golden {
-        fx: "cost",
-        id: "ef7290455fc940d9cfcb35e80d74a4e5b91aeb00426dc145a968cb422ec26d41",
-        machine_id: "cost-machine",
-        machine_source: "env",
-        project_id: None,
-        time_ms: None,
-        payload: r####"{"alpha":[1.5,{"a":"café 日","b":null},true],"machine":{"id":"cost-machine","source":"env"},"n":1e+21,"s":"line\nbreak \"q\"","zeta":2}"####,
-    },
-];
 
 struct Fx {
     tmp: tempfile::TempDir,
@@ -244,33 +124,6 @@ impl Fx {
     }
 }
 
-#[test]
-fn event_ids_match_claudecat_golden() {
-    let fx = Fx::new();
-    for name in ["v2", "prev2", "cost"] {
-        let want: Vec<&Golden> = GOLDEN.iter().filter(|g| g.fx == name).collect();
-        let got = fx.events(name);
-        assert_eq!(got.len(), want.len(), "{name}: event count");
-        for (g, w) in got.iter().zip(&want) {
-            // The payload string first: it asserts key order and every value conversion.
-            assert_eq!(g.payload, w.payload, "{name}: payload");
-            assert_eq!(g.event_id, w.id, "{name}: id of {}", w.payload);
-            assert_eq!(g.machine_id, w.machine_id, "{name}: machine_id");
-            assert_eq!(g.machine_source, w.machine_source, "{name}: machine_source");
-            assert_eq!(g.project_id.as_deref(), w.project_id, "{name}: project_id");
-            assert_eq!(g.time_ms, w.time_ms, "{name}: time_ms");
-            assert_eq!(
-                g.source,
-                if name == "cost" {
-                    "cost_daily"
-                } else {
-                    "cort_command"
-                }
-            );
-        }
-    }
-}
-
 /// claudecat sorted keys; the table's column order is not what reaches the hash. Pinned both ways
 /// so a "tidy-up" to column order (or a `preserve_order` feature flip) fails here.
 #[test]
@@ -286,12 +139,6 @@ fn payload_keys_are_sorted_not_in_column_order() {
     let mut sorted = keys.clone();
     sorted.sort();
     assert_eq!(keys, sorted, "keys must be alphabetical");
-    let cols = command_log_columns(&fx.p("v2/usage.db")).unwrap();
-    let col_order: Vec<&str> = cols.split(',').collect();
-    assert_ne!(
-        col_order, keys,
-        "fixture would not distinguish sorted from column order"
-    );
     assert!(
         first.payload.starts_with("{\"args_summary\":"),
         "{}",
@@ -352,7 +199,7 @@ fn cost_report_without_machine_stamp_is_an_error() {
     let fx = Fx::new();
     let dir = fx.p("badcost");
     fs::create_dir_all(&dir).unwrap();
-    fs::write(dir.join("x.json"), r#"{"total":1}"#).unwrap();
+    fs::write(dir.join("2026-10-28.json"), r#"{"total":1}"#).unwrap();
     let err = cost_events(&dir).unwrap_err();
     assert!(err.contains("no machine stamp"), "{err}");
     assert!(cost_events(&fx.p("absent")).unwrap().is_empty());
@@ -378,7 +225,7 @@ fn inputs(fx: &Fx) -> UploadInputs {
     UploadInputs {
         usage_db: fx.p("v2/usage.db"),
         cost_dir: fx.p("no-cost-here"),
-        marker_path: fx.p("verified.json"),
+        progress_path: fx.p("measure-progress.json"),
         machine_id: "mach-A".into(),
     }
 }
@@ -391,215 +238,85 @@ fn held(s: &mut SqliteStore) -> usize {
 }
 
 #[test]
-fn dry_run_refuses_on_mismatch() {
+fn command_boundary_and_empty_remote_rebuild() {
     let fx = Fx::new();
-    let mut s = store(&fx);
-    seed_one_per_machine(&mut s, &fx);
-    let mut local = fx.events("v2");
-    // Same row, but the id was computed from a different byte.
-    local[0].event_id = event_id("cort_command", "mach-A", 0, "not the payload");
-    let err = dry_run(&mut s, &local).unwrap_err();
-    assert!(err.contains("id mismatch on 1 of"), "{err}");
-    assert!(err.contains("rowid 1"), "{err}");
-    assert!(err.contains("local  payload"), "{err}");
-    assert!(err.contains("remote payload"), "{err}");
-}
-
-#[test]
-fn dry_run_refuses_empty_overlap() {
-    let fx = Fx::new();
-    let mut s = store(&fx);
-    // Remote holds two of the three machines; the third has none of its rows there.
-    let v2 = fx.events("v2");
-    s.insert_events(&[v2[0].clone(), v2[1].clone()]).unwrap();
-    let err = dry_run(&mut s, &v2).unwrap_err();
+    let db = fx.p("boundary.db");
+    let conn = Connection::open(&db).unwrap();
+    conn.execute_batch(V2_SCHEMA).unwrap();
+    for (id, ts) in [(1, MEASURE_START_MS - 1), (2, MEASURE_START_MS)] {
+        conn.execute(
+            "INSERT INTO command_log (id,ts,machine_id,machine_source,command,args_summary,status,bytes_out) VALUES (?1,?2,'boundary','test','impact','x','ok',0)",
+            params![id, ts],
+        )
+        .unwrap();
+    }
+    let input = UploadInputs {
+        usage_db: db.clone(),
+        cost_dir: fx.p("missing-cost"),
+        progress_path: fx.p("boundary-progress.json"),
+        machine_id: "boundary".into(),
+    };
+    assert_eq!(cort_events(&db, None).unwrap().len(), 1);
+    assert_eq!(cort_events_page(&db, None, 1).unwrap()[0].rowid, Some(2));
+    let mut remote = SqliteStore::open(&fx.p("empty-boundary-store.db")).unwrap();
+    fs::write(&input.progress_path, "corrupt progress").unwrap();
+    assert!(matches!(
+        upload_events(&mut remote, &input),
+        EventsReport::Uploaded { inserted: 1, .. }
+    ));
+    assert_eq!(remote.event_count("boundary", SOURCE_COMMAND).unwrap(), 1);
+    fs::write(&input.progress_path, "corrupt progress").unwrap();
+    let report = upload_events(&mut remote, &input);
     assert!(
-        err.contains("no overlap: nothing proves the ids match"),
-        "{err}"
+        matches!(report, EventsReport::Uploaded { inserted: 0, .. }),
+        "{report:?}"
     );
-    assert!(err.contains("meta-machine"), "{err}");
-    // And a wholly empty remote.
-    let mut empty = SqliteStore::open(&fx.p("empty.db")).unwrap();
-    assert!(dry_run(&mut empty, &v2).unwrap_err().contains("no overlap"));
+    assert_eq!(remote.event_count("boundary", SOURCE_COMMAND).unwrap(), 1);
 }
 
 #[test]
-fn dry_run_counts_local_only_and_remote_only() {
+fn all_old_command_rows_advance_watermark_before_new_event() {
     let fx = Fx::new();
-    let mut s = store(&fx);
-    let v2 = fx.events("v2");
-    let mach_a: Vec<TelemetryEvent> = v2
-        .iter()
-        .filter(|e| e.machine_id == "mach-A")
-        .cloned()
-        .collect();
-    assert_eq!(mach_a.len(), 3);
-    s.insert_events(&mach_a[..2]).unwrap();
-    // A remote row this machine's file no longer has (pruned after 90 days).
-    let mut old = mach_a[0].clone();
-    old.payload = old.payload.replace("\"id\":1,", "\"id\":99,");
-    old.event_id = event_id("cort_command", "mach-A", 0, &old.payload);
-    s.insert_events(&[old]).unwrap();
-    let report = dry_run(&mut s, &mach_a).unwrap();
-    assert_eq!(
-        report,
-        DryRun {
-            matched: 2,
-            mismatched: vec![],
-            local_only: 1,
-            remote_only: 1
+    let db = fx.p("old-only.db");
+    let conn = Connection::open(&db).unwrap();
+    conn.execute_batch(V2_SCHEMA).unwrap();
+    for id in 1..=3 {
+        conn.execute(
+            "INSERT INTO command_log (id,ts,machine_id,machine_source,command,args_summary,status,bytes_out) VALUES (?1,?2,'boundary','test','impact','x','ok',0)",
+            params![id, MEASURE_START_MS - 1],
+        )
+        .unwrap();
+    }
+    let input = UploadInputs {
+        usage_db: db.clone(),
+        cost_dir: fx.p("missing-cost"),
+        progress_path: fx.p("old-progress.json"),
+        machine_id: "boundary".into(),
+    };
+    let mut remote = SqliteStore::open(&fx.p("old-store.db")).unwrap();
+    assert!(matches!(
+        upload_events(&mut remote, &input),
+        EventsReport::Uploaded {
+            scanned: 0,
+            inserted: 0,
+            watermark: Some(3),
+            ..
         }
-    );
-}
-
-#[test]
-fn verify_writes_the_marker() {
-    let fx = Fx::new();
-    let mut s = store(&fx);
-    seed_one_per_machine(&mut s, &fx);
-    let report = verify_events(&mut s, &inputs(&fx), 42).unwrap();
-    assert_eq!(report.matched, 3);
-    let marker: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(fx.p("verified.json")).unwrap()).unwrap();
-    assert_eq!(marker["machine_id"], "mach-A");
-    assert_eq!(marker["verified_ms"], 42);
-    // Verification wrote nothing but the marker.
-    assert_eq!(held(&mut s), 3);
-    assert_eq!(s.event_watermark("mach-A", "cort_command").unwrap(), None);
-}
-
-#[test]
-fn failed_verify_leaves_no_marker() {
-    let fx = Fx::new();
-    let mut s = store(&fx); // empty remote: no overlap
-    assert!(verify_events(&mut s, &inputs(&fx), 1).is_err());
-    assert!(!fx.p("verified.json").exists());
-}
-
-/// A machine that never uploaded proves its first upload by absence in the measurement store.
-#[test]
-fn new_machine_verify_opens_the_gate_only_when_nothing_is_remote() {
-    let fx = Fx::new();
-    let mut s = store(&fx);
-    let found = verify_new_machine(&mut s, &inputs(&fx), 42).unwrap();
-    assert_eq!(found.machines, 3, "{found:?}");
-    let marker: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(fx.p("verified.json")).unwrap()).unwrap();
-    assert_eq!(marker["machine_id"], "mach-A");
-    assert_eq!(marker["new_machine"], true);
-    assert_eq!(held(&mut s), 0, "verification writes nothing remote");
-    let report = upload_events(&mut s, &inputs(&fx));
-    assert!(
-        matches!(report, EventsReport::Uploaded { .. }),
-        "{report:?}"
-    );
-}
-
-/// One row in the measurement store means a history exists, so the overlap proof is required.
-#[test]
-fn new_machine_verify_refuses_when_any_row_is_remote() {
-    let fx = Fx::new();
-    let mut s = store(&fx);
-    seed_one_per_machine(&mut s, &fx);
-    let error = verify_new_machine(&mut s, &inputs(&fx), 1).unwrap_err();
-    assert!(error.starts_with("not a new machine"), "{error}");
-    assert!(error.contains("without --new-machine"), "{error}");
-    assert!(!fx.p("verified.json").exists());
-}
-
-/// The marker's machine id is checked even if its usage.db rows belong to other machines.
-#[test]
-fn new_machine_verify_checks_marker_machine_without_local_rows() {
-    let fx = Fx::new();
-    let mut s = store(&fx);
-    let mut row = fx.events("v2")[0].clone();
-    row.machine_id = "marker-only".into();
-    s.insert_events(&[row]).unwrap();
-    let input = UploadInputs {
-        machine_id: "marker-only".into(),
-        ..inputs(&fx)
-    };
-    let error = verify_new_machine(&mut s, &input, 1).unwrap_err();
-    assert!(
-        error.contains("marker-only (1 in the measurement store)"),
-        "{error}"
-    );
-    assert!(!fx.p("verified.json").exists());
-}
-
-/// Absence is counted in rows, not in parsed ids: a stored row whose payload has no usable `id`
-/// still means a history exists for that machine.
-#[test]
-fn new_machine_verify_counts_rows_with_unparsable_payloads() {
-    let fx = Fx::new();
-    let mut s = store(&fx);
-    let mut junk = fx.events("v2")[0].clone();
-    junk.payload = "not json".into();
-    junk.event_id = "junk".into();
-    s.insert_events(&[junk]).unwrap();
-    assert!(s.remote_ids("mach-A", "cort_command").unwrap().is_empty());
-    let error = verify_new_machine(&mut s, &inputs(&fx), 1).unwrap_err();
-    assert!(
-        error.contains("mach-A (1 in the measurement store)"),
-        "{error}"
-    );
-    assert!(!fx.p("verified.json").exists());
-}
-
-/// Nothing local proves nothing: an empty usage.db is refused rather than passed vacuously.
-#[test]
-fn new_machine_verify_refuses_an_empty_usage_db() {
-    let fx = Fx::new();
-    let empty = fx.p("empty.db");
-    Connection::open(&empty)
-        .unwrap()
-        .execute_batch(V2_SCHEMA)
-        .unwrap();
-    let mut s = store(&fx);
-    let input = UploadInputs {
-        usage_db: empty,
-        ..inputs(&fx)
-    };
-    let error = verify_new_machine(&mut s, &input, 1).unwrap_err();
-    assert!(error.starts_with("no local cort_command events"), "{error}");
-    assert!(!fx.p("verified.json").exists());
-}
-
-#[test]
-fn upload_refuses_without_watermark_or_passing_verify() {
-    let fx = Fx::new();
-    let mut s = store(&fx);
-    let report = upload_events(&mut s, &inputs(&fx));
-    assert!(
-        matches!(&report, EventsReport::Refused(r) if r.contains("measure verify")),
-        "{report:?}"
-    );
-    assert_eq!(held(&mut s), 0);
-    assert_eq!(s.event_watermark("mach-A", "cort_command").unwrap(), None);
-}
-
-#[test]
-fn marker_for_another_machine_or_schema_does_not_open_the_gate() {
-    let fx = Fx::new();
-    let mut s = store(&fx);
-    seed_one_per_machine(&mut s, &fx);
-    verify_events(&mut s, &inputs(&fx), 1).unwrap();
-    let mut other = inputs(&fx);
-    other.machine_id = "mach-Z".into();
-    assert!(matches!(
-        upload_events(&mut s, &other),
-        EventsReport::Refused(_)
     ));
-    // Changing the column layout changes every payload, so the old comparison proves nothing.
-    Connection::open(fx.p("v2/usage.db"))
-        .unwrap()
-        .execute_batch("ALTER TABLE command_log ADD COLUMN extra TEXT")
-        .unwrap();
+    conn.execute(
+        "INSERT INTO command_log (id,ts,machine_id,machine_source,command,args_summary,status,bytes_out) VALUES (4,?1,'boundary','test','impact','x','ok',0)",
+        [MEASURE_START_MS],
+    )
+    .unwrap();
     assert!(matches!(
-        upload_events(&mut s, &inputs(&fx)),
-        EventsReport::Refused(_)
+        upload_events(&mut remote, &input),
+        EventsReport::Uploaded {
+            inserted: 1,
+            watermark: Some(4),
+            ..
+        }
     ));
-    assert_eq!(held(&mut s), 3);
+    assert_eq!(remote.event_count("boundary", SOURCE_COMMAND).unwrap(), 1);
 }
 
 #[test]
@@ -607,7 +324,6 @@ fn missing_watermark_full_range_inserts_no_duplicates() {
     let fx = Fx::new();
     let mut s = store(&fx);
     seed_one_per_machine(&mut s, &fx);
-    verify_events(&mut s, &inputs(&fx), 1).unwrap();
     let r = upload_events(&mut s, &inputs(&fx));
     assert_eq!(
         r,
@@ -646,7 +362,6 @@ fn watermark_skips_already_uploaded() {
     let fx = Fx::new();
     let mut s = store(&fx);
     seed_one_per_machine(&mut s, &fx);
-    verify_events(&mut s, &inputs(&fx), 1).unwrap();
     upload_events(&mut s, &inputs(&fx));
     assert_eq!(wm(&fx, "mach-A"), Some(9_000_000_000));
     // Nothing new: nothing read, nothing inserted.
@@ -662,12 +377,11 @@ fn watermark_skips_already_uploaded() {
             watermark: Some(9_000_000_000)
         }
     );
-    // A later row is the only one read, and the gate no longer needs the marker.
-    fs::remove_file(fx.p("verified.json")).unwrap();
+    // A later row is the only one read.
     Connection::open(fx.p("v2/usage.db"))
         .unwrap()
         .execute(
-            "INSERT INTO command_log (id,ts,machine_id,machine_source,command,args_summary,status,bytes_out) VALUES (9000000001,1,'mach-A','etc-machine-id','x','y','ok',1)",
+            "INSERT INTO command_log (id,ts,machine_id,machine_source,command,args_summary,status,bytes_out) VALUES (9000000001,1793116800000,'mach-A','etc-machine-id','x','y','ok',1)",
             [],
         )
         .unwrap();
@@ -701,11 +415,10 @@ fn watermark_set_replaces_so_a_recreated_db_can_restart_lower() {
 }
 
 #[test]
-fn cost_events_upload_under_the_same_gate() {
+fn cost_events_upload_after_start() {
     let fx = Fx::new();
     let mut s = store(&fx);
     seed_one_per_machine(&mut s, &fx);
-    verify_events(&mut s, &inputs(&fx), 1).unwrap();
     let mut with_cost = inputs(&fx);
     with_cost.cost_dir = fx.p("cost");
     let r = upload_events(&mut s, &with_cost);
@@ -738,6 +451,23 @@ fn cost_events_upload_under_the_same_gate() {
         0,
         "no `id` key, no rowid pairing"
     );
+}
+
+#[test]
+fn cost_day_spanning_start_is_not_uploaded() {
+    let fx = Fx::new();
+    fs::write(fx.p("cost/2026-10-27.json"), COST_FILE).unwrap();
+    fs::write(fx.p("cost/undated.json"), COST_FILE).unwrap();
+    let events = cost_events(&fx.p("cost")).unwrap();
+    assert_eq!(events.len(), 1);
+    let mut remote = store(&fx);
+    let mut input = inputs(&fx);
+    input.cost_dir = fx.p("cost");
+    assert!(matches!(
+        upload_events(&mut remote, &input),
+        EventsReport::Uploaded { .. }
+    ));
+    assert_eq!(remote.event_count("cost-machine", SOURCE_COST).unwrap(), 1);
 }
 
 fn git(dir: &Path, args: &[&str]) {
@@ -778,7 +508,7 @@ fn log_row(db: &Path, id: i64, machine: &str, project: Option<&str>) {
     let c = Connection::open(db).unwrap();
     c.execute_batch(V2_SCHEMA).ok(); // idempotent: IF NOT EXISTS
     c.execute(
-        "INSERT INTO command_log (id,ts,project_id,machine_id,machine_source,command,args_summary,status,bytes_out) VALUES (?1,1,?2,?3,'env','x','y','ok',1)",
+        "INSERT INTO command_log (id,ts,project_id,machine_id,machine_source,command,args_summary,status,bytes_out) VALUES (?1,1793116800000,?2,?3,'env','x','y','ok',1)",
         params![id, project, machine],
     )
     .unwrap();
@@ -800,6 +530,13 @@ fn project_aliases_map_observed_pairs() {
     log_row(&db, 2, "mach-A", Some(&without));
     log_row(&db, 3, "legacy_unknown", Some(&with)); // no _usage_meta: machine stays unknown
     log_row(&db, 4, "mach-A", Some("unindexed-project"));
+    Connection::open(&db)
+        .unwrap()
+        .execute(
+            "INSERT INTO command_log (id,ts,project_id,machine_id,machine_source,command,args_summary,status,bytes_out) VALUES (5,?1,?2,'old-only','env','x','y','ok',0)",
+            params![MEASURE_START_MS - 1, &with],
+        )
+        .unwrap();
     let aliases = project_aliases(&db).unwrap();
     assert_eq!(aliases.len(), 1, "{aliases:?}");
     assert_eq!(
@@ -825,10 +562,9 @@ fn alias_appears_on_a_later_run_after_its_events_were_watermarked() {
     let up = UploadInputs {
         usage_db: db.clone(),
         cost_dir: fx.p("no-cost-here"),
-        marker_path: fx.p("verified.json"),
+        progress_path: fx.p("measure-progress.json"),
         machine_id: "mach-A".into(),
     };
-    verify_events(&mut s, &up, 1).unwrap();
     let first = upload_events(&mut s, &up);
     assert!(
         matches!(first, EventsReport::Uploaded { aliases: 0, .. }),
@@ -880,8 +616,7 @@ fn schema_file_warns_that_column_order_is_hashed() {
     );
 }
 
-/// `--help` is answered globally (there is no per-verb help), so the retention boundary and the
-/// dry-run flag live in the `measure` line of the usage text.
+/// `--help` is answered globally, so the restart and retention boundaries live in its usage text.
 #[test]
 fn help_states_the_retention_boundary() {
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_cort"))
@@ -889,7 +624,14 @@ fn help_states_the_retention_boundary() {
         .output()
         .unwrap();
     let text = String::from_utf8_lossy(&out.stdout);
-    assert!(text.contains("verify compares event ids"), "{text}");
+    assert!(
+        text.contains("uploads start at 2026-10-28 00:00 Taiwan time"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("measure <configure|show|record|collect|verify"),
+        "{text}"
+    );
     assert!(text.contains("rows not yet uploaded 180 days"), "{text}");
     assert!(text.contains("pruned_unuploaded_rows"), "{text}");
     assert!(!text.contains("record not running"), "{text}");
@@ -910,7 +652,7 @@ fn replace_usage_db(fx: &Fx, rows: &[(i64, &str)]) {
     c.execute_batch(V2_SCHEMA).unwrap();
     for (id, cmd) in rows {
         c.execute(
-            "INSERT INTO command_log (id,ts,machine_id,machine_source,command,args_summary,status,bytes_out) VALUES (?1,1,'mach-A','etc-machine-id',?2,'y','ok',1)",
+            "INSERT INTO command_log (id,ts,machine_id,machine_source,command,args_summary,status,bytes_out) VALUES (?1,1793116800000,'mach-A','etc-machine-id',?2,'y','ok',1)",
             params![id, cmd],
         )
         .unwrap();
@@ -920,7 +662,6 @@ fn replace_usage_db(fx: &Fx, rows: &[(i64, &str)]) {
 fn uploaded_s(fx: &Fx) -> SqliteStore {
     let mut s = store(fx);
     seed_one_per_machine(&mut s, fx);
-    verify_events(&mut s, &inputs(fx), 1).unwrap();
     upload_events(&mut s, &inputs(fx));
     assert_eq!(wm(fx, "mach-A"), Some(9_000_000_000));
     s
@@ -977,7 +718,6 @@ fn pruned_watermark_row_falls_back_to_full_range_without_regating() {
         .unwrap()
         .execute("DELETE FROM command_log WHERE id = 9000000000", [])
         .unwrap();
-    fs::remove_file(fx.p("verified.json")).unwrap(); // no marker: the fallback must not need one
     let r = upload_events(&mut s, &inputs(&fx));
     assert!(
         matches!(&r, EventsReport::Uploaded { scanned: 5, inserted: 0, full_range: true,
@@ -988,42 +728,16 @@ fn pruned_watermark_row_falls_back_to_full_range_without_regating() {
 }
 
 #[test]
-fn marker_certifies_algorithm_not_file() {
-    let fx = Fx::new();
-    let mut s = store(&fx);
-    seed_one_per_machine(&mut s, &fx);
-    verify_events(&mut s, &inputs(&fx), 1).unwrap();
-    // Same machine, same column layout, entirely different contents (and so no overlap with the
-    // remote at all): the verified algorithm still applies, so the gate stays open.
-    replace_usage_db(&fx, &[(1, "other"), (2, "rows")]);
-    let mut fresh = SqliteStore::open(&fx.p("fresh.db")).unwrap();
-    let r = upload_events(&mut fresh, &inputs(&fx));
-    assert!(
-        matches!(
-            r,
-            EventsReport::Uploaded {
-                scanned: 2,
-                inserted: 2,
-                full_range: true,
-                ..
-            }
-        ),
-        "{r:?}"
-    );
-}
-
-#[test]
 fn upload_pages_through_a_large_range() {
     let fx = Fx::new();
     let mut s = store(&fx);
     seed_one_per_machine(&mut s, &fx);
-    verify_events(&mut s, &inputs(&fx), 1).unwrap();
     {
         let c = Connection::open(fx.p("v2/usage.db")).unwrap();
         c.execute_batch("BEGIN").unwrap();
         for i in 1..=4500i64 {
             c.execute(
-                "INSERT INTO command_log (id,ts,machine_id,machine_source,command,args_summary,status,bytes_out) VALUES (?1,1,'mach-A','etc-machine-id','bulk','y','ok',1)",
+                "INSERT INTO command_log (id,ts,machine_id,machine_source,command,args_summary,status,bytes_out) VALUES (?1,1793116800000,'mach-A','etc-machine-id','bulk','y','ok',1)",
                 params![10_000_000_000 + i],
             )
             .unwrap();
@@ -1090,7 +804,7 @@ fn schema_change_in_same_db_continues_after_watermark() {
             .unwrap();
         for id in [9_000_000_010i64, 9_000_000_011] {
             c.execute(
-                "INSERT INTO command_log (id,ts,machine_id,machine_source,command,args_summary,status,bytes_out,extra) VALUES (?1,1,'mach-A','etc-machine-id','new','y','ok',1,'e')",
+                "INSERT INTO command_log (id,ts,machine_id,machine_source,command,args_summary,status,bytes_out,extra) VALUES (?1,1793116800000,'mach-A','etc-machine-id','new','y','ok',1,'e')",
                 params![id],
             )
             .unwrap();
@@ -1129,7 +843,7 @@ fn schema_change_then_pruned_watermark_resends_full_range() {
             .unwrap();
         for id in [9_000_000_010i64, 9_000_000_011] {
             c.execute(
-                "INSERT INTO command_log (id,ts,machine_id,machine_source,command,args_summary,status,bytes_out,extra) VALUES (?1,2,'mach-A','etc-machine-id','new','y','ok',1,'e')",
+                "INSERT INTO command_log (id,ts,machine_id,machine_source,command,args_summary,status,bytes_out,extra) VALUES (?1,1793116800000,'mach-A','etc-machine-id','new','y','ok',1,'e')",
                 params![id],
             )
             .unwrap();
@@ -1163,7 +877,6 @@ fn same_millisecond_same_command_distinct_rows_both_upload_in_full_range() {
     let first = cort_events(&fx.p("v2/usage.db"), None).unwrap()[0].clone();
     assert_eq!(first.rowid, Some(1));
     s.insert_events(&[first]).unwrap();
-    verify_events(&mut s, &inputs(&fx), 1).unwrap();
     let r = upload_events(&mut s, &inputs(&fx));
     assert!(
         matches!(

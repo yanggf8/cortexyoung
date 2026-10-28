@@ -1,24 +1,20 @@
-//! Usage events, uploaded to the measurement database under the ids claudecat already used.
+//! Usage events uploaded to the measurement database from the 2026-10-28 restart instant.
 //!
 //! The event id is a hash of `source \0 machine \0 rowid \0 payload`, so "the same event" means
-//! "the same bytes". claudecat uploaded the history under its own bytes; an id that differs in
-//! one character uploads that history a second time, and a remote row cannot be taken back. Every
-//! rule below is therefore copied from what claudecat *produced* (golden values in
-//! `tests/telemetry.rs`), including two behaviours its source only implies:
+//! "the same bytes". The serializer preserves the established payload shape, including two
+//! SQLite and JSON details:
 //!
 //! * the payload's keys come out **alphabetical**, not in column order (its JSON map is a
 //!   `BTreeMap`, whatever the column order of the table), and
 //! * `SELECT rowid, * FROM command_log` yields no `rowid` key at all -- SQLite names the rowid
 //!   column `id` when the table's primary key is the rowid alias, and the second `id` overwrites
-//!   the first -- so claudecat hashed **rowid 0** for every `cort_command` event.
+//!   the first -- so command events hash **rowid 0**.
 //!
 //! The JSON here is written by hand over `BTreeMap`, so cort's own `serde_json` feature set (which
 //! decides whether *its* maps keep insertion order) cannot change a byte.
 //!
-//! Dry-run gate: the first upload for a machine is allowed only after [`verify_events`] has
-//! compared local ids with the remote ones, or once the machine already has an event watermark.
+//! Measurement restarted on 2026-10-28; only events at or after [`MEASURE_START_MS`] upload.
 
-use crate::data_dir::write_atomic;
 use crate::measure::format_utc;
 use crate::measure_progress::{self, Progress};
 use crate::measure_store::MeasureStore;
@@ -36,8 +32,24 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 pub const SOURCE_COMMAND: &str = "cort_command";
+/// Measurement restarted on 2026-10-28 at 00:00 Taiwan time (2026-10-27 16:00 UTC).
+pub const MEASURE_START_MS: i64 = 1_793_116_800_000;
+
+#[cfg(test)]
+mod start_tests {
+    use super::MEASURE_START_MS;
+
+    #[test]
+    fn restart_instant_is_taiwan_midnight() {
+        assert_eq!(MEASURE_START_MS, 1_793_116_800_000);
+        assert_eq!(
+            crate::measure::format_utc(MEASURE_START_MS),
+            "2026-10-27 16:00 UTC"
+        );
+    }
+}
 pub const SOURCE_COST: &str = "cost_daily";
-/// Index health observations. They have no claudecat history, so their id is a content key
+/// Index health observations. Their id is a content key
 /// (day + root + the row's payload without `id` or `ts`) rather than a rowid: re-observing the
 /// same state on the same day -- including after `usage.db` is replaced -- must not store a
 /// second row. `id` is left out because a replaced `usage.db` numbers its rows afresh.
@@ -54,15 +66,6 @@ pub struct TelemetryEvent {
     pub payload: String,
     /// The row's real SQLite rowid (`None` for sources that have none). Not what the id hashes.
     pub rowid: Option<i64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DryRun {
-    pub matched: usize,
-    /// `(local rowid, description)` for every paired row whose ids differ.
-    pub mismatched: Vec<(i64, String)>,
-    pub local_only: usize,
-    pub remote_only: usize,
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -261,8 +264,7 @@ fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool, Stri
     stmt.exists((table, column)).map_err(|e| e.to_string())
 }
 
-/// The column names `SELECT rowid, * FROM command_log` returns, joined. They decide every payload
-/// (hence every id), so the verify marker records them: a changed schema voids the verification.
+/// Column order returned by the command log query; useful when checking payload shape.
 pub fn command_log_columns(usage_db: &Path) -> Result<String, String> {
     let conn = open_readonly(usage_db)?;
     let stmt = conn
@@ -271,7 +273,8 @@ pub fn command_log_columns(usage_db: &Path) -> Result<String, String> {
     Ok(stmt.column_names().join(","))
 }
 
-/// Every `command_log` row (or those after `after_rowid`) as an event. A missing file is no events.
+/// `command_log` rows at or after the restart (and after `after_rowid`) as events.
+/// A missing file is no events.
 pub fn cort_events(
     usage_db: &Path,
     after_rowid: Option<i64>,
@@ -279,7 +282,7 @@ pub fn cort_events(
     read_events(usage_db, after_rowid.map_or(Scope::All, Scope::After), None)
 }
 
-/// At most `limit` events after `after_rowid`, in rowid order: one page of an upload.
+/// At most `limit` post-restart events after `after_rowid`, in rowid order.
 pub fn cort_events_page(
     usage_db: &Path,
     after_rowid: Option<i64>,
@@ -346,7 +349,7 @@ pub fn health_events(
     if !usage_db.exists() {
         return Ok(Vec::new());
     }
-    health_rows_after_at(usage_db, after_id, limit)?
+    health_rows_after_at(usage_db, after_id, limit, MEASURE_START_MS)?
         .into_iter()
         .map(|row| {
             let mut value = json!({
@@ -401,8 +404,8 @@ fn read_events(
     let row_stamp = has_column(&conn, "command_log", "machine_id")?
         && has_column(&conn, "command_log", "machine_source")?;
     let filter = match scope {
-        Scope::All => "",
-        Scope::After(_) => " WHERE rowid > ?1",
+        Scope::All => " WHERE ts >= ?1",
+        Scope::After(_) => " WHERE rowid > ?1 AND ts >= ?2",
     };
     let cap = limit.map_or(String::new(), |n| format!(" LIMIT {n}"));
     let sql = format!("SELECT rowid, * FROM command_log{filter} ORDER BY rowid{cap}");
@@ -412,8 +415,8 @@ fn read_events(
         .map_err(|e| format!("{}: {e}", usage_db.display()))?;
     let names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
     let mut rows = match scope {
-        Scope::All => stmt.query([]),
-        Scope::After(r) => stmt.query([r]),
+        Scope::All => stmt.query([MEASURE_START_MS]),
+        Scope::After(r) => stmt.query((r, MEASURE_START_MS)),
     }
     .map_err(|e| e.to_string())?;
     let mut out = Vec::new();
@@ -489,7 +492,26 @@ pub fn cost_events(dir: &Path) -> Result<Vec<TelemetryEvent>, String> {
     }
     paths.sort();
     let mut out = Vec::new();
+    let start_utc_day = format_utc(MEASURE_START_MS);
+    let partial_day = start_utc_day.get(..10).unwrap_or_default();
     for path in paths {
+        // Cost files represent a whole UTC day. The day straddling the restart cannot be
+        // separated by event time, so begin with the first full day after the boundary.
+        let day = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default();
+        let bytes = day.as_bytes();
+        let dated = bytes.len() == 10
+            && bytes[4] == b'-'
+            && bytes[7] == b'-'
+            && bytes
+                .iter()
+                .enumerate()
+                .all(|(i, b)| i == 4 || i == 7 || b.is_ascii_digit());
+        if !dated || day <= partial_day {
+            continue;
+        }
         let body = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
         let report: J =
             serde_json::from_str(&body).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -552,10 +574,10 @@ fn observed_pairs(usage_db: &Path) -> Result<Vec<(String, String)>, String> {
         "NULL"
     };
     let sql = format!(
-        "SELECT DISTINCT {machine}, project_id FROM command_log WHERE typeof(project_id) = 'text'"
+        "SELECT DISTINCT {machine}, project_id FROM command_log WHERE typeof(project_id) = 'text' AND ts >= ?1"
     );
     let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
-    let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
+    let mut rows = stmt.query([MEASURE_START_MS]).map_err(|e| e.to_string())?;
     let mut out = std::collections::BTreeSet::new();
     while let Some(row) = rows.next().map_err(|e| e.to_string())? {
         let machine = row
@@ -622,101 +644,17 @@ pub fn project_aliases(usage_db: &Path) -> Result<Vec<(String, String, String)>,
 }
 
 // ---------------------------------------------------------------------------------------------
-// dry run
-// ---------------------------------------------------------------------------------------------
-
-/// Compare local `cort_command` events with what the store already holds, without writing.
-///
-/// Pairing key: `(machine_id, rowid)` -- the id is the thing under test, so it cannot also be the
-/// key. Every machine that has local events must overlap the remote at least once; zero overlap
-/// proves nothing about the ids. Any paired row whose ids differ refuses the whole run.
-pub fn dry_run(store: &mut dyn MeasureStore, local: &[TelemetryEvent]) -> Result<DryRun, String> {
-    let mut by_machine: BTreeMap<&str, Vec<&TelemetryEvent>> = BTreeMap::new();
-    for e in local.iter().filter(|e| e.source == SOURCE_COMMAND) {
-        by_machine.entry(&e.machine_id).or_default().push(e);
-    }
-    let mut report = DryRun {
-        matched: 0,
-        mismatched: Vec::new(),
-        local_only: 0,
-        remote_only: 0,
-    };
-    let mut no_overlap = Vec::new();
-    for (machine, events) in &by_machine {
-        let remote = store.remote_ids(machine, SOURCE_COMMAND)?;
-        let mut overlap = 0usize;
-        let mut seen = std::collections::HashSet::new();
-        for e in events {
-            let Some(rowid) = e.rowid else { continue };
-            seen.insert(rowid);
-            match remote.get(&rowid) {
-                None => report.local_only += 1,
-                Some(rid) if *rid == e.event_id => {
-                    overlap += 1;
-                    report.matched += 1;
-                }
-                Some(rid) => {
-                    overlap += 1;
-                    let remote_payload = store
-                        .remote_payload(machine, SOURCE_COMMAND, rid)?
-                        .unwrap_or_else(|| "<gone>".into());
-                    report.mismatched.push((
-                        rowid,
-                        format!(
-                            "machine {machine} rowid {rowid}: local id {} remote id {rid}\n  local  payload {}\n  remote payload {remote_payload}",
-                            e.event_id, e.payload
-                        ),
-                    ));
-                }
-            }
-        }
-        report.remote_only += remote.keys().filter(|r| !seen.contains(r)).count();
-        if overlap == 0 {
-            no_overlap.push(*machine);
-        }
-    }
-    if !report.mismatched.is_empty() {
-        let shown: Vec<&str> = report
-            .mismatched
-            .iter()
-            .take(5)
-            .map(|(_, d)| d.as_str())
-            .collect();
-        return Err(format!(
-            "id mismatch on {} of {} paired rows; refusing to upload. First {}:\n{}",
-            report.mismatched.len(),
-            report.matched + report.mismatched.len(),
-            shown.len(),
-            shown.join("\n")
-        ));
-    }
-    if !no_overlap.is_empty() {
-        return Err(format!(
-            "no overlap: nothing proves the ids match (machine(s) {} have local events and none \
-             of them exist remotely)",
-            no_overlap.join(", ")
-        ));
-    }
-    Ok(report)
-}
-
-// ---------------------------------------------------------------------------------------------
-// the verified marker, upload, and the gate
+// upload
 // ---------------------------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
 pub struct UploadInputs {
     pub usage_db: PathBuf,
     pub cost_dir: PathBuf,
-    /// Local file written by a successful `measure verify`; see [`verify_events`].
-    pub marker_path: PathBuf,
+    pub progress_path: PathBuf,
     /// The machine running this, whose events watermark is kept (rows in a carried-over usage.db
     /// stamped with another machine still upload under their own `machine_id`).
     pub machine_id: String,
-}
-
-pub fn default_marker_path() -> PathBuf {
-    crate::data_dir::data_dir().join("measure-events-verified.json")
 }
 
 pub fn default_cost_dir() -> PathBuf {
@@ -729,112 +667,6 @@ pub fn default_cost_dir() -> PathBuf {
     base.join("cort-evals/claude-cost")
 }
 
-/// Whether a dry-run has passed for this machine and this `command_log` column layout.
-///
-/// The marker certifies the ALGORITHM for `(machine, column layout)`, not a particular file.
-/// What a dry-run proves is that the id function, run over this layout, reproduces the ids the
-/// remote already holds. A replacement `usage.db` with the same layout is hashed by that same
-/// verified function, so its ids are right and `INSERT OR IGNORE` absorbs any repeats. Demanding a
-/// fresh dry-run per file would also block a recreated database forever: its rows are new, so it
-/// can never overlap the remote and the dry-run's overlap rule could never pass again. A changed
-/// layout does void it, because that changes the function's output.
-fn marker_valid(input: &UploadInputs) -> bool {
-    let Ok(text) = fs::read_to_string(&input.marker_path) else {
-        return false;
-    };
-    let Ok(v) = serde_json::from_str::<Value>(&text) else {
-        return false;
-    };
-    v["machine_id"] == input.machine_id.as_str()
-        && command_log_columns(&input.usage_db).is_ok_and(|c| v["columns"] == c.as_str())
-}
-
-/// What [`verify_new_machine`] found: how many local events it checked, for how many machine ids.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NewMachine {
-    pub local: usize,
-    pub machines: usize,
-}
-
-/// The first-upload proof for a machine that never uploaded. [`verify_events`] proves the ids by
-/// overlap, which such a machine can never have; here the proof is absence. The gate exists so an
-/// id that differs from claudecat's never uploads a history twice. Claudecat's history was copied
-/// into the measurement store by `copy-events` on 2026-10-25 and re-checked on 2026-10-28, so
-/// that store answers both history questions: every machine id among the local `cort_command`
-/// events must have no row there. One row refuses, and the overlap check is the way forward. On
-/// success it writes the same marker [`verify_events`] does.
-pub fn verify_new_machine(
-    store: &mut dyn MeasureStore,
-    input: &UploadInputs,
-    now_ms: i64,
-) -> Result<NewMachine, String> {
-    let local = cort_events(&input.usage_db, None)?;
-    let mut machines: std::collections::BTreeSet<&str> = local
-        .iter()
-        .filter(|e| e.source == SOURCE_COMMAND)
-        .map(|e| e.machine_id.as_str())
-        .collect();
-    // Absence proves something only about what was looked at: an empty or missing usage.db would
-    // pass for anything, and the marker is written for this machine, so this machine is checked
-    // whether or not its rows are here yet.
-    if machines.is_empty() {
-        return Err(format!(
-            "no local cort_command events in {}; nothing to prove absence for",
-            input.usage_db.display()
-        ));
-    }
-    machines.insert(input.machine_id.as_str());
-    let mut present = Vec::new();
-    for machine in &machines {
-        let here = store.event_count(machine, SOURCE_COMMAND)?;
-        if here > 0 {
-            present.push(format!("{machine} ({here} in the measurement store)"));
-        }
-    }
-    if !present.is_empty() {
-        return Err(format!(
-            "not a new machine: remote rows exist for {}; run `cort measure verify` without \
-             --new-machine, which proves the ids by overlap",
-            present.join(", ")
-        ));
-    }
-    let marker = json!({
-        "machine_id": input.machine_id,
-        "columns": command_log_columns(&input.usage_db)?,
-        "verified_ms": now_ms,
-        "matched": 0,
-        "new_machine": true,
-    });
-    write_atomic(&input.marker_path, &marker.to_string())
-        .map_err(|e| format!("cannot write {}: {e}", input.marker_path.display()))?;
-    Ok(NewMachine {
-        local: local.len(),
-        machines: machines.len(),
-    })
-}
-
-/// Compare every local `cort_command` event with the remote, and on success write the
-/// marker that lets the first real upload through.
-pub fn verify_events(
-    store: &mut dyn MeasureStore,
-    input: &UploadInputs,
-    now_ms: i64,
-) -> Result<DryRun, String> {
-    let local = cort_events(&input.usage_db, None)?;
-    let report = dry_run(store, &local)?;
-    if report.matched > 0 {
-        let marker = json!({
-            "machine_id": input.machine_id,
-            "columns": command_log_columns(&input.usage_db)?,
-            "verified_ms": now_ms,
-            "matched": report.matched,
-        });
-        write_atomic(&input.marker_path, &marker.to_string())
-            .map_err(|e| format!("cannot write {}: {e}", input.marker_path.display()))?;
-    }
-    Ok(report)
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EventsReport {
     Uploaded {
@@ -842,7 +674,7 @@ pub enum EventsReport {
         inserted: usize,
         aliases: usize,
         /// Everything was read, not just the rows after the watermark: either there was no
-        /// watermark yet (verified by dry-run) or `reason` says why it could not be trusted.
+        /// watermark yet or `reason` says why it could not be trusted.
         full_range: bool,
         /// Why a watermark was not used: `watermark_row_changed` (the file was replaced and the row
         /// at that rowid is a different event) or `watermark_row_missing` (replaced with fewer
@@ -850,8 +682,6 @@ pub enum EventsReport {
         reason: Option<String>,
         watermark: Option<i64>,
     },
-    /// The first upload for this machine has not been verified by a dry-run. Nothing was uploaded.
-    Refused(String),
     /// Reading or writing failed. Nothing is claimed uploaded beyond what the watermark says.
     Failed(String),
 }
@@ -872,7 +702,6 @@ impl EventsReport {
                 watermark,
             } => json!({"status":"uploaded","scanned":scanned,"inserted":inserted,
                 "aliases":aliases,"full_range":full_range,"reason":reason,"watermark":watermark}),
-            EventsReport::Refused(r) => json!({"status":"refused","reason":r}),
             EventsReport::Failed(e) => json!({"status":"failed","error":e}),
         }
     }
@@ -882,18 +711,17 @@ impl EventsReport {
 const PAGE: usize = 2000;
 
 /// Write new events into the store. Never returns an error and
-/// never panics: a refusal or a failure is a value, so the compaction record beside it still runs.
+/// never panics: a failure is a value, so the compaction record beside it still runs.
 ///
 /// With a watermark, the row at that rowid must still be the same row (same raw `ts` and
 /// `command`, see [`row_fingerprint`]; the computed event id would change with any new column and
 /// re-upload history under new ids); then only later rows are read. If it is different or gone,
 /// `usage.db` was replaced (rowids restart) or pruned, so the whole file is read and `INSERT OR IGNORE` dedups. That fallback is
-/// not re-gated: see [`marker_valid`]. With no watermark, the whole file is read, but only if
-/// [`verify_events`] has passed for this machine and column layout.
+/// With no watermark, only events since [`MEASURE_START_MS`] are read.
 pub fn upload_events(store: &mut dyn MeasureStore, input: &UploadInputs) -> EventsReport {
-    let path = input.marker_path.with_file_name("measure-progress.json");
-    let result = measure_progress::open(store, &path, &input.machine_id, Some(&input.usage_db))
-        .and_then(|(mut progress, _)| try_upload(store, input, &mut progress, &path));
+    let path = &input.progress_path;
+    let result = measure_progress::open(store, path, &input.machine_id, Some(&input.usage_db))
+        .and_then(|(mut progress, _)| try_upload(store, input, &mut progress, path));
     match result {
         Ok(r) => r,
         Err(e) => EventsReport::Failed(e),
@@ -909,7 +737,7 @@ pub fn upload_events_with_progress(
     try_upload(store, input, progress, path).unwrap_or_else(EventsReport::Failed)
 }
 
-/// Copy local health observations to the store without the command dry-run gate. `progress_path`
+/// Copy local health observations to the store. `progress_path`
 /// is the progress file to use. Production collection goes through `record_with_scan_until`
 /// instead; usage.db lives in the cache directory, so the path is never derived from it.
 pub fn upload_health_events(
@@ -949,6 +777,8 @@ struct UploadSource<'a> {
     source: &'static str,
     fingerprint: Fingerprint,
     read_page: EventPage,
+    table: &'static str,
+    key: &'static str,
 }
 
 fn health_events_page(
@@ -984,7 +814,31 @@ fn upload_pages(
     let mut inserted = 0;
     loop {
         let page = (config.read_page)(config.usage_db, cursor, PAGE)?;
-        let Some(last) = page.last() else { break };
+        let Some(last) = page.last() else {
+            // An all-old page is empty after the SQL cutoff. Advance past the old tail so
+            // collection does not keep treating those rows as pending on every run.
+            if config.usage_db.exists() {
+                let conn = open_readonly(config.usage_db)?;
+                let sql = format!(
+                    "SELECT MAX({}) FROM {} WHERE {} > ?1 AND ts < ?2",
+                    config.key, config.table, config.key
+                );
+                let old_tail: Option<i64> = conn
+                    .query_row(&sql, (cursor.unwrap_or(0), MEASURE_START_MS), |r| r.get(0))
+                    .map_err(|e| e.to_string())?;
+                if let Some(rowid) = old_tail {
+                    let fingerprint = (config.fingerprint)(config.usage_db, rowid)?
+                        .ok_or("old tail vanished while advancing watermark")?;
+                    // These rows are intentionally discarded. The local retention floor must
+                    // pass them too, or they appear later as unuploaded losses.
+                    let _ = crate::usage::uploaded_floor_at(config.usage_db, config.source, rowid);
+                    progress.set_watermark(config.machine, config.source, rowid, fingerprint);
+                    progress.save(path)?;
+                    watermark = Some(rowid);
+                }
+            }
+            break;
+        };
         scanned += page.len();
         inserted += store.insert_events(&page)?;
         let last_rowid = last.rowid.ok_or("event without a rowid")?;
@@ -997,9 +851,6 @@ fn upload_pages(
         progress.save(path)?;
         watermark = Some(last_rowid);
         cursor = Some(last_rowid);
-        if page.len() < PAGE {
-            break;
-        }
     }
     Ok((scanned, inserted, watermark))
 }
@@ -1017,6 +868,8 @@ fn try_upload_health(
         source: SOURCE_HEALTH,
         fingerprint: health_row_fingerprint,
         read_page: health_events_page,
+        table: "index_health_log",
+        key: "id",
     };
     let (cursor, reason, watermark) = upload_cursor(progress, &config)?;
     let full_range = cursor.is_none();
@@ -1045,19 +898,15 @@ fn try_upload(
         source: SOURCE_COMMAND,
         fingerprint: row_fingerprint,
         read_page: cort_events_page,
+        table: "command_log",
+        key: "rowid",
     };
     let (cursor, reason, watermark) = upload_cursor(progress, &config)?;
-    if watermark.is_none() && !marker_valid(input) {
-        return Ok(EventsReport::Refused(format!(
-            "no event watermark for machine {machine} and no passing verify: run `cort \
-             measure verify` once; nothing was uploaded"
-        )));
-    }
     let full_range = cursor.is_none();
     let mut scanned = 0usize;
     let mut inserted = 0usize;
     // Cost reports have no rowid to watermark; INSERT OR IGNORE is their only dedup, so they go
-    // under the same gate.
+    // without a cursor.
     let cost = cost_events(&input.cost_dir)?;
     if !cost.is_empty() {
         scanned += cost.len();

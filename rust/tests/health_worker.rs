@@ -88,7 +88,7 @@ fn state_of(paths: &KickPaths) -> HealthState {
 }
 
 fn rows(usage_db: &Path) -> Vec<HealthRow> {
-    health_rows_after_at(usage_db, 0, 100).expect("read the health rows")
+    health_rows_after_at(usage_db, 0, 100, i64::MIN).expect("read the health rows")
 }
 
 fn git(root: &Path, args: &[&str]) {

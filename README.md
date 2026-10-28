@@ -60,7 +60,7 @@ Five shipped commands (plus `status`/`projects`/`delete` utilities):
   (`bare` / `scoped` / `receiver` / `type`)
 - `cort memory <record|resolve|recall|status|check|configure|import-config|import-legacy>` — reviewed project facts in a shared Turso ledger, owned by cort; see [Project memory](docs/memory.md)
 - `cort usage [days]` — local per-machine usage stats (best-effort; 1–90 days, default 30)
-- `cort measure <configure|record|collect|verify|health|status|report|show|cron>` — agent measurement in its own Turso database; see [Local usage recording](#local-usage-recording-offline-hook-separate-tursodb-upload)
+- `cort measure <configure|record|collect|health|status|report|show|cron>` — agent measurement in its own Turso database; see [Local usage recording](#local-usage-recording-offline-hook-separate-tursodb-upload)
 
 `struct`, `context`, `read` and `recall` were removed on 2026-10-23 after zero invocations in 30 days
 on both machines; for those jobs use `ast-grep run`, `rg`, or open the file. `cort memory recall` is a
@@ -247,8 +247,8 @@ that actually reached the agent: a v≤5 row stored the final user-authored prom
 credential prefixes and the local account name. The suggestion was removed on 2026-10-25, and the
 thin trigger that replaced it writes identifiers only — harness, model, the harness's own tool
 name and the project id (see [the hook section](#the-pretooluse-hook--the-retrospective-half-of-the-routing)).
-v≤5 rows stay in the local `usage.db` for its 90-day retention and on the remote for good, so such
-an excerpt can still be found there; that scrubber was excerpt-level, not a guarantee that every
+v≤5 rows stay in the local `usage.db` for its 90-day retention, so such an excerpt can still be
+found there until they age out (the remote copies were discarded at the 2026-10-28 measurement restart); that scrubber was excerpt-level, not a guarantee that every
 sensitive phrase is detected. The transcript itself was never copied, and when the hook could not
 read a supported transcript it stored a status such as `no_transcript_path` or
 `transcript_unreadable`, not a guessed need. Transcript readers covered Claude Code/Grok-compatible
@@ -277,28 +277,14 @@ legacy cron entry. `cort measure cron` remains available to install or remove it
 collection uploads batches of local `command_log` and `index_health_log` rows and writes its result to
 `measure.log`. A dead network leaves rows local for a later attempt. Both logs keep uploaded rows 90 days
 and rows not yet uploaded 180 days, pruned when a new command is recorded, before asynchronous
-collection. A row still not uploaded after 180 days (collection never ran, or uploads stayed refused
-pending a verify) is deleted and counted: `cort measure status` reports `pruned_unuploaded_rows`
+collection. A row still not uploaded after 180 days is deleted and counted: `cort measure status` reports `pruned_unuploaded_rows`
 and the next collection writes the count to `measure.log`. An upload pending for more than 7 days
 shows as `upload_stalled_days` in status and as a warning line in `measure.log`. Uploaded
-events are kept remotely for good. The `command_log` event ids are claudecat's, byte for byte (alphabetical
-payload keys, rowid 0 in the hash; `rust/tests/telemetry.rs` pins them against values claudecat
-itself produced), so history it already uploaded is not uploaded twice. Because a wrong id would
-re-upload that history and a remote row cannot be taken back, a machine with no event watermark yet
-uploads nothing until `cort measure verify` has passed for it: verify compares the ids
-computed here with the stored ones for the same machine and row, uploads nothing, and fails on any
-mismatch or on zero overlap. A machine that never uploaded can have no overlap, so it runs
-`cort measure verify --new-machine` instead: that passes only when none of its machine ids has a
-row in the measurement database, which also holds claudecat's copied history. Until then manual `record` still records compactions and reports
-`events.status: "refused"`; background collection writes its result to `measure.log`. A changed
-`command_log` column set voids the verification.
-
-**Retired imports.** `copy-events` copied claudecat's `telemetry_events` and
-`telemetry_project_aliases` from `harnessuse` into the measurement database on 2026-10-25.
-The 2026-10-28 re-check found 31,279 source rows, no conflicts, and at least as many destination
-rows in every `(source, machine_id)` group. `import-audit` imported the retired `CORT-AUDIT.md`
-on 2026-10-25. Both one-time commands were removed on 2026-10-28; the imported rows remain in
-the measurement database.
+events are kept remotely for good. On 2026-10-28 measurement restarted at 00:00 Taiwan
+time (2026-10-27 16:00 UTC): old events, aliases, compactions, and imported rows are discarded.
+No event before that instant is uploaded again, even when local progress is rebuilt against an
+empty measurement database. Daily cost reports from the UTC day spanning the restart are skipped
+because they cannot separate costs from before and after the instant.
 
 ## Install
 

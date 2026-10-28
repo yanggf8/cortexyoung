@@ -1,6 +1,5 @@
 use cort::collect::{
-    run_collect, run_manual, CollectConfig, CollectState, ErrorKind, Failure, KickPaths,
-    ManualMode, ManualStep,
+    run_collect, run_manual, CollectConfig, CollectState, ErrorKind, Failure, KickPaths, ManualStep,
 };
 use cort::measure_store::{MeasureStore, OpenError, SqliteStore};
 use cort::usage::{record_command_at, CommandRecord};
@@ -124,22 +123,20 @@ fn manual_busy_times_out_with_holder() {
                 .unwrap();
         use std::io::Write;
         writeln!(holder, "pid=4242 started_ms={NOW}").unwrap();
-        for args in [&["measure", "record"][..], &["measure", "verify"][..]] {
-            let start = std::time::Instant::now();
-            let output = cort_cli(paths, args);
-            assert!(!output.status.success());
-            assert!(start.elapsed() >= std::time::Duration::from_millis(900));
-            let value: Value = serde_json::from_slice(&output.stdout).unwrap();
-            assert_eq!(value["error"], "measure_collect_busy", "{value}");
-            assert!(value["detail"]["message"]
-                .as_str()
-                .unwrap()
-                .contains("pid 4242"));
-            assert!(value["detail"]["message"]
-                .as_str()
-                .unwrap()
-                .contains(&cort::measure::format_utc(NOW)));
-        }
+        let start = std::time::Instant::now();
+        let output = cort_cli(paths, &["measure", "record"]);
+        assert!(!output.status.success());
+        assert!(start.elapsed() >= std::time::Duration::from_millis(900));
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["error"], "measure_collect_busy", "{value}");
+        assert!(value["detail"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("pid 4242"));
+        assert!(value["detail"]["message"]
+            .as_str()
+            .unwrap()
+            .contains(&cort::measure::format_utc(NOW)));
     });
 }
 
@@ -160,21 +157,14 @@ fn manual_runs_even_when_not_due() {
         );
         before.save(&state_path(paths)).unwrap();
         let mut called = false;
-        run_manual(
-            &mut opener(db),
-            paths,
-            NOW,
-            &config(),
-            ManualMode::Write,
-            &mut |_| {
-                called = true;
-                Ok(ManualStep {
-                    value: (),
-                    events: None,
-                    failure: None,
-                })
-            },
-        )
+        run_manual(&mut opener(db), paths, NOW, &config(), &mut |_| {
+            called = true;
+            Ok(ManualStep {
+                value: (),
+                events: None,
+                failure: None,
+            })
+        })
         .unwrap();
         assert!(called);
         assert!(!state(paths).failures.contains_key("manual"));
@@ -202,7 +192,6 @@ fn manual_failure_counts_manual_only() {
             paths,
             NOW,
             &config(),
-            ManualMode::Write,
             &mut |store| {
                 let _ = store;
                 Err(("push failed: x".to_string(), ErrorKind::Network))
@@ -211,84 +200,17 @@ fn manual_failure_counts_manual_only() {
         assert!(failed.unwrap_err().message().starts_with("push failed:"));
         assert_eq!(state(paths).failures["manual"].count, 1);
         assert_eq!(state(paths).failures["codex"].count, 3);
-        run_manual(
-            &mut opener(db),
-            paths,
-            NOW + 1,
-            &config(),
-            ManualMode::Write,
-            &mut |store| {
-                let _ = store;
-                Ok(ManualStep {
-                    value: (),
-                    events: None,
-                    failure: None,
-                })
-            },
-        )
+        run_manual(&mut opener(db), paths, NOW + 1, &config(), &mut |store| {
+            let _ = store;
+            Ok(ManualStep {
+                value: (),
+                events: None,
+                failure: None,
+            })
+        })
         .unwrap();
         assert!(!state(paths).failures.contains_key("manual"));
         assert_eq!(state(paths).failures["codex"].count, 3);
-    });
-}
-
-#[test]
-fn dry_run_pass_clears_refused_and_stamp() {
-    sandbox(|paths, db| {
-        let mut before = CollectState {
-            refused: true,
-            ..CollectState::default()
-        };
-        before.save(&state_path(paths)).unwrap();
-        let stamp = paths.data_dir.join("measure-batch.spawned");
-        fs::write(&stamp, "123").unwrap();
-        let inputs = cort::telemetry::UploadInputs {
-            usage_db: paths.usage_db.clone(),
-            cost_dir: paths.data_dir.join("cost"),
-            marker_path: paths.data_dir.join("measure-events-verified.json"),
-            machine_id: "manual-test-machine".into(),
-        };
-        let failed: Result<(), _> = run_manual(
-            &mut opener(db),
-            paths,
-            NOW,
-            &config(),
-            ManualMode::DryRun,
-            &mut |store| {
-                cort::telemetry::verify_events(store, &inputs, NOW)
-                    .map(|_| ManualStep {
-                        value: (),
-                        events: None,
-                        failure: None,
-                    })
-                    .map_err(|error| (error, ErrorKind::Storage))
-            },
-        );
-        assert!(failed.is_err());
-        assert!(state(paths).refused);
-        assert!(stamp.exists());
-        let events = cort::telemetry::cort_events(&paths.usage_db, None).unwrap();
-        let mut seeded = SqliteStore::open(db).unwrap();
-        seeded.insert_events(&events).unwrap();
-        drop(seeded);
-        run_manual(
-            &mut opener(db),
-            paths,
-            NOW,
-            &config(),
-            ManualMode::DryRun,
-            &mut |store| {
-                let report = cort::telemetry::verify_events(store, &inputs, NOW)
-                    .map_err(|error| (error, ErrorKind::Storage))?;
-                assert!(report.matched > 0);
-                Ok(cort::collect::dry_run_step(report))
-            },
-        )
-        .unwrap();
-        before = state(paths);
-        assert!(!before.refused);
-        assert!(!before.upload_pending);
-        assert!(!stamp.exists());
     });
 }
 
@@ -299,20 +221,13 @@ fn dry_run_pass_clears_refused_and_stamp() {
 fn record_scan_shape_survives_run_manual() {
     sandbox(|paths, db| {
         let scan = cort::measure::ScanSummary::default();
-        let result = run_manual(
-            &mut opener(db),
-            paths,
-            NOW,
-            &config(),
-            ManualMode::Write,
-            &mut |_| {
-                Ok(ManualStep {
-                    value: scan.clone(),
-                    events: None,
-                    failure: None,
-                })
-            },
-        )
+        let result = run_manual(&mut opener(db), paths, NOW, &config(), &mut |_| {
+            Ok(ManualStep {
+                value: scan.clone(),
+                events: None,
+                failure: None,
+            })
+        })
         .unwrap();
         let output = json!({"status":"recorded","scan":result.to_json()});
         assert_eq!(
@@ -327,29 +242,22 @@ fn record_scan_shape_survives_run_manual() {
 #[test]
 fn manual_holds_collect_lock_while_running() {
     sandbox(|paths, db| {
-        run_manual(
-            &mut opener(db),
-            paths,
-            NOW,
-            &config(),
-            ManualMode::Write,
-            &mut |_| {
-                let background = run_collect(
-                    &mut || panic!("background opened store"),
-                    paths,
-                    "codex",
-                    NOW,
-                    &config(),
-                    false,
-                );
-                assert_eq!(background.outcome, "skipped_busy");
-                Ok(ManualStep {
-                    value: (),
-                    events: None,
-                    failure: None,
-                })
-            },
-        )
+        run_manual(&mut opener(db), paths, NOW, &config(), &mut |_| {
+            let background = run_collect(
+                &mut || panic!("background opened store"),
+                paths,
+                "codex",
+                NOW,
+                &config(),
+                false,
+            );
+            assert_eq!(background.outcome, "skipped_busy");
+            Ok(ManualStep {
+                value: (),
+                events: None,
+                failure: None,
+            })
+        })
         .unwrap();
     });
 }
@@ -362,7 +270,6 @@ fn measure_lock_busy_is_collect_busy() {
             paths,
             NOW,
             &config(),
-            ManualMode::Write,
             &mut |_| panic!("action called"),
         );
         let error = result.unwrap_err();
@@ -372,55 +279,16 @@ fn measure_lock_busy_is_collect_busy() {
 }
 
 #[test]
-fn dry_run_without_matches_keeps_refusal() {
-    sandbox(|paths, db| {
-        CollectState {
-            refused: true,
-            ..CollectState::default()
-        }
-        .save(&state_path(paths))
-        .unwrap();
-        let stamp = paths.data_dir.join("measure-batch.spawned");
-        fs::write(&stamp, "123").unwrap();
-        // matched == 0 wrote no marker, so the next batch would be refused again.
-        let report = run_manual(
-            &mut opener(db),
-            paths,
-            NOW,
-            &config(),
-            ManualMode::DryRun,
-            &mut |_| {
-                Ok(cort::collect::dry_run_step(cort::telemetry::DryRun {
-                    matched: 0,
-                    mismatched: Vec::new(),
-                    local_only: 3,
-                    remote_only: 0,
-                }))
-            },
-        )
-        .unwrap();
-        assert_eq!(report.matched, 0);
-        assert!(state(paths).refused);
-        assert!(stamp.exists());
-    });
-}
-
-#[test]
-fn unconfigured_keeps_each_command_code() {
+fn unconfigured_record_keeps_error_code() {
     sandbox(|paths, _| {
-        for (args, code) in [
-            (&["measure", "record"][..], "measure_error"),
-            (&["measure", "verify"][..], "measure_verify_failed"),
-        ] {
-            let output = cort_cli(paths, args);
-            assert!(!output.status.success());
-            let value: Value = serde_json::from_slice(&output.stdout).unwrap();
-            assert_eq!(value["error"], code, "{args:?} {value}");
-            assert!(value["detail"]["message"]
-                .as_str()
-                .unwrap()
-                .contains("not configured"));
-        }
+        let output = cort_cli(paths, &["measure", "record"]);
+        assert!(!output.status.success());
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["error"], "measure_error", "{value}");
+        assert!(value["detail"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("not configured"));
         assert!(!paths.data_dir.join("measure-collect.lock").exists());
     });
 }
@@ -441,7 +309,6 @@ fn manual_deadline_stops_after_the_opener() {
             paths,
             NOW,
             &cfg,
-            ManualMode::Write,
             &mut |_| panic!("action ran past the deadline"),
         );
         let error = result.unwrap_err();
@@ -464,7 +331,6 @@ fn manual_bootstrap_timeout_is_a_network_failure() {
             paths,
             NOW,
             &config(),
-            ManualMode::Write,
             &mut |_| panic!("action called"),
         );
         assert_eq!(result.unwrap_err().code(), "measure_error");

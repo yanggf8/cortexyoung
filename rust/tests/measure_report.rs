@@ -58,7 +58,7 @@ fn report_first_section_shows_collection_state() {
     let mut input = inputs(FRI_W43_MS);
     input.collection = Some(json!({
         "batch": {"pending": 3, "last_run_ms": 123, "last_ok_ms": 120,
-            "upload_pending": true, "refused": false, "failures": {}},
+            "upload_pending": true, "failures": {}},
         "health": {"pending": 2, "last_run_ms": 122,
             "unmapped_count": 1, "unmapped_recent": ["missing"]}
     }));
@@ -313,7 +313,7 @@ fn transcript_with_one_compaction() -> String {
     }
     t.push_str(&line(
         json!({"type":"system","subtype":"compact_boundary","uuid":"b-1","sessionId":"sess-1",
-        "timestamp":"2026-10-22T23:37:47.345Z","cwd":"/nonexistent/cwd",
+        "timestamp":"2026-10-28T00:37:47.345Z","cwd":"/nonexistent/cwd",
         "compactMetadata":{"trigger":"auto","preTokens":100,"postTokens":10}}),
     ));
     t.push_str(&line(json!({"type":"assistant","message":{"content":[
@@ -340,7 +340,7 @@ fn rec_env() -> Rec {
         marks_path: tmp.path().join("marks.json"),
         machine_id: "m1".into(),
         host: "box".into(),
-        now_ms: 5_000,
+        now_ms: cort::telemetry::MEASURE_START_MS,
         events: None,
         health: None,
     };
@@ -357,9 +357,21 @@ fn record_writes_and_moves_watermark() {
     let hosts = s.machine_hosts().unwrap();
     assert_eq!(hosts.len(), 1);
     assert_eq!(hosts[0].host, "box");
-    assert_eq!(hosts[0].last_seen_ms, 5_000);
+    assert_eq!(hosts[0].last_seen_ms, cort::telemetry::MEASURE_START_MS);
     // The writes succeeded, so the watermark moved.
     assert!(r.input.marks_path.exists());
+}
+
+#[test]
+fn machine_host_starts_at_restart_instant() {
+    let (_t, mut store) = store();
+    let mut rec = rec_env();
+    rec.input.now_ms = cort::telemetry::MEASURE_START_MS - 1;
+    record(&mut store, &rec.input).unwrap();
+    assert!(store.machine_hosts().unwrap().is_empty());
+    rec.input.now_ms = cort::telemetry::MEASURE_START_MS;
+    record(&mut store, &rec.input).unwrap();
+    assert_eq!(store.machine_hosts().unwrap().len(), 1);
 }
 
 #[test]
@@ -508,7 +520,7 @@ fn record_surfaces_scan_summary() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// record + events: the event step may refuse or fail without costing the compaction record
+// record + events: the event step may fail without costing the compaction record
 // ---------------------------------------------------------------------------------------------
 
 fn usage_db_with_rows(dir: &Path) -> PathBuf {
@@ -518,7 +530,7 @@ fn usage_db_with_rows(dir: &Path) -> PathBuf {
         .unwrap();
     c.execute_batch(
         "INSERT INTO command_log (id,ts,project_id,machine_id,machine_source,command,args_summary,status,bytes_out)
-         VALUES (1,1760000000000,NULL,'m1','env','impact','a','ok',1)",
+         VALUES (1,1793116800000,NULL,'m1','env','impact','a','ok',1)",
     )
     .unwrap();
     path
@@ -528,13 +540,13 @@ fn with_events(r: &mut Rec, usage_db: PathBuf) {
     r.input.events = Some(cort::telemetry::UploadInputs {
         usage_db,
         cost_dir: r._tmp.path().join("no-cost"),
-        marker_path: r._tmp.path().join("verified.json"),
+        progress_path: r._tmp.path().join("measure-progress.json"),
         machine_id: "m1".into(),
     });
 }
 
 #[test]
-fn record_keeps_compactions_when_events_refuse() {
+fn record_uploads_events_without_marker() {
     let (_t, mut s) = store();
     let mut r = rec_env();
     let db = usage_db_with_rows(r._tmp.path());
@@ -544,14 +556,8 @@ fn record_keeps_compactions_when_events_refuse() {
     assert_eq!(scan.compactions, 1);
     assert_eq!(s.compactions_since(0).unwrap().len(), 1);
     let events = scan.to_json()["events"].clone();
-    assert_eq!(events["status"], "refused", "{events}");
-    assert!(events["reason"]
-        .as_str()
-        .unwrap()
-        .contains("measure verify"));
-    // Nothing reached the store: no events, no watermark.
-    assert!(s.remote_ids("m1", "cort_command").unwrap().is_empty());
-    assert_eq!(s.event_watermark("m1", "cort_command").unwrap(), None);
+    assert_eq!(events["status"], "uploaded", "{events}");
+    assert_eq!(s.remote_ids("m1", "cort_command").unwrap().len(), 1);
 }
 
 #[test]
@@ -731,10 +737,6 @@ fn measure_refuses_memory_database_before_open() {
     .unwrap();
     for (args, code) in [
         (&["measure", "status"][..], "measure_error"),
-        (
-            &["measure", "verify", "--new-machine"][..],
-            "measure_verify_failed",
-        ),
         (&["measure", "report", "--json"][..], "measure_error"),
     ] {
         let (out, elapsed) = configured_cli(&data, &home, &cache, args);
@@ -797,7 +799,7 @@ fn measure_different_or_missing_memory_config_does_not_refuse() {
 
 #[test]
 fn removed_and_unconfigured_measure_commands() {
-    for removed in ["sync", "copy-events", "import-audit"] {
+    for removed in ["sync", "copy-events", "import-audit", "verify"] {
         let (out, _t) = bare_cli(&["measure", removed]);
         assert!(!out.status.success());
         let v: Value = serde_json::from_slice(&out.stdout).unwrap();
@@ -811,7 +813,6 @@ fn removed_and_unconfigured_measure_commands() {
     for (args, code) in [
         (&["measure", "report"][..], "measure_error"),
         (&["measure", "status"][..], "measure_not_configured"),
-        (&["measure", "verify"][..], "measure_verify_failed"),
     ] {
         let (out, _t) = bare_cli(args);
         assert!(!out.status.success());

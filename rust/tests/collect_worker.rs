@@ -70,6 +70,25 @@ fn state(paths: &KickPaths) -> CollectState {
     assert!(path.exists(), "state file missing");
     CollectState::load(&path)
 }
+
+#[test]
+fn measure_log_omits_retired_refusal_fields() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = CollectRun {
+        outcome: "ok",
+        error_kind: None,
+        summary: serde_json::json!({"outcome":"ok","scan":{"events":{"status":"uploaded"}}}),
+    };
+    cort::collect::log_collect_run(dir.path(), &run, NOW).unwrap();
+    let line: serde_json::Value = serde_json::from_str(
+        fs::read_to_string(dir.path().join("measure.log"))
+            .unwrap()
+            .trim(),
+    )
+    .unwrap();
+    assert!(line.get("refused").is_none());
+    assert!(line.get("refused_changed").is_none());
+}
 fn uploaded(paths: &KickPaths) -> (i64, i64) {
     batch_cursors(
         &state(paths),
@@ -424,7 +443,7 @@ fn instance_change_resets_and_reuploads_nothing_twice() {
         assert_eq!(run(paths, db, "codex").outcome, "ok");
         s = state(paths);
         assert_ne!(s.instance_id.as_deref(), Some("old-instance"));
-        assert_eq!(uploaded(paths), (0, 1)); // command upload awaits a dry-run marker
+        assert_eq!(uploaded(paths), (1, 1));
         let mut store = SqliteStore::open(db).unwrap();
         let first = store
             .event_count("collect-test-machine", "cort_index_health")
@@ -494,29 +513,6 @@ fn busy_store_is_skipped_not_failed() {
         assert!(after.upload_pending);
         assert_eq!(after.failures["codex"].count, 2);
         assert_eq!(after.last_run_ms, Some(NOW));
-    });
-}
-
-#[test]
-fn refused_is_not_failure() {
-    sandbox(|paths, db| {
-        command(paths);
-        health(paths);
-        let result = run(paths, db, "codex");
-        assert_eq!(result.outcome, "ok");
-        assert!(result.refused);
-        let s = state(paths);
-        assert!(s.refused);
-        assert!(!s.upload_pending);
-        assert!(s.failures.is_empty());
-        assert_eq!(uploaded(paths), (0, 1));
-        assert_eq!(
-            SqliteStore::open(db)
-                .unwrap()
-                .event_count("collect-test-machine", "cort_index_health")
-                .unwrap(),
-            1
-        );
     });
 }
 
@@ -664,12 +660,12 @@ fn upload_failure_is_classified_as_storage() {
             (result.outcome, result.error_kind),
             ("failed", Some(ErrorKind::Storage))
         );
-        assert_eq!(result.summary["scan"]["events"]["status"], "refused");
+        assert_eq!(result.summary["scan"]["events"]["status"], "failed");
         assert_eq!(result.summary["scan"]["health"]["status"], "failed");
-        // The message is the failed upload's own, not the push failure that followed it.
+        // The first failed upload supplies the run error.
         assert_eq!(
             result.summary["error"],
-            result.summary["scan"]["health"]["error"]
+            result.summary["scan"]["events"]["error"]
         );
         assert!(result.summary["error"]
             .as_str()
@@ -759,54 +755,6 @@ fn data_dir_creation_error_is_structured_other() {
 }
 
 #[test]
-fn refusal_is_not_failure_and_logs_on_transition_only() {
-    sandbox(|paths, db| {
-        command(paths);
-        for iteration in 0..3 {
-            let result = run(paths, db, "codex");
-            assert_eq!(result.outcome, "ok");
-            assert!(result.refused);
-            assert_eq!(result.refused_changed, iteration == 0);
-            cort::collect::log_collect_run(&paths.data_dir, &result, NOW).unwrap();
-        }
-        assert!(state(paths).failures.is_empty());
-        let lines = fs::read_to_string(paths.data_dir.join("measure.log")).unwrap();
-        let logs: Vec<serde_json::Value> = lines
-            .lines()
-            .map(|s| serde_json::from_str(s).unwrap())
-            .collect();
-        assert_eq!(logs.len(), 3);
-        assert_eq!(
-            logs.iter().filter(|v| v["refused_changed"] == true).count(),
-            1
-        );
-        assert!(logs[0]["scan"]["events"]["reason"].is_string());
-        for log in &logs[1..] {
-            assert_eq!(
-                log["scan"]["events"],
-                serde_json::json!({"status":"refused"})
-            );
-        }
-        // A valid marker uses the current command_log column fingerprint.
-        let columns = cort::telemetry::command_log_columns(&paths.usage_db).unwrap();
-        fs::write(
-            paths.data_dir.join("measure-events-verified.json"),
-            serde_json::json!({"machine_id":cort::usage::machine_id(),"columns":columns})
-                .to_string(),
-        )
-        .unwrap();
-        let result = run(paths, db, "codex");
-        assert!(!result.refused);
-        assert!(result.refused_changed);
-        cort::collect::log_collect_run(&paths.data_dir, &result, NOW).unwrap();
-        let lines = fs::read_to_string(paths.data_dir.join("measure.log")).unwrap();
-        let last: serde_json::Value = serde_json::from_str(lines.lines().last().unwrap()).unwrap();
-        assert_eq!(last["refused"], false);
-        assert_eq!(last["refused_changed"], true);
-    });
-}
-
-#[test]
 fn background_busy_is_silent() {
     sandbox(|paths, _| {
         command(paths);
@@ -891,43 +839,6 @@ fn lock_order_collect_then_measure() {
                 "report"
             );
         });
-    });
-}
-
-#[test]
-fn refusal_transition_survives_a_failed_final_save() {
-    sandbox(|paths, db| {
-        command(paths);
-        let state_file = state_path(paths);
-        let mut opener = || {
-            // The pre-run save already happened; a directory in its place fails the final one.
-            fs::remove_file(&state_file).unwrap();
-            fs::create_dir(&state_file).unwrap();
-            Ok(Box::new(SqliteStore::open(db).unwrap()) as Box<dyn MeasureStore>)
-        };
-        let result = run_collect(
-            &mut opener,
-            paths,
-            "codex",
-            NOW,
-            &CollectConfig::from_lookup(|_| None),
-            false,
-        );
-        assert_eq!(
-            (result.outcome, result.error_kind),
-            ("failed", Some(ErrorKind::Storage))
-        );
-        assert!(result.refused);
-        assert!(result.refused_changed);
-        cort::collect::log_collect_run(&paths.data_dir, &result, NOW).unwrap();
-        let line: serde_json::Value = serde_json::from_str(
-            fs::read_to_string(paths.data_dir.join("measure.log"))
-                .unwrap()
-                .trim(),
-        )
-        .unwrap();
-        assert_eq!(line["refused_changed"], true);
-        assert!(line["scan"]["events"]["reason"].is_string());
     });
 }
 

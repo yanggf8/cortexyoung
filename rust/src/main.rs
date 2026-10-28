@@ -61,7 +61,7 @@ fn usage_value() -> Value {
             "impact": "cort impact --symbol <name> [--depth <n>] [--coverage] [-f json|lean]",
             "usage": "cort usage [days] [-f json|lean]",
             "memory": "cort memory <configure|import-config|record|resolve|recall|status|check|import-legacy|notes> [options]",
-            "measure": "cort measure <configure|show|record|collect|verify|health|status|cron|report> [options]  (collect: scan and upload the batch; --background appends at most one result to measure.log (none when skipped_busy) without stdout; health: observe recently used indexes and write local index_health_log, reading indexes only, with no network; --background appends the result to measure.log without stdout; status: read local collection state, -f json|lean; cron: manual install or removal of the legacy entry, no longer installed automatically; hook kick is the only automatic collection trigger; verify compares event ids and uploads nothing, and verify --new-machine passes a machine with no remote rows in the measurement database; command_log and index_health_log keep uploaded rows 90 days and rows not yet uploaded 180 days, pruned when a new command is recorded; rows still not uploaded after 180 days are deleted and counted in measure status (pruned_unuploaded_rows) and measure.log)",
+            "measure": "cort measure <configure|show|record|collect|health|status|cron|report> [options]  (uploads start at 2026-10-28 00:00 Taiwan time; collect: scan and upload the batch; --background appends at most one result to measure.log (none when skipped_busy) without stdout; health: observe recently used indexes and write local index_health_log, reading indexes only, with no network; --background appends the result to measure.log without stdout; status: read local collection state, -f json|lean; cron: manual install or removal of the legacy entry, no longer installed automatically; hook kick is the only automatic collection trigger; command_log and index_health_log keep uploaded rows 90 days and rows not yet uploaded 180 days, pruned when a new command is recorded; rows still not uploaded after 180 days are deleted and counted in measure status (pruned_unuploaded_rows) and measure.log)",
             "hook-suggest": "cort hook-suggest  (PreToolUse hook: records one fire row and kicks collection; never speaks; not a verb to type)",
             "hook-refresh": "cort hook-refresh  (PostToolUse hook: brings this project's index up to the tree after an edit; silent, never creates an index; not a verb to type)",
             "hook-recall": "cort hook-recall --harness <h>  (SessionStart hook: reads the shared memory database; not a verb to type)",
@@ -2324,13 +2324,6 @@ enum MeasureAction {
         #[arg(long)]
         background: bool,
     },
-    /// Compare local and remote event ids; a passing run permits this machine's first upload.
-    Verify {
-        /// For a machine that never uploaded: pass only when no remote row exists for its machine
-        /// ids in the measurement database.
-        #[arg(long)]
-        new_machine: bool,
-    },
     /// Manually install or remove the legacy cron entry; hooks' kick is the only automatic trigger.
     Cron {
         #[arg(long, group = "cron_action")]
@@ -2362,12 +2355,12 @@ fn event_inputs() -> Option<cort::telemetry::UploadInputs> {
     Some(cort::telemetry::UploadInputs {
         usage_db: usage::usage_db_path()?,
         cost_dir: cort::telemetry::default_cost_dir(),
-        marker_path: cort::telemetry::default_marker_path(),
+        progress_path: cort::data_dir::data_dir().join("measure-progress.json"),
         machine_id: usage::machine_id().to_string(),
     })
 }
 
-/// A refused or failed event step does not fail `record` (the compaction rows are independent),
+/// A failed event step does not fail `record` (the compaction rows are independent),
 /// so it must not pass silently either: say so on stderr.
 fn warn_events(scan: &cort::measure::ScanSummary) {
     if let Some(events) = &scan.events {
@@ -2402,7 +2395,7 @@ fn measure_remote_error(message: String, local: Option<Value>) -> CortError {
 }
 
 /// `code` is the one each command reports for an unconfigured store, checked before any lock:
-/// `measure_verify_failed` for `verify`, `measure_not_configured` for `status`,
+/// `measure_not_configured` for `status`,
 /// `measure_error` everywhere else.
 fn require_measure_config(code: &'static str) -> Result<(), CortError> {
     if cort::measure_store::is_configured() {
@@ -2562,7 +2555,6 @@ fn cmd_measure(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, CortErr
                 &paths,
                 now_ms,
                 &cfg,
-                cort::collect::ManualMode::Write,
                 &mut |store| {
                     let (scan, outcome) =
                         cort::measure::record_with_scan(store, &input).map_err(|e| {
@@ -2667,65 +2659,6 @@ fn cmd_measure(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, CortErr
                 ));
             }
             summary
-        }
-        MeasureAction::Verify { new_machine } => {
-            let Some(up) = event_inputs() else {
-                return Err(CortError::new(
-                    "measure_error",
-                    json!({"message":"cannot locate usage.db (HOME is unset and CORT_CACHE_DIR is not set)"}),
-                ));
-            };
-            require_measure_config("measure_verify_failed")?;
-            let fail = |m: String| CortError::new("measure_error", json!({"message":m}));
-            let paths = cort::collect::KickPaths::current()
-                .ok_or_else(|| fail("cannot locate usage.db".into()))?;
-            let cfg = cort::collect::CollectConfig::from_env();
-            let now_ms = usage::now_ms();
-            let mut opener = || {
-                cort::measure_store::open_measure_store_within_timeout(
-                    std::time::Duration::from_millis(cfg.manual_wait_ms),
-                    std::time::Duration::from_millis(cfg.net_timeout_ms),
-                )
-            };
-            if new_machine {
-                // The copied history is in the measurement store; the dry run sends nothing.
-                let report = cort::collect::run_manual(
-                    &mut opener,
-                    &paths,
-                    now_ms,
-                    &cfg,
-                    cort::collect::ManualMode::DryRun,
-                    &mut |store| {
-                        cort::telemetry::verify_new_machine(store, &up, now_ms)
-                            .map(|value| cort::collect::ManualStep {
-                                value,
-                                events: None,
-                                failure: None,
-                            })
-                            .map_err(|e| (e.clone(), cort::collect::classify_error(&e)))
-                    },
-                )
-                .map_err(|e| manual_error(e, "measure_verify_failed"))?;
-                json!({"status":"verified","new_machine":true,
-                    "local":report.local,"machines":report.machines,"verified":true})
-            } else {
-                let report = cort::collect::run_manual(
-                    &mut opener,
-                    &paths,
-                    now_ms,
-                    &cfg,
-                    cort::collect::ManualMode::DryRun,
-                    &mut |store| {
-                        cort::telemetry::verify_events(store, &up, now_ms)
-                            .map(cort::collect::dry_run_step)
-                            .map_err(|e| (e.clone(), cort::collect::classify_error(&e)))
-                    },
-                )
-                .map_err(|e| manual_error(e, "measure_verify_failed"))?;
-                json!({"status": if report.matched > 0 {"verified"} else {"not_verified"},
-                "matched":report.matched,"local_only":report.local_only,
-                "remote_only":report.remote_only,"verified":report.matched > 0})
-            }
         }
         MeasureAction::Report {
             days,

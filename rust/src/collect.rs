@@ -306,7 +306,6 @@ pub struct CollectState {
     pub pending_since_ms: Option<i64>,
     #[serde(skip)]
     pub progress_path: Option<PathBuf>,
-    pub refused: bool,
 }
 
 #[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq, Eq)]
@@ -363,7 +362,6 @@ pub fn collection_status(paths: &KickPaths) -> Value {
                 "upload_pending": batch.upload_pending,
                 "pending_since_ms": batch.pending_since_ms,
                 "upload_stalled_days": batch.stalled_days(crate::usage::now_ms()),
-                "refused": batch.refused,
                 "failures": batch.failures,
             })
         }
@@ -446,8 +444,6 @@ impl ErrorKind {
 
 pub struct CollectRun {
     pub outcome: &'static str,
-    pub refused: bool,
-    pub refused_changed: bool,
     pub error_kind: Option<ErrorKind>,
     pub summary: Value,
 }
@@ -455,17 +451,14 @@ pub struct CollectRun {
 fn collect_run(
     outcome: &'static str,
     harness: &str,
-    refused: bool,
     error_kind: Option<ErrorKind>,
     scan: Option<Value>,
 ) -> CollectRun {
     CollectRun {
         outcome,
-        refused,
-        refused_changed: false,
         error_kind,
         summary: json!({"outcome": outcome, "harness": harness,
-            "error_kind": error_kind.map(ErrorKind::label), "error": null, "refused": refused,
+            "error_kind": error_kind.map(ErrorKind::label), "error": null,
             "scan": scan}),
     }
 }
@@ -478,8 +471,7 @@ impl CollectRun {
     }
 }
 
-/// A kicked child writes at most one line. Repeated refusals keep their status but omit the
-/// explanatory text; the transition line retains it for diagnosis.
+/// A kicked child writes at most one line.
 pub fn log_collect_run(data_dir: &Path, run: &CollectRun, now_ms: i64) -> Result<(), String> {
     if run.outcome == "skipped_busy" {
         return Ok(());
@@ -487,11 +479,6 @@ pub fn log_collect_run(data_dir: &Path, run: &CollectRun, now_ms: i64) -> Result
     let mut summary = run.summary.clone();
     summary["lane"] = json!("batch");
     summary["ts_ms"] = json!(now_ms);
-    if run.refused_changed {
-        summary["refused_changed"] = json!(true);
-    } else if summary["scan"]["events"]["status"] == "refused" {
-        summary["scan"]["events"] = json!({"status":"refused"});
-    }
     append_measure_log(data_dir, &summary.to_string())?;
     if let Some(days) =
         CollectState::load(&data_dir.join("measure-collect-state.json")).stalled_days(now_ms)
@@ -563,14 +550,8 @@ fn arm_collect_watchdog(
                         let path = data_dir.join("measure-collect-state.json");
                         let mut state = CollectState::load(&path);
                         let message = format!("watchdog: run exceeded {}s", limit.as_secs());
-                        let run = collect_run(
-                            "failed",
-                            &harness,
-                            state.refused,
-                            Some(ErrorKind::Network),
-                            None,
-                        )
-                        .with_error(message);
+                        let run = collect_run("failed", &harness, Some(ErrorKind::Network), None)
+                            .with_error(message);
                         let _ = log_collect_run(&data_dir, &run, now_ms);
                         collect_failure(&mut state, &harness, now_ms, ErrorKind::Network);
                         state.mark_pending(now_ms);
@@ -590,20 +571,12 @@ fn finish_collect_state(
     harness: &str,
     now_ms: i64,
     kind: Option<ErrorKind>,
-    events: Option<&Value>,
-    health: Option<&Value>,
 ) {
-    if let Some(report) = events {
-        state.refused = report["status"] == "refused";
-    }
-    let _ = health;
     if let Some(kind) = kind {
         collect_failure(state, harness, now_ms, kind);
     } else {
         state.failures.remove(harness);
         state.last_ok_ms = Some(now_ms);
-        // A refusal is the persistent state `refused` records, not pending work: keeping the lane
-        // pending would make every kick due and rewrite the host row on each one.
         state.upload_pending = false;
         state.pending_since_ms = None;
     }
@@ -656,12 +629,6 @@ fn stamp_holder(lock: &mut fs::File, now_ms: i64) {
         .and_then(|_| writeln!(lock, "pid={} started_ms={}", std::process::id(), now_ms));
 }
 
-#[derive(Clone, Copy)]
-pub enum ManualMode {
-    Write,
-    DryRun,
-}
-
 pub struct ManualStep<T> {
     pub value: T,
     pub events: Option<Value>,
@@ -669,18 +636,6 @@ pub struct ManualStep<T> {
 }
 
 pub type ManualActionResult<T> = Result<ManualStep<T>, (String, ErrorKind)>;
-
-/// A dry run passes only when it matched ids, because only then did `verify_events` write the
-/// marker the upload gate reads. `matched == 0` is still a successful command, but clearing
-/// `refused` (and the kick stamp) for it would only buy the next batch another refusal.
-pub fn dry_run_step(report: crate::telemetry::DryRun) -> ManualStep<crate::telemetry::DryRun> {
-    let failure = (report.matched == 0).then_some(ErrorKind::Other);
-    ManualStep {
-        value: report,
-        events: None,
-        failure,
-    }
-}
 
 #[derive(Debug)]
 pub enum ManualError {
@@ -749,13 +704,12 @@ fn manual_lock(path: &Path, wait: Duration, now_ms: i64) -> Result<fs::File, Man
 }
 
 /// Hold the collection lock, then open the bounded measure store and update shared collection
-/// state around a manual record or verify. The caller supplies the original CLI operation.
+/// state around a manual record. The caller supplies the original CLI operation.
 pub fn run_manual<T>(
     store_opener: &mut dyn FnMut() -> Result<Box<dyn MeasureStore>, OpenError>,
     paths: &KickPaths,
     now_ms: i64,
     cfg: &CollectConfig,
-    mode: ManualMode,
     action: &mut dyn FnMut(&mut dyn MeasureStore) -> ManualActionResult<T>,
 ) -> Result<T, ManualError> {
     let deadline = RunDeadline::after(Instant::now(), cfg.run_deadline_ms);
@@ -767,28 +721,18 @@ pub fn run_manual<T>(
     )?;
     let state_path = paths.data_dir.join("measure-collect-state.json");
     let mut state = CollectState::load(&state_path);
-    if matches!(mode, ManualMode::Write) {
-        let counters =
-            crate::usage::kick_counters_within(&paths.usage_db, crate::usage::WORKER_BUSY);
-        if let Some(ref counters) = counters {
-            state.instance_id = Some(counters.instance_id.clone());
-        }
-        state.mark_pending(now_ms);
-        state.last_run_ms = Some(now_ms);
-        if counters.is_none() {
-            finish_collect_state(
-                &mut state,
-                "manual",
-                now_ms,
-                Some(ErrorKind::Storage),
-                None,
-                None,
-            );
-        }
-        state.save(&state_path).map_err(ManualError::Other)?;
-        if counters.is_none() {
-            return Err(ManualError::Other("usage_db_unreadable".into()));
-        }
+    let counters = crate::usage::kick_counters_within(&paths.usage_db, crate::usage::WORKER_BUSY);
+    if let Some(ref counters) = counters {
+        state.instance_id = Some(counters.instance_id.clone());
+    }
+    state.mark_pending(now_ms);
+    state.last_run_ms = Some(now_ms);
+    if counters.is_none() {
+        finish_collect_state(&mut state, "manual", now_ms, Some(ErrorKind::Storage));
+    }
+    state.save(&state_path).map_err(ManualError::Other)?;
+    if counters.is_none() {
+        return Err(ManualError::Other("usage_db_unreadable".into()));
     }
     let opened = match store_opener() {
         Ok(store) => Ok(store),
@@ -804,10 +748,8 @@ pub fn run_manual<T>(
     let mut store = match opened {
         Ok(store) => store,
         Err((kind, error)) => {
-            if matches!(mode, ManualMode::Write) {
-                finish_collect_state(&mut state, "manual", now_ms, Some(kind), None, None);
-                state.save(&state_path).map_err(ManualError::Other)?;
-            }
+            finish_collect_state(&mut state, "manual", now_ms, Some(kind));
+            state.save(&state_path).map_err(ManualError::Other)?;
             return Err(ManualError::Other(error));
         }
     };
@@ -815,52 +757,20 @@ pub fn run_manual<T>(
     // its last checkpoint this layer can see: a caller whose limit is already gone must not start
     // the network work. The background path additionally stops after the uploads.
     if deadline.expired() {
-        if matches!(mode, ManualMode::Write) {
-            finish_collect_state(
-                &mut state,
-                "manual",
-                now_ms,
-                Some(ErrorKind::Network),
-                None,
-                None,
-            );
-            state.save(&state_path).map_err(ManualError::Other)?;
-        }
+        finish_collect_state(&mut state, "manual", now_ms, Some(ErrorKind::Network));
+        state.save(&state_path).map_err(ManualError::Other)?;
         return Err(ManualError::Other(deadline.error()));
     }
     let result = action(store.as_mut());
     match result {
         Ok(step) => {
-            if matches!(mode, ManualMode::DryRun) {
-                // Only a pass lifts the refusal; see `dry_run_step`.
-                if step.failure.is_none() {
-                    state.refused = false;
-                    state.save(&state_path).map_err(ManualError::Other)?;
-                    let stamp = paths.data_dir.join("measure-batch.spawned");
-                    if let Err(error) = fs::remove_file(stamp) {
-                        if error.kind() != std::io::ErrorKind::NotFound {
-                            return Err(ManualError::Other(error.to_string()));
-                        }
-                    }
-                }
-            } else {
-                finish_collect_state(
-                    &mut state,
-                    "manual",
-                    now_ms,
-                    step.failure,
-                    step.events.as_ref(),
-                    None,
-                );
-                state.save(&state_path).map_err(ManualError::Other)?;
-            }
+            finish_collect_state(&mut state, "manual", now_ms, step.failure);
+            state.save(&state_path).map_err(ManualError::Other)?;
             Ok(step.value)
         }
         Err((message, kind)) => {
-            if matches!(mode, ManualMode::Write) {
-                finish_collect_state(&mut state, "manual", now_ms, Some(kind), None, None);
-                state.save(&state_path).map_err(ManualError::Other)?;
-            }
+            finish_collect_state(&mut state, "manual", now_ms, Some(kind));
+            state.save(&state_path).map_err(ManualError::Other)?;
             Err(ManualError::Other(message))
         }
     }
@@ -936,24 +846,24 @@ fn run_collect_inner(
     watchdog: Option<WatchdogSpec>,
 ) -> CollectRun {
     if manual {
-        return collect_run("failed", harness, false, Some(ErrorKind::Other), None)
+        return collect_run("failed", harness, Some(ErrorKind::Other), None)
             .with_error("manual collection is not implemented");
     }
     let started = Instant::now();
     let deadline = RunDeadline::after(started, cfg.run_deadline_ms);
     // open_lock does not create its parent; the first explicit collect may precede any kick.
     if let Err(e) = fs::create_dir_all(&paths.data_dir) {
-        return collect_run("failed", harness, false, Some(ErrorKind::Other), None)
+        return collect_run("failed", harness, Some(ErrorKind::Other), None)
             .with_error(format!("cannot create {}: {e}", paths.data_dir.display()));
     }
     let mut lock =
         match crate::upgrade::try_exclusive_lock(&paths.data_dir.join("measure-collect.lock")) {
             Ok(lock) => lock,
             Err(crate::upgrade::LockError::AdmissionBusy) => {
-                return collect_run("skipped_busy", harness, false, None, None);
+                return collect_run("skipped_busy", harness, None, None);
             }
             Err(e) => {
-                return collect_run("failed", harness, false, Some(ErrorKind::Other), None)
+                return collect_run("failed", harness, Some(ErrorKind::Other), None)
                     .with_error(format!("measure_collect_lock_unavailable: {e:?}"))
             }
         };
@@ -962,14 +872,13 @@ fn run_collect_inner(
     if let Err(crate::upgrade::LockError::AdmissionBusy) =
         crate::upgrade::try_protected_entry(&paths.cache_dir)
     {
-        return collect_run("skipped_busy", harness, false, None, None);
+        return collect_run("skipped_busy", harness, None, None);
     }
     // This is descriptive metadata on the already locked file; never replace its inode or fd.
     stamp_holder(&mut lock, now_ms);
 
     let state_path = paths.data_dir.join("measure-collect-state.json");
     let mut state = CollectState::load(&state_path);
-    let refused_before = state.refused;
     let Some(counters) =
         crate::usage::kick_counters_within(&paths.usage_db, crate::usage::WORKER_BUSY)
     else {
@@ -977,27 +886,14 @@ fn run_collect_inner(
         state.mark_pending(now_ms);
         collect_failure(&mut state, harness, now_ms, ErrorKind::Storage);
         let _ = state.save(&state_path);
-        return collect_run(
-            "failed",
-            harness,
-            state.refused,
-            Some(ErrorKind::Storage),
-            None,
-        )
-        .with_error("usage_db_unreadable");
+        return collect_run("failed", harness, Some(ErrorKind::Storage), None)
+            .with_error("usage_db_unreadable");
     };
     state.instance_id = Some(counters.instance_id);
     state.mark_pending(now_ms);
     state.last_run_ms = Some(now_ms);
     if let Err(e) = state.save(&state_path) {
-        return collect_run(
-            "failed",
-            harness,
-            state.refused,
-            Some(ErrorKind::Storage),
-            None,
-        )
-        .with_error(e);
+        return collect_run("failed", harness, Some(ErrorKind::Storage), None).with_error(e);
     }
 
     let mut claim = None;
@@ -1016,14 +912,8 @@ fn run_collect_inner(
             let mut state = CollectState::load(&state_path);
             collect_failure(&mut state, harness, now_ms, ErrorKind::Other);
             let _ = state.save(&state_path);
-            return collect_run(
-                "failed",
-                harness,
-                state.refused,
-                Some(ErrorKind::Other),
-                None,
-            )
-            .with_error(format!("cannot start collect watchdog: {e}"));
+            return collect_run("failed", harness, Some(ErrorKind::Other), None)
+                .with_error(format!("cannot start collect watchdog: {e}"));
         }
         claim = Some(flag);
     }
@@ -1034,7 +924,7 @@ fn run_collect_inner(
             if let Some(claim) = &claim {
                 claim_normal(claim);
             }
-            return collect_run("skipped_busy", harness, state.refused, None, None);
+            return collect_run("skipped_busy", harness, None, None);
         }
         Err(OpenError::Network(e)) => Err((ErrorKind::Network, e)),
         Err(OpenError::Config(e)) => Err((ErrorKind::Storage, e)),
@@ -1048,7 +938,7 @@ fn run_collect_inner(
             }
             collect_failure(&mut state, harness, now_ms, kind);
             let _ = state.save(&state_path);
-            return collect_run("failed", harness, state.refused, Some(kind), None).with_error(e);
+            return collect_run("failed", harness, Some(kind), None).with_error(e);
         }
     };
     // The opener's bootstrap is a network operation; if it alone spent the budget, stop before
@@ -1060,14 +950,8 @@ fn run_collect_inner(
         }
         collect_failure(&mut state, harness, now_ms, ErrorKind::Network);
         let _ = state.save(&state_path);
-        return collect_run(
-            "failed",
-            harness,
-            state.refused,
-            Some(ErrorKind::Network),
-            None,
-        )
-        .with_error(deadline.error());
+        return collect_run("failed", harness, Some(ErrorKind::Network), None)
+            .with_error(deadline.error());
     }
     let machine_id = crate::usage::machine_id().to_string();
     let input = RecordInputs {
@@ -1079,7 +963,7 @@ fn run_collect_inner(
         events: Some(UploadInputs {
             usage_db: paths.usage_db.clone(),
             cost_dir: telemetry::default_cost_dir(),
-            marker_path: telemetry::default_marker_path(),
+            progress_path: paths.data_dir.join("measure-progress.json"),
             machine_id,
         }),
         health: Some(paths.usage_db.clone()),
@@ -1111,37 +995,18 @@ fn run_collect_inner(
     if let Some(claim) = &claim {
         claim_normal(claim);
     }
-    finish_collect_state(
-        &mut state,
-        harness,
-        now_ms,
-        kind,
-        scan.as_ref().and_then(|s| s.events.as_ref()),
-        scan.as_ref().and_then(|s| s.health.as_ref()),
-    );
+    finish_collect_state(&mut state, harness, now_ms, kind);
     let scan_json = scan.map(|s| s.to_json());
-    // Decided before the save: a run whose state cannot be written still saw the transition, and
-    // its line is the one that most needs the refusal's reason.
-    let refused_changed = state.refused != refused_before;
     if let Err(e) = state.save(&state_path) {
-        let mut run = collect_run(
-            "failed",
-            harness,
-            state.refused,
-            Some(ErrorKind::Storage),
-            scan_json,
-        );
-        run.refused_changed = refused_changed;
+        let run = collect_run("failed", harness, Some(ErrorKind::Storage), scan_json);
         return run.with_error(e);
     }
-    let mut run = collect_run(
+    let run = collect_run(
         if kind.is_some() { "failed" } else { "ok" },
         harness,
-        state.refused,
         kind,
         scan_json,
     );
-    run.refused_changed = refused_changed;
     match error {
         Some(e) => run.with_error(e),
         None => run,
@@ -1255,14 +1120,10 @@ pub fn batch_pending(state: &CollectState, counters: &KickCounters) -> i64 {
     // The clamp is not defensive: a cursor may legitimately sit past `max_command_id`, because the
     // rows it already copied include the `measure` rows that `max_command_id` excludes. Without the
     // floor that negative would eat into `health_pending`.
-    let command_pending = if state.refused {
-        0
-    } else {
-        counters
-            .max_command_id
-            .saturating_sub(command_cursor)
-            .max(0)
-    };
+    let command_pending = counters
+        .max_command_id
+        .saturating_sub(command_cursor)
+        .max(0);
     let health_pending = counters.max_health_id.saturating_sub(health_cursor).max(0);
     command_pending.saturating_add(health_pending)
 }
@@ -1408,7 +1269,6 @@ mod watchdog_tests {
             instance_id: Some("original-instance".into()),
             upload_pending: true,
             pending_since_ms: Some(123),
-            refused: true,
             last_run_ms: Some(123),
             last_ok_ms: Some(100),
             ..CollectState::default()
@@ -1462,12 +1322,11 @@ mod watchdog_tests {
         assert!(line["ts_ms"].as_i64().is_some());
         assert_eq!(line["error_kind"], "network");
         assert_eq!(line["error"], "watchdog: run exceeded 0s");
-        assert_eq!(line["refused"], true);
+        assert!(line.get("refused").is_none());
         assert!(line["scan"].is_null());
         let saved = CollectState::load(&state_path);
         assert_eq!(saved.instance_id, state.instance_id);
         assert_eq!(saved.pending_since_ms, state.pending_since_ms);
-        assert_eq!(saved.refused, state.refused);
         assert_eq!(saved.last_run_ms, state.last_run_ms);
         assert_eq!(saved.last_ok_ms, state.last_ok_ms);
         assert_eq!(saved.failures["claude"], state.failures["claude"]);

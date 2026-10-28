@@ -165,14 +165,15 @@ pub fn health_rows_after_at(
     path: &Path,
     after_id: i64,
     limit: usize,
+    since_ms: i64,
 ) -> Result<Vec<HealthRow>, String> {
     let conn = open_health_read(path)?;
     let sql =
-        format!("SELECT {HEALTH_COLUMNS} FROM index_health_log WHERE id > ?1 ORDER BY id LIMIT ?2");
+        format!("SELECT {HEALTH_COLUMNS} FROM index_health_log WHERE id > ?1 AND ts >= ?2 ORDER BY id LIMIT ?3");
     let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map(
-            params![after_id, i64::try_from(limit).unwrap_or(i64::MAX)],
+            params![after_id, since_ms, i64::try_from(limit).unwrap_or(i64::MAX)],
             read_health_row,
         )
         .map_err(|e| e.to_string())?;
@@ -613,7 +614,7 @@ pub fn query_usage_at(path: &Path, days: i64, now_ms: i64) -> Result<Value, Cort
 /// judging hook wrote `hit*` when a suggestion was injected, which made this db a second source for
 /// that period's injection count, while since the thin trigger (2026-10-25) a row is only
 /// `no_payload` or `fired`. The legacy values are still read here because the local database keeps
-/// 90 days and the remote keeps everything.
+/// 90 days (the remote history was discarded at the 2026-10-28 measurement restart).
 ///
 /// Nothing in the product calls this today: the `usage` report reads [`hook_census_at`], and the
 /// lens functions are exercised by the test suite. They stay because the rows they read stay.
@@ -788,8 +789,8 @@ pub fn hook_models_at(
 /// * `no_shape/<decline>` -- suggest only, and only for legacy rows: v≤5 rows attribute the one
 ///   outcome whose reason lives one level down, per `crate::hook::SUGGEST_DECLINES`;
 ///   `no_shape/decline_absent` is the pre-tag shape, a deployment state rather than a tenth cause.
-///   The thin trigger never writes `no_shape`, but the local 90-day retention and the remote's
-///   forever still hold rows that do. A `no_shape` value on any other command is not that
+///   The thin trigger never writes `no_shape`, but the local 90-day retention still holds rows that do (the remote
+///   history was discarded at the 2026-10-28 restart). A `no_shape` value on any other command is not that
 ///   command's shape to attribute, so it surfaces as `unknown/no_shape` instead.
 /// * every `crate::hook::SUGGEST_OUTCOMES` (suggest) or `crate::hook::REFRESH_OUTCOMES` (refresh)
 ///   value -- verbatim; the vocabulary is the writing command's own, and the decline split below

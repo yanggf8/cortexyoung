@@ -72,7 +72,7 @@ fn health_row_roundtrip() {
     let id = insert_health_row_at(&path, &row).unwrap();
     assert!(id > 0);
     assert_eq!(
-        health_rows_after_at(&path, 0, 10).unwrap(),
+        health_rows_after_at(&path, 0, 10, i64::MIN).unwrap(),
         vec![HealthRow { id, ..row }]
     );
 }
@@ -89,9 +89,11 @@ fn health_rows_after_pages_in_id_order() {
             insert_health_row_at(&path, &row).unwrap()
         })
         .collect();
-    let page = health_rows_after_at(&path, ids[1], 2).unwrap();
+    let page = health_rows_after_at(&path, ids[1], 2, i64::MIN).unwrap();
     assert_eq!(page.iter().map(|row| row.id).collect::<Vec<_>>(), ids[2..4]);
-    assert!(health_rows_after_at(&path, ids[4], 2).unwrap().is_empty());
+    assert!(health_rows_after_at(&path, ids[4], 2, i64::MIN)
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
@@ -223,7 +225,9 @@ fn invalid_status_is_an_error_not_a_panic() {
     let path = dir.path().join("usage.db");
     let _conn = db(&path);
     assert!(insert_health_row_at(&path, &sample_health("local", "bogus")).is_err());
-    assert!(health_rows_after_at(&path, 0, 10).unwrap().is_empty());
+    assert!(health_rows_after_at(&path, 0, 10, i64::MIN)
+        .unwrap()
+        .is_empty());
 }
 
 #[test]

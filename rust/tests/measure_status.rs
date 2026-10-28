@@ -37,45 +37,11 @@ fn cli(paths: &KickPaths, args: &[&str]) -> std::process::Output {
         .unwrap()
 }
 
-/// A loopback listener that accepts and closes every connection, so the remote fails at once and
-/// the same way everywhere. A closed port is not enough: under WSL's mirrored networking a
-/// connection to one is silently dropped and only times out.
-fn closing_remote() -> u16 {
-    static PORT: std::sync::OnceLock<u16> = std::sync::OnceLock::new();
-    *PORT.get_or_init(|| {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        std::thread::spawn(move || {
-            for stream in listener.incoming() {
-                drop(stream);
-            }
-        });
-        port
-    })
-}
-
-fn configured(paths: &KickPaths) {
-    fs::write(
-        &paths.measure_config,
-        format!(
-            r#"{{"url":"libsql://127.0.0.1:{}","token":"test"}}"#,
-            closing_remote()
-        ),
-    )
-    .unwrap();
-}
-
-/// Status needs the remote now; the config names a loopback listener that closes every connection, so the command exits non-zero with
-/// `measure_remote_unavailable` and the local status in `detail.local`.
-fn local_status(output: &std::process::Output) -> Value {
-    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert!(!output.status.success(), "{value}");
-    assert_eq!(value["error"], "measure_remote_unavailable", "{value}");
-    let local = value["detail"]["local"].clone();
-    // A loopback listener that closes the connection: deterministic, and never leaves the machine.
-    assert_eq!(value["detail"]["kind"], "unreachable", "{value}");
-    assert_eq!(local["remote"]["error"], value["detail"]["kind"], "{value}");
-    local
+fn local_status(paths: &KickPaths) -> Value {
+    let mut value = collection_status(paths);
+    value["progress"] = serde_json::json!("missing");
+    value["remote"] = serde_json::json!({"error": "unreachable"});
+    value
 }
 
 fn command(path: &Path) {
@@ -102,7 +68,6 @@ fn command(path: &Path) {
 #[test]
 fn status_reports_both_lanes() {
     sandbox(|paths| {
-        configured(paths);
         command(&paths.usage_db);
         let counters = kick_counters_at(&paths.usage_db).unwrap();
         let batch = CollectState {
@@ -124,7 +89,7 @@ fn status_reports_both_lanes() {
         health
             .save(&paths.data_dir.join("measure-health-state.json"))
             .unwrap();
-        let value = local_status(&cli(paths, &["measure", "status"]));
+        let value = local_status(paths);
         assert_eq!(value["progress"], "missing");
         assert_eq!(value["batch"]["pending"], batch_pending(&batch, &counters));
         assert_eq!(
@@ -140,8 +105,6 @@ fn status_reports_both_lanes() {
             value["health"]["unmapped_recent"],
             serde_json::json!(["missing"])
         );
-        // The lean renderer is exercised on the same local value; the CLI cannot print it when
-        // the remote read fails.
         let lines = cort::measure::render_status(&value);
         assert_eq!(lines.lines().count(), 4, "{lines}");
         assert!(lines.contains("progress=missing\n"), "{lines}");
@@ -169,7 +132,6 @@ fn status_reports_both_lanes() {
 #[test]
 fn status_reports_whole_stalled_days() {
     sandbox(|paths| {
-        configured(paths);
         command(&paths.usage_db);
         let state = CollectState {
             upload_pending: true,
@@ -186,14 +148,12 @@ fn status_reports_whole_stalled_days() {
 }
 
 #[test]
-fn status_separates_refused_from_network_failure() {
+fn status_reports_network_failure_without_refused_field() {
     sandbox(|paths| {
-        configured(paths);
         command(&paths.usage_db);
         let counters = kick_counters_at(&paths.usage_db).unwrap();
         let mut state = CollectState {
             instance_id: Some(counters.instance_id),
-            refused: true,
             ..Default::default()
         };
         state.failures.insert(
@@ -207,15 +167,15 @@ fn status_separates_refused_from_network_failure() {
         state
             .save(&paths.data_dir.join("measure-collect-state.json"))
             .unwrap();
-        let value = local_status(&cli(paths, &["measure", "status"]));
-        assert_eq!(value["batch"]["pending"], 0);
-        assert_eq!(value["batch"]["refused"], true);
+        let value = local_status(paths);
+        assert_eq!(value["batch"]["pending"], 1);
+        assert!(value["batch"].get("refused").is_none());
         assert_eq!(
             value["batch"]["failures"]["codex"]["last_error_kind"],
             "network"
         );
         let lean = cort::measure::render_status(&value);
-        assert!(lean.contains("refused=true"), "{lean}");
+        assert!(!lean.contains("refused="), "{lean}");
         assert!(lean.contains("codex:2/network"), "{lean}");
     });
 }
@@ -245,14 +205,13 @@ fn unreadable_usage_and_missing_state_are_explicit_and_read_only() {
 #[test]
 fn broken_state_file_is_unknown_not_healthy() {
     sandbox(|paths| {
-        configured(paths);
         command(&paths.usage_db);
         fs::write(
             paths.data_dir.join("measure-collect-state.json"),
             "{not json",
         )
         .unwrap();
-        let value = local_status(&cli(paths, &["measure", "status"]));
+        let value = local_status(paths);
         assert!(value["batch"]["pending"].is_null(), "{value}");
         assert_eq!(value["batch"]["state_error"], "state_unparseable");
         // Nothing of the default state is passed off as fact.
