@@ -54,11 +54,13 @@ for 62 of 63 sampled seeds -- which is why the instruction is *read the rows*, n
 change that makes an answer cheaper to verify is on the main line; a feature that only makes answers
 more numerous is not.
 
-**`PreToolUse` is a thin trigger since 2026-10-25, and it decides nothing.** It is deployed by
+**`PreToolUse` is a thin trigger since 2026-10-25; cort's own judgment stays silent.** It is deployed by
 `install.sh` in the same run as the skill and runs `cort hook-suggest`, which reads the payload and
 records one row in local `usage.db` -- `fired` with the harness, model, tool and project, or
 `no_payload` when stdin was not JSON or carried no (or a null) `tool_input`; a `fired` row then kicks
-collection when a run is due, and the hook says nothing to the agent. It measures demand; it is not a
+collection when a run is due. Since 2026-10-28, a configured external gate via `cort hook-gate`
+may deny a `Bash` call only when it exits 75; all other results stay silent and allow the call.
+Codex obedience to that deny remains unverified. The hook measures demand; it is not a
 path by which ClaudeCat memory reaches an agent. Recording without speaking began on 2026-09-27; the
 search suggestion and the `judge` behind it were removed on 2026-10-25 (T5/T6), and what survives of
 that vocabulary in `rust/src/hook.rs` is `LEGACY_SUGGEST_OUTCOMES` and `SUGGEST_DECLINES`, kept only
@@ -168,7 +170,8 @@ but `cort` and the pack.
 
 **Two hook events, and the second one repairs rather than reports.** `PreToolUse` on `Bash` (and
 Kimi's `Grep`) records one row in `usage.db` and, for a `fired` row, kicks collection, speaking
-nothing to the agent; `PostToolUse` on edit tools runs `cort index --incremental`. The second
+nothing to the agent unless a gate configured with `cort hook-gate` denies a `Bash` call;
+`PostToolUse` on edit tools runs `cort index --incremental`. The second
 exists because the first, while it still judged, could only ever *say* the index was behind and
 that was measured at 19 re-index runs against 2,700+ fires in 90 days -- and because the staleness it compared was git
 heads, so an edited-but-uncommitted tree read as fresh while its answers were already wrong.
@@ -216,7 +219,8 @@ before answering: milliseconds when an incremental suffices, the full 1-2s rebui
 does not, and a single-flight background rebuilder (`flock`, kernel-released on death, never a pid
 file) for trees past `CORT_HEAL_MAX_FILES`. A foreground command a person chose to run has the
 budget a hook never will; the `PreToolUse` hook reads no index at all -- since 2026-10-25 it only records
-a row and kicks collection -- and the edit hook only repairs an existing index. What the payload
+a row and kicks collection, and since 2026-10-28 hands a `Bash` payload to a configured gate under a
+time limit -- and the edit hook only repairs an existing index. What the payload
 owes the reader is unchanged: `self_healed`/`heal_deferred` name what the query did about
 staleness, and every disclosure field still means what it meant — they describe the answer's
 basis, they never assign the caller maintenance work. One arm of that contract had to learn to

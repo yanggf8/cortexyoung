@@ -302,6 +302,11 @@ if [ -e "$HOME/.local/share/cortexyoung/cort/fake_ast_grep" ]; then
 else
   pass "dev-only fixture stays out of the installed payload"
 fi
+if [ -e "$HOME/.local/share/cortexyoung/cort/fake_gate" ]; then
+  fail "fake_gate stays out of the installed payload"
+else
+  pass "fake_gate stays out of the installed payload"
+fi
 test -x "$REPO_ROOT/rust/target/release/cort_upgrade" \
   || fail "release build must produce cort_upgrade (smoke Step 6 builds release first)"
 if [ -e "$HOME/.local/share/cortexyoung/cort/cort_upgrade" ]; then

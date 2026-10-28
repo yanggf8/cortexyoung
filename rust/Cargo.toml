@@ -18,6 +18,11 @@ path = "src/main.rs"
 name = "fake_ast_grep"
 path = "src/bin/fake_ast_grep.rs"
 
+# Dev-only resource gate fixture; never copied into the installed payload.
+[[bin]]
+name = "fake_gate"
+path = "src/bin/fake_gate.rs"
+
 # Repo-local upgrader: diagnoses an existing install and brings it to what THIS tree
 # requires. Never installed — it runs the new tree's code, so it belongs to the tree.
 [[bin]]

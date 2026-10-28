@@ -36,14 +36,18 @@ same hooks — with three things, in this order:
 | Agent and project memory: the reviewed shared ledger and its CLI | cort | `cort memory`. The only owner; ClaudeCat may call cort, never keep a second ledger. |
 | Measurement of how agents work: collection and analysis | cort | `cort measure`, kicked from cort's own hooks into cort's own Turso database. ClaudeCat collects nothing; `claudecat telemetry sync` and its daily `CORT-AUDIT.md` audit are retired. |
 | Code helpers: the local index, `impact`, repairing the index after an edit | cort | `cort index`, `cort impact`, the `PostToolUse` hook. |
-| The hooks on Claude Code, Codex and Kimi | cort | `PreToolUse` and `PostToolUse` record each call and kick collection; they stay silent, exit 0 and never wait. |
+| The hooks on Claude Code, Codex and Kimi | cort | `PreToolUse` and `PostToolUse` record each call and kick collection; they exit 0 and never wait on the network or a lock. cort's own judgment stays silent; the only thing that can speak is a configured external gate's deny (`cort hook-gate`), bounded by its timeout. |
 | Machine resources: load, memory and swap, the machine-wide heavy-work slots, never stacking two full builds, `nice`, `cargo -j`, orphaned delegate processes | [ClaudeCat](https://github.com/yanggf8/claudecat) | One canonical copy of the thresholds. A project keeps only its own dispatch flow (who writes, who reviews, tickets) and asks ClaudeCat: `claudecat gate check` from a shell, or through cort's hook. |
 | Search routing | nobody | Removed 2026-10-25: the `CORT_SUGGEST` delivery and the would-be verdict behind it. 409 searches in skill-bearing sessions produced zero `cort` calls. |
 
-The dependency runs one way, ClaudeCat → cort. cort's `PreToolUse` hook will offer a generic
-hand-off point that never names ClaudeCat; whatever answers there gets a time limit, and a missing,
-slow or failing answer lets the call through. Resource gating therefore cannot make a hook wait, and
-removing ClaudeCat changes nothing in cort.
+The dependency runs one way, ClaudeCat → cort. cort's `PreToolUse` hook offers a generic
+hand-off point that never names ClaudeCat (`cort hook-gate set`, which `claudecat gate install`
+calls): a `Bash` payload goes to the configured command, which gets a time limit (200 ms by
+default, at most 1 s). Only its exit 75 denies the call; a missing, slow or failing answer lets the
+call through. Resource gating therefore makes a hook wait at most that limit, and removing ClaudeCat
+changes nothing in cort. The deny is Claude Code's documented shape; Kimi honoured the same shape on its `Grep`
+tool in 2026-09 (not yet seen on `Bash`), and whether Codex honours it is not yet
+verified.
 
 Since 2026-09-01 the indexing scan runs the rule pack **in-process** through the `ast-grep-core`/`-config`/`-language` crates (proven byte-identical to the CLI on 1,604 match comparisons plus row-identical full indexes of two venues); the `ast-grep` CLI is still provisioned by `install.sh` and stays the engine of `struct --pattern` lookup. `CORT_SCAN_BACKEND=cli` puts the subprocess back on the indexing path; the scan engine's identity is part of `extractor_version`, so flipping it or bumping the crates forces a full re-index.
 
@@ -311,7 +315,7 @@ exit 2, on a fresh install). `./install.sh --force` really reinstalls over it.
 - Downloads pinned `ast-grep` v0.45.3 prebuilt `app-<target>.zip` for your platform (Linux x86_64/aarch64, macOS x86_64/arm64) from GitHub Releases and verifies SHA-256 (repo-maintained; upstream publishes no checksums) — fail-closed: an empty or mismatched checksum refuses to install. Falls back to `cargo install ast-grep --version 0.45.3 --locked` (requires Rust 1.88+).
 - Builds `cort` from `rust/` with `cargo build --release --locked` on **every** run and installs the binary plus its ast-grep pack (`src/pack`, located at runtime via `CORT_PACK_DIR`) to `~/.local/share/cortexyoung/cort`, shimming `~/.cargo/bin/cort` or `~/.local/bin/cort`.
 - Deploys `skills/cort/SKILL.md` to **both** agent homes — `~/.claude/skills/cort/SKILL.md` and `~/.codex/skills/cort/SKILL.md` (honouring `CODEX_HOME`) — **byte-for-byte the repo file**. The installer writes nothing inside the document: the frontmatter block holds keys only (`name`, `description`, and nothing of ours), both loaders anchor that fence to line 1, and `rust/tests/skill_format.rs` fails the build if a source stops parsing. Ownership lives in `.cortexyoung-managed` beside the skill, which records the SHA-256 of the bytes we deployed — so a hand-edit of a deployed `SKILL.md` reads as someone else's file and is refused, not silently overwritten. Edit `skills/<name>/SKILL.md` in this repo instead; one source feeds both homes. Preflights collisions before mutating: skips if hash-equal, replaces what it owns, refuses what it does not (use `--force` to backup and replace). An old `ast-grep` skill is removed only when its stamp matches its current bytes; edited or unstamped copies remain with a notice. Uninstall removes owned skill documents and stamps.
-- Wires **two** hooks into `~/.claude/settings.json`, `~/.codex/config.toml` and `~/.kimi-code/config.toml` in the **same run** as the skill (skip all of them with `--no-hook`): a `PreToolUse` trigger that records one row per fire in local `usage.db` and kicks collection, and a `PostToolUse` edit hook that repairs an existing index. Neither speaks; both exit 0 and never wait. `cort hook-install --all` resolves all six entries from its own table (`install.sh` names no path, dialect or subcommand), and the single-entry form takes an explicit `--format` and `--event` — JSON via `rust/src/settings.rs`, Codex's nested TOML via `rust/src/settings_toml.rs`, Kimi's flat `[[hooks]]` TOML via `rust/src/settings_kimi.rs` — never `jq`: every one of them preserves the hooks you already have, rewrites our own entry when the binary moves instead of adding a second, collapses duplicates down to one, refuses outright to overwrite a settings file it could not parse, and gives an install-then-uninstall cycle back byte for byte. (The format used to be read off the file extension. Two of these three files are called `config.toml`, so each caller now names its own.) Grok reads the same `settings.json` as Claude Code and needs no entry of its own. See [the hook section](#the-pretooluse-hook--the-retrospective-half-of-the-routing) for the current runtime behavior and the dated measurements behind the removal.
+- Wires **two** hooks into `~/.claude/settings.json`, `~/.codex/config.toml` and `~/.kimi-code/config.toml` in the **same run** as the skill (skip all of them with `--no-hook`): a `PreToolUse` trigger that records one row per fire in local `usage.db` and kicks collection, and a `PostToolUse` edit hook that repairs an existing index. Both exit 0; only a configured external gate exiting 75 can make `PreToolUse` deny a call. `cort hook-install --all` resolves all six entries from its own table (`install.sh` names no path, dialect or subcommand), and the single-entry form takes an explicit `--format` and `--event` — JSON via `rust/src/settings.rs`, Codex's nested TOML via `rust/src/settings_toml.rs`, Kimi's flat `[[hooks]]` TOML via `rust/src/settings_kimi.rs` — never `jq`: every one of them preserves the hooks you already have, rewrites our own entry when the binary moves instead of adding a second, collapses duplicates down to one, refuses outright to overwrite a settings file it could not parse, and gives an install-then-uninstall cycle back byte for byte. (The format used to be read off the file extension. Two of these three files are called `config.toml`, so each caller now names its own.) Grok reads the same `settings.json` as Claude Code and needs no entry of its own. See [the hook section](#the-pretooluse-hook--the-retrospective-half-of-the-routing) for the current runtime behavior and the dated measurements behind the removal.
 - Adds a single bounded idempotent `PATH` block to your shell profile (`.bashrc`/`.zshrc`/`.profile`) so `cort` and `ast-grep` are on `PATH`; removed on `--uninstall`.
 - Records ownership in `~/.local/share/cortexyoung/manifest` (v2 `key:value` lines) — uninstall only removes what it installed, never a pre-existing binary.
 
@@ -832,12 +836,13 @@ The `cort` skill teaches agents to recall project decisions at the start of work
 
 ## The PreToolUse hook — the retrospective half of the routing
 
-**Current behavior (`rust/src/main.rs`, since 2026-10-25):** the hook is a thin trigger. It does
-not judge the tool call and says nothing: a payload it cannot parse, or one with no (or a null)
+**Current behavior (`rust/src/main.rs`):** the hook is a thin trigger. Cort does
+not judge the tool call: a payload it cannot parse, or one with no (or a null)
 `tool_input`, is recorded as `no_payload` and kicks nothing; every other payload is recorded as
 `fired` with the harness, model, project and tool name, and calls `collect::kick` — which decides
 whether a collection run is due and, if so, starts `cort measure collect|health --background` in
-the background. stdout stays `{}`, exit 0, no waiting, no network. `CORT_SUGGEST` no longer exists;
+the background. A configured external gate can deny a `Bash` call by exiting 75; otherwise
+stdout stays `{}`. The hook exits 0. Codex obedience to deny is not yet verified. `CORT_SUGGEST` no longer exists;
 nothing reads it. The collection subcommands ship with the event-driven-collection plan, not with
 this trigger. Between 2026-09-27 and 2026-10-25 the hook ran the routing rule, recorded its verdict
 and stayed silent by default; before 2026-09-27 the verdict was delivered. Both are history, and
@@ -852,7 +857,8 @@ what is left is the demand instrument — a fire is a fact about how often an ag
 matched tool.
 
 It runs as a `PreToolUse` hook matched to `Bash` (`Bash|Grep` on Kimi), reads the harness payload
-on stdin, records one row, and stays silent. The matcher decides which tool calls become fires,
+on stdin, and records one row. Cort stays silent unless a configured external gate denies
+a `Bash` call. The matcher decides which tool calls become fires,
 not whether a search deserves an answer. `cort hook-suggest` is not a verb to type.
 
 **Earlier delivery rationale.** When enabled, the hook was the delivery mechanism; the number it delivered
@@ -873,7 +879,7 @@ than trusting a flag, because a flag stays right only as long as one settings fi
 harness. While the hook still spoke, Codex never received `suppressOutput` in its JSON reply — the
 field is legal by Codex's own schema but makes it discard the whole response if present
 (`docs/2026-09-02-hook-wiring-correction.md` §12) — while Claude Code and Grok got it, to keep the
-raw JSON out of the transcript view. That rule went with the reply body: the trigger returns `{}`.
+raw JSON out of the transcript view. That rule went with the reply body: absent a configured gate deny, the trigger returns `{}`.
 
 **Not every harness searched through a shell.** Kimi's search surface was its structured `Grep`
 tool: 1,078 structured searches against 3,417 shell ones across the whole local corpus, and on that
@@ -1012,7 +1018,8 @@ described above. Its `args_summary` is `v: 6` and always carries `hook` — `fir
 says). A `fired` row adds `model` when the payload names one; `harness_declared`, only when the
 installer's `--harness` flag and the payload's own `transcript_path` disagree; `tool`, the
 harness's own `tool_name` when it is identifier-shaped (1–64 bytes of `[A-Za-z0-9_.:-]`) and
-`unrecognised` otherwise; and `collect`, the label `collect::kick` returned for that fire. It also
+`unrecognised` otherwise; `gate`, the handoff result; `gate_ms` when spawned; and
+`collect`, the label `collect::kick` returned for that fire. It also
 sets the row's `project_id` column to the canonicalised directory the hook ran in, hashed the same
 way `cort index` takes it. Field names are vocabulary; payload content never enters the row, which
 `payload_content_never_enters_the_hook_row` (`rust/tests/cli.rs`) holds.

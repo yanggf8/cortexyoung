@@ -8,6 +8,7 @@ use cort::db::{
     project_root_for_path, with_busy_retry, Db, ProjectEntry, SqliteErrorCode, WithBusyRetryError,
 };
 use cort::errors::CortError;
+use cort::gate::{self, GateConfig};
 use cort::impact::{impact_command, DEFAULT_DEPTH};
 use cort::incremental::{incremental_index, RebuildPolicy};
 use cort::indexer::{
@@ -32,7 +33,7 @@ use std::time::{Duration, Instant};
 // measurement that has a numerator -- and since the thin trigger landed the row says only that a
 // fire happened, so that pairing is now read from the rows rather than inferred from a verdict.
 // It is not a verb anyone types.
-const KNOWN_COMMANDS: [&str; 15] = [
+const KNOWN_COMMANDS: [&str; 16] = [
     "index",
     "status",
     "projects",
@@ -44,6 +45,7 @@ const KNOWN_COMMANDS: [&str; 15] = [
     "hook-suggest",
     "hook-refresh",
     "hook-recall",
+    "hook-gate",
     "hook-install",
     "internal-shim",
     "internal-ast-grep",
@@ -62,9 +64,10 @@ fn usage_value() -> Value {
             "usage": "cort usage [days] [-f json|lean]",
             "memory": "cort memory <configure|import-config|record|resolve|recall|status|check|import-legacy|notes> [options]",
             "measure": "cort measure <configure|show|record|collect|health|status|cron|report> [options]  (uploads start at 2026-10-28 00:00 Taiwan time; collect: scan and upload the batch; --background appends at most one result to measure.log (none when skipped_busy) without stdout; health: observe recently used indexes and write local index_health_log, reading indexes only, with no network; --background appends the result to measure.log without stdout; status: read local collection state, -f json|lean; cron: manual install or removal of the legacy entry, no longer installed automatically; hook kick is the only automatic collection trigger; command_log and index_health_log keep uploaded rows 90 days and rows not yet uploaded 180 days, pruned when a new command is recorded; rows still not uploaded after 180 days are deleted and counted in measure status (pruned_unuploaded_rows) and measure.log)",
-            "hook-suggest": "cort hook-suggest  (PreToolUse hook: records one fire row and kicks collection; never speaks; not a verb to type)",
+            "hook-suggest": "cort hook-suggest  (PreToolUse hook: records one fire row, kicks collection, and relays a configured gate's deny; not a verb to type)",
             "hook-refresh": "cort hook-refresh  (PostToolUse hook: brings this project's index up to the tree after an edit; silent, never creates an index; not a verb to type)",
             "hook-recall": "cort hook-recall --harness <h>  (SessionStart hook: reads the shared memory database; not a verb to type)",
+            "hook-gate": "cort hook-gate <set [--timeout-ms N] -- <argv...>|clear|status [-f json|lean]>",
             "hook-install": "cort hook-install [--all|--settings <path>] [--event pre|post|session] [--command <cmd>] [--remove|--status]  (installer-invoked hook wiring; not a verb to type)",
             "internal-shim": "cort internal-shim --cort-home <dir>  (installer-invoked: renders the $BIN_DIR/cort shim for a CORT_HOME; not a verb to type)",
             "internal-ast-grep": "cort internal-ast-grep  (installer-invoked: prints the pinned ast-grep release and its checksums as lean TSV; not a verb to type)",
@@ -138,12 +141,19 @@ fn memory_usage_value() -> Value {
     })
 }
 
-/// `--help` and `-h` are flags and count wherever they appear. The bare word `help` is a command
-/// word, so it counts only where one can stand: first, or directly after `memory`. Anywhere else
-/// it is a value -- `cort memory recall help` searches the ledger for the topic "help".
+/// The arguments cort itself may read as flags. Everything after a bare `--` belongs to another
+/// program -- `cort hook-gate set -- /path/gate --help` configures a gate that takes `--help`, it
+/// does not ask cort for its usage.
+fn before_separator(args: &[String]) -> impl Iterator<Item = &String> {
+    args.iter().take_while(|a| *a != "--")
+}
+
+/// `--help` and `-h` are flags and count wherever they appear before `--`. The bare word `help` is
+/// a command word, so it counts only where one can stand: first, or directly after `memory`.
+/// Anywhere else it is a value -- `cort memory recall help` searches the ledger for the topic "help".
 fn wants_help(args: &[String]) -> bool {
     let at = |i: usize, word: &str| args.get(i).is_some_and(|a| a == word);
-    args.iter().any(|a| a == "--help" || a == "-h")
+    before_separator(args).any(|a| a == "--help" || a == "-h")
         || at(0, "help")
         || (at(0, "memory") && at(1, "help"))
 }
@@ -162,7 +172,7 @@ fn wants_help(args: &[String]) -> bool {
 /// printed: `--check` greps `head -1` of it, and a JSON first line of `{` is exactly the failure
 /// that hid a stale shim on a live machine.
 fn wants_version(args: &[String]) -> bool {
-    args.iter().any(|a| a == "--version" || a == "-V")
+    before_separator(args).any(|a| a == "--version" || a == "-V")
 }
 
 fn map_index(err: IndexError) -> CortError {
@@ -371,6 +381,27 @@ fn render_emit(emit: &Emit) -> String {
             .to_string()
     } else if emit.render_command == Some("hook-recall") {
         emit.payload.as_str().unwrap_or_default().to_string()
+    } else if emit.render_command == Some("hook-gate") && emit.format == Format::Lean {
+        let p = &emit.payload;
+        let field = |key: &str| match p.get(key) {
+            Some(Value::String(s)) => s.clone(),
+            Some(Value::Null) | None => String::new(),
+            Some(v) => v.to_string(),
+        };
+        let mut lines = vec![
+            format!("state\t{}", field("state")),
+            format!("path\t{}", field("path")),
+        ];
+        for key in [
+            "command",
+            "timeout_ms",
+            "reason",
+            "executable_exists",
+            "executable",
+        ] {
+            lines.push(format!("{key}\t{}", field(key)));
+        }
+        format!("{}\n", lines.join("\n"))
     } else {
         render(emit.render_command, emit.format, &emit.payload)
     }
@@ -683,6 +714,110 @@ fn pin_bin() -> Result<String, CortError> {
     Ok(bin)
 }
 
+fn gate_arg_error(message: &str) -> CortError {
+    CortError::new("gate_invalid_args", json!({ "message": message }))
+}
+
+fn gate_status(format: Format) -> Emit {
+    let path = gate::path();
+    let payload = match gate::load() {
+        GateConfig::Unconfigured => json!({
+            "state": "unconfigured", "path": path, "command": null,
+            "timeout_ms": null, "reason": null,
+            "executable_exists": null, "executable": null,
+        }),
+        GateConfig::Invalid { reason } => json!({
+            "state": "invalid", "path": path, "command": null,
+            "timeout_ms": null, "reason": reason,
+            "executable_exists": null, "executable": null,
+        }),
+        GateConfig::Configured {
+            command,
+            timeout_ms,
+        } => {
+            let executable = Path::new(&command[0]);
+            let metadata = std::fs::metadata(executable).ok();
+            let executable_exists = metadata.is_some();
+            #[cfg(unix)]
+            let can_execute = {
+                use std::os::unix::fs::PermissionsExt;
+                metadata
+                    .as_ref()
+                    .is_some_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+            };
+            #[cfg(not(unix))]
+            let can_execute = metadata.as_ref().is_some_and(|m| m.is_file());
+            json!({
+                "state": "configured", "path": path, "command": command,
+                "timeout_ms": timeout_ms, "reason": null,
+                "executable_exists": executable_exists, "executable": can_execute,
+            })
+        }
+    };
+    Emit {
+        render_command: Some("hook-gate"),
+        format,
+        payload,
+    }
+}
+
+fn cmd_hook_gate(args: &[String]) -> Result<Emit, CortError> {
+    match args.first().map(String::as_str) {
+        Some("set") => {
+            let separator = args
+                .iter()
+                .position(|s| s == "--")
+                .ok_or_else(|| gate_arg_error("set requires -- before the command"))?;
+            let options = &args[1..separator];
+            let mut timeout_ms = None;
+            let mut index = 0;
+            while index < options.len() {
+                if options[index] != "--timeout-ms" || timeout_ms.is_some() {
+                    return Err(gate_arg_error("unknown or repeated set option"));
+                }
+                let value = options
+                    .get(index + 1)
+                    .ok_or_else(|| gate_arg_error("--timeout-ms requires a value"))?;
+                timeout_ms = Some(
+                    value
+                        .parse::<u64>()
+                        .map_err(|_| gate_arg_error("--timeout-ms must be an unsigned integer"))?,
+                );
+                index += 2;
+            }
+            let command = args[separator + 1..].to_vec();
+            let path = gate::save(command, timeout_ms)?;
+            Ok(Emit {
+                render_command: None,
+                format: Format::Json,
+                payload: json!({ "path": path, "state": "configured" }),
+            })
+        }
+        Some("clear") if args.len() == 1 => {
+            let removed = gate::clear().map_err(|e| {
+                CortError::new(
+                    "gate_storage_error",
+                    json!({ "path": gate::path(), "message": e.to_string() }),
+                )
+            })?;
+            Ok(Emit {
+                render_command: None,
+                format: Format::Json,
+                payload: json!({ "path": gate::path(), "removed": removed }),
+            })
+        }
+        Some("status") => {
+            let format = match &args[1..] {
+                [] => Format::Json,
+                [flag, value] if flag == "-f" || flag == "--format" => resolve_fmt(Some(value))?,
+                _ => return Err(gate_arg_error("status accepts only -f json|lean")),
+            };
+            Ok(gate_status(format))
+        }
+        _ => Err(gate_arg_error("expected set, clear, or status")),
+    }
+}
+
 fn dispatch(args: &[String], usage: &mut UsageEvent, started: Instant) -> Result<Emit, CortError> {
     let command = args.first().map(String::as_str);
     match command {
@@ -697,6 +832,7 @@ fn dispatch(args: &[String], usage: &mut UsageEvent, started: Instant) -> Result
         Some("hook-suggest") => cmd_hook_suggest(&args[1..], usage),
         Some("hook-refresh") => cmd_hook_refresh(&args[1..], usage),
         Some("hook-recall") => cmd_hook_recall(&args[1..], usage, started),
+        Some("hook-gate") => cmd_hook_gate(&args[1..]),
         Some("hook-install") => cmd_hook_install(&args[1..], usage),
         Some("internal-shim") => cmd_internal_shim(&args[1..], usage),
         Some("internal-ast-grep") => cmd_internal_ast_grep(usage),
@@ -1050,7 +1186,8 @@ fn cmd_hook_refresh(args: &[String], usage: &mut UsageEvent) -> Result<Emit, Cor
 }
 
 /// A `PreToolUse` hook, not a verb anyone types. It records one row per fire and kicks the
-/// collection lanes; it does not judge the tool call and says nothing to the agent.
+/// collection lanes. Its own judgment stays silent; a configured external gate's exit 75
+/// is the only path that sends a deny to the agent.
 ///
 /// This is what is left of the suggestion. The announcement was measured worthless -- 409 searches
 /// in skill-bearing sessions followed by zero `cort` calls, then 0/9 external uptake and a window
@@ -1103,10 +1240,35 @@ fn cmd_hook_suggest(args: &[String], usage: &mut UsageEvent) -> Result<Emit, Cor
         "tool",
         hook_tool_label(&v),
     );
-    // External resource gate hook point: claudecat's gate hands off here, fail-open, before kick.
+    // Only a fired Bash call reaches the optional external gate.
+    let hand_off = if v.get("tool_name").and_then(Value::as_str) == Some("Bash") {
+        cort::gate::hand_off(&cort::gate::load(), payload.as_bytes())
+    } else {
+        cort::gate::HandOff {
+            tag: "not_shell",
+            elapsed_ms: None,
+            deny_reason: None,
+        }
+    };
+    let mut row = hook_args_tag(&row, "gate", hand_off.tag);
+    if let Some(ms) = hand_off.elapsed_ms {
+        row = hook_args_tag(&row, "gate_ms", &ms.to_string());
+    }
     let row = hook_args_tag(&row, "collect", cort::collect::kick(&harness));
     usage.args_summary = hook_args_tag(&row, "notes", cort::notes_kick::kick(None));
-    quiet()
+    if let Some(reason) = hand_off.deny_reason {
+        Ok(Emit {
+            payload: json!({"hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": reason,
+            }}),
+            format: Format::Lean,
+            render_command: Some("hook-suggest"),
+        })
+    } else {
+        quiet()
+    }
 }
 
 /// SessionStart reads shared memory without waiting on a local writer.

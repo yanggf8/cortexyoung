@@ -6,6 +6,7 @@ pub mod cron;
 pub mod data_dir;
 pub mod db;
 pub mod errors;
+pub mod gate;
 pub mod graph;
 pub mod heal;
 pub mod health;
