@@ -196,13 +196,15 @@ pub trait Transport {
     ) -> Result<Vec<u8>, RemoteError>;
 }
 
-/// The recall hook's whole budget, from process start. Every harness gives a hook 5 s
-/// (`settings::TIMEOUT_SECS` and its two TOML twins); the rest is process start and exit. It was
-/// 2500 ms until 2026-10-29, when the first read after an idle spell timed out on three session
-/// starts in one afternoon while warm reads took about 300 ms. 4300 rather than 4500 leaves 500 ms
-/// after the last possible network return for rendering, stdout and the usage row before the
-/// watchdog: at 4500 a debug build under test load had about 30 ms left.
-pub const RECALL_DEADLINE: Duration = Duration::from_millis(4300);
+/// When the recall hook's network waits must end, from `main()`. Every harness kills a hook at 5 s
+/// (`settings::TIMEOUT_SECS` and its two TOML twins); the watchdog fires 900 ms after this, which
+/// covers what the deadline cannot bound: a blocking socket read outlasted its 4.175 s timeout by
+/// 30-210 ms on this machine (strace, 2026-10-29), a debug build spent ~35 ms between setting the
+/// socket timeout and its first read, and rendering plus the usage row follow. With 500 ms of
+/// headroom a slow CI runner still lost the race and printed nothing. It was 2500 ms until
+/// 2026-10-29, when the first read after an idle spell timed out on three session starts in one
+/// afternoon while warm reads took about 300 ms.
+pub const RECALL_DEADLINE: Duration = Duration::from_millis(3800);
 
 /// Recompute the SessionStart allowance for each POST, including a ledger-only retry.
 pub struct RecallTransport {

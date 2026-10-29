@@ -1399,8 +1399,8 @@ fn cmd_hook_recall(
                 .ok()
                 .and_then(|s| s.parse::<u64>().ok())
                 .filter(|n| *n > 0)
-                .unwrap_or(4000)
-                .min(4200);
+                .unwrap_or(3500)
+                .min(3700);
             let db = cort::remote::RemoteDb::new(
                 &url,
                 token,
@@ -3015,7 +3015,7 @@ fn main() {
     if recall_hook {
         // A timeout exits before the normal usage writer; that missing row is intentional.
         // The process must never hold up a session start, even if stdin or storage stalls.
-        // It fires 400 ms after the recall deadline, so a read the deadline allows still gets to
+        // It fires 900 ms after the recall deadline, so a read the deadline allows still gets to
         // print its notice and row. Losing the claim means the main path is writing stdout and
         // its row; it gets 300 ms more for that, then the process exits anyway (a stuck pipe or
         // usage.db). The two add up to the harnesses' 5 s hook limit, as 3 s + 2 s did before.
@@ -3024,7 +3024,7 @@ fn main() {
             .name("hook-recall-watchdog".into())
             .spawn(move || {
                 std::thread::sleep(
-                    cort::remote::RECALL_DEADLINE + std::time::Duration::from_millis(400),
+                    cort::remote::RECALL_DEADLINE + std::time::Duration::from_millis(900),
                 );
                 if watchdog_claim
                     .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)

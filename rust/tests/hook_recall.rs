@@ -591,12 +591,16 @@ fn cli_silent_server_times_out_and_clamps() {
     let repo = git_repo(root);
     config(&root.join("data"), &server.url);
     let payload = json!({"cwd":repo}).to_string();
-    // 99999 clamps to the 4200 ms cap. The notice and its row are the real check: they are missing
-    // when the watchdog (deadline + 400 ms) exits first. The bound is the harnesses' 5 s hook limit.
+    // 99999 clamps to the 3700 ms cap. The notice and its row are the real check: they are missing
+    // when the watchdog (deadline + 900 ms) exits first. The bound is the harnesses' 5 s hook limit.
     for (setting, bound) in [("400", 1800), ("99999", 4950)] {
         let (out, elapsed) = run(root, root, &payload, Some(setting));
         assert!(out.status.success());
         assert!(elapsed < Duration::from_millis(bound), "{elapsed:?}");
+        assert!(
+            !out.stdout.is_empty(),
+            "setting {setting}: no output after {elapsed:?}, so the watchdog exited first"
+        );
         notice(&out, "remote_timeout");
         assert_eq!(outcome(root)["hook"], "remote_timeout");
     }
