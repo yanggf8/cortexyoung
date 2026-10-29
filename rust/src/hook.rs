@@ -92,8 +92,10 @@ pub const REFRESH_OUTCOMES: [&str; 8] = [
     "busy_or_failed",
 ];
 
-/// Closed outcome vocabulary for the shared database SessionStart memory hook.
-pub const RECALL_OUTCOMES: [&str; 7] = [
+/// Closed outcome vocabulary for the shared database recall hook. The last three are Kimi's
+/// once-per-session `UserPromptSubmit` path: a later prompt of an injected session, a payload with
+/// no session id, and a marker directory that could not be written.
+pub const RECALL_OUTCOMES: [&str; 10] = [
     "injected",
     "none",
     "not_configured",
@@ -101,5 +103,8 @@ pub const RECALL_OUTCOMES: [&str; 7] = [
     "remote_unreachable",
     "remote_blocked",
     "remote_timeout",
+    "already_injected",
+    "missing_session_id",
+    "marker_unavailable",
 ];
 pub const LEGACY_RECALL_OUTCOMES: [&str; 3] = ["no_replica", "unsynced_replica", "busy"];

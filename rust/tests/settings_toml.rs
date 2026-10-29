@@ -672,9 +672,41 @@ fn installing_the_refresh_hook_does_not_disturb_the_suggest_hook() {
     let (_d, p) = kimi_tmp();
     cort::settings_kimi::install_hook(&p, "/bin/cort hook-suggest", HookEvent::Suggest).unwrap();
     cort::settings_kimi::install_hook(&p, "/bin/cort hook-refresh", HookEvent::Refresh).unwrap();
+    let recall = "/bin/cort hook-recall --harness kimi-code";
+    cort::settings_kimi::install_hook(&p, recall, HookEvent::Recall).unwrap();
+    assert_eq!(
+        cort::settings_kimi::install_hook(&p, recall, HookEvent::Recall)
+            .unwrap()
+            .change,
+        Change::AlreadyPresent
+    );
+    assert_eq!(
+        cort::settings_kimi::installed_command(&p, HookEvent::Recall).as_deref(),
+        Some(recall)
+    );
+    assert!(cort::settings_kimi::entry_shape_ok(
+        &p,
+        HookEvent::Recall,
+        recall
+    ));
+    let doc = fs::read_to_string(&p)
+        .unwrap()
+        .parse::<DocumentMut>()
+        .unwrap();
+    let entry = doc["hooks"]
+        .as_array_of_tables()
+        .unwrap()
+        .iter()
+        .find(|e| e.get("command").and_then(|v| v.as_str()) == Some(recall))
+        .unwrap();
+    assert_eq!(
+        entry.get("event").and_then(|v| v.as_str()),
+        Some("UserPromptSubmit")
+    );
+    assert!(entry.get("matcher").is_none());
 
     let entries = kimi_entries(&p);
-    assert_eq!(entries.len(), 2, "one entry per event, got {entries:?}");
+    assert_eq!(entries.len(), 3, "one entry per event, got {entries:?}");
     assert!(entries.contains(&(
         "PreToolUse".to_string(),
         "/bin/cort hook-suggest".to_string()
@@ -691,7 +723,7 @@ fn installing_the_refresh_hook_does_not_disturb_the_suggest_hook() {
             .change,
         Change::AlreadyPresent
     );
-    assert_eq!(kimi_entries(&p).len(), 2);
+    assert_eq!(kimi_entries(&p).len(), 3);
 }
 
 #[test]
@@ -779,6 +811,12 @@ fn an_install_and_remove_cycle_returns_the_file_exactly_as_it_was() {
 
     cort::settings_kimi::install_hook(&p, "/bin/cort hook-suggest", HookEvent::Suggest).unwrap();
     cort::settings_kimi::install_hook(&p, "/bin/cort hook-refresh", HookEvent::Refresh).unwrap();
+    cort::settings_kimi::install_hook(
+        &p,
+        "/bin/cort hook-recall --harness kimi-code",
+        HookEvent::Recall,
+    )
+    .unwrap();
     assert_eq!(
         fs::read_to_string(&p)
             .unwrap()
@@ -987,18 +1025,4 @@ fn codex_session_start_round_trip_and_shape() {
     ));
     assert_eq!(remove_hook(&codex).unwrap().change, Change::Removed);
     assert_eq!(fs::read_to_string(&codex).unwrap(), original);
-}
-
-/// Kimi discards SessionStart output, so its dialect refuses the event.
-#[test]
-fn kimi_refuses_session_start() {
-    let dir = tempfile::tempdir().unwrap();
-    let kimi = dir.path().join("kimi.toml");
-    assert!(matches!(
-        cort::settings_kimi::install_hook(&kimi, "/bin/cort hook-recall", HookEvent::Recall),
-        Err(cort::settings_toml::SettingsError::Unsupported(
-            "SessionStart"
-        ))
-    ));
-    assert!(!kimi.exists());
 }

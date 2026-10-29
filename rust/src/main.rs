@@ -1328,7 +1328,7 @@ fn cmd_hook_suggest(args: &[String], usage: &mut UsageEvent) -> Result<Emit, Cor
     }
 }
 
-/// SessionStart reads shared memory without waiting on a local writer.
+/// Recall reads shared memory without waiting on a local writer.
 fn cmd_hook_recall(
     args: &[String],
     usage: &mut UsageEvent,
@@ -1348,6 +1348,28 @@ fn cmd_hook_recall(
         .map(|v| harness_of(v, &declared))
         .unwrap_or((declared, None));
     let model = parsed.as_ref().and_then(model_of_payload);
+    let prompt = parsed
+        .as_ref()
+        .and_then(|v| v.get("hook_event_name"))
+        .and_then(Value::as_str)
+        == Some("UserPromptSubmit");
+    let skip = if prompt {
+        match parsed
+            .as_ref()
+            .and_then(|v| v.get("session_id"))
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+        {
+            None => Some("missing_session_id"),
+            Some(id) => match cort::hook_recall::claim_prompt_session(id) {
+                Ok(true) => None,
+                Ok(false) => Some("already_injected"),
+                Err(_) => Some("marker_unavailable"),
+            },
+        }
+    } else {
+        None
+    };
     let root = parsed
         .as_ref()
         .and_then(|v| v.get("cwd"))
@@ -1358,7 +1380,9 @@ fn cmd_hook_recall(
     usage.project_id = std::fs::canonicalize(&root)
         .ok()
         .and_then(|p| p.to_str().map(project_id_for));
-    let (outcome, content, count, notes_count) = if parsed.is_none() {
+    let (outcome, content, count, notes_count) = if let Some(outcome) = skip {
+        (outcome, None, 0, 0)
+    } else if parsed.is_none() {
         ("failed", None, 0, 0)
     } else {
         let read = (|| {
@@ -1424,7 +1448,11 @@ fn cmd_hook_recall(
     usage.args_summary = row.to_string();
     let payload = content
         .map(|text| {
-            json!({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": text}}).to_string()
+            if prompt {
+                json!({"message": text}).to_string()
+            } else {
+                json!({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": text}}).to_string()
+            }
         })
         .unwrap_or_default();
     Ok(Emit {

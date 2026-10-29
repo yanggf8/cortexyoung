@@ -615,6 +615,50 @@ fn cli_unbound_port_and_payload_cwd() {
     notice(&out, &kind);
     assert!(outcome(root)["hook"].as_str().is_some());
 }
+
+#[test]
+fn kimi_prompt_claims_session_even_when_remote_fails() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let repo = git_repo(root);
+    config(&root.join("data"), "turso://127.0.0.1:9");
+    let payload = |id: Option<&str>| {
+        json!({"hook_event_name":"UserPromptSubmit", "session_id":id, "cwd":repo}).to_string()
+    };
+    let (first, _) = run(root, root, &payload(Some("session_one")), Some("400"));
+    assert!(first.status.success());
+    let value: Value = serde_json::from_slice(&first.stdout).unwrap();
+    assert!(value["message"].as_str().unwrap().contains("remote_"));
+    assert!(!String::from_utf8_lossy(&first.stdout).contains("permissionDecision"));
+    assert!(!String::from_utf8_lossy(&first.stdout).contains("block"));
+    // An invalid config proves the second call does not read it.
+    fs::write(root.join("data/turso-memory.json"), "invalid").unwrap();
+    let (second, _) = run(root, root, &payload(Some("session_one")), Some("400"));
+    assert!(second.status.success() && second.stdout.is_empty());
+    assert_eq!(outcome(root)["hook"], "already_injected");
+    config(&root.join("data"), "turso://127.0.0.1:9");
+    let (other, _) = run(root, root, &payload(Some("session_two")), Some("400"));
+    assert!(other.status.success());
+    assert!(serde_json::from_slice::<Value>(&other.stdout).unwrap()["message"].is_string());
+    let (missing, _) = run(root, root, &payload(None), Some("400"));
+    assert!(missing.status.success() && missing.stdout.is_empty());
+    assert_eq!(outcome(root)["hook"], "missing_session_id");
+}
+
+#[test]
+fn kimi_unwritable_marker_is_silent() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    fs::write(root.join("data"), "not a directory").unwrap();
+    let (out, _) = run(
+        root,
+        root,
+        &json!({"hook_event_name":"UserPromptSubmit", "session_id":"s"}).to_string(),
+        None,
+    );
+    assert!(out.status.success() && out.stdout.is_empty());
+    assert_eq!(outcome(root)["hook"], "marker_unavailable");
+}
 #[test]
 fn render_orders_and_caps_entries() {
     use cort::memory::{MemoryEntry, MemoryHit, MemoryRecall};

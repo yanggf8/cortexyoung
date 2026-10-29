@@ -1413,14 +1413,15 @@ fi
 # No wiring restore: Test 20 below brings its own HOME, so nothing later reads this one.
 rm -rf "$STALEBIN"
 
-# ── 20. all eight wired entries, not just the one this file used to check ──
-# Eight entries ship: three harnesses have two tool events, and Claude Code and Codex have SessionStart too. Until 2026-09-03 every hook assertion in this
+# ── 20. all nine wired entries, not just the one this file used to check ──
+# Nine entries ship: each of three harnesses has two tool events and recall -- SessionStart for Claude
+# Code and Codex, UserPromptSubmit for Kimi, which discards SessionStart output. Until 2026-09-03 every hook assertion in this
 # file pointed at `~/.claude/settings.json` and at the pre event, so five of the six were deployed
 # with no install-level test at all -- including both of Kimi's, whose file is a third TOML dialect,
 # and both post events. A deploy path with no assertion is the failure mode this whole file exists
 # for; `--check` reading green is not the same claim, because `--check` asks the same binary that
 # wrote the entry.
-echo "--- Test 20: all eight hook entries are deployed, per harness per shipped event ---"
+echo "--- Test 20: all nine hook entries are deployed, per harness per shipped event ---"
 fresh_home_with_install
 CLAUDE_CFG="$HOME/.claude/settings.json"
 assert_contains "$CLAUDE_CFG" '"SessionStart"' "Claude Code has a SessionStart group"
@@ -1447,6 +1448,8 @@ assert_contains "$CODEX_CFG" "hook-recall --harness codex" "Codex recall is wire
 # A fresh home has no Codex trust record: wired, and Codex asks the user to review it on first start.
 assert_contains /tmp/smoke20check.log "codex/session: $HOME/.codex/config.toml (wired, NOT TRUSTED" "--check reports Codex session wired and awaiting review"
 assert_not_contains "$KIMI_CFG" "SessionStart" "Kimi has no SessionStart entry"
+assert_contains "$KIMI_CFG" "hook-recall --harness kimi-code" "Kimi recall is wired"
+assert_contains "$KIMI_CFG" 'event = "UserPromptSubmit"' "Kimi recall fires on UserPromptSubmit"
 # The two TOML dialects are not each other. Codex nests its groups; Kimi is flat with the event as
 # a field. Asserting the entry's own shape is what would catch a `--format` mixup that both files
 # would otherwise absorb silently, since both are called config.toml.

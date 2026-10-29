@@ -109,3 +109,37 @@ pub fn render_with_notes(
     text.push_str(&section);
     Some((text, entries, shown))
 }
+
+/// Claim a prompt session locally before reading configuration or contacting the database.
+pub fn claim_prompt_session(session_id: &str) -> Result<bool, std::io::Error> {
+    use sha2::{Digest, Sha256};
+    use std::fs::{self, OpenOptions};
+    use std::time::{Duration, SystemTime};
+
+    let dir = crate::data_dir::data_dir().join("recall-sessions");
+    fs::create_dir_all(&dir)?;
+    if let Ok(entries) = fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let old = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|time| SystemTime::now().duration_since(time).ok())
+                .is_some_and(|age| age > Duration::from_secs(7 * 24 * 60 * 60));
+            if old && entry.file_type().is_ok_and(|t| t.is_file()) {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
+    }
+    let hash = Sha256::digest(session_id.as_bytes());
+    let name: String = hash.iter().map(|b| format!("{b:02x}")).collect();
+    match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(dir.join(name))
+    {
+        Ok(_) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+        Err(e) => Err(e),
+    }
+}

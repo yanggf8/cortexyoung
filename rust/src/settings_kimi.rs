@@ -43,11 +43,18 @@ use toml_edit::{value, ArrayOfTables, DocumentMut, Item, Table};
 /// name, so one entry covers both.
 const MATCHER: &str = "Bash|Grep";
 
-fn matcher_for(event: HookEvent) -> &'static str {
+fn matcher_for(event: HookEvent) -> Option<&'static str> {
     match event {
-        HookEvent::Suggest => MATCHER,
-        HookEvent::Refresh => EDIT_MATCHER,
-        HookEvent::Recall => "",
+        HookEvent::Suggest => Some(MATCHER),
+        HookEvent::Refresh => Some(EDIT_MATCHER),
+        HookEvent::Recall => None,
+    }
+}
+fn event_name(event: HookEvent) -> &'static str {
+    if event == HookEvent::Recall {
+        "UserPromptSubmit"
+    } else {
+        event.name()
     }
 }
 /// Seconds. Kimi's schema allows 1..=600; the other two modules use 5 and there is no reason for
@@ -64,8 +71,10 @@ pub fn default_settings_path() -> Option<PathBuf> {
 
 fn hook_table(command: &str, event: HookEvent) -> Table {
     let mut t = Table::new();
-    t.insert("event", value(event.name()));
-    t.insert("matcher", value(matcher_for(event)));
+    t.insert("event", value(event_name(event)));
+    if let Some(matcher) = matcher_for(event) {
+        t.insert("matcher", value(matcher));
+    }
     t.insert("command", value(command));
     t.insert("timeout", value(TIMEOUT_SECS));
     t
@@ -74,8 +83,11 @@ fn hook_table(command: &str, event: HookEvent) -> Table {
 /// Is this entry exactly what `install_hook` would write right now? Field-by-field rather than a
 /// serialized comparison, which would trip on formatting `toml_edit` introduces.
 fn is_canonical(h: &Table, command: &str, event: HookEvent) -> bool {
-    h.get("event").and_then(Item::as_str) == Some(event.name())
-        && h.get("matcher").and_then(Item::as_str) == Some(matcher_for(event))
+    h.get("event").and_then(Item::as_str) == Some(event_name(event))
+        && match matcher_for(event) {
+            Some(matcher) => h.get("matcher").and_then(Item::as_str) == Some(matcher),
+            None => h.get("matcher").is_none(),
+        }
         && h.get("command").and_then(Item::as_str) == Some(command)
         && h.get("timeout").and_then(Item::as_integer) == Some(TIMEOUT_SECS)
 }

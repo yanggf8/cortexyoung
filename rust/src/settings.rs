@@ -114,24 +114,21 @@ pub enum HookEvent {
     Suggest,
     /// After an edit: bring the index up to the tree.
     Refresh,
-    /// At Claude Code or Codex session start: recall reviewed project memory.
+    /// Recall reviewed project memory at session start or Kimi's first prompt.
     Recall,
 }
 
 pub const EVENTS: [HookEvent; 3] = [HookEvent::Suggest, HookEvent::Refresh, HookEvent::Recall];
-const TOOL_EVENTS: [HookEvent; 2] = [HookEvent::Suggest, HookEvent::Refresh];
 
 /// Every harness we wire, in `HOOK_TARGETS` order. This is the one home for the list: main.rs
 /// builds its format mapping from these indices, and `entry_shape_ok` dispatches on these
 /// names — a fourth harness is added here and both consumers move in the same commit.
 pub const HOOK_HARNESSES: [&str; 3] = ["claude-code", "codex", "kimi-code"];
 
-/// The shipped event policy. Codex SessionStart was intercepted on 2026-10-29; Kimi discards
-/// SessionStart output, so it receives only tool events.
+/// Kimi recalls on UserPromptSubmit because it discards SessionStart output.
 pub fn events_for(harness: &str) -> &'static [HookEvent] {
     match harness {
-        "claude-code" | "codex" => &EVENTS,
-        "kimi-code" => &TOOL_EVENTS,
+        "claude-code" | "codex" | "kimi-code" => &EVENTS,
         _ => &[],
     }
 }
