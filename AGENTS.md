@@ -189,11 +189,11 @@ the active entries for the project go into `additionalContext`, newest first, ca
 only, never bodies, capped at 15 and 2000 bytes, and labelled unreviewed. It reads the shared
 database over the network in one pipeline (plus one ledger-only retry when the notes statements fail
 with a SQL error and at least 200 ms remain) and never writes to it or takes a local lock. The dispatch
-deadline is 4500 ms from process start (`remote::RECALL_DEADLINE`, inside the harnesses' 5 s hook limit); the
-network timeout defaults to 4000 ms (`CORT_RECALL_TIMEOUT_MS`), is capped at 4400 ms, and is also limited to
+deadline is 4300 ms from process start (`remote::RECALL_DEADLINE`, inside the harnesses' 5 s hook limit); the
+network timeout defaults to 4000 ms (`CORT_RECALL_TIMEOUT_MS`), is capped at 4200 ms, and is also limited to
 the remaining deadline minus 100 ms. It was 2500/1500 ms until 2026-10-29, when the first read after an idle
 spell timed out on three session starts in one afternoon while warm reads took about 300 ms.
-With under 200 ms left, it sends no request, and a watchdog exits the process 200 ms after the deadline
+With under 200 ms left, it sends no request, and a watchdog exits the process 400 ms after the deadline
 (300 ms more once the answer is being written), so the whole run stays inside 5 s. On
 `remote_unreachable`, `remote_blocked`, or `remote_timeout`, it injects a one-line notice to retry
 `cort memory recall "<topic>"` when needed. It records one `usage.db` row on every normal return.

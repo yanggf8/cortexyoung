@@ -199,8 +199,10 @@ pub trait Transport {
 /// The recall hook's whole budget, from process start. Every harness gives a hook 5 s
 /// (`settings::TIMEOUT_SECS` and its two TOML twins); the rest is process start and exit. It was
 /// 2500 ms until 2026-10-29, when the first read after an idle spell timed out on three session
-/// starts in one afternoon while warm reads took about 300 ms.
-pub const RECALL_DEADLINE: Duration = Duration::from_millis(4500);
+/// starts in one afternoon while warm reads took about 300 ms. 4300 rather than 4500 leaves 500 ms
+/// after the last possible network return for rendering, stdout and the usage row before the
+/// watchdog: at 4500 a debug build under test load had about 30 ms left.
+pub const RECALL_DEADLINE: Duration = Duration::from_millis(4300);
 
 /// Recompute the SessionStart allowance for each POST, including a ledger-only retry.
 pub struct RecallTransport {
