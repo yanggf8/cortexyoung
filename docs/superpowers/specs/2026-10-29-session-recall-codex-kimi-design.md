@@ -38,3 +38,25 @@
 
 - 不用 Kimi 外掛的 `sessionStart.skill`：那是靜態 skill 內容、只對 Kimi 有效，會多一個 hook 擁有者。
 - 不在攔到 payload 之前改 `HOOK_TARGETS`（AGENTS.md：judge a matcher only from an intercepted payload）。
+
+## 攔截結果（2026-10-29 15:05–15:26 台灣時間，NUC11i5）
+
+兩個 config 先備份（SHA-256 記下），各加暫時 entry，攔完以備份覆蓋，雜湊與攔截前相同。Codex 那段期間的其他寫入
+沒有逐行比對：還原前看到的差異只有檔尾 entry 與核准寫入的 `[hooks.state."…:session_start:0:0"]`。
+
+- **Kimi Code 2.1.1**（`kimi -p`、`kimi -r <id> -p`）：
+  - SessionStart：`{"hook_event_name":"SessionStart","session_id":"session_…","cwd":…,"client_type":"kimi_code_cli","source":"startup"|"resume","model":"kimi-code/k3.1-pro","profile":"agent"}`。
+  - UserPromptSubmit：`{"hook_event_name":"UserPromptSubmit","session_id":…,"cwd":…,"client_type":"kimi_code_cli","prompt":[{"type":"text","text":…}],"is_steer":false}`。
+  - resume 沿用同一個 `session_id`。
+  - **注入實測**：UserPromptSubmit hook 印 `{"message":"cort probe: the code word is PAPAYA-7"}`、exit 0，問模型 hook 給了什麼
+    暗號，答 `PAPAYA-7`。`PostCompact` 這次沒有觸發（沒有發生壓縮），還沒攔到。
+- **Codex 0.164.0**（`codex exec`、`codex exec resume <id>`）：
+  - SessionStart：`{"session_id":…,"transcript_path":…,"cwd":…,"hook_event_name":"SessionStart","model":"gpt-6.1-terra","permission_mode":"default","source":"startup"|"resume"}`，
+    欄位與 Claude Code 相同。呼叫者命令列是那次 `codex exec …`。
+  - 改了 `command` 的 entry 在重新核准前不執行（payload 檔數不變、模型答 NONE）：信任綁 entry 內容，所以正式接線時
+    使用者要在 Codex 裡核准一次。
+  - **注入實測**：hook 印 `{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"…MANGO-3"}}`，模型答
+    `MANGO-3`；把 payload 原樣交給現有的 `cort hook-recall --harness codex`，在 tpm repo 問模型開場拿到哪些 cort memory
+    key，答出該專案 ledger 最新的 5 個 key。現有 hook-recall 不用改就能服務 Codex。
+  - 一次在 tpm repo 的 `codex exec` 沒有觸發 hook 也沒有輸出，原因沒查到；同樣的指令加上 `< /dev/null` 重跑就正常。
+    正式接線後若再看到「沒注入」，先查這個。
