@@ -72,7 +72,10 @@
   prompt 注入 `{"message"}`，之後的 prompt 不讀設定也不連網路（`already_injected`）。tpm repo 實測：新 session 列出
   11 個 ledger key，`--continue` 的第二個 prompt 沒有再注入。
 - **逾時（`36524521`，同日部署兩台）**：閒置後第一次讀取在三個 harness 的 session 開始各逾時一次，熱讀約
-  300–400 ms，30 天統計 53 次裡 5 次 `remote_timeout`。總期限 2500 → 4500 ms（`remote::RECALL_DEADLINE`），
-  網路逾時預設 1500 → 4000 ms、上限 2400 → 4400 ms，watchdog 改在期限後 200 ms（寫出時再 300 ms），總長仍在
-  harness 的 5 s 內。harness 的 5 s 從程序啟動算、watchdog 從 `main()` 算，啟動本身卡住（編譯中見過一次 5 s）
+  300–400 ms，30 天統計 53 次裡 5 次 `remote_timeout`。第一版（`36524521`）期限 4500 ms、watchdog
+  期限後 200 ms，K3.1 抓到舊的 3 s watchdog 會吃掉加長的部分；第二版（`09aab479`）留 500 ms 緩衝，CI ubuntu
+  仍被 watchdog 搶先、什麼都沒印——strace 看到 socket 逾時 4.175 s、`recvfrom` 卻擋了 4.205–4.389 s。定版
+  （`652497e9`，同晚部署兩台）：網路期限 3800 ms（`remote::RECALL_DEADLINE`），逾時預設 3500、上限 3700 ms，
+  watchdog 在期限後 900 ms（寫出時再 300 ms），總長仍在 harness 的 5 s 內。另一個 session 編譯時，計時測試會
+  失敗；機器閒時連跑五次都過。harness 的 5 s 從程序啟動算、watchdog 從 `main()` 算，啟動本身卡住（編譯中見過一次 5 s）
   不在程式能管的範圍。
