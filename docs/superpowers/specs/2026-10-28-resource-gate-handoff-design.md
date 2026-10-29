@@ -375,3 +375,21 @@ duplicate、`+toolchain`、canonicalize、紀錄檔真正的上限與只讀檔�
    `gate log` 時舊列會留著。README 照這句寫，不宣稱定時刪除。
 8. **`since` 只對 `gate run` 持有者。** 持有者有 `started_at`；一般 `cargo` 程序第一版不讀啟動時間，訊息裡
    沒有 `since=`，只有 `pid`、`dir`、`cmd`。
+
+### G4 進度
+
+- 2026-10-29 claudecat `main` 推到 `2a39387`：G4a `623a0f0`（身分、單次 `/proc` 掃描、情況二）、G4b
+  `9da1b5b`（deny 紀錄、情況一、`gate log`）、審查修正 `2a39387`。我逐行審時另修一點：紀錄的 `sub` 原本取
+  身分 argv 第一個字，`cargo --manifest-path=/路徑 test` 會把路徑寫進紀錄，改成跳過選項與其值取子命令。
+  K3.1 Pro 程式審查（代 Muse）approve with changes，4 點已併入：身分改取段落實際執行的字（`env`／`nice`／
+  `timeout` 之後），`node server.js cargo test` 不再算成 `cargo test`、`env -u cargo cargo test` 認得出來；
+  只有 canonical 目錄相同時，目錄底下的 target（含相對 `--target-dir`、`CARGO_TARGET_DIR`）跟著換；放行路徑
+  先壓縮再讀；1 MiB 計時測試取三次最快。K3.1 沒回報非 ASCII 切片、append／壓縮競爭、重試計數對規格的部分，
+  這幾塊視為未審。測試 106 通過，fmt／clippy 乾淨。
+- 部署：NUC11i5 與 Thinkpade15 重裝 claudecat `2a39387`（cort 不動，`hook-gate status` 仍是 `configured`）。
+- 三邊實測（NUC11i5，09:50–09:53 台灣時間）：背景跑 `cargo test`（測試睡 600 秒）佔住。Claude Code 下同一指令
+  第一次收到 `gate denied (duplicate) the same command is already running: pid=… dir=… cmd=cargo test.`，
+  第二次前面多了 `retry 2 of this command in this session; first denied 3s ago, still blocked.`；Codex 與 Kimi
+  以 `cargo test --manifest-path …/Cargo.toml`（佔位用同一形式）各下兩次，結果相同（Kimi 是 8s）——三邊的
+  payload 都帶 `session_id`。紀錄檔目錄 `0700`、檔案 `0600`，內容只有雜湊、`sub` 與原因，沒有路徑；
+  `claudecat gate log` 彙總為 `duplicate: 6`、`test: 6`、重試分布 `2=3`。
