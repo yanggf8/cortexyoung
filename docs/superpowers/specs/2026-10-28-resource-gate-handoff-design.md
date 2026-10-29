@@ -423,3 +423,18 @@ duplicate、`+toolchain`、canonicalize、紀錄檔真正的上限與只讀檔�
   一台主機在期間內沒有任何 `hook-suggest` 列也照列，寫「這段期間沒有 hook 列」（安靜的機器不是不存在）。
 - **測試**：`SqliteStore` 灌列——兩台機器、三個 harness、各種 tag、`args_summary` 壞掉的一列、早於
   `MEASURE_START_MS` 與早於 `days` 的列、非 `hook-suggest` 的列——驗 JSON 每個數字與文字版的行。
+
+### G5 進度
+
+- 2026-10-29 master `3cc2a28b`（CI 四個 job 全綠；rust 903 測試通過）。Codex 實作，我逐行審；K3.1 Pro 程式
+  審查（代 Muse）approve with changes，2 點已併入：`untagged` 只算 `hook=fired` 的列（`no_payload` 記自己的
+  值、壞掉的記 `unparsed`），新查詢納入查詢計畫測試。
+- 部署：NUC11i5（`cort-4b14484b3979`）與 Thinkpade15（`cort-363d248052aa`），`install.sh --check` OK。
+- 真實資料第一份報表（11:05 台灣時間，最近 7 天，起點 `MEASURE_START_MS`）：
+  - NUC11i5：claude-code fires 1687、handed_off 329（allow 320、deny 9）、`gate_ms` p50 3／p95 6／max 48；
+    codex 742、84（allow 77、deny 7）、p50 3／p95 6／max 14；kimi-code 117、4（deny 4）、`not_shell` 16。
+  - Thinkpade15：claude-code 146、51（allow 51）、p50 3／p95 7／max 10。
+  - i51149R3050：claude-code 25，`unconfigured` 5、`untagged` 20——有 G1 之後的 binary 在跑但沒裝閘門。
+  - i5940R3070：claude-code 162 全是 `untagged`，與它還沒部署一致。
+  - 轉交本身 p95 不到 10 ms、最大 48 ms，離 200 ms 上限很遠：轉交沒有拖慢 Bash。`untagged` 數與早上直接查
+    `telemetry_events` 的結果相同，遠端 `RemoteStore` 路徑確認可用。
