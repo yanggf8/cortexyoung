@@ -153,3 +153,15 @@ issue #7 與 aib #996。
    測試：「別名表沒有、notes 表在」時 notes 照樣出現；「兩者都沒有」時拿到不帶別名的 ledger、沒有 notes。
 3. （審查建議）remove 與跨識別寫入的競態補一個測試：直接造出「新識別的紀錄取代舊識別的 id、但別名不在」的狀態，
    確認讀取報 `supersedes missing id`、錯誤訊息提示加回別名，`alias add` 之後讀得出來。
+
+## 進度
+
+- 2026-10-29 master `6e7cc591`（A1 讀取走連通分量）、`78acc917`（A2 alias 函式庫層）、`afcf9ad7`（A3a hook-recall
+  分步退路）、`2f869f45`（A3b `cort memory alias add|list|remove` CLI 與 `docs/memory.md` 改名一節），CI 都全綠；
+  Codex 實作、我逐行審，K3.1 Pro 程式審查（代 Muse）四包都 approve，提出的測試缺口與兩個低嚴重度問題已併入。
+- 部署：13:30 台灣時間 NUC11i5（`cort-3f975d9f94a1`）與 Thinkpade15（`cort-40d0165644fb`），`install.sh --check` OK。
+- tpm repo（origin 已改成 `lisyanggf/oec-bsr-revamp-tpm`）：加別名前確認兩個識別的 42 筆紀錄全是 NUC11i5
+  （`09a907a06cdea300`）寫的，沒有舊 binary 寫過；`alias add --from-remote https://github.com/lisyanggf/agent-portal-tpm.git`
+  回 `linked`，之後 `status` 為 42 筆／22 active（8+34／7+15）、無衝突，`recall "gateway option B"` 與 SessionStart
+  注入都讀得到改名前的紀錄。monorepo（`leadinginfo/oec-bsr-revamp`，舊名 `agent-portal`）新舊識別下都沒有 ledger
+  紀錄，不需要別名。
