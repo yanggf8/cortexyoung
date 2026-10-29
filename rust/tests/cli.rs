@@ -1676,17 +1676,15 @@ fn the_lean_hook_report_has_six_non_empty_fields_on_every_line() {
         .stdout
         .lines()
         .all(|l| l.split('\t').nth(2) == Some("not_wired")));
-    for format in ["kimi"] {
-        let unsupported = run(&[
-            "--format",
-            format,
-            "--event",
-            "session",
-            "--command",
-            "/bin/cort hook-recall",
-        ]);
-        assert_ne!(unsupported.code, 0, "{format} must reject SessionStart");
-    }
+    let unsupported = run(&[
+        "--format",
+        "kimi",
+        "--event",
+        "session",
+        "--command",
+        "/bin/cort hook-recall",
+    ]);
+    assert_ne!(unsupported.code, 0, "kimi must reject SessionStart");
 
     // And `--all` needs to be told which binary to name; defaulting to this one would wire the
     // executable behind the installer's shim.
