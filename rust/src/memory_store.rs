@@ -1624,18 +1624,47 @@ impl Ledger {
         current: &str,
         args: Vec<Cell>,
         present_after: bool,
-    ) -> Result<(), LedgerError> {
+        expected_count: u64,
+    ) -> Result<bool, LedgerError> {
+        let pair_args = || {
+            vec![
+                Cell::Text(old.into()),
+                Cell::Text(current.into()),
+                Cell::Text(current.into()),
+                Cell::Text(old.into()),
+            ]
+        };
+        let pair_sql = "SELECT 1 FROM project_aliases WHERE (old_project = ? AND new_project = ?) OR (old_project = ? AND new_project = ?)";
         match self.db.execute(sql, args) {
-            Ok(result) if result.affected_row_count == 1 => Ok(()),
+            Ok(result) if result.affected_row_count == expected_count => Ok(true),
+            Ok(result) if present_after && result.affected_row_count == 0 => {
+                match self.db.execute(pair_sql, pair_args()) {
+                    Ok(result) if !result.rows.is_empty() => Ok(false),
+                    Ok(_) => Err(LedgerError::Message(
+                        "alias is not linked or changed concurrently".into(),
+                    )),
+                    Err(error) => Err(LedgerError::NotRecorded { kind: error.kind }),
+                }
+            }
+            // A remove whose count differs from the snapshot raced another machine's add or remove
+            // of one direction: the unlink succeeded if no row is left in either direction.
+            Ok(_) if !present_after => match self.db.execute(pair_sql, pair_args()) {
+                Ok(result) if result.rows.is_empty() => Ok(true),
+                Ok(_) => Err(LedgerError::Message(
+                    "alias is not linked or changed concurrently".into(),
+                )),
+                Err(error) => Err(LedgerError::OutcomeUnknown {
+                    id: Some(old.into()),
+                    key: None,
+                    kind: error.kind,
+                }),
+            },
             Ok(_) => Err(LedgerError::Message(
                 "alias is not linked or changed concurrently".into(),
             )),
             Err(error) if outcome_unknown(error.kind) => {
-                match self.db.execute(
-                    "SELECT 1 FROM project_aliases WHERE old_project = ? AND new_project = ?",
-                    vec![Cell::Text(old.into()), Cell::Text(current.into())],
-                ) {
-                    Ok(result) if result.rows.is_empty() != present_after => Ok(()),
+                match self.db.execute(pair_sql, pair_args()) {
+                    Ok(result) if result.rows.is_empty() != present_after => Ok(true),
                     Ok(_) => Err(LedgerError::NotRecorded { kind: error.kind }),
                     Err(_) => Err(LedgerError::OutcomeUnknown {
                         id: Some(old.into()),
@@ -1649,7 +1678,7 @@ impl Ledger {
     }
 }
 
-const ALIAS_INSERT: &str = "INSERT INTO project_aliases (old_project, new_project, created_at, machine) VALUES (?, ?, ?, ?)";
+const ALIAS_INSERT: &str = "INSERT INTO project_aliases (old_project, new_project, created_at, machine) SELECT ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM project_aliases WHERE (old_project = ? AND new_project = ?) OR (old_project = ? AND new_project = ?))";
 const ALIAS_EMPTY: &str = "old project component has no memory rows; the URL may be wrong. Use --from-project with the id cort memory status printed before the rename";
 const ALIAS_COMPATIBILITY: &str =
     "Old binaries see only their own project id; cross-id corrections wait for them to upgrade.";
@@ -1693,13 +1722,17 @@ pub fn alias_add_with(
         Cell::Text(current.clone()),
         Cell::Text(notes_now()?),
         Cell::Text(usage::machine_id().into()),
+        Cell::Text(old.clone()),
+        Cell::Text(current.clone()),
+        Cell::Text(current.clone()),
+        Cell::Text(old.clone()),
     ];
-    ledger.alias_write(ALIAS_INSERT, &old, &current, args, true)?;
+    let inserted = ledger.alias_write(ALIAS_INSERT, &old, &current, args, true, 1)?;
     Ok(AliasOutcome {
-        outcome: "linked",
+        outcome: if inserted { "linked" } else { "already_linked" },
         old_project: old,
         current_project: current,
-        compatibility_note: Some(ALIAS_COMPATIBILITY),
+        compatibility_note: inserted.then_some(ALIAS_COMPATIBILITY),
     })
 }
 
@@ -1734,16 +1767,16 @@ pub fn alias_remove_with(
     let current = project(root)?;
     let old = from.id();
     let snapshot = ledger.alias_snapshot(&current).map_err(not_recorded_read)?;
-    let edge = snapshot
-        .aliases
-        .iter()
-        .find(|edge| {
-            (edge.old_project == old && edge.new_project == current)
-                || (edge.old_project == current && edge.new_project == old)
-        })
-        .ok_or_else(|| {
-            LedgerError::Message("alias is not linked directly to the current project".into())
-        })?;
+    let is_edge = |edge: &AliasRow| {
+        (edge.old_project == old && edge.new_project == current)
+            || (edge.old_project == current && edge.new_project == old)
+    };
+    let edge_count = snapshot.aliases.iter().filter(|edge| is_edge(edge)).count();
+    if edge_count == 0 {
+        return Err(LedgerError::Message(
+            "alias is not linked directly to the current project".into(),
+        ));
+    }
     let mut components = BTreeMap::new();
     for id in &snapshot.ids {
         if components.contains_key(id) {
@@ -1753,7 +1786,7 @@ pub fn alias_remove_with(
         loop {
             let before = reached.len();
             for other in &snapshot.aliases {
-                if other.old_project == edge.old_project && other.new_project == edge.new_project {
+                if is_edge(other) {
                     continue;
                 }
                 if reached.contains(&other.old_project) || reached.contains(&other.new_project) {
@@ -1797,14 +1830,17 @@ pub fn alias_remove_with(
         )));
     }
     ledger.alias_write(
-        "DELETE FROM project_aliases WHERE old_project = ? AND new_project = ?",
-        &edge.old_project,
-        &edge.new_project,
+        "DELETE FROM project_aliases WHERE (old_project = ? AND new_project = ?) OR (old_project = ? AND new_project = ?)",
+        &old,
+        &current,
         vec![
-            Cell::Text(edge.old_project.clone()),
-            Cell::Text(edge.new_project.clone()),
+            Cell::Text(old.clone()),
+            Cell::Text(current.clone()),
+            Cell::Text(current.clone()),
+            Cell::Text(old.clone()),
         ],
         false,
+        edge_count as u64,
     )?;
     Ok(AliasOutcome {
         outcome: "removed",

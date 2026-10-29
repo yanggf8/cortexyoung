@@ -12,6 +12,7 @@ enum Action {
     ForwardThenTimeout,
     ForwardThenFail(u16),
     Sql(String),
+    SqlThenFail(String, u16),
 }
 
 #[derive(Default)]
@@ -75,6 +76,10 @@ impl Transport for Wrapped {
             Some(Action::Sql(sql)) => {
                 self.sql(url, &sql, headers);
                 self.inner.post(url, body, headers)
+            }
+            Some(Action::SqlThenFail(sql, status)) => {
+                self.sql(url, &sql, headers);
+                Err(self.timeout(status, url, body, headers))
             }
             None => self.inner.post(url, body, headers),
         }
@@ -335,6 +340,154 @@ fn alias_remote_normalization_and_write_outcomes() {
 }
 
 #[test]
+fn alias_add_race_with_reverse_insert_reports_already_linked() {
+    use memory_store::AliasFrom;
+    let f = Fixture::new();
+    let current = f.project();
+    let row = f.record("one", "A", None).unwrap();
+    f.insert("old", &row);
+    f.arm(
+        2,
+        Action::Sql(format!(
+            "INSERT INTO project_aliases VALUES ('{current}', 'old', 'now', 'test')"
+        )),
+    );
+    let result =
+        memory_store::alias_add_with(f.root(), AliasFrom::Project("old".into()), &f.ledger)
+            .unwrap();
+    assert_eq!(result.outcome, "already_linked");
+    assert!(result.compatibility_note.is_none());
+    let aliases = memory_store::alias_list_with(f.root(), &f.ledger)
+        .unwrap()
+        .aliases;
+    assert_eq!(aliases.len(), 1);
+    assert_eq!(
+        (&aliases[0].old_project, &aliases[0].new_project),
+        (&current, &"old".to_string())
+    );
+}
+
+/// Two machines adding the same link: the second insert finds the row instead of hitting the
+/// primary key, so it reports `already_linked` rather than `not_recorded`.
+#[test]
+fn alias_add_race_with_same_direction_insert_reports_already_linked() {
+    use memory_store::AliasFrom;
+    let f = Fixture::new();
+    let current = f.project();
+    let row = f.record("one", "A", None).unwrap();
+    f.insert("old", &row);
+    f.arm(
+        2,
+        Action::Sql(format!(
+            "INSERT INTO project_aliases VALUES ('old', '{current}', 'now', 'test')"
+        )),
+    );
+    let result =
+        memory_store::alias_add_with(f.root(), AliasFrom::Project("old".into()), &f.ledger)
+            .unwrap();
+    assert_eq!(result.outcome, "already_linked");
+    assert_eq!(
+        memory_store::alias_list_with(f.root(), &f.ledger)
+            .unwrap()
+            .aliases
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn alias_add_timeout_settles_when_reverse_row_exists() {
+    use memory_store::AliasFrom;
+    let f = Fixture::new();
+    let current = f.project();
+    let row = f.record("one", "A", None).unwrap();
+    f.insert("old", &row);
+    f.arm(
+        2,
+        Action::SqlThenFail(
+            format!("INSERT INTO project_aliases VALUES ('{current}', 'old', 'now', 'test')"),
+            504,
+        ),
+    );
+    let result =
+        memory_store::alias_add_with(f.root(), AliasFrom::Project("old".into()), &f.ledger)
+            .unwrap();
+    assert_eq!(result.outcome, "linked");
+    assert_eq!(
+        memory_store::alias_list_with(f.root(), &f.ledger)
+            .unwrap()
+            .aliases
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn alias_remove_deletes_duplicate_directions() {
+    use memory_store::AliasFrom;
+    for timeout in [false, true] {
+        let f = Fixture::new();
+        let current = f.project();
+        let row = f.record("one", "A", None).unwrap();
+        let mut old_row = row.clone();
+        old_row.id = "old-id".into();
+        old_row.key = "old-key".into();
+        f.insert("old", &old_row);
+        f.alias("old", &current);
+        f.alias(&current, "old");
+        assert_eq!(f.ledger.read(&current).unwrap().entries.len(), 2);
+        if timeout {
+            f.arm(2, Action::ForwardThenTimeout);
+        }
+        let result =
+            memory_store::alias_remove_with(f.root(), AliasFrom::Project("old".into()), &f.ledger)
+                .unwrap();
+        assert_eq!(result.outcome, "removed");
+        assert!(memory_store::alias_list_with(f.root(), &f.ledger)
+            .unwrap()
+            .aliases
+            .is_empty());
+        let entries = f.ledger.read(&current).unwrap().entries;
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id, row.id);
+    }
+}
+
+/// Another machine changes one direction between the snapshot and the DELETE: the count no
+/// longer matches, but the unlink still succeeded, so it is reported as `removed`.
+#[test]
+fn alias_remove_settles_a_concurrent_change_of_one_direction() {
+    use memory_store::AliasFrom;
+    for reverse_added in [false, true] {
+        let f = Fixture::new();
+        let current = f.project();
+        let row = f.record("one", "A", None).unwrap();
+        let mut old_row = row.clone();
+        old_row.id = "old-id".into();
+        old_row.key = "old-key".into();
+        f.insert("old", &old_row);
+        f.alias("old", &current);
+        let race = if reverse_added {
+            format!("INSERT INTO project_aliases VALUES ('{current}', 'old', 'now', 'test')")
+        } else {
+            f.alias(&current, "old");
+            format!(
+                "DELETE FROM project_aliases WHERE old_project = '{current}' AND new_project = 'old'"
+            )
+        };
+        f.arm(2, Action::Sql(race));
+        let result =
+            memory_store::alias_remove_with(f.root(), AliasFrom::Project("old".into()), &f.ledger)
+                .unwrap();
+        assert_eq!(result.outcome, "removed", "reverse_added={reverse_added}");
+        assert!(memory_store::alias_list_with(f.root(), &f.ledger)
+            .unwrap()
+            .aliases
+            .is_empty());
+    }
+}
+
+#[test]
 fn alias_remove_both_directions_and_timeout() {
     use memory_store::AliasFrom;
     for reverse in [false, true] {
@@ -420,6 +573,7 @@ fn alias_remove_refuses_cross_component_supersede_and_resolve() {
             "DELETE FROM project_memory WHERE project = '{current}'"
         ));
         f.alias("old", &current);
+        f.alias(&current, "old");
         if resolution {
             let mut second = first.clone();
             second.id = "second".into();
@@ -446,7 +600,7 @@ fn alias_remove_refuses_cross_component_supersede_and_resolve() {
                 .unwrap()
                 .aliases
                 .len(),
-            1
+            2
         );
     }
 }
