@@ -237,6 +237,243 @@ fn alias_components_are_bidirectional_transitive_and_cycle_safe() {
 }
 
 #[test]
+fn alias_add_guards_transitive_and_reverse_links() {
+    use memory_store::AliasFrom;
+    let f = Fixture::new();
+    let current = f.project();
+    let entry = f.record("one", "A", None).unwrap();
+    let add =
+        |id: &str| memory_store::alias_add_with(f.root(), AliasFrom::Project(id.into()), &f.ledger);
+    assert!(
+        matches!(add(&current), Err(LedgerError::Message(message)) if message.contains("itself"))
+    );
+    assert!(
+        matches!(add("empty"), Err(LedgerError::Message(message)) if message.contains("URL may be wrong") && message.contains("--from-project") && message.contains("cort memory status"))
+    );
+    f.insert("A", &entry);
+    f.alias("A", "B");
+    assert_eq!(add("B").unwrap().outcome, "linked");
+    assert_eq!(add("B").unwrap().outcome, "already_linked");
+    // A reaches the current id only through B: still linked, and no second row.
+    assert_eq!(add("A").unwrap().outcome, "already_linked");
+    let list = memory_store::alias_list_with(f.root(), &f.ledger).unwrap();
+    assert_eq!(list.aliases.len(), 2);
+    let mut expected = vec![(current.as_str(), 1), ("A", 1), ("B", 0)];
+    expected.sort();
+    assert_eq!(
+        list.projects
+            .iter()
+            .map(|p| (p.project_id.as_str(), p.row_count))
+            .collect::<Vec<_>>(),
+        expected
+    );
+    let g = Fixture::new();
+    let id = g.project();
+    let row = g.record("one", "A", None).unwrap();
+    g.insert("old", &row);
+    g.alias(&id, "old");
+    assert_eq!(
+        memory_store::alias_add_with(g.root(), AliasFrom::Project("old".into()), &g.ledger)
+            .unwrap()
+            .outcome,
+        "already_linked"
+    );
+    assert_eq!(
+        memory_store::alias_list_with(g.root(), &g.ledger)
+            .unwrap()
+            .aliases
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn alias_remote_normalization_and_write_outcomes() {
+    use memory_store::AliasFrom;
+    let f = Fixture::new();
+    let row = f.record("one", "A", None).unwrap();
+    // Derive the remote id using the same origin path as production.
+    let other = Fixture::new();
+    assert!(Command::new("git")
+        .current_dir(other.root())
+        .args([
+            "remote",
+            "set-url",
+            "origin",
+            "https://github.com/example/old.git"
+        ])
+        .status()
+        .unwrap()
+        .success());
+    let old = other.project();
+    f.insert(&old, &row);
+    f.arm(2, Action::ForwardThenTimeout);
+    let linked = memory_store::alias_add_with(
+        f.root(),
+        AliasFrom::Remote("git@github.com:example/old.git".into()),
+        &f.ledger,
+    )
+    .unwrap();
+    assert_eq!(linked.outcome, "linked");
+    assert!(linked.compatibility_note.is_some());
+    assert_eq!(linked.old_project, old);
+    let repeat = memory_store::alias_add_with(
+        f.root(),
+        AliasFrom::Remote("https://github.com/example/old.git".into()),
+        &f.ledger,
+    )
+    .unwrap();
+    assert_eq!(repeat.outcome, "already_linked");
+    f.insert("another", &row);
+    f.arm(2, Action::Fail(504));
+    assert!(matches!(
+        memory_store::alias_add_with(f.root(), AliasFrom::Project("another".into()), &f.ledger),
+        Err(LedgerError::NotRecorded {
+            kind: cort::remote::ErrorKind::Timeout
+        })
+    ));
+}
+
+#[test]
+fn alias_remove_both_directions_and_timeout() {
+    use memory_store::AliasFrom;
+    for reverse in [false, true] {
+        let f = Fixture::new();
+        let current = f.project();
+        let row = f.record("one", "A", None).unwrap();
+        f.insert("old", &row);
+        if reverse {
+            f.alias(&current, "old");
+        } else {
+            f.alias("old", &current);
+        }
+        f.arm(2, Action::ForwardThenTimeout);
+        memory_store::alias_remove_with(f.root(), AliasFrom::Project("old".into()), &f.ledger)
+            .unwrap();
+        assert!(memory_store::alias_list_with(f.root(), &f.ledger)
+            .unwrap()
+            .aliases
+            .is_empty());
+        assert_eq!(f.ledger.read(&current).unwrap().entries.len(), 1);
+        assert_eq!(f.ledger.read("old").unwrap().entries.len(), 1);
+        assert!(
+            matches!(memory_store::alias_remove_with(f.root(), AliasFrom::Project("old".into()), &f.ledger), Err(LedgerError::Message(message)) if message.contains("not linked"))
+        );
+    }
+}
+
+#[test]
+fn alias_writes_report_unknown_and_uncommitted_remove() {
+    use memory_store::AliasFrom;
+    let f = Fixture::new();
+    let row = f.record("one", "A", None).unwrap();
+    f.insert("old", &row);
+    f.arm(2, Action::ForwardThenTimeout);
+    f.arm(3, Action::Fail(503));
+    assert!(matches!(
+        memory_store::alias_add_with(f.root(), AliasFrom::Project("old".into()), &f.ledger),
+        Err(LedgerError::OutcomeUnknown {
+            kind: cort::remote::ErrorKind::Timeout,
+            ..
+        })
+    ));
+    f.arm(2, Action::Fail(504));
+    assert!(matches!(
+        memory_store::alias_remove_with(f.root(), AliasFrom::Project("old".into()), &f.ledger),
+        Err(LedgerError::NotRecorded {
+            kind: cort::remote::ErrorKind::Timeout
+        })
+    ));
+    assert_eq!(
+        memory_store::alias_list_with(f.root(), &f.ledger)
+            .unwrap()
+            .aliases
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn alias_remove_allows_a_reference_stored_on_both_sides() {
+    use memory_store::AliasFrom;
+    let f = Fixture::new();
+    let current = f.project();
+    let first = f.record("choice", "old", None).unwrap();
+    f.insert("old", &first);
+    f.alias("old", &current);
+    f.record("choice", "new", Some(&first.id)).unwrap();
+    // The superseded id stays under the current project, so splitting the component strands nothing.
+    memory_store::alias_remove_with(f.root(), AliasFrom::Project("old".into()), &f.ledger).unwrap();
+    assert_eq!(f.ledger.read(&current).unwrap().entries.len(), 2);
+    assert_eq!(f.ledger.read("old").unwrap().entries.len(), 1);
+}
+
+#[test]
+fn alias_remove_refuses_cross_component_supersede_and_resolve() {
+    use memory_store::AliasFrom;
+    for resolution in [false, true] {
+        let f = Fixture::new();
+        let current = f.project();
+        let first = f.record("choice", "old", None).unwrap();
+        f.insert("old", &first);
+        f.sql(&format!(
+            "DELETE FROM project_memory WHERE project = '{current}'"
+        ));
+        f.alias("old", &current);
+        if resolution {
+            let mut second = first.clone();
+            second.id = "second".into();
+            second.claim = "other".into();
+            f.insert(&current, &second);
+            memory_store::resolve_with(
+                f.root(),
+                "choice",
+                "resolved",
+                Path::new("decision.md"),
+                1,
+                &[first.id.clone(), second.id],
+                &f.ledger,
+            )
+            .unwrap();
+        } else {
+            f.record("choice", "new", Some(&first.id)).unwrap();
+        }
+        assert!(
+            matches!(memory_store::alias_remove_with(f.root(), AliasFrom::Project("old".into()), &f.ledger), Err(LedgerError::Message(message)) if message.contains("alias_in_use") && message.contains(&first.id))
+        );
+        assert_eq!(
+            memory_store::alias_list_with(f.root(), &f.ledger)
+                .unwrap()
+                .aliases
+                .len(),
+            1
+        );
+    }
+}
+
+#[test]
+fn alias_repairs_missing_superseded_id_after_race() {
+    use memory_store::AliasFrom;
+    let f = Fixture::new();
+    let current = f.project();
+    let old = f.record("choice", "old", None).unwrap();
+    f.insert("old", &old);
+    f.sql(&format!(
+        "DELETE FROM project_memory WHERE project = '{current}'"
+    ));
+    let mut newer = old.clone();
+    newer.id = "newer".into();
+    newer.claim = "new".into();
+    newer.supersedes = Some(old.id.clone());
+    f.insert(&current, &newer);
+    assert!(
+        matches!(f.ledger.read(&current), Err(LedgerError::Message(message)) if message.contains("supersedes missing id") && message.contains("cort memory alias add"))
+    );
+    memory_store::alias_add_with(f.root(), AliasFrom::Project("old".into()), &f.ledger).unwrap();
+    assert_eq!(f.ledger.read(&current).unwrap().entries.len(), 2);
+}
+
+#[test]
 fn supersedes_across_alias_requires_link() {
     let f = Fixture::new();
     let a = f.project();

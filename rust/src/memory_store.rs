@@ -6,7 +6,7 @@ use crate::{notes, notes_upload, usage};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -139,7 +139,15 @@ impl Ledger {
     }
 
     pub fn read(&self, project: &str) -> Result<MemoryLedger, LedgerError> {
-        ledger_from_bodies(self.read_bodies(project)?).map_err(LedgerError::Message)
+        ledger_from_bodies(self.read_bodies(project)?).map_err(|message| {
+            if message.contains("supersedes missing id") {
+                LedgerError::Message(format!(
+                    "{message}; re-add the alias with cort memory alias add"
+                ))
+            } else {
+                LedgerError::Message(message)
+            }
+        })
     }
 }
 
@@ -392,6 +400,14 @@ fn ledger_from_bodies(bodies: Vec<String>) -> Result<MemoryLedger, String> {
     // written on a machine with a slow clock can legitimately predate the entry it replaces.
     ledger.entries.sort_by(|a, b| a.id.cmp(&b.id));
     let mut pending = std::mem::take(&mut ledger.entries);
+    let all_ids: BTreeSet<_> = pending.iter().map(|entry| entry.id.clone()).collect();
+    for entry in &pending {
+        for old in entry.supersedes.iter().chain(entry.resolves.iter()) {
+            if !all_ids.contains(old) {
+                return Err(format!("memory {} supersedes missing id {old}", entry.id));
+            }
+        }
+    }
     let mut seen = std::collections::HashSet::new();
     while !pending.is_empty() {
         let Some(index) = pending.iter().position(|entry| {
@@ -1469,6 +1485,288 @@ pub fn status(root: &Path) -> Result<MemoryStatus, LedgerError> {
     let config = config()?;
     let ledger = Ledger::open()?;
     status_with(root, &ledger, &config.url)
+}
+
+#[derive(Debug, Clone)]
+pub enum AliasFrom {
+    Remote(String),
+    Project(String),
+}
+
+impl AliasFrom {
+    fn id(self) -> String {
+        match self {
+            Self::Remote(remote) => digest(&normalize_remote(&remote)),
+            Self::Project(id) => id,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct AliasOutcome {
+    pub outcome: &'static str,
+    pub old_project: String,
+    pub current_project: String,
+    pub compatibility_note: Option<&'static str>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AliasRow {
+    pub old_project: String,
+    pub new_project: String,
+    pub created_at: String,
+    pub machine: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AliasProject {
+    pub project_id: String,
+    pub row_count: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AliasList {
+    pub aliases: Vec<AliasRow>,
+    pub projects: Vec<AliasProject>,
+}
+
+struct AliasSnapshot {
+    aliases: Vec<AliasRow>,
+    bodies: Vec<(String, MemoryEntry)>,
+    ids: Vec<String>,
+}
+
+impl Ledger {
+    fn alias_snapshot(&self, project: &str) -> Result<AliasSnapshot, LedgerError> {
+        let aliases_sql = format!("SELECT old_project, new_project, created_at, machine FROM project_aliases WHERE old_project IN ({COMPONENT})");
+        let bodies_sql =
+            format!("SELECT project, body FROM project_memory WHERE project IN ({COMPONENT})");
+        let arg = || vec![Cell::Text(project.into())];
+        let results = self
+            .db
+            .pipeline(&[
+                Stmt::new(CREATE_TABLE, vec![]),
+                Stmt::new(CREATE_ALIASES, vec![]),
+                Stmt::new(COMPONENT, arg()),
+                Stmt::new(aliases_sql, arg()),
+                Stmt::new(bodies_sql, arg()),
+            ])
+            .map_err(|e| LedgerError::Remote(e.kind))?;
+        let text = |row: &[Cell], index| match row.get(index) {
+            Some(Cell::Text(value)) => Ok(value.clone()),
+            _ => Err(LedgerError::Message("invalid remote alias row".into())),
+        };
+        let mut ids = results[2]
+            .rows
+            .iter()
+            .map(|row| text(row, 0))
+            .collect::<Result<Vec<_>, _>>()?;
+        ids.sort();
+        let mut aliases = results[3]
+            .rows
+            .iter()
+            .map(|row| {
+                Ok(AliasRow {
+                    old_project: text(row, 0)?,
+                    new_project: text(row, 1)?,
+                    created_at: text(row, 2)?,
+                    machine: text(row, 3)?,
+                })
+            })
+            .collect::<Result<Vec<_>, LedgerError>>()?;
+        aliases.sort_by(|a, b| {
+            (&a.old_project, &a.new_project).cmp(&(&b.old_project, &b.new_project))
+        });
+        let bodies = results[4]
+            .rows
+            .iter()
+            .map(|row| {
+                let body = text(row, 1)?;
+                let entry = serde_json::from_str(&body)
+                    .map_err(|e| LedgerError::Message(format!("invalid remote memory row: {e}")))?;
+                Ok((text(row, 0)?, entry))
+            })
+            .collect::<Result<Vec<_>, LedgerError>>()?;
+        Ok(AliasSnapshot {
+            aliases,
+            bodies,
+            ids,
+        })
+    }
+
+    fn alias_write(
+        &self,
+        sql: &str,
+        old: &str,
+        current: &str,
+        args: Vec<Cell>,
+        present_after: bool,
+    ) -> Result<(), LedgerError> {
+        match self.db.execute(sql, args) {
+            Ok(result) if result.affected_row_count == 1 => Ok(()),
+            Ok(_) => Err(LedgerError::Message(
+                "alias is not linked or changed concurrently".into(),
+            )),
+            Err(error) if outcome_unknown(error.kind) => {
+                match self.db.execute(
+                    "SELECT 1 FROM project_aliases WHERE old_project = ? AND new_project = ?",
+                    vec![Cell::Text(old.into()), Cell::Text(current.into())],
+                ) {
+                    Ok(result) if result.rows.is_empty() != present_after => Ok(()),
+                    Ok(_) => Err(LedgerError::NotRecorded { kind: error.kind }),
+                    Err(_) => Err(LedgerError::OutcomeUnknown {
+                        id: Some(old.into()),
+                        key: None,
+                        kind: error.kind,
+                    }),
+                }
+            }
+            Err(error) => Err(LedgerError::NotRecorded { kind: error.kind }),
+        }
+    }
+}
+
+const ALIAS_INSERT: &str = "INSERT INTO project_aliases (old_project, new_project, created_at, machine) VALUES (?, ?, ?, ?)";
+const ALIAS_EMPTY: &str = "old project component has no memory rows; the URL may be wrong. Use --from-project with the id cort memory status printed before the rename";
+const ALIAS_COMPATIBILITY: &str =
+    "Old binaries see only their own project id; cross-id corrections wait for them to upgrade.";
+
+pub fn alias_add_with(
+    root: &Path,
+    from: AliasFrom,
+    ledger: &Ledger,
+) -> Result<AliasOutcome, LedgerError> {
+    let current = project(root)?;
+    let old = from.id();
+    if old == current {
+        return Err("cannot alias a project to itself".into());
+    }
+    let snapshot = ledger.alias_snapshot(&old).map_err(not_recorded_read)?;
+    if snapshot.ids.contains(&current) {
+        return Ok(AliasOutcome {
+            outcome: "already_linked",
+            old_project: old,
+            current_project: current,
+            compatibility_note: None,
+        });
+    }
+    if snapshot.bodies.is_empty() {
+        return Err(ALIAS_EMPTY.into());
+    }
+    let args = vec![
+        Cell::Text(old.clone()),
+        Cell::Text(current.clone()),
+        Cell::Text(notes_now()?),
+        Cell::Text(usage::machine_id().into()),
+    ];
+    ledger.alias_write(ALIAS_INSERT, &old, &current, args, true)?;
+    Ok(AliasOutcome {
+        outcome: "linked",
+        old_project: old,
+        current_project: current,
+        compatibility_note: Some(ALIAS_COMPATIBILITY),
+    })
+}
+
+pub fn alias_list_with(root: &Path, ledger: &Ledger) -> Result<AliasList, LedgerError> {
+    let snapshot = ledger.alias_snapshot(&project(root)?)?;
+    let projects = snapshot
+        .ids
+        .into_iter()
+        .map(|id| {
+            let row_count = snapshot
+                .bodies
+                .iter()
+                .filter(|(project, _)| project == &id)
+                .count();
+            AliasProject {
+                project_id: id,
+                row_count,
+            }
+        })
+        .collect();
+    Ok(AliasList {
+        aliases: snapshot.aliases,
+        projects,
+    })
+}
+
+pub fn alias_remove_with(root: &Path, from: AliasFrom, ledger: &Ledger) -> Result<(), LedgerError> {
+    let current = project(root)?;
+    let old = from.id();
+    let snapshot = ledger.alias_snapshot(&current).map_err(not_recorded_read)?;
+    let edge = snapshot
+        .aliases
+        .iter()
+        .find(|edge| {
+            (edge.old_project == old && edge.new_project == current)
+                || (edge.old_project == current && edge.new_project == old)
+        })
+        .ok_or_else(|| {
+            LedgerError::Message("alias is not linked directly to the current project".into())
+        })?;
+    let mut components = BTreeMap::new();
+    for id in &snapshot.ids {
+        if components.contains_key(id) {
+            continue;
+        }
+        let mut reached = BTreeSet::from([id.clone()]);
+        loop {
+            let before = reached.len();
+            for other in &snapshot.aliases {
+                if other.old_project == edge.old_project && other.new_project == edge.new_project {
+                    continue;
+                }
+                if reached.contains(&other.old_project) || reached.contains(&other.new_project) {
+                    reached.insert(other.old_project.clone());
+                    reached.insert(other.new_project.clone());
+                }
+            }
+            if reached.len() == before {
+                break;
+            }
+        }
+        for member in reached {
+            components.insert(member, id.clone());
+        }
+    }
+    let mut locations: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    for (project, entry) in &snapshot.bodies {
+        let component = components
+            .get(project)
+            .ok_or_else(|| LedgerError::Message("invalid alias component".into()))?;
+        locations.entry(&entry.id).or_default().insert(component);
+    }
+    let mut crossing = BTreeSet::new();
+    for (project, entry) in &snapshot.bodies {
+        let component = components
+            .get(project)
+            .ok_or_else(|| LedgerError::Message("invalid alias component".into()))?;
+        for id in entry.supersedes.iter().chain(entry.resolves.iter()) {
+            if !locations
+                .get(id.as_str())
+                .is_some_and(|places| places.contains(component.as_str()))
+            {
+                crossing.insert(id.clone());
+            }
+        }
+    }
+    if !crossing.is_empty() {
+        return Err(LedgerError::Message(format!(
+            "alias_in_use: removing the alias would separate referenced ids: {}",
+            crossing.into_iter().collect::<Vec<_>>().join(", ")
+        )));
+    }
+    ledger.alias_write(
+        "DELETE FROM project_aliases WHERE old_project = ? AND new_project = ?",
+        &edge.old_project,
+        &edge.new_project,
+        vec![
+            Cell::Text(edge.old_project.clone()),
+            Cell::Text(edge.new_project.clone()),
+        ],
+        false,
+    )
 }
 
 #[doc(hidden)]
