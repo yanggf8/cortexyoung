@@ -1,6 +1,6 @@
 # repo 改名後讓 ledger 跟著走：專案別名
 
-日期：2026-10-29。分支 `measure`。對應 issue #7（aib #996 的回報）。第 2 版：併入 K3.1 Pro 設計審查（block，6 點），見文末「第 2 版修正」，與前文衝突處以它為準。
+日期：2026-10-29。分支 `measure`。對應 issue #7（aib #996 的回報）。第 3 版：併入 K3.1 Pro 兩輪設計審查（block 6 點、block 2 點），見文末「第 2 版修正」「第 3 版修正」，與前文衝突處以後者為準。
 
 ## 問題
 
@@ -136,3 +136,20 @@ issue #7 與 aib #996。
 
 此外，`alias add` 若發現「目前識別」與「舊識別」之間已經有一條反向的列，視同已連結（`already_linked`），不再
 加第二列。
+
+## 第 3 版修正（K3.1 Pro 第二輪，block，2 點；以下覆蓋前文）
+
+1. **原子寫入的條件數「不同的 id」，不數列。** `--supersedes` 與 `resolve` 的條件式
+   `(SELECT COUNT(*) FROM project_memory WHERE project IN (…) AND id IN (…)) = N` 改成 `COUNT(DISTINCT id)`。
+   第 2 版第 4 點允許同一個 id 出現在兩個識別下（讀取時合併成一筆）；用 `COUNT(*)` 的話，`X` 兩列加 `Y` 一列會數成
+   3、不等於 2，寫入影響 0 列，被誤報成 `supersedes_missing`，衝突就解不掉。測試：`X` 同時在 A、B 兩個識別下、
+   `Y` 只在 B，合併後衝突 `{X, Y}`，`resolve X Y` 成功。
+2. **第 0 步失敗的退路要保留 notes。** 別名表還沒建、notes 表已經在的資料庫上，帶別名的 ledger 句會在第 0 步失敗；
+   這時只重送 ledger 會把好好的 notes 一起丟掉（hook-only 的機器可能一直如此，因為 SessionStart 不送 DDL）。改成：
+   - 第 0 步 SQL 錯誤 → 重送**整條**管線，ledger 換成不帶別名的 `project = ?`，notes 兩句照舊；
+   - 這次重送若在第 1 步以後 SQL 錯誤（notes 表也沒有）→ 再重送一次只有 ledger（不帶別名）；
+   - 第 1 步以後的 SQL 錯誤（第一次就發生）→ 重送只有 ledger（帶別名），同第 2 版；
+   - 每次重送前都要剩餘時間 ≥ 200 ms，最多兩次重送。
+   測試：「別名表沒有、notes 表在」時 notes 照樣出現；「兩者都沒有」時拿到不帶別名的 ledger、沒有 notes。
+3. （審查建議）remove 與跨識別寫入的競態補一個測試：直接造出「新識別的紀錄取代舊識別的 id、但別名不在」的狀態，
+   確認讀取報 `supersedes missing id`、錯誤訊息提示加回別名，`alias add` 之後讀得出來。
