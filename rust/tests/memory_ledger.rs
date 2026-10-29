@@ -85,6 +85,7 @@ struct Fixture {
     _temp: tempfile::TempDir,
     ledger: Ledger,
     control: Arc<Mutex<Control>>,
+    inner: Arc<SqliteTransport>,
 }
 
 impl Fixture {
@@ -125,7 +126,7 @@ impl Fixture {
             "https://example.test",
             "test",
             Box::new(Wrapped {
-                inner,
+                inner: inner.clone(),
                 control: control.clone(),
             }),
         )
@@ -134,6 +135,7 @@ impl Fixture {
             _temp: temp,
             ledger,
             control,
+            inner,
         }
     }
     fn root(&self) -> &Path {
@@ -146,6 +148,29 @@ impl Fixture {
         let mut control = self.control.lock().unwrap();
         let post = control.posts + offset;
         control.next.push((post, action));
+    }
+    fn sql(&self, sql: &str) {
+        let body =
+            json!({"requests":[{"type":"execute","stmt":{"sql":sql,"args":[]}},{"type":"close"}]})
+                .to_string();
+        let response = self
+            .inner
+            .post("https://example.test", body.as_bytes(), &[])
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&response).unwrap();
+        assert_eq!(value["results"][0]["type"], "ok", "{value}");
+    }
+    fn alias(&self, a: &str, b: &str) {
+        self.sql(&format!(
+            "INSERT INTO project_aliases VALUES ('{a}', '{b}', 'now', 'test')"
+        ));
+    }
+    fn insert(&self, project: &str, entry: &cort::memory::MemoryEntry) {
+        let body = serde_json::to_string(entry).unwrap().replace('\'', "''");
+        self.sql(&format!(
+            "INSERT INTO project_memory VALUES ('{project}', '{}', '{body}')",
+            entry.id
+        ));
     }
     fn record(
         &self,
@@ -182,6 +207,105 @@ fn round_trip_and_supersedes_chain() {
     let rows = f.ledger.read(&f.project()).unwrap();
     assert_eq!(rows.entries.len(), 3);
     assert_eq!(c.supersedes.as_deref(), Some(b.id.as_str()));
+}
+
+#[test]
+fn alias_components_are_bidirectional_transitive_and_cycle_safe() {
+    let f = Fixture::new();
+    let a = f.project();
+    let entry = f.record("one", "A", None).unwrap();
+    let mut b_entry = entry.clone();
+    b_entry.id = "b-id".into();
+    b_entry.key = "two".into();
+    f.insert("B", &b_entry);
+    assert_eq!(f.ledger.read(&a).unwrap().entries.len(), 1);
+    assert_eq!(f.ledger.read("B").unwrap().entries.len(), 1);
+    f.alias(&a, "B");
+    assert_eq!(f.ledger.read(&a).unwrap().entries.len(), 2);
+    assert_eq!(f.ledger.read("B").unwrap().entries.len(), 2);
+    let mut c_entry = entry.clone();
+    c_entry.id = "c-id".into();
+    c_entry.key = "three".into();
+    f.insert("C", &c_entry);
+    f.alias("B", "C");
+    f.alias("B", &a);
+    assert_eq!(f.ledger.read("C").unwrap().entries.len(), 3);
+    let status = memory_store::status_with(f.root(), &f.ledger, "test").unwrap();
+    assert_eq!(status.project_ids, vec![a, "B".into(), "C".into()]);
+    assert_eq!((status.total_entries, status.active_entries), (3, 3));
+    assert!(status.conflicts.is_empty());
+}
+
+#[test]
+fn supersedes_across_alias_requires_link() {
+    let f = Fixture::new();
+    let a = f.project();
+    let entry = f.record("choice", "old", None).unwrap();
+    f.insert("B", &entry);
+    f.sql(&format!("DELETE FROM project_memory WHERE project = '{a}'"));
+    assert!(matches!(
+        f.record("choice", "new", Some(&entry.id)),
+        Err(LedgerError::SupersedesMissing { .. })
+    ));
+    f.alias(&a, "B");
+    f.record("choice", "new", Some(&entry.id)).unwrap();
+    let status = memory_store::status_with(f.root(), &f.ledger, "test").unwrap();
+    assert_eq!((status.total_entries, status.active_entries), (2, 1));
+}
+
+#[test]
+fn resolve_component_conflict_counts_distinct_ids() {
+    let f = Fixture::new();
+    let a = f.project();
+    let x = f.record("choice", "X", None).unwrap();
+    f.insert("B", &x);
+    let mut y = x.clone();
+    y.id = "other-id".into();
+    y.claim = "Y".into();
+    f.insert("B", &y);
+    f.alias(&a, "B");
+    let status = memory_store::status_with(f.root(), &f.ledger, "test").unwrap();
+    assert_eq!((status.total_entries, status.active_entries), (2, 2));
+    assert_eq!(status.conflicts.len(), 1);
+    assert!(status.conflicts[0].active_ids.contains(&x.id));
+    assert!(status.conflicts[0].active_ids.contains(&y.id));
+    memory_store::resolve_with(
+        f.root(),
+        "choice",
+        "resolved",
+        Path::new("decision.md"),
+        2,
+        &[x.id, y.id],
+        &f.ledger,
+    )
+    .unwrap();
+    let status = memory_store::status_with(f.root(), &f.ledger, "test").unwrap();
+    assert_eq!((status.total_entries, status.active_entries), (3, 1));
+    assert!(status.conflicts.is_empty());
+}
+
+#[test]
+fn duplicate_claims_merge_and_collisions_fail() {
+    let f = Fixture::new();
+    let a = f.project();
+    let entry = f.record("choice", "X", None).unwrap();
+    f.insert("B", &entry);
+    f.alias(&a, "B");
+    assert_eq!(f.ledger.read(&a).unwrap().entries.len(), 1);
+    f.sql("DELETE FROM project_memory WHERE project = 'B'");
+    let mut unstamped = entry.clone();
+    unstamped.recorded_machine = None;
+    unstamped.recorded_machine_source = None;
+    f.insert("B", &unstamped);
+    let merged = f.ledger.read(&a).unwrap();
+    assert_eq!(merged.entries.len(), 1);
+    assert_eq!(merged.entries[0].recorded_machine, entry.recorded_machine);
+    f.sql("DELETE FROM project_memory WHERE project = 'B'");
+    unstamped.claim = "different".into();
+    f.insert("B", &unstamped);
+    assert!(
+        matches!(f.ledger.read(&a), Err(LedgerError::Message(message)) if message.contains("collision"))
+    );
 }
 
 #[test]
@@ -291,6 +415,30 @@ fn unforwarded_timeout_with_good_reread_is_not_recorded() {
         })
     ));
     assert!(f.ledger.read(&f.project()).unwrap().entries.is_empty());
+}
+
+#[test]
+fn timeout_reread_ignores_an_id_visible_only_through_an_alias() {
+    let f = Fixture::new();
+    let project = f.project();
+    // The first read creates the alias table.
+    f.ledger.read(&project).unwrap();
+    f.alias(&project, "renamed");
+    f.arm(2, Action::ForwardThenTimeout);
+    // Before the reread, move the committed row to the aliased project: the merged ledger
+    // still shows the id, but nothing is stored under this project.
+    f.arm(
+        3,
+        Action::Sql(format!(
+            "UPDATE project_memory SET project = 'renamed' WHERE project = '{project}'"
+        )),
+    );
+    assert!(matches!(
+        f.record("choice", "A", None),
+        Err(LedgerError::NotRecorded {
+            kind: cort::remote::ErrorKind::Timeout
+        })
+    ));
 }
 
 #[test]

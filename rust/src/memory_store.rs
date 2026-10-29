@@ -13,6 +13,8 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 const CREATE_TABLE: &str = "CREATE TABLE IF NOT EXISTS project_memory (project TEXT NOT NULL, id TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY (project, id))";
+const CREATE_ALIASES: &str = "CREATE TABLE IF NOT EXISTS project_aliases (old_project TEXT NOT NULL, new_project TEXT NOT NULL, created_at TEXT NOT NULL, machine TEXT NOT NULL, PRIMARY KEY (old_project, new_project))";
+const COMPONENT: &str = "WITH RECURSIVE g(p) AS (SELECT ? UNION SELECT CASE WHEN a.old_project = g.p THEN a.new_project ELSE a.old_project END FROM project_aliases a JOIN g ON a.old_project = g.p OR a.new_project = g.p) SELECT p FROM g";
 #[derive(Debug, Serialize)]
 pub struct MemoryConflict {
     pub key: String,
@@ -22,6 +24,7 @@ pub struct MemoryConflict {
 #[derive(Debug, Serialize)]
 pub struct MemoryStatus {
     pub project_id: String,
+    pub project_ids: Vec<String>,
     pub project_id_source: &'static str,
     pub database_url: String,
     pub remote: &'static str,
@@ -96,24 +99,43 @@ impl Ledger {
     }
 
     fn read_bodies(&self, project: &str) -> Result<Vec<String>, LedgerError> {
+        let sql = format!("SELECT body FROM project_memory WHERE project IN ({COMPONENT})");
         let results = self
             .db
             .pipeline(&[
                 Stmt::new(CREATE_TABLE, vec![]),
-                Stmt::new(
-                    "SELECT body FROM project_memory WHERE project = ?",
-                    vec![Cell::Text(project.into())],
-                ),
+                Stmt::new(CREATE_ALIASES, vec![]),
+                Stmt::new(&sql, vec![Cell::Text(project.into())]),
             ])
             .map_err(|e| LedgerError::Remote(e.kind))?;
-        results[1]
+        let bodies: Vec<String> = results[2]
             .rows
             .iter()
             .map(|row| match row.first() {
                 Some(Cell::Text(body)) => Ok(body.clone()),
                 _ => Err(LedgerError::Message("invalid remote memory row".into())),
             })
-            .collect()
+            .collect::<Result<_, _>>()?;
+        merge_bodies(bodies).map_err(LedgerError::Message)
+    }
+
+    fn project_ids(&self, project: &str) -> Result<Vec<String>, LedgerError> {
+        let result = self
+            .db
+            .execute(COMPONENT, vec![Cell::Text(project.into())])
+            .map_err(|e| LedgerError::Remote(e.kind))?;
+        let mut ids = result
+            .rows
+            .iter()
+            .map(|row| match row.first() {
+                Some(Cell::Text(id)) => Ok(id.clone()),
+                _ => Err(LedgerError::Message("invalid remote project id row".into())),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        ids.sort();
+        ids.retain(|id| id != project);
+        ids.insert(0, project.to_string());
+        Ok(ids)
     }
 
     pub fn read(&self, project: &str) -> Result<MemoryLedger, LedgerError> {
@@ -331,6 +353,34 @@ fn require_committed_source(root: &Path, source: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn merge_bodies(bodies: Vec<String>) -> Result<Vec<String>, String> {
+    let mut groups: BTreeMap<String, Vec<(MemoryEntry, String)>> = BTreeMap::new();
+    for body in bodies {
+        let entry: MemoryEntry =
+            serde_json::from_str(&body).map_err(|e| format!("invalid remote memory row: {e}"))?;
+        let group = groups.entry(entry.id.clone()).or_default();
+        if group.iter().any(|(_, old)| !same_claim(old, &body)) {
+            return Err(format!(
+                "memory id collision: {} is stored under two aliased projects with different content",
+                entry.id
+            ));
+        }
+        group.push((entry, body));
+    }
+    Ok(groups
+        .into_values()
+        .filter_map(|group| {
+            group
+                .into_iter()
+                .max_by_key(|(entry, _)| {
+                    usize::from(entry.recorded_machine.is_some())
+                        + usize::from(entry.recorded_machine_source.is_some())
+                })
+                .map(|(_, body)| body)
+        })
+        .collect())
+}
+
 fn ledger_from_bodies(bodies: Vec<String>) -> Result<MemoryLedger, String> {
     let mut ledger = MemoryLedger::default();
     for body in bodies {
@@ -414,8 +464,13 @@ impl Ledger {
                     "insert affected more than one row".into(),
                 ))
             }
-            Err(error) if outcome_unknown(error.kind) => match self.read(project) {
-                Ok(after) if after.entries.iter().any(|item| item.id == entry.id) => {}
+            // Ask for the row itself, not the merged ledger: through an alias the same id may
+            // already be visible under another project while nothing was written under this one.
+            Err(error) if outcome_unknown(error.kind) => match self.db.execute(
+                "SELECT 1 FROM project_memory WHERE project = ? AND id = ?",
+                vec![Cell::Text(project.into()), Cell::Text(entry.id.clone())],
+            ) {
+                Ok(found) if !found.rows.is_empty() => {}
                 Ok(_) => return Err(LedgerError::NotRecorded { kind: error.kind }),
                 Err(_) => {
                     return Err(LedgerError::OutcomeUnknown {
@@ -1413,12 +1468,23 @@ fn conflicts(ledger: &MemoryLedger) -> Vec<MemoryConflict> {
 pub fn status(root: &Path) -> Result<MemoryStatus, LedgerError> {
     let config = config()?;
     let ledger = Ledger::open()?;
+    status_with(root, &ledger, &config.url)
+}
+
+#[doc(hidden)]
+pub fn status_with(
+    root: &Path,
+    ledger: &Ledger,
+    database_url: &str,
+) -> Result<MemoryStatus, LedgerError> {
     let project = project(root)?;
     let entries = ledger.read(&project)?;
+    let project_ids = ledger.project_ids(&project)?;
     Ok(MemoryStatus {
         project_id: project,
+        project_ids,
         project_id_source: project_source(),
-        database_url: config.url,
+        database_url: database_url.into(),
         remote: "ok",
         total_entries: entries.entries.len(),
         active_entries: memory::active_entries(&entries).len(),
@@ -1483,7 +1549,7 @@ fn resolve_entry(
         return Err(LedgerError::Message("--supersedes must name every active id for this key exactly once; inspect memory status".into()));
     }
     let placeholders = vec!["?"; supersedes.len()].join(", ");
-    let sql = format!("INSERT OR IGNORE INTO project_memory (project, id, body) SELECT ?, ?, ? WHERE (SELECT COUNT(*) FROM project_memory WHERE project = ? AND id IN ({placeholders})) = {}", supersedes.len());
+    let sql = format!("INSERT OR IGNORE INTO project_memory (project, id, body) SELECT ?, ?, ? WHERE (SELECT COUNT(DISTINCT id) FROM project_memory WHERE project IN ({COMPONENT}) AND id IN ({placeholders})) = {}", supersedes.len());
     let mut args = entry_args(&project, &entry)?;
     args.push(Cell::Text(project.clone()));
     args.extend(supersedes.iter().cloned().map(Cell::Text));
@@ -1531,6 +1597,11 @@ fn record_entry(
         ));
     }
     match supersedes {
+        Some(id) if !before.entries.iter().any(|e| e.id == id) => {
+            return Err(LedgerError::SupersedesMissing {
+                superseded: vec![id.into()],
+            });
+        }
         Some(id) if !active.iter().any(|e| e.id == id && e.key == entry.key) => {
             return Err(LedgerError::Message(
                 "superseded id must be the active entry for the same key".into(),
@@ -1548,14 +1619,14 @@ fn record_entry(
         Some(id) => {
             args.push(Cell::Text(project.clone()));
             args.push(Cell::Text(id.into()));
-            ("INSERT OR IGNORE INTO project_memory (project, id, body) SELECT ?, ?, ? WHERE EXISTS (SELECT 1 FROM project_memory WHERE project = ? AND id = ?)", vec![id.to_string()])
+            (format!("INSERT OR IGNORE INTO project_memory (project, id, body) SELECT ?, ?, ? WHERE (SELECT COUNT(DISTINCT id) FROM project_memory WHERE project IN ({COMPONENT}) AND id = ?) = 1"), vec![id.to_string()])
         }
         None => (
-            "INSERT OR IGNORE INTO project_memory (project, id, body) VALUES (?, ?, ?)",
+            "INSERT OR IGNORE INTO project_memory (project, id, body) VALUES (?, ?, ?)".to_string(),
             Vec::new(),
         ),
     };
-    ledger.write_checked(&project, &entry, sql, args, &old, false)?;
+    ledger.write_checked(&project, &entry, &sql, args, &old, false)?;
     Ok(entry)
 }
 
