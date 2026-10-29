@@ -3005,3 +3005,38 @@ fn main() {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::memory_ledger_error;
+    use cort::memory_store::LedgerError;
+    use serde_json::json;
+
+    #[test]
+    fn one_missing_supersedes_names_the_id_and_records_nothing() {
+        let error = memory_ledger_error(LedgerError::SupersedesMissing {
+            superseded: vec!["abc123".into()],
+        });
+        assert_eq!(error.code, "memory_supersedes_missing");
+        assert_eq!(
+            error.detail,
+            json!({
+                "superseded": "abc123",
+                "message": "supersedes_missing: abc123 is not in the shared database; nothing was recorded"
+            })
+        );
+    }
+
+    #[test]
+    fn several_missing_supersedes_do_not_claim_which_one_is_missing() {
+        let error = memory_ledger_error(LedgerError::SupersedesMissing {
+            superseded: vec!["a1".into(), "b2".into()],
+        });
+        assert_eq!(error.code, "memory_supersedes_missing");
+        assert_eq!(error.detail["superseded"], json!(["a1", "b2"]));
+        assert_eq!(
+            error.detail["message"],
+            "supersedes_missing: not all of a1, b2 are in the shared database; nothing was recorded"
+        );
+    }
+}
