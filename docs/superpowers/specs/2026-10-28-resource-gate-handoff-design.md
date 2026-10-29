@@ -438,3 +438,8 @@ duplicate、`+toolchain`、canonicalize、紀錄檔真正的上限與只讀檔�
   - i5940R3070：claude-code 162 全是 `untagged`，與它還沒部署一致。
   - 轉交本身 p95 不到 10 ms、最大 48 ms，離 200 ms 上限很遠：轉交沒有拖慢 Bash。`untagged` 數與早上直接查
     `telemetry_events` 的結果相同，遠端 `RemoteStore` 路徑確認可用。
+- i51149R3050（2026-10-29 補）：從它上傳的列推得，10/28 22:31 台灣時間跑過 `install.sh`（`hook-install` 4 次、
+  `internal-shim` 1 次），之後的 hook 列帶 `gate: unconfigured`、`notes: not_configured`，所以是 G1 那一版
+  （當時 master `5d3be5ce`，binary 與 `afca7e2f` 相同；上傳資料不帶版本，無法再細分），沒有閘門。最後一筆上傳是
+  10/28 22:32:33。10/29 11:20 從 NUC11i5 ssh／ping 都逾時（MagicDNS 解析得到 100.115.155.57），應是休眠；
+  待它醒來再升到 `3cc2a28b`、裝 claudecat `2a39387` 並 `claudecat gate install`。
