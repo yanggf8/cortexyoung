@@ -534,7 +534,8 @@ const SESSION_NOTES: &str = "SELECT n.note_id, n.machine, m.host, n.file_name, n
 const SESSION_NOTES_COUNT: &str =
     "SELECT COUNT(*) FROM harness_notes WHERE project=? AND machine<>? AND deleted=0";
 
-/// Read only. A notes schema error may be retried as a ledger-only request within the deadline.
+/// Read only. Retry a step-zero SQL error with an unaliased full pipeline, then retry a
+/// notes SQL error with ledger only, subject to the deadline before each retry.
 #[doc(hidden)]
 pub fn session_recall_with(
     root: &Path,
@@ -543,21 +544,51 @@ pub fn session_recall_with(
     projects: (&str, &str),
     started: Instant,
 ) -> Result<(MemoryRecall, usize, Vec<notes_upload::NoteBrief>, usize), ErrorKind> {
-    let ledger_stmt = Stmt::new(
+    let unaliased = Stmt::new(
         "SELECT body FROM project_memory WHERE project = ?",
         vec![Cell::Text(projects.0.into())],
     );
+    let aliased = Stmt::new(
+        format!("SELECT body FROM project_memory WHERE project IN ({COMPONENT})"),
+        vec![Cell::Text(projects.0.into())],
+    );
     let note_args = || vec![Cell::Text(projects.1.into()), Cell::Text(machine.into())];
-    if Duration::from_millis(2500).saturating_sub(started.elapsed()) < Duration::from_millis(200) {
-        return Err(ErrorKind::Timeout);
-    }
-    let result = db.pipeline(&[
-        ledger_stmt.clone(),
-        Stmt::new(SESSION_NOTES, note_args()),
-        Stmt::new(SESSION_NOTES_COUNT, note_args()),
-    ]);
+    let mut ledger_stmt = aliased;
+    let mut with_notes = true;
+    let mut retried_alias = false;
+    let result = loop {
+        if Duration::from_millis(2500).saturating_sub(started.elapsed())
+            < Duration::from_millis(200)
+        {
+            return Err(ErrorKind::Timeout);
+        }
+        let mut statements = vec![ledger_stmt.clone()];
+        if with_notes {
+            statements.push(Stmt::new(SESSION_NOTES, note_args()));
+            statements.push(Stmt::new(SESSION_NOTES_COUNT, note_args()));
+        }
+        match db.pipeline(&statements) {
+            Err(error)
+                if error.kind == ErrorKind::Sql
+                    && error.step == Some(0)
+                    && !retried_alias
+                    && with_notes =>
+            {
+                ledger_stmt = unaliased.clone();
+                retried_alias = true;
+            }
+            Err(error)
+                if error.kind == ErrorKind::Sql
+                    && error.step.is_some_and(|n| n >= 1)
+                    && with_notes =>
+            {
+                with_notes = false;
+            }
+            result => break result.map_err(|error| error.kind)?,
+        }
+    };
     let (rows, notes, total) = match result {
-        Ok(mut results) => {
+        mut results if with_notes => {
             if results.len() != 3 {
                 return Err(ErrorKind::Sql);
             }
@@ -570,16 +601,7 @@ pub fn session_recall_with(
             };
             (ledger.rows, note_rows.rows, total)
         }
-        Err(error) if error.kind == ErrorKind::Sql && error.step.is_some_and(|n| n >= 1) => {
-            if Duration::from_millis(2500).saturating_sub(started.elapsed())
-                < Duration::from_millis(200)
-            {
-                return Err(ErrorKind::Timeout);
-            }
-            let mut results = db.pipeline(&[ledger_stmt]).map_err(|e| e.kind)?;
-            (results.pop().ok_or(ErrorKind::Sql)?.rows, Vec::new(), 0)
-        }
-        Err(error) => return Err(error.kind),
+        mut results => (results.pop().ok_or(ErrorKind::Sql)?.rows, Vec::new(), 0),
     };
     let bodies = rows
         .iter()
@@ -588,6 +610,7 @@ pub fn session_recall_with(
             _ => Err(ErrorKind::Sql),
         })
         .collect::<Result<Vec<_>, _>>()?;
+    let bodies = merge_bodies(bodies).map_err(|_| ErrorKind::Sql)?;
     let ledger = ledger_from_bodies(bodies).map_err(|_| ErrorKind::Sql)?;
     let (recall, omitted) = memory::recall_ledger_for_hook(root, &ledger);
     let briefs = notes

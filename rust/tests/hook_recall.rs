@@ -122,10 +122,35 @@ fn seed_notes(db: &RemoteDb) {
         .unwrap();
     }
 }
+fn seed_alias(db: &RemoteDb) {
+    db.execute(
+        "CREATE TABLE project_aliases (old_project TEXT, new_project TEXT)",
+        vec![],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO project_aliases VALUES ('old', 'ledger')",
+        vec![],
+    )
+    .unwrap();
+}
+fn seed_old_entry(db: &RemoteDb, id: &str) {
+    db.execute(
+        "INSERT INTO project_memory VALUES (?, ?, ?)",
+        vec![
+            cort::remote::Cell::Text("old".into()),
+            cort::remote::Cell::Text(id.into()),
+            cort::remote::Cell::Text(entry(id, "2026-11-01")),
+        ],
+    )
+    .unwrap();
+}
 #[test]
 fn pipeline_reads_ledger_and_other_machine_notes_without_writes() {
     let (db, read_only, requests) = database();
     seed_ledger(&db);
+    seed_alias(&db);
+    seed_old_entry(&db, "old-entry");
     seed_notes(&db);
     read_only.store(true, Ordering::SeqCst);
     let temp = tempfile::tempdir().unwrap();
@@ -142,6 +167,7 @@ fn pipeline_reads_ledger_and_other_machine_notes_without_writes() {
     assert_eq!(shown, 20);
     assert_eq!(note_count, 15);
     assert_eq!(total, 18);
+    assert!(rendered.contains("[old-entry]"));
     assert!(rendered.find("[id-24]").unwrap() < rendered.find("[id-23]").unwrap());
     assert!(rendered.contains("[nohost]"));
     assert!(rendered.contains("[host-one]"));
@@ -152,6 +178,8 @@ fn pipeline_reads_ledger_and_other_machine_notes_without_writes() {
 fn missing_notes_schema_retries_ledger_and_creates_nothing() {
     let (db, read_only, requests) = database();
     seed_ledger(&db);
+    seed_alias(&db);
+    seed_old_entry(&db, "old-entry");
     read_only.store(true, Ordering::SeqCst);
     let temp = tempfile::tempdir().unwrap();
     let (recall, _, notes, total) = cort::memory_store::session_recall_with(
@@ -163,6 +191,7 @@ fn missing_notes_schema_retries_ledger_and_creates_nothing() {
     )
     .unwrap();
     assert_eq!(recall.hits.len(), 20);
+    assert!(recall.hits.iter().any(|hit| hit.entry.id == "old-entry"));
     assert!(notes.is_empty());
     assert_eq!(total, 0);
     assert_eq!(
@@ -174,6 +203,7 @@ fn missing_notes_schema_retries_ledger_and_creates_nothing() {
             .collect::<Vec<_>>(),
         vec![3, 1]
     );
+    assert!(requests.lock().unwrap()[1][0].contains("project IN (WITH RECURSIVE"));
     read_only.store(false, Ordering::SeqCst);
     let tables = db
         .execute(
@@ -188,6 +218,7 @@ fn missing_notes_schema_retries_ledger_and_creates_nothing() {
 fn missing_host_table_keeps_ledger_and_does_not_create_host_table() {
     let (db, read_only, requests) = database();
     seed_ledger(&db);
+    seed_alias(&db);
     db.execute("CREATE TABLE harness_notes (project TEXT, machine TEXT, source_dir TEXT, file_name TEXT, note_id TEXT, deleted INTEGER, updated_at TEXT)", vec![]).unwrap();
     read_only.store(true, Ordering::SeqCst);
     let temp = tempfile::tempdir().unwrap();
@@ -222,6 +253,147 @@ fn missing_host_table_keeps_ledger_and_does_not_create_host_table() {
 }
 
 #[test]
+fn missing_alias_table_retries_full_pipeline_and_keeps_notes() {
+    let (db, read_only, requests) = database();
+    seed_ledger(&db);
+    seed_notes(&db);
+    read_only.store(true, Ordering::SeqCst);
+    let temp = tempfile::tempdir().unwrap();
+    let (recall, _, notes, total) = cort::memory_store::session_recall_with(
+        temp.path(),
+        &db,
+        "self",
+        ("ledger", "origin"),
+        Instant::now(),
+    )
+    .unwrap();
+    assert_eq!(recall.hits.len(), 20);
+    assert_eq!(notes.len(), 15);
+    assert_eq!(total, 18);
+    let requests = requests.lock().unwrap();
+    assert_eq!(
+        requests.iter().map(Vec::len).collect::<Vec<_>>(),
+        vec![3, 3]
+    );
+    assert!(requests[0][0].contains("project IN (WITH RECURSIVE"));
+    assert!(requests[1][0].contains("project = ?"));
+    assert_eq!(&requests[0][1..], &requests[1][1..]);
+}
+
+#[test]
+fn missing_alias_and_notes_tables_retries_unaliased_ledger_only() {
+    let (db, read_only, requests) = database();
+    seed_ledger(&db);
+    read_only.store(true, Ordering::SeqCst);
+    let temp = tempfile::tempdir().unwrap();
+    let (recall, _, notes, total) = cort::memory_store::session_recall_with(
+        temp.path(),
+        &db,
+        "self",
+        ("ledger", "origin"),
+        Instant::now(),
+    )
+    .unwrap();
+    assert_eq!(recall.hits.len(), 20);
+    assert!(notes.is_empty());
+    assert_eq!(total, 0);
+    let requests = requests.lock().unwrap();
+    assert_eq!(
+        requests.iter().map(Vec::len).collect::<Vec<_>>(),
+        vec![3, 3, 1]
+    );
+    assert!(requests[0][0].contains("project IN (WITH RECURSIVE"));
+    assert!(requests[1][0].contains("project = ?"));
+    assert_eq!(requests[1][0], requests[2][0]);
+}
+
+#[test]
+fn duplicate_aliased_entry_is_returned_once() {
+    let (db, read_only, requests) = database();
+    seed_ledger(&db);
+    seed_alias(&db);
+    seed_old_entry(&db, "shared");
+    db.execute(
+        "INSERT INTO project_memory VALUES (?, ?, ?)",
+        vec![
+            cort::remote::Cell::Text("ledger".into()),
+            cort::remote::Cell::Text("shared".into()),
+            cort::remote::Cell::Text(entry("shared", "2026-11-01")),
+        ],
+    )
+    .unwrap();
+    seed_notes(&db);
+    read_only.store(true, Ordering::SeqCst);
+    let temp = tempfile::tempdir().unwrap();
+    let (recall, omitted, _, _) = cort::memory_store::session_recall_with(
+        temp.path(),
+        &db,
+        "self",
+        ("ledger", "origin"),
+        Instant::now(),
+    )
+    .unwrap();
+    assert_eq!(
+        recall
+            .hits
+            .iter()
+            .filter(|hit| hit.entry.id == "shared")
+            .count(),
+        1
+    );
+    assert_eq!(omitted, 6);
+    assert_eq!(requests.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn conflicting_aliased_entry_returns_sql_error() {
+    let (db, read_only, requests) = database();
+    seed_ledger(&db);
+    seed_alias(&db);
+    seed_old_entry(&db, "shared");
+    db.execute(
+        "INSERT INTO project_memory VALUES (?, ?, ?)",
+        vec![
+            cort::remote::Cell::Text("ledger".into()),
+            cort::remote::Cell::Text("shared".into()),
+            cort::remote::Cell::Text(entry("shared", "2026-11-02")),
+        ],
+    )
+    .unwrap();
+    seed_notes(&db);
+    read_only.store(true, Ordering::SeqCst);
+    let temp = tempfile::tempdir().unwrap();
+    let result = cort::memory_store::session_recall_with(
+        temp.path(),
+        &db,
+        "self",
+        ("ledger", "origin"),
+        Instant::now(),
+    );
+    assert!(matches!(result, Err(cort::remote::ErrorKind::Sql)));
+    assert_eq!(requests.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn alias_failure_without_budget_for_retry_is_timeout() {
+    let (db, read_only, requests) = database_with_delay(Duration::from_millis(250));
+    seed_ledger(&db);
+    read_only.store(true, Ordering::SeqCst);
+    let temp = tempfile::tempdir().unwrap();
+    let result = cort::memory_store::session_recall_with(
+        temp.path(),
+        &db,
+        "self",
+        ("ledger", "origin"),
+        Instant::now() - Duration::from_millis(2100),
+    );
+    assert!(matches!(result, Err(cort::remote::ErrorKind::Timeout)));
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0][0].contains("project IN (WITH RECURSIVE"));
+}
+
+#[test]
 fn expired_dispatch_budget_sends_no_request() {
     let (db, read_only, requests) = database();
     read_only.store(true, Ordering::SeqCst);
@@ -239,17 +411,18 @@ fn expired_dispatch_budget_sends_no_request() {
 
 #[test]
 fn notes_failure_without_budget_for_retry_is_timeout() {
-    let (db, read_only, requests) = database_with_delay(Duration::from_millis(150));
+    let (db, read_only, requests) = database_with_delay(Duration::from_millis(250));
     seed_ledger(&db);
+    seed_alias(&db);
     read_only.store(true, Ordering::SeqCst);
     let temp = tempfile::tempdir().unwrap();
-    // 250 ms remain before the pipeline; the 150 ms response leaves under 200 ms for the retry.
+    // 400 ms remain before the pipeline; the 250 ms response leaves under 200 ms for the retry.
     let result = cort::memory_store::session_recall_with(
         temp.path(),
         &db,
         "self",
         ("ledger", "origin"),
-        Instant::now() - Duration::from_millis(2250),
+        Instant::now() - Duration::from_millis(2100),
     );
     assert!(matches!(result, Err(cort::remote::ErrorKind::Timeout)));
     assert_eq!(
