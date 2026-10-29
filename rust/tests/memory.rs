@@ -73,3 +73,70 @@ fn an_unconfigured_recall_logs_the_harness_without_the_query() {
     assert!(bytes.contains("harness_declared"));
     assert!(!bytes.contains("private deployment"));
 }
+
+#[test]
+fn alias_write_requires_exactly_one_source() {
+    let dir = tempfile::tempdir().unwrap();
+    for action in ["add", "remove"] {
+        for flags in [
+            vec![],
+            vec![
+                "--from-remote",
+                "https://example.test/x",
+                "--from-project",
+                "old",
+            ],
+        ] {
+            let output = Command::new(env!("CARGO_BIN_EXE_cort"))
+                .env("CORT_MEMORY_DIR", dir.path().join("memory"))
+                .env("CORT_CACHE_DIR", dir.path().join("cache"))
+                .args(["memory", "alias", action])
+                .args(flags)
+                .output()
+                .unwrap();
+            assert!(!output.status.success());
+            let error: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(error["error"], "unknown_command");
+        }
+    }
+}
+
+#[test]
+fn alias_commands_report_unconfigured_without_exposing_remote_credentials() {
+    let dir = tempfile::tempdir().unwrap();
+    for args in [
+        vec!["memory", "alias", "list"],
+        vec![
+            "memory",
+            "alias",
+            "add",
+            "--from-remote",
+            "https://user:secret@example.test/x.git",
+        ],
+        vec![
+            "memory",
+            "alias",
+            "remove",
+            "--from-remote",
+            "https://user:secret@example.test/x.git",
+        ],
+        vec!["memory", "status"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_cort"))
+            .env("CORT_MEMORY_DIR", dir.path().join("memory"))
+            .env("CORT_CACHE_DIR", dir.path().join("cache"))
+            .env("CORT_MEMORY_PROJECT", "test-project")
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("secret"));
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("secret"));
+        let error: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(error["error"], "memory_error");
+        assert!(error["detail"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("not configured"));
+    }
+}

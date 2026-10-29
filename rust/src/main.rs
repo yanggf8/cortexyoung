@@ -62,7 +62,7 @@ fn usage_value() -> Value {
             "delete": "cort delete [root]",
             "impact": "cort impact --symbol <name> [--depth <n>] [--coverage] [-f json|lean]",
             "usage": "cort usage [days] [-f json|lean]",
-            "memory": "cort memory <configure|import-config|record|resolve|recall|status|check|import-legacy|notes> [options]",
+            "memory": "cort memory <configure|import-config|record|resolve|recall|status|check|import-legacy|notes|alias> [options]",
             "measure": "cort measure <configure|show|record|collect|health|status|cron|report> [options]  (uploads start at 2026-10-28 00:00 Taiwan time; collect: scan and upload the batch; --background appends at most one result to measure.log (none when skipped_busy) without stdout; health: observe recently used indexes and write local index_health_log, reading indexes only, with no network; --background appends the result to measure.log without stdout; status: read local collection state, -f json|lean; cron: manual install or removal of the legacy entry, no longer installed automatically; hook kick is the only automatic collection trigger; command_log and index_health_log keep uploaded rows 90 days and rows not yet uploaded 180 days, pruned when a new command is recorded; rows still not uploaded after 180 days are deleted and counted in measure status (pruned_unuploaded_rows) and measure.log)",
             "hook-suggest": "cort hook-suggest  (PreToolUse hook: records one fire row, kicks collection, and relays a configured gate's deny; not a verb to type)",
             "hook-refresh": "cort hook-refresh  (PostToolUse hook: brings this project's index up to the tree after an edit; silent, never creates an index; not a verb to type)",
@@ -85,34 +85,55 @@ fn usage_value() -> Value {
 /// cannot be added to the parser without appearing here. clap's own `render_usage` folds every
 /// optional argument into `[OPTIONS]`, which hides exactly the options a caller is looking for.
 fn memory_usage_value() -> Value {
+    fn arg_text(arg: &clap::Arg) -> String {
+        let id = arg.get_id().as_str().to_uppercase();
+        let choices: Vec<String> = arg
+            .get_possible_values()
+            .iter()
+            .map(|v| v.get_name().to_string())
+            .collect();
+        let value = if choices.is_empty() {
+            format!("<{id}>")
+        } else {
+            format!("<{}>", choices.join("|"))
+        };
+        let takes_value = !matches!(
+            arg.get_action(),
+            clap::ArgAction::SetTrue | clap::ArgAction::SetFalse | clap::ArgAction::Count
+        );
+        let text = match arg.get_long() {
+            Some(long) if takes_value => format!("--{long} {value}"),
+            Some(long) => format!("--{long}"),
+            None => value,
+        };
+        if matches!(arg.get_action(), clap::ArgAction::Append) {
+            format!("{text}...")
+        } else {
+            text
+        }
+    }
     fn command_usage(verb: &clap::Command, prefix: &str) -> String {
         let mut parts = vec![format!("{prefix} {}", verb.get_name())];
-        for arg in verb.get_arguments() {
-            let id = arg.get_id().as_str().to_uppercase();
-            let choices: Vec<String> = arg
-                .get_possible_values()
-                .iter()
-                .map(|v| v.get_name().to_string())
+        // A required one-of group prints as `(--a <A> | --b <B>)`; its members are not optional.
+        let mut grouped = Vec::new();
+        for group in verb.get_groups() {
+            if !group.is_required_set() {
+                continue;
+            }
+            let members: Vec<&clap::Id> = group.get_args().collect();
+            let texts: Vec<String> = verb
+                .get_arguments()
+                .filter(|arg| members.contains(&arg.get_id()))
+                .map(arg_text)
                 .collect();
-            let value = if choices.is_empty() {
-                format!("<{id}>")
-            } else {
-                format!("<{}>", choices.join("|"))
-            };
-            let takes_value = !matches!(
-                arg.get_action(),
-                clap::ArgAction::SetTrue | clap::ArgAction::SetFalse | clap::ArgAction::Count
-            );
-            let text = match arg.get_long() {
-                Some(long) if takes_value => format!("--{long} {value}"),
-                Some(long) => format!("--{long}"),
-                None => value,
-            };
-            let text = if matches!(arg.get_action(), clap::ArgAction::Append) {
-                format!("{text}...")
-            } else {
-                text
-            };
+            parts.push(format!("({})", texts.join(" | ")));
+            grouped.extend(members);
+        }
+        for arg in verb.get_arguments() {
+            if grouped.contains(&arg.get_id()) {
+                continue;
+            }
+            let text = arg_text(arg);
             let required = arg.is_required_set() && arg.get_default_values().is_empty();
             parts.push(if required { text } else { format!("[{text}]") });
         }
@@ -125,13 +146,12 @@ fn memory_usage_value() -> Value {
             verb.get_name().to_string(),
             json!(command_usage(verb, "cort memory")),
         );
-        if verb.get_name() == "notes" {
-            for sub in verb.get_subcommands() {
-                commands.insert(
-                    format!("notes {}", sub.get_name()),
-                    json!(command_usage(sub, "cort memory notes")),
-                );
-            }
+        let prefix = format!("cort memory {}", verb.get_name());
+        for sub in verb.get_subcommands() {
+            commands.insert(
+                format!("{} {}", verb.get_name(), sub.get_name()),
+                json!(command_usage(sub, &prefix)),
+            );
         }
     }
     json!({
@@ -612,6 +632,11 @@ struct MemoryArgs {
 
 #[derive(Subcommand, Debug)]
 enum MemoryAction {
+    /// Link, list, or unlink the project id a renamed repository had before (its old origin).
+    Alias {
+        #[command(subcommand)]
+        action: AliasAction,
+    },
     /// Opt in, inspect, and upload Claude Code harness notes.
     Notes {
         #[command(subcommand)]
@@ -678,6 +703,38 @@ enum MemoryAction {
         #[arg(long, default_value = ".")]
         root: PathBuf,
     },
+}
+
+#[derive(clap::Args, Debug)]
+#[command(group(clap::ArgGroup::new("from").required(true).multiple(false).args(["from_remote", "from_project"])))]
+struct AliasWriteArgs {
+    #[arg(long, default_value = ".")]
+    root: PathBuf,
+    #[arg(long)]
+    from_remote: Option<String>,
+    #[arg(long)]
+    from_project: Option<String>,
+}
+
+impl AliasWriteArgs {
+    fn from(&self) -> cort::memory_store::AliasFrom {
+        match &self.from_remote {
+            Some(remote) => cort::memory_store::AliasFrom::Remote(remote.clone()),
+            None => cort::memory_store::AliasFrom::Project(
+                self.from_project.clone().unwrap_or_default(),
+            ),
+        }
+    }
+}
+
+#[derive(Subcommand, Debug)]
+enum AliasAction {
+    Add(AliasWriteArgs),
+    List {
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+    },
+    Remove(AliasWriteArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -2246,6 +2303,22 @@ fn cmd_usage(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, CortError
 fn cmd_memory(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError> {
     let a = MemoryArgs::try_parse_from(args.iter()).map_err(clap_fail)?;
     let value = match a.action {
+        MemoryAction::Alias { action } => match action {
+            AliasAction::Add(args) => serde_json::to_value(
+                cort::memory_store::alias_add(&args.root, args.from())
+                    .map_err(memory_alias_error)?,
+            )
+            .unwrap_or(Value::Null),
+            AliasAction::List { root } => serde_json::to_value(
+                cort::memory_store::alias_list(&root).map_err(memory_alias_error)?,
+            )
+            .unwrap_or(Value::Null),
+            AliasAction::Remove(args) => serde_json::to_value(
+                cort::memory_store::alias_remove(&args.root, args.from())
+                    .map_err(memory_alias_error)?,
+            )
+            .unwrap_or(Value::Null),
+        },
         MemoryAction::Notes { action } => match action {
             NotesAction::OptIn { root } => cort::memory_store::notes_opt_in(&root, true),
             NotesAction::OptOut { root } => cort::memory_store::notes_opt_in(&root, false),
@@ -2373,6 +2446,23 @@ fn memory_read_error(error: cort::memory_store::LedgerError) -> CortError {
             "memory_remote_unavailable",
             json!({"remote":kind.as_str(),"message":format!("remote: {}",kind.as_str())}),
         ),
+        other => memory_ledger_error(other),
+    }
+}
+
+fn memory_alias_error(error: cort::memory_store::LedgerError) -> CortError {
+    use cort::memory_store::LedgerError;
+    match error {
+        LedgerError::Remote(kind) => memory_read_error(LedgerError::Remote(kind)),
+        LedgerError::NotRecorded { kind } => CortError::new(
+            "memory_alias_not_recorded",
+            json!({"kind":kind.as_str(), "message":"nothing changed; re-run when the database is reachable"}),
+        ),
+        LedgerError::OutcomeUnknown { kind, .. } => CortError::new(
+            "memory_alias_outcome_unknown",
+            json!({"kind":kind.as_str(), "message":"the alias change may or may not have been applied; run `cort memory alias list` before re-running"}),
+        ),
+        LedgerError::Message(message) => memory_error(message),
         other => memory_ledger_error(other),
     }
 }
@@ -3008,9 +3098,52 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::memory_ledger_error;
+    use super::{memory_alias_error, memory_ledger_error};
     use cort::memory_store::LedgerError;
+    use cort::remote::ErrorKind;
     use serde_json::json;
+
+    #[test]
+    fn alias_errors_use_alias_specific_guidance() {
+        let cases = [
+            (
+                LedgerError::Remote(ErrorKind::Timeout),
+                "memory_remote_unavailable",
+            ),
+            (
+                LedgerError::NotRecorded {
+                    kind: ErrorKind::Timeout,
+                },
+                "memory_alias_not_recorded",
+            ),
+            (
+                LedgerError::OutcomeUnknown {
+                    id: Some("old".into()),
+                    key: None,
+                    kind: ErrorKind::Timeout,
+                },
+                "memory_alias_outcome_unknown",
+            ),
+            (
+                LedgerError::Message("alias is not linked".into()),
+                "memory_error",
+            ),
+            (
+                LedgerError::SupersedesMissing {
+                    superseded: vec!["id".into()],
+                },
+                "memory_supersedes_missing",
+            ),
+        ];
+        for (input, code) in cases {
+            let error = memory_alias_error(input);
+            assert_eq!(error.code, code);
+            let message = error.detail["message"].as_str().unwrap();
+            for forbidden in ["import-legacy", "recall", "invalid memory outcome"] {
+                assert!(!message.contains(forbidden), "{message}");
+            }
+        }
+    }
 
     #[test]
     fn one_missing_supersedes_names_the_id_and_records_nothing() {

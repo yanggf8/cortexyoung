@@ -276,6 +276,10 @@ fn memory_help_lists_each_memory_verb_with_its_options() {
         assert_eq!(
             verbs,
             [
+                "alias",
+                "alias add",
+                "alias list",
+                "alias remove",
                 "check",
                 "configure",
                 "import-config",
@@ -297,6 +301,10 @@ fn memory_help_lists_each_memory_verb_with_its_options() {
             .as_str()
             .unwrap()
             .contains("--dry-run"));
+        assert!(commands["alias add"]
+            .as_str()
+            .unwrap()
+            .contains("(--from-remote <FROM_REMOTE> | --from-project <FROM_PROJECT>)"));
         for (verb, synopsis) in commands {
             assert!(
                 synopsis

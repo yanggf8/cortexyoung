@@ -104,6 +104,39 @@ The earlier `.claudecat/memory.json` ledger is an explicit import source through
 `cort memory import-legacy`. It is not the active database. (The unrelated `cort read` / `cort recall`
 file-reading verbs were removed on 2026-10-23; they never read this decision ledger.)
 
+## After a repository rename
+
+The project id is a hash of the normalized `origin` URL, so renaming the repository (or moving
+it to another owner) starts an empty ledger under a new id. Link the old id instead of moving
+rows:
+
+```sh
+cort memory alias add --from-remote https://github.com/<owner>/<old-name>.git --root .
+cort memory alias list --root .
+```
+
+`--from-remote` hashes the URL the same way `origin` is hashed: the `git@host:owner/repo`,
+`ssh://git@host/owner/repo` and `https://host/owner/repo` spellings of one repository give the same
+id, but any other user or credentials part (`https://user:token@host/...`) stays in the hash, so give
+the old URL as the old `origin` spelled it. When the URL is not known, pass `--from-project <id>` with the
+`project_id` an earlier `cort memory status` printed. `add` refuses the current id itself and an
+old id whose linked ids hold no entries at all (usually a mistyped URL); it answers
+`already_linked` when the two ids are already connected, directly or through other aliases.
+
+Aliases are read as an undirected graph: every command, and Claude Code's SessionStart recall,
+reads the entries of every id connected to the current one, and `status` lists them in
+`project_ids`. Harness notes are not aliased; they stay under the id each machine uploaded them
+with. New entries are still written under the current id, and `--supersedes` or
+`resolve` may name an id stored under a linked one. Upgrade every machine that writes this
+project before adding the alias: an older cort sees only its own id, so it can still supersede
+an entry a newer machine already replaced, which later shows up as a conflict to `resolve`.
+
+`cort memory alias remove --from-remote <url> | --from-project <id>` deletes the one alias row
+joining that id and the current one, whichever way it was stored; it never deletes entries. It
+refuses (`alias_in_use`) when an entry's `--supersedes` or `resolve` target would end up on the
+other side. If a ledger read fails with `supersedes missing id`, the usual cause is a removed
+alias; adding it back repairs the read.
+
 ## Deployment evidence and the next gate
 
 On 2026-10-19, a temporary cort replica using the existing ClaudeCat Turso connection

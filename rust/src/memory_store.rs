@@ -1654,6 +1654,18 @@ const ALIAS_EMPTY: &str = "old project component has no memory rows; the URL may
 const ALIAS_COMPATIBILITY: &str =
     "Old binaries see only their own project id; cross-id corrections wait for them to upgrade.";
 
+pub fn alias_add(root: &Path, from: AliasFrom) -> Result<AliasOutcome, LedgerError> {
+    alias_add_with(root, from, &Ledger::open()?)
+}
+
+pub fn alias_list(root: &Path) -> Result<AliasList, LedgerError> {
+    alias_list_with(root, &Ledger::open()?)
+}
+
+pub fn alias_remove(root: &Path, from: AliasFrom) -> Result<AliasOutcome, LedgerError> {
+    alias_remove_with(root, from, &Ledger::open()?)
+}
+
 pub fn alias_add_with(
     root: &Path,
     from: AliasFrom,
@@ -1714,7 +1726,11 @@ pub fn alias_list_with(root: &Path, ledger: &Ledger) -> Result<AliasList, Ledger
     })
 }
 
-pub fn alias_remove_with(root: &Path, from: AliasFrom, ledger: &Ledger) -> Result<(), LedgerError> {
+pub fn alias_remove_with(
+    root: &Path,
+    from: AliasFrom,
+    ledger: &Ledger,
+) -> Result<AliasOutcome, LedgerError> {
     let current = project(root)?;
     let old = from.id();
     let snapshot = ledger.alias_snapshot(&current).map_err(not_recorded_read)?;
@@ -1789,7 +1805,13 @@ pub fn alias_remove_with(root: &Path, from: AliasFrom, ledger: &Ledger) -> Resul
             Cell::Text(edge.new_project.clone()),
         ],
         false,
-    )
+    )?;
+    Ok(AliasOutcome {
+        outcome: "removed",
+        old_project: old,
+        current_project: current,
+        compatibility_note: None,
+    })
 }
 
 #[doc(hidden)]
