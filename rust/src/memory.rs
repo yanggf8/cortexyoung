@@ -6,6 +6,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const SCHEMA: u32 = 1;
@@ -148,6 +149,41 @@ fn safe_relative(path: &Path) -> bool {
     !path.as_os_str().is_empty() && path.components().all(|c| matches!(c, Component::Normal(_)))
 }
 
+pub(crate) fn source_root(root: &Path) -> PathBuf {
+    Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(root)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|path| PathBuf::from(path.trim_end_matches(['\n', '\r'])))
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| root.to_path_buf())
+}
+
+pub(crate) fn record_source(root: &Path, source: &Path) -> Result<(PathBuf, PathBuf), String> {
+    let error = "source must be a relative path inside the repository";
+    if source.is_absolute() || source.as_os_str().is_empty() {
+        return Err(error.into());
+    }
+    let top = fs::canonicalize(source_root(root))
+        .map_err(|e| format!("cannot open project root: {e}"))?;
+    // Resolve through the filesystem, not lexically: `link/../x` follows `link` first, exactly
+    // as reading the file will, so the path stored is the file that gets hashed.
+    let base = fs::canonicalize(root).map_err(|e| format!("cannot open project root: {e}"))?;
+    let real = fs::canonicalize(base.join(source))
+        .map_err(|e| format!("cannot open source {}: {e}", source.display()))?;
+    let relative = real
+        .strip_prefix(&top)
+        .map_err(|_| error.to_string())?
+        .to_path_buf();
+    if !safe_relative(&relative) {
+        return Err(error.into());
+    }
+    Ok((top, relative))
+}
+
 fn source_bytes(root: &Path, relative: &Path) -> Result<Vec<u8>, String> {
     if !safe_relative(relative) {
         return Err("source must be a relative path inside the repository".into());
@@ -230,13 +266,22 @@ pub(crate) fn recall_ledger(
     present: bool,
     sync_status: Option<String>,
 ) -> MemoryRecall {
-    recall_ledger_inner(root, query, ledger, present, sync_status, None).0
+    recall_ledger_inner(
+        &source_root(root),
+        query,
+        ledger,
+        present,
+        sync_status,
+        None,
+    )
+    .0
 }
 
-/// SessionStart evaluates evidence only for entries it can display.
-pub(crate) fn recall_ledger_for_hook(root: &Path, ledger: &MemoryLedger) -> (MemoryRecall, usize) {
+/// SessionStart evaluates evidence only for entries it can display. `top` is the work-tree top
+/// level, resolved by the caller before its network wait so no subprocess runs after it.
+pub(crate) fn recall_ledger_for_hook(top: &Path, ledger: &MemoryLedger) -> (MemoryRecall, usize) {
     recall_ledger_inner(
-        root,
+        top,
         "",
         ledger,
         !ledger.entries.is_empty(),

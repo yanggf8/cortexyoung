@@ -204,6 +204,177 @@ fn competing_sql(id: &str) -> String {
 }
 
 #[test]
+fn recall_from_subdirectory_matches_repository_root() {
+    let f = Fixture::new();
+    f.record("choice", "A", None).unwrap();
+    let sub = f.root().join("sub");
+    fs::create_dir(&sub).unwrap();
+    let top = memory_store::recall_with(f.root(), "choice", &f.ledger).unwrap();
+    let nested = memory_store::recall_with(&sub, "choice", &f.ledger).unwrap();
+    assert_eq!(top.hits[0].evidence_status, "source_unchanged");
+    assert_eq!(nested.hits[0].evidence_status, top.hits[0].evidence_status);
+    assert_eq!(
+        nested.hits[0].source_line_status,
+        top.hits[0].source_line_status
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn record_from_subdirectory_stores_repository_relative_source() {
+    let f = Fixture::new();
+    let sub = f.root().join("sub");
+    fs::create_dir(&sub).unwrap();
+    fs::write(sub.join("nested.md"), "nested\n").unwrap();
+    assert!(Command::new("git")
+        .current_dir(f.root())
+        .args(["add", "sub/nested.md"])
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .current_dir(f.root())
+        .args([
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-qm",
+            "nested"
+        ])
+        .status()
+        .unwrap()
+        .success());
+    let entry = memory_store::record_with(
+        &sub,
+        "choice",
+        "A",
+        Path::new("../decision.md"),
+        1,
+        None,
+        &f.ledger,
+    )
+    .unwrap();
+    assert_eq!(entry.source, "decision.md");
+    let nested = memory_store::record_with(
+        &sub,
+        "nested",
+        "B",
+        Path::new("nested.md"),
+        1,
+        None,
+        &f.ledger,
+    )
+    .unwrap();
+    assert_eq!(nested.source, "sub/nested.md");
+    // An existing file outside the work tree, reached through a symlink, is refused for where
+    // it is, not because it cannot be opened.
+    let elsewhere = tempfile::tempdir().unwrap();
+    fs::write(elsewhere.path().join("outside.md"), "outside\n").unwrap();
+    std::os::unix::fs::symlink(elsewhere.path().join("outside.md"), sub.join("escape.md")).unwrap();
+    let error = memory_store::record_with(
+        &sub,
+        "outside",
+        "C",
+        Path::new("escape.md"),
+        1,
+        None,
+        &f.ledger,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(error, LedgerError::Message(message) if message.contains("source must be a relative path inside the repository"))
+    );
+    fs::write(sub.join("nested.md"), "changed\n").unwrap();
+    let error = memory_store::record_with(
+        &sub,
+        "dirty",
+        "D",
+        Path::new("nested.md"),
+        1,
+        None,
+        &f.ledger,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(error, LedgerError::Message(message) if message.contains("uncommitted changes"))
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn record_resolves_a_parent_step_after_a_symlink_through_the_filesystem() {
+    let f = Fixture::new();
+    for dir in ["sub", "a/b"] {
+        fs::create_dir_all(f.root().join(dir)).unwrap();
+    }
+    fs::write(f.root().join("a/decision.md"), "real\n").unwrap();
+    fs::write(f.root().join("sub/decision.md"), "lexical\n").unwrap();
+    std::os::unix::fs::symlink("../a/b", f.root().join("sub/link")).unwrap();
+    for args in [
+        &["add", "."][..],
+        &[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-qm",
+            "link",
+        ],
+    ] {
+        assert!(Command::new("git")
+            .current_dir(f.root())
+            .args(args)
+            .status()
+            .unwrap()
+            .success());
+    }
+    let sub = f.root().join("sub");
+    let entry = memory_store::record_with(
+        &sub,
+        "choice",
+        "A",
+        Path::new("link/../decision.md"),
+        1,
+        None,
+        &f.ledger,
+    )
+    .unwrap();
+    // `link` is followed before `..`, as reading the file does: a lexical pop would cite
+    // sub/decision.md, a different committed file.
+    assert_eq!(entry.source, "a/decision.md");
+}
+
+#[test]
+fn session_recall_from_payload_subdirectory_checks_repository_source() {
+    let f = Fixture::new();
+    let entry = f.record("choice", "A", None).unwrap();
+    let sub = f.root().join("sub");
+    fs::create_dir(&sub).unwrap();
+    let db = cort::remote::RemoteDb::new(
+        "https://example.test",
+        "test",
+        Box::new(Wrapped {
+            inner: f.inner.clone(),
+            control: f.control.clone(),
+        }),
+    )
+    .unwrap();
+    let (recall, _, _, _) = memory_store::session_recall_with(
+        &sub,
+        &db,
+        "self",
+        (&f.project(), &f.project()),
+        std::time::Instant::now(),
+    )
+    .unwrap();
+    assert_eq!(recall.hits[0].entry.id, entry.id);
+    assert_eq!(recall.hits[0].evidence_status, "source_unchanged");
+}
+
+#[test]
 fn round_trip_and_supersedes_chain() {
     let f = Fixture::new();
     let a = f.record("choice", "A", None).unwrap();

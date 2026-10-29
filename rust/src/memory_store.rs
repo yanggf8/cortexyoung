@@ -544,6 +544,8 @@ pub fn session_recall_with(
     projects: (&str, &str),
     started: Instant,
 ) -> Result<(MemoryRecall, usize, Vec<notes_upload::NoteBrief>, usize), ErrorKind> {
+    // Before the network wait: nothing after it may spend the watchdog's margin on a subprocess.
+    let top = memory::source_root(root);
     let unaliased = Stmt::new(
         "SELECT body FROM project_memory WHERE project = ?",
         vec![Cell::Text(projects.0.into())],
@@ -612,7 +614,7 @@ pub fn session_recall_with(
         .collect::<Result<Vec<_>, _>>()?;
     let bodies = merge_bodies(bodies).map_err(|_| ErrorKind::Sql)?;
     let ledger = ledger_from_bodies(bodies).map_err(|_| ErrorKind::Sql)?;
-    let (recall, omitted) = memory::recall_ledger_for_hook(root, &ledger);
+    let (recall, omitted) = memory::recall_ledger_for_hook(&top, &ledger);
     let briefs = notes
         .iter()
         .map(|row| {
@@ -1904,8 +1906,9 @@ pub fn resolve_with(
     if supersedes.len() < 2 {
         return Err("resolution needs at least two active ids".into());
     }
-    let entry = memory::new_entry(root, key, claim, source, line, None)?;
-    require_committed_source(root, source)?;
+    let (source_root, source) = memory::record_source(root, source)?;
+    let entry = memory::new_entry(&source_root, key, claim, &source, line, None)?;
+    require_committed_source(&source_root, &source)?;
     resolve_entry(root, entry, supersedes, ledger)
 }
 
@@ -1956,8 +1959,9 @@ pub fn record_with(
     supersedes: Option<&str>,
     ledger: &Ledger,
 ) -> Result<MemoryEntry, LedgerError> {
-    let entry = memory::new_entry(root, key, claim, source, line, supersedes)?;
-    require_committed_source(root, source)?;
+    let (source_root, source) = memory::record_source(root, source)?;
+    let entry = memory::new_entry(&source_root, key, claim, &source, line, supersedes)?;
+    require_committed_source(&source_root, &source)?;
     record_entry(root, entry, supersedes, ledger)
 }
 
