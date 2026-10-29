@@ -443,3 +443,12 @@ duplicate、`+toolchain`、canonicalize、紀錄檔真正的上限與只讀檔�
   （當時 master `5d3be5ce`，binary 與 `afca7e2f` 相同；上傳資料不帶版本，無法再細分），沒有閘門。最後一筆上傳是
   10/28 22:32:33。10/29 11:20 從 NUC11i5 ssh／ping 都逾時（MagicDNS 解析得到 100.115.155.57），應是休眠；
   待它醒來再升到 `3cc2a28b`、裝 claudecat `2a39387` 並 `claudecat gate install`。
+- i51149R3050 更正與升級（2026-10-29，本機醒來後自記）：上段「沒有閘門」只對到 10/28 23:05——本機 22:31
+  `install.sh`（`cort-af9ac1345bac`）之後，23:05 已裝 claudecat `030cfcd`、跑過 `claudecat gate install`，
+  並以手饋 payload 驗過四條路（無負載放行；假 `rustc` 在跑＝閘門 exit 75、cort 送 deny JSON；同負載 `ls`
+  放行；`Grep` 不轉交）；那幾列在休眠前未上傳，遠端才只看得到 `unconfigured`。2026-10-29 完成升級：
+  cortexyoung `652497e9`（TODO 指定的 `3cc2a28b` 已是祖先；live `cort-0e66503ccba9`）、claudecat `0ed5b67`
+  （G4a/G4b 在內）、`claudecat gate install` 重跑（`configured`、200 ms），B1/B2 接線落在 Codex
+  `SessionStart` 與 Kimi `UserPromptSubmit`。本機實機 deny 成立：`install.sh` 的 rustc 編譯中，Claude Code
+  下 `cargo build --help` 被 `gate denied (compiler)` 擋下（原因含 pid 與 cwd），編譯結束後同一指令放行。
+  i5940R3070 仍未部署。
