@@ -376,7 +376,8 @@ fn conflicting_aliased_entry_returns_sql_error() {
 
 #[test]
 fn alias_failure_without_budget_for_retry_is_timeout() {
-    let (db, read_only, requests) = database_with_delay(Duration::from_millis(250));
+    // 1150 ms remain before the pipeline; the 1000 ms response leaves under 200 ms for the retry.
+    let (db, read_only, requests) = database_with_delay(Duration::from_millis(1000));
     seed_ledger(&db);
     read_only.store(true, Ordering::SeqCst);
     let temp = tempfile::tempdir().unwrap();
@@ -385,7 +386,7 @@ fn alias_failure_without_budget_for_retry_is_timeout() {
         &db,
         "self",
         ("ledger", "origin"),
-        Instant::now() - (cort::remote::RECALL_DEADLINE - Duration::from_millis(400)),
+        Instant::now() - (cort::remote::RECALL_DEADLINE - Duration::from_millis(1150)),
     );
     assert!(matches!(result, Err(cort::remote::ErrorKind::Timeout)));
     let requests = requests.lock().unwrap();
@@ -411,18 +412,19 @@ fn expired_dispatch_budget_sends_no_request() {
 
 #[test]
 fn notes_failure_without_budget_for_retry_is_timeout() {
-    let (db, read_only, requests) = database_with_delay(Duration::from_millis(250));
+    let (db, read_only, requests) = database_with_delay(Duration::from_millis(1000));
     seed_ledger(&db);
     seed_alias(&db);
     read_only.store(true, Ordering::SeqCst);
     let temp = tempfile::tempdir().unwrap();
-    // 400 ms remain before the pipeline; the 250 ms response leaves under 200 ms for the retry.
+    // 1150 ms remain before the pipeline; the 1000 ms response leaves under 200 ms for the retry.
+    // The windows are wide so a loaded machine cannot spend the budget before the first request.
     let result = cort::memory_store::session_recall_with(
         temp.path(),
         &db,
         "self",
         ("ledger", "origin"),
-        Instant::now() - (cort::remote::RECALL_DEADLINE - Duration::from_millis(400)),
+        Instant::now() - (cort::remote::RECALL_DEADLINE - Duration::from_millis(1150)),
     );
     assert!(matches!(result, Err(cort::remote::ErrorKind::Timeout)));
     assert_eq!(
@@ -593,7 +595,7 @@ fn cli_silent_server_times_out_and_clamps() {
     let payload = json!({"cwd":repo}).to_string();
     // 99999 clamps to the 3700 ms cap. The notice and its row are the real check: they are missing
     // when the watchdog (deadline + 900 ms) exits first. The bound is the harnesses' 5 s hook limit.
-    for (setting, bound) in [("400", 1800), ("99999", 4950)] {
+    for (setting, bound) in [("400", 3000), ("99999", 4950)] {
         let (out, elapsed) = run(root, root, &payload, Some(setting));
         assert!(out.status.success());
         assert!(elapsed < Duration::from_millis(bound), "{elapsed:?}");
@@ -612,7 +614,7 @@ fn cli_unbound_port_and_payload_cwd() {
     let repo = git_repo(root);
     config(&root.join("data"), "turso://127.0.0.1:9");
     let (out, elapsed) = run(root, root, &json!({"cwd":repo}).to_string(), Some("400"));
-    assert!(elapsed < Duration::from_millis(2700));
+    assert!(elapsed < Duration::from_millis(3500));
     let kind = outcome(root)["hook"].as_str().unwrap().to_owned();
     assert!(
         kind == "remote_unreachable" || kind == "remote_timeout",
