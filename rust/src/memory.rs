@@ -55,8 +55,10 @@ impl Default for MemoryLedger {
 pub struct MemoryHit {
     #[serde(flatten)]
     pub entry: MemoryEntry,
-    /// `source_unchanged` checks bytes only. It does not prove the claim follows from the source.
+    /// Evidence checks source bytes, not whether the claim follows from its context.
     pub evidence_status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_file_changed: Option<bool>,
     /// `same_line`, `moved` (the cited line's exact text now sits only at `source_line_now`),
     /// `moved_ambiguous` (it sits at several lines), `changed` (it sits nowhere) or
     /// `source_missing`. Absent for rows recorded without a line hash.
@@ -326,18 +328,26 @@ fn recall_ledger_inner(
             }
             (Some(_), Err(_)) => (Some("source_missing".to_string()), None),
         };
+        let source_file_changed = source
+            .as_ref()
+            .ok()
+            .map(|bytes| hash(bytes) != entry.source_sha256);
         let evidence_status = if counts[entry.key.as_str()] > 1 {
             "conflict"
         } else {
-            match source {
-                Ok(bytes) if hash(&bytes) == entry.source_sha256 => "source_unchanged",
-                Ok(_) => "source_changed",
-                Err(_) => "source_missing",
+            match (source_file_changed, source_line_status.as_deref()) {
+                (None, _) => "source_missing",
+                (Some(_), Some("same_line")) => "source_unchanged",
+                (Some(_), Some("moved")) => "source_moved",
+                (Some(_), Some(_)) => "source_changed",
+                (Some(false), None) => "source_unchanged",
+                (Some(true), None) => "source_changed",
             }
         };
         hits.push(MemoryHit {
             entry: entry.clone(),
             evidence_status: evidence_status.to_string(),
+            source_file_changed,
             source_line_status,
             source_line_now,
         });
@@ -410,6 +420,53 @@ mod tests {
     use super::*;
 
     #[test]
+    fn line_evidence_and_file_change_are_reported_independently() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("decision.md");
+        fs::write(&path, "Heading\nDecision\nOther\n").unwrap();
+        let entry = new_entry(dir.path(), "k", "claim", Path::new("decision.md"), 2, None).unwrap();
+        let mut ledger = MemoryLedger {
+            schema: SCHEMA,
+            entries: vec![entry.clone()],
+        };
+        let check = |ledger: &MemoryLedger, status: &str, file_changed: Option<bool>| {
+            let hits = recall_ledger(dir.path(), "k", ledger, true, None).hits;
+            assert_eq!(hits[0].evidence_status, status);
+            assert_eq!(
+                serde_json::to_value(&hits[0])
+                    .unwrap()
+                    .get("source_file_changed")
+                    .and_then(|v| v.as_bool()),
+                file_changed
+            );
+        };
+        check(&ledger, "source_unchanged", Some(false));
+        fs::write(&path, "Heading\nDecision\nOther edited\n").unwrap();
+        check(&ledger, "source_unchanged", Some(true));
+        fs::write(&path, "Intro\nHeading\nDecision\nOther\n").unwrap();
+        check(&ledger, "source_moved", Some(true));
+        assert_eq!(
+            recall_ledger(dir.path(), "k", &ledger, true, None).hits[0].source_line_now,
+            Some(3)
+        );
+        fs::write(&path, "Heading\nEdited\nOther\n").unwrap();
+        check(&ledger, "source_changed", Some(true));
+        ledger.entries[0].source_line_sha256 = None;
+        fs::write(&path, "Heading\nDecision\nOther edited\n").unwrap();
+        check(&ledger, "source_changed", Some(true));
+        fs::write(&path, "Heading\nDecision\nOther\n").unwrap();
+        check(&ledger, "source_unchanged", Some(false));
+        let mut other = entry;
+        other.id = "different".into();
+        ledger.entries.push(other);
+        check(&ledger, "conflict", Some(false));
+        fs::remove_file(&path).unwrap();
+        check(&ledger, "conflict", None);
+        ledger.entries.pop();
+        check(&ledger, "source_missing", None);
+    }
+
+    #[test]
     fn a_changed_source_is_disclosed_and_a_correction_replaces_it() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("decision.md"), "Use option A.\n").unwrap();
@@ -470,7 +527,7 @@ mod tests {
 
         fs::write(&path, "# Title\n\nIntro.\n\nThe database is harnessuse.\n").unwrap();
         let hit = &recall(dir.path())[0];
-        assert_eq!(hit.evidence_status, "source_changed");
+        assert_eq!(hit.evidence_status, "source_moved");
         assert_eq!(hit.source_line_status.as_deref(), Some("moved"));
         assert_eq!(hit.source_line_now, Some(5));
 
@@ -480,11 +537,13 @@ mod tests {
         )
         .unwrap();
         let hit = &recall(dir.path())[0];
+        assert_eq!(hit.evidence_status, "source_changed");
         assert_eq!(hit.source_line_status.as_deref(), Some("moved_ambiguous"));
         assert_eq!(hit.source_line_now, None);
 
         fs::write(&path, "# Title\nThe database is cortex-v5.\n").unwrap();
         let hit = &recall(dir.path())[0];
+        assert_eq!(hit.evidence_status, "source_changed");
         assert_eq!(hit.source_line_status.as_deref(), Some("changed"));
         assert_eq!(hit.source_line_now, None);
     }

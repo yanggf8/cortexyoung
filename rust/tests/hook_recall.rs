@@ -699,6 +699,7 @@ fn render_orders_and_caps_entries() {
                 recorded_machine_source: None,
             },
             evidence_status: "source_unchanged".into(),
+            source_file_changed: Some(false),
             source_line_status: None,
             source_line_now: None,
         })
@@ -733,9 +734,15 @@ fn render_orders_and_caps_entries() {
                 recorded_machine: None,
                 recorded_machine_source: None,
             },
-            evidence_status: "source_missing".into(),
-            source_line_status: None,
-            source_line_now: None,
+            evidence_status: if i == 29 {
+                "source_moved"
+            } else {
+                "source_missing"
+            }
+            .into(),
+            source_file_changed: (i == 29).then_some(true),
+            source_line_status: (i == 29).then(|| "moved".into()),
+            source_line_now: (i == 29).then_some(7),
         })
         .collect();
     let (short, count) = cort::hook_recall::render(MemoryRecall {
@@ -746,6 +753,8 @@ fn render_orders_and_caps_entries() {
     .unwrap();
     assert_eq!(count, 20);
     assert!(short.contains("10 entries left out"));
+    // A moved entry is cited at the line it sits on now, not the recorded one.
+    assert!(short.contains("- [key-29] short (x:7, source_moved)"));
 }
 
 #[test]

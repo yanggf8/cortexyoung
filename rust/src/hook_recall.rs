@@ -44,7 +44,10 @@ pub fn render_with_omitted(recall: MemoryRecall, pre_omitted: usize) -> Option<(
             clean(&hit.entry.key),
             clean(&hit.entry.claim),
             clean(&hit.entry.source),
-            hit.entry.source_line,
+            // A moved line is cited where it sits now: the recorded number points at other text.
+            hit.source_line_now
+                .filter(|_| hit.evidence_status == "source_moved")
+                .unwrap_or(hit.entry.source_line),
             hit.evidence_status
         );
         if out.len() + line.len() > body_limit {

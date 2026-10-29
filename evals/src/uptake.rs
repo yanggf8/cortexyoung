@@ -334,6 +334,7 @@ fn parse_injection(text: &str) -> Injection {
     }
     result
 }
+
 fn attachment(e: &Value) -> Option<&Value> {
     (e.get("type")?.as_str()? == "attachment")
         .then(|| e.get("attachment"))
@@ -1297,4 +1298,18 @@ pub fn scan_sample(
         "total":total.json(),"by_source":sources,"sample":sample,
         "salt":if private.is_some() { "persistent_private" } else { "ephemeral; ids are not comparable across runs" }}),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn uptake_parses_moved_evidence() {
+        let text = format!(
+            "{}\n- [key] claim (docs/decision.md:3, source_moved)",
+            super::HEADER
+        );
+        let injection = super::parse_injection(&text);
+        assert_eq!(injection.entries.len(), 1);
+        assert_eq!(injection.entries[0].evidence_status, "source_moved");
+    }
 }

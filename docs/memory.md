@@ -83,15 +83,23 @@ cort memory recall 'deployment option' --harness claude-code
 pass `--replace` for the sole active entry, or `--supersedes <active-id>` (a unique prefix of at
 least 8 lowercase hex characters works). For concurrent active entries, repeat `--supersedes` for
 every active id reported by `status`; `cort memory resolve` is an alias for this form.
-Recall returns active hits with `source_unchanged`, `source_changed`, `source_missing`, or
+Recall returns active hits with `source_unchanged`, `source_moved`, `source_changed`, `source_missing`, or
 `conflict`, plus the cited line's status: `same_line`; `moved` with `source_line_now` when the
 line's exact text appears at exactly one other line (for example because text was inserted or
 removed above it; the check does not establish why);
-`moved_ambiguous` when it appears at several; `changed` when it appears nowhere. A `moved` hit
-keeps `source_changed` because the file bytes did change. `moved` locates the text; it does not
-check its surroundings, so a line that moved from a "Current" section to a "Deprecated" one
-still reports `moved`. Read the line and its section at `source_line_now`; a supersession is
-unnecessary only if that context still supports the claim. Read the cited line before using a
+`moved_ambiguous` when it appears at several; `changed` when it appears nowhere. For rows with
+a line hash, `same_line` yields `source_unchanged`, `moved` yields `source_moved`, and
+`moved_ambiguous` or `changed` yields `source_changed`. An unreadable source yields
+`source_missing`, while `conflict` takes precedence. Older rows without a line hash use the
+whole-file hash for their evidence status. Whenever the file is readable, `source_file_changed`
+reports whether its bytes differ from the recorded file hash. Neither label checks the
+surroundings: a line that moved from a "Current" section to a "Deprecated" one still reports
+`source_moved`, and a line that stayed put under a heading rewritten that way still reports
+`source_unchanged` (with `source_file_changed: true`). That is the 2026-10-30 trade: the label
+follows the cited line because whole-file changes flagged 21 of 22 intact lines. Read the line
+and its section at `source_line_now` for a moved hit, and read the section of any hit whose
+claim depends on it when `source_file_changed` is true; a supersession is unnecessary only if
+that context still supports the claim. SessionStart cites a moved hit at `source_line_now`. Read the cited line before using a
 hit. Rows written by cort since 2026-10-20 (`63f7de3f`) carry `recorded_machine` and
 `recorded_machine_source`, the writer's `usage::machine_id` and how it was derived. It is a
 self-reported hint, not proof: `CORT_MACHINE_ID` overrides it, the fallbacks are a hostname

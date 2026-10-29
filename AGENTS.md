@@ -265,8 +265,11 @@ ClaudeCat collects nothing, and its `claudecat telemetry sync` is retired.
 developers lean on it, and on 2026-10-27 an agent kept a next-day plan in its harness-private memory
 alone, where no other machine or harness can read it, until the user asked why.
 - **Recall** with `cort memory recall "<topic>"` at the start of work, after a compaction, and
-  before asserting a project fact (a decision, a machine's state, what was retired). A hit whose
-  `evidence_status` is not `source_unchanged` is a lead to re-check, not a fact.
+  before asserting a project fact (a decision, a machine's state, what was retired). For
+  `source_moved`, read the line at `source_line_now` and its section; `source_changed`,
+  `source_missing`, and `conflict` are leads to re-check, not facts. The label follows the cited
+  line only, so when a claim depends on its section and `source_file_changed` is true, read the
+  section too.
 - **Record** with `cort memory record --key <key> --claim <claim> --source <repo file> --line <n>`
   when a decision is made or changed, when the user corrects a working assumption, and when a
   deployment changes what a machine runs. Cite the line that states it (a doc, plan or code line);
