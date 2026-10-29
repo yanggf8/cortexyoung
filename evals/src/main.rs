@@ -22,6 +22,8 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
+mod gate;
+
 /// Print a report, stamped with the machine that produced it.
 ///
 /// Every number this harness emits gets quoted somewhere -- into a document, into another agent's
@@ -112,7 +114,7 @@ const UPTAKE_FLAGS: &[&str] = &[
 ];
 
 const USAGE_TOP: &str =
-    "usage: cort-evals <run-agents|verify-impact|summarize|demand|memory-uptake|recall-exp|cost-audit|cost-collect|cost-trial|gate-audit> [options]";
+    "usage: cort-evals <run-agents|verify-impact|summarize|demand|memory-uptake|recall-exp|cost-audit|cost-collect|cost-trial|gate-audit|gate> [options]";
 const USAGE_RUN_AGENTS: &str = "usage: cort-evals run-agents --venue DIR [--tasks FILE] [--only ID[,ID...]] [--arms a,b] [--max-turns N] [--config-dir DIR] [--cache-dir DIR] [--jail-dir DIR] [--jail] [--out DIR] [--concurrency N] [--delay-secs N]";
 const USAGE_VERIFY_IMPACT: &str =
     "usage: cort-evals verify-impact --repo DIR --symbols A,B [--depth N]";
@@ -1061,6 +1063,7 @@ fn main() {
         Some("memory-uptake") => uptake_main(&argv[1..]),
         Some("recall-exp") => recall_exp_main(&argv[1..]),
         Some("gate-audit") => gate_audit_main(&argv[1..]),
+        Some("gate") => std::process::exit(gate::run(&argv[1..])),
         Some("cost-audit") => cost_audit_main(&argv[1..]),
         Some("cost-collect") => cost_collect_main(&argv[1..]),
         Some("cost-trial") => cost_trial_main(&argv[1..]),
@@ -1078,6 +1081,7 @@ fn main() {
                 println!("  {USAGE_UPTAKE}");
                 println!("  {USAGE_RECALL_EXP}");
                 println!("  {USAGE_GATE_AUDIT}");
+                println!("  {}", gate::USAGE);
                 println!("  {USAGE_COST_AUDIT}");
                 println!("  {USAGE_COST_COLLECT}");
                 println!("  {USAGE_COST_TRIAL}");

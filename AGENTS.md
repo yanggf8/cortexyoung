@@ -251,6 +251,13 @@ transient `SQLITE_IOERR_FSYNC` on a CI runner killed eight tests through four `.
 `rust/src/db.rs`, and the same panic would break `hook-refresh`'s promise to be silent and exit 0 on
 every edit for as long as a disk misbehaved.
 
+Before committing, run `CARGO_BUILD_JOBS=2 cargo run -q --locked --manifest-path evals/Cargo.toml --
+gate` from this repository (an installed `cort-evals` may predate the subcommand). It runs CI's fmt,
+clippy and test steps for both crates in CI's order under load-safe settings, stops at the first
+failure, and ends with one JSON line naming the failed crate and step; `--crate rust|evals` and
+`--skip-tests` narrow a quick pre-check, and `--release` adds CI's release builds. It does not run
+the installer, the smoke test or shellcheck, which CI also runs.
+
 ## Shared decision memory (cort)
 
 **Ownership correction (2026-10-19): cortexyoung owns the Claude Code continuity goal and the
