@@ -1,6 +1,6 @@
 # 資源閘門轉交點：cort 的 `PreToolUse` 把重工交給外部閘門
 
-日期：2026-10-28。分支 `measure`（HEAD `b7d454f4`）。第 1 版：初稿加自審（process group、Kimi 實測的是 `Grep`、出處、同時開工的窗口、措辭）；第 2 版：併入 K3.1 Pro 審查（代 Muse；approve with changes，7 點：`gate run` 段不再放行整條、deny 訊息不說「排隊」、認引號的 lexer、`cargo +toolchain`／絕對路徑／`command`、claudecat 拿掉 `id -u` 的 fork、`--timeout-ms` 放在 `--` 前、孫程序握 pipe 與 stdin 塞滿的測試）。
+日期：2026-10-28。分支 `measure`（HEAD `b7d454f4`）。第 5 版：G4 併入 K3.1 Pro 第二輪（block，8 點，見「第 5 版補充」）。第 4 版：G4 併入 K3.1 Pro 審查（block，8 點）。第 3 版：加「第二階段（G4）」（重複）。第 1 版：初稿加自審（process group、Kimi 實測的是 `Grep`、出處、同時開工的窗口、措辭）；第 2 版：併入 K3.1 Pro 審查（代 Muse；approve with changes，7 點：`gate run` 段不再放行整條、deny 訊息不說「排隊」、認引號的 lexer、`cargo +toolchain`／絕對路徑／`command`、claudecat 拿掉 `id -u` 的 fork、`--timeout-ms` 放在 `--` 前、孫程序握 pipe 與 stdin 塞滿的測試）。
 
 ## 為什麼做
 
@@ -230,3 +230,148 @@ G1、G2 可以平行；G3 等兩包都進 master。
   顯示 `ERROR: Tool execution failed.` 加上同一句原因（Kimi 擋 `Bash` 也成立）。同一段時間輕量指令與
   heredoc 內容照常執行。前一輪以真的 rustc 當佔位時 Claude Code 被擋（`compiler`），Codex 的指令晚了
   一秒、編譯已結束而正確放行，Kimi 則被 kimi plugin 自己的 rescue hook 以「不接受 `&&`」擋下，兩者都不算數。
+
+## 第二階段（G4）：告訴 agent「這是重複的」
+
+使用者 2026-10-29：擋下來不夠，閘門要告訴 agent 它在重複——同一個 agent 一直重試同一個指令，或者
+別人已經在跑同一個指令。兩種都做（「好,兩種都做」）。只動 claudecat 的 `gate hook`；cort 端的合約不變，
+仍然只看 exit 75 與 stdout 那一行。
+
+### 指令的身分
+
+重複要先定義「同一個指令」。第一版**只做 Cargo**：Gradle 的 `gradle`／`gradlew` 會 exec 成 Java
+（`org.gradle.launcher.GradleMain`），還要經過 daemon，從 `/proc` 拿不到可比對的原始指令；Gradle 仍照原本的
+資源門檻擋，只是不會回 duplicate。`classify` 找出重工片段之後，G4 讓它一併回傳那一段的**身分**
+`(argv, dir, target)`：
+
+- `argv`：`cargo` 之後的字，原樣保留，但拿掉 `+toolchain`（rustup proxy 在 exec 真正的 cargo 之前就把它
+  吃掉了，`/proc/<pid>/cmdline` 裡不會有）和片段裡的重導向（`2>&1`、`> log`）。不同 toolchain 在同一個
+  target 目錄會搶同一把 build 鎖，所以忽略 toolchain 與「重複」的理由一致。前面的環境變數、`nice`、
+  `timeout`、`env`、`exec`、`command` 不進 `argv`。
+- `dir`：指令實際作用的目錄，依序取第一個存在的：`--manifest-path X` 的 `X` 所在目錄；`cargo -C X`；
+  同一片段 `env -C X`／`env --chdir X`；重工片段之前最後一個 `cd X`；payload 的 `cwd`。相對路徑以前一個
+  基準解析，開頭的 `~` 以 `HOME` 展開，再用 `fs::canonicalize` 解析 symlink（只是系統呼叫，不 fork；
+  目錄不存在就退回字面正規化：去掉 `.`、`..`、重複的 `/`）。`/proc/<pid>/cwd` 本來就是解析過的路徑，兩邊
+  才比得起來。
+- `target`：實際的 target 目錄，依序取：`argv` 裡的 `--target-dir X`；片段前綴（或 `env`）裡的
+  `CARGO_TARGET_DIR=X`；hook 程序自己的 `CARGO_TARGET_DIR`（hook 繼承 harness 的環境，和 agent 的 shell
+  一樣）；都沒有就是 `<dir>/target`。同樣解析成絕對路徑。
+- 有多個重工片段時，用第一個 `test` 片段，否則第一個重工片段（和 kind 的選法一致）。
+
+### 情況二：別人已經在跑同一個指令（先判斷）
+
+在看負載之前先找有沒有**正在跑的同一個指令**，找到就擋，不管機器忙不忙——同一個目錄、同一個 target
+同時跑兩次 `cargo test`，第二個本來就會卡在 cargo 的 build 目錄鎖上，只是 agent 看不出來在等什麼。
+這個順序也讓 agent 拿到比「機器忙」更具體、做得到的指示。
+
+比對對象，與資源判斷共用**同一次** `/proc` 掃描（`snapshot` 要改成先掃程序、再讀負載，不能多掃一次）：
+
+1. `gate run` 的名額持有者：`Holder` 加 `cwd`（`gate run` 寫入時取 `env::current_dir()` 並 canonicalize）與
+   `target`（`gate run` 自己的 `CARGO_TARGET_DIR`，沒有就 null）。持有者的 `command` 依上一節的規則算身分；
+   舊檔沒有 `cwd` 就不比對、不出錯。
+2. 同 uid 正在跑、basename 是 `cargo` 的程序：用 `cmdline` 算 `argv` 與 `--manifest-path`／`-C`／
+   `--target-dir`，`dir` 的基準是程序自己的 `cwd`；`target` 沒有在 argv 裡時讀 `/proc/<pid>/environ` 的
+   `CARGO_TARGET_DIR`（同 uid 可讀；讀不到就當成預設 `<dir>/target`）。`cargo-clippy`、`rustc`、
+   `clippy-driver` 不算（它們是 cargo 的子程序，外層的 `cargo` 程序本身就在）。
+
+`(argv, dir, target)` 三者都相等才算重複。擋的時候一行：
+
+`gate denied (duplicate) the same command is already running: pid=<pid> since=<秒>s dir=<dir> cmd=cargo <argv>. Its output is not visible to you; wait for it to finish, then run this once (the build will be warm). Do not poll with sleep in the foreground.`
+
+`since` 用「幾秒前」，不用時鐘時間，免得時區問題。
+
+### 情況一：同一個 agent 一直重試（每一次 deny 都適用）
+
+每次 `gate hook` 決定擋（包括情況二和原本的資源門檻），讀紀錄計次，再追加一筆：
+
+- 檔案：`$XDG_STATE_HOME/claudecat/gate-denies.jsonl`，沒有 `XDG_STATE_HOME` 就用
+  `$HOME/.local/state/claudecat/gate-denies.jsonl`；`CLAUDECAT_GATE_LOG` 可覆寫（測試用）。放在耐久的 state
+  目錄，因為它也是量測資料，重開機不該消失。目錄以 `0700` 建立、檔案以 `0600` 建立（`OpenOptions::mode`），
+  不靠 umask。
+- **不存指令內容。** 一筆一行 JSON：
+  `{"ts":<秒>,"session":<session_id 的 SHA-256 前 16 hex 或 null>,"id":<身分的 SHA-256 前 16 hex>,"sub":"<cargo 子命令，如 test>","reason":"<duplicate|compiler|compiler-lock|slots|load|swap 以逗號相接>"}`，
+  放行列多一個 `"allowed":true`、沒有 `reason`。沒有 argv、沒有路徑、沒有原始 session id——參數裡可能有
+  憑證，路徑是專案名稱；計次只需要能比對，量測只需要子命令與原因。
+- 每一列序列化後上限 512 位元組（以上面的欄位一定小於它；超過就不寫）。用 `O_APPEND` 一次 `write_all`
+  一行；一般檔案的 `O_APPEND` 不保證多個寫入者不交錯，所以讀的時候**跳過解析失敗的列**。讀、計次、追加
+  三步不是原子的：兩個 hook 同時擋同一個 session 的同一個指令時，兩個可能拿到同一個次數。接受——次數是
+  建議，不改變擋或放行。
+- **只讀檔尾。** 計次與「是否被擋過」只看最後 64 KiB（從檔尾往前讀，丟掉第一個不完整的列），所以不管檔案
+  多大，每次 hook 的讀取量都有上限；30 分鐘內的列一定在檔尾。
+- 次數：同一個 `session`、同一個 `id`，在最近 30 分鐘內、且最近一筆放行列之後的 deny 筆數，加上這一次。
+  `session` 是 null 的不計次數（只記錄）。
+- 放行列：hook 決定放行一個 Cargo 重工指令時，若檔尾 64 KiB 裡這個 session 這個 `id` 在 30 分鐘內有 deny
+  列，就追加一筆放行列，計次從那之後重新算。沒有 deny 紀錄就不寫。這表示**每一次放行的重工指令都會讀一次
+  檔尾**，上限 64 KiB。
+- 第 2 次起，訊息前面加 `retry <N> of this command in this session; first denied <S>s ago, still blocked.`；
+  第 3 次起再加 `Stop retrying it: do other work or tell the user what is blocking it.`
+- **保留與壓縮。** 每次寫入前看檔案大小：超過 256 KiB，或第一列的 `ts` 早於 7 天前（只讀第一列），就改寫成
+  「7 天內、而且從最新往回最多 128 KiB」的列（寫暫存檔、`0600`、再 rename）。所以檔案大小上限約 256 KiB
+  加一列，保留期限 7 天，和大小無關。和同時追加的 hook 競爭時可能掉幾筆，接受。
+- 任何讀寫失敗都當成「沒有紀錄」照常回答：紀錄壞了不能改變擋或放行，只少了計次那段話。
+
+### 預算
+
+情況二不多掃 `/proc`（共用掃描），每個同 uid 的 `cargo` 程序多讀一次 `cmdline` 已有的資料，必要時讀一次
+`environ`；情況一每次最多讀 64 KiB 檔尾、寫一列，偶爾改寫 128 KiB。都遠低於 cort 的 200 ms；逾時會讓 cort
+放行，連資源門檻都失效，所以 G4 的測試要量 `gate hook` 在大紀錄檔下的耗時。
+
+### 量測
+
+`claudecat gate log [--json] [--days N]`（預設 7）：讀整個紀錄檔，報每個 reason 的 deny 次數、每個子命令的
+deny 次數、重試次數分布（同一 session 同一 `id` 連續 deny 數：1、2、3+）、從第一次 deny 到放行的秒數
+（有放行列的才算；p50／p95）。這回答原本「被擋之後是否空轉」的問題，usage 列不必加 session id。
+
+### 測試（claudecat）
+
+- 身分：`cd x && cargo test`、`cargo test --manifest-path x/Cargo.toml`、`cargo -C x test`、`env -C x cargo test`、
+  `RUST_TEST_THREADS=2 nice -n 15 cargo test 2>&1 | tail` 得到相同 `argv=["test"]` 與 `dir=x`；`cargo +stable test`
+  的 `argv` 也是 `["test"]`；`cd` 的相對路徑以 payload `cwd` 為基準、`~` 展開、`..` 正規化；symlink 目錄與它
+  的目標得到相同 `dir`（canonicalize）；`CARGO_TARGET_DIR=/tmp/a` 與 `/tmp/b` 的 `target` 不同；`--target-dir`
+  優先於環境變數。
+- 情況二（fixture `/proc`）：同 uid、同 cwd 的 `cargo test` → duplicate；`env -C /b cargo test` 對上 `/a` 的
+  程序 → 不算；cwd 不同、argv 多一個參數、不同 uid、`environ` 的 `CARGO_TARGET_DIR` 不同 → 不算；
+  `cmdline` 是 rustup 執行後的 `…/toolchains/stable-…/bin/cargo test` 對上 `cargo +stable test` → duplicate；
+  `gate run` 持有者帶 `cwd` 的比對；舊格式持有者不比對也不出錯；`cargo-clippy`／`rustc` 程序不當成比對對象。
+  機器閒置時 duplicate 仍然擋；機器也忙時訊息是 duplicate（順序）。
+- 情況一：同一 session 連續三次 deny → 第二次有 `retry 2`、第三次有 `Stop retrying`；不同 session 各自計次；
+  一次放行之後重新計次；超過 30 分鐘的不算；`session` 為 null 不計次；檔案與目錄權限是 `0600`／`0700`；
+  檔案裡沒有指令字串與路徑；紀錄檔不可寫時照常 deny、訊息沒有計次段；夾雜一列壞 JSON 時照常計次。
+- 上限：先灌一個 1 MiB 的紀錄檔，`gate hook` 在 deny 與放行兩條路上都在 50 ms 內回答、寫完後檔案在 256 KiB
+  附近；第一列超過 7 天時觸發改寫；改寫後只剩 7 天內的列。
+- 一行：所有 deny 訊息仍然只有一行。`gate log` 的彙總。
+
+### 分包
+
+- **G4a**：身分（`classify` 回傳身分，含 canonicalize 與 target）、`snapshot` 改成單次掃描、情況二、
+  `Holder.cwd`／`target`。
+- **G4b**：deny 紀錄（權限、雜湊、檔尾讀、保留）、情況一、`gate log`。
+- 部署：兩台重裝 claudecat 即可（cort 不動），再做一次三邊實測：同一 session 連下兩次被擋的指令，
+  第二次要看到 `retry 2`；背景跑一個 `cargo test`，另一邊下同一個指令要看到 `duplicate`。
+
+第 4 版：併入 K3.1 Pro 對 G4 的設計審查（代 Muse；block，8 點：`env -C`、`CARGO_TARGET_DIR`、Gradle 改成不做
+duplicate、`+toolchain`、canonicalize、紀錄檔真正的上限與只讀檔尾、不存指令內容與權限、`O_APPEND` 的
+保證與非原子計次）。
+
+### 第 5 版補充（K3.1 Pro 第二輪，block，8 點；以下覆蓋前文衝突處）
+
+1. **`environ` 讀不到就不比對。** 跑中的 `cargo` 程序 argv 沒有 `--target-dir`、而 `/proc/<pid>/environ`
+   讀不到時，這個程序**不當成比對對象**（寧可漏抓，不誤擋），不再假設 `<dir>/target`。
+2. **計次讀整個檔，並承認是近似值。** 不再只讀檔尾 64 KiB：檔案在壓縮後最多約 256 KiB，整檔讀取的成本有
+   上限。壓縮只保留最新 128 KiB，所以 30 分鐘內的列極多時（一般列約 150 位元組，約 850 列以上）最舊的會被
+   丟掉，計次與 `first denied` 因此是近似值；文件與訊息都不宣稱精確。測試要放超過 128 KiB、全部在 30 分鐘內
+   的列，確認仍然照常回答。
+3. **`target` 是近似值。** 只看 `--target-dir`、`CARGO_TARGET_DIR` 與 `<dir>/target`，不讀 Cargo 設定檔
+   （`build.target-dir`）也不解析 workspace 根目錄。後果只會是**漏抓**（兩個其實共用 target 的指令被當成不同），
+   不會誤擋——兩個身分相同的指令在同一個目錄用同樣的環境，讀到的設定檔也相同。
+4. **`=` 寫法。** `--manifest-path=X`、`--target-dir=X`、`env --chdir=X`、`cargo --config=…` 與分開寫的形式等價，
+   兩種都要測。
+5. **情況一的範圍。** 計次只對 Cargo 指令。Gradle 被擋時也寫一列，但 `id` 是 null、`sub` 是 `"gradle"`、不計
+   次數、訊息沒有計次段；`gate log` 仍把它算進每個 reason 的 deny 次數。
+6. **`canonicalize` 的延遲。** 先用字面正規化的 `dir` 與候選者比，相等就不碰檔案系統；不相等時才對新指令的
+   `dir` 呼叫一次 `canonicalize`（每次 hook 最多一次）。卡在無回應的網路檔案系統時仍可能拖過 cort 的
+   200 ms，cort 會放行——這是已知限制，寫進 README。
+7. **保留期限的措辭。** 7 天以上的列在「下一次寫入或下一次 `gate log`」時刪除；沒有任何寫入也沒人看
+   `gate log` 時舊列會留著。README 照這句寫，不宣稱定時刪除。
+8. **`since` 只對 `gate run` 持有者。** 持有者有 `started_at`；一般 `cargo` 程序第一版不讀啟動時間，訊息裡
+   沒有 `since=`，只有 `pid`、`dir`、`cmd`。
