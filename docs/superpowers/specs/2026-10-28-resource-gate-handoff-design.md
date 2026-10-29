@@ -401,14 +401,17 @@ duplicate、`+toolchain`、canonicalize、紀錄檔真正的上限與只讀檔�
 `now − days` 之後（`--days`，現有參數，預設照舊）且不早於 `MEASURE_START_MS` 的列。
 
 - **讀法**：store 新增一個方法，在 SQL 裡用 `json_extract` 取 `machine_id`、`args_summary` 裡的
-  `harness`、`gate`、`gate_ms` 四欄，一列一筆傳回；不把整個 payload 拉回來（一週上千列）。`args_summary`
-  不是合法 JSON 的列，`harness` 與 `gate` 當成缺值，不讓整份報表失敗。本機 `SqliteStore` 與遠端
-  `RemoteStore` 都實作；測試走 `SqliteStore`。
+  `harness`、`gate`、`gate_ms`、`hook` 五欄，一列一筆傳回；不把整個 payload 拉回來（一週上千列）。`args_summary`
+  不是合法 JSON 的列，四個值都當成缺值，不讓整份報表失敗。本機 `SqliteStore` 與遠端
+  `RemoteStore` 都實作；測試走 `SqliteStore`。這句查詢和既有的遠端查詢一起受「不得無索引掃描
+  `telemetry_events`」的查詢計畫測試約束；Turso 上的實際執行在部署後以真實資料驗。
 - **分組**：主機沿用壓縮段的 `machine_id → host`（同樣的多主機警告）；主機之下按 harness。每組報：
   - `fires`：列數；
   - `tags`：每個 `gate` 值的次數，原樣計（`allow`、`deny`、`timeout`、`error`、`spawn_failed`、
-    `config_invalid`、`unconfigured`、`not_shell`，將來新值也照計）；沒有 `gate` 的列記成 `untagged`
-    ——那是 G1 之前的 binary 寫的，數字本身說明哪台機器還沒升級；
+    `config_invalid`、`unconfigured`、`not_shell`，將來新值也照計）。沒有 `gate` 的列：`hook` 是 `fired`
+    的記成 `untagged`——那是 G1 之前的 binary 寫的，數字說明哪台機器還沒升級；`hook` 是別的值（現行版本
+    讀不到 payload 時的 `no_payload`）就記那個值，因為現行版本在那條路上本來就不加 `gate`；`args_summary`
+    讀不了的記 `unparsed`。（K3.1 Pro 程式審查指出原本全記 `untagged` 會把這兩種誤當成舊 binary。）
   - `handed_off`：`allow + deny + timeout + error + spawn_failed`（真的 spawn 了閘門或試過的）；
   - `gate_ms`：有 `gate_ms` 的列的 p50／p95（最近秩法，與 `gate log` 相同），沒有就 `null`；另報
     `max`，因為 cort 的上限是 200 ms，p95 看不到單次逾時。

@@ -2,7 +2,9 @@ use cort::collect::{
     batch_cursors, run_collect, CollectConfig, CollectRun, CollectState, ErrorKind, Failure,
     KickPaths,
 };
-use cort::measure_store::{CompactionRow, MachineHost, MeasureStore, OpenError, SqliteStore};
+use cort::measure_store::{
+    CompactionRow, GateRow, MachineHost, MeasureStore, OpenError, SqliteStore,
+};
 use cort::telemetry::TelemetryEvent;
 use cort::usage::{insert_health_row_at, record_command_at, CommandRecord, HealthRow};
 use std::collections::HashMap;
@@ -259,6 +261,7 @@ impl MeasureStore for SlowFirstWrite {
         upsert_compaction(row: &CompactionRow) -> Result<(), String>;
         compaction_owners(machine_id: &str) -> Result<Vec<(String, String)>, String>;
         compactions_since(since_ms: i64) -> Result<Vec<CompactionRow>, String>;
+        gate_rows_since(since_ms: i64) -> Result<Vec<GateRow>, String>;
         machine_hosts() -> Result<Vec<MachineHost>, String>;
         insert_events(events: &[TelemetryEvent]) -> Result<usize, String>;
         remote_ids(machine_id: &str, source: &str) -> Result<HashMap<i64, String>, String>;

@@ -4,7 +4,7 @@
 
 use crate::data_dir::{data_dir, write_atomic};
 use crate::measure_progress::{self, Progress};
-use crate::measure_store::{CompactionRow, MeasureStore};
+use crate::measure_store::{CompactionRow, GateRow, MeasureStore};
 use crate::memory_store::project_from_git_origin;
 use crate::telemetry::{
     upload_events_with_progress, upload_health_events_with_progress, UploadInputs,
@@ -567,7 +567,53 @@ fn host_section(host: &str, machine_ids: &[String], rows: &[&CompactionRow]) -> 
     })
 }
 
-/// Reads the remote store as it stands. Only the compaction section exists so far.
+fn gate_host_section(host: &str, machine_ids: &[String], rows: &[&GateRow]) -> Value {
+    let mut harnesses: BTreeMap<String, Vec<&GateRow>> = BTreeMap::new();
+    for row in rows {
+        harnesses
+            .entry(row.harness.as_deref().unwrap_or("unknown").to_string())
+            .or_default()
+            .push(row);
+    }
+    let harnesses: Vec<Value> = harnesses
+        .into_iter()
+        .map(|(harness, rows)| {
+            let mut tags: BTreeMap<String, usize> = BTreeMap::new();
+            let mut times = Vec::new();
+            for row in &rows {
+                // Only a `fired` row without a tag was written by a binary that predates the
+                // hand-off; a row that never read its payload keeps its own outcome, and an
+                // unreadable summary says so.
+                let tag = match (row.gate.as_deref(), row.hook.as_deref()) {
+                    (Some(gate), _) => gate,
+                    (None, None) => "unparsed",
+                    (None, Some("fired")) => "untagged",
+                    (None, Some(hook)) => hook,
+                };
+                *tags.entry(tag.to_string()).or_default() += 1;
+                if let Some(ms) = row.gate_ms {
+                    times.push(ms);
+                }
+            }
+            times.sort_unstable();
+            let rank = |p: usize| times.get((times.len() * p).div_ceil(100).saturating_sub(1));
+            let handed_off: usize = ["allow", "deny", "timeout", "error", "spawn_failed"]
+                .iter()
+                .map(|tag| tags.get(*tag).copied().unwrap_or(0))
+                .sum();
+            json!({
+                "harness": harness,
+                "fires": rows.len(),
+                "tags": tags,
+                "handed_off": handed_off,
+                "gate_ms": {"p50": rank(50), "p95": rank(95), "max": times.last()},
+            })
+        })
+        .collect();
+    json!({"host": host, "machine_ids": machine_ids, "harnesses": harnesses})
+}
+
+/// Reads the measurement store as it stands.
 pub fn report(store: &mut dyn MeasureStore, input: &ReportInputs) -> Result<Value, String> {
     let since = input.now_ms - input.compaction_days * DAY_MS;
     let rows = store.compactions_since(since)?;
@@ -645,6 +691,31 @@ pub fn report(store: &mut dyn MeasureStore, input: &ReportInputs) -> Result<Valu
             host_section(host, &ids, rs)
         })
         .collect();
+    let gate_since = (input.now_ms - input.days * DAY_MS).max(crate::telemetry::MEASURE_START_MS);
+    let gate_rows = store.gate_rows_since(gate_since)?;
+    let mut gate_grouped: BTreeMap<String, (Vec<String>, Vec<&GateRow>)> = grouped
+        .iter()
+        .map(|(host, (ids, _))| (host.clone(), (ids.clone(), Vec::new())))
+        .collect();
+    for row in &gate_rows {
+        let host = host_of
+            .get(&row.machine_id)
+            .cloned()
+            .unwrap_or_else(|| format!("machine {}", short(&row.machine_id)));
+        let entry = gate_grouped.entry(host).or_default();
+        if !entry.0.contains(&row.machine_id) {
+            entry.0.push(row.machine_id.clone());
+        }
+        entry.1.push(row);
+    }
+    let gate_sections: Vec<Value> = gate_grouped
+        .iter()
+        .map(|(host, (ids, rs))| {
+            let mut ids = ids.clone();
+            ids.sort();
+            gate_host_section(host, &ids, rs)
+        })
+        .collect();
     Ok(json!({
         "collection": input.collection,
         "days": input.days,
@@ -653,6 +724,7 @@ pub fn report(store: &mut dyn MeasureStore, input: &ReportInputs) -> Result<Valu
             "total": rows.len(),
             "hosts": sections,
         },
+        "gate": {"days": input.days, "total": gate_rows.len(), "hosts": gate_sections},
         "warnings": warnings,
     }))
 }
@@ -847,6 +919,77 @@ pub fn render_report(v: &Value, color: bool) -> String {
                 n("transcript_lookups"),
                 n("corrections"),
             ));
+        }
+    }
+    let gate = &v["gate"];
+    out.push('\n');
+    out.push_str(&p.bold(&format!(
+        "閘門（最近 {} 天）",
+        gate["days"].as_i64().unwrap_or(0)
+    )));
+    out.push('\n');
+    let gate_hosts = gate["hosts"].as_array().cloned().unwrap_or_default();
+    if gate_hosts.is_empty() {
+        out.push_str("這段期間沒有 hook 列\n");
+    }
+    for host in &gate_hosts {
+        let ids: Vec<&str> = host["machine_ids"]
+            .as_array()
+            .map(|a| a.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        out.push('\n');
+        out.push_str(&p.bold(&format!(
+            "{}  ({})",
+            host["host"].as_str().unwrap_or("?"),
+            ids.join(", ")
+        )));
+        out.push('\n');
+        let harnesses = host["harnesses"].as_array().cloned().unwrap_or_default();
+        if harnesses.is_empty() {
+            out.push_str("  這段期間沒有 hook 列\n");
+        }
+        for harness in harnesses {
+            let tags = &harness["tags"];
+            let count = |tag: &str| tags[tag].as_u64().unwrap_or(0);
+            let mut handed_tags = Vec::new();
+            for tag in ["allow", "deny"] {
+                if count(tag) > 0 {
+                    handed_tags.push(format!("{tag} {}", count(tag)));
+                }
+            }
+            let ms = |name: &str| {
+                harness["gate_ms"][name]
+                    .as_i64()
+                    .map_or("-".to_string(), |n| n.to_string())
+            };
+            out.push_str(&format!(
+                "  {}  fires {}  handed_off {}",
+                harness["harness"].as_str().unwrap_or("unknown"),
+                harness["fires"].as_u64().unwrap_or(0),
+                harness["handed_off"].as_u64().unwrap_or(0),
+            ));
+            if !handed_tags.is_empty() {
+                out.push_str(&format!("（{}）", handed_tags.join(" ")));
+            }
+            for tag in ["timeout", "error", "spawn_failed"] {
+                if count(tag) > 0 {
+                    out.push_str(&format!("  {tag} {}", count(tag)));
+                }
+            }
+            out.push_str(&format!(
+                "  gate_ms p50 {} p95 {} max {}",
+                ms("p50"),
+                ms("p95"),
+                ms("max"),
+            ));
+            for (tag, number) in tags.as_object().into_iter().flatten() {
+                if !["allow", "deny", "timeout", "error", "spawn_failed"].contains(&tag.as_str())
+                    && number.as_u64().unwrap_or(0) > 0
+                {
+                    out.push_str(&format!("  {tag} {}", number.as_u64().unwrap_or(0)));
+                }
+            }
+            out.push('\n');
         }
     }
     for w in v["warnings"].as_array().cloned().unwrap_or_default() {

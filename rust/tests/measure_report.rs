@@ -1,5 +1,6 @@
 use cort::measure::*;
 use cort::measure_store::{CompactionRow, MeasureStore, SqliteStore, WindowCounts};
+use cort::telemetry::{TelemetryEvent, MEASURE_START_MS, SOURCE_COMMAND};
 use serde_json::{json, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -9,6 +10,7 @@ use std::process::Command;
 const MON_W43_MS: i64 = 1_792_368_000_000;
 const THU_W43_MS: i64 = 1_792_670_400_000; // 2026-10-22 12:00Z
 const FRI_W43_MS: i64 = 1_792_756_800_000; // 2026-10-23 12:00Z
+const DAY_MS: i64 = 86_400_000;
 
 fn w(tool_calls: i64, rereads: i64, repeated: i64, lookups: i64, corrections: i64) -> WindowCounts {
     WindowCounts {
@@ -50,6 +52,174 @@ fn inputs(now_ms: i64) -> ReportInputs {
         now_ms,
         collection: None,
     }
+}
+
+fn gate_event(id: &str, machine: &str, time_ms: i64, command: &str, args: &str) -> TelemetryEvent {
+    TelemetryEvent {
+        source: SOURCE_COMMAND.into(),
+        event_id: id.into(),
+        machine_id: machine.into(),
+        machine_source: "test".into(),
+        project_id: None,
+        time_ms: Some(time_ms),
+        payload: json!({"command": command, "args_summary": args}).to_string(),
+        rowid: None,
+    }
+}
+
+#[test]
+fn report_gate_groups_tags_and_nearest_rank_times() {
+    let (_t, mut s) = store();
+    s.upsert_machine_host("m1", "host-one", 1).unwrap();
+    s.upsert_machine_host("m2", "host-two", 1).unwrap();
+    let now = MEASURE_START_MS + 10 * DAY_MS;
+    let recent = now - DAY_MS;
+    let events = vec![
+        gate_event(
+            "1",
+            "m1",
+            recent,
+            "hook-suggest",
+            r#"{"hook":"fired","harness":"claude-code","gate":"allow","gate_ms":10}"#,
+        ),
+        gate_event(
+            "2",
+            "m1",
+            recent,
+            "hook-suggest",
+            r#"{"hook":"fired","harness":"claude-code","gate":"deny","gate_ms":"12"}"#,
+        ),
+        gate_event(
+            "3",
+            "m1",
+            recent,
+            "hook-suggest",
+            r#"{"hook":"fired","harness":"claude-code","gate":"timeout","gate_ms":30}"#,
+        ),
+        gate_event(
+            "4",
+            "m1",
+            recent,
+            "hook-suggest",
+            r#"{"hook":"fired","harness":"claude-code","gate":"not_shell"}"#,
+        ),
+        gate_event(
+            "5",
+            "m1",
+            recent,
+            "hook-suggest",
+            r#"{"hook":"fired","harness":"claude-code","gate":"unconfigured","gate_ms":"bad"}"#,
+        ),
+        gate_event(
+            "6",
+            "m1",
+            recent,
+            "hook-suggest",
+            r#"{"hook":"fired","harness":"claude-code"}"#,
+        ),
+        gate_event("7", "m1", recent, "hook-suggest", "broken json"),
+        gate_event(
+            "7b",
+            "m1",
+            recent,
+            "hook-suggest",
+            r#"{"v":6,"hook":"no_payload","harness":"unspecified"}"#,
+        ),
+        gate_event(
+            "8",
+            "m1",
+            recent,
+            "hook-suggest",
+            r#"{"hook":"fired","harness":"codex","gate":"allow","gate_ms":3}"#,
+        ),
+        gate_event(
+            "9",
+            "m2",
+            recent,
+            "hook-suggest",
+            r#"{"hook":"fired","harness":"kimi","gate":"deny","gate_ms":40}"#,
+        ),
+        gate_event(
+            "old-start",
+            "m1",
+            MEASURE_START_MS - 1,
+            "hook-suggest",
+            r#"{"gate":"allow"}"#,
+        ),
+        gate_event(
+            "old-days",
+            "m1",
+            MEASURE_START_MS + DAY_MS,
+            "hook-suggest",
+            r#"{"gate":"allow"}"#,
+        ),
+        gate_event("other", "m1", recent, "hook-refresh", r#"{"gate":"allow"}"#),
+    ];
+    s.insert_events(&events).unwrap();
+    let v = report(&mut s, &inputs(now)).unwrap();
+    assert_eq!(v["gate"]["days"], 7);
+    assert_eq!(v["gate"]["total"], 10);
+    let hosts = v["gate"]["hosts"].as_array().unwrap();
+    assert_eq!(hosts.len(), 2);
+    assert_eq!(hosts[0]["host"], "host-one");
+    assert_eq!(hosts[0]["machine_ids"], json!(["m1"]));
+    assert_eq!(
+        hosts[0]["harnesses"],
+        json!([
+            {"harness":"claude-code","fires":6,"tags":{"allow":1,"deny":1,"timeout":1,"not_shell":1,"unconfigured":1,"untagged":1},"handed_off":3,"gate_ms":{"p50":12,"p95":30,"max":30}},
+            {"harness":"codex","fires":1,"tags":{"allow":1},"handed_off":1,"gate_ms":{"p50":3,"p95":3,"max":3}},
+            {"harness":"unknown","fires":1,"tags":{"unparsed":1},"handed_off":0,"gate_ms":{"p50":null,"p95":null,"max":null}},
+            {"harness":"unspecified","fires":1,"tags":{"no_payload":1},"handed_off":0,"gate_ms":{"p50":null,"p95":null,"max":null}}
+        ])
+    );
+    assert_eq!(
+        hosts[1],
+        json!({"host":"host-two","machine_ids":["m2"],"harnesses":[
+            {"harness":"kimi","fires":1,"tags":{"deny":1},"handed_off":1,"gate_ms":{"p50":40,"p95":40,"max":40}}
+        ]})
+    );
+    let text = render_report(&v, false);
+    assert!(
+        text.contains("閘門（最近 7 天）\n\nhost-one  (m1)"),
+        "{text}"
+    );
+    assert!(text.contains("  claude-code  fires 6  handed_off 3（allow 1 deny 1）  timeout 1  gate_ms p50 12 p95 30 max 30  not_shell 1  unconfigured 1  untagged 1"), "{text}");
+    assert!(
+        text.contains("  codex  fires 1  handed_off 1（allow 1）  gate_ms p50 3 p95 3 max 3"),
+        "{text}"
+    );
+    assert!(
+        text.contains("  unknown  fires 1  handed_off 0  gate_ms p50 - p95 - max -  unparsed 1"),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "  unspecified  fires 1  handed_off 0  gate_ms p50 - p95 - max -  no_payload 1"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "host-two  (m2)\n  kimi  fires 1  handed_off 1（deny 1）  gate_ms p50 40 p95 40 max 40"
+        ),
+        "{text}"
+    );
+}
+
+#[test]
+fn report_gate_keeps_quiet_hosts_and_empty_report() {
+    let (_t, mut s) = store();
+    let now = MEASURE_START_MS + DAY_MS;
+    let empty = report(&mut s, &inputs(now)).unwrap();
+    assert_eq!(empty["gate"], json!({"days":7,"total":0,"hosts":[]}));
+    assert!(render_report(&empty, false).contains("閘門（最近 7 天）\n這段期間沒有 hook 列"));
+    s.upsert_machine_host("quiet", "quiet-host", 1).unwrap();
+    let quiet = report(&mut s, &inputs(now)).unwrap();
+    assert_eq!(
+        quiet["gate"]["hosts"][0],
+        json!({"host":"quiet-host","machine_ids":["quiet"],"harnesses":[]})
+    );
+    assert!(render_report(&quiet, false).contains("quiet-host  (quiet)\n  這段期間沒有 hook 列"));
 }
 
 #[test]

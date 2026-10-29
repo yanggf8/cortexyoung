@@ -45,12 +45,24 @@ pub struct MachineHost {
     pub last_seen_ms: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GateRow {
+    pub machine_id: String,
+    pub harness: Option<String>,
+    pub gate: Option<String>,
+    pub gate_ms: Option<i64>,
+    /// The row's `hook` outcome (`fired`, `no_payload`, ...); `None` when `args_summary` is
+    /// not JSON.
+    pub hook: Option<String>,
+}
+
 pub trait MeasureStore {
     /// Insert, or replace the row with the same `(machine_id, boundary_uuid)`.
     fn upsert_compaction(&mut self, row: &CompactionRow) -> Result<(), String>;
     /// Uploaded boundary owners for one machine, used to rebuild lost local progress.
     fn compaction_owners(&mut self, machine_id: &str) -> Result<Vec<(String, String)>, String>;
     fn compactions_since(&mut self, since_ms: i64) -> Result<Vec<CompactionRow>, String>;
+    fn gate_rows_since(&mut self, since_ms: i64) -> Result<Vec<GateRow>, String>;
     /// Record that `host` was seen for `machine_id`; the latest `seen_ms` wins.
     fn upsert_machine_host(
         &mut self,
@@ -222,6 +234,22 @@ const SELECT_WATERMARK: &str =
 const INSERT_ALIAS: &str = "INSERT OR IGNORE INTO telemetry_project_aliases \
     (machine_id, local_project_id, shared_project_id) VALUES (?, ?, ?)";
 const SELECT_INDEX_NAMES: &str = "SELECT name FROM sqlite_master WHERE type='index'";
+const SELECT_GATE_ROWS: &str = "WITH candidates AS (
+    SELECT machine_id, json_extract(payload, '$.args_summary') AS args_summary
+    FROM telemetry_events
+    WHERE source = 'cort_command' AND time_ms >= ?
+      AND json_extract(payload, '$.command') = 'hook-suggest'
+), valid_args AS (
+    SELECT machine_id,
+      CASE WHEN json_valid(args_summary) THEN args_summary END AS args_summary
+    FROM candidates
+)
+SELECT machine_id,
+  CAST(json_extract(args_summary, '$.harness') AS TEXT),
+  CAST(json_extract(args_summary, '$.gate') AS TEXT),
+  CAST(json_extract(args_summary, '$.gate_ms') AS TEXT),
+  CAST(json_extract(args_summary, '$.hook') AS TEXT)
+FROM valid_args";
 /// Events per transaction: a commit per row is minutes on a 130k-row first upload.
 const EVENT_CHUNK: usize = 2000;
 
@@ -323,6 +351,20 @@ fn host_from_cells(c: &[Cell]) -> Result<MachineHost, String> {
         machine_id: text(&c[0])?,
         host: text(&c[1])?,
         last_seen_ms: int(&c[2])?,
+    })
+}
+
+fn gate_from_cells(c: &[Cell]) -> Result<GateRow, String> {
+    let optional_text = |cell: &Cell| match cell {
+        Cell::Null => Ok(None),
+        other => text(other).map(Some),
+    };
+    Ok(GateRow {
+        machine_id: text(&c[0])?,
+        harness: optional_text(&c[1])?,
+        gate: optional_text(&c[2])?,
+        gate_ms: optional_text(&c[3])?.and_then(|s| s.parse::<i64>().ok()),
+        hook: optional_text(&c[4])?,
     })
 }
 
@@ -456,6 +498,13 @@ impl MeasureStore for SqliteStore {
         self.query(&select_since(), vec![Cell::Int(since_ms)], 21)?
             .iter()
             .map(|r| compaction_from_cells(r))
+            .collect()
+    }
+
+    fn gate_rows_since(&mut self, since_ms: i64) -> Result<Vec<GateRow>, String> {
+        self.query(SELECT_GATE_ROWS, vec![Cell::Int(since_ms)], 5)?
+            .iter()
+            .map(|r| gate_from_cells(r))
             .collect()
     }
 
@@ -850,6 +899,13 @@ impl MeasureStore for RemoteStore {
             .collect()
     }
 
+    fn gate_rows_since(&mut self, since_ms: i64) -> Result<Vec<GateRow>, String> {
+        self.query(SELECT_GATE_ROWS, vec![Cell::Int(since_ms)], 5)?
+            .iter()
+            .map(|r| gate_from_cells(r))
+            .collect()
+    }
+
     fn upsert_machine_host(
         &mut self,
         machine_id: &str,
@@ -1121,7 +1177,10 @@ mod tests {
         for ddl in MEASURE_SCHEMA {
             conn.execute_batch(ddl).unwrap();
         }
-        for (name, sql, args) in [("SELECT_REMOTE", SELECT_REMOTE, 2)] {
+        for (name, sql, args) in [
+            ("SELECT_REMOTE", SELECT_REMOTE, 2),
+            ("SELECT_GATE_ROWS", SELECT_GATE_ROWS, 1),
+        ] {
             let explain = format!("EXPLAIN QUERY PLAN {sql}");
             let mut statement = conn.prepare(&explain).unwrap();
             let params = vec![rusqlite::types::Value::Null; args];

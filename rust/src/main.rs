@@ -2501,7 +2501,7 @@ enum MeasureAction {
         #[arg(long)]
         command_prefix: Option<String>,
     },
-    /// Cross-machine report; compaction cost first.
+    /// Cross-machine report with compaction cost and gate handoff sections.
     Report {
         #[arg(long, default_value_t = 7)]
         days: i64,

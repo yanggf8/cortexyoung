@@ -24,6 +24,7 @@ same hooks — with three things, in this order:
    analyses this itself, into its own Turso database; cort's hooks kick background collection
    ([design](docs/superpowers/specs/2026-10-24-event-driven-collection-design.md)).
    ClaudeCat no longer collects anything.
+   `cort measure report` includes a gate section with hook handoff counts and latency by host and harness.
 3. **The helper functions agents need while editing code.** `cort index` keeps one local SQLite
    index per checkout (`ast-grep` + SQLite, no embeddings, no server); `cort impact` returns the
    caller set before a rename or delete, edge by edge and with a statement of what it could not
