@@ -176,8 +176,23 @@ pub(crate) fn record_source(root: &Path, source: &Path) -> Result<(PathBuf, Path
     // Resolve through the filesystem, not lexically: `link/../x` follows `link` first, exactly
     // as reading the file will, so the path stored is the file that gets hashed.
     let base = fs::canonicalize(root).map_err(|e| format!("cannot open project root: {e}"))?;
-    let real = fs::canonicalize(base.join(source))
-        .map_err(|e| format!("cannot open source {}: {e}", source.display()))?;
+    // Relative to the invoking directory first, as git reads a path; when nothing is there, relative
+    // to the top level, because that is how recall prints every source and an agent copies it back.
+    // Only when nothing at all is there: a dangling symlink or an unreadable entry at the invoking
+    // path is the caller's file and its error is theirs, never a reason to cite a different file.
+    let here = base.join(source);
+    let nothing_here = nothing_at(&base, source);
+    let candidate = if nothing_here { top.join(source) } else { here };
+    let real = fs::canonicalize(&candidate).map_err(|e| {
+        if nothing_here {
+            format!(
+                "cannot open source {} (not in the current directory or at the repository top level): {e}",
+                source.display()
+            )
+        } else {
+            format!("cannot open source {}: {e}", source.display())
+        }
+    })?;
     let relative = real
         .strip_prefix(&top)
         .map_err(|_| error.to_string())?
@@ -186,6 +201,24 @@ pub(crate) fn record_source(root: &Path, source: &Path) -> Result<(PathBuf, Path
         return Err(error.into());
     }
     Ok((top, relative))
+}
+
+/// True only when walking `relative` from `base` reaches a component that does not exist, with
+/// every component before it present and resolvable. A dangling symlink anywhere on the way, or any
+/// error other than not-found, means something is there that the caller named.
+fn nothing_at(base: &Path, relative: &Path) -> bool {
+    let mut path = base.to_path_buf();
+    for component in relative.components() {
+        path.push(component);
+        match fs::symlink_metadata(&path) {
+            Ok(meta) if meta.file_type().is_symlink() && fs::metadata(&path).is_err() => {
+                return false
+            }
+            Ok(_) => {}
+            Err(e) => return e.kind() == std::io::ErrorKind::NotFound,
+        }
+    }
+    false
 }
 
 fn source_bytes(root: &Path, relative: &Path) -> Result<Vec<u8>, String> {

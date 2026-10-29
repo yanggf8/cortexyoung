@@ -302,6 +302,76 @@ fn record_from_subdirectory_stores_repository_relative_source() {
     );
 }
 
+/// Recall prints sources relative to the top level, so an agent in a subdirectory copies
+/// `decision.md` back; that path must still find the top-level file. A file at the path relative to
+/// the invoking directory wins, as git would read it.
+#[test]
+fn record_from_subdirectory_accepts_the_top_level_path_recall_prints() {
+    let f = Fixture::new();
+    let sub = f.root().join("sub");
+    fs::create_dir(&sub).unwrap();
+    fs::write(sub.join("both.md"), "nested\n").unwrap();
+    fs::write(f.root().join("both.md"), "top\n").unwrap();
+    for args in [
+        &["add", "."][..],
+        &[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-qm",
+            "both",
+        ],
+    ] {
+        assert!(Command::new("git")
+            .current_dir(f.root())
+            .args(args)
+            .status()
+            .unwrap()
+            .success());
+    }
+    let record = |key: &str, path: &str| {
+        memory_store::record_with(&sub, key, "A", Path::new(path), 1, None, &f.ledger).unwrap()
+    };
+    assert_eq!(record("top", "decision.md").source, "decision.md");
+    assert_eq!(record("nested", "both.md").source, "sub/both.md");
+    // Something broken at the invoking path is reported, never swapped for the top-level file.
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink("gone.md", sub.join("decision.md")).unwrap();
+        let error = memory_store::record_with(
+            &sub,
+            "dangling",
+            "A",
+            Path::new("decision.md"),
+            1,
+            None,
+            &f.ledger,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&error, LedgerError::Message(m) if m.contains("cannot open source decision.md")),
+            "{error:?}"
+        );
+        // The same for a dangling symlink part-way down: `link/decision.md` through a broken
+        // `sub/link` must not become a top-level `link/decision.md`.
+        fs::create_dir(f.root().join("link")).unwrap();
+        fs::write(f.root().join("link/decision.md"), "top\n").unwrap();
+        std::os::unix::fs::symlink("missing-dir", sub.join("link")).unwrap();
+        assert!(memory_store::record_with(
+            &sub,
+            "through",
+            "A",
+            Path::new("link/decision.md"),
+            1,
+            None,
+            &f.ledger
+        )
+        .is_err());
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn record_resolves_a_parent_step_after_a_symlink_through_the_filesystem() {
