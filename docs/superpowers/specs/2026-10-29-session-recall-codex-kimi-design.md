@@ -60,3 +60,19 @@
     key，答出該專案 ledger 最新的 5 個 key。現有 hook-recall 不用改就能服務 Codex。
   - 一次在 tpm repo 的 `codex exec` 沒有觸發 hook 也沒有輸出，原因沒查到；同樣的指令加上 `< /dev/null` 重跑就正常。
     正式接線後若再看到「沒注入」，先查這個。
+
+## 進度
+
+- **B1 Codex（`53d65f9f`、`d058ac00`，2026-10-29 16:2x 台灣時間部署 NUC11i5、Thinkpade15）**：`settings::events_for`
+  給 Codex `Recall`，TOML 方言寫不帶 matcher 的 `[[hooks.SessionStart]]`。使用者 17:1x 在 Codex 核准後，
+  `--check` 由 `NOT TRUSTED` 轉 `wired`；tpm repo 實測 hook 有跑，但那次讀共用資料庫逾時，模型只拿到逾時通知。
+  Thinkpade15 沒裝 codex。
+- **B2 Kimi（`db551c93`，同日部署兩台）**：Kimi 的 `Recall` 寫成 `event = "UserPromptSubmit"`、無 matcher；
+  `hook-recall` 依 `session_id` 的 SHA-256 在記憶資料目錄 `recall-sessions/` 下 create-new 一個標記檔，第一個
+  prompt 注入 `{"message"}`，之後的 prompt 不讀設定也不連網路（`already_injected`）。tpm repo 實測：新 session 列出
+  11 個 ledger key，`--continue` 的第二個 prompt 沒有再注入。
+- **逾時（`36524521`，同日部署兩台）**：閒置後第一次讀取在三個 harness 的 session 開始各逾時一次，熱讀約
+  300–400 ms，30 天統計 53 次裡 5 次 `remote_timeout`。總期限 2500 → 4500 ms（`remote::RECALL_DEADLINE`），
+  網路逾時預設 1500 → 4000 ms、上限 2400 → 4400 ms，watchdog 改在期限後 200 ms（寫出時再 300 ms），總長仍在
+  harness 的 5 s 內。harness 的 5 s 從程序啟動算、watchdog 從 `main()` 算，啟動本身卡住（編譯中見過一次 5 s）
+  不在程式能管的範圍。
