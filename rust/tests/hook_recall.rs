@@ -691,6 +691,7 @@ fn render_orders_and_caps_entries() {
                 },
                 source_line: i + 1,
                 source_sha256: String::new(),
+                unsourced: i == 28,
                 source_line_sha256: None,
                 recorded_at: format!("2026-10-{:02}", i + 1),
                 supersedes: None,
@@ -716,6 +717,7 @@ fn render_orders_and_caps_entries() {
     assert!(!text.contains('\u{1b}'));
     assert!(!text.contains('\t'));
     assert!(text.contains("entries left out"));
+    assert!(text.contains("(unsourced)"));
     assert!(text.find("key -29").unwrap() < text.find("key-28").unwrap());
 
     let short_hits = (0..30)
@@ -727,6 +729,7 @@ fn render_orders_and_caps_entries() {
                 source: "x".into(),
                 source_line: 1,
                 source_sha256: String::new(),
+                unsourced: false,
                 source_line_sha256: None,
                 recorded_at: format!("{i:03}"),
                 supersedes: None,

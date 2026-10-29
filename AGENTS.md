@@ -5,9 +5,13 @@ Instructions for any coding agent working in this repository (Codex reads `AGENT
 This repo builds `cort`: local code intelligence over `ast-grep` + SQLite, plus an explicit
 cross-machine project memory client backed by TursoDB.
 
-**The repository's long-term product goal is durable, source-checkable project memory for Claude Code
-across sessions: an agent should recover the right project fact or correction, know its scope and
-source, and detect when it was superseded.** `cort memory` now supplies an explicit reviewed
+Every tool is agent-first: agents drive it directly, and a rule that makes an agent take detours is
+what gets simplified (user, 2026-10-30).
+
+**The repository's long-term product goal is durable project memory for Claude Code,
+source-checkable where a source exists and explicitly labelled `unsourced` where none does, across
+sessions: an agent should recover the right project fact or correction, know its scope and source,
+and detect when it was superseded.** `cort memory` now supplies an explicit reviewed
 decision ledger across machines, and since 2026-10-27 Claude Code's `SessionStart` hook pushes its active
 entries into each session; automatic conversation capture remains open.
 The shipped code-intelligence CLI has its own measurable goal: make the caller-set enumeration an
@@ -270,11 +274,11 @@ alone, where no other machine or harness can read it, until the user asked why.
   `source_missing`, and `conflict` are leads to re-check, not facts. The label follows the cited
   line only, so when a claim depends on its section and `source_file_changed` is true, read the
   section too.
-- **Record** with `cort memory record --key <key> --claim <claim> --source <repo file> --line <n>`
-  when a decision is made or changed, when the user corrects a working assumption, and when a
-  deployment changes what a machine runs. Cite the line that states it (a doc, plan or code line);
-  if no line states it yet, write and commit that line first (`record` refuses a source that is
-  untracked or dirty at HEAD). Replace the sole active claim with `--replace`, or pass
+- **Record** with `cort memory record --key <key> --claim <claim>` when a decision is made or
+  changed, when the user corrects a working assumption, and when a deployment changes what a machine
+  runs. Cite a naturally existing line with `--source <repo file> --line <n>` when it states the
+  fact; otherwise record the claim directly. Never write or commit a line just to cite it. A cited
+  source must be tracked and clean at HEAD. Replace the sole active claim with `--replace`, or pass
   `--supersedes <id>` (a unique lowercase hex prefix of at least 8 characters works); repeat
   `--supersedes` for every active id to resolve a conflict.
 - A harness-private memory is for how one agent works, never the only copy of a project fact.

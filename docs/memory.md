@@ -79,18 +79,19 @@ cort memory recall 'deployment option' --harness claude-code
 
 `cort memory --help` lists every memory verb with all of its options, rendered from the parser.
 
-`record` requires a tracked, committed source file and a nonblank cited line. For a correction,
+`record` accepts a claim without a source. When a natural source exists, pass `--source` and
+`--line` together; the file must be tracked and committed, and the cited line nonblank. For a correction,
 pass `--replace` for the sole active entry, or `--supersedes <active-id>` (a unique prefix of at
 least 8 lowercase hex characters works). For concurrent active entries, repeat `--supersedes` for
 every active id reported by `status`; `cort memory resolve` is an alias for this form.
-Recall returns active hits with `source_unchanged`, `source_moved`, `source_changed`, `source_missing`, or
+Recall returns active hits with `unsourced`, `source_unchanged`, `source_moved`, `source_changed`, `source_missing`, or
 `conflict`, plus the cited line's status: `same_line`; `moved` with `source_line_now` when the
 line's exact text appears at exactly one other line (for example because text was inserted or
 removed above it; the check does not establish why);
 `moved_ambiguous` when it appears at several; `changed` when it appears nowhere. For rows with
 a line hash, `same_line` yields `source_unchanged`, `moved` yields `source_moved`, and
 `moved_ambiguous` or `changed` yields `source_changed`. An unreadable source yields
-`source_missing`, while `conflict` takes precedence. Older rows without a line hash use the
+`source_missing`, while `conflict` takes precedence. Unsourced entries have no source status or file-change field and rest on their recorded time and machine. Older rows without a line hash use the
 whole-file hash for their evidence status. Whenever the file is readable, `source_file_changed`
 reports whether its bytes differ from the recorded file hash. Neither label checks the
 surroundings: a line that moved from a "Current" section to a "Deprecated" one still reports

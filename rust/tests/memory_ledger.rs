@@ -375,6 +375,51 @@ fn session_recall_from_payload_subdirectory_checks_repository_source() {
 }
 
 #[test]
+fn unsourced_entries_supersede_and_conflict() {
+    let f = Fixture::new();
+    let write = |claim: &str, source: Option<(&Path, usize)>, ids: &[String], replace: bool| {
+        memory_store::record_optional_with(
+            f.root(),
+            "choice",
+            claim,
+            source,
+            ids,
+            replace,
+            &f.ledger,
+        )
+        .unwrap()
+    };
+    let first = write("unsourced", None, &[], false);
+    let recall = memory_store::recall_with(f.root(), "choice", &f.ledger).unwrap();
+    let hit = &recall.hits[0];
+    assert_eq!(hit.evidence_status, "unsourced");
+    let value = serde_json::to_value(hit).unwrap();
+    assert!(value.get("source_line_status").is_none());
+    assert!(value.get("source_file_changed").is_none());
+    assert!(first.recorded_machine.is_some() && first.recorded_machine_source.is_some());
+    let second = write(
+        "sourced",
+        Some((Path::new("decision.md"), 1)),
+        &[first.id[..8].into()],
+        false,
+    );
+    let third = write("again", None, &[], true);
+    assert_eq!(third.supersedes.as_deref(), Some(second.id.as_str()));
+    let mut other = first.clone();
+    other.id = "other".into();
+    other.supersedes = None;
+    f.insert(&memory_store::project(f.root()).unwrap(), &other);
+    let recall = memory_store::recall_with(f.root(), "choice", &f.ledger).unwrap();
+    assert!(recall
+        .hits
+        .iter()
+        .all(|hit| hit.evidence_status == "conflict"));
+    let ids = vec![third.id[..8].into(), other.id];
+    let resolved = write("resolved", None, &ids, false);
+    assert_eq!(resolved.resolves.len(), 2);
+}
+
+#[test]
 fn round_trip_and_supersedes_chain() {
     let f = Fixture::new();
     let a = f.record("choice", "A", None).unwrap();

@@ -20,6 +20,8 @@ pub struct MemoryEntry {
     pub source: String,
     pub source_line: usize,
     pub source_sha256: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unsourced: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_line_sha256: Option<String>,
     pub recorded_at: String,
@@ -319,8 +321,19 @@ fn recall_ledger_inner(
         if !terms.iter().all(|term| haystack.contains(term)) {
             continue;
         }
-        let source = source_bytes(root, Path::new(&entry.source));
-        let (source_line_status, source_line_now) = match (&entry.source_line_sha256, &source) {
+        let source = if entry.unsourced {
+            Err("unsourced".into())
+        } else {
+            source_bytes(root, Path::new(&entry.source))
+        };
+        let (source_line_status, source_line_now) = match (
+            if entry.unsourced {
+                None
+            } else {
+                entry.source_line_sha256.as_ref()
+            },
+            &source,
+        ) {
             (None, _) => (None, None),
             (Some(expected), Ok(bytes)) => {
                 let (status, now) = locate_line(bytes, entry.source_line, expected);
@@ -334,6 +347,8 @@ fn recall_ledger_inner(
             .map(|bytes| hash(bytes) != entry.source_sha256);
         let evidence_status = if counts[entry.key.as_str()] > 1 {
             "conflict"
+        } else if entry.unsourced {
+            "unsourced"
         } else {
             match (source_file_changed, source_line_status.as_deref()) {
                 (None, _) => "source_missing",
@@ -406,6 +421,7 @@ pub(crate) fn new_entry(
         source: source_name,
         source_line,
         source_sha256,
+        unsourced: false,
         source_line_sha256: line_hash(&bytes, source_line),
         recorded_at: timestamp.to_string(),
         supersedes: supersedes.map(str::to_string),
@@ -415,9 +431,72 @@ pub(crate) fn new_entry(
     })
 }
 
+pub(crate) fn new_unsourced_entry(key: &str, claim: &str) -> Result<MemoryEntry, String> {
+    let key = key.trim();
+    let claim = claim.trim();
+    if key.is_empty() || claim.is_empty() {
+        return Err("key and claim must be nonempty".into());
+    }
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| format!("clock error: {e}"))?
+        .as_nanos();
+    let id = hash(format!("{key}\0{claim}\0{timestamp}").as_bytes());
+    Ok(MemoryEntry {
+        source: format!(".cort-unsourced/{id}"),
+        source_line: 1,
+        source_sha256: String::new(),
+        source_line_sha256: None,
+        unsourced: true,
+        id,
+        key: key.into(),
+        claim: claim.into(),
+        recorded_at: timestamp.to_string(),
+        supersedes: None,
+        resolves: Vec::new(),
+        recorded_machine: Some(crate::usage::machine_id().to_string()),
+        recorded_machine_source: Some(crate::usage::machine_id_source().to_string()),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unsourced_body_is_readable_by_old_field_set() {
+        #[derive(Deserialize)]
+        struct OldEntry {
+            id: String,
+            key: String,
+            claim: String,
+            source: String,
+            source_line: usize,
+            source_sha256: String,
+            recorded_at: String,
+        }
+        let entry = new_unsourced_entry("key", "claim").unwrap();
+        let body = serde_json::to_string(&entry).unwrap();
+        let old: OldEntry = serde_json::from_str(&body).unwrap();
+        assert!(
+            !old.id.is_empty()
+                && !old.key.is_empty()
+                && !old.claim.is_empty()
+                && !old.recorded_at.is_empty()
+        );
+        assert!(
+            safe_relative(Path::new(&old.source))
+                && old.source_line > 0
+                && old.source_sha256.is_empty()
+        );
+        let dir = tempfile::tempdir().unwrap();
+        assert!(source_bytes(dir.path(), Path::new(&old.source)).is_err());
+        validate(&MemoryLedger {
+            schema: SCHEMA,
+            entries: vec![entry],
+        })
+        .unwrap();
+    }
 
     #[test]
     fn line_evidence_and_file_change_are_reported_independently() {

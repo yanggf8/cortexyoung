@@ -39,16 +39,27 @@ pub fn render_with_omitted(recall: MemoryRecall, pre_omitted: usize) -> Option<(
                 .map(|c| if c.is_control() { ' ' } else { c })
                 .collect::<String>()
         };
+        let evidence = if hit.entry.unsourced {
+            if hit.evidence_status == "conflict" {
+                "unsourced, conflict".to_string()
+            } else {
+                "unsourced".to_string()
+            }
+        } else {
+            format!(
+                "{}:{}, {}",
+                clean(&hit.entry.source),
+                hit.source_line_now
+                    .filter(|_| hit.evidence_status == "source_moved")
+                    .unwrap_or(hit.entry.source_line),
+                hit.evidence_status
+            )
+        };
         let line = format!(
-            "\n- [{}] {} ({}:{}, {})",
+            "\n- [{}] {} ({})",
             clean(&hit.entry.key),
             clean(&hit.entry.claim),
-            clean(&hit.entry.source),
-            // A moved line is cited where it sits now: the recorded number points at other text.
-            hit.source_line_now
-                .filter(|_| hit.evidence_status == "source_moved")
-                .unwrap_or(hit.entry.source_line),
-            hit.evidence_status
+            evidence
         );
         if out.len() + line.len() > body_limit {
             let room = body_limit.saturating_sub(out.len());

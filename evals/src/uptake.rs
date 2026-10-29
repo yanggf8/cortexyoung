@@ -304,7 +304,11 @@ fn parse_injection(text: &str) -> Injection {
                 let (claim, source, source_line, status) =
                     if let Some((claim, tail)) = rest.rsplit_once(" (") {
                         let tail = tail.trim_end_matches(')');
-                        if let Some((location, status)) = tail.rsplit_once(", ") {
+                        if tail == "unsourced" {
+                            (claim, "", "", "unsourced")
+                        } else if tail == "unsourced, conflict" {
+                            (claim, "", "", "conflict")
+                        } else if let Some((location, status)) = tail.rsplit_once(", ") {
                             if let Some((source, source_line)) = location.rsplit_once(':') {
                                 (claim, source, source_line, status)
                             } else {
@@ -1302,6 +1306,17 @@ pub fn scan_sample(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn uptake_parses_unsourced_evidence() {
+        let text = format!(
+            "{}\n- [key] claim (unsourced)\n- [key] other (unsourced, conflict)",
+            super::HEADER
+        );
+        let injection = super::parse_injection(&text);
+        assert_eq!(injection.entries[0].claim, "claim");
+        assert_eq!(injection.entries[0].evidence_status, "unsourced");
+        assert_eq!(injection.entries[1].evidence_status, "conflict");
+    }
     #[test]
     fn uptake_parses_moved_evidence() {
         let text = format!(

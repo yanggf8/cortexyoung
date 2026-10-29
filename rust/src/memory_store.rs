@@ -1906,10 +1906,38 @@ pub fn resolve_with(
     if supersedes.len() < 2 {
         return Err("resolution needs at least two active ids".into());
     }
-    let (source_root, source) = memory::record_source(root, source)?;
-    let entry = memory::new_entry(&source_root, key, claim, &source, line, None)?;
-    require_committed_source(&source_root, &source)?;
+    let entry = make_entry(root, key, claim, Some((source, line)))?;
     resolve_entry(root, entry, supersedes, ledger)
+}
+
+fn make_entry(
+    root: &Path,
+    key: &str,
+    claim: &str,
+    source: Option<(&Path, usize)>,
+) -> Result<MemoryEntry, LedgerError> {
+    if let Some((source, line)) = source {
+        let (source_root, source) = memory::record_source(root, source)?;
+        let entry = memory::new_entry(&source_root, key, claim, &source, line, None)?;
+        require_committed_source(&source_root, &source)?;
+        Ok(entry)
+    } else {
+        Ok(memory::new_unsourced_entry(key, claim)?)
+    }
+}
+
+pub fn resolve_optional(
+    root: &Path,
+    key: &str,
+    claim: &str,
+    source: Option<(&Path, usize)>,
+    supersedes: &[String],
+) -> Result<MemoryEntry, LedgerError> {
+    if supersedes.len() < 2 {
+        return Err("resolution needs at least two active ids".into());
+    }
+    let entry = make_entry(root, key, claim, source)?;
+    resolve_entry(root, entry, supersedes, &Ledger::open()?)
 }
 
 fn resolve_entry(
@@ -2033,12 +2061,49 @@ pub fn record_options_with(
     replace: bool,
     ledger: &Ledger,
 ) -> Result<MemoryEntry, LedgerError> {
+    record_optional_with(
+        root,
+        key,
+        claim,
+        Some((source, line)),
+        supersedes,
+        replace,
+        ledger,
+    )
+}
+
+pub fn record_optional(
+    root: &Path,
+    key: &str,
+    claim: &str,
+    source: Option<(&Path, usize)>,
+    supersedes: &[String],
+    replace: bool,
+) -> Result<MemoryEntry, LedgerError> {
+    record_optional_with(
+        root,
+        key,
+        claim,
+        source,
+        supersedes,
+        replace,
+        &Ledger::open()?,
+    )
+}
+
+pub fn record_optional_with(
+    root: &Path,
+    key: &str,
+    claim: &str,
+    source: Option<(&Path, usize)>,
+    supersedes: &[String],
+    replace: bool,
+    ledger: &Ledger,
+) -> Result<MemoryEntry, LedgerError> {
     if replace && !supersedes.is_empty() {
         return Err("--replace conflicts with --supersedes".into());
     }
-    let (source_root, source) = memory::record_source(root, source)?;
-    let entry = memory::new_entry(&source_root, key, claim, &source, line, None)?;
-    require_committed_source(&source_root, &source)?;
+    let entry = make_entry(root, key, claim, source)?;
     if supersedes.len() >= 2 {
         return resolve_entry(root, entry, supersedes, ledger);
     }
@@ -2269,6 +2334,7 @@ mod tests {
             source: "decision.md".into(),
             source_line: 1,
             source_sha256: "hash".into(),
+            unsourced: false,
             source_line_sha256: None,
             recorded_at: "1".into(),
             supersedes: None,

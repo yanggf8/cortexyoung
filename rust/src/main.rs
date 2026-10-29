@@ -659,10 +659,10 @@ enum MemoryAction {
         key: String,
         #[arg(long)]
         claim: String,
-        #[arg(long)]
-        source: PathBuf,
-        #[arg(long)]
-        line: usize,
+        #[arg(long, requires = "line")]
+        source: Option<PathBuf>,
+        #[arg(long, requires = "source")]
+        line: Option<usize>,
         #[arg(long, conflicts_with = "replace")]
         supersedes: Vec<String>,
         #[arg(long)]
@@ -676,10 +676,10 @@ enum MemoryAction {
         key: String,
         #[arg(long)]
         claim: String,
-        #[arg(long)]
-        source: PathBuf,
-        #[arg(long)]
-        line: usize,
+        #[arg(long, requires = "line")]
+        source: Option<PathBuf>,
+        #[arg(long, requires = "source")]
+        line: Option<usize>,
         #[arg(long, required = true)]
         supersedes: Vec<String>,
     },
@@ -2413,12 +2413,11 @@ fn cmd_memory(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError
             supersedes,
             replace,
         } => serde_json::to_value(
-            cort::memory_store::record_options(
+            cort::memory_store::record_optional(
                 &root,
                 &key,
                 &claim,
-                &source,
-                line,
+                source.as_deref().zip(line),
                 &supersedes,
                 replace,
             )
@@ -2433,8 +2432,14 @@ fn cmd_memory(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError
             line,
             supersedes,
         } => serde_json::to_value(
-            cort::memory_store::resolve(&root, &key, &claim, &source, line, &supersedes)
-                .map_err(memory_ledger_error)?,
+            cort::memory_store::resolve_optional(
+                &root,
+                &key,
+                &claim,
+                source.as_deref().zip(line),
+                &supersedes,
+            )
+            .map_err(memory_ledger_error)?,
         )
         .unwrap_or(Value::Null),
         MemoryAction::Recall {

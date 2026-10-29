@@ -78,6 +78,43 @@ fn payload(run: &Run) -> Value {
 }
 
 #[test]
+fn memory_source_and_line_must_be_paired() {
+    let (_p, cwd, _c, cache) = sandbox();
+    for action in ["record", "resolve"] {
+        for extra in [vec!["--source", "x"], vec!["--line", "1"]] {
+            let mut args = vec!["memory", action, "--key", "k", "--claim", "c"];
+            if action == "resolve" {
+                args.extend(["--supersedes", "12345678"]);
+            }
+            args.extend(extra);
+            let run = run_cort_env(
+                &args,
+                &cwd,
+                &cache,
+                &[("CORT_MEMORY_DIR", cache.to_str().unwrap())],
+            );
+            assert!(format!("{}{}", run.stdout, run.stderr).contains("required"));
+        }
+        let mut args = vec!["memory", action, "--key", "k", "--claim", "c"];
+        if action == "resolve" {
+            args.extend(["--supersedes", "12345678"]);
+        }
+        let run = run_cort_env(
+            &args,
+            &cwd,
+            &cache,
+            &[("CORT_MEMORY_DIR", cache.to_str().unwrap())],
+        );
+        assert!(
+            !format!("{}{}", run.stdout, run.stderr).contains("required"),
+            "{} {}",
+            run.stdout,
+            run.stderr
+        );
+    }
+}
+
+#[test]
 fn memory_record_replace_conflicts_with_supersedes_at_parse_time() {
     let (_p, cwd, _c, cache) = sandbox();
     let run = run_cort(
