@@ -319,6 +319,11 @@ payload 讀不到）不算使用，也不需要觀察。`project_id` 是 NULL �
 - 沙箱裡跑的 harness（例如 Codex）：生出來的子程序繼承沙箱，可能連不上網或寫不了 `data_dir()`。
   寫不了 → 節流戳記寫不成 → 不生程序；連不上網 → 失敗、記 `failed_harness`，別的 harness 不受退避
   影響。哪些沙箱實際能寫哪裡，要在部署時實機觀察，結果補進這份文件。
+- 實機觀察（2026-10-29，NUC11i5）：`measure status` 一直顯示 `failures=measure-health:3/storage`，是 10/27 16:57
+  台灣時間舊版留下的 `usage_db_unreadable`（最後一次 10/28 05:34，之後未再出現）。失敗只在同一個 harness 成功時
+  清除，而 `measure-health` 很少觸發、又被它自己的退避擋住，所以這筆會一直留著。它不擋資料：健康列由其他
+  harness 的 batch 一起送出（當天水位 120 → 129）。曾試過「背景成功就清掉所有背景失敗」，但這違反上一條：子程序
+  繼承觸發者的沙箱，codex 的失敗不能被 claude-code 的成功抹掉，所以撤回，維持原設計。
 
 ## 留給實作者
 
