@@ -452,3 +452,8 @@ duplicate、`+toolchain`、canonicalize、紀錄檔真正的上限與只讀檔�
   `SessionStart` 與 Kimi `UserPromptSubmit`。本機實機 deny 成立：`install.sh` 的 rustc 編譯中，Claude Code
   下 `cargo build --help` 被 `gate denied (compiler)` 擋下（原因含 pid 與 cwd），編譯結束後同一指令放行。
   i5940R3070 仍未部署。
+- i5940R3070 待辦（2026-10-29 20:4x，NUC11i5 記）：仍跑 `3ea01b2d`，aib #982（升 `e243ffce`）與 #984（刪舊
+  replica）都沒有回覆，ssh 100.86.135.18 逾時。#982 的目標已過時：醒來後直接升到 master 最新（至少
+  `652497e9`；`e243ffce` 已是祖先），裝 claudecat `0ed5b67` 並 `claudecat gate install`，照 i51149R3050 的做法
+  驗 `cort hook-gate status` 為 `configured`。#984 的刪除步驟仍適用，但要在升級回報之後才做（它用 `70bf926e`
+  的舊 binary 先把 replica 推完）。裝完若有 codex，要在 Codex 裡核准新的 SessionStart hook 一次。
