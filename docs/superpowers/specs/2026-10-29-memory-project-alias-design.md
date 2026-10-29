@@ -1,6 +1,6 @@
 # repo 改名後讓 ledger 跟著走：專案別名
 
-日期：2026-10-29。分支 `measure`。對應 issue #7（aib #996 的回報）。
+日期：2026-10-29。分支 `measure`。對應 issue #7（aib #996 的回報）。第 2 版：併入 K3.1 Pro 設計審查（block，6 點），見文末「第 2 版修正」，與前文衝突處以它為準。
 
 ## 問題
 
@@ -99,3 +99,40 @@ CREATE TABLE IF NOT EXISTS project_aliases (
 `cort memory alias add --from-remote https://github.com/lisyanggf/agent-portal-tpm.git`，確認
 `cort memory recall "gateway option B"` 找得到改名前的紀錄；monorepo 若有 ledger 紀錄也做一次。結果回覆
 issue #7 與 aib #996。
+
+## 第 2 版修正（K3.1 Pro 設計審查，block，6 點；以下覆蓋前文）
+
+1. **hook-recall 的退路要看是哪一步失敗。** 現在的重送只在 SQL 錯誤落在第 1 步以後（notes 那幾句）才發生
+   （`memory_store.rs` `error.step.is_some_and(|n| n >= 1)`，步驟從 0 算）。別名表不存在時失敗的是第 0 步
+   （ledger 那句），舊條件不會重送，SessionStart 會整個沒有 ledger。改成：
+   - 第 0 步 SQL 錯誤 → 重送**不帶別名**的 `project = ?`（別名表還沒建）；
+   - 第 1 步以後 SQL 錯誤 → 重送**帶別名**的 ledger 句（notes 表沒建，與別名無關，不該丟掉改名前的紀錄）；
+   - 兩種重送都受同一個「剩餘時間 ≥ 200 ms」條件約束，且都只重送一次。
+   測試三種：別名表不存在、notes 表不存在但有別名、兩者都在。
+2. **`alias remove` 不能讓 ledger 讀不出來。** 新識別的紀錄取代了舊識別的紀錄之後，拆掉唯一連著兩邊的別名，
+   新那筆會指向讀不到的 id，`validate` 會拒絕整份 ledger（`supersedes missing id`），recall、status、
+   SessionStart、之後的寫入全部失敗。改成：remove 先讀整個連通分量的紀錄與別名，算出拆掉這一條之後的分量；
+   若有任何紀錄的 `supersedes`／`resolves` 指向拆完後不在同一分量的 id，就拒絕（`alias_in_use`，列出那些
+   id），不刪。remove 與另一台機器同時做跨識別取代的競態不做成原子：發生時的修復是把別名加回來
+   （`alias add` 立刻讓 ledger 讀得出來），這寫進錯誤訊息。測試：跨識別 supersede 與 resolve 之後 remove 被拒；
+   沒有跨識別引用時 remove 成功。
+3. **「舊識別沒有紀錄就拒絕」改看整個連通分量。** A→B 之後又改名成 C，期間在 B 沒記任何東西：B 自己沒有列，
+   但它連著 A。所以 guard 改成「舊識別所在的連通分量（含它自己）一筆紀錄都沒有」才拒絕。`--from-project`
+   只是跳過「網址算雜湊」那一步，guard 一樣適用；錯誤訊息提示核對網址，或從舊名時 `cort memory status`
+   印過的 `project_id` 拿識別。測試 A→B→C 的第二次加別名成功。
+4. **同一個 id 出現在兩個識別下：用既有的 `same_claim` 合併。** 直接把兩列都交給 `ledger_from_bodies` 會因
+   重複 id 被 `validate` 拒絕；隨便挑一列又可能把內容不同的兩列藏起來。改成在交出前依解析後的 `id` 合併：
+   `same_claim` 成立（完全相同，或只差舊版 binary 丟掉的機器戳記）就保留一筆（有戳記的那筆）；不成立就報錯，
+   與今天讀到損壞列的處理相同。排序不用另外處理：`ledger_from_bodies` 本來就依取代關係做拓撲排序，不靠時鐘。
+   測試：完全相同、只差戳記、內容不同三種。
+5. **舊 binary 會讓已被取代的 key 分岔。** 新 binary 在 B 寫了「B1 取代 A1」，還在讀 A 的舊 binary 仍看得到
+   A1 是 active，可以合法地寫「A2 取代 A1」；合併後 B1 與 A2 都 active，成為衝突。升級後的 client 會照常報衝突、
+   要求 `resolve`，不會默默選一個，但分岔本身擋不住。所以：
+   - 部署步驟改成「會寫這個專案的機器都升級之後，才 `alias add`」；
+   - `alias add` 成功時印一行相容性提醒（舊 binary 只看得到自己的識別，跨識別的更正要等它們升級）；
+   - 測試這個衝突：合併後 `status` 列出衝突、`resolve` 能跨兩個識別解決。
+6. **remove 不分方向。** 別名列有方向（誰是舊的），但讀取當無向邊；從 A 端或 B 端下 remove 都要刪掉連著兩者的
+   那一列，不論它存成 `(A,B)` 還是 `(B,A)`。測試從兩端各 remove 一次。
+
+此外，`alias add` 若發現「目前識別」與「舊識別」之間已經有一條反向的列，視同已連結（`already_linked`），不再
+加第二列。
