@@ -178,6 +178,43 @@ fn wants_help(args: &[String]) -> bool {
         || (at(0, "memory") && at(1, "help"))
 }
 
+/// `cort memory record --help` answers with `record` alone, and `cort memory notes --help` with
+/// every `notes` verb: an agent asking about one command should not have to read all of them. The
+/// command words are the leading arguments before the first flag; when they name nothing, the
+/// whole list is the answer.
+fn narrow_usage(mut usage: Value, args: &[String]) -> Value {
+    let words: Vec<&str> = args
+        .iter()
+        .map(String::as_str)
+        .take_while(|a| !a.starts_with('-') && *a != "help")
+        .collect();
+    if words.is_empty() {
+        return usage;
+    }
+    let Some(commands) = usage.get("commands").and_then(Value::as_object) else {
+        return usage;
+    };
+    // Longest leading run that names a command: `recall foo --help` is about `recall`.
+    let narrowed = (1..=words.len()).rev().find_map(|n| {
+        let wanted = words[..n].join(" ");
+        let found: serde_json::Map<String, Value> = commands
+            .iter()
+            .filter(|(key, _)| {
+                key.as_str() == wanted
+                    || key
+                        .strip_prefix(wanted.as_str())
+                        .is_some_and(|rest| rest.starts_with(' '))
+            })
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        (!found.is_empty()).then_some(found)
+    });
+    if let Some(narrowed) = narrowed {
+        usage["commands"] = Value::Object(narrowed);
+    }
+    usage
+}
+
 /// `--version` is answered by the binary, and that is the whole point of it.
 ///
 /// It used to be intercepted by the installer's shim, which echoed a string baked in at install
@@ -3074,9 +3111,9 @@ fn main() {
     let background_measure = background_measure || background_notes;
     if wants_help(&args) {
         let usage = if args.first().is_some_and(|a| a == "memory") {
-            memory_usage_value()
+            narrow_usage(memory_usage_value(), &args[1..])
         } else {
-            usage_value()
+            narrow_usage(usage_value(), &args)
         };
         if !background_measure {
             print!("{}", render(None, Format::Json, &usage));

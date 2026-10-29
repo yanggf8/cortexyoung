@@ -313,6 +313,36 @@ fn every_spelling_of_help_reaches_the_same_usage_and_none_of_them_is_an_error() 
     }
 }
 
+/// Asking one command for help answers with that command alone, or every verb under a group;
+/// words that name nothing fall back to the whole list.
+#[test]
+fn help_for_one_command_answers_with_that_command_alone() {
+    let (_p, cwd, _c, cache) = sandbox();
+    let keys = |args: &[&str]| -> Vec<String> {
+        let r = run_cort(args, &cwd, &cache);
+        assert_eq!(r.code, 0, "{} stderr={}", args.join(" "), r.stderr);
+        let mut keys: Vec<String> = payload(&r)["commands"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        keys.sort();
+        keys
+    };
+    assert_eq!(keys(&["memory", "record", "--help"]), ["record"]);
+    assert_eq!(keys(&["memory", "recall", "some topic", "-h"]), ["recall"]);
+    assert_eq!(keys(&["memory", "alias", "add", "--help"]), ["alias add"]);
+    assert_eq!(
+        keys(&["memory", "alias", "--help"]),
+        ["alias", "alias add", "alias list", "alias remove"]
+    );
+    assert_eq!(keys(&["impact", "--symbol", "x", "--help"]), ["impact"]);
+    assert!(keys(&["memory", "nonsense", "--help"]).len() > 5);
+    assert!(keys(&["--help"]).len() > 5);
+    assert_eq!(fs::read_dir(&cache).unwrap().count(), 0);
+}
+
 /// `memory` has its own verbs and options, none of which fit on the one line the top-level
 /// usage gives it, so `cort memory --help` used to answer with the whole top-level usage. The
 /// memory usage is rendered from the parser itself, so a verb or option cannot drift out of it.
@@ -323,7 +353,6 @@ fn memory_help_lists_each_memory_verb_with_its_options() {
         vec!["memory", "--help"],
         vec!["memory", "-h"],
         vec!["memory", "help"],
-        vec!["memory", "recall", "--help"],
     ] {
         let r = run_cort(&args, &cwd, &cache);
         assert_eq!(r.code, 0, "{} stderr={}", args.join(" "), r.stderr);

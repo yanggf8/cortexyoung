@@ -77,7 +77,8 @@ cort memory record --key 'deployment option' --claim 'Option B is current' \
 cort memory recall 'deployment option' --harness claude-code
 ```
 
-`cort memory --help` lists every memory verb with all of its options, rendered from the parser.
+`cort memory --help` lists every memory verb with all of its options, rendered from the parser;
+`cort memory <verb> --help` (or a group such as `notes`) answers with just that part.
 
 `record` accepts a claim without a source. When a natural source exists, pass `--source` and
 `--line` together; the file must be tracked and committed, and the cited line nonblank. For a correction,
