@@ -8,7 +8,7 @@
 //! to `--check` -- the same "a route that has to be wired by hand is a route that is not wired"
 //! failure the rest of that document is about, one harness later.
 //!
-//! The group shape below -- a `matcher` per group, and a nested `hooks` array of
+//! The group shape below -- a `matcher` for tool events, no matcher for SessionStart, and a nested `hooks` array of
 //! `{type, command, timeout}` entries -- mirrors `settings.rs`'s JSON shape field for field. That is
 //! not a guess: the shipped Codex binary's own string table names a `ConfiguredHookMatcherGroup`
 //! struct with exactly two fields (`matcher`, `hooks`), and separately lists `type`/`command`/
@@ -57,11 +57,19 @@ use toml_edit::{value, ArrayOfTables, DocumentMut, Item, Table};
 /// still unread; the gate is the whole alternation, so it does not change what to write here. §13.
 const MATCHER: &str = "Bash";
 
-fn matcher_for(event: HookEvent) -> &'static str {
+fn matcher_for(event: HookEvent) -> Option<&'static str> {
     match event {
-        HookEvent::Suggest => MATCHER,
-        HookEvent::Refresh => EDIT_MATCHER,
-        HookEvent::Recall => "",
+        HookEvent::Suggest => Some(MATCHER),
+        HookEvent::Refresh => Some(EDIT_MATCHER),
+        // The 2026-10-29 Codex SessionStart probe fired without a matcher key.
+        HookEvent::Recall => None,
+    }
+}
+
+fn matcher_matches(group: &Table, event: HookEvent) -> bool {
+    match matcher_for(event) {
+        Some(matcher) => group.get("matcher").and_then(Item::as_str) == Some(matcher),
+        None => group.get("matcher").is_none(),
     }
 }
 
@@ -267,11 +275,12 @@ pub fn install_hook(
         //
         // Only when the group holds our entry and nothing else. A matcher on a shared group is
         // also somebody else's routing, and rewriting it would silently re-aim their hook.
-        if ours_in_this_group
-            && remaining == 1
-            && group.get("matcher").and_then(Item::as_str) != Some(matcher_for(event))
-        {
-            group.insert("matcher", value(matcher_for(event)));
+        if ours_in_this_group && remaining == 1 && !matcher_matches(group, event) {
+            if let Some(matcher) = matcher_for(event) {
+                group.insert("matcher", value(matcher));
+            } else {
+                group.remove("matcher");
+            }
             changed = true;
             found_same = false;
         }
@@ -296,7 +305,9 @@ pub fn install_hook(
         Change::Updated
     } else {
         let mut group = Table::new();
-        group.insert("matcher", value(matcher_for(event)));
+        if let Some(matcher) = matcher_for(event) {
+            group.insert("matcher", value(matcher));
+        }
         let mut hooks = ArrayOfTables::new();
         hooks.push(hook_command_table(command));
         group.insert("hooks", Item::ArrayOfTables(hooks));
@@ -457,7 +468,7 @@ fn trusted_at(hooks: &Table, gi: usize, hi: usize, event: HookEvent) -> bool {
 /// ours or anyone else's is left in it.
 ///
 /// `event_list` creates the key it is asked for, which is what an installer wants and what an
-/// uninstaller must undo: scanning both events on the way out would otherwise leave behind an empty
+/// uninstaller must undo: scanning all events on the way out would otherwise leave behind an empty
 /// `hooks.PostToolUse` in a file that never had one. Only empty lists go, and only after the scan
 /// -- somebody else's populated `PostToolUse` is not ours to touch.
 fn prune_empty_scaffolding(doc: &mut DocumentMut) {
@@ -504,7 +515,7 @@ pub fn entry_shape_ok(path: &Path, event: HookEvent, expected_command: &str) -> 
         };
         for h in entries.iter() {
             if h.get("command").and_then(Item::as_str) == Some(expected_command) {
-                return group.get("matcher").and_then(Item::as_str) == Some(matcher_for(event))
+                return matcher_matches(group, event)
                     && h.get("type").and_then(Item::as_str) == Some("command")
                     && h.get("timeout").and_then(Item::as_integer) == Some(TIMEOUT_SECS);
             }

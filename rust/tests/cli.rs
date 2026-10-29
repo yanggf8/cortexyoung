@@ -1597,8 +1597,8 @@ fn the_lean_hook_report_has_six_non_empty_fields_on_every_line() {
     let lines: Vec<&str> = r.stdout.lines().filter(|l| !l.is_empty()).collect();
     assert_eq!(
         lines.len(),
-        7,
-        "Claude Code has session plus the two tool events: {lines:?}"
+        8,
+        "Claude Code and Codex have session plus the two tool events: {lines:?}"
     );
     for l in &lines {
         let f: Vec<&str> = l.split('\t').collect();
@@ -1633,7 +1633,7 @@ fn the_lean_hook_report_has_six_non_empty_fields_on_every_line() {
         .filter(|l| !l.is_empty())
         .map(|l| l.split('\t').nth(3).unwrap())
         .collect();
-    assert_eq!(files.len(), 7);
+    assert_eq!(files.len(), 8);
     assert_eq!(
         s.stdout
             .lines()
@@ -1641,22 +1641,29 @@ fn the_lean_hook_report_has_six_non_empty_fields_on_every_line() {
             .count(),
         1
     );
+    assert_eq!(
+        s.stdout
+            .lines()
+            .filter(|l| l.starts_with("codex\tsession\t"))
+            .count(),
+        1
+    );
     assert!(!s
         .stdout
         .lines()
-        .any(|l| l.starts_with("codex\tsession\t") || l.starts_with("kimi-code\tsession\t")));
+        .any(|l| l.starts_with("kimi-code\tsession\t")));
     for l in s.stdout.lines().filter(|l| !l.is_empty()) {
         assert_eq!(l.split('\t').nth(2), Some("wired"), "not wired: {l}");
     }
     assert_eq!(
         files.iter().collect::<std::collections::HashSet<_>>().len(),
         3,
-        "seven entries across three files: {files:?}"
+        "eight entries across three files: {files:?}"
     );
     let removed = run(&["--all", "--remove", "--lean"]);
     assert_eq!(removed.code, 0, "{}", removed.stderr);
     let removed_rows: Vec<&str> = removed.stdout.lines().collect();
-    assert_eq!(removed_rows.len(), 7);
+    assert_eq!(removed_rows.len(), 8);
     assert_eq!(
         removed_rows
             .iter()
@@ -1669,7 +1676,7 @@ fn the_lean_hook_report_has_six_non_empty_fields_on_every_line() {
         .stdout
         .lines()
         .all(|l| l.split('\t').nth(2) == Some("not_wired")));
-    for format in ["codex", "kimi"] {
+    for format in ["kimi"] {
         let unsupported = run(&[
             "--format",
             format,

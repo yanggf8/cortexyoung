@@ -114,7 +114,7 @@ pub enum HookEvent {
     Suggest,
     /// After an edit: bring the index up to the tree.
     Refresh,
-    /// At Claude Code session start: recall reviewed project memory.
+    /// At Claude Code or Codex session start: recall reviewed project memory.
     Recall,
 }
 
@@ -126,11 +126,12 @@ const TOOL_EVENTS: [HookEvent; 2] = [HookEvent::Suggest, HookEvent::Refresh];
 /// names — a fourth harness is added here and both consumers move in the same commit.
 pub const HOOK_HARNESSES: [&str; 3] = ["claude-code", "codex", "kimi-code"];
 
-/// The only shipped event policy. SessionStart payloads are confirmed only for Claude Code.
+/// The shipped event policy. Codex SessionStart was intercepted on 2026-10-29; Kimi discards
+/// SessionStart output, so it receives only tool events.
 pub fn events_for(harness: &str) -> &'static [HookEvent] {
     match harness {
-        "claude-code" => &EVENTS,
-        "codex" | "kimi-code" => &TOOL_EVENTS,
+        "claude-code" | "codex" => &EVENTS,
+        "kimi-code" => &TOOL_EVENTS,
         _ => &[],
     }
 }

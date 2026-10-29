@@ -935,25 +935,70 @@ fn a_kimi_entry_with_our_command_but_a_stale_matcher_is_not_in_shape() {
     );
 }
 
-/// SessionStart ships for Claude Code only (`settings::events_for`); the TOML dialects refuse it
-/// at the library boundary too, so no future caller can wire an un-intercepted payload.
 #[test]
-fn toml_dialects_refuse_session_start() {
-    let dir = tempfile::tempdir().unwrap();
-    let codex = dir.path().join("config.toml");
-    let kimi = dir.path().join("kimi.toml");
-    assert!(matches!(
-        install_hook(&codex, "/bin/cort hook-recall", HookEvent::Recall),
-        Err(cort::settings_toml::SettingsError::Unsupported(
-            "SessionStart"
-        ))
+fn codex_session_start_round_trip_and_shape() {
+    let (_dir, codex) = tmp();
+    let original = "# user's settings\napprovals_reviewer = \"user\"\n\n# foreign session hook\n[[hooks.SessionStart]]\n[[hooks.SessionStart.hooks]]\ntype = \"command\"\ncommand = \"foreign hook\" # keep this comment\n";
+    fs::write(&codex, original).unwrap();
+    let command = "/bin/cort hook-recall --harness codex";
+    assert_eq!(
+        install_hook(&codex, command, HookEvent::Recall)
+            .unwrap()
+            .change,
+        Change::Installed
+    );
+    let doc = read(&codex);
+    assert!(doc["hooks"]["SessionStart"][1].get("matcher").is_none());
+    assert_eq!(
+        installed_command(&codex, HookEvent::Recall).as_deref(),
+        Some(command)
+    );
+    assert!(cort::settings_toml::entry_shape_ok(
+        &codex,
+        HookEvent::Recall,
+        command
     ));
+    let installed = fs::read_to_string(&codex).unwrap();
+    assert_eq!(
+        install_hook(&codex, command, HookEvent::Recall)
+            .unwrap()
+            .change,
+        Change::AlreadyPresent
+    );
+    assert_eq!(fs::read_to_string(&codex).unwrap(), installed);
+    let drifted = installed.replace("[[hooks.SessionStart]]\n\n[[hooks.SessionStart.hooks]]\ntype = \"command\"\ncommand = \"/bin/cort", "[[hooks.SessionStart]]\nmatcher = \"\"\n\n[[hooks.SessionStart.hooks]]\ntype = \"command\"\ncommand = \"/bin/cort");
+    assert_ne!(installed, drifted);
+    fs::write(&codex, drifted).unwrap();
+    assert!(!cort::settings_toml::entry_shape_ok(
+        &codex,
+        HookEvent::Recall,
+        command
+    ));
+    assert_eq!(
+        install_hook(&codex, command, HookEvent::Recall)
+            .unwrap()
+            .change,
+        Change::Updated
+    );
+    assert!(cort::settings_toml::entry_shape_ok(
+        &codex,
+        HookEvent::Recall,
+        command
+    ));
+    assert_eq!(remove_hook(&codex).unwrap().change, Change::Removed);
+    assert_eq!(fs::read_to_string(&codex).unwrap(), original);
+}
+
+/// Kimi discards SessionStart output, so its dialect refuses the event.
+#[test]
+fn kimi_refuses_session_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let kimi = dir.path().join("kimi.toml");
     assert!(matches!(
         cort::settings_kimi::install_hook(&kimi, "/bin/cort hook-recall", HookEvent::Recall),
         Err(cort::settings_toml::SettingsError::Unsupported(
             "SessionStart"
         ))
     ));
-    assert!(!codex.exists());
     assert!(!kimi.exists());
 }

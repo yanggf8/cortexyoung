@@ -182,7 +182,7 @@ apart. An install-then-uninstall cycle must hand every one of those files back b
 including comments that belong to other owners; that is a test, because it was a bug first
 (`docs/2026-09-02-hook-wiring-correction.md` §17).
 
-**A third event, for Claude Code only: `SessionStart` runs `cort hook-recall`** (2026-10-27). Agents did
+**A third event, for Claude Code and Codex: `SessionStart` runs `cort hook-recall`** (Claude Code since 2026-10-27; Codex payload intercepted 2026-10-29). Agents did
 not recall the ledger unprompted, so recall is pushed at session start, resume, clear and compaction:
 the active entries for the project go into `additionalContext`, newest first, capped at 20 entries and
 6000 bytes. It also lists other machines' harness notes for the project -- names and hosts
@@ -193,7 +193,7 @@ deadline is 2500 ms from process start; the network timeout defaults to 1500 ms,
 and is also limited to the remaining deadline minus 100 ms. With under 200 ms left, it sends no request.
 On `remote_unreachable`, `remote_blocked`, or `remote_timeout`, it injects a one-line notice to retry
 `cort memory recall "<topic>"` when needed. It records one `usage.db` row on every normal return.
-Codex and Kimi are not wired: no `SessionStart` payload of theirs has been intercepted, and
+Kimi is not wired: it discards `SessionStart` output, and
 `settings::events_for` is the one place that says which harness gets which event.
 
 **Both staleness checks are one-sided, and they lean opposite ways.** The head comparison

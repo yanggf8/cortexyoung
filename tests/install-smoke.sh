@@ -1161,7 +1161,9 @@ if command -v codex >/dev/null 2>&1; then
   PROMPT_INPUT="$(CODEX_HOME="$codex_probe_home" codex debug prompt-input 'smoke probe' 2>/dev/null || true)"
   if [ -z "$PROMPT_INPUT" ]; then
     echo "  SKIP: codex prompt-input returned nothing; loader visibility not exercised"
-  elif printf '%s' "$PROMPT_INPUT" | grep -qF "$SKILL_PROBE"; then
+  # A here-string, not a pipe: grep -q exits at the first match, and under pipefail the writer's
+  # SIGPIPE on a prompt past the pipe buffer (~90 KB with Codex 0.164) failed this half the time.
+  elif grep -qF -- "$SKILL_PROBE" <<<"$PROMPT_INPUT"; then
     pass "deployed skill is visible in a real Codex prompt (loader accepted it)"
   else
     fail "deployed skill is on disk but invisible to the Codex loader"
@@ -1411,14 +1413,14 @@ fi
 # No wiring restore: Test 20 below brings its own HOME, so nothing later reads this one.
 rm -rf "$STALEBIN"
 
-# ── 20. all seven wired entries, not just the one this file used to check ──
-# Seven entries ship: three harnesses have two tool events, and Claude Code has SessionStart too. Until 2026-09-03 every hook assertion in this
+# ── 20. all eight wired entries, not just the one this file used to check ──
+# Eight entries ship: three harnesses have two tool events, and Claude Code and Codex have SessionStart too. Until 2026-09-03 every hook assertion in this
 # file pointed at `~/.claude/settings.json` and at the pre event, so five of the six were deployed
 # with no install-level test at all -- including both of Kimi's, whose file is a third TOML dialect,
 # and both post events. A deploy path with no assertion is the failure mode this whole file exists
 # for; `--check` reading green is not the same claim, because `--check` asks the same binary that
 # wrote the entry.
-echo "--- Test 20: all seven hook entries are deployed, per harness per shipped event ---"
+echo "--- Test 20: all eight hook entries are deployed, per harness per shipped event ---"
 fresh_home_with_install
 CLAUDE_CFG="$HOME/.claude/settings.json"
 assert_contains "$CLAUDE_CFG" '"SessionStart"' "Claude Code has a SessionStart group"
@@ -1440,7 +1442,10 @@ for pair in "claude-code:$HOME/.claude/settings.json" "codex:$CODEX_CFG" "kimi-c
   assert_contains "$f" "hook-suggest --harness $h" "$h pre-event wired in $(basename "$f")"
   assert_contains "$f" "hook-refresh --harness $h" "$h post-event wired in $(basename "$f")"
 done
-assert_not_contains "$CODEX_CFG" "SessionStart" "Codex has no SessionStart entry"
+assert_contains "$CODEX_CFG" "[[hooks.SessionStart]]" "Codex has a SessionStart group"
+assert_contains "$CODEX_CFG" "hook-recall --harness codex" "Codex recall is wired"
+# A fresh home has no Codex trust record: wired, and Codex asks the user to review it on first start.
+assert_contains /tmp/smoke20check.log "codex/session: $HOME/.codex/config.toml (wired, NOT TRUSTED" "--check reports Codex session wired and awaiting review"
 assert_not_contains "$KIMI_CFG" "SessionStart" "Kimi has no SessionStart entry"
 # The two TOML dialects are not each other. Codex nests its groups; Kimi is flat with the event as
 # a field. Asserting the entry's own shape is what would catch a `--format` mixup that both files

@@ -1599,8 +1599,8 @@ fn hook_install_all(a: &HookInstallArgs) -> Result<Emit, CortError> {
                 row["command"] = json!(wired);
                 row["trusted"] = json!(trusted);
             } else if a.remove {
-                // Removal takes both events at once in every dialect, so it runs once per file and
-                // the second event reports what the first one did rather than re-editing.
+                // Removal takes all events at once in every dialect, so it runs once per file and
+                // later events report what the first one did rather than re-editing.
                 if event == cort::settings::HookEvent::Suggest {
                     match remove_from(fmt, &path) {
                         Ok(out) => {

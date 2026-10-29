@@ -886,6 +886,24 @@ fn missing_only_claude_session_entry_is_drifted() {
     assert!(c.detail.contains("claude-code/session"), "{c:?}");
 }
 
+#[test]
+fn missing_only_codex_session_entry_is_drifted() {
+    let dir = tempfile::tempdir().unwrap();
+    let shim = dir.path().join("cort");
+    let good = wired_fixture(dir.path(), &shim);
+    let without_session = good
+        .lines()
+        .filter(|line| !line.starts_with("codex\tsession\t"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let c = cort::upgrade::judge_hooks(&shim, &without_session);
+    assert!(
+        matches!(c.state, cort::upgrade::ComponentState::Drifted),
+        "{c:?}"
+    );
+    assert!(c.detail.contains("codex/session"), "{c:?}");
+}
+
 /// A correct command with an obsolete matcher still passes `--status` — the exact false-pass
 /// CLAUDE.md §12-13 records (a matcher-only rewrite left the command byte-identical). The
 /// shape check exists for this row and only this row proves it.
