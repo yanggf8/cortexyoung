@@ -88,11 +88,11 @@ cort 的 hook 已經裝在 Claude Code、Codex、Kimi 三邊，是唯一擋得�
 ```
 
 - Claude Code：官方格式。
-- Kimi：形狀已實測，工具還沒。舊的 search 建議（`4042a7a6`，於 `6cf17b14` 移除）在 Kimi 上用的就是
+- Kimi：形狀與 `Bash` 都已實測。舊的 search 建議（`4042a7a6`，於 `6cf17b14` 移除）在 Kimi 上用的就是
   這個形狀，2026-09-03 實機上 deny 有送到模型、模型照做（`docs/2026-09-02-hook-wiring-correction.md`
-  §16）；但那次擋的是 `Grep` 工具，擋 `Bash` 要在 G3 實測一次。
-- Codex：**尚未證實會照 deny 做。** 以前只攔到過它的 payload，從沒看過它執行 deny。上線前要在 Codex
-  實機跑一次被擋的情境，才能說擋得到 Codex；在那之前文件只能寫「Claude Code、Kimi」。
+  §16）；那次擋的是 `Grep` 工具。2026-10-29 G3 實測擋 `Bash` 也成立（見「進度」）。
+- Codex：2026-10-29 G3 實測證實會照 deny 做（見「進度」）。在那之前只攔到過它的 payload，從沒看過它執行
+  deny，所以設計時這裡寫的是「尚未證實」。
 - 不加 `suppressOutput`：Codex 會因為這個欄位丟掉整份輸出（舊程式的註解）。
 - stdout 是空字串時，原因換成固定句 `resource gate denied this command (no reason given)`。
 
@@ -220,4 +220,13 @@ G1、G2 可以平行；G3 等兩包都進 master。
 - 同時 G2 進 claudecat `main`：`030cfcd`。除了設計的分類規則，另外處理 heredoc 內容（`<<EOF` 到結束行，
   `<<-` 才去掉開頭 tab）、`#` 註解、開頭的重導向、`2>&1` 裡的 `&`、cargo 的 `-Z`／`--color` 帶值選項，
   deny 原因裡的換行換成空白以保證一行。K3.1 Pro 審查 approve with changes，5 點已併入。
-- G3 尚未開始：兩台都還沒部署、還沒跑 `claudecat gate install`，三邊實測都還沒做。
+- G3（2026-10-29）：NUC11i5 部署 master `5d3be5ce`（`cort-7a5d501addf2`）與 claudecat `030cfcd`，
+  Thinkpade15 同版（`cort-2a217223f835`），兩台 `install.sh --check` OK、`claudecat gate install` 後
+  `cort hook-gate status` 是 `configured`（`~/.cargo/bin/claudecat gate hook`，200 ms）。i5940R3070 未部署。
+- G3 實測（NUC11i5，08:49 台灣時間）：以 `claudecat gate run --kind build -- sleep 300` 拿住
+  `compiler.lock`，三邊各下一次 `cargo check --locked --manifest-path …`，**三邊都沒有執行、都收到同一句
+  原因**：Claude Code 顯示 `PreToolUse:Bash hook error: gate denied (compiler-lock) …`；Codex 顯示
+  `Command blocked by PreToolUse hook: gate denied (compiler-lock) …`（第一次證實 Codex 照 deny 做）；Kimi
+  顯示 `ERROR: Tool execution failed.` 加上同一句原因（Kimi 擋 `Bash` 也成立）。同一段時間輕量指令與
+  heredoc 內容照常執行。前一輪以真的 rustc 當佔位時 Claude Code 被擋（`compiler`），Codex 的指令晚了
+  一秒、編譯已結束而正確放行，Kimi 則被 kimi plugin 自己的 rescue hook 以「不接受 `&&`」擋下，兩者都不算數。

@@ -60,7 +60,7 @@ records one row in local `usage.db` -- `fired` with the harness, model, tool and
 `no_payload` when stdin was not JSON or carried no (or a null) `tool_input`; a `fired` row then kicks
 collection when a run is due. Since 2026-10-28, a configured external gate via `cort hook-gate`
 may deny a `Bash` call only when it exits 75; all other results stay silent and allow the call.
-Codex obedience to that deny remains unverified. The hook measures demand; it is not a
+Claude Code, Codex and Kimi all honoured that deny on `Bash` in a live run on 2026-10-29. The hook measures demand; it is not a
 path by which ClaudeCat memory reaches an agent. Recording without speaking began on 2026-09-27; the
 search suggestion and the `judge` behind it were removed on 2026-10-25 (T5/T6), and what survives of
 that vocabulary in `rust/src/hook.rs` is `LEGACY_SUGGEST_OUTCOMES` and `SUGGEST_DECLINES`, kept only

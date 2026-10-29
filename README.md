@@ -45,9 +45,9 @@ hand-off point that never names ClaudeCat (`cort hook-gate set`, which `claudeca
 calls): a `Bash` payload goes to the configured command, which gets a time limit (200 ms by
 default, at most 1 s). Only its exit 75 denies the call; a missing, slow or failing answer lets the
 call through. Resource gating therefore makes a hook wait at most that limit, and removing ClaudeCat
-changes nothing in cort. The deny is Claude Code's documented shape; Kimi honoured the same shape on its `Grep`
-tool in 2026-09 (not yet seen on `Bash`), and whether Codex honours it is not yet
-verified.
+changes nothing in cort. The deny is Claude Code's documented shape; in a live run on 2026-10-29 Claude Code, Codex
+and Kimi each refused a `cargo check` with it while another build held the lock, and showed the agent
+the reason (`docs/superpowers/specs/2026-10-28-resource-gate-handoff-design.md`, 進度).
 
 Since 2026-09-01 the indexing scan runs the rule pack **in-process** through the `ast-grep-core`/`-config`/`-language` crates (proven byte-identical to the CLI on 1,604 match comparisons plus row-identical full indexes of two venues); the `ast-grep` CLI is still provisioned by `install.sh` and stays the engine of `struct --pattern` lookup. `CORT_SCAN_BACKEND=cli` puts the subprocess back on the indexing path; the scan engine's identity is part of `extractor_version`, so flipping it or bumping the crates forces a full re-index.
 
@@ -842,7 +842,7 @@ not judge the tool call: a payload it cannot parse, or one with no (or a null)
 `fired` with the harness, model, project and tool name, and calls `collect::kick` — which decides
 whether a collection run is due and, if so, starts `cort measure collect|health --background` in
 the background. A configured external gate can deny a `Bash` call by exiting 75; otherwise
-stdout stays `{}`. The hook exits 0. Codex obedience to deny is not yet verified. `CORT_SUGGEST` no longer exists;
+stdout stays `{}`. The hook exits 0. Claude Code, Codex and Kimi honoured the deny in a live run on 2026-10-29. `CORT_SUGGEST` no longer exists;
 nothing reads it. The collection subcommands ship with the event-driven-collection plan, not with
 this trigger. Between 2026-09-27 and 2026-10-25 the hook ran the routing rule, recorded its verdict
 and stayed silent by default; before 2026-09-27 the verdict was delivered. Both are history, and
