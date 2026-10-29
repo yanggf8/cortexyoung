@@ -385,7 +385,7 @@ fn alias_failure_without_budget_for_retry_is_timeout() {
         &db,
         "self",
         ("ledger", "origin"),
-        Instant::now() - Duration::from_millis(2100),
+        Instant::now() - (cort::remote::RECALL_DEADLINE - Duration::from_millis(400)),
     );
     assert!(matches!(result, Err(cort::remote::ErrorKind::Timeout)));
     let requests = requests.lock().unwrap();
@@ -403,7 +403,7 @@ fn expired_dispatch_budget_sends_no_request() {
         &db,
         "self",
         ("ledger", "origin"),
-        Instant::now() - Duration::from_millis(2400),
+        Instant::now() - (cort::remote::RECALL_DEADLINE - Duration::from_millis(100)),
     );
     assert!(matches!(result, Err(cort::remote::ErrorKind::Timeout)));
     assert!(requests.lock().unwrap().is_empty());
@@ -422,7 +422,7 @@ fn notes_failure_without_budget_for_retry_is_timeout() {
         &db,
         "self",
         ("ledger", "origin"),
-        Instant::now() - Duration::from_millis(2100),
+        Instant::now() - (cort::remote::RECALL_DEADLINE - Duration::from_millis(400)),
     );
     assert!(matches!(result, Err(cort::remote::ErrorKind::Timeout)));
     assert_eq!(
@@ -591,7 +591,9 @@ fn cli_silent_server_times_out_and_clamps() {
     let repo = git_repo(root);
     config(&root.join("data"), &server.url);
     let payload = json!({"cwd":repo}).to_string();
-    for (setting, bound) in [("400", 1800), ("99999", 2950)] {
+    // 99999 clamps to the 4400 ms cap, which the 4500 ms deadline then trims; the notice and its row must
+    // still land before the watchdog (deadline + 200 ms) exits the process.
+    for (setting, bound) in [("400", 1800), ("99999", 4650)] {
         let (out, elapsed) = run(root, root, &payload, Some(setting));
         assert!(out.status.success());
         assert!(elapsed < Duration::from_millis(bound), "{elapsed:?}");

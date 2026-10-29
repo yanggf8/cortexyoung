@@ -196,6 +196,12 @@ pub trait Transport {
     ) -> Result<Vec<u8>, RemoteError>;
 }
 
+/// The recall hook's whole budget, from process start. Every harness gives a hook 5 s
+/// (`settings::TIMEOUT_SECS` and its two TOML twins); the rest is process start and exit. It was
+/// 2500 ms until 2026-10-29, when the first read after an idle spell timed out on three session
+/// starts in one afternoon while warm reads took about 300 ms.
+pub const RECALL_DEADLINE: Duration = Duration::from_millis(4500);
+
 /// Recompute the SessionStart allowance for each POST, including a ledger-only retry.
 pub struct RecallTransport {
     pub started: Instant,
@@ -209,7 +215,7 @@ impl Transport for RecallTransport {
         body: &[u8],
         headers: &[(&str, &str)],
     ) -> Result<Vec<u8>, RemoteError> {
-        let remaining = Duration::from_millis(2500).saturating_sub(self.started.elapsed());
+        let remaining = RECALL_DEADLINE.saturating_sub(self.started.elapsed());
         if remaining < Duration::from_millis(200) {
             return Err(RemoteError::new(
                 ErrorKind::Timeout,

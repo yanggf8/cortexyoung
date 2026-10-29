@@ -557,7 +557,7 @@ pub fn session_recall_with(
     let mut with_notes = true;
     let mut retried_alias = false;
     let result = loop {
-        if Duration::from_millis(2500).saturating_sub(started.elapsed())
+        if crate::remote::RECALL_DEADLINE.saturating_sub(started.elapsed())
             < Duration::from_millis(200)
         {
             return Err(ErrorKind::Timeout);

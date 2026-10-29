@@ -1391,7 +1391,7 @@ fn cmd_hook_recall(
                 return Err("not_configured");
             };
             let projects = cort::memory_store::session_project_ids(&root).map_err(|_| "failed")?;
-            let remaining = Duration::from_millis(2500).saturating_sub(started.elapsed());
+            let remaining = cort::remote::RECALL_DEADLINE.saturating_sub(started.elapsed());
             if remaining < Duration::from_millis(200) {
                 return Err("remote_timeout");
             }
@@ -1399,8 +1399,8 @@ fn cmd_hook_recall(
                 .ok()
                 .and_then(|s| s.parse::<u64>().ok())
                 .filter(|n| *n > 0)
-                .unwrap_or(1500)
-                .min(2400);
+                .unwrap_or(4000)
+                .min(4400);
             let db = cort::remote::RemoteDb::new(
                 &url,
                 token,
@@ -3015,20 +3015,24 @@ fn main() {
     if recall_hook {
         // A timeout exits before the normal usage writer; that missing row is intentional.
         // The process must never hold up a session start, even if stdin or storage stalls.
-        // Losing the claim means the main path is writing stdout and its row; it gets two
-        // more seconds for that, then the process exits anyway (a stuck pipe or usage.db).
+        // It fires just after the recall deadline, so a read the deadline allows still gets to
+        // print its notice and row. Losing the claim means the main path is writing stdout and
+        // its row; it gets 300 ms more for that, then the process exits anyway (a stuck pipe or
+        // usage.db). The two add up to the harnesses' 5 s hook limit, as 3 s + 2 s did before.
         let watchdog_claim = Arc::clone(&claim);
         if std::thread::Builder::new()
             .name("hook-recall-watchdog".into())
             .spawn(move || {
-                std::thread::sleep(std::time::Duration::from_secs(3));
+                std::thread::sleep(
+                    cort::remote::RECALL_DEADLINE + std::time::Duration::from_millis(200),
+                );
                 if watchdog_claim
                     .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
                     .is_ok()
                 {
                     std::process::exit(0);
                 }
-                std::thread::sleep(std::time::Duration::from_secs(2));
+                std::thread::sleep(std::time::Duration::from_millis(300));
                 std::process::exit(0);
             })
             .is_err()
