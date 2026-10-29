@@ -142,7 +142,7 @@ usage 列的 `gate` tag 和 `gate_ms` 隨 `cort measure` 上傳（`command_log` 
 - 被擋之後同一個 session 是否在名額空出前又被擋（agent 是否在空轉）——這一項要 session id，usage
   列目前沒有，第一版先不答，記為待辦。
 
-報表不在這份設計的範圍；先讓列寫得出來。
+報表見文末「量測報表（G5）」（2026-10-29 補）；第三項由 claudecat 的 `gate log` 回答（見 G4「量測」）。
 
 ## 不做的事
 
@@ -393,3 +393,30 @@ duplicate、`+toolchain`、canonicalize、紀錄檔真正的上限與只讀檔�
   以 `cargo test --manifest-path …/Cargo.toml`（佔位用同一形式）各下兩次，結果相同（Kimi 是 8s）——三邊的
   payload 都帶 `session_id`。紀錄檔目錄 `0700`、檔案 `0600`，內容只有雜湊、`sub` 與原因，沒有路徑；
   `claudecat gate log` 彙總為 `duplicate: 6`、`test: 6`、重試分布 `2=3`。
+
+## 量測報表（G5，2026-10-29）
+
+`cort measure report` 在壓縮段之後加一段 `gate`，回答「量測」前兩項。資料是已上傳的 `cort_command` 事件
+（`telemetry_events`，`source = 'cort_command'`），只取 `payload.command = 'hook-suggest'`、`time_ms` 在
+`now − days` 之後（`--days`，現有參數，預設照舊）且不早於 `MEASURE_START_MS` 的列。
+
+- **讀法**：store 新增一個方法，在 SQL 裡用 `json_extract` 取 `machine_id`、`args_summary` 裡的
+  `harness`、`gate`、`gate_ms` 四欄，一列一筆傳回；不把整個 payload 拉回來（一週上千列）。`args_summary`
+  不是合法 JSON 的列，`harness` 與 `gate` 當成缺值，不讓整份報表失敗。本機 `SqliteStore` 與遠端
+  `RemoteStore` 都實作；測試走 `SqliteStore`。
+- **分組**：主機沿用壓縮段的 `machine_id → host`（同樣的多主機警告）；主機之下按 harness。每組報：
+  - `fires`：列數；
+  - `tags`：每個 `gate` 值的次數，原樣計（`allow`、`deny`、`timeout`、`error`、`spawn_failed`、
+    `config_invalid`、`unconfigured`、`not_shell`，將來新值也照計）；沒有 `gate` 的列記成 `untagged`
+    ——那是 G1 之前的 binary 寫的，數字本身說明哪台機器還沒升級；
+  - `handed_off`：`allow + deny + timeout + error + spawn_failed`（真的 spawn 了閘門或試過的）；
+  - `gate_ms`：有 `gate_ms` 的列的 p50／p95（最近秩法，與 `gate log` 相同），沒有就 `null`；另報
+    `max`，因為 cort 的上限是 200 ms，p95 看不到單次逾時。
+- **不做**：不讀 claudecat 的 deny 紀錄（那是本機檔，`gate log` 已回答空轉）；不按 model 分；不報週趨勢
+  （第一版的量還太少）。
+- **呈現**：JSON 加 `gate: {days, total, hosts: [{host, machine_ids, harnesses: [{harness, fires, tags,
+  handed_off, gate_ms: {p50, p95, max}}]}]}`；文字版每台一個標題，每個 harness 一行：
+  `  claude-code  fires 1520  handed_off 168（allow 164 deny 4）  gate_ms p50 … p95 … max …  untagged 1356`。
+  一台主機在期間內沒有任何 `hook-suggest` 列也照列，寫「這段期間沒有 hook 列」（安靜的機器不是不存在）。
+- **測試**：`SqliteStore` 灌列——兩台機器、三個 harness、各種 tag、`args_summary` 壞掉的一列、早於
+  `MEASURE_START_MS` 與早於 `days` 的列、非 `hook-suggest` 的列——驗 JSON 每個數字與文字版的行。
