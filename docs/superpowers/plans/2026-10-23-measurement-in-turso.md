@@ -344,7 +344,12 @@
 - [x] 2026-10-28 05:58 台灣時間：i5940R3070（RTX 3070）部署 master `3ea01b2d`（live `cort-3c219c2b9f78`）並第一次上傳：`cort measure verify --new-machine` 回 `verified`（本機 2559 筆、1 個 machine id，遠端兩個資料庫都沒有它的列），上傳共 2566 筆、`refused: false`、`missing_indexes: []`；claudecat 排程已清（crontab 兩行已刪，無 systemd timer）。
 - [x] 2026-10-28 09:30 台灣時間（01:30Z）兩台部署 master `e243ffce`（NUC11i5 `cort-79170425e007`、Thinkpade15 `cort-738002ea0ae1`）：集中式設計 C3a–C4 完成，記憶 ledger 指令直連遠端（`cort memory sync` 改名 `cort memory check`）、`notes upload` 依本機 `notes-uploaded.json` 規劃、SessionStart 的 `cort hook-recall` 上網讀共享資料庫（2.5 秒預算，兩台實測約 300 ms），turso／tokio 相依已拿掉（binary 45M → 22M）。兩台 `install.sh --check` OK、crontab 0 行、`memory check` 回 `remote: ok`（19 active／33 total）。副本目錄尚未刪（第 8.4 節另做）；i5940R3070 的指示貼在 aib #982。
 - [x] 2026-10-28 09:55 台灣時間（01:55Z）NUC11i5、Thinkpade15 完成 spec 第 8.4 節：以重建的 `70bf926e` binary 跑 `cort memory sync` 回 `synced`，本機副本與 `cort memory check` 遠端皆 34 total／19 active，量測副本 `push_pending: false`；之後刪除 `memory/turso-memory/`、`memory/turso-measure/`、`measure-transcripts.json` 與舊 binary（`turso-*.json` 設定檔保留）。刪後兩台 `notes upload` 皆 `planned_from: local_state`、measure collect 成功。i5940R3070 尚未部署 C4，也尚未做第 8.4 節。
-- [ ] 隔天：遠端兩台都有昨天的快照、事件持續增加、無重複；壓縮列有新增。
+- [x] 隔天：遠端兩台都有昨天的快照、事件持續增加、無重複；壓縮列有新增。2026-10-29 12:00 台灣時間查：`cort_command`
+  NUC11i5 10/28 5171、10/29 1189 列，Thinkpade15 277、196 列；`cort_index_health`（快照，見 Task 8 的取代說明）NUC11i5
+  48、8，Thinkpade15 6、5；同一機器同一來源同一本機 `id` 沒有重複；壓縮列 NUC11i5 10/28 6、10/29 2（Thinkpade15 期間內
+  沒有壓縮）。兩台 `measure.log` 沒有 `watchdog:`、`memory-upload.log` 沒有錯誤；`measure status` 的 failures 只剩
+  10/27 副本時代留下、不再發生的舊項（NUC11i5 `measure-health:3/storage`，Thinkpade15 `codex:3/network`、
+  `measure-health:4/network`，見 event-driven 設計的實機觀察）。i5940R3070 只有 10/28 的 396 列、i51149R3050 只有 58 列。
 - [x] ~~移除 `~/.cargo/bin/claudecat`（兩台）。~~ 作廢（2026-10-28）：claudecat 已改當資源閘門，`claudecat gate` 就在這個 binary 裡，要保留。
 - [x] 2026-10-28 10:55 台灣時間（02:55Z）本機部署 master `0160dfe1`（`cort-4a28f4a28871`）：L1 讓 cort 不再讀 `harnessuse` 的 `telemetry_events`／`telemetry_project_aliases`（`verify --new-machine` 只看量測庫），移除一次性的 `copy-events`、`import-audit`；所有 measure 指令遇到量測設定指向記憶資料庫時一律拒絕。刪表前 copy-events 重跑：來源 31,279 列、衝突 0、每組目的端列數皆不少於來源；舊表最後寫入 2026-10-23。
 - [x] 使用者 2026-10-28 決定：舊量測全部作廢、從 2026-10-28 00:00（台灣時間）重來，只量新功能（SessionStart 記憶注入、跨機器 notes、之後的 claudecat 資源閘門）。順序：M1（上傳起點 `MEASURE_START_MS`，拿掉 verify／new-machine 把關）部署後，使用者手動刪 `harnessuse` 的 `telemetry_events`、`telemetry_project_aliases`，並清空 `cort-measure` 的舊資料。
