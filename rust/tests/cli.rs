@@ -77,6 +77,33 @@ fn payload(run: &Run) -> Value {
     })
 }
 
+#[test]
+fn memory_record_replace_conflicts_with_supersedes_at_parse_time() {
+    let (_p, cwd, _c, cache) = sandbox();
+    let run = run_cort(
+        &[
+            "memory",
+            "record",
+            "--key",
+            "k",
+            "--claim",
+            "c",
+            "--source",
+            "x",
+            "--line",
+            "1",
+            "--replace",
+            "--supersedes",
+            "12345678",
+        ],
+        &cwd,
+        &cache,
+    );
+    assert_ne!(run.code, 0);
+    assert!(format!("{}{}", run.stdout, run.stderr).contains("--replace"));
+    assert!(format!("{}{}", run.stdout, run.stderr).contains("--supersedes"));
+}
+
 fn run_cort_env(args: &[&str], cwd: &Path, cache: &Path, envs: &[(&str, &str)]) -> Run {
     let mut cmd = Command::new(cort_bin());
     cmd.args(args).current_dir(cwd).env("CORT_CACHE_DIR", cache);

@@ -1918,9 +1918,10 @@ fn resolve_entry(
     supersedes: &[String],
     ledger: &Ledger,
 ) -> Result<MemoryEntry, LedgerError> {
-    entry.resolves = supersedes.to_vec();
     let project = project(root)?;
     let before = ledger.read(&project).map_err(not_recorded_read)?;
+    let supersedes = resolve_ids(&before, supersedes)?;
+    entry.resolves = supersedes.clone();
     let active_ids: std::collections::HashSet<_> = memory::active_entries(&before)
         .into_iter()
         .filter(|item| item.key == entry.key)
@@ -1935,8 +1936,45 @@ fn resolve_entry(
     let mut args = entry_args(&project, &entry)?;
     args.push(Cell::Text(project.clone()));
     args.extend(supersedes.iter().cloned().map(Cell::Text));
-    ledger.write_checked(&project, &entry, &sql, args, supersedes, true)?;
+    ledger.write_checked(&project, &entry, &sql, args, &supersedes, true)?;
     Ok(entry)
+}
+
+fn resolve_ids(before: &MemoryLedger, ids: &[String]) -> Result<Vec<String>, LedgerError> {
+    ids.iter()
+        .map(|id| {
+            // An exact id always names itself, whatever it looks like (imported ids need not be
+            // hex); anything else is a prefix.
+            if before.entries.iter().any(|entry| entry.id == *id) {
+                return Ok(id.clone());
+            }
+            if !(8..=64).contains(&id.len())
+                || !id
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            {
+                return Err(LedgerError::Message(
+                    "--supersedes requires a full id or at least 8 lowercase hex characters".into(),
+                ));
+            }
+            let matches: BTreeSet<_> = before
+                .entries
+                .iter()
+                .filter(|entry| entry.id.starts_with(id))
+                .map(|entry| entry.id.as_str())
+                .collect();
+            match matches.len() {
+                0 => Err(LedgerError::SupersedesMissing {
+                    superseded: vec![id.clone()],
+                }),
+                1 => Ok(matches.into_iter().next().unwrap_or_default().to_string()),
+                _ => Err(LedgerError::Message(format!(
+                    "ambiguous --supersedes {id}: {}",
+                    matches.into_iter().collect::<Vec<_>>().join(", ")
+                ))),
+            }
+        })
+        .collect()
 }
 
 pub fn record(
@@ -1959,44 +1997,113 @@ pub fn record_with(
     supersedes: Option<&str>,
     ledger: &Ledger,
 ) -> Result<MemoryEntry, LedgerError> {
+    let ids: Vec<String> = supersedes.into_iter().map(str::to_string).collect();
+    record_options_with(root, key, claim, source, line, &ids, false, ledger)
+}
+
+pub fn record_options(
+    root: &Path,
+    key: &str,
+    claim: &str,
+    source: &Path,
+    line: usize,
+    supersedes: &[String],
+    replace: bool,
+) -> Result<MemoryEntry, LedgerError> {
+    record_options_with(
+        root,
+        key,
+        claim,
+        source,
+        line,
+        supersedes,
+        replace,
+        &Ledger::open()?,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn record_options_with(
+    root: &Path,
+    key: &str,
+    claim: &str,
+    source: &Path,
+    line: usize,
+    supersedes: &[String],
+    replace: bool,
+    ledger: &Ledger,
+) -> Result<MemoryEntry, LedgerError> {
+    if replace && !supersedes.is_empty() {
+        return Err("--replace conflicts with --supersedes".into());
+    }
     let (source_root, source) = memory::record_source(root, source)?;
-    let entry = memory::new_entry(&source_root, key, claim, &source, line, supersedes)?;
+    let entry = memory::new_entry(&source_root, key, claim, &source, line, None)?;
     require_committed_source(&source_root, &source)?;
-    record_entry(root, entry, supersedes, ledger)
+    if supersedes.len() >= 2 {
+        return resolve_entry(root, entry, supersedes, ledger);
+    }
+    record_entry(
+        root,
+        entry,
+        supersedes.first().map(String::as_str),
+        replace,
+        ledger,
+    )
 }
 
 fn record_entry(
     root: &Path,
-    entry: MemoryEntry,
+    mut entry: MemoryEntry,
     supersedes: Option<&str>,
+    replace: bool,
     ledger: &Ledger,
 ) -> Result<MemoryEntry, LedgerError> {
     let project = project(root)?;
     let before = ledger.read(&project).map_err(not_recorded_read)?;
     let active = memory::active_entries(&before);
-    if active.iter().filter(|e| e.key == entry.key).count() > 1 {
+    let same_key: Vec<_> = active.iter().filter(|e| e.key == entry.key).collect();
+    if replace && same_key.is_empty() {
+        return Err("no active entry has this key; drop --replace".into());
+    }
+    if replace && same_key.len() > 1 {
+        return Err(LedgerError::Message(format!(
+            "conflicting active entries: {}; repeat --supersedes for every active id",
+            same_key
+                .iter()
+                .map(|e| e.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )));
+    }
+    let resolved = if replace {
+        Some(same_key[0].id.clone())
+    } else if let Some(id) = supersedes {
+        Some(resolve_ids(&before, &[id.to_string()])?.remove(0))
+    } else {
+        None
+    };
+    if same_key.len() > 1 {
         return Err(LedgerError::Message(
             "conflicting active entries for this key".into(),
         ));
     }
+    let supersedes = resolved.as_deref();
     match supersedes {
-        Some(id) if !before.entries.iter().any(|e| e.id == id) => {
-            return Err(LedgerError::SupersedesMissing {
-                superseded: vec![id.into()],
-            });
-        }
         Some(id) if !active.iter().any(|e| e.id == id && e.key == entry.key) => {
             return Err(LedgerError::Message(
                 "superseded id must be the active entry for the same key".into(),
             ))
         }
-        None if active.iter().any(|e| e.key == entry.key) => {
-            return Err(LedgerError::Message(
-                "an active entry has this key; pass --supersedes".into(),
-            ))
+        None if !same_key.is_empty() => {
+            return Err(LedgerError::Message(format!(
+                "an active entry has this key: {}; pass --supersedes or --replace",
+                same_key[0].id
+            )))
         }
         _ => {}
     }
+    entry.supersedes = resolved;
+    let supersedes = entry.supersedes.as_deref();
     let mut args = entry_args(&project, &entry)?;
     let (sql, old) = match supersedes {
         Some(id) => {

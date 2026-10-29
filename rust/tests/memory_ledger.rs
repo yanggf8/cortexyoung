@@ -386,6 +386,90 @@ fn round_trip_and_supersedes_chain() {
 }
 
 #[test]
+fn supersedes_prefixes_are_resolved_and_validated() {
+    let f = Fixture::new();
+    let first = f.record("choice", "A", None).unwrap();
+    let next = f.record("choice", "B", Some(&first.id[..8])).unwrap();
+    assert_eq!(next.supersedes.as_deref(), Some(first.id.as_str()));
+    assert!(matches!(
+        f.record("choice", "C", Some(&next.id[..7])),
+        Err(LedgerError::Message(_))
+    ));
+    assert!(matches!(
+        f.record("choice", "C", Some("ffffffffffffffff")),
+        Err(LedgerError::SupersedesMissing { .. })
+    ));
+    let mut other = next.clone();
+    other.id = format!("{}{}", &first.id[..8], "0".repeat(56));
+    if other.id == first.id {
+        other.id.replace_range(63..64, "1");
+    }
+    other.key = "other".into();
+    other.supersedes = None;
+    f.insert(&f.project(), &other);
+    let Err(LedgerError::Message(message)) = f.record("choice", "C", Some(&first.id[..8])) else {
+        panic!("expected ambiguity")
+    };
+    assert!(message.contains(&first.id) && message.contains(&other.id));
+}
+
+#[test]
+fn active_entry_refusal_names_id() {
+    let f = Fixture::new();
+    let first = f.record("choice", "A", None).unwrap();
+    let Err(LedgerError::Message(message)) = f.record("choice", "B", None) else {
+        panic!("expected refusal")
+    };
+    assert!(message.contains(&first.id) && message.contains("--replace"));
+}
+
+#[test]
+fn replace_and_repeated_supersedes_resolve_conflict() {
+    let f = Fixture::new();
+    let write = |ids: &[String], replace| {
+        memory_store::record_options_with(
+            f.root(),
+            "choice",
+            "new",
+            Path::new("decision.md"),
+            1,
+            ids,
+            replace,
+            &f.ledger,
+        )
+    };
+    assert!(
+        matches!(write(&[], true), Err(LedgerError::Message(message)) if message.contains("drop --replace"))
+    );
+    let first = f.record("choice", "old", None).unwrap();
+    assert!(
+        matches!(write(std::slice::from_ref(&first.id), true), Err(LedgerError::Message(message)) if message.contains("conflicts"))
+    );
+    let replacement = write(&[], true).unwrap();
+    assert_eq!(replacement.supersedes.as_deref(), Some(first.id.as_str()));
+    let mut other = first.clone();
+    other.id = "a".repeat(64);
+    other.claim = "competing".into();
+    f.insert(&f.project(), &other);
+    let Err(LedgerError::Message(message)) = write(&[], true) else {
+        panic!("expected conflict")
+    };
+    assert!(
+        message.contains(&replacement.id)
+            && message.contains(&other.id)
+            && message.contains("--supersedes")
+    );
+    let ids = vec![replacement.id[..8].to_string(), other.id[..8].to_string()];
+    assert!(
+        matches!(write(&[ids[0].clone(), ids[0].clone()], false), Err(LedgerError::Message(message)) if message.contains("exactly once"))
+    );
+    let resolved = write(&ids, false).unwrap();
+    assert_eq!(resolved.resolves, vec![replacement.id, other.id]);
+    let status = memory_store::status_with(f.root(), &f.ledger, "test").unwrap();
+    assert_eq!(status.active_entries, 1);
+}
+
+#[test]
 fn alias_components_are_bidirectional_transitive_and_cycle_safe() {
     let f = Fixture::new();
     let a = f.project();
@@ -810,7 +894,8 @@ fn supersedes_across_alias_requires_link() {
         Err(LedgerError::SupersedesMissing { .. })
     ));
     f.alias(&a, "B");
-    f.record("choice", "new", Some(&entry.id)).unwrap();
+    let updated = f.record("choice", "new", Some(&entry.id[..8])).unwrap();
+    assert_eq!(updated.supersedes.as_deref(), Some(entry.id.as_str()));
     let status = memory_store::status_with(f.root(), &f.ledger, "test").unwrap();
     assert_eq!((status.total_entries, status.active_entries), (2, 1));
 }

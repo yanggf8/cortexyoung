@@ -271,7 +271,9 @@ alone, where no other machine or harness can read it, until the user asked why.
   when a decision is made or changed, when the user corrects a working assumption, and when a
   deployment changes what a machine runs. Cite the line that states it (a doc, plan or code line);
   if no line states it yet, write and commit that line first (`record` refuses a source that is
-  untracked or dirty at HEAD). Replacing an earlier claim passes `--supersedes <id>`.
+  untracked or dirty at HEAD). Replace the sole active claim with `--replace`, or pass
+  `--supersedes <id>` (a unique lowercase hex prefix of at least 8 characters works); repeat
+  `--supersedes` for every active id to resolve a conflict.
 - A harness-private memory is for how one agent works, never the only copy of a project fact.
 
 **Harness notes are a second, unreviewed table beside the ledger** (2026-10-27). `cort memory notes

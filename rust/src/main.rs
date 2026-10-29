@@ -157,7 +157,7 @@ fn memory_usage_value() -> Value {
     json!({
         "usage": "cort memory <command> [options]",
         "commands": commands,
-        "note": "Commands read the project at --root (default: the cwd).",
+        "note": "Commands read the project at --root (default: the cwd). resolve is an alias for record with repeated --supersedes.",
     })
 }
 
@@ -663,9 +663,12 @@ enum MemoryAction {
         source: PathBuf,
         #[arg(long)]
         line: usize,
+        #[arg(long, conflicts_with = "replace")]
+        supersedes: Vec<String>,
         #[arg(long)]
-        supersedes: Option<String>,
+        replace: bool,
     },
+    /// Alias for record with repeated --supersedes.
     Resolve {
         #[arg(long, default_value = ".")]
         root: PathBuf,
@@ -2408,9 +2411,18 @@ fn cmd_memory(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError
             source,
             line,
             supersedes,
+            replace,
         } => serde_json::to_value(
-            cort::memory_store::record(&root, &key, &claim, &source, line, supersedes.as_deref())
-                .map_err(memory_ledger_error)?,
+            cort::memory_store::record_options(
+                &root,
+                &key,
+                &claim,
+                &source,
+                line,
+                &supersedes,
+                replace,
+            )
+            .map_err(memory_ledger_error)?,
         )
         .unwrap_or(Value::Null),
         MemoryAction::Resolve {

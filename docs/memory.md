@@ -80,8 +80,9 @@ cort memory recall 'deployment option' --harness claude-code
 `cort memory --help` lists every memory verb with all of its options, rendered from the parser.
 
 `record` requires a tracked, committed source file and a nonblank cited line. For a correction,
-pass `--supersedes <active-id>`; for two or more concurrent active entries of one key, use
-`cort memory resolve` and repeat `--supersedes` for every active id reported by `status`.
+pass `--replace` for the sole active entry, or `--supersedes <active-id>` (a unique prefix of at
+least 8 lowercase hex characters works). For concurrent active entries, repeat `--supersedes` for
+every active id reported by `status`; `cort memory resolve` is an alias for this form.
 Recall returns active hits with `source_unchanged`, `source_changed`, `source_missing`, or
 `conflict`, plus the cited line's status: `same_line`; `moved` with `source_line_now` when the
 line's exact text appears at exactly one other line (for example because text was inserted or
