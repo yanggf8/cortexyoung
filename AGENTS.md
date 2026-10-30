@@ -145,6 +145,15 @@ aggregate still warns when its file's origin differs from the current machine.
 and the harness total stays whole regardless of the other two (`hook_models_at` is a second lens,
 never a split of the first).
 
+**A time budget is measured before it is written down, not tuned against CI.** Session recall's
+deadline changed three times in three hours on 2026-10-29 -- 4500 ms with 200 ms before the
+watchdog (`36524521`), 4300/400 after a local test came within 30 ms of it (`09aab479`), then
+3800/900 after CI's runner still lost to the watchdog (`652497e9`) -- and only the last was derived
+from a measurement: strace showed a 4.175 s socket timeout blocking for 4.205-4.389 s. When a
+number sits against a hard limit (a harness's hook timeout, a test bound), measure each part that
+spends it -- the wait as the kernel actually ends it, the work after it -- where it runs slowest (a
+debug build, CI's runner), and put the reading and its machine in the spec or commit that sets it.
+
 **Delivery was disabled by default, including Kimi's deny, and since 2026-10-25 there is nothing
 left to deliver.** The `CORT_SUGGEST` switch and Kimi's deny went out with the suggestion itself
 (T5/T6). The bounded exception is worth remembering as history: Kimi's `PreToolUse` kept only
