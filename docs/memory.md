@@ -94,7 +94,10 @@ removed above it; the check does not establish why);
 `moved_ambiguous` when it appears at several; `changed` when it appears nowhere. For rows with
 a line hash, `same_line` yields `source_unchanged`, `moved` yields `source_moved`, and
 `moved_ambiguous` or `changed` yields `source_changed`. An unreadable source yields
-`source_missing`, while `conflict` takes precedence. Unsourced entries have no source status or file-change field and rest on their recorded time and machine. Older rows without a line hash use the
+`source_missing`, while `conflict` takes precedence. Unsourced hits print no `source`, `source_line`,
+or `source_sha256`, have no source status or file-change field, and rest on their recorded time and
+machine. `recorded_at_utc` is the readable UTC form of `recorded_at` when it can be formatted.
+Older rows without a line hash use the
 whole-file hash for their evidence status. Whenever the file is readable, `source_file_changed`
 reports whether its bytes differ from the recorded file hash. Neither label checks the
 surroundings: a line that moved from a "Current" section to a "Deprecated" one still reports

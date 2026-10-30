@@ -2527,8 +2527,8 @@ fn cmd_memory(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError
             line,
             supersedes,
             replace,
-        } => serde_json::to_value(
-            cort::memory_store::record_optional(
+        } => cort::memory::entry_view(
+            &cort::memory_store::record_optional(
                 &root,
                 &key,
                 &claim,
@@ -2537,8 +2537,7 @@ fn cmd_memory(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError
                 replace,
             )
             .map_err(memory_ledger_error)?,
-        )
-        .unwrap_or(Value::Null),
+        ),
         MemoryAction::Resolve {
             root,
             key,
@@ -2546,8 +2545,8 @@ fn cmd_memory(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError
             source,
             line,
             supersedes,
-        } => serde_json::to_value(
-            cort::memory_store::resolve_optional(
+        } => cort::memory::entry_view(
+            &cort::memory_store::resolve_optional(
                 &root,
                 &key,
                 &claim,
@@ -2555,8 +2554,7 @@ fn cmd_memory(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError
                 &supersedes,
             )
             .map_err(memory_ledger_error)?,
-        )
-        .unwrap_or(Value::Null),
+        ),
         MemoryAction::Recall {
             query,
             root,

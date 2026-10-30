@@ -52,21 +52,76 @@ impl Default for MemoryLedger {
     }
 }
 
-#[derive(Clone, Debug, Serialize)]
+/// JSON presented to an agent; storage continues to serialize `MemoryEntry` directly.
+pub fn entry_view(entry: &MemoryEntry) -> serde_json::Value {
+    serde_json::Value::Object(entry_fields(entry))
+}
+
+fn entry_fields(entry: &MemoryEntry) -> serde_json::Map<String, serde_json::Value> {
+    // A struct of strings and integers always serializes to an object; an empty map is the
+    // never-taken fallback, so printing an entry can never panic.
+    let mut fields = match serde_json::to_value(entry) {
+        Ok(serde_json::Value::Object(fields)) => fields,
+        _ => serde_json::Map::new(),
+    };
+    if entry.unsourced {
+        fields.remove("source");
+        fields.remove("source_line");
+        fields.remove("source_sha256");
+    }
+    if let Ok(ns) = entry.recorded_at.parse::<i128>() {
+        let seconds = ns.div_euclid(1_000_000_000);
+        let days = seconds.div_euclid(86_400);
+        // The requested four-digit UTC year has a finite representable range.
+        if (-719_528..=2_932_896).contains(&days) {
+            let (year, month, day) = crate::measure::civil_from_days(days as i64);
+            let time = seconds.rem_euclid(86_400);
+            fields.insert(
+                "recorded_at_utc".into(),
+                format!(
+                    "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+                    time / 3600,
+                    time % 3600 / 60,
+                    time % 60
+                )
+                .into(),
+            );
+        }
+    }
+    fields
+}
+
+#[derive(Clone, Debug)]
 pub struct MemoryHit {
-    #[serde(flatten)]
     pub entry: MemoryEntry,
     /// Evidence checks source bytes, not whether the claim follows from its context.
     pub evidence_status: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub source_file_changed: Option<bool>,
     /// `same_line`, `moved` (the cited line's exact text now sits only at `source_line_now`),
     /// `moved_ambiguous` (it sits at several lines), `changed` (it sits nowhere) or
     /// `source_missing`. Absent for rows recorded without a line hash.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub source_line_status: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub source_line_now: Option<usize>,
+}
+
+impl Serialize for MemoryHit {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut fields = entry_fields(&self.entry);
+        fields.insert(
+            "evidence_status".into(),
+            self.evidence_status.clone().into(),
+        );
+        if let Some(changed) = self.source_file_changed {
+            fields.insert("source_file_changed".into(), changed.into());
+        }
+        if let Some(status) = &self.source_line_status {
+            fields.insert("source_line_status".into(), status.clone().into());
+        }
+        if let Some(line) = self.source_line_now {
+            fields.insert("source_line_now".into(), line.into());
+        }
+        fields.serialize(serializer)
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]

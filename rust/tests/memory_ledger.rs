@@ -445,6 +445,88 @@ fn session_recall_from_payload_subdirectory_checks_repository_source() {
 }
 
 #[test]
+fn entry_views_preserve_storage_and_other_hit_fields() {
+    #[derive(serde::Serialize)]
+    struct OldHit<'a> {
+        #[serde(flatten)]
+        entry: &'a cort::memory::MemoryEntry,
+        evidence_status: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        source_file_changed: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        source_line_status: &'a Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        source_line_now: Option<usize>,
+    }
+    let f = Fixture::new();
+    let unsourced = memory_store::record_optional_with(
+        f.root(),
+        "unsourced",
+        "claim",
+        None,
+        &[],
+        false,
+        &f.ledger,
+    )
+    .unwrap();
+    let storage = serde_json::to_value(&unsourced).unwrap();
+    for key in ["source", "source_line", "source_sha256"] {
+        assert!(storage.get(key).is_some());
+    }
+    let record_output = cort::memory::entry_view(&unsourced);
+    let mut expected_record = storage.clone();
+    let fields = expected_record.as_object_mut().unwrap();
+    for key in ["source", "source_line", "source_sha256"] {
+        fields.remove(key);
+    }
+    fields.insert(
+        "recorded_at_utc".into(),
+        record_output["recorded_at_utc"].clone(),
+    );
+    assert!(record_output["recorded_at_utc"].is_string());
+    assert_eq!(record_output, expected_record);
+
+    f.record("sourced", "claim", None).unwrap();
+    for hit in memory_store::recall_with(f.root(), "", &f.ledger)
+        .unwrap()
+        .hits
+    {
+        let old = OldHit {
+            entry: &hit.entry,
+            evidence_status: &hit.evidence_status,
+            source_file_changed: hit.source_file_changed,
+            source_line_status: &hit.source_line_status,
+            source_line_now: hit.source_line_now,
+        };
+        let mut expected = serde_json::to_value(old).unwrap();
+        let actual = serde_json::to_value(&hit).unwrap();
+        let fields = expected.as_object_mut().unwrap();
+        if hit.entry.unsourced {
+            for key in ["source", "source_line", "source_sha256"] {
+                fields.remove(key);
+            }
+        } else {
+            for key in ["source", "source_line", "source_sha256"] {
+                assert!(actual.get(key).is_some());
+            }
+        }
+        assert!(actual["recorded_at_utc"].is_string());
+        fields.insert("recorded_at_utc".into(), actual["recorded_at_utc"].clone());
+        assert_eq!(actual, expected);
+    }
+    let mut entry = unsourced;
+    entry.recorded_at = "1793345679479001886".into();
+    assert_eq!(
+        cort::memory::entry_view(&entry)["recorded_at_utc"],
+        "2026-10-30T07:34:39Z"
+    );
+    entry.recorded_at = "not a timestamp".into();
+    assert!(cort::memory::entry_view(&entry)
+        .get("recorded_at_utc")
+        .is_none());
+}
+
+#[test]
 fn unsourced_entries_supersede_and_conflict() {
     let f = Fixture::new();
     let write = |claim: &str, source: Option<(&Path, usize)>, ids: &[String], replace: bool| {
