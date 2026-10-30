@@ -184,11 +184,13 @@ and writer are one physical machine, so it cannot show a stamp written elsewhere
 a reader whose cort or checkout is older than the writer's.
 
 The local tests cover source change, supersession, schema compatibility, project isolation,
-config migration, and query redaction. The remaining deployment check is that read half: from
-a second configured machine, recall `memory ownership` and confirm exactly one active hit — id
-`b479302767d36c88…`, written by `e4b1d0199c504367`, `source_unchanged`. A machine still
-running a pre-`63f7de3f` cort has no stamp fields to read; upgrade it first. Fresh Claude Code
-and Codex sessions must then be graded on the
+config migration, and query redaction. The read half was checked on 2026-10-30: machines
+`09a907a06cdea300` and `2eb02d46ec5c4319`, both running `d4e92a6a` and neither the writer, each
+recalled `memory ownership` as exactly one active hit — id `b479302767d36c88…`, written by
+`e4b1d0199c504367`. Its status was `source_moved`, not the `source_unchanged` this paragraph
+expected: lines inserted above it in `AGENTS.md` moved the cited line from 227 to 274, and
+the section there still states the claim, so it needs no supersession. Fresh Claude Code
+and Codex sessions must still be graded on the
 same frozen questions, including a superseded claim, stale source, and false pasted report.
 A successful remote read or a hook fire does not prove the later answer is correct. The ordered
 experiment and product priorities are in `docs/2026-10-20-direction-after-collection.md`.
