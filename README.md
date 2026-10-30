@@ -63,7 +63,7 @@ Five shipped commands (plus `status`/`projects`/`delete` utilities):
   depth 3, accepting a comma-separated batch. In `lean`, each row carries the dependent's definition
   line *and* the site that ties it to the seed (`@626`), tagged with the shape that attached it
   (`bare` / `scoped` / `receiver` / `type`)
-- `cort memory <record|resolve|recall|status|check|configure|import-config|import-legacy>` — reviewed project facts in a shared Turso ledger, owned by cort; see [Project memory](docs/memory.md)
+- `cort memory <record|resolve|recall|status|check|configure|import-config>` — reviewed project facts in a shared Turso ledger, owned by cort; see [Project memory](docs/memory.md)
 - `cort usage [days]` — local per-machine usage stats (best-effort; 1–90 days, default 30)
 - `cort measure <configure|record|collect|health|status|report|show|cron>` — agent measurement in its own Turso database; see [Local usage recording](#local-usage-recording-offline-hook-separate-tursodb-upload)
 

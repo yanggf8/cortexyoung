@@ -1092,31 +1092,6 @@ fn pre_read_and_definite_write_failures_save_no_row() {
 }
 
 #[test]
-fn import_that_fails_its_first_batch_definitely_is_not_recorded() {
-    let f = Fixture::new();
-    let first = f.record("choice", "A", None).unwrap();
-    let mut legacy = first.clone();
-    legacy.id = "legacy".into();
-    fs::create_dir(f.root().join(".claudecat")).unwrap();
-    fs::write(
-        f.root().join(".claudecat/memory.json"),
-        json!({"schema":1,"entries":[legacy]}).to_string(),
-    )
-    .unwrap();
-    // Post 1 is the pre-read; the first batch is post 2 and nothing reads after it.
-    let before = f.control.lock().unwrap().posts;
-    f.arm(2, Action::Fail(401));
-    assert!(matches!(
-        memory_store::import_legacy_with(f.root(), &f.ledger),
-        Err(LedgerError::NotRecorded {
-            kind: cort::remote::ErrorKind::Unauthorized
-        })
-    ));
-    assert_eq!(f.control.lock().unwrap().posts, before + 2);
-    assert_eq!(f.ledger.read(&f.project()).unwrap().entries.len(), 1);
-}
-
-#[test]
 fn timeout_after_forward_is_reconciled() {
     let f = Fixture::new();
     f.arm(2, Action::ForwardThenTimeout);
@@ -1131,7 +1106,7 @@ fn timeout_after_forward_and_failed_reread_is_unknown() {
     f.arm(3, Action::Fail(503));
     let result = f.record("choice", "A", None);
     let Err(LedgerError::OutcomeUnknown {
-        id: Some(id),
+        id,
         key: Some(key),
         kind,
     }) = result
@@ -1154,7 +1129,7 @@ fn committed_write_with_failed_reread_keeps_row() {
     let f = Fixture::new();
     f.arm(3, Action::Fail(503));
     let result = f.record("choice", "A", None);
-    let Err(LedgerError::CommittedUnverified { id: Some(id), .. }) = result else {
+    let Err(LedgerError::CommittedUnverified { id, .. }) = result else {
         panic!("expected committed unverified: {result:?}");
     };
     assert!(f
@@ -1293,39 +1268,6 @@ fn resolve_missing_predecessor_and_new_conflict() {
 }
 
 #[test]
-fn import_is_idempotent_forgives_absent_stamp_and_refuses_collision() {
-    let f = Fixture::new();
-    let first = f.record("choice", "A", None).unwrap();
-    let mut legacy = first.clone();
-    legacy.recorded_machine = None;
-    legacy.recorded_machine_source = None;
-    fs::create_dir(f.root().join(".claudecat")).unwrap();
-    let path = f.root().join(".claudecat/memory.json");
-    fs::write(&path, json!({"schema":1,"entries":[legacy]}).to_string()).unwrap();
-    assert_eq!(
-        memory_store::import_legacy_with(f.root(), &f.ledger).unwrap(),
-        0
-    );
-    let mut added = first.clone();
-    added.id = "legacy".into();
-    added.supersedes = None;
-    fs::write(&path, json!({"schema":1,"entries":[added]}).to_string()).unwrap();
-    assert_eq!(
-        memory_store::import_legacy_with(f.root(), &f.ledger).unwrap(),
-        1
-    );
-    assert_eq!(
-        memory_store::import_legacy_with(f.root(), &f.ledger).unwrap(),
-        0
-    );
-    added.claim = "tampered".into();
-    fs::write(&path, json!({"schema":1,"entries":[added]}).to_string()).unwrap();
-    assert!(
-        matches!(memory_store::import_legacy_with(f.root(), &f.ledger), Err(LedgerError::Message(message)) if message == "memory id collision with different content")
-    );
-}
-
-#[test]
 fn resolve_settles_two_active_entries() {
     let f = Fixture::new();
     f.record("seed", "seed", None).unwrap();
@@ -1379,63 +1321,4 @@ fn sql_error_after_a_committed_write_is_settled_by_the_reread() {
         "{result:?}"
     );
     assert_eq!(f.ledger.read(&f.project()).unwrap().entries.len(), 1);
-}
-
-fn legacy_entries(f: &Fixture, count: usize) -> Vec<cort::memory::MemoryEntry> {
-    let template = f.record("template", "T", None).unwrap();
-    (0..count)
-        .map(|index| {
-            let mut entry = template.clone();
-            entry.id = format!("legacy-{index:03}");
-            entry.key = format!("legacy-{index:03}");
-            entry
-        })
-        .collect()
-}
-
-#[test]
-fn import_writes_every_batch_and_names_a_later_batch_failure() {
-    let f = Fixture::new();
-    let entries = legacy_entries(&f, 120);
-    fs::create_dir(f.root().join(".claudecat")).unwrap();
-    let path = f.root().join(".claudecat/memory.json");
-    fs::write(&path, json!({"schema":1,"entries":entries}).to_string()).unwrap();
-    // Post 1 is the pre-read and posts 2-4 are the three batches: the third is refused.
-    f.arm(4, Action::Fail(401));
-    let result = memory_store::import_legacy_with(f.root(), &f.ledger);
-    let Err(LedgerError::Message(message)) = result else {
-        panic!("expected a partial-import message: {result:?}");
-    };
-    assert_eq!(
-        message,
-        "legacy import stopped after 2 of 3 batches (unauthorized); re-run import-legacy, it is idempotent"
-    );
-    assert_eq!(f.ledger.read(&f.project()).unwrap().entries.len(), 101);
-    assert_eq!(
-        memory_store::import_legacy_with(f.root(), &f.ledger).unwrap(),
-        20
-    );
-    assert_eq!(f.ledger.read(&f.project()).unwrap().entries.len(), 121);
-}
-
-#[test]
-fn import_with_an_unknown_batch_and_a_failed_reread_is_unknown() {
-    let f = Fixture::new();
-    let entries = legacy_entries(&f, 3);
-    fs::create_dir(f.root().join(".claudecat")).unwrap();
-    fs::write(
-        f.root().join(".claudecat/memory.json"),
-        json!({"schema":1,"entries":entries}).to_string(),
-    )
-    .unwrap();
-    f.arm(2, Action::ForwardThenTimeout);
-    f.arm(3, Action::Fail(503));
-    assert!(matches!(
-        memory_store::import_legacy_with(f.root(), &f.ledger),
-        Err(LedgerError::OutcomeUnknown {
-            id: None,
-            kind: cort::remote::ErrorKind::Timeout,
-            ..
-        })
-    ));
 }

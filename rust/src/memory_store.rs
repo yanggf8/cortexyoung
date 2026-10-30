@@ -41,11 +41,11 @@ pub enum LedgerError {
         kind: ErrorKind,
     },
     CommittedUnverified {
-        id: Option<String>,
+        id: String,
         kind: ErrorKind,
     },
     OutcomeUnknown {
-        id: Option<String>,
+        id: String,
         key: Option<String>,
         kind: ErrorKind,
     },
@@ -490,7 +490,7 @@ impl Ledger {
                 Ok(_) => return Err(LedgerError::NotRecorded { kind: error.kind }),
                 Err(_) => {
                     return Err(LedgerError::OutcomeUnknown {
-                        id: Some(entry.id.clone()),
+                        id: entry.id.clone(),
                         key: Some(entry.key.clone()),
                         kind: error.kind,
                     })
@@ -502,7 +502,7 @@ impl Ledger {
             Ok(after) => after,
             Err(LedgerError::Remote(kind)) => {
                 return Err(LedgerError::CommittedUnverified {
-                    id: Some(entry.id.clone()),
+                    id: entry.id.clone(),
                     kind,
                 })
             }
@@ -1656,7 +1656,7 @@ impl Ledger {
                     "alias is not linked or changed concurrently".into(),
                 )),
                 Err(error) => Err(LedgerError::OutcomeUnknown {
-                    id: Some(old.into()),
+                    id: old.into(),
                     key: None,
                     kind: error.kind,
                 }),
@@ -1669,7 +1669,7 @@ impl Ledger {
                     Ok(result) if result.rows.is_empty() != present_after => Ok(true),
                     Ok(_) => Err(LedgerError::NotRecorded { kind: error.kind }),
                     Err(_) => Err(LedgerError::OutcomeUnknown {
-                        id: Some(old.into()),
+                        id: old.into(),
                         key: None,
                         kind: error.kind,
                     }),
@@ -2183,101 +2183,6 @@ fn record_entry(
     };
     ledger.write_checked(&project, &entry, &sql, args, &old, false)?;
     Ok(entry)
-}
-
-pub fn import_legacy(root: &Path) -> Result<usize, LedgerError> {
-    let ledger = Ledger::open()?;
-    import_legacy_with(root, &ledger)
-}
-
-pub fn import_legacy_with(root: &Path, ledger: &Ledger) -> Result<usize, LedgerError> {
-    if !memory::ledger_path(root).exists() {
-        return Err("no legacy .claudecat/memory.json to import".into());
-    }
-    let legacy = memory::load(root)?;
-    if legacy.entries.is_empty() {
-        return Ok(0);
-    }
-    let project = project(root)?;
-    let before = ledger.read(&project).map_err(not_recorded_read)?;
-    let existing: std::collections::HashSet<_> =
-        before.entries.iter().map(|e| e.id.as_str()).collect();
-    let chunks: Vec<_> = legacy.entries.chunks(50).collect();
-    // A chunk whose outcome is unknown (`outcome_unknown`) is settled by the reread below.
-    let mut unknown = None;
-    for (written, chunk) in chunks.iter().enumerate() {
-        let statements = chunk
-            .iter()
-            .map(|entry| {
-                Ok(Stmt::new(
-                    "INSERT OR IGNORE INTO project_memory (project, id, body) VALUES (?, ?, ?)",
-                    entry_args(&project, entry)?,
-                ))
-            })
-            .collect::<Result<Vec<_>, LedgerError>>()?;
-        match ledger.db.transaction(&statements) {
-            Ok(_) => {}
-            Err(error) if outcome_unknown(error.kind) => {
-                unknown = Some(error.kind);
-                break;
-            }
-            Err(error) if written == 0 => {
-                return Err(LedgerError::NotRecorded { kind: error.kind })
-            }
-            Err(error) => {
-                return Err(LedgerError::Message(format!(
-                    "legacy import stopped after {written} of {} batches ({}); re-run import-legacy, it is idempotent",
-                    chunks.len(),
-                    error.kind.as_str()
-                )))
-            }
-        }
-    }
-    let after_bodies = match ledger.read_bodies(&project) {
-        Ok(bodies) => bodies,
-        Err(LedgerError::Remote(kind)) => {
-            return Err(match unknown {
-                Some(kind) => LedgerError::OutcomeUnknown {
-                    id: None,
-                    key: None,
-                    kind,
-                },
-                None => LedgerError::CommittedUnverified { id: None, kind },
-            })
-        }
-        Err(other) => return Err(other),
-    };
-    ledger_from_bodies(after_bodies.clone()).map_err(LedgerError::Message)?;
-    let stored: std::collections::HashMap<String, String> = after_bodies
-        .into_iter()
-        .map(|body| {
-            let entry: MemoryEntry = serde_json::from_str(&body)
-                .map_err(|e| LedgerError::Message(format!("invalid remote memory row: {e}")))?;
-            Ok((entry.id, body))
-        })
-        .collect::<Result<_, LedgerError>>()?;
-    let mut count = 0;
-    for entry in &legacy.entries {
-        let body = serde_json::to_string(entry).map_err(|e| LedgerError::Message(e.to_string()))?;
-        match stored.get(entry.id.as_str()) {
-            Some(old) if same_claim(old, &body) => {
-                if !existing.contains(entry.id.as_str()) {
-                    count += 1;
-                }
-            }
-            Some(_) => {
-                return Err(LedgerError::Message(
-                    "memory id collision with different content".into(),
-                ))
-            }
-            None => {
-                return Err(LedgerError::Message(
-                    "legacy import incomplete; re-run import-legacy".into(),
-                ))
-            }
-        }
-    }
-    Ok(count)
 }
 
 #[cfg(test)]

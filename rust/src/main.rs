@@ -62,7 +62,7 @@ fn usage_value() -> Value {
             "delete": "cort delete [root]",
             "impact": "cort impact --symbol <name> [--depth <n>] [--coverage] [-f json|lean]",
             "usage": "cort usage [days] [-f json|lean]",
-            "memory": "cort memory <configure|import-config|record|resolve|recall|status|check|import-legacy|notes|alias> [options]",
+            "memory": "cort memory <configure|import-config|record|resolve|recall|status|check|notes|alias> [options]",
             "measure": "cort measure <configure|show|record|collect|health|status|cron|report> [options]  (uploads start at 2026-10-28 00:00 Taiwan time; collect: scan and upload the batch; --background appends at most one result to measure.log (none when skipped_busy) without stdout; health: observe recently used indexes and write local index_health_log, reading indexes only, with no network; --background appends the result to measure.log without stdout; status: read local collection state, -f json|lean; cron: manual install or removal of the legacy entry, no longer installed automatically; hook kick is the only automatic collection trigger; command_log and index_health_log keep uploaded rows 90 days and rows not yet uploaded 180 days, pruned when a new command is recorded; rows still not uploaded after 180 days are deleted and counted in measure status (pruned_unuploaded_rows) and measure.log)",
             "hook-suggest": "cort hook-suggest  (PreToolUse hook: records one fire row, kicks collection, and relays a configured gate's deny; not a verb to type)",
             "hook-refresh": "cort hook-refresh  (PostToolUse hook: brings this project's index up to the tree after an edit; silent, never creates an index; not a verb to type)",
@@ -736,10 +736,6 @@ enum MemoryAction {
         json: bool,
     },
     Check {
-        #[arg(long, default_value = ".")]
-        root: PathBuf,
-    },
-    ImportLegacy {
         #[arg(long, default_value = ".")]
         root: PathBuf,
     },
@@ -2506,9 +2502,6 @@ fn cmd_memory(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError
         MemoryAction::Check { root } => {
             cort::memory_store::check(&root).map_err(memory_read_error)?
         }
-        MemoryAction::ImportLegacy { root } => {
-            json!({"imported":cort::memory_store::import_legacy(&root).map_err(memory_ledger_error)?})
-        }
     };
     Ok(Emit {
         render_command: None,
@@ -2558,29 +2551,19 @@ fn memory_ledger_error(error: cort::memory_store::LedgerError) -> CortError {
             json!({"kind":kind.as_str(),
                 "message":format!("not recorded: {}; nothing was saved locally; re-run the same command when the database is reachable",kind.as_str())}),
         ),
-        LedgerError::CommittedUnverified { id: Some(id), kind } => CortError::new(
+        LedgerError::CommittedUnverified { id, kind } => CortError::new(
             "memory_committed_unverified",
             json!({"id":id,"kind":kind.as_str(),
                 "message":format!("committed_unverified: {}; {id} was written but could not be read back; run `cort memory check` when the database is readable",kind.as_str())}),
         ),
-        LedgerError::CommittedUnverified { id: None, kind } => CortError::new(
-            "memory_committed_unverified",
-            json!({"kind":kind.as_str(),
-                "message":format!("committed_unverified: {}; import may have written rows but could not be checked; re-running import-legacy is safe because it is idempotent",kind.as_str())}),
-        ),
         LedgerError::OutcomeUnknown {
-            id: Some(id),
+            id,
             key: Some(key),
             kind,
         } => CortError::new(
             "memory_outcome_unknown",
             json!({"id":id,"key":key,"kind":kind.as_str(),
                 "message":format!("outcome unknown: {}; {id} may or may not have been written; run `cort memory recall \"{key}\"` before re-running",kind.as_str())}),
-        ),
-        LedgerError::OutcomeUnknown { id: None, kind, .. } => CortError::new(
-            "memory_outcome_unknown",
-            json!({"kind":kind.as_str(),
-                "message":format!("outcome unknown: {}; import may or may not have written rows; re-running import-legacy is safe because it is idempotent",kind.as_str())}),
         ),
         LedgerError::OutcomeUnknown { .. } => memory_error("invalid memory outcome".into()),
         LedgerError::SupersedesMissing { superseded } => {
@@ -3204,7 +3187,7 @@ mod tests {
             ),
             (
                 LedgerError::OutcomeUnknown {
-                    id: Some("old".into()),
+                    id: "old".into(),
                     key: None,
                     kind: ErrorKind::Timeout,
                 },

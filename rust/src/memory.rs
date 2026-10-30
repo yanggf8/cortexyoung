@@ -1,4 +1,4 @@
-//! Reviewed memory entries, source checks, and explicit import of the older Git JSON ledger.
+//! Reviewed memory entries and source checks.
 //! `memory_store` reads and writes the shared database.
 
 use serde::{Deserialize, Serialize};
@@ -10,7 +10,6 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const SCHEMA: u32 = 1;
-const LEDGER_PATH: &str = ".claudecat/memory.json";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MemoryEntry {
@@ -77,36 +76,6 @@ pub struct MemoryRecall {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sync_status: Option<String>,
     pub hits: Vec<MemoryHit>,
-}
-
-pub fn ledger_path(root: &Path) -> PathBuf {
-    root.join(LEDGER_PATH)
-}
-
-pub fn load(root: &Path) -> Result<MemoryLedger, String> {
-    let path = ledger_path(root);
-    reject_ledger_symlinks(root)?;
-    let body = match fs::read_to_string(&path) {
-        Ok(body) => body,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(MemoryLedger::default()),
-        Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
-    };
-    let ledger: MemoryLedger =
-        serde_json::from_str(&body).map_err(|e| format!("cannot parse {}: {e}", path.display()))?;
-    validate(&ledger)?;
-    Ok(ledger)
-}
-
-fn reject_ledger_symlinks(root: &Path) -> Result<(), String> {
-    for path in [root.join(".claudecat"), ledger_path(root)] {
-        if fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
-            return Err(format!(
-                "memory path must not be a symlink: {}",
-                path.display()
-            ));
-        }
-    }
-    Ok(())
 }
 
 pub(crate) fn validate(ledger: &MemoryLedger) -> Result<(), String> {
@@ -291,10 +260,6 @@ pub(crate) fn active_entries(ledger: &MemoryLedger) -> Vec<&MemoryEntry> {
         .filter(|entry| !replaced.contains(entry.id.as_str()))
         .collect()
 }
-
-// The JSON ledger is read-only now (`load`, for `cort memory import-legacy`). Its writer and reader
-// had no caller left once the Turso store took over, and a writer that stamps provenance fields
-// the older ClaudeCat client drops is how one id could later import with two different bodies.
 
 pub(crate) fn recall_ledger(
     root: &Path,
