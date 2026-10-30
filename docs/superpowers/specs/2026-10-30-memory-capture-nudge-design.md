@@ -85,8 +85,12 @@ quoted the marker verbatim. The payload carried `tool_input.file_path`, `transcr
    copied from the file (the row is uploaded as telemetry): `nudged_project`, `nudged_feedback`,
    `type_user`, `type_reference`, `type_other`, `no_type`, `read_failed`, `index_file`,
    `not_memory`, `not_configured`, `not_claude`. Uptake is
-   then measured by rerunning the transcript classification above (to become an `evals` subcommand
-   if it is kept): the share of memory-writing turns that end private-only, 7 of 16 (44%) before.
+   measured by `cort-evals capture-gap`: the share of memory-writing turns that end private-only.
+   Its baseline is 4 of 9 (44%) with `--project` naming this checkout's Claude Code project
+   directory, `--since 2026-10-27T00:00:00Z --until 2026-10-30T07:20:00Z`, on NUC11i5; the table
+   above came from a
+   looser throwaway classification (any user-role text, `MEMORY.md` and Bash writes counted) and
+   is not comparable with later runs.
 
 ## Contract change
 

@@ -8,6 +8,7 @@
 //!   cort-evals summarize     <rows.json>... [--strict]
 //!   cort-evals demand        [--claude-dir DIR] [--codex-dir DIR] [--exclude a,b]
 //!                            [--show] [--out FILE]
+//!   cort-evals capture-gap   [--claude-dir DIR] [--project NAME] [--since RFC3339] [--until RFC3339] [--out FILE] [--show]
 //!   cort-evals memory-uptake [--claude-dir DIR] [--since RFC3339] [--out FILE] [--private DIR [--sample N] [--seed S]] [--judged FILE [--audit-seed S]]
 //!   cort-evals cost-audit    --since UTC --until UTC [--claude-dir DIR] [--out FILE]
 //!   cort-evals cost-collect  [--day YYYY-MM-DD] [--claude-dir DIR]
@@ -94,6 +95,14 @@ const GATE_AUDIT_FLAGS: &[&str] = &["--venue", "--examples", "--report"];
 const COST_AUDIT_FLAGS: &[&str] = &["--since", "--until", "--claude-dir", "--out"];
 const COST_COLLECT_FLAGS: &[&str] = &["--day", "--days", "--claude-dir", "--out-dir", "--force"];
 const COST_TRIAL_FLAGS: &[&str] = &["--file"];
+const CAPTURE_GAP_FLAGS: &[&str] = &[
+    "--claude-dir",
+    "--project",
+    "--since",
+    "--until",
+    "--out",
+    "--show",
+];
 const SUMMARIZE_FLAGS: &[&str] = &["--strict"];
 const DEMAND_FLAGS: &[&str] = &[
     "--claude-dir",
@@ -114,12 +123,13 @@ const UPTAKE_FLAGS: &[&str] = &[
 ];
 
 const USAGE_TOP: &str =
-    "usage: cort-evals <run-agents|verify-impact|summarize|demand|memory-uptake|recall-exp|cost-audit|cost-collect|cost-trial|gate-audit|gate> [options]";
+    "usage: cort-evals <run-agents|verify-impact|summarize|demand|capture-gap|memory-uptake|recall-exp|cost-audit|cost-collect|cost-trial|gate-audit|gate> [options]";
 const USAGE_RUN_AGENTS: &str = "usage: cort-evals run-agents --venue DIR [--tasks FILE] [--only ID[,ID...]] [--arms a,b] [--max-turns N] [--config-dir DIR] [--cache-dir DIR] [--jail-dir DIR] [--jail] [--out DIR] [--concurrency N] [--delay-secs N]";
 const USAGE_VERIFY_IMPACT: &str =
     "usage: cort-evals verify-impact --repo DIR --symbols A,B [--depth N]";
 const USAGE_SUMMARIZE: &str = "usage: cort-evals summarize [--strict] rows.json [rows.json...]";
 const USAGE_DEMAND: &str = "usage: cort-evals demand [--claude-dir DIR] [--codex-dir DIR] [--exclude a,b,c] [--out FILE] [--show]";
+const USAGE_CAPTURE_GAP: &str = "usage: cort-evals capture-gap [--claude-dir DIR] [--project NAME] [--since RFC3339] [--until RFC3339] [--out FILE] [--show]  (aggregate-only share of memory-writing turns that skipped the ledger; --show lists the memory-writing turns on stderr)";
 const USAGE_UPTAKE: &str = "usage: cort-evals memory-uptake [--claude-dir DIR] [--since RFC3339] [--out FILE] [--private DIR [--sample N] [--seed S]] [--judged FILE [--audit-seed S]]  (aggregate-only report; --private stores readable detail outside git)";
 const USAGE_COST_AUDIT: &str = "usage: cort-evals cost-audit --since YYYY-MM-DDTHH:MM:SSZ --until YYYY-MM-DDTHH:MM:SSZ [--claude-dir DIR] [--out FILE]  (read-only Claude Code cost census; no model calls)";
 const USAGE_COST_COLLECT: &str = "usage: cort-evals cost-collect [--day YYYY-MM-DD | --days 1..90] [--claude-dir DIR] [--out-dir DIR] [--force]  (persist daily aggregates before transcript retention deletes them; default last seven complete UTC days, skipping existing files; no model calls)";
@@ -844,6 +854,51 @@ fn demand_main(argv: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+fn capture_gap_main(argv: &[String]) -> Result<(), String> {
+    guard_options(argv, CAPTURE_GAP_FLAGS, USAGE_CAPTURE_GAP)?;
+    for (i, arg) in argv.iter().enumerate() {
+        if CAPTURE_GAP_FLAGS.contains(&arg.as_str())
+            && arg != "--show"
+            && argv
+                .get(i + 1)
+                .is_none_or(|v| v.is_empty() || v.starts_with("--"))
+        {
+            return Err(format!("{arg} needs a value"));
+        }
+    }
+    let dir = if has(argv, "--claude-dir") {
+        at(argv, "--claude-dir", "")
+    } else {
+        let home = std::env::var("HOME")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .ok_or("HOME is unset: pass --claude-dir explicitly")?;
+        format!("{home}/.claude/projects")
+    };
+    let project = has(argv, "--project").then(|| at(argv, "--project", ""));
+    let since = has(argv, "--since").then(|| at(argv, "--since", ""));
+    let until = has(argv, "--until").then(|| at(argv, "--until", ""));
+    let mut report = cort_evals::capture_gap::scan(
+        Path::new(&dir),
+        project.as_deref(),
+        since.as_deref(),
+        until.as_deref(),
+        has(argv, "--show"),
+    )?;
+    stamp_machine(&mut report);
+    let body = format!(
+        "{}\n",
+        serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?
+    );
+    if has(argv, "--out") {
+        let out = at(argv, "--out", "");
+        std::fs::write(&out, body).map_err(|e| format!("{out}: {e}"))?;
+    } else {
+        print!("{body}");
+    }
+    Ok(())
+}
+
 fn uptake_main(argv: &[String]) -> Result<(), String> {
     guard_options(argv, UPTAKE_FLAGS, USAGE_UPTAKE)?;
     // Every uptake flag takes a value; a missing one would fall back to a default and change the
@@ -1060,6 +1115,7 @@ fn main() {
         Some("verify-impact") => verify_impact_main(&argv[1..]),
         Some("summarize") => summarize_main(&argv[1..]),
         Some("demand") => demand_main(&argv[1..]),
+        Some("capture-gap") => capture_gap_main(&argv[1..]),
         Some("memory-uptake") => uptake_main(&argv[1..]),
         Some("recall-exp") => recall_exp_main(&argv[1..]),
         Some("gate-audit") => gate_audit_main(&argv[1..]),
@@ -1078,6 +1134,7 @@ fn main() {
                 println!("  {USAGE_VERIFY_IMPACT}");
                 println!("  {USAGE_SUMMARIZE}");
                 println!("  {USAGE_DEMAND}");
+                println!("  {USAGE_CAPTURE_GAP}");
                 println!("  {USAGE_UPTAKE}");
                 println!("  {USAGE_RECALL_EXP}");
                 println!("  {USAGE_GATE_AUDIT}");
@@ -1126,6 +1183,10 @@ mod option_guard {
         for flag in RUN_AGENTS_FLAGS {
             assert!(check_flags(&v(&[flag, "x"]), RUN_AGENTS_FLAGS, USAGE_RUN_AGENTS).is_ok());
         }
+        for flag in CAPTURE_GAP_FLAGS {
+            assert!(check_flags(&v(&[flag, "x"]), CAPTURE_GAP_FLAGS, USAGE_CAPTURE_GAP).is_ok());
+        }
+        assert!(check_flags(&v(&["--unknown"]), CAPTURE_GAP_FLAGS, USAGE_CAPTURE_GAP).is_err());
         assert!(check_flags(
             &v(&["--strict", "rows.json"]),
             SUMMARIZE_FLAGS,
@@ -1344,6 +1405,7 @@ mod whitelist_coverage {
                         .chain(VERIFY_IMPACT_FLAGS.iter())
                         .chain(SUMMARIZE_FLAGS.iter())
                         .chain(DEMAND_FLAGS.iter())
+                        .chain(CAPTURE_GAP_FLAGS.iter())
                         .chain(UPTAKE_FLAGS.iter())
                         .chain(RECALL_EXP_FLAGS.iter())
                         .chain(GATE_AUDIT_FLAGS.iter())

@@ -484,7 +484,7 @@ pub fn scrub(text: &str) -> String {
 
 /// The developer's own account name, used as a redaction target: `project_of_cwd` labels the home
 /// directory with its basename, which is a username rather than a repo.
-fn home_user() -> Option<String> {
+pub(crate) fn home_user() -> Option<String> {
     std::env::var("HOME").ok().and_then(|h| {
         Path::new(&h)
             .file_name()

@@ -623,7 +623,7 @@ fn segments(command: &str) -> Vec<Vec<String>> {
     flush_segment(&mut words, &mut out);
     out
 }
-fn command_purpose(command: &str) -> (bool, bool, bool) {
+pub(crate) fn command_purpose(command: &str) -> (bool, bool, bool) {
     let mut flags = (false, false, false);
     for words in segments(command) {
         let arg = |i: usize| words.get(i).map(String::as_str);

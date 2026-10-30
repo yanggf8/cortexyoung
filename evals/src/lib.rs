@@ -5,6 +5,7 @@
 //! holding `cort` reach the labelled answer for less than an agent holding a shell?
 
 pub mod arms;
+pub mod capture_gap;
 pub mod cost_audit;
 pub mod cost_trial;
 pub mod demand;
