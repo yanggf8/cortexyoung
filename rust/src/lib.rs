@@ -31,6 +31,7 @@ pub mod render;
 pub mod scan;
 pub mod settings;
 pub mod settings_kimi;
+pub mod settings_sidecar;
 pub mod settings_toml;
 pub mod staleness;
 pub mod telemetry;

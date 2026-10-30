@@ -540,16 +540,32 @@ fn a_trusted_hash_at_our_position_reads_as_trusted() {
     assert!(installed_entry(&p, HookEvent::Suggest).unwrap().1);
 }
 
-/// The path half of the key is Codex's spelling of the same file, so it is deliberately not
-/// compared -- a trust entry written against a symlinked or `CODEX_HOME`-relative spelling still
-/// counts. Anchoring recognition to two processes agreeing on how to write a path is the mistake
-/// §7/§9 already paid for once on the command line.
+/// The path half of the key is deliberately compared only down to the file's own basename: a
+/// trust entry written against a symlinked or `CODEX_HOME`-relative spelling of *this same file*
+/// still counts. Anchoring recognition to two processes agreeing on how to write a full path is
+/// the mistake §7/§9 already paid for once on the command line.
 #[test]
-fn the_path_half_of_the_key_is_not_compared() {
+fn a_different_spelling_of_the_same_basename_still_counts() {
     let (_d, p) = tmp();
     install_hook(&p, "/bin/cort hook-suggest", HookEvent::Suggest).unwrap();
     append(&p, &trust_block("/some/other/spelling/config.toml", 0, 0));
     assert!(installed_entry(&p, HookEvent::Suggest).unwrap().1);
+}
+
+/// But another hook-bearing file's trust row must not vouch for ours. Codex keys `hooks.state`
+/// rows for `~/.codex/hooks.json` too (the external-agent import-sync copy, 2026-09-29), and a
+/// bare `:pre_tool_use:0:0` tail matches `hooks.json:pre_tool_use:0:0` exactly as it matches
+/// `config.toml:pre_tool_use:0:0` — a trust decision Codex gave to a different file's entry read
+/// as trust for ours. The basename in the suffix is what keeps the two apart.
+#[test]
+fn a_hooks_json_trust_row_no_longer_vouches_for_config_toml() {
+    let (_d, p) = tmp();
+    install_hook(&p, "/bin/cort hook-suggest", HookEvent::Suggest).unwrap();
+    append(&p, &trust_block("/Users/x/.codex/hooks.json", 0, 0));
+    assert!(
+        !installed_entry(&p, HookEvent::Suggest).unwrap().1,
+        "another file's trust row read as ours"
+    );
 }
 
 /// Position is compared, though: trust granted to somebody else's entry is not ours. `0:0` must

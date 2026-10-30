@@ -1,12 +1,19 @@
 //! Wiring `cort hook-suggest` into Codex's `~/.codex/config.toml`, and taking it back out.
 //!
-//! Codex loads a `PreToolUse` hook only from `[[hooks.PreToolUse]]` in `config.toml` --
-//! `~/.codex/hooks/hooks.json` and `~/.codex/hooks.json` are both silently ignored, and Codex's
-//! payload is byte-for-byte Claude Code's shape (established 2026-09-02,
-//! `docs/2026-09-02-hook-wiring-correction.md` §12). Until this module, the working Codex hook was
-//! deliberately left unwired: hand-added outside `install.sh`, absent from the manifest, invisible
-//! to `--check` -- the same "a route that has to be wired by hand is a route that is not wired"
-//! failure the rest of that document is about, one harness later.
+//! Codex loads a `PreToolUse` hook only from `[[hooks.PreToolUse]]` in `config.toml` -- and,
+//! contrary to what this file believed between 2026-09-02 and 2026-09-29, `~/.codex/hooks.json`
+//! is *not* dead weight on every Codex. The claim that both `~/.codex/hooks/hooks.json` and
+//! `~/.codex/hooks.json` are silently ignored was established on codex-cli 0.152.1
+//! (`docs/2026-09-02-hook-wiring-correction.md` §12) and held for it; the 2026-09-23 desktop
+//! build (153.0.8010.53) loads `hooks.json`, writes `[hooks.state]` trust rows keyed to it, and
+//! -- when `[desktop].external-agent-import-sync-enabled` is true -- *generates* it by copying
+//! `~/.claude/settings.json`'s whole hooks table (binary string table:
+//! `codex.external_agent_config.import`, "failed to serialize hooks.json"). An import copy of
+//! our Claude Code entries therefore double-fires every hook beside the entry here, mis-attributed
+//! to `--harness claude-code`. `cort hook-install --all` sweeps that sidecar
+//! (`settings_sidecar`) and turns the sync off; `trusted_at` below anchors trust recognition to
+//! this file's basename so a `hooks.json` trust row can no longer vouch for an entry here.
+//! `docs/2026-09-29-codex-hooks-json-import-sync.md`.
 //!
 //! The group shape below -- a `matcher` for tool events, no matcher for SessionStart, and a nested `hooks` array of
 //! `{type, command, timeout}` entries -- mirrors `settings.rs`'s JSON shape field for field. That is
@@ -27,12 +34,12 @@
 //! (`docs/2026-09-02-hook-wiring-correction.md` §7, §9), and a second copy of it here is a second
 //! place for the same bug to reappear.
 
+use crate::settings::{backup_as, Change, Outcome};
 use crate::settings::{events_for, is_ours_for, HookEvent, EDIT_MATCHER};
-use crate::settings::{Change, Outcome};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use toml_edit::{value, ArrayOfTables, DocumentMut, Item, Table};
+use toml_edit::{value, ArrayOfTables, DocumentMut, Item, Table, Value};
 
 /// The tool this hook is matched to on Codex.
 ///
@@ -103,6 +110,17 @@ impl std::fmt::Display for SettingsError {
 impl From<io::Error> for SettingsError {
     fn from(e: io::Error) -> Self {
         SettingsError::Io(e)
+    }
+}
+
+/// A faithful lift of the JSON side's error into this module's own: `sweep_trust_and_sync` takes
+/// `backup_as` from `settings`, and its failures are the same two kinds this module names.
+impl From<crate::settings::SettingsError> for SettingsError {
+    fn from(e: crate::settings::SettingsError) -> Self {
+        match e {
+            crate::settings::SettingsError::Io(io) => SettingsError::Io(io),
+            crate::settings::SettingsError::Unparsable(m) => SettingsError::Unparsable(m),
+        }
     }
 }
 
@@ -418,7 +436,7 @@ pub fn installed_entry(path: &Path, event: HookEvent) -> Option<(String, bool)> 
         for (hi, h) in entries.iter().enumerate() {
             if let Some(c) = h.get("command").and_then(Item::as_str) {
                 if is_ours_for(c, event) {
-                    return Some((c.to_string(), trusted_at(hooks, gi, hi, event)));
+                    return Some((c.to_string(), trusted_at(path, hooks, gi, hi, event)));
                 }
             }
         }
@@ -431,20 +449,27 @@ pub fn installed_command(path: &Path, event: HookEvent) -> Option<String> {
     installed_entry(path, event).map(|(command, _)| command)
 }
 
-/// Does `hooks.state` carry a `trusted_hash` for the entry at `gi`/`hi`?
+/// Does `hooks.state` carry a `trusted_hash` for the entry at `gi`/`hi` of *this* settings file?
 ///
-/// Only the `:pre_tool_use:<gi>:<hi>` tail of the key is matched. The half in front of it is
-/// Codex's spelling of the same file we were handed, and making recognition of our own entry
-/// depend on two processes agreeing on how to write a path is the mistake §7/§9 already paid for
-/// once on the command line. The tail cannot collide: `:pre_tool_use:0:0` is not a suffix of
-/// `:pre_tool_use:10:0`.
+/// Codex's key shape is `<absolute path>:<event>:<gi>:<hi>`. Only the tail from the settings
+/// file's own basename onward is matched -- `<basename>:<event>:<gi>:<hi>` -- never the full path.
+/// That is deliberate in both directions. Comparing the full path would make recognition of our
+/// own entry depend on two processes agreeing on how to write a path, the mistake §7/§9 already
+/// paid for once on the command line; but matching the bare `:<event>:<gi>:<hi>` tail was its
+/// own bug, found on 2026-09-29: Codex also keys trust rows for `~/.codex/hooks.json` (the
+/// external-agent import-sync copy, see the module head), and `hooks.json:pre_tool_use:0:0`
+/// ends with `pre_tool_use:0:0` exactly as `config.toml:pre_tool_use:0:0` does -- so a trust
+/// decision Codex gave to a *different file's* entry vouched for ours, and `--status` reported
+/// trusted. The basename sits between the two failure modes: path spellings in front of it
+/// still don't matter, while a row written for another hook-bearing file can no longer be
+/// mistaken for ours.
 ///
 /// Presence is the whole of what this can report, and the doc comment on `installed_entry` is
 /// where that limit is stated rather than hidden: the hash covers something only Codex can
-/// recompute, so an entry trusted under an *older* command reads here exactly like a current one.
-/// That is why `install.sh` says trust has to be renewed at the moment it rewrites the command,
-/// instead of trying to detect it afterwards.
-fn trusted_at(hooks: &Table, gi: usize, hi: usize, event: HookEvent) -> bool {
+/// recompute, so an entry trusted under an *older* command reads here exactly like a current
+/// one. That is why `install.sh` says trust has to be renewed at the moment it rewrites the
+/// command, instead of trying to detect it afterwards.
+fn trusted_at(path: &Path, hooks: &Table, gi: usize, hi: usize, event: HookEvent) -> bool {
     let Some(state) = hooks.get("state").and_then(Item::as_table) else {
         return false;
     };
@@ -453,9 +478,18 @@ fn trusted_at(hooks: &Table, gi: usize, hi: usize, event: HookEvent) -> bool {
         HookEvent::Refresh => "post_tool_use",
         HookEvent::Recall => "session_start",
     };
-    let suffix = format!(":{key}:{gi}:{hi}");
+    let basename = path
+        .file_name()
+        .map(|b| b.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let suffix = format!("{basename}:{key}:{gi}:{hi}");
     state.iter().any(|(key, entry)| {
-        key.ends_with(&suffix)
+        // The basename must be a complete path segment of the key: whatever precedes it is a
+        // separator, or there is nothing before it at all. Matching the bare tail alone would
+        // let a trust row for a file named `myhooks.json` vouch for `hooks.json` -- a prefix,
+        // not a basename.
+        ((key.ends_with(&suffix) && key[..key.len() - suffix.len()].ends_with('/'))
+            || key == suffix)
             && entry
                 .as_table_like()
                 .and_then(|t| t.get("trusted_hash"))
@@ -522,4 +556,150 @@ pub fn entry_shape_ok(path: &Path, event: HookEvent, expected_command: &str) -> 
         }
     }
     false
+}
+
+/// What is `[desktop].external-agent-import-sync-enabled` set to, if the key is there at all?
+/// Read-only; `--status` reports it because the sync is what re-creates the sidecar this crate
+/// sweeps (see `settings_sidecar`).
+pub fn import_sync_flag(path: &Path) -> Result<Option<bool>, SettingsError> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let doc = read_doc(path)?;
+    Ok(doc
+        .as_table()
+        .get("desktop")
+        .and_then(Item::as_table)
+        .and_then(|t| t.get("external-agent-import-sync-enabled"))
+        .and_then(Item::as_value)
+        .and_then(Value::as_bool))
+}
+
+/// Is this `[hooks.state]` key one of Codex's trust rows for a file with one of `basenames`?
+///
+/// The key shape is `<absolute path>:<event>:<gi>:<hi>`, so the tail after the last three colons
+/// is what identifies a trust row at all; the last two segments must be numeric, which is what
+/// keeps plugin rows (`browser@openai-bundled:plugin.json#hooks[0]:stop:0:0`) -- whose "event"
+/// is `stop` and whose path part names no hook file of ours -- from ever matching a basename.
+fn state_key_names_basename(key: &str, basenames: &[&str]) -> bool {
+    let mut parts = key.rsplitn(4, ':');
+    let hi = parts.next();
+    let gi = parts.next();
+    let event = parts.next();
+    let path_part = parts.next();
+    let numeric = |s: Option<&str>| s.is_some_and(|v| v.parse::<usize>().is_ok());
+    if !numeric(hi) || !numeric(gi) {
+        return false;
+    }
+    match (event, path_part) {
+        (Some(ev), Some(p)) if !ev.is_empty() => Path::new(p)
+            .file_name()
+            .map(|b| basenames.iter().any(|n| b == *n))
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
+/// One read-modify-write pass over `config.toml` on behalf of the sidecar sweep
+/// (`settings_sidecar`): drop every `[hooks.state]` trust row keyed to one of `sidecar_basenames`,
+/// and — when `flip_sync_off` — turn `[desktop].external-agent-import-sync-enabled` to `false`.
+///
+/// Both edits share one backup and one write, not because either is expensive but because they
+/// happen in the same second as `install_hook`'s own backup: two `.bak.<same stamp>` files are
+/// one file, and the second copy silently erases the first. That is also why the backup tail is
+/// `.sweep`-suffixed rather than `backup`'s plain stamp.
+///
+/// Dropping rows is keyed to what the sweep *did to the sidecar*, not to what it found here:
+/// once entries are removed from `hooks.json`, every index below them shifts, and Codex's own
+/// `hooks.json:<event>:<gi>:<hi>` rows silently re-aim at whatever moved into that slot. A row
+/// for an entry that no longer exists is an orphan; a row for an entry that *moved* is worse --
+/// it vouches for somebody else's position. Both go. Rows for this file, for plugins, and for
+/// any sidecar that was not changed are not ours to drop.
+pub fn sweep_trust_and_sync(
+    path: &Path,
+    sidecar_basenames: &[&str],
+    flip_sync_off: bool,
+) -> Result<(usize, Change, Option<PathBuf>), SettingsError> {
+    if !path.exists() {
+        return Ok((0, Change::NotPresent, None));
+    }
+    let mut doc = read_doc(path)?;
+    let mut dropped = 0usize;
+
+    if let Some(state) = doc
+        .as_table_mut()
+        .get_mut("hooks")
+        .and_then(Item::as_table_mut)
+        .and_then(|t| t.get_mut("state"))
+        .and_then(Item::as_table_mut)
+    {
+        let dead: Vec<String> = state
+            .iter()
+            .map(|(k, _)| k.to_owned())
+            .filter(|k| state_key_names_basename(k, sidecar_basenames))
+            .collect();
+        for k in &dead {
+            state.remove(k);
+            dropped += 1;
+        }
+    }
+    // A `state` table this call emptied still prints its `[hooks.state]` header -- toml_edit's
+    // `is_empty` counts the table itself, so `prune_empty_scaffolding` would leave the shell
+    // behind and `hooks` would never quite vanish. Only a table we emptied goes.
+    if dropped > 0 {
+        let state_emptied = doc
+            .as_table_mut()
+            .get_mut("hooks")
+            .and_then(Item::as_table_mut)
+            .and_then(|t| t.get_mut("state"))
+            .and_then(Item::as_table_mut)
+            .map(|t| t.is_empty());
+        if state_emptied == Some(true) {
+            if let Some(h) = doc
+                .as_table_mut()
+                .get_mut("hooks")
+                .and_then(Item::as_table_mut)
+            {
+                h.remove("state");
+            }
+        }
+    }
+
+    let mut sync = Change::NotPresent;
+    if flip_sync_off {
+        let current = doc
+            .as_table()
+            .get("desktop")
+            .and_then(Item::as_table)
+            .and_then(|d| d.get("external-agent-import-sync-enabled"))
+            .and_then(Item::as_value)
+            .and_then(Value::as_bool);
+        sync = match current {
+            Some(true) => {
+                if let Some(d) = doc
+                    .as_table_mut()
+                    .get_mut("desktop")
+                    .and_then(Item::as_table_mut)
+                {
+                    d.insert("external-agent-import-sync-enabled", value(false));
+                }
+                Change::Updated
+            }
+            Some(false) => Change::AlreadyPresent,
+            None => Change::NotPresent,
+        };
+    }
+
+    if dropped == 0 && !sync.wrote() {
+        return Ok((0, sync, None));
+    }
+    // A `hooks` table that held only the dropped `state` is scaffolding this call emptied.
+    prune_empty_scaffolding(&mut doc);
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let bak = backup_as(path, &format!("toml.bak.{stamp}.sweep"))?;
+    write_doc(path, &doc)?;
+    Ok((dropped, sync, bak))
 }

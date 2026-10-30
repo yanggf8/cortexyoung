@@ -1783,6 +1783,194 @@ fn the_lean_hook_report_has_six_non_empty_fields_on_every_line() {
     );
 }
 
+// --- The Codex sidecar sweep as `hook-install --all` runs it -------------------------------------
+//
+// `~/.codex/hooks.json` is the external-agent import-sync's copy of `~/.claude/settings.json`'s
+// hooks table, and current Codex loads it — so an install that only managed `config.toml` left a
+// double-firing second hook in place. These tests seed that copy in a temp `CODEX_HOME` and pin
+// three contracts: the lean TSV gains no column for any of it (install.sh reads it per field),
+// the JSON report carries the sweep, and `--remove` takes ours out of the sidecar without taking
+// the user's imported entries.
+//
+// `CORT_CODEX_RUNNING=0` makes the desktop-app gate deterministic — the sweep refuses to mutate
+// while Codex is open, and on a developer machine it is always open.
+
+/// The import copy: one cort entry per event (as `settings.json` carries them, wrong harness flag
+/// and all) plus a foreign iterm2 group, and an event with no cort entry at all.
+fn sidecar_seed_hooks() -> Value {
+    json!({
+        "hooks": {
+            "PreToolUse": [
+                {"matcher": "Bash", "hooks": [
+                    {"type": "command", "command": "/bin/cort hook-suggest --harness claude-code", "timeout": 5}
+                ]},
+                {"hooks": [{"type": "command", "command": "/Users/x/.config/iterm2/cc-status"}]}
+            ],
+            "PostToolUse": [
+                {"matcher": "Bash|Edit|Write|MultiEdit|NotebookEdit", "hooks": [
+                    {"type": "command", "command": "/bin/cort hook-refresh --harness claude-code", "timeout": 5}
+                ]},
+                {"hooks": [{"type": "command", "command": "/Users/x/.config/iterm2/cc-status"}]}
+            ],
+            "Stop": [
+                {"hooks": [{"type": "command", "command": "/Users/x/.config/iterm2/cc-status"}]}
+            ]
+        }
+    })
+}
+
+fn seed_sidecar(home: &Path) {
+    let claude = home.join(".claude").join("settings.json");
+    fs::create_dir_all(claude.parent().unwrap()).unwrap();
+    // The live source the copy signature is checked against: same table.
+    let live: Value = json!({"model": "x"});
+    let mut root = live.clone();
+    root["hooks"] = sidecar_seed_hooks()["hooks"].clone();
+    fs::write(&claude, serde_json::to_string_pretty(&root).unwrap()).unwrap();
+    let codex = home.join(".codex");
+    fs::create_dir_all(&codex).unwrap();
+    fs::write(
+        codex.join("hooks.json"),
+        serde_json::to_string_pretty(&sidecar_seed_hooks()).unwrap(),
+    )
+    .unwrap();
+}
+
+fn run_hook_install_with_env(args: &[&str], home: &Path, env: &[(&str, &str)]) -> Run {
+    let mut cmd = Command::new(cort_bin());
+    cmd.arg("hook-install")
+        .args(args)
+        .current_dir(home)
+        .env("HOME", home)
+        .env("CLAUDE_SKILL_HOME", home.join(".claude"))
+        .env("CODEX_HOME", home.join(".codex"))
+        .env("KIMI_CODE_HOME", home.join(".kimi-code"));
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let out = cmd.output().expect("spawn cort hook-install");
+    Run {
+        code: out.status.code().unwrap_or(1),
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+    }
+}
+
+#[test]
+fn the_lean_report_gains_no_column_for_the_sidecar_sweep() {
+    let home = tempfile::Builder::new()
+        .prefix("cort-hook-sidecar-lean-")
+        .tempdir()
+        .unwrap();
+    let h = home.path();
+    seed_sidecar(h);
+
+    let r = run_hook_install_with_env(
+        &["--all", "--lean", "--command-prefix", "/bin/cort"],
+        h,
+        &[("CORT_CODEX_RUNNING", "0")],
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let lines: Vec<&str> = r.stdout.lines().filter(|l| !l.is_empty()).collect();
+    let expected = cort::settings::HOOK_HARNESSES
+        .iter()
+        .map(|h| cort::settings::events_for(h).len())
+        .sum::<usize>();
+    assert_eq!(
+        lines.len(),
+        expected,
+        "the TSV is the wired hook entries, no more: {lines:?}"
+    );
+    for l in &lines {
+        let f: Vec<&str> = l.split('\t').collect();
+        assert_eq!(f.len(), 6, "no sweep column may appear: {l:?}");
+        assert!(f.iter().all(|v| !v.is_empty()), "no empty field: {l:?}");
+    }
+
+    // And the sweep itself ran: the sidecar is empty of hooks, its non-hooks keys intact.
+    let sidecar: Value =
+        serde_json::from_str(&fs::read_to_string(h.join(".codex").join("hooks.json")).unwrap())
+            .unwrap();
+    assert!(sidecar.get("hooks").is_none(), "{sidecar}");
+}
+
+#[test]
+fn the_json_report_carries_the_sidecar_sweep() {
+    let home = tempfile::Builder::new()
+        .prefix("cort-hook-sidecar-json-")
+        .tempdir()
+        .unwrap();
+    let h = home.path();
+    seed_sidecar(h);
+
+    let r = run_hook_install_with_env(
+        &["--all", "--command-prefix", "/bin/cort"],
+        h,
+        &[("CORT_CODEX_RUNNING", "0")],
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let payload: Value = serde_json::from_str(&r.stdout).unwrap();
+    let sweep = payload
+        .get("codex_sidecar")
+        .unwrap_or_else(|| panic!("no codex_sidecar in: {}", r.stdout));
+    assert_eq!(sweep["mode"].as_str(), Some("install"));
+    assert_eq!(sweep["codex_running"].as_bool(), Some(false));
+    assert_eq!(
+        sweep["import_sync"]["was"].as_bool(),
+        None,
+        "no config.toml on this machine, so no flag to read"
+    );
+    let f = &sweep["files"][0];
+    assert_eq!(f["ours_removed"].as_u64(), Some(2));
+    assert_eq!(f["foreign_removed"].as_u64(), Some(3));
+    assert_eq!(f["foreign_all_copies"].as_bool(), Some(true));
+    assert_eq!(f["change"].as_str(), Some("removed"));
+}
+
+#[test]
+fn all_remove_sweeps_ours_from_the_sidecars_and_leaves_the_imports() {
+    let home = tempfile::Builder::new()
+        .prefix("cort-hook-sidecar-rm-")
+        .tempdir()
+        .unwrap();
+    let h = home.path();
+    seed_sidecar(h);
+    // Install first so there is something to uninstall.
+    let inst = run_hook_install_with_env(
+        &["--all", "--command-prefix", "/bin/cort"],
+        h,
+        &[("CORT_CODEX_RUNNING", "0")],
+    );
+    assert_eq!(inst.code, 0, "{}", inst.stderr);
+    // Install already swept the copy away; the sync would put it back, so that is exactly the
+    // state the uninstall has to be able to clean: seed it again.
+    seed_sidecar(h);
+
+    let r = run_hook_install_with_env(&["--all", "--remove"], h, &[("CORT_CODEX_RUNNING", "0")]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let payload: Value = serde_json::from_str(&r.stdout).unwrap();
+    assert_eq!(payload["codex_sidecar"]["mode"].as_str(), Some("uninstall"));
+    assert_eq!(
+        payload["codex_sidecar"]["files"][0]["ours_removed"].as_u64(),
+        Some(2),
+        "{}",
+        r.stdout
+    );
+
+    let sidecar: Value =
+        serde_json::from_str(&fs::read_to_string(h.join(".codex").join("hooks.json")).unwrap())
+            .unwrap();
+    let hooks = sidecar["hooks"].as_object().unwrap();
+    let rendered = serde_json::to_string(&hooks).unwrap();
+    assert!(
+        !rendered.contains("cort "),
+        "no cort entry survives uninstall: {rendered}"
+    );
+    assert!(
+        rendered.contains("cc-status"),
+        "the user's imported iterm2 hooks are not uninstall's to take: {rendered}"
+    );
+}
 fn git_in_fixture(root: &Path) {
     for args in [
         vec!["init", "-q"],
