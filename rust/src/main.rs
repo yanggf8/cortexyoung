@@ -65,7 +65,7 @@ fn usage_value() -> Value {
             "memory": "cort memory <configure|import-config|record|resolve|recall|status|check|notes|alias> [options]",
             "measure": "cort measure <configure|show|record|collect|health|status|cron|report> [options]  (uploads start at 2026-10-28 00:00 Taiwan time; collect: scan and upload the batch; --background appends at most one result to measure.log (none when skipped_busy) without stdout; health: observe recently used indexes and write local index_health_log, reading indexes only, with no network; --background appends the result to measure.log without stdout; status: read local collection state, -f json|lean; cron: manual install or removal of the legacy entry, no longer installed automatically; hook kick is the only automatic collection trigger; command_log and index_health_log keep uploaded rows 90 days and rows not yet uploaded 180 days, pruned when a new command is recorded; rows still not uploaded after 180 days are deleted and counted in measure status (pruned_unuploaded_rows) and measure.log)",
             "hook-suggest": "cort hook-suggest  (PreToolUse hook: records one fire row, kicks collection, and relays a configured gate's deny; not a verb to type)",
-            "hook-refresh": "cort hook-refresh  (PostToolUse hook: brings this project's index up to the tree after an edit; silent, never creates an index; not a verb to type)",
+            "hook-refresh": "cort hook-refresh  (PostToolUse hook: refreshes an existing index and may prompt on a private-memory save; not a verb to type)",
             "hook-recall": "cort hook-recall --harness <h>  (SessionStart hook: reads the shared memory database; not a verb to type)",
             "hook-gate": "cort hook-gate <set [--timeout-ms N] -- <argv...>|clear|status [-f json|lean]>",
             "hook-install": "cort hook-install [--all|--settings <path>] [--event pre|post|session] [--command <cmd>] [--remove|--status]  (installer-invoked hook wiring; not a verb to type)",
@@ -436,7 +436,10 @@ fn render_emit(emit: &Emit) -> String {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string()
-    } else if emit.render_command == Some("hook-recall") {
+    } else if matches!(
+        emit.render_command,
+        Some("hook-recall" | "hook-refresh-raw")
+    ) {
         emit.payload.as_str().unwrap_or_default().to_string()
     } else if emit.render_command == Some("hook-gate") && emit.format == Format::Lean {
         let p = &emit.payload;
@@ -1087,7 +1090,7 @@ fn harness_of(payload: &Value, declared: &str) -> (String, Option<String>) {
 }
 
 /// A `PostToolUse` hook on the edit tools, not a verb anyone types. It brings this project's index
-/// up to the tree it now describes, and says nothing either way.
+/// up to the tree it now describes, and may nudge on a private-memory save.
 ///
 /// Why it exists. The `PreToolUse` hook could already tell that the index was behind, and all it
 /// could do was say so -- and measured, saying so is worth almost nothing: 19 `cort index` runs
@@ -1105,7 +1108,8 @@ fn harness_of(payload: &Value, declared: &str) -> (String, Option<String>) {
 /// * **It gives up rather than wait.** Another refresh, or a real `cort index`, may hold the write
 ///   lock; a busy database is a reason to do nothing, not to block the agent's next tool call.
 ///   Nothing is lost -- the next edit refreshes it.
-/// * **It is silent and always succeeds.** Exit 0, `{}` on stdout, whatever happened. A
+/// * **It always succeeds.** Exit 0; silent except for a capture line on a qualifying
+///   private-memory save. Otherwise it prints `{}`. A
 ///   `PostToolUse` hook that reports failure would put an error in front of the user for a cache
 ///   they did not ask about, on a tool call that already succeeded.
 ///
@@ -1162,6 +1166,28 @@ fn cmd_hook_refresh(args: &[String], usage: &mut UsageEvent) -> Result<Emit, Cor
         }
     });
     let notes = cort::notes_kick::kick(edited_for_notes.as_deref());
+    let (capture, context) = cort::notes_kick::capture(
+        &cort::notes_kick::NotesKickPaths::current(),
+        &harness,
+        edited_for_notes.as_deref(),
+    );
+    // A nudge is written raw on one line (`hook-refresh-raw`), like hook-recall's answer; anything
+    // else stays the `{}` this hook has always printed.
+    let output = || match &context {
+        Some(text) => Emit {
+            payload: json!(format!(
+                "{}\n",
+                json!({"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":text}})
+            )),
+            format: Format::Lean,
+            render_command: Some("hook-refresh-raw"),
+        },
+        None => Emit {
+            payload: json!({}),
+            format: Format::Lean,
+            render_command: Some("hook-refresh"),
+        },
+    };
     // Every return from here on knows its harness, so every one kicks collection; `kick`
     // does its own upgrade check, which is why the stand-down below kicks too.
     let quiet = |outcome: &str, usage: &mut UsageEvent| {
@@ -1175,12 +1201,9 @@ fn cmd_hook_refresh(args: &[String], usage: &mut UsageEvent) -> Result<Emit, Cor
             "collect",
             cort::collect::kick(&harness),
         );
-        usage.args_summary = hook_args_tag(&row, "notes", notes);
-        Ok(Emit {
-            payload: json!({}),
-            format: Format::Lean,
-            render_command: Some("hook-refresh"),
-        })
+        let row = hook_args_tag(&row, "notes", notes);
+        usage.args_summary = hook_args_tag(&row, "capture", capture);
+        Ok(output())
     };
 
     // Upgrade stand-down (spec §3b). An upgrade holding admission exclusive is publishing a
@@ -1250,12 +1273,9 @@ fn cmd_hook_refresh(args: &[String], usage: &mut UsageEvent) -> Result<Emit, Cor
             row["reindexed"] = json!(r.files_reindexed);
             row["removed"] = json!(r.files_removed);
             let row = hook_args_tag(&row.to_string(), "collect", cort::collect::kick(&harness));
-            usage.args_summary = hook_args_tag(&row, "notes", notes);
-            Ok(Emit {
-                payload: json!({}),
-                format: Format::Lean,
-                render_command: Some("hook-refresh"),
-            })
+            let row = hook_args_tag(&row, "notes", notes);
+            usage.args_summary = hook_args_tag(&row, "capture", capture);
+            Ok(output())
         }
         Ok(_) => quiet("already_current", usage),
         Err(cort::indexer::IndexError::FullRebuildRequired { reasons }) => {
@@ -1267,12 +1287,9 @@ fn cmd_hook_refresh(args: &[String], usage: &mut UsageEvent) -> Result<Emit, Cor
             );
             row["reasons"] = json!(reasons);
             let row = hook_args_tag(&row.to_string(), "collect", cort::collect::kick(&harness));
-            usage.args_summary = hook_args_tag(&row, "notes", notes);
-            Ok(Emit {
-                payload: json!({}),
-                format: Format::Lean,
-                render_command: Some("hook-refresh"),
-            })
+            let row = hook_args_tag(&row, "notes", notes);
+            usage.args_summary = hook_args_tag(&row, "capture", capture);
+            Ok(output())
         }
         Err(_) => quiet("busy_or_failed", usage),
     }

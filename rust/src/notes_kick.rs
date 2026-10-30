@@ -3,6 +3,7 @@
 use crate::data_dir::write_atomic;
 use serde_json::{json, Value};
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -63,7 +64,7 @@ impl NotesSpawner for DetachedNotesSpawner {
     }
 }
 
-fn is_memory_edit(edited: &Path, projects: &Path) -> bool {
+pub fn is_memory_edit(edited: &Path, projects: &Path) -> bool {
     if edited.extension().is_none_or(|ext| ext != "md") {
         return false;
     }
@@ -80,6 +81,80 @@ fn is_memory_edit(edited: &Path, projects: &Path) -> bool {
         return false;
     };
     project.parent() == Some(projects.as_path())
+}
+
+/// The note's `metadata.type`, read by the same parser that uploads notes (`notes::frontmatter`),
+/// so the two can never disagree about a file. Only the first 8 KiB is read; a frontmatter block
+/// longer than that, or one never closed, has no type.
+fn memory_type(path: &Path) -> Result<Option<String>, ()> {
+    let mut head = Vec::new();
+    fs::File::open(path)
+        .and_then(|file| file.take(8192).read_to_end(&mut head))
+        .map_err(|_| ())?;
+    Ok(crate::notes::frontmatter(&String::from_utf8_lossy(&head)).kind)
+}
+
+#[cfg(test)]
+mod capture_tests {
+    use super::memory_type;
+    use std::fs;
+
+    #[test]
+    fn reads_metadata_type_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("note.md");
+        for (input, expected) in [
+            (
+                "---\nname: x\ndescription: a: b: c\nmetadata:\n  node_type: memory\n  type: project\n---\nbody",
+                Some("project"),
+            ),
+            ("---\nmetadata: \n  type: feedback\n---\n", Some("feedback")),
+            ("---\nmetadata:\n  node_type: project\n---\n", None),
+            ("---\ntype: feedback\n---\n", None),
+            ("no frontmatter\n", None),
+            ("---\nmetadata:\n  type: project\n", None),
+            ("---\r\nmetadata:\r\n  type: project\r\n---\r\nbody", Some("project")),
+        ] {
+            fs::write(&path, input).unwrap();
+            assert_eq!(memory_type(&path).unwrap().as_deref(), expected, "{input:?}");
+        }
+        assert!(memory_type(&dir.path().join("missing.md")).is_err());
+    }
+}
+
+/// Return a closed telemetry tag and, for qualifying saves, the hook context.
+pub fn capture(
+    paths: &NotesKickPaths,
+    harness: &str,
+    edited: Option<&Path>,
+) -> (&'static str, Option<String>) {
+    if harness != "claude-code" {
+        return ("not_claude", None);
+    }
+    let Some(path) = edited.filter(|p| is_memory_edit(p, &paths.claude_projects)) else {
+        return ("not_memory", None);
+    };
+    if path.file_name().is_some_and(|n| n == "MEMORY.md") {
+        return ("index_file", None);
+    }
+    if !paths.memory_config.is_file() {
+        return ("not_configured", None);
+    }
+    let kind = match memory_type(path) {
+        Err(()) => return ("read_failed", None),
+        Ok(None) => return ("no_type", None),
+        Ok(Some(kind)) => kind,
+    };
+    let tag = match kind.as_str() {
+        "project" => "nudged_project",
+        "feedback" => "nudged_feedback",
+        "user" => return ("type_user", None),
+        "reference" => return ("type_reference", None),
+        _ => return ("type_other", None),
+    };
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let text = format!("cort memory: you saved `{name}` (type `{kind}`) to private memory, which no other machine or harness reads. If it states a project fact, decision or correction and you have not recorded it yet, also run `cort memory record --key <key> --claim <claim>` (cite `--source/--line` only when a line states it). Skip if it only describes how you work.");
+    (tag, Some(text))
 }
 
 pub fn kick_at(

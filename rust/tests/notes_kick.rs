@@ -177,3 +177,93 @@ fn hook_refresh_kicks_memory_edit_without_an_index_and_records_tag() {
     let value: Value = serde_json::from_str(&row).unwrap();
     assert_eq!(value["notes"], "spawned_edit");
 }
+
+#[test]
+fn hook_refresh_capture_output_and_tags() {
+    for (name, kind, configured, harness, tag) in [
+        ("note.md", "project", true, "claude-code", "nudged_project"),
+        (
+            "note.md",
+            "feedback",
+            true,
+            "claude-code",
+            "nudged_feedback",
+        ),
+        ("note.md", "user", true, "claude-code", "type_user"),
+        ("MEMORY.md", "project", true, "claude-code", "index_file"),
+        ("note.md", "project", false, "claude-code", "not_configured"),
+        ("note.md", "project", true, "codex", "not_claude"),
+        ("outside.md", "project", true, "claude-code", "not_memory"),
+        (
+            "note.md",
+            "reference",
+            true,
+            "claude-code",
+            "type_reference",
+        ),
+        ("note.md", "scratch", true, "claude-code", "type_other"),
+        ("note.md", "", true, "claude-code", "no_type"),
+        // A directory named like a note: is_memory_edit accepts the path, the read fails.
+        ("dir.md", "project", true, "claude-code", "read_failed"),
+        // The harness may name the file relative to the payload's cwd.
+        (
+            "relative.md",
+            "project",
+            true,
+            "claude-code",
+            "nudged_project",
+        ),
+    ] {
+        let f = Fixture::new();
+        if configured {
+            fs::write(f.data.join("turso-memory.json"), "invalid").unwrap();
+        }
+        let memory = f.claude.join("projects/one/memory");
+        fs::create_dir_all(&memory).unwrap();
+        let note = if name == "outside.md" {
+            f.root.join(name)
+        } else {
+            memory.join(name)
+        };
+        if name == "dir.md" {
+            fs::create_dir(&note).unwrap();
+        } else if kind.is_empty() {
+            fs::write(&note, "no frontmatter\n").unwrap();
+        } else {
+            fs::write(
+                &note,
+                format!("---\nmetadata:\n  type: {kind}\n---\nbody\n"),
+            )
+            .unwrap();
+        }
+        let file_path = if name == "relative.md" {
+            note.strip_prefix(&f.root).unwrap().to_path_buf()
+        } else {
+            note.clone()
+        };
+        let payload = serde_json::json!({"tool_name":"Write","tool_input":{"file_path":file_path},"cwd":f.root});
+        let out = output_with_stdin(
+            f.command(&["hook-refresh", "--harness", harness]),
+            &payload.to_string(),
+        );
+        assert!(out.status.success());
+        assert!(out.stderr.is_empty());
+        // Exactly one raw line: the harness reads the whole of stdout as one JSON document.
+        let stdout = String::from_utf8(out.stdout).unwrap();
+        assert_eq!(stdout.matches('\n').count(), 1, "{tag}: {stdout:?}");
+        assert!(stdout.ends_with('\n'), "{tag}: {stdout:?}");
+        let expected = if tag.starts_with("nudged_") {
+            let text = format!("cort memory: you saved `{name}` (type `{kind}`) to private memory, which no other machine or harness reads. If it states a project fact, decision or correction and you have not recorded it yet, also run `cort memory record --key <key> --claim <claim>` (cite `--source/--line` only when a line states it). Skip if it only describes how you work.");
+            serde_json::json!({"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":text}})
+        } else {
+            serde_json::json!({})
+        };
+        let got: Value = serde_json::from_str(&stdout).unwrap();
+        assert_eq!(got, expected, "{tag}");
+        let db = rusqlite::Connection::open(f.cache.join("usage.db")).unwrap();
+        let row: String = db.query_row("SELECT args_summary FROM command_log WHERE command='hook-refresh' ORDER BY id DESC LIMIT 1", [], |r| r.get(0)).unwrap();
+        let row: Value = serde_json::from_str(&row).unwrap();
+        assert_eq!(row["capture"], tag);
+        assert_eq!(row["hook"], "no_index");
+    }
+}

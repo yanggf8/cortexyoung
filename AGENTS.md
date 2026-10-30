@@ -184,12 +184,14 @@ but `cort` and the pack.
 **Two hook events, and the second one repairs rather than reports.** `PreToolUse` on `Bash` (and
 Kimi's `Grep`) records one row in `usage.db` and, for a `fired` row, kicks collection, speaking
 nothing to the agent unless a gate configured with `cort hook-gate` denies a `Bash` call;
-`PostToolUse` on edit tools runs `cort index --incremental`. The second
-exists because the first, while it still judged, could only ever *say* the index was behind and
+`PostToolUse` on edit tools runs `cort index --incremental`. The second exists because the first,
+while it still judged, could only ever *say* the index was behind and
 that was measured at 19 re-index runs against 2,700+ fires in 90 days -- and because the staleness it compared was git
 heads, so an edited-but-uncommitted tree read as fresh while its answers were already wrong.
-`hook-refresh` never creates an index, gives up rather than wait on a busy database, and is silent
-and exits 0 whatever happens. Both entries live in the same three files, told apart by their
+`hook-refresh` never creates an index, gives up rather than wait on a busy database, and exits 0
+whatever happens. It is silent except for one capture line on a qualifying Claude Code private-memory
+save, prompting the agent to record project facts in the ledger; see
+`docs/superpowers/specs/2026-10-30-memory-capture-nudge-design.md`. Both entries live in the same three files, told apart by their
 subcommand rather than by position -- in Kimi's flat `[[hooks]]` array nothing else can tell them
 apart. An install-then-uninstall cycle must hand every one of those files back byte for byte,
 including comments that belong to other owners; that is a test, because it was a bug first
