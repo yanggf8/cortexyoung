@@ -1465,8 +1465,19 @@ mod lock_tests {
         assert!(matches!(old.try_lock(), Err(fs::TryLockError::WouldBlock)));
         assert!(matches!(new.try_lock(), Err(fs::TryLockError::WouldBlock)));
         drop(guard);
-        assert!(old.try_lock().is_ok());
-        assert!(new.try_lock().is_ok());
+        // Released means retakable within a bound, not on the first try: a sibling test in this
+        // binary that spawns a child forks with the just-dropped descriptors, and the flock stays
+        // held until that child execs (same window as tests/upgrade.rs's release check).
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        for file in [&old, &new] {
+            while let Err(error) = file.try_lock() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "release must free the lock: {error:?}"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
         assert!(matches!(
             lock_in_within_at(
                 base,
