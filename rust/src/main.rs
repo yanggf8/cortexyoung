@@ -1717,7 +1717,8 @@ fn hook_install_all(a: &HookInstallArgs) -> Result<Emit, CortError> {
             rows.push(row);
         }
     }
-    let payload = json!({ "entries": rows });
+    let mut payload = json!({ "entries": rows });
+    payload["codex_sidecar"] = codex_sidecar_report(a);
     if a.lean {
         return Ok(Emit {
             render_command: Some("hook-install-all-lean"),
@@ -1792,6 +1793,70 @@ fn render_hook_entries_lean(payload: &Value) -> String {
         ));
     }
     out
+}
+
+/// Is the Codex desktop app running? The sweep (`settings_sidecar`) refuses to mutate anything
+/// while it is, because the app rewrites `config.toml` wholesale on its way out and its
+/// external-agent import-sync can repopulate the sidecar under us.
+///
+/// `pgrep -x Codex` matches nothing here: the app runs as ChatGPT.app helpers
+/// (`Codex Framework.framework/.../Codex (Service)`), so the patterns name the helpers and the
+/// main binary by path. They are regular expressions to pgrep — hence the escaped parentheses —
+/// and they deliberately do NOT include the bare `codex` CLI: agent sessions run `codex exec`
+/// constantly, it reads `config.toml` without ever rewriting `[desktop]`, and gating the sweep on
+/// it would gate the sweep on nearly every moment of this machine's working day. pgrep itself
+/// missing (non-macOS CI) degrades to "not running", never to an error.
+///
+/// `CORT_CODEX_RUNNING=0|1` overrides the probe outright — the deterministic escape hatch the
+/// integration tests need on a machine like this one, where the app is simply always open.
+fn codex_desktop_running() -> bool {
+    match std::env::var("CORT_CODEX_RUNNING").as_deref() {
+        Ok("1") => return true,
+        Ok("0") => return false,
+        _ => {}
+    }
+    const DESKTOP_PATTERNS: [&str; 3] = [
+        "Codex Framework.framework",
+        "Codex \\(Service\\)",
+        "ChatGPT.app/Contents/MacOS/ChatGPT",
+    ];
+    DESKTOP_PATTERNS.iter().any(|pat| {
+        std::process::Command::new("pgrep")
+            .args(["-f", pat])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    })
+}
+
+/// The sidecar sweep report for one `hook-install --all` invocation, in whichever mode the
+/// caller asked for: read-only under `--status`, ours-only under `--remove`, ours plus verified
+/// copies (and the sync flag) otherwise. The Codex home and the live Claude settings both come
+/// from the same resolvers the per-harness loop used above, so a test's tempdir is honoured
+/// end to end.
+fn codex_sidecar_report(a: &HookInstallArgs) -> Value {
+    let codex_home = cort::settings_toml::default_settings_path()
+        .and_then(|p| p.parent().map(Path::to_path_buf));
+    let Some(codex_home) = codex_home else {
+        return json!({ "skipped_reason": "no_codex_home" });
+    };
+    let mode = if a.status {
+        cort::settings_sidecar::SidecarMode::Status
+    } else if a.remove {
+        cort::settings_sidecar::SidecarMode::Uninstall
+    } else {
+        cort::settings_sidecar::SidecarMode::Install
+    };
+    let claude_settings = cort::settings::default_settings_path();
+    cort::settings_sidecar::sweep(
+        &codex_home,
+        claude_settings.as_deref(),
+        codex_desktop_running(),
+        mode,
+    )
+    .to_value()
 }
 
 fn status_of_entry(

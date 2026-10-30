@@ -243,7 +243,7 @@ fn hook_entry(command: &str, event: HookEvent) -> Value {
     group
 }
 
-fn read_root(path: &Path) -> Result<Map<String, Value>, SettingsError> {
+pub(crate) fn read_root(path: &Path) -> Result<Map<String, Value>, SettingsError> {
     let raw = match fs::read_to_string(path) {
         Ok(r) => r,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Map::new()),
@@ -266,7 +266,7 @@ fn read_root(path: &Path) -> Result<Map<String, Value>, SettingsError> {
 
 /// Write next to the target and rename, so an interrupted install cannot leave a half-written
 /// settings file — that file is read by the harness on every session start.
-fn write_root(path: &Path, root: &Map<String, Value>) -> Result<(), SettingsError> {
+pub(crate) fn write_root(path: &Path, root: &Map<String, Value>) -> Result<(), SettingsError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -282,14 +282,23 @@ fn write_root(path: &Path, root: &Map<String, Value>) -> Result<(), SettingsErro
 /// One copy of the file as it was before the first change we make to it. Named with a timestamp
 /// for the same reason the skill deploy log is: "what did the installer do, and when".
 fn backup(path: &Path) -> Result<Option<PathBuf>, SettingsError> {
-    if !path.exists() {
-        return Ok(None);
-    }
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let dest = path.with_extension(format!("json.bak.{stamp}"));
+    backup_as(path, &format!("json.bak.{stamp}"))
+}
+
+/// `backup` under a caller-chosen extension tail. Exists because one install can now write the
+/// same file twice in the same second (the hook merge, then the sidecar sweep) and two
+/// `.bak.<same stamp>` copies are one copy: the second `fs::copy` silently overwrites the first,
+/// destroying the only snapshot of the pre-install state. The sweep calls this with a distinct
+/// tail so the two backups can never collide.
+pub(crate) fn backup_as(path: &Path, ext_tail: &str) -> Result<Option<PathBuf>, SettingsError> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let dest = path.with_extension(ext_tail);
     fs::copy(path, &dest)?;
     Ok(Some(dest))
 }
