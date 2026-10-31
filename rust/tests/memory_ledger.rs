@@ -54,6 +54,12 @@ impl Transport for Wrapped {
         body: &[u8],
         headers: &[(&str, &str)],
     ) -> Result<Vec<u8>, RemoteError> {
+        // Fault offsets refer to the read, insert and verification calls, not best-effort DDL.
+        if String::from_utf8_lossy(body)
+            .contains("CREATE UNIQUE INDEX IF NOT EXISTS project_memory_chain")
+        {
+            return self.inner.post(url, body, headers);
+        }
         let action = {
             let mut control = self.control.lock().unwrap();
             control.posts += 1;
@@ -177,6 +183,14 @@ impl Fixture {
             entry.id
         ));
     }
+    fn seed_legacy_duplicate(&self) {
+        self.sql("DROP INDEX IF EXISTS project_memory_chain");
+        let entry: cort::memory::MemoryEntry = serde_json::from_value(json!({"id":"legacy-one","key":"legacy","claim":"A","source":"decision.md","source_line":1,"source_sha256":"hash","recorded_at":"1"})).unwrap();
+        self.insert("unlinked-legacy", &entry);
+        let mut other = entry.clone();
+        other.id = "legacy-two".into();
+        self.insert("unlinked-legacy", &other);
+    }
     fn record(
         &self,
         key: &str,
@@ -193,6 +207,49 @@ impl Fixture {
             &self.ledger,
         )
     }
+}
+
+#[test]
+fn record_creates_chain_index() {
+    let f = Fixture::new();
+    f.record("choice", "A", None).unwrap();
+    // A second root for the key is ignored only if the index exists.
+    let first = f.ledger.read(&f.project()).unwrap().entries.remove(0);
+    let mut duplicate = first.clone();
+    duplicate.id = "duplicate".into();
+    let body = serde_json::to_string(&duplicate)
+        .unwrap()
+        .replace('\'', "''");
+    f.sql(&format!(
+        "INSERT OR IGNORE INTO project_memory VALUES ('{}', 'duplicate', '{body}')",
+        f.project()
+    ));
+    assert_eq!(f.ledger.read(&f.project()).unwrap().entries.len(), 1);
+    // Without IF EXISTS this fails unless the index carries this exact name.
+    f.sql("DROP INDEX project_memory_chain");
+}
+
+#[test]
+fn legacy_duplicate_roots_can_be_resolved_without_index() {
+    let f = Fixture::new();
+    f.ledger.read(&f.project()).unwrap();
+    let first: cort::memory::MemoryEntry = serde_json::from_value(json!({"id":"first","key":"choice","claim":"A","source":"decision.md","source_line":1,"source_sha256":"hash","recorded_at":"1"})).unwrap();
+    let mut second = first.clone();
+    second.id = "second".into();
+    f.insert(&f.project(), &first);
+    f.insert(&f.project(), &second);
+    let result = memory_store::resolve_with(
+        f.root(),
+        "choice",
+        "resolved",
+        Path::new("decision.md"),
+        1,
+        &[first.id, second.id],
+        &f.ledger,
+    )
+    .unwrap();
+    assert_eq!(result.resolves.len(), 2);
+    assert_eq!(f.ledger.read(&f.project()).unwrap().entries.len(), 3);
 }
 
 fn competing_sql(id: &str) -> String {
@@ -560,6 +617,7 @@ fn unsourced_entries_supersede_and_conflict() {
     let mut other = first.clone();
     other.id = "other".into();
     other.supersedes = None;
+    f.sql("DROP INDEX project_memory_chain");
     f.insert(&memory_store::project(f.root()).unwrap(), &other);
     let recall = memory_store::recall_with(f.root(), "choice", &f.ledger).unwrap();
     assert!(recall
@@ -647,6 +705,7 @@ fn replace_and_repeated_supersedes_resolve_conflict() {
     let mut other = first.clone();
     other.id = "a".repeat(64);
     other.claim = "competing".into();
+    f.sql("DROP INDEX project_memory_chain");
     f.insert(&f.project(), &other);
     let Err(LedgerError::Message(message)) = write(&[], true) else {
         panic!("expected conflict")
@@ -1106,6 +1165,7 @@ fn resolve_component_conflict_counts_distinct_ids() {
     let mut y = x.clone();
     y.id = "other-id".into();
     y.claim = "Y".into();
+    f.sql("DROP INDEX project_memory_chain");
     f.insert("B", &y);
     f.alias(&a, "B");
     let status = memory_store::status_with(f.root(), &f.ledger, "test").unwrap();
@@ -1279,30 +1339,27 @@ fn superseded_row_deleted_before_write_is_missing() {
 }
 
 #[test]
-fn competing_active_entry_reports_conflict_and_keeps_write() {
+fn competing_active_entry_is_rejected() {
     let f = Fixture::new();
     // Seed another key so the SQL can copy this project's id without a hard-coded hash.
     f.record("seed", "seed", None).unwrap();
     f.arm(2, Action::Sql(competing_sql("competing")));
     let result = f.record("choice", "A", None);
-    let Err(LedgerError::Conflict { id, active_ids, .. }) = result else {
-        panic!("expected conflict: {result:?}");
-    };
-    assert!(active_ids.contains(&id));
-    assert!(active_ids.contains(&"competing".to_string()));
-    assert!(f
-        .ledger
-        .read(&f.project())
-        .unwrap()
-        .entries
-        .iter()
-        .any(|entry| entry.id == id));
+    assert_eq!(
+        result.unwrap_err(),
+        LedgerError::ChainTaken {
+            key: "choice".into(),
+            existing_id: "competing".into()
+        }
+    );
+    assert_eq!(f.ledger.read(&f.project()).unwrap().entries.len(), 2);
 }
 
 #[test]
 fn resolve_missing_predecessor_and_new_conflict() {
     let f = Fixture::new();
     f.record("seed", "seed", None).unwrap();
+    f.seed_legacy_duplicate();
     f.arm(2, Action::Sql(competing_sql("competing")));
     let Err(LedgerError::Conflict { id, .. }) = f.record("choice", "A", None) else {
         panic!("expected conflict");
@@ -1353,6 +1410,7 @@ fn resolve_missing_predecessor_and_new_conflict() {
 fn resolve_settles_two_active_entries() {
     let f = Fixture::new();
     f.record("seed", "seed", None).unwrap();
+    f.seed_legacy_duplicate();
     f.arm(2, Action::Sql(competing_sql("competing")));
     let Err(LedgerError::Conflict { id, .. }) = f.record("choice", "A", None) else {
         panic!("expected conflict");

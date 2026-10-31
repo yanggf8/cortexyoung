@@ -2665,6 +2665,13 @@ fn memory_ledger_error(error: cort::memory_store::LedgerError) -> CortError {
             };
             CortError::new("memory_supersedes_missing", detail)
         }
+        LedgerError::ChainTaken { key, existing_id } => {
+            let message = format!("another entry for key \"{key}\" was recorded first ({existing_id}); nothing was written; recall it and ask the user which holds before superseding");
+            CortError::new(
+                "memory_key_taken",
+                json!({"key":key,"existing_id":existing_id,"message":message}),
+            )
+        }
         LedgerError::Conflict {
             id,
             key,
@@ -3292,6 +3299,19 @@ mod tests {
                 assert!(!message.contains(forbidden), "{message}");
             }
         }
+    }
+
+    #[test]
+    fn chain_taken_error_has_key_existing_id_and_guidance() {
+        let error = memory_ledger_error(LedgerError::ChainTaken {
+            key: "choice".into(),
+            existing_id: "abc".into(),
+        });
+        assert_eq!(error.code, "memory_key_taken");
+        assert_eq!(
+            error.detail,
+            json!({"key":"choice", "existing_id":"abc", "message":"another entry for key \"choice\" was recorded first (abc); nothing was written; recall it and ask the user which holds before superseding"})
+        );
     }
 
     #[test]

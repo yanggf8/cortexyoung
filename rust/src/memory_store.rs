@@ -13,6 +13,7 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 const CREATE_TABLE: &str = "CREATE TABLE IF NOT EXISTS project_memory (project TEXT NOT NULL, id TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY (project, id))";
+const CREATE_CHAIN_INDEX: &str = "CREATE UNIQUE INDEX IF NOT EXISTS project_memory_chain ON project_memory (project, json_extract(body,'$.key'), coalesce(json_extract(body,'$.supersedes'), json_extract(body,'$.resolves'), ''))";
 const CREATE_ALIASES: &str = "CREATE TABLE IF NOT EXISTS project_aliases (old_project TEXT NOT NULL, new_project TEXT NOT NULL, created_at TEXT NOT NULL, machine TEXT NOT NULL, PRIMARY KEY (old_project, new_project))";
 const COMPONENT: &str = "WITH RECURSIVE g(p) AS (SELECT ? UNION SELECT CASE WHEN a.old_project = g.p THEN a.new_project ELSE a.old_project END FROM project_aliases a JOIN g ON a.old_project = g.p OR a.new_project = g.p) SELECT p FROM g";
 #[derive(Debug, Serialize)]
@@ -51,6 +52,10 @@ pub enum LedgerError {
     },
     SupersedesMissing {
         superseded: Vec<String>,
+    },
+    ChainTaken {
+        key: String,
+        existing_id: String,
     },
     Conflict {
         id: String,
@@ -467,6 +472,22 @@ impl Ledger {
         match self.db.execute(sql, args) {
             Ok(result) if result.affected_row_count == 1 => {}
             Ok(result) if result.affected_row_count == 0 => {
+                let body = serde_json::to_string(entry)
+                    .map_err(|e| LedgerError::Message(e.to_string()))?;
+                let found = self.db.execute(
+                    "SELECT id FROM project_memory WHERE project = ? AND id <> ? AND json_extract(body,'$.key') = json_extract(?,'$.key') AND coalesce(json_extract(body,'$.supersedes'), json_extract(body,'$.resolves'), '') = coalesce(json_extract(?,'$.supersedes'), json_extract(?,'$.resolves'), '') LIMIT 1",
+                    vec![Cell::Text(project.into()), Cell::Text(entry.id.clone()), Cell::Text(body.clone()), Cell::Text(body.clone()), Cell::Text(body)],
+                );
+                if let Ok(found) = found {
+                    if let Some(Some(Cell::Text(existing_id))) =
+                        found.rows.first().map(|row| row.first())
+                    {
+                        return Err(LedgerError::ChainTaken {
+                            key: entry.key.clone(),
+                            existing_id: existing_id.clone(),
+                        });
+                    }
+                }
                 return if superseded.is_empty() {
                     Err(LedgerError::Message("insert affected no row".into()))
                 } else {
@@ -1975,6 +1996,7 @@ fn resolve_entry(
     let mut args = entry_args(&project, &entry)?;
     args.push(Cell::Text(project.clone()));
     args.extend(supersedes.iter().cloned().map(Cell::Text));
+    let _ = ledger.db.execute(CREATE_CHAIN_INDEX, vec![]);
     ledger.write_checked(&project, &entry, &sql, args, &supersedes, true)?;
     Ok(entry)
 }
@@ -2192,6 +2214,7 @@ fn record_entry(
             Vec::new(),
         ),
     };
+    let _ = ledger.db.execute(CREATE_CHAIN_INDEX, vec![]);
     ledger.write_checked(&project, &entry, &sql, args, &old, false)?;
     Ok(entry)
 }
@@ -2199,6 +2222,73 @@ fn record_entry(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chain_slots_reject_second_root_and_second_successor() {
+        let ledger = Ledger::with_transport(
+            "https://example.test",
+            "test",
+            Box::new(crate::remote::SqliteTransport::new().unwrap()),
+        )
+        .unwrap();
+        ledger.read("p").unwrap();
+        ledger.db.execute(CREATE_CHAIN_INDEX, vec![]).unwrap();
+        let mut entry: MemoryEntry = serde_json::from_value(json!({"id":"root","key":"choice","claim":"A","source":"decision.md","source_line":1,"source_sha256":"hash","recorded_at":"1"})).unwrap();
+        let sql = "INSERT OR IGNORE INTO project_memory (project, id, body) VALUES (?, ?, ?)";
+        ledger
+            .write_checked(
+                "p",
+                &entry,
+                sql,
+                entry_args("p", &entry).unwrap(),
+                &[],
+                false,
+            )
+            .unwrap();
+        entry.id = "other-root".into();
+        assert_eq!(
+            ledger.write_checked(
+                "p",
+                &entry,
+                sql,
+                entry_args("p", &entry).unwrap(),
+                &[],
+                false
+            ),
+            Err(LedgerError::ChainTaken {
+                key: "choice".into(),
+                existing_id: "root".into()
+            })
+        );
+        entry.id = "successor".into();
+        entry.supersedes = Some("root".into());
+        ledger
+            .write_checked(
+                "p",
+                &entry,
+                sql,
+                entry_args("p", &entry).unwrap(),
+                &["root".into()],
+                false,
+            )
+            .unwrap();
+        entry.id = "other-successor".into();
+        assert_eq!(
+            ledger.write_checked(
+                "p",
+                &entry,
+                sql,
+                entry_args("p", &entry).unwrap(),
+                &["root".into()],
+                false
+            ),
+            Err(LedgerError::ChainTaken {
+                key: "choice".into(),
+                existing_id: "successor".into()
+            })
+        );
+        assert_eq!(ledger.read("p").unwrap().entries.len(), 2);
+    }
 
     #[test]
     fn project_id_matches_common_git_remote_spellings() {

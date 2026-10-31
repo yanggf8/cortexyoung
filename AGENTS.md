@@ -290,7 +290,8 @@ alone, where no other machine or harness can read it, until the user asked why.
   before asserting a project fact (a decision, a machine's state, what was retired). For
   `source_moved`, read the line at `source_line_now` and its section; `source_changed`,
   `source_missing`, and `conflict` are leads to re-check, not facts; when the current source
-  contradicts the claim, state both versions and ask the user which holds instead of picking one,
+  contradicts the claim, or `conflict` shows several active entries for one key, state both
+  versions and ask the user which holds instead of picking one,
   because the edit may be unreviewed or the entry may need `--replace` (user, 2026-10-31: Codex
   picked "the current file wins" 4 of 4 times in the memory answer trial); when the source is
   missing, say the claim could not be re-checked rather than asserting it. The label follows the
@@ -302,7 +303,9 @@ alone, where no other machine or harness can read it, until the user asked why.
   fact; otherwise record the claim directly. Never write or commit a line just to cite it. A cited
   source must be tracked and clean at HEAD. Replace the sole active claim with `--replace`, or pass
   `--supersedes <id>` (a unique lowercase hex prefix of at least 8 characters works); repeat
-  `--supersedes` for every active id to resolve a conflict.
+  `--supersedes` for every active id to resolve a conflict, only after the user has said which
+  claim holds. If record reports `memory_key_taken`, another entry for the key landed first and
+  nothing was written: recall it and ask the user before superseding.
 - A harness-private memory is for how one agent works, never the only copy of a project fact.
 
 **Harness notes are a second, unreviewed table beside the ledger** (2026-10-27). `cort memory notes

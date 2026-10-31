@@ -87,6 +87,14 @@ cort memory recall 'deployment option' --harness claude-code
 pass `--replace` for the sole active entry, or `--supersedes <active-id>` (a unique prefix of at
 least 8 lowercase hex characters works). For concurrent active entries, repeat `--supersedes` for
 every active id reported by `status`; `cort memory resolve` is an alias for this form.
+Writes attempt to create the `project_memory_chain` unique index, which prevents two first entries
+for one key, or two entries superseding the same id, within a project id. A competing write returns `memory_key_taken`
+with the existing id and writes nothing; recall it and ask the user which claim holds before
+superseding. Index creation is best-effort so legacy duplicate chains can still be resolved; the
+index covers the whole table, so while any project in the database still holds such a duplicate
+it is not created and concurrent writes fall back to the post-write `memory_conflict` check.
+Conflicts can still arise from older cort builds or across project aliases because the index is
+per project id. List the active entries and ask the user which holds before using `cort memory resolve`.
 Recall returns active hits with `unsourced`, `source_unchanged`, `source_moved`, `source_changed`, `source_missing`, or
 `conflict`, plus the cited line's status: `same_line`; `moved` with `source_line_now` when the
 line's exact text appears at exactly one other line (for example because text was inserted or
