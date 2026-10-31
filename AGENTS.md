@@ -289,9 +289,13 @@ alone, where no other machine or harness can read it, until the user asked why.
 - **Recall** with `cort memory recall "<topic>"` at the start of work, after a compaction, and
   before asserting a project fact (a decision, a machine's state, what was retired). For
   `source_moved`, read the line at `source_line_now` and its section; `source_changed`,
-  `source_missing`, and `conflict` are leads to re-check, not facts. The label follows the cited
-  line only, so when a claim depends on its section and `source_file_changed` is true, read the
-  section too.
+  `source_missing`, and `conflict` are leads to re-check, not facts; when the current source
+  contradicts the claim, state both versions and ask the user which holds instead of picking one,
+  because the edit may be unreviewed or the entry may need `--replace` (user, 2026-10-31: Codex
+  picked "the current file wins" 4 of 4 times in the memory answer trial); when the source is
+  missing, say the claim could not be re-checked rather than asserting it. The label follows the
+  cited line only, so when a claim depends on its section and `source_file_changed` is true, read
+  the section too.
 - **Record** with `cort memory record --key <key> --claim <claim>` when a decision is made or
   changed, when the user corrects a working assumption, and when a deployment changes what a machine
   runs. Cite a naturally existing line with `--source <repo file> --line <n>` when it states the
