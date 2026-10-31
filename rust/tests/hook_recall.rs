@@ -735,7 +735,12 @@ fn cli_watchdog_records_network_stall_once() {
     let project: String = db
         .query_row("SELECT project_id FROM command_log", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(project, cort::db::project_id_for(repo.to_str().unwrap()));
+    // The hook hashes the canonical path; macOS temp dirs sit behind the /var -> /private/var link.
+    let canonical = std::fs::canonicalize(&repo).unwrap();
+    assert_eq!(
+        project,
+        cort::db::project_id_for(canonical.to_str().unwrap())
+    );
 }
 
 #[cfg(debug_assertions)]
