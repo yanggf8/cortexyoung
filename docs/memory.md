@@ -105,6 +105,11 @@ a line hash, `same_line` yields `source_unchanged`, `moved` yields `source_moved
 `source_missing`, while `conflict` takes precedence. Unsourced hits print no `source`, `source_line`,
 or `source_sha256`, have no source status or file-change field, and rest on their recorded time and
 machine. `recorded_at_utc` is the readable UTC form of `recorded_at` when it can be formatted.
+For a query of at least two terms with no entry containing every term, recall returns up to five
+entries containing at least half of the distinct terms, marked `match: partial` with `matched_terms`;
+common English function words ("to", "the", ...) and single ASCII characters do not count there.
+These are candidates, not answers to the query; when no entry reaches half, the output is
+`match: partial` with empty `hits`.
 Older rows without a line hash use the
 whole-file hash for their evidence status. Whenever the file is readable, `source_file_changed`
 reports whether its bytes differ from the recorded file hash. Neither label checks the

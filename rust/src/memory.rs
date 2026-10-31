@@ -10,6 +10,12 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const SCHEMA: u32 = 1;
+/// English function words left out of partial-match scoring (see `recall_ledger_inner`).
+const PARTIAL_IGNORED: &[&str] = &[
+    "a", "about", "an", "and", "are", "as", "at", "be", "by", "can", "do", "does", "for", "from",
+    "how", "in", "into", "is", "it", "of", "on", "or", "should", "that", "the", "this", "to",
+    "was", "we", "what", "when", "where", "which", "who", "why", "with",
+];
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MemoryEntry {
@@ -94,6 +100,7 @@ fn entry_fields(entry: &MemoryEntry) -> serde_json::Map<String, serde_json::Valu
 #[derive(Clone, Debug)]
 pub struct MemoryHit {
     pub entry: MemoryEntry,
+    pub matched_terms: Option<Vec<String>>,
     /// Evidence checks source bytes, not whether the claim follows from its context.
     pub evidence_status: String,
     pub source_file_changed: Option<bool>,
@@ -120,6 +127,9 @@ impl Serialize for MemoryHit {
         if let Some(line) = self.source_line_now {
             fields.insert("source_line_now".into(), line.into());
         }
+        if let Some(terms) = &self.matched_terms {
+            fields.insert("matched_terms".into(), terms.clone().into());
+        }
         fields.serialize(serializer)
     }
 }
@@ -130,6 +140,8 @@ pub struct MemoryRecall {
     pub ledger_status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sync_status: Option<String>,
+    #[serde(rename = "match", skip_serializing_if = "Option::is_none")]
+    pub match_kind: Option<String>,
     pub hits: Vec<MemoryHit>,
 }
 
@@ -368,12 +380,53 @@ fn recall_ledger_inner(
     if let Some(n) = limit {
         active.truncate(n);
     }
-    let mut hits = Vec::new();
-    for entry in active {
-        let haystack = format!("{} {}", entry.key, entry.claim).to_lowercase();
-        if !terms.iter().all(|term| haystack.contains(term)) {
-            continue;
+    let mut selected: Vec<_> = active
+        .iter()
+        .filter(|entry| {
+            let haystack = format!("{} {}", entry.key, entry.claim).to_lowercase();
+            terms.iter().all(|term| haystack.contains(term))
+        })
+        .map(|entry| (*entry, None))
+        .collect();
+    // Partial scoring is substring counting, so words that sit inside almost every claim ("to",
+    // "the", a lone digit) would outrank the entry the query is about. They still count for the
+    // all-terms match above; a single CJK character is a word and is kept.
+    let mut distinct = Vec::new();
+    for term in &terms {
+        let noise =
+            PARTIAL_IGNORED.contains(&term.as_str()) || (term.len() == 1 && term.is_ascii());
+        if !noise && !distinct.contains(term) {
+            distinct.push(term.clone());
         }
+    }
+    let partial =
+        selected.is_empty() && terms.len() >= 2 && limit.is_none() && !distinct.is_empty();
+    if partial {
+        selected = active
+            .iter()
+            .filter_map(|entry| {
+                let haystack = format!("{} {}", entry.key, entry.claim).to_lowercase();
+                let matched: Vec<_> = distinct
+                    .iter()
+                    .filter(|term| haystack.contains(term.as_str()))
+                    .cloned()
+                    .collect();
+                (matched.len() * 2 >= distinct.len()).then_some((*entry, Some(matched)))
+            })
+            .collect();
+        selected.sort_by(|(a, a_terms), (b, b_terms)| {
+            b_terms
+                .as_ref()
+                .unwrap()
+                .len()
+                .cmp(&a_terms.as_ref().unwrap().len())
+                .then(b.recorded_at.cmp(&a.recorded_at))
+                .then(a.id.cmp(&b.id))
+        });
+        selected.truncate(5);
+    }
+    let mut hits = Vec::new();
+    for (entry, matched_terms) in selected {
         let source = if entry.unsourced {
             Err("unsourced".into())
         } else {
@@ -414,22 +467,26 @@ fn recall_ledger_inner(
         };
         hits.push(MemoryHit {
             entry: entry.clone(),
+            matched_terms,
             evidence_status: evidence_status.to_string(),
             source_file_changed,
             source_line_status,
             source_line_now,
         });
     }
-    hits.sort_by(|a, b| {
-        a.entry
-            .key
-            .cmp(&b.entry.key)
-            .then(a.entry.id.cmp(&b.entry.id))
-    });
+    if !partial {
+        hits.sort_by(|a, b| {
+            a.entry
+                .key
+                .cmp(&b.entry.key)
+                .then(a.entry.id.cmp(&b.entry.id))
+        });
+    }
     (
         MemoryRecall {
             ledger_status: if present { "present" } else { "absent" }.into(),
             sync_status,
+            match_kind: partial.then(|| "partial".into()),
             hits,
         },
         omitted,
@@ -515,6 +572,216 @@ pub(crate) fn new_unsourced_entry(key: &str, claim: &str) -> Result<MemoryEntry,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn recall_fixture(id: &str, key: &str, claim: &str, recorded_at: &str) -> MemoryEntry {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "key": key, "claim": claim, "recorded_at": recorded_at,
+            "source": "unused", "source_line": 1, "source_sha256": "", "unsourced": true
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn recall_all_terms_keeps_normal_output_and_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = MemoryLedger {
+            schema: SCHEMA,
+            entries: vec![
+                recall_fixture("2", "z", "alpha beta", "2"),
+                recall_fixture("1", "a", "alpha beta", "1"),
+                recall_fixture("3", "partial", "alpha", "3"),
+            ],
+        };
+        let json =
+            serde_json::to_value(recall_ledger(dir.path(), "ALPHA beta", &ledger, true, None))
+                .unwrap();
+        assert!(json.get("match").is_none());
+        let hits = json["hits"].as_array().unwrap();
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0]["key"], "a");
+        assert_eq!(hits[1]["key"], "z");
+        assert!(hits.iter().all(|hit| hit.get("matched_terms").is_none()));
+    }
+
+    #[test]
+    fn recall_partial_matches_mixed_language_query() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = MemoryLedger {
+            schema: SCHEMA,
+            entries: vec![
+                recall_fixture(
+                    "1",
+                    "time budgets measured first",
+                    "hook timeout on CI",
+                    "1",
+                ),
+                recall_fixture("2", "unrelated", "another subject", "2"),
+            ],
+        };
+        let json = serde_json::to_value(recall_ledger(
+            dir.path(),
+            "hook timeout 5 秒 CI 時間預算",
+            &ledger,
+            true,
+            None,
+        ))
+        .unwrap();
+        assert_eq!(json["match"], "partial");
+        assert_eq!(json["hits"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            json["hits"][0]["matched_terms"],
+            serde_json::json!(["hook", "timeout", "ci"])
+        );
+        assert_eq!(json["hits"][0]["evidence_status"], "unsourced");
+    }
+
+    #[test]
+    fn recall_partial_excludes_below_half_and_counts_distinct_terms() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = MemoryLedger {
+            schema: SCHEMA,
+            entries: vec![
+                recall_fixture("1", "one", "alpha", "1"),
+                recall_fixture("2", "two", "alpha beta", "2"),
+            ],
+        };
+        let json = serde_json::to_value(recall_ledger(
+            dir.path(),
+            "alpha alpha beta gamma delta",
+            &ledger,
+            true,
+            None,
+        ))
+        .unwrap();
+        assert_eq!(json["hits"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            json["hits"][0]["matched_terms"],
+            serde_json::json!(["alpha", "beta"])
+        );
+    }
+
+    #[test]
+    fn recall_partial_caps_and_orders_by_score_recency_and_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = MemoryLedger {
+            schema: SCHEMA,
+            entries: vec![
+                recall_fixture("z", "z", "alpha beta gamma", "01"),
+                recall_fixture("b", "b", "alpha beta", "05"),
+                recall_fixture("a", "a", "alpha beta", "05"),
+                recall_fixture("c", "c", "alpha beta", "04"),
+                recall_fixture("d", "d", "alpha beta", "03"),
+                recall_fixture("e", "e", "alpha beta", "02"),
+            ],
+        };
+        let recall = recall_ledger(dir.path(), "alpha beta gamma delta", &ledger, true, None);
+        assert_eq!(
+            recall
+                .hits
+                .iter()
+                .map(|hit| hit.entry.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["z", "a", "b", "c", "d"]
+        );
+    }
+
+    #[test]
+    fn recall_partial_ignores_function_words_and_lone_ascii() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = MemoryLedger {
+            schema: SCHEMA,
+            entries: vec![
+                recall_fixture("1", "deployed version", "machines run the build", "1"),
+                recall_fixture("2", "noise", "nothing to do with the 5 others", "2"),
+            ],
+        };
+        let json = serde_json::to_value(recall_ledger(
+            dir.path(),
+            "deploy to the 5 server",
+            &ledger,
+            true,
+            None,
+        ))
+        .unwrap();
+        assert_eq!(json["match"], "partial");
+        assert_eq!(json["hits"].as_array().unwrap().len(), 1);
+        assert_eq!(json["hits"][0]["key"], "deployed version");
+        assert_eq!(
+            json["hits"][0]["matched_terms"],
+            serde_json::json!(["deploy"])
+        );
+        let only_noise =
+            serde_json::to_value(recall_ledger(dir.path(), "to the 7", &ledger, true, None))
+                .unwrap();
+        assert!(only_noise.get("match").is_none());
+        assert!(only_noise["hits"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn recall_partial_counts_cjk_terms() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = MemoryLedger {
+            schema: SCHEMA,
+            entries: vec![recall_fixture("1", "budget", "時間預算 以 秒 計", "1")],
+        };
+        // Only the two CJK terms match; dropping them as noise would leave 0 of 2.
+        let json = serde_json::to_value(recall_ledger(
+            dir.path(),
+            "秒 時間預算 hook alpha",
+            &ledger,
+            true,
+            None,
+        ))
+        .unwrap();
+        assert_eq!(json["match"], "partial");
+        assert_eq!(
+            json["hits"][0]["matched_terms"],
+            serde_json::json!(["秒", "時間預算"])
+        );
+    }
+
+    #[test]
+    fn recall_single_missing_term_stays_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = MemoryLedger {
+            schema: SCHEMA,
+            entries: vec![recall_fixture("1", "key", "claim", "1")],
+        };
+        let json = serde_json::to_value(recall_ledger(dir.path(), "missing", &ledger, true, None))
+            .unwrap();
+        assert!(json.get("match").is_none());
+        assert!(json["hits"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn recall_empty_query_and_hook_keep_normal_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = MemoryLedger {
+            schema: SCHEMA,
+            entries: vec![
+                recall_fixture("2", "z", "claim", "2"),
+                recall_fixture("1", "a", "claim", "1"),
+            ],
+        };
+        let normal = serde_json::to_value(recall_ledger(
+            dir.path(),
+            "",
+            &ledger,
+            true,
+            Some("shared_database".into()),
+        ))
+        .unwrap();
+        let (hook, omitted) = recall_ledger_for_hook(dir.path(), &ledger);
+        assert_eq!(omitted, 0);
+        assert_eq!(serde_json::to_value(hook).unwrap(), normal);
+        assert!(normal.get("match").is_none());
+        assert_eq!(normal["hits"][0]["key"], "a");
+        assert!(normal["hits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|hit| hit.get("matched_terms").is_none()));
+    }
 
     #[test]
     fn unsourced_body_is_readable_by_old_field_set() {

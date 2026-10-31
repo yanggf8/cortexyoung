@@ -699,6 +699,7 @@ fn render_orders_and_caps_entries() {
                 recorded_machine: None,
                 recorded_machine_source: None,
             },
+            matched_terms: None,
             evidence_status: "source_unchanged".into(),
             source_file_changed: Some(false),
             source_line_status: None,
@@ -708,6 +709,7 @@ fn render_orders_and_caps_entries() {
     let (text, count) = cort::hook_recall::render(MemoryRecall {
         ledger_status: "present".into(),
         sync_status: None,
+        match_kind: None,
         hits,
     })
     .unwrap();
@@ -737,6 +739,7 @@ fn render_orders_and_caps_entries() {
                 recorded_machine: None,
                 recorded_machine_source: None,
             },
+            matched_terms: None,
             evidence_status: if i == 29 {
                 "source_moved"
             } else {
@@ -751,6 +754,7 @@ fn render_orders_and_caps_entries() {
     let (short, count) = cort::hook_recall::render(MemoryRecall {
         ledger_status: "present".into(),
         sync_status: None,
+        match_kind: None,
         hits: short_hits,
     })
     .unwrap();
@@ -776,6 +780,7 @@ fn notes_section_byte_cap_binds_before_the_count_cap() {
     let recall = MemoryRecall {
         ledger_status: "present".into(),
         sync_status: None,
+        match_kind: None,
         hits: Vec::new(),
     };
     let (text, entries, shown) =
