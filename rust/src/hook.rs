@@ -94,8 +94,9 @@ pub const REFRESH_OUTCOMES: [&str; 8] = [
 
 /// Closed outcome vocabulary for the shared database recall hook. The last three are Kimi's
 /// once-per-session `UserPromptSubmit` path: a later prompt of an injected session, a payload with
-/// no session id, and a marker directory that could not be written.
-pub const RECALL_OUTCOMES: [&str; 10] = [
+/// no session id, and a marker directory that could not be written. `watchdog` means the process
+/// deadline won the claim and attempted its own bounded usage write.
+pub const RECALL_OUTCOMES: [&str; 11] = [
     "injected",
     "none",
     "not_configured",
@@ -103,6 +104,7 @@ pub const RECALL_OUTCOMES: [&str; 10] = [
     "remote_unreachable",
     "remote_blocked",
     "remote_timeout",
+    "watchdog",
     "already_injected",
     "missing_session_id",
     "marker_unavailable",

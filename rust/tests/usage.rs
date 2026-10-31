@@ -1804,6 +1804,98 @@ fn the_usage_report_carries_the_hook_census_and_the_lean_says_what_cannot_close(
     );
 }
 
+#[test]
+fn recall_network_readout_counts_stalls_and_success_percentiles() {
+    use serde_json::json;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("usage.db");
+    seed_schema(&path);
+    let db = Connection::open(&path).unwrap();
+    let insert = |ts: i64, command: &str, status: &str, raw: String| {
+        db.execute(
+            "INSERT INTO command_log (ts, command, args_summary, status, bytes_out, saved_bytes) VALUES (?1, ?2, ?3, ?4, 0, 0)",
+            params![ts, command, raw, status],
+        ).unwrap();
+    };
+    for n in 0..20 {
+        insert(
+            NOW_MS,
+            "hook-recall",
+            "ok",
+            json!({
+                "hook": if n % 2 == 0 { "none" } else { "injected" },
+                "net":{"dns_ms":n, "connect_ms":n*2, "tls_ms":n*3, "response_ms":n*4}
+            })
+            .to_string(),
+        );
+    }
+    for phase in ["tls", "tls", "dns", "tls"] {
+        insert(
+            NOW_MS,
+            "hook-recall",
+            "ok",
+            json!({"hook":"remote_timeout", "stall":{"phase":phase, "tls_ms":3500}}).to_string(),
+        );
+    }
+    insert(
+        NOW_MS,
+        "hook-recall",
+        "ok",
+        json!({"hook":"watchdog", "stall":{"phase":"dns", "dns_ms":4700}}).to_string(),
+    );
+    let ignored =
+        json!({"hook":"none", "net":{"dns_ms":9999}, "stall":{"phase":"connect"}}).to_string();
+    insert(NOW_MS - 31 * DAY_MS, "hook-recall", "ok", ignored.clone());
+    insert(NOW_MS, "hook-refresh", "ok", ignored.clone());
+    insert(NOW_MS, "hook-recall", "error", ignored);
+    insert(NOW_MS, "hook-recall", "ok", "not JSON".into());
+    insert(
+        NOW_MS,
+        "hook-recall",
+        "ok",
+        json!({"hook":"none"}).to_string(),
+    );
+    insert(
+        NOW_MS,
+        "hook-recall",
+        "ok",
+        json!({"hook":"none", "net":{"dns_ms":-1, "tls_ms":"slow", "response_ms":null}})
+            .to_string(),
+    );
+    drop(db);
+
+    let report = query_usage_at(&path, 30, NOW_MS).unwrap();
+    let recall = &report["hook_census"]["hook-recall"];
+    assert_eq!(recall["_total"], 29);
+    assert_eq!(recall["none"], 12);
+    assert_eq!(recall["injected"], 10);
+    assert_eq!(recall["remote_timeout"], 4);
+    assert_eq!(recall["watchdog"], 1);
+    assert!(recall.get("unknown/watchdog").is_none());
+    assert_eq!(recall["status_error"], 1);
+    assert_eq!(recall["unparseable_summary"], 1);
+    assert_eq!(recall["stall_phase"], json!({"dns":2, "tls":3}));
+    for (phase, factor) in [("dns", 1), ("connect", 2), ("tls", 3), ("response", 4)] {
+        assert_eq!(
+            recall["net"][format!("{phase}_ms")],
+            json!({"n":20, "p50":9*factor, "p95":18*factor, "max":19*factor})
+        );
+    }
+    let lean = render_usage_lean(&report);
+    assert!(
+        lean.contains("# hook_census hook-recall total=29"),
+        "{lean}"
+    );
+    assert!(
+        lean.contains("# hook_network hook-recall stall_phase={\"dns\":2,\"tls\":3}"),
+        "{lean}"
+    );
+    assert!(
+        lean.contains("# hook_network hook-recall dns_ms n=20 p50=9 p95=18 max=19"),
+        "{lean}"
+    );
+}
+
 /// usage.db is a rollback-journal database, so a commit in progress blocks readers. The hook's
 /// read gives up at the record wait; a worker's read waits the lock out instead of reporting
 /// `usage_db_unreadable`.

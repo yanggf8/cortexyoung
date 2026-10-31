@@ -2,6 +2,25 @@
 
 use crate::memory::MemoryRecall;
 use crate::notes_upload::NoteBrief;
+use serde_json::Value;
+
+/// Add transport diagnostics only when a request reached DNS. A successful empty ledger
+/// (`none`) is a remote read too; configuration/dispatch failures have no network baseline.
+pub fn add_network_timings(row: &mut Value, outcome: &str, snapshot: Option<Value>) {
+    let Some(mut timing) = snapshot else {
+        return;
+    };
+    match outcome {
+        "remote_timeout" | "remote_unreachable" | "watchdog" => row["stall"] = timing,
+        "injected" | "none" => {
+            if let Some(object) = timing.as_object_mut() {
+                object.remove("phase");
+            }
+            row["net"] = timing;
+        }
+        _ => {}
+    }
+}
 
 const MAX_ENTRIES: usize = 20;
 const MAX_BYTES: usize = 6000;

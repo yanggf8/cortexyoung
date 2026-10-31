@@ -589,7 +589,8 @@ pub fn query_usage_at(path: &Path, days: i64, now_ms: i64) -> Result<Value, Cort
     };
     let suggest_census = with_total(hook_census_at(path, "hook-suggest", cutoff)?);
     let refresh_census = with_total(hook_census_at(path, "hook-refresh", cutoff)?);
-    let recall_census = with_total(hook_census_at(path, "hook-recall", cutoff)?);
+    let mut recall_census = with_total(hook_census_at(path, "hook-recall", cutoff)?);
+    recall_census.extend(recall_network_at(&conn, cutoff)?);
     Ok(json!({
         "best_effort": true,
         "commands": commands,
@@ -874,6 +875,58 @@ pub fn hook_census_at(
     Ok(out)
 }
 
+/// Network diagnostics are separate objects beside the outcome buckets, so `_total` still
+/// counts hook rows exactly once. Old rows without timings never become zero-ms samples.
+fn recall_network_at(conn: &Connection, since_ms: i64) -> Result<Map<String, Value>, CortError> {
+    let mut stmt = conn
+        .prepare("SELECT args_summary FROM command_log WHERE command = 'hook-recall' AND ts >= ?1 AND status = 'ok'")
+        .map_err(map_query_err)?;
+    let rows = stmt
+        .query_map(params![since_ms], |r| r.get::<_, String>(0))
+        .map_err(map_query_err)?;
+    let phases = ["dns", "connect", "tls", "response"];
+    let mut stalls = std::collections::BTreeMap::<String, u64>::new();
+    let mut samples: [Vec<u64>; 4] = std::array::from_fn(|_| Vec::new());
+    for row in rows {
+        let raw = row.map_err(map_query_err)?;
+        let Ok(parsed) = serde_json::from_str::<Value>(&raw) else {
+            continue;
+        };
+        if let Some(phase) = parsed["stall"]["phase"]
+            .as_str()
+            .filter(|p| phases.contains(p) || *p == "budget")
+        {
+            *stalls.entry(phase.to_string()).or_default() += 1;
+        }
+        for (phase, values) in phases.iter().zip(&mut samples) {
+            if let Some(ms) = parsed["net"][format!("{phase}_ms")].as_u64() {
+                values.push(ms);
+            }
+        }
+    }
+    let mut out = Map::new();
+    if !stalls.is_empty() {
+        out.insert("stall_phase".into(), json!(stalls));
+    }
+    let mut net = Map::new();
+    for (phase, values) in phases.iter().zip(&mut samples) {
+        if values.is_empty() {
+            continue;
+        }
+        values.sort_unstable();
+        // Nearest-rank percentiles, including the measured zero-ms samples.
+        let percentile = |p: usize| values[(values.len() * p).div_ceil(100) - 1];
+        net.insert(
+            format!("{phase}_ms"),
+            json!({"n":values.len(), "p50":percentile(50), "p95":percentile(95), "max":values.last()}),
+        );
+    }
+    if !net.is_empty() {
+        out.insert("net".into(), json!(net));
+    }
+    Ok(out)
+}
+
 pub fn render_usage_lean(payload: &Value) -> String {
     let days = payload.get("days").and_then(Value::as_i64).unwrap_or(0);
     let best = payload
@@ -946,6 +999,17 @@ pub fn render_usage_lean(payload: &Value) -> String {
                 at("unparseable_summary"),
                 at("legacy_unsplit"),
             ));
+            if let Some(stalls) = part.get("stall_phase") {
+                lines.push(format!("# hook_network {name} stall_phase={stalls}"));
+            }
+            if let Some(net) = part.get("net").and_then(Value::as_object) {
+                for (phase, stats) in net {
+                    lines.push(format!(
+                        "# hook_network {name} {phase} n={} p50={} p95={} max={}",
+                        stats["n"], stats["p50"], stats["p95"], stats["max"],
+                    ));
+                }
+            }
         }
     }
     lines.push("# projects".into());

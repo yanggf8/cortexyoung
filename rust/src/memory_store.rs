@@ -583,6 +583,7 @@ pub fn session_recall_with(
         if crate::remote::RECALL_DEADLINE.saturating_sub(started.elapsed())
             < Duration::from_millis(200)
         {
+            crate::remote::network_budget_exhausted();
             return Err(ErrorKind::Timeout);
         }
         let mut statements = vec![ledger_stmt.clone()];

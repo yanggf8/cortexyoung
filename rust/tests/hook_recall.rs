@@ -484,6 +484,7 @@ fn run(
         .env_remove("CORT_MEMORY_PROJECT")
         .env_remove("CLAUDECAT_MEMORY_PROJECT")
         .env("CORT_MACHINE_ID", "self")
+        .env_remove("CORT_TEST_RECALL_WATCHDOG_MS")
         .current_dir(cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -520,6 +521,8 @@ fn cli_unconfigured_and_invalid_input_are_silent() {
     assert!(out.status.success());
     assert!(out.stdout.is_empty());
     assert_eq!(outcome(root)["hook"], "not_configured");
+    assert!(outcome(root).get("stall").is_none());
+    assert!(outcome(root).get("net").is_none());
     config(&root.join("data"), "turso://127.0.0.1:9");
     let (out, _) = run(root, root, "not JSON", None);
     assert!(out.stdout.is_empty());
@@ -605,6 +608,14 @@ fn cli_silent_server_times_out_and_clamps() {
         );
         notice(&out, "remote_timeout");
         assert_eq!(outcome(root)["hook"], "remote_timeout");
+        let row = outcome(root);
+        assert_eq!(row["stall"]["phase"], "tls");
+        for phase in ["dns_ms", "connect_ms", "tls_ms"] {
+            assert!(row["stall"][phase].is_u64(), "{row}");
+        }
+        assert!(row["stall"]["tls_ms"].as_u64().unwrap() >= 300, "{row}");
+        assert!(row["stall"].get("response_ms").is_none());
+        assert!(row.get("net").is_none());
     }
 }
 #[test]
@@ -622,6 +633,173 @@ fn cli_unbound_port_and_payload_cwd() {
     );
     notice(&out, &kind);
     assert!(outcome(root)["hook"].as_str().is_some());
+    let row = outcome(root);
+    assert_eq!(row["stall"]["phase"], "connect");
+    assert!(row["stall"]["dns_ms"].is_u64());
+    assert!(row["stall"]["connect_ms"].is_u64());
+    assert!(row["stall"].get("tls_ms").is_none());
+    assert!(row.get("net").is_none());
+}
+
+#[cfg(debug_assertions)]
+fn watchdog_command(root: &Path) -> Command {
+    // Start with an existing usage cache. Fresh SQLite schema creation can itself exceed the
+    // fixed 300 ms write grace on a busy disk; that failure is deliberately best-effort.
+    fs::create_dir_all(root.join("cache")).unwrap();
+    let mut db = rusqlite::Connection::open(root.join("cache/usage.db")).unwrap();
+    let tx = db.transaction().unwrap();
+    tx.execute_batch(include_str!("../src/usage_schema.sql"))
+        .unwrap();
+    for (key, value) in [
+        ("USAGE_SCHEMA_VERSION", "2"),
+        ("MACHINE_ID", "test"),
+        ("MACHINE_ID_SOURCE", "env"),
+        ("INSTANCE_ID", "test"),
+    ] {
+        tx.execute(
+            "INSERT INTO _usage_meta (key, value) VALUES (?1, ?2)",
+            [key, value],
+        )
+        .unwrap();
+    }
+    tx.commit().unwrap();
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_cort"));
+    cmd.args(["hook-recall", "--harness", "claude-code"])
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("HOME", root)
+        .env("CORT_MEMORY_DIR", root.join("data"))
+        .env("CORT_CACHE_DIR", root.join("cache"))
+        .env("CLAUDE_CONFIG_DIR", root.join("claude"))
+        .env("CORT_MACHINE_ID", "self")
+        .env("CORT_RECALL_TIMEOUT_MS", "99999")
+        .env("CORT_TEST_RECALL_WATCHDOG_MS", "1000")
+        .current_dir(root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    cmd
+}
+
+#[cfg(debug_assertions)]
+fn assert_single_watchdog(root: &Path) -> Value {
+    let db = rusqlite::Connection::open(root.join("cache/usage.db")).unwrap();
+    let count: i64 = db
+        .query_row("SELECT COUNT(*) FROM command_log", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(count, 1, "only the winning path may write a row");
+    let (status, bytes): (String, i64) = db
+        .query_row("SELECT status, bytes_out FROM command_log", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .unwrap();
+    assert_eq!((status.as_str(), bytes), ("ok", 0));
+    let row = outcome(root);
+    assert_eq!(row["hook"], "watchdog");
+    row
+}
+
+#[cfg(debug_assertions)]
+#[test]
+fn cli_watchdog_records_network_stall_once() {
+    let Some(server) = SilentServer::new() else {
+        return;
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let repo = git_repo(root);
+    config(&root.join("data"), &server.url);
+    let mut command = watchdog_command(root);
+    let started = Instant::now();
+    let mut child = command.spawn().unwrap();
+    child.stdin.take().unwrap().write_all(
+        json!({"cwd":repo, "model":"test-model", "transcript_path":root.join(".codex/sessions/test.jsonl")})
+            .to_string().as_bytes(),
+    ).unwrap();
+    let out = child.wait_with_output().unwrap();
+    let elapsed = started.elapsed();
+    assert!(out.status.success());
+    assert!(out.stdout.is_empty() && out.stderr.is_empty(), "{out:?}");
+    // 1000 ms test watchdog + 300 ms write grace, with 500 ms scheduling tolerance.
+    // The real network timeout is longer, so normal completion cannot satisfy this bound.
+    assert!(elapsed < Duration::from_millis(1800), "{elapsed:?}");
+    let row = assert_single_watchdog(root);
+    assert_eq!(row["harness"], "codex");
+    assert_eq!(row["harness_declared"], "claude-code");
+    assert_eq!(row["model"], "test-model");
+    assert_eq!(row["stall"]["phase"], "tls", "{row}");
+    // How long the child took to reach TLS depends on machine load; the phase is the claim.
+    assert!(row["stall"]["tls_ms"].is_u64(), "{row}");
+    assert!(row.get("net").is_none());
+    let db = rusqlite::Connection::open(root.join("cache/usage.db")).unwrap();
+    let project: String = db
+        .query_row("SELECT project_id FROM command_log", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(project, cort::db::project_id_for(repo.to_str().unwrap()));
+}
+
+#[cfg(debug_assertions)]
+#[test]
+fn cli_watchdog_does_not_wait_for_stdin() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let mut command = watchdog_command(root);
+    let started = Instant::now();
+    let mut child = command.spawn().unwrap();
+    // Hold stdin open outside Child so wait_with_output cannot close it for us.
+    let stdin = child.stdin.take().unwrap();
+    let out = child.wait_with_output().unwrap();
+    let elapsed = started.elapsed();
+    drop(stdin);
+    assert!(out.status.success());
+    assert!(out.stdout.is_empty() && out.stderr.is_empty(), "{out:?}");
+    assert!(elapsed < Duration::from_millis(1800), "{elapsed:?}");
+    let row = assert_single_watchdog(root);
+    assert_eq!(row["harness"], "unknown");
+    assert_eq!(row["harness_declared"], "claude-code");
+    assert!(row.get("model").is_none());
+    assert!(row.get("stall").is_none() && row.get("net").is_none());
+}
+
+#[test]
+fn recall_network_row_shapes() {
+    use cort::hook_recall::add_network_timings;
+    let stalled = json!({"phase":"tls", "dns_ms":120, "connect_ms":40, "tls_ms":3500});
+    let complete =
+        json!({"phase":"response", "dns_ms":120, "connect_ms":40, "tls_ms":80, "response_ms":60});
+    for outcome in [
+        "remote_timeout",
+        "remote_unreachable",
+        "watchdog",
+        "injected",
+        "none",
+        "not_configured",
+    ] {
+        let mut row = json!({"v":6, "hook":outcome, "harness":"claude-code"});
+        let timing = if outcome.starts_with("remote_") || outcome == "watchdog" {
+            &stalled
+        } else {
+            &complete
+        };
+        add_network_timings(&mut row, outcome, Some(timing.clone()));
+        match outcome {
+            "remote_timeout" | "remote_unreachable" | "watchdog" => {
+                assert_eq!(row["stall"], stalled);
+                assert!(row.get("net").is_none());
+            }
+            "injected" | "none" => {
+                assert_eq!(
+                    row["net"],
+                    json!({"dns_ms":120, "connect_ms":40, "tls_ms":80, "response_ms":60})
+                );
+                assert!(row.get("stall").is_none());
+            }
+            _ => assert!(row.get("net").is_none() && row.get("stall").is_none()),
+        }
+        let mut no_request = json!({"hook":outcome});
+        add_network_timings(&mut no_request, outcome, None);
+        assert_eq!(no_request, json!({"hook":outcome}));
+    }
 }
 
 #[test]

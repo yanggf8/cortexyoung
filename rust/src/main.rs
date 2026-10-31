@@ -25,7 +25,7 @@ use serde_json::{json, Value};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 // `hook-suggest` is here so its rows are recorded under their own name rather than `_unknown`:
@@ -983,6 +983,12 @@ fn dispatch(args: &[String], usage: &mut UsageEvent, started: Instant) -> Result
 /// `symbol`, `why`, `decline`, `shape`, `demand` and `kind` keys appear only in v≤5 rows, which
 /// stay in `usage.db` for the 90-day retention (and forever on the remote). `hook-refresh` shares
 /// this row shape, so its rows are v6 too and unchanged in every field they carry.
+///
+/// Still within `v: 6`, `hook-recall` rows may add network timings (additive keys, so no bump):
+/// `stall` on `remote_timeout`, `remote_unreachable` and the watchdog's own `watchdog` row (the
+/// phase reached -- `dns`, `connect`, `tls`, `response`, or `budget` when the call gave up before
+/// sending -- with per-phase `*_ms`), and `net` on a successful read. A row without them either
+/// predates them or made no request.
 fn hook_row(outcome: &str, harness: &str, declared: Option<&str>, model: Option<&str>) -> Value {
     let mut v = json!({ "v": 6, "hook": outcome, "harness": harness });
     if let Some(d) = declared {
@@ -1381,6 +1387,10 @@ fn cmd_hook_suggest(args: &[String], usage: &mut UsageEvent) -> Result<Emit, Cor
     }
 }
 
+// Published separately so a stall resolving the project cannot hide already parsed fields.
+static RECALL_WATCHDOG_ROW: OnceLock<Value> = OnceLock::new();
+static RECALL_WATCHDOG_PROJECT: OnceLock<String> = OnceLock::new();
+
 /// Recall reads shared memory without waiting on a local writer.
 fn cmd_hook_recall(
     args: &[String],
@@ -1401,6 +1411,7 @@ fn cmd_hook_recall(
         .map(|v| harness_of(v, &declared))
         .unwrap_or((declared, None));
     let model = parsed.as_ref().and_then(model_of_payload);
+    let _ = RECALL_WATCHDOG_ROW.set(hook_row("watchdog", &harness, differs.as_deref(), model));
     let prompt = parsed
         .as_ref()
         .and_then(|v| v.get("hook_event_name"))
@@ -1433,6 +1444,9 @@ fn cmd_hook_recall(
     usage.project_id = std::fs::canonicalize(&root)
         .ok()
         .and_then(|p| p.to_str().map(project_id_for));
+    if let Some(project) = &usage.project_id {
+        let _ = RECALL_WATCHDOG_PROJECT.set(project.clone());
+    }
     let (outcome, content, count, notes_count) = if let Some(outcome) = skip {
         (outcome, None, 0, 0)
     } else if parsed.is_none() {
@@ -1494,6 +1508,7 @@ fn cmd_hook_recall(
         }
     };
     let mut row = hook_row(outcome, &harness, differs.as_deref(), model);
+    cort::hook_recall::add_network_timings(&mut row, outcome, cort::remote::network_snapshot());
     if outcome == "injected" {
         row["entries"] = json!(count);
         row["notes"] = json!(notes_count);
@@ -3137,26 +3152,54 @@ fn main() {
     let recall_hook = args.first().is_some_and(|a| a == "hook-recall");
     let claim = Arc::new(AtomicBool::new(false));
     if recall_hook {
-        // A timeout exits before the normal usage writer; that missing row is intentional.
         // The process must never hold up a session start, even if stdin or storage stalls.
         // It fires 900 ms after the recall deadline, so a read the deadline allows still gets to
-        // print its notice and row. Losing the claim means the main path is writing stdout and
-        // its row; it gets 300 ms more for that, then the process exits anyway (a stuck pipe or
-        // usage.db). The two add up to the harnesses' 5 s hook limit, as 3 s + 2 s did before.
+        // print its notice and row. Winning the claim starts a best-effort watchdog row writer
+        // on another thread; losing means the main path is writing stdout and its row. Either
+        // writer gets at most 300 ms more before exit, including a stuck pipe or usage.db.
+        // The total envelope stays deadline + 900 + 300 = the harnesses' 5 s hook limit.
         let watchdog_claim = Arc::clone(&claim);
+        let watchdog_args = args.clone();
+        let delay = cort::remote::RECALL_DEADLINE + Duration::from_millis(900);
+        // Integration tests need a watchdog that beats a bounded local TLS blackhole.
+        // Release builds never read this override; debug builds can only shorten the wait.
+        #[cfg(debug_assertions)]
+        let delay = std::env::var("CORT_TEST_RECALL_WATCHDOG_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|ms| *ms > 0)
+            .map(|ms| Duration::from_millis(ms).min(delay))
+            .unwrap_or(delay);
         if std::thread::Builder::new()
             .name("hook-recall-watchdog".into())
             .spawn(move || {
-                std::thread::sleep(
-                    cort::remote::RECALL_DEADLINE + std::time::Duration::from_millis(900),
-                );
+                std::thread::sleep(delay.saturating_sub(started.elapsed()));
+                let exit_at = Instant::now() + Duration::from_millis(300);
                 if watchdog_claim
                     .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
                     .is_ok()
                 {
-                    std::process::exit(0);
+                    let snapshot = cort::remote::network_snapshot();
+                    let _ = std::thread::Builder::new()
+                        .name("hook-recall-watchdog-row".into())
+                        .spawn(move || {
+                            // Never read stdin or wait for its parser. If it has not published
+                            // attribution, explicitly record that the harness is unknown.
+                            let mut row = RECALL_WATCHDOG_ROW.get().cloned().unwrap_or_else(|| {
+                                let declared =
+                                    HookSuggestArgs::try_parse_from(watchdog_args.iter().skip(1))
+                                        .ok()
+                                        .and_then(|a| a.harness);
+                                hook_row("watchdog", "unknown", declared.as_deref(), None)
+                            });
+                            cort::hook_recall::add_network_timings(&mut row, "watchdog", snapshot);
+                            let mut usage_ev = usage_from_args(&watchdog_args);
+                            usage_ev.project_id = RECALL_WATCHDOG_PROJECT.get().cloned();
+                            usage_ev.args_summary = row.to_string();
+                            finish_record(&usage_ev, "ok", None, 0);
+                        });
                 }
-                std::thread::sleep(std::time::Duration::from_millis(300));
+                std::thread::sleep(exit_at.saturating_duration_since(Instant::now()));
                 std::process::exit(0);
             })
             .is_err()
@@ -3232,6 +3275,17 @@ fn main() {
             );
         }
         Err(err) => {
+            // `cmd_hook_recall` answers every outcome with Ok today, but an error here must still
+            // yield to a watchdog that already claimed the exit and wrote its row.
+            if recall_hook
+                && claim
+                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                    .is_err()
+            {
+                loop {
+                    std::thread::park();
+                }
+            }
             let format = peek_format(&args);
             let rendered = render_error(format, &err);
             if !background_measure {

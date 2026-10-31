@@ -70,6 +70,8 @@ only edited notes would return until it is deleted.
 The secret screen is coarse and fail-closed; it is not a privacy guarantee. Run
 `cort memory notes upload --dry-run` to list what would be uploaded before uploading.
 Claude Code's SessionStart context lists up to 15 unreviewed note names from other machines for this project, without their bodies.
+Its usage row carries `stall` on `remote_timeout`/`remote_unreachable`/`watchdog` (the last network phase reached -- or `budget` when the recall gave up before sending its next request, with the previous request's timings -- and completed/current phase milliseconds), or `net` on successful remote reads (`dns_ms`, `connect_ms`, `tls_ms`, `response_ms`); both are absent when no request reached DNS. Normal returns write one row; when the watchdog wins, it instead attempts one `watchdog` row on a separate thread, with at most 300 ms to finish before process exit. It uses the harness/model already parsed by the main thread, or harness `unknown` if those fields are not yet available, without reading stdin. A stalled or failed usage write can still leave no row; the 5 s process envelope is unchanged.
+`cort usage` reports `stall_phase` counts and each `net` phase's sample count, p50, p95 and max milliseconds under `hook_census.hook-recall`, including in lean output.
 
 ## Review, record, recall
 

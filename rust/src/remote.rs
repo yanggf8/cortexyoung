@@ -2,6 +2,8 @@
 
 use serde_json::{json, Value};
 use std::fmt;
+use std::net::ToSocketAddrs;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -206,6 +208,108 @@ pub trait Transport {
 /// afternoon while warm reads took about 300 ms.
 pub const RECALL_DEADLINE: Duration = Duration::from_millis(3800);
 
+/// The hook makes sequential requests (including its ledger-only retry). Keep the latest
+/// connection attempt visible to other threads without a mutex a stalled worker could hold.
+/// Boundaries are published in order; zero means that boundary has not been reached.
+struct NetworkRecorder {
+    boundaries: [AtomicU64; 4],
+    stopped: AtomicU64,
+    /// Nonzero once a call gave up for lack of budget without sending a request; the boundaries
+    /// then still describe the previous request, which is what spent the budget.
+    budget: AtomicU64,
+}
+
+impl NetworkRecorder {
+    const fn new() -> Self {
+        Self {
+            boundaries: [const { AtomicU64::new(0) }; 4],
+            stopped: AtomicU64::new(0),
+            budget: AtomicU64::new(0),
+        }
+    }
+
+    fn reset(&self) {
+        for boundary in &self.boundaries {
+            boundary.store(0, Ordering::Release);
+        }
+        self.stopped.store(0, Ordering::Release);
+        self.budget.store(0, Ordering::Release);
+    }
+
+    fn mark_budget(&self) {
+        self.budget.store(1, Ordering::Release);
+    }
+
+    fn tick() -> u64 {
+        static ORIGIN: OnceLock<Instant> = OnceLock::new();
+        ORIGIN.get_or_init(Instant::now).elapsed().as_nanos() as u64 + 1
+    }
+
+    fn enter(&self, phase: usize) {
+        self.boundaries[phase].store(Self::tick(), Ordering::Release);
+    }
+
+    fn stop(&self) {
+        self.stopped.store(Self::tick(), Ordering::Release);
+    }
+
+    fn snapshot(&self) -> Option<Value> {
+        self.snapshot_at(Self::tick())
+    }
+
+    fn snapshot_at(&self, now: u64) -> Option<Value> {
+        // Read newest first: observing a boundary also observes all preceding writes.
+        let stopped = self.stopped.load(Ordering::Acquire);
+        let mut times = [0; 4];
+        for i in (0..4).rev() {
+            times[i] = self.boundaries[i].load(Ordering::Acquire);
+        }
+        let budget = self.budget.load(Ordering::Acquire) != 0;
+        let Some(phase) = times.iter().rposition(|&t| t != 0) else {
+            return budget.then(|| json!({"phase": "budget"}));
+        };
+        // A reset racing this read can leave a newer boundary beside cleared older ones; that
+        // would print a plausible but invented duration, so report nothing instead.
+        if times[..=phase].contains(&0) || times[..=phase].windows(2).any(|w| w[0] > w[1]) {
+            return None;
+        }
+        let names = ["dns", "connect", "tls", "response"];
+        let mut out = json!({"phase": if budget { "budget" } else { names[phase] }});
+        for i in 0..=phase {
+            let end = if i < phase {
+                times[i + 1]
+            } else if stopped != 0 {
+                stopped
+            } else {
+                now
+            };
+            out[format!("{}_ms", names[i])] = json!(end.saturating_sub(times[i]) / 1_000_000);
+        }
+        Some(out)
+    }
+}
+
+static NETWORK: NetworkRecorder = NetworkRecorder::new();
+
+/// Last HTTP request's completed phases and elapsed time in its current (or final) phase.
+/// Before DNS begins this is absent. Normal returns freeze it; a stuck request stays readable.
+pub fn network_snapshot() -> Option<Value> {
+    NETWORK.snapshot()
+}
+
+/// A recall that stops for lack of budget before sending its next request reports phase
+/// `budget`, keeping the previous request's timings, instead of looking stalled in that request.
+pub fn network_budget_exhausted() {
+    NETWORK.mark_budget();
+}
+
+struct NetworkRequest;
+impl Drop for NetworkRequest {
+    fn drop(&mut self) {
+        NETWORK.stop();
+    }
+}
+
 /// Recompute the SessionStart allowance for each POST, including a ledger-only retry.
 pub struct RecallTransport {
     pub started: Instant,
@@ -221,6 +325,7 @@ impl Transport for RecallTransport {
     ) -> Result<Vec<u8>, RemoteError> {
         let remaining = RECALL_DEADLINE.saturating_sub(self.started.elapsed());
         if remaining < Duration::from_millis(200) {
+            network_budget_exhausted();
             return Err(RemoteError::new(
                 ErrorKind::Timeout,
                 "recall budget exhausted",
@@ -290,6 +395,7 @@ impl ureq::TlsConnector for AwsLcTls {
         dns_name: &str,
         mut io: Box<dyn ureq::ReadWrite>,
     ) -> Result<Box<dyn ureq::ReadWrite>, ureq::Error> {
+        NETWORK.enter(2);
         // ureq's errors can only be built from an io::Error outside the crate; a handshake that
         // stalls keeps its TimedOut kind and classifies as Timeout.
         let host = match dns_name.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
@@ -302,6 +408,7 @@ impl ureq::TlsConnector for AwsLcTls {
         let mut session = rustls::ClientConnection::new(self.0.clone(), name)
             .map_err(|_| std::io::Error::other("TLS session setup failed"))?;
         session.complete_io(&mut io)?;
+        NETWORK.enter(3);
         Ok(Box::new(TlsStream(rustls::StreamOwned::new(session, io))))
     }
 }
@@ -318,11 +425,26 @@ impl Transport for UreqTransport {
         headers: &[(&str, &str)],
     ) -> Result<Vec<u8>, RemoteError> {
         use std::io::Read;
+        NETWORK.reset();
+        let _recording = NetworkRequest;
         // ureq 2.12's per-request timeout does not bound the TCP connect: that waits for the
         // agent's `timeout_connect` (30 s by default), which a blackholed address reaches in
         // full (strace on 2026-10-28: `poll(..., 29999)` under a 1 s request timeout).
         let agent = ureq::AgentBuilder::new()
             .tls_connector(tls()?)
+            .resolver(|netloc: &str| {
+                // A redirect may open another connection within this POST. Do not let the
+                // preceding connection's TLS/response boundary hide a stall in its DNS.
+                NETWORK.reset();
+                NETWORK.enter(0);
+                let result = netloc
+                    .to_socket_addrs()
+                    .map(|addrs| addrs.collect::<Vec<_>>());
+                if result.as_ref().is_ok_and(|addrs| !addrs.is_empty()) {
+                    NETWORK.enter(1);
+                }
+                result
+            })
             .timeout_connect(self.timeout)
             .build();
         let mut request = agent.post(url).timeout(self.timeout);
@@ -950,6 +1072,138 @@ impl Transport for SqliteTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn network_recorder_phase_order_and_frozen_return() {
+        let recorder = NetworkRecorder::new();
+        assert_eq!(recorder.snapshot_at(1), None);
+        for (phase, (name, start)) in [
+            ("dns", 1),
+            ("connect", 120_000_001),
+            ("tls", 160_000_001),
+            ("response", 460_000_001),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            recorder.boundaries[phase].store(start, Ordering::Release);
+            let snapshot = recorder.snapshot_at(start + 35_000_000).unwrap();
+            assert_eq!(snapshot["phase"], name);
+            assert_eq!(snapshot[format!("{name}_ms")], 35);
+            assert_eq!(snapshot.as_object().unwrap().len(), phase + 2);
+        }
+        recorder.stopped.store(510_000_001, Ordering::Release);
+        let frozen = json!({"phase":"response", "dns_ms":120, "connect_ms":40, "tls_ms":300, "response_ms":50});
+        assert_eq!(recorder.snapshot_at(900_000_001), Some(frozen.clone()));
+        assert_eq!(recorder.snapshot_at(9_000_000_001), Some(frozen));
+        recorder.reset();
+        assert_eq!(recorder.snapshot(), None);
+    }
+
+    #[test]
+    fn network_recorder_budget_and_torn_reads() {
+        let recorder = NetworkRecorder::new();
+        // Budget spent before any request: the phase alone.
+        recorder.mark_budget();
+        assert_eq!(recorder.snapshot_at(5), Some(json!({"phase": "budget"})));
+        // Budget spent after a completed request keeps that request's timings.
+        recorder.reset();
+        for (phase, start) in [1, 100_000_001, 200_000_001, 300_000_001]
+            .into_iter()
+            .enumerate()
+        {
+            recorder.boundaries[phase].store(start, Ordering::Release);
+        }
+        recorder.stopped.store(400_000_001, Ordering::Release);
+        recorder.mark_budget();
+        assert_eq!(
+            recorder.snapshot_at(900_000_001),
+            Some(
+                json!({"phase":"budget","dns_ms":100,"connect_ms":100,"tls_ms":100,"response_ms":100})
+            )
+        );
+        // A reset caught halfway (older boundaries cleared, a newer one not yet) reports nothing.
+        recorder.reset();
+        recorder.boundaries[3].store(300_000_001, Ordering::Release);
+        assert_eq!(recorder.snapshot_at(900_000_001), None);
+    }
+
+    #[test]
+    fn network_recorder_snapshot_from_another_thread_mid_phase() {
+        let recorder = Arc::new(NetworkRecorder::new());
+        let worker_recorder = Arc::clone(&recorder);
+        let (entered, waiting) = std::sync::mpsc::channel();
+        let (resume, released) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            for phase in 0..=2 {
+                worker_recorder.enter(phase);
+            }
+            entered.send(()).unwrap();
+            released.recv().unwrap();
+            worker_recorder.enter(3);
+            worker_recorder.stop();
+        });
+        waiting.recv().unwrap();
+        let snapshot = recorder.snapshot().unwrap();
+        assert_eq!(snapshot["phase"], "tls");
+        for phase in ["dns_ms", "connect_ms", "tls_ms"] {
+            assert!(snapshot[phase].is_u64());
+        }
+        assert!(snapshot.get("response_ms").is_none());
+        resume.send(()).unwrap();
+        worker.join().unwrap();
+        assert_eq!(recorder.snapshot().unwrap()["phase"], "response");
+    }
+
+    #[test]
+    fn network_recorder_tls_timeout_without_sockets() {
+        #[derive(Debug)]
+        struct SilentPeer;
+        impl std::io::Read for SilentPeer {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "silent peer",
+                ))
+            }
+        }
+        impl std::io::Write for SilentPeer {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl ureq::ReadWrite for SilentPeer {
+            fn socket(&self) -> Option<&std::net::TcpStream> {
+                None
+            }
+        }
+
+        NETWORK.reset();
+        let recording = NetworkRequest;
+        NETWORK.enter(0);
+        NETWORK.enter(1);
+        let error =
+            ureq::TlsConnector::connect(tls().unwrap().as_ref(), "localhost", Box::new(SilentPeer))
+                .unwrap_err();
+        drop(recording);
+        let snapshot = network_snapshot().unwrap();
+        assert_eq!(snapshot["phase"], "tls");
+        for phase in ["dns_ms", "connect_ms", "tls_ms"] {
+            assert!(snapshot[phase].is_u64(), "{snapshot}");
+        }
+        assert!(snapshot.get("response_ms").is_none());
+        assert_eq!(
+            std::error::Error::source(&error)
+                .unwrap()
+                .downcast_ref::<std::io::Error>()
+                .unwrap()
+                .kind(),
+            std::io::ErrorKind::TimedOut
+        );
+    }
+
     #[test]
     fn classification_table() {
         for (code, message, status, expected) in [
