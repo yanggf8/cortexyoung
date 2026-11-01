@@ -262,6 +262,7 @@ impl MeasureStore for SlowFirstWrite {
         compaction_owners(machine_id: &str) -> Result<Vec<(String, String)>, String>;
         compactions_since(since_ms: i64) -> Result<Vec<CompactionRow>, String>;
         gate_rows_since(since_ms: i64) -> Result<Vec<GateRow>, String>;
+        recall_rows_since(since_ms: i64) -> Result<Vec<cort::measure_store::RecallRow>, String>;
         machine_hosts() -> Result<Vec<MachineHost>, String>;
         insert_events(events: &[TelemetryEvent]) -> Result<usize, String>;
         remote_ids(machine_id: &str, source: &str) -> Result<HashMap<i64, String>, String>;

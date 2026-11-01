@@ -223,6 +223,95 @@ fn report_gate_keeps_quiet_hosts_and_empty_report() {
 }
 
 #[test]
+fn report_recall_counts_outcomes_stalls_and_net_timings() {
+    let (_t, mut s) = store();
+    s.upsert_machine_host("m1", "host-one", 1).unwrap();
+    s.upsert_machine_host("quiet", "quiet-host", 1).unwrap();
+    let now = MEASURE_START_MS + 10 * DAY_MS;
+    let recent = now - DAY_MS;
+    let ev = |id: &str, args: &str| gate_event(id, "m1", recent, "hook-recall", args);
+    let events = vec![
+        ev(
+            "1",
+            r#"{"v":6,"hook":"injected","harness":"claude-code","net":{"dns_ms":16,"connect_ms":56,"tls_ms":146,"response_ms":225}}"#,
+        ),
+        ev(
+            "2",
+            r#"{"v":6,"hook":"injected","harness":"claude-code","net":{"dns_ms":798,"connect_ms":50,"tls_ms":140,"response_ms":"bad"}}"#,
+        ),
+        // A row from before the timings existed contributes no samples.
+        ev("3", r#"{"v":6,"hook":"none","harness":"claude-code"}"#),
+        ev(
+            "4",
+            r#"{"v":6,"hook":"remote_timeout","harness":"claude-code","stall":{"phase":"dns","dns_ms":3500}}"#,
+        ),
+        ev(
+            "5",
+            r#"{"v":6,"hook":"watchdog","harness":"unknown","stall":{"phase":"budget"}}"#,
+        ),
+        ev(
+            "6",
+            r#"{"v":6,"hook":"remote_unreachable","harness":"codex","stall":{"phase":"connect","dns_ms":10,"connect_ms":3000}}"#,
+        ),
+        ev("7", "broken json"),
+        gate_event(
+            "other",
+            "m1",
+            recent,
+            "hook-suggest",
+            r#"{"hook":"injected","harness":"claude-code"}"#,
+        ),
+        gate_event(
+            "old",
+            "m1",
+            MEASURE_START_MS - 1,
+            "hook-recall",
+            r#"{"hook":"injected","harness":"claude-code"}"#,
+        ),
+    ];
+    s.insert_events(&events).unwrap();
+    let v = report(&mut s, &inputs(now)).unwrap();
+    assert_eq!(v["recall"]["days"], 7);
+    assert_eq!(v["recall"]["total"], 7);
+    let hosts = v["recall"]["hosts"].as_array().unwrap();
+    assert_eq!(hosts.len(), 2);
+    assert_eq!(
+        hosts[0]["harnesses"],
+        json!([
+            {"harness":"claude-code","runs":4,
+             "outcomes":{"injected":2,"none":1,"remote_timeout":1},
+             "stall_phase":{"dns":1},
+             "net":{
+                "dns_ms":{"n":2,"p50":16,"p95":798,"max":798},
+                "connect_ms":{"n":2,"p50":50,"p95":56,"max":56},
+                "tls_ms":{"n":2,"p50":140,"p95":146,"max":146},
+                "response_ms":{"n":1,"p50":225,"p95":225,"max":225}}},
+            {"harness":"codex","runs":1,"outcomes":{"remote_unreachable":1},
+             "stall_phase":{"connect":1},"net":{}},
+            {"harness":"unknown","runs":2,"outcomes":{"unparsed":1,"watchdog":1},
+             "stall_phase":{"budget":1},"net":{}}
+        ])
+    );
+    assert_eq!(
+        hosts[1],
+        json!({"host":"quiet-host","machine_ids":["quiet"],"harnesses":[]})
+    );
+    let text = render_report(&v, false);
+    assert!(
+        text.contains("recall（最近 7 天）\n\nhost-one  (m1)\n  claude-code  runs 4  injected 2  none 1  remote_timeout 1  stall（dns 1）\n    net ms (n 2)  dns p50 16 p95 798 max 798  connect p50 50 p95 56 max 56  tls p50 140 p95 146 max 146  response p50 225 p95 225 max 225\n  codex  runs 1  remote_unreachable 1  stall（connect 1）\n  unknown  runs 2  unparsed 1  watchdog 1  stall（budget 1）\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("quiet-host  (quiet)\n  這段期間沒有 recall 列"),
+        "{text}"
+    );
+    let (_t2, mut fresh) = store();
+    let empty = report(&mut fresh, &inputs(now)).unwrap();
+    assert_eq!(empty["recall"], json!({"days":7,"total":0,"hosts":[]}));
+    assert!(render_report(&empty, false).contains("recall（最近 7 天）\n這段期間沒有 recall 列"));
+}
+
+#[test]
 fn report_first_section_shows_collection_state() {
     let (_t, mut s) = store();
     let mut input = inputs(FRI_W43_MS);

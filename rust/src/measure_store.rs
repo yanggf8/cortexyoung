@@ -56,6 +56,22 @@ pub struct GateRow {
     pub hook: Option<String>,
 }
 
+/// The network phases a `hook-recall` row times, in the order a request passes through them.
+pub const RECALL_PHASES: [&str; 4] = ["dns", "connect", "tls", "response"];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecallRow {
+    pub machine_id: String,
+    pub harness: Option<String>,
+    /// The row's `hook` outcome (`injected`, `remote_timeout`, `watchdog`, ...); `None` when
+    /// `args_summary` is not JSON.
+    pub hook: Option<String>,
+    /// `stall.phase` of a timed-out, unreachable or watchdog row.
+    pub stall_phase: Option<String>,
+    /// `net.<phase>_ms` of a successful read, in [`RECALL_PHASES`] order.
+    pub net_ms: [Option<i64>; 4],
+}
+
 pub trait MeasureStore {
     /// Insert, or replace the row with the same `(machine_id, boundary_uuid)`.
     fn upsert_compaction(&mut self, row: &CompactionRow) -> Result<(), String>;
@@ -63,6 +79,7 @@ pub trait MeasureStore {
     fn compaction_owners(&mut self, machine_id: &str) -> Result<Vec<(String, String)>, String>;
     fn compactions_since(&mut self, since_ms: i64) -> Result<Vec<CompactionRow>, String>;
     fn gate_rows_since(&mut self, since_ms: i64) -> Result<Vec<GateRow>, String>;
+    fn recall_rows_since(&mut self, since_ms: i64) -> Result<Vec<RecallRow>, String>;
     /// Record that `host` was seen for `machine_id`; the latest `seen_ms` wins.
     fn upsert_machine_host(
         &mut self,
@@ -250,6 +267,28 @@ SELECT machine_id,
   CAST(json_extract(args_summary, '$.gate_ms') AS TEXT),
   CAST(json_extract(args_summary, '$.hook') AS TEXT)
 FROM valid_args";
+/// `hook-recall` rows: outcome, the phase a failed read stalled in, and per-phase timings of a
+/// successful read. Timings are cast to TEXT and parsed in Rust, as `gate_ms` is, so a
+/// non-numeric value is dropped rather than failing the whole report.
+const SELECT_RECALL_ROWS: &str = "WITH candidates AS (
+    SELECT machine_id, json_extract(payload, '$.args_summary') AS args_summary
+    FROM telemetry_events
+    WHERE source = 'cort_command' AND time_ms >= ?
+      AND json_extract(payload, '$.command') = 'hook-recall'
+), valid_args AS (
+    SELECT machine_id,
+      CASE WHEN json_valid(args_summary) THEN args_summary END AS args_summary
+    FROM candidates
+)
+SELECT machine_id,
+  CAST(json_extract(args_summary, '$.harness') AS TEXT),
+  CAST(json_extract(args_summary, '$.hook') AS TEXT),
+  CAST(json_extract(args_summary, '$.stall.phase') AS TEXT),
+  CAST(json_extract(args_summary, '$.net.dns_ms') AS TEXT),
+  CAST(json_extract(args_summary, '$.net.connect_ms') AS TEXT),
+  CAST(json_extract(args_summary, '$.net.tls_ms') AS TEXT),
+  CAST(json_extract(args_summary, '$.net.response_ms') AS TEXT)
+FROM valid_args";
 /// Events per transaction: a commit per row is minutes on a 130k-row first upload.
 const EVENT_CHUNK: usize = 2000;
 
@@ -365,6 +404,23 @@ fn gate_from_cells(c: &[Cell]) -> Result<GateRow, String> {
         gate: optional_text(&c[2])?,
         gate_ms: optional_text(&c[3])?.and_then(|s| s.parse::<i64>().ok()),
         hook: optional_text(&c[4])?,
+    })
+}
+
+fn recall_from_cells(c: &[Cell]) -> Result<RecallRow, String> {
+    let optional_text = |cell: &Cell| match cell {
+        Cell::Null => Ok(None),
+        other => text(other).map(Some),
+    };
+    let ms = |cell: &Cell| -> Result<Option<i64>, String> {
+        Ok(optional_text(cell)?.and_then(|s| s.parse::<i64>().ok()))
+    };
+    Ok(RecallRow {
+        machine_id: text(&c[0])?,
+        harness: optional_text(&c[1])?,
+        hook: optional_text(&c[2])?,
+        stall_phase: optional_text(&c[3])?,
+        net_ms: [ms(&c[4])?, ms(&c[5])?, ms(&c[6])?, ms(&c[7])?],
     })
 }
 
@@ -505,6 +561,13 @@ impl MeasureStore for SqliteStore {
         self.query(SELECT_GATE_ROWS, vec![Cell::Int(since_ms)], 5)?
             .iter()
             .map(|r| gate_from_cells(r))
+            .collect()
+    }
+
+    fn recall_rows_since(&mut self, since_ms: i64) -> Result<Vec<RecallRow>, String> {
+        self.query(SELECT_RECALL_ROWS, vec![Cell::Int(since_ms)], 8)?
+            .iter()
+            .map(|r| recall_from_cells(r))
             .collect()
     }
 
@@ -903,6 +966,13 @@ impl MeasureStore for RemoteStore {
         self.query(SELECT_GATE_ROWS, vec![Cell::Int(since_ms)], 5)?
             .iter()
             .map(|r| gate_from_cells(r))
+            .collect()
+    }
+
+    fn recall_rows_since(&mut self, since_ms: i64) -> Result<Vec<RecallRow>, String> {
+        self.query(SELECT_RECALL_ROWS, vec![Cell::Int(since_ms)], 8)?
+            .iter()
+            .map(|r| recall_from_cells(r))
             .collect()
     }
 

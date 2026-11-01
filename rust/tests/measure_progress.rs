@@ -62,6 +62,7 @@ impl MeasureStore for Counted {
     read! {
         compactions_since(since_ms: i64) -> Result<Vec<CompactionRow>, String>;
         gate_rows_since(since_ms: i64) -> Result<Vec<cort::measure_store::GateRow>, String>;
+        recall_rows_since(since_ms: i64) -> Result<Vec<cort::measure_store::RecallRow>, String>;
         machine_hosts() -> Result<Vec<MachineHost>, String>;
         remote_ids(machine_id: &str, source: &str) -> Result<HashMap<i64, String>, String>;
         event_count(machine_id: &str, source: &str) -> Result<usize, String>;

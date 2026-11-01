@@ -4,7 +4,7 @@
 
 use crate::data_dir::{data_dir, write_atomic};
 use crate::measure_progress::{self, Progress};
-use crate::measure_store::{CompactionRow, GateRow, MeasureStore};
+use crate::measure_store::{CompactionRow, GateRow, MeasureStore, RecallRow, RECALL_PHASES};
 use crate::memory_store::project_from_git_origin;
 use crate::telemetry::{
     upload_events_with_progress, upload_health_events_with_progress, UploadInputs,
@@ -613,6 +613,59 @@ fn gate_host_section(host: &str, machine_ids: &[String], rows: &[&GateRow]) -> V
     json!({"host": host, "machine_ids": machine_ids, "harnesses": harnesses})
 }
 
+/// Nearest-rank p50/p95/max of `values`, which must be sorted; nulls when empty.
+fn nearest_rank(values: &[i64]) -> Value {
+    let rank = |p: usize| values.get((values.len() * p).div_ceil(100).saturating_sub(1));
+    json!({"n": values.len(), "p50": rank(50), "p95": rank(95), "max": values.last()})
+}
+
+fn recall_host_section(host: &str, machine_ids: &[String], rows: &[&RecallRow]) -> Value {
+    let mut harnesses: BTreeMap<String, Vec<&RecallRow>> = BTreeMap::new();
+    for row in rows {
+        harnesses
+            .entry(row.harness.as_deref().unwrap_or("unknown").to_string())
+            .or_default()
+            .push(row);
+    }
+    let harnesses: Vec<Value> = harnesses
+        .into_iter()
+        .map(|(harness, rows)| {
+            let mut outcomes: BTreeMap<String, usize> = BTreeMap::new();
+            let mut stalls: BTreeMap<String, usize> = BTreeMap::new();
+            let mut samples: [Vec<i64>; 4] = Default::default();
+            for row in &rows {
+                *outcomes
+                    .entry(row.hook.as_deref().unwrap_or("unparsed").to_string())
+                    .or_default() += 1;
+                if let Some(phase) = &row.stall_phase {
+                    *stalls.entry(phase.clone()).or_default() += 1;
+                }
+                // Rows written before the timings existed carry none; they never become zeros.
+                for (ms, values) in row.net_ms.iter().zip(&mut samples) {
+                    if let Some(ms) = ms {
+                        values.push(*ms);
+                    }
+                }
+            }
+            let mut net = serde_json::Map::new();
+            for (phase, values) in RECALL_PHASES.iter().zip(&mut samples) {
+                if !values.is_empty() {
+                    values.sort_unstable();
+                    net.insert(format!("{phase}_ms"), nearest_rank(values));
+                }
+            }
+            json!({
+                "harness": harness,
+                "runs": rows.len(),
+                "outcomes": outcomes,
+                "stall_phase": stalls,
+                "net": net,
+            })
+        })
+        .collect();
+    json!({"host": host, "machine_ids": machine_ids, "harnesses": harnesses})
+}
+
 /// Reads the measurement store as it stands.
 pub fn report(store: &mut dyn MeasureStore, input: &ReportInputs) -> Result<Value, String> {
     let since = input.now_ms - input.compaction_days * DAY_MS;
@@ -716,6 +769,30 @@ pub fn report(store: &mut dyn MeasureStore, input: &ReportInputs) -> Result<Valu
             gate_host_section(host, &ids, rs)
         })
         .collect();
+    let recall_rows = store.recall_rows_since(gate_since)?;
+    let mut recall_grouped: BTreeMap<String, (Vec<String>, Vec<&RecallRow>)> = grouped
+        .iter()
+        .map(|(host, (ids, _))| (host.clone(), (ids.clone(), Vec::new())))
+        .collect();
+    for row in &recall_rows {
+        let host = host_of
+            .get(&row.machine_id)
+            .cloned()
+            .unwrap_or_else(|| format!("machine {}", short(&row.machine_id)));
+        let entry = recall_grouped.entry(host).or_default();
+        if !entry.0.contains(&row.machine_id) {
+            entry.0.push(row.machine_id.clone());
+        }
+        entry.1.push(row);
+    }
+    let recall_sections: Vec<Value> = recall_grouped
+        .iter()
+        .map(|(host, (ids, rs))| {
+            let mut ids = ids.clone();
+            ids.sort();
+            recall_host_section(host, &ids, rs)
+        })
+        .collect();
     Ok(json!({
         "collection": input.collection,
         "days": input.days,
@@ -725,6 +802,7 @@ pub fn report(store: &mut dyn MeasureStore, input: &ReportInputs) -> Result<Valu
             "hosts": sections,
         },
         "gate": {"days": input.days, "total": gate_rows.len(), "hosts": gate_sections},
+        "recall": {"days": input.days, "total": recall_rows.len(), "hosts": recall_sections},
         "warnings": warnings,
     }))
 }
@@ -850,6 +928,81 @@ impl Paint {
             format!("\x1b[33m{s}\x1b[0m")
         } else {
             s.to_string()
+        }
+    }
+}
+
+/// One line per harness: run count, then every outcome and stalled phase by name; a second,
+/// indented line carries the successful-read timings when any row has them.
+fn render_recall(recall: &Value, p: &Paint, out: &mut String) {
+    let count_list = |map: &Value| {
+        map.as_object()
+            .into_iter()
+            .flatten()
+            .map(|(k, n)| format!("{k} {}", n.as_u64().unwrap_or(0)))
+            .collect::<Vec<_>>()
+    };
+    out.push('\n');
+    out.push_str(&p.bold(&format!(
+        "recall（最近 {} 天）",
+        recall["days"].as_i64().unwrap_or(0)
+    )));
+    out.push('\n');
+    let hosts = recall["hosts"].as_array().cloned().unwrap_or_default();
+    if hosts.is_empty() {
+        out.push_str("這段期間沒有 recall 列\n");
+    }
+    for host in &hosts {
+        let ids: Vec<&str> = host["machine_ids"]
+            .as_array()
+            .map(|a| a.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        out.push('\n');
+        out.push_str(&p.bold(&format!(
+            "{}  ({})",
+            host["host"].as_str().unwrap_or("?"),
+            ids.join(", ")
+        )));
+        out.push('\n');
+        let harnesses = host["harnesses"].as_array().cloned().unwrap_or_default();
+        if harnesses.is_empty() {
+            out.push_str("  這段期間沒有 recall 列\n");
+        }
+        for harness in harnesses {
+            out.push_str(&format!(
+                "  {}  runs {}",
+                harness["harness"].as_str().unwrap_or("unknown"),
+                harness["runs"].as_u64().unwrap_or(0),
+            ));
+            for item in count_list(&harness["outcomes"]) {
+                out.push_str(&format!("  {item}"));
+            }
+            let stalls = count_list(&harness["stall_phase"]);
+            if !stalls.is_empty() {
+                out.push_str(&format!("  stall（{}）", stalls.join(" ")));
+            }
+            out.push('\n');
+            let net: Vec<String> = RECALL_PHASES
+                .iter()
+                .filter_map(|phase| {
+                    let t = harness["net"].get(format!("{phase}_ms"))?;
+                    let n = |k: &str| t[k].as_i64().map_or("-".into(), |x| x.to_string());
+                    Some(format!(
+                        "{phase} p50 {} p95 {} max {}",
+                        n("p50"),
+                        n("p95"),
+                        n("max")
+                    ))
+                })
+                .collect();
+            if !net.is_empty() {
+                let n = RECALL_PHASES
+                    .iter()
+                    .filter_map(|phase| harness["net"][format!("{phase}_ms")]["n"].as_u64())
+                    .max()
+                    .unwrap_or(0);
+                out.push_str(&format!("    net ms (n {n})  {}\n", net.join("  ")));
+            }
         }
     }
 }
@@ -992,6 +1145,7 @@ pub fn render_report(v: &Value, color: bool) -> String {
             out.push('\n');
         }
     }
+    render_recall(&v["recall"], &p, &mut out);
     for w in v["warnings"].as_array().cloned().unwrap_or_default() {
         out.push_str(&p.yellow(&format!("警告：{}", w.as_str().unwrap_or(""))));
         out.push('\n');
