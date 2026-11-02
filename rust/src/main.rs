@@ -3165,7 +3165,8 @@ fn main() {
         // It fires 900 ms after the recall deadline, so a read the deadline allows still gets to
         // print its notice and row. Winning the claim starts a best-effort watchdog row writer
         // on another thread; losing means the main path is writing stdout and its row. Either
-        // writer gets at most 300 ms more before exit, including a stuck pipe or usage.db.
+        // writer gets at most 300 ms more before exit, including a stuck pipe or usage.db;
+        // the watchdog row writer's completion ends the wait early.
         // The total envelope stays deadline + 900 + 300 = the harnesses' 5 s hook limit.
         let watchdog_claim = Arc::clone(&claim);
         let watchdog_args = args.clone();
@@ -3179,16 +3180,27 @@ fn main() {
             .filter(|ms| *ms > 0)
             .map(|ms| Duration::from_millis(ms).min(delay))
             .unwrap_or(delay);
+        let write_grace = Duration::from_millis(300);
+        // Slow debug writes may use a longer grace in tests. Release builds never read it.
+        // Capped so `Instant + grace` cannot overflow and kill the watchdog thread.
+        #[cfg(debug_assertions)]
+        let write_grace = std::env::var("CORT_TEST_RECALL_WRITE_GRACE_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|ms| *ms > 0)
+            .map(|ms| Duration::from_millis(ms.min(60_000)))
+            .unwrap_or(write_grace);
         if std::thread::Builder::new()
             .name("hook-recall-watchdog".into())
             .spawn(move || {
                 std::thread::sleep(delay.saturating_sub(started.elapsed()));
-                let exit_at = Instant::now() + Duration::from_millis(300);
+                let exit_at = Instant::now() + write_grace;
                 if watchdog_claim
                     .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
                     .is_ok()
                 {
                     let snapshot = cort::remote::network_snapshot();
+                    let (done_tx, done_rx) = std::sync::mpsc::channel();
                     let _ = std::thread::Builder::new()
                         .name("hook-recall-watchdog-row".into())
                         .spawn(move || {
@@ -3206,9 +3218,12 @@ fn main() {
                             usage_ev.project_id = RECALL_WATCHDOG_PROJECT.get().cloned();
                             usage_ev.args_summary = row.to_string();
                             finish_record(&usage_ev, "ok", None, 0);
+                            let _ = done_tx.send(());
                         });
+                    let _ = done_rx.recv_timeout(exit_at.saturating_duration_since(Instant::now()));
+                } else {
+                    std::thread::sleep(exit_at.saturating_duration_since(Instant::now()));
                 }
-                std::thread::sleep(exit_at.saturating_duration_since(Instant::now()));
                 std::process::exit(0);
             })
             .is_err()

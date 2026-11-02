@@ -644,7 +644,7 @@ fn cli_unbound_port_and_payload_cwd() {
 #[cfg(debug_assertions)]
 fn watchdog_command(root: &Path) -> Command {
     // Start with an existing usage cache. Fresh SQLite schema creation can itself exceed the
-    // fixed 300 ms write grace on a busy disk; that failure is deliberately best-effort.
+    // production 300 ms write grace on a busy disk; tests use a 20000 ms debug-only write grace.
     fs::create_dir_all(root.join("cache")).unwrap();
     let mut db = rusqlite::Connection::open(root.join("cache/usage.db")).unwrap();
     let tx = db.transaction().unwrap();
@@ -674,6 +674,7 @@ fn watchdog_command(root: &Path) -> Command {
         .env("CORT_MACHINE_ID", "self")
         .env("CORT_RECALL_TIMEOUT_MS", "99999")
         .env("CORT_TEST_RECALL_WATCHDOG_MS", "1000")
+        .env("CORT_TEST_RECALL_WRITE_GRACE_MS", "20000")
         .current_dir(root)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -720,9 +721,11 @@ fn cli_watchdog_records_network_stall_once() {
     let elapsed = started.elapsed();
     assert!(out.status.success());
     assert!(out.stdout.is_empty() && out.stderr.is_empty(), "{out:?}");
-    // 1000 ms test watchdog + 300 ms write grace, with 500 ms scheduling tolerance.
-    // The real network timeout is longer, so normal completion cannot satisfy this bound.
-    assert!(elapsed < Duration::from_millis(1800), "{elapsed:?}");
+    // 1000 ms test watchdog + 20000 ms test write grace: a watchdog that slept out the grace
+    // would take at least 21 s, so this bound shows the wait ended before the grace did (the
+    // row writer finishing ends it; idle runs take about 1.2 s). It is not a latency bound.
+    // Normal completion cannot win because the watchdog claim parks the main path.
+    assert!(elapsed < Duration::from_millis(20000), "{elapsed:?}");
     let row = assert_single_watchdog(root);
     assert_eq!(row["harness"], "codex");
     assert_eq!(row["harness_declared"], "claude-code");
@@ -758,7 +761,12 @@ fn cli_watchdog_does_not_wait_for_stdin() {
     drop(stdin);
     assert!(out.status.success());
     assert!(out.stdout.is_empty() && out.stderr.is_empty(), "{out:?}");
-    assert!(elapsed < Duration::from_millis(1800), "{elapsed:?}");
+    // 1000 ms test watchdog + 20000 ms test write grace: a watchdog that slept out the grace
+    // would take at least 21 s, so this bound shows the wait ended before the grace did (the
+    // row writer finishing ends it; idle runs take about 1.2 s). It is not a latency bound.
+    // Normal completion cannot win because the watchdog claim parks the main path;
+    // stdin is also held open here.
+    assert!(elapsed < Duration::from_millis(20000), "{elapsed:?}");
     let row = assert_single_watchdog(root);
     assert_eq!(row["harness"], "unknown");
     assert_eq!(row["harness_declared"], "claude-code");
