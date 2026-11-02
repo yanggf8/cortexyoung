@@ -475,6 +475,15 @@ fn run(
     stdin: &str,
     timeout: Option<&str>,
 ) -> (std::process::Output, Duration) {
+    run_with(root, cwd, stdin, timeout, |_| {})
+}
+fn run_with(
+    root: &Path,
+    cwd: &Path,
+    stdin: &str,
+    timeout: Option<&str>,
+    configure: impl FnOnce(&mut Command),
+) -> (std::process::Output, Duration) {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_cort"));
     cmd.args(["hook-recall", "--harness", "claude-code"])
         .env("CORT_MEMORY_DIR", root.join("data"))
@@ -492,6 +501,7 @@ fn run(
     if let Some(value) = timeout {
         cmd.env("CORT_RECALL_TIMEOUT_MS", value);
     }
+    configure(&mut cmd);
     let started = Instant::now();
     let mut child = cmd.spawn().unwrap();
     child
@@ -527,6 +537,90 @@ fn cli_unconfigured_and_invalid_input_are_silent() {
     let (out, _) = run(root, root, "not JSON", None);
     assert!(out.stdout.is_empty());
     assert_eq!(outcome(root)["hook"], "failed");
+}
+#[test]
+fn cli_configured_without_project_is_silent() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let repo = root.join("repo");
+    assert!(Command::new("git")
+        .arg("init")
+        .arg(&repo)
+        .output()
+        .unwrap()
+        .status
+        .success());
+    config(&root.join("data"), "turso://127.0.0.1:9");
+    let (out, _) = run(root, root, &json!({"cwd":repo}).to_string(), None);
+    assert!(out.status.success());
+    assert!(out.stdout.is_empty());
+    let row = outcome(root);
+    assert_eq!(row["hook"], "no_project");
+    assert!(row.get("stall").is_none());
+    assert!(row.get("net").is_none());
+    let db = rusqlite::Connection::open(root.join("cache/usage.db")).unwrap();
+    let count: i64 = db
+        .query_row(
+            "SELECT count(*) FROM command_log WHERE command='hook-recall'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 1);
+}
+#[test]
+fn cli_configured_outside_git_is_silent() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    config(&root.join("data"), "turso://127.0.0.1:9");
+    let (out, _) = run(root, root, &json!({"cwd":root}).to_string(), None);
+    assert!(out.status.success());
+    assert!(out.stdout.is_empty());
+    let row = outcome(root);
+    assert_eq!(row["hook"], "no_project");
+    assert!(row.get("stall").is_none());
+    assert!(row.get("net").is_none());
+}
+#[test]
+fn cli_configured_without_git_is_failed() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let repo = git_repo(root);
+    let empty_path = root.join("empty-path");
+    fs::create_dir(&empty_path).unwrap();
+    config(&root.join("data"), "turso://127.0.0.1:9");
+    let (out, _) = run_with(root, &repo, &json!({"cwd":repo}).to_string(), None, |cmd| {
+        cmd.env("PATH", &empty_path);
+    });
+    assert!(out.status.success());
+    assert!(out.stdout.is_empty());
+    let row = outcome(root);
+    assert_eq!(row["hook"], "failed");
+    assert!(row.get("stall").is_none());
+    assert!(row.get("net").is_none());
+}
+#[test]
+fn cli_project_override_survives_missing_git() {
+    for name in ["CORT_MEMORY_PROJECT", "CLAUDECAT_MEMORY_PROJECT"] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let repo = git_repo(root);
+        let empty_path = root.join("empty-path");
+        fs::create_dir(&empty_path).unwrap();
+        config(&root.join("data"), "turso://127.0.0.1:9");
+        let (out, _) = run_with(root, &repo, &json!({"cwd":repo}).to_string(), None, |cmd| {
+            cmd.env("PATH", &empty_path).env(name, "explicit-project");
+        });
+        assert!(out.status.success());
+        // Reaching the network at all is the claim; port 9 refuses on some hosts and times out
+        // on others, as in cli_unbound_port_and_payload_cwd.
+        let kind = outcome(root)["hook"].as_str().unwrap().to_owned();
+        assert!(
+            kind == "remote_unreachable" || kind == "remote_timeout",
+            "{name}: {kind}"
+        );
+        notice(&out, &kind);
+    }
 }
 #[cfg(unix)]
 #[test]
@@ -797,6 +891,7 @@ fn recall_network_row_shapes() {
         "injected",
         "none",
         "not_configured",
+        "no_project",
     ] {
         let mut row = json!({"v":6, "hook":outcome, "harness":"claude-code"});
         let timing = if outcome.starts_with("remote_") || outcome == "watchdog" {

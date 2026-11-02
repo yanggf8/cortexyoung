@@ -1457,7 +1457,11 @@ fn cmd_hook_recall(
             else {
                 return Err("not_configured");
             };
-            let projects = cort::memory_store::session_project_ids(&root).map_err(|_| "failed")?;
+            let projects =
+                cort::memory_store::session_project_ids(&root).map_err(|error| match error {
+                    cort::memory_store::SessionProjectError::NoProject => "no_project",
+                    cort::memory_store::SessionProjectError::Failed(_) => "failed",
+                })?;
             let remaining = cort::remote::RECALL_DEADLINE.saturating_sub(started.elapsed());
             if remaining < Duration::from_millis(200) {
                 cort::remote::network_budget_exhausted();

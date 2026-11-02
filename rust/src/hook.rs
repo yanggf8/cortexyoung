@@ -95,11 +95,14 @@ pub const REFRESH_OUTCOMES: [&str; 8] = [
 /// Closed outcome vocabulary for the shared database recall hook. The last three are Kimi's
 /// once-per-session `UserPromptSubmit` path: a later prompt of an injected session, a payload with
 /// no session id, and a marker directory that could not be written. `watchdog` means the process
-/// deadline won the claim and attempted its own bounded usage write.
-pub const RECALL_OUTCOMES: [&str; 11] = [
+/// deadline won the claim and attempted its own bounded usage write. `no_project` means the cwd
+/// is outside a Git repository or has no origin, without a project override; `failed` covers
+/// payload, configuration and other Git errors.
+pub const RECALL_OUTCOMES: [&str; 12] = [
     "injected",
     "none",
     "not_configured",
+    "no_project",
     "failed",
     "remote_unreachable",
     "remote_blocked",

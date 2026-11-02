@@ -288,34 +288,72 @@ pub fn project(root: &Path) -> Result<String, String> {
     project_from_git_origin(root)
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum SessionProjectError {
+    NoProject,
+    Failed(String),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum OriginError {
+    NoProject,
+    Failed(String),
+}
+
 /// Resolve origin once: the ledger may use an explicit project, while notes always use origin.
-pub fn session_project_ids(root: &Path) -> Result<(String, String), String> {
-    let origin = project_from_git_origin(root).ok();
-    let ledger = ["CORT_MEMORY_PROJECT", "CLAUDECAT_MEMORY_PROJECT"]
+pub fn session_project_ids(root: &Path) -> Result<(String, String), SessionProjectError> {
+    let origin = resolve_git_origin(root);
+    if let Some(ledger) = ["CORT_MEMORY_PROJECT", "CLAUDECAT_MEMORY_PROJECT"]
         .iter()
         .find_map(|name| std::env::var(name).ok().filter(|v| !v.trim().is_empty()))
         .map(|v| digest(v.trim()))
-        .or_else(|| origin.clone())
-        .ok_or_else(|| "project needs an origin remote or CORT_MEMORY_PROJECT".to_string())?;
-    // Without an origin, an explicit ledger project remains readable; no notes use an override.
-    Ok((ledger, origin.unwrap_or_default()))
+    {
+        // Without an origin, an explicit ledger project remains readable; no notes use an override.
+        return Ok((ledger, origin.unwrap_or_default()));
+    }
+    let origin = origin.map_err(|error| match error {
+        OriginError::NoProject => SessionProjectError::NoProject,
+        OriginError::Failed(message) => SessionProjectError::Failed(message),
+    })?;
+    Ok((origin.clone(), origin))
 }
 
 /// Resolve an indexed project's identity from its own origin, ignoring the process-wide
 /// override that applies only to the current memory command's chosen project.
 pub fn project_from_git_origin(root: &Path) -> Result<String, String> {
+    resolve_git_origin(root).map_err(|error| match error {
+        OriginError::NoProject => "project needs an origin remote or CORT_MEMORY_PROJECT".into(),
+        OriginError::Failed(message) => message,
+    })
+}
+
+fn resolve_git_origin(root: &Path) -> Result<String, OriginError> {
     let output = Command::new("git")
         .args(["remote", "get-url", "origin"])
+        .env("LC_ALL", "C")
         .current_dir(root)
         .output()
-        .map_err(|e| format!("cannot identify project Git remote: {e}"))?;
+        .map_err(|e| OriginError::Failed(format!("cannot identify project Git remote: {e}")))?;
+    origin_from_output(output)
+}
+
+fn origin_from_output(output: std::process::Output) -> Result<String, OriginError> {
     if !output.status.success() {
-        return Err("project needs an origin remote or CORT_MEMORY_PROJECT".into());
+        let stderr = std::str::from_utf8(&output.stderr).unwrap_or_default();
+        if (output.status.code() == Some(128) && stderr.contains("not a git repository"))
+            || (output.status.code() == Some(2) && stderr.contains("No such remote 'origin'"))
+        {
+            return Err(OriginError::NoProject);
+        }
+        return Err(OriginError::Failed(
+            "project needs an origin remote or CORT_MEMORY_PROJECT".into(),
+        ));
     }
-    let remote = String::from_utf8(output.stdout).map_err(|e| e.to_string())?;
+    let remote =
+        String::from_utf8(output.stdout).map_err(|e| OriginError::Failed(e.to_string()))?;
     let remote = remote.trim();
     if remote.is_empty() {
-        return Err("empty origin remote".into());
+        return Err(OriginError::Failed("empty origin remote".into()));
     }
     Ok(digest(&normalize_remote(remote)))
 }
@@ -2229,6 +2267,89 @@ fn record_entry(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn origin_classification_requires_matching_exit_code_and_stderr() {
+        use std::os::unix::process::ExitStatusExt;
+        use std::process::{ExitStatus, Output};
+
+        for (code, stderr, no_project) in [
+            (
+                128,
+                "fatal: not a git repository (or any of the parent directories): .git",
+                true,
+            ),
+            (2, "error: No such remote 'origin'", true),
+            (2, "fatal: not a git repository", false),
+            (128, "error: No such remote 'origin'", false),
+            (
+                128,
+                "fatal: detected dubious ownership in repository",
+                false,
+            ),
+            (
+                128,
+                "fatal: unable to read config file: Permission denied",
+                false,
+            ),
+            (1, "", false),
+        ] {
+            let result = origin_from_output(Output {
+                status: ExitStatus::from_raw(code << 8),
+                stdout: vec![],
+                stderr: stderr.as_bytes().to_vec(),
+            });
+            if no_project {
+                assert_eq!(result, Err(OriginError::NoProject), "{code}: {stderr}");
+            } else {
+                assert_eq!(
+                    result,
+                    Err(OriginError::Failed(
+                        "project needs an origin remote or CORT_MEMORY_PROJECT".into()
+                    )),
+                    "{code}: {stderr}"
+                );
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn origin_output_rejects_empty_and_non_utf8_remotes() {
+        use std::os::unix::process::ExitStatusExt;
+        use std::process::{ExitStatus, Output};
+
+        for stdout in [b" \n".to_vec(), vec![0xff]] {
+            let result = origin_from_output(Output {
+                status: ExitStatus::from_raw(0),
+                stdout,
+                stderr: vec![],
+            });
+            assert!(matches!(result, Err(OriginError::Failed(_))));
+        }
+        assert_eq!(
+            origin_from_output(Output {
+                status: ExitStatus::from_raw(0),
+                stdout: b"https://example.test/team/project.git\n".to_vec(),
+                stderr: vec![],
+            }),
+            Ok(digest("example.test/team/project"))
+        );
+    }
+
+    #[test]
+    fn origin_spawn_error_keeps_its_public_message() {
+        let temp = tempfile::tempdir().unwrap();
+        let missing = temp.path().join("missing");
+        assert!(matches!(
+            resolve_git_origin(&missing),
+            Err(OriginError::Failed(_))
+        ));
+        assert!(project_from_git_origin(&missing)
+            .unwrap_err()
+            .starts_with("cannot identify project Git remote: "));
+    }
 
     #[test]
     fn chain_slots_reject_second_root_and_second_successor() {
