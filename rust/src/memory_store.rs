@@ -56,6 +56,9 @@ pub enum LedgerError {
     ChainTaken {
         key: String,
         existing_id: String,
+        /// The refused write was a resolution: the user already chose, and another resolution of
+        /// the same entries won.
+        resolution: bool,
     },
     Conflict {
         id: String,
@@ -478,15 +481,16 @@ impl Ledger {
                     "SELECT id FROM project_memory WHERE project = ? AND id <> ? AND json_extract(body,'$.key') = json_extract(?,'$.key') AND coalesce(json_extract(body,'$.supersedes'), json_extract(body,'$.resolves'), '') = coalesce(json_extract(?,'$.supersedes'), json_extract(?,'$.resolves'), '') LIMIT 1",
                     vec![Cell::Text(project.into()), Cell::Text(entry.id.clone()), Cell::Text(body.clone()), Cell::Text(body.clone()), Cell::Text(body)],
                 );
-                if let Ok(found) = found {
-                    if let Some(Some(Cell::Text(existing_id))) =
-                        found.rows.first().map(|row| row.first())
-                    {
-                        return Err(LedgerError::ChainTaken {
-                            key: entry.key.clone(),
-                            existing_id: existing_id.clone(),
-                        });
-                    }
+                // The ignored insert wrote nothing; if its cause cannot be read, say only that.
+                let found = found.map_err(|error| LedgerError::NotRecorded { kind: error.kind })?;
+                if let Some(Some(Cell::Text(existing_id))) =
+                    found.rows.first().map(|row| row.first())
+                {
+                    return Err(LedgerError::ChainTaken {
+                        key: entry.key.clone(),
+                        existing_id: existing_id.clone(),
+                        resolution,
+                    });
                 }
                 return if superseded.is_empty() {
                     Err(LedgerError::Message("insert affected no row".into()))
@@ -1981,7 +1985,9 @@ fn resolve_entry(
 ) -> Result<MemoryEntry, LedgerError> {
     let project = project(root)?;
     let before = ledger.read(&project).map_err(not_recorded_read)?;
-    let supersedes = resolve_ids(&before, supersedes)?;
+    let mut supersedes = resolve_ids(&before, supersedes)?;
+    // The chain slot compares the stored JSON, so one set of ids must have one spelling.
+    supersedes.sort();
     entry.resolves = supersedes.clone();
     let active_ids: std::collections::HashSet<_> = memory::active_entries(&before)
         .into_iter()
@@ -2258,7 +2264,8 @@ mod tests {
             ),
             Err(LedgerError::ChainTaken {
                 key: "choice".into(),
-                existing_id: "root".into()
+                existing_id: "root".into(),
+                resolution: false,
             })
         );
         entry.id = "successor".into();
@@ -2285,7 +2292,8 @@ mod tests {
             ),
             Err(LedgerError::ChainTaken {
                 key: "choice".into(),
-                existing_id: "successor".into()
+                existing_id: "successor".into(),
+                resolution: false,
             })
         );
         assert_eq!(ledger.read("p").unwrap().entries.len(), 2);

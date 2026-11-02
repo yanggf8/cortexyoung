@@ -1349,7 +1349,8 @@ fn competing_active_entry_is_rejected() {
         result.unwrap_err(),
         LedgerError::ChainTaken {
             key: "choice".into(),
-            existing_id: "competing".into()
+            existing_id: "competing".into(),
+            resolution: false,
         }
     );
     assert_eq!(f.ledger.read(&f.project()).unwrap().entries.len(), 2);
@@ -1438,7 +1439,9 @@ fn resolve_settles_two_active_entries() {
         .collect();
     assert_eq!(active.len(), 1);
     assert_eq!(active[0].id, resolved.id);
-    assert_eq!(resolved.resolves, vec![id, "competing".to_string()]);
+    let mut expected = vec![id, "competing".to_string()];
+    expected.sort();
+    assert_eq!(resolved.resolves, expected);
 }
 
 /// A 400 classifies as `Sql`, which a malformed response to a committed write also produces, so
@@ -1461,4 +1464,75 @@ fn sql_error_after_a_committed_write_is_settled_by_the_reread() {
         "{result:?}"
     );
     assert_eq!(f.ledger.read(&f.project()).unwrap().entries.len(), 1);
+}
+
+/// A resolution's slot is its set of ids, not the order the caller typed them in: a competing
+/// resolution of the same entries landed first, so this one is refused, and as a resolution.
+#[test]
+fn resolution_slot_ignores_the_order_ids_were_given() {
+    let f = Fixture::new();
+    let a = f.project();
+    let x = f.record("choice", "X", None).unwrap();
+    let mut y = x.clone();
+    y.id = "f0".repeat(32);
+    y.claim = "Y".into();
+    // Another project id keeps the second root out of this project's chain slot.
+    f.insert("B", &y);
+    f.alias(&a, "B");
+    let mut sorted = vec![x.id.clone(), y.id.clone()];
+    sorted.sort();
+    let winner = json!({"id":"winner","key":"choice","claim":"won","source":"decision.md",
+        "source_line":1,"source_sha256":"hash","recorded_at":"1","resolves":sorted})
+    .to_string()
+    .replace('\'', "''");
+    f.arm(
+        2,
+        Action::Sql(format!(
+            "INSERT INTO project_memory VALUES ('{a}', 'winner', '{winner}')"
+        )),
+    );
+    let reversed: Vec<String> = sorted.iter().rev().cloned().collect();
+    let result = memory_store::resolve_with(
+        f.root(),
+        "choice",
+        "lost",
+        Path::new("decision.md"),
+        2,
+        &reversed,
+        &f.ledger,
+    );
+    assert_eq!(
+        result.unwrap_err(),
+        LedgerError::ChainTaken {
+            key: "choice".into(),
+            existing_id: "winner".into(),
+            resolution: true,
+        }
+    );
+}
+
+/// An ignored insert whose cause cannot be looked up wrote nothing, but is not a missing
+/// predecessor either.
+#[test]
+fn ignored_insert_with_failed_lookup_is_not_recorded() {
+    let f = Fixture::new();
+    let first = f.record("choice", "A", None).unwrap();
+    let rival = json!({"id":"rival","key":"choice","claim":"other","source":"decision.md",
+        "source_line":1,"source_sha256":"hash","recorded_at":"1","supersedes":first.id})
+    .to_string()
+    .replace('\'', "''");
+    f.arm(
+        2,
+        Action::Sql(format!(
+            "INSERT INTO project_memory VALUES ('{}', 'rival', '{rival}')",
+            f.project()
+        )),
+    );
+    f.arm(3, Action::Fail(504));
+    assert_eq!(
+        f.record("choice", "B", Some(&first.id)).unwrap_err(),
+        LedgerError::NotRecorded {
+            kind: cort::remote::ErrorKind::Timeout
+        }
+    );
 }

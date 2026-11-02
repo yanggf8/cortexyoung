@@ -92,9 +92,14 @@ every active id reported by `status`; `cort memory resolve` is an alias for this
 Writes attempt to create the `project_memory_chain` unique index, which prevents two first entries
 for one key, or two entries superseding the same id, within a project id. A competing write returns `memory_key_taken`
 with the existing id and writes nothing; recall it and ask the user which claim holds before
-superseding. Index creation is best-effort so legacy duplicate chains can still be resolved; the
-index covers the whole table, so while any project in the database still holds such a duplicate
-it is not created and concurrent writes fall back to the post-write `memory_conflict` check.
+superseding. When the refused write is a resolution, the user has already chosen and another
+resolution of the same entries won, so the message says to recall it and tell the user which claim
+now holds rather than resolve again; a resolution stores its ids sorted, so one set has one slot
+whatever order `--supersedes` was given in. If the lookup that names the existing entry fails, the
+write reports `memory_not_recorded` (nothing was written), never `memory_supersedes_missing`.
+Index creation is best-effort so legacy duplicate chains can still be resolved; the index covers
+the whole table, so while any project in the database still holds such a duplicate it is not created
+and concurrent writes fall back to the post-write `memory_conflict` check.
 Conflicts can still arise from older cort builds or across project aliases because the index is
 per project id. List the active entries and ask the user which holds before using `cort memory resolve`.
 Recall returns active hits with `unsourced`, `source_unchanged`, `source_moved`, `source_changed`, `source_missing`, or

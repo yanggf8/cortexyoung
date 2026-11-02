@@ -2680,8 +2680,16 @@ fn memory_ledger_error(error: cort::memory_store::LedgerError) -> CortError {
             };
             CortError::new("memory_supersedes_missing", detail)
         }
-        LedgerError::ChainTaken { key, existing_id } => {
-            let message = format!("another entry for key \"{key}\" was recorded first ({existing_id}); nothing was written; recall it and ask the user which holds before superseding");
+        LedgerError::ChainTaken {
+            key,
+            existing_id,
+            resolution,
+        } => {
+            let message = if resolution {
+                format!("another resolution of these entries for key \"{key}\" was recorded first ({existing_id}); nothing was written; recall it and tell the user which claim now holds instead of resolving again")
+            } else {
+                format!("another entry for key \"{key}\" was recorded first ({existing_id}); nothing was written; recall it and ask the user which holds before superseding")
+            };
             CortError::new(
                 "memory_key_taken",
                 json!({"key":key,"existing_id":existing_id,"message":message}),
@@ -3360,12 +3368,24 @@ mod tests {
         let error = memory_ledger_error(LedgerError::ChainTaken {
             key: "choice".into(),
             existing_id: "abc".into(),
+            resolution: false,
         });
         assert_eq!(error.code, "memory_key_taken");
         assert_eq!(
             error.detail,
             json!({"key":"choice", "existing_id":"abc", "message":"another entry for key \"choice\" was recorded first (abc); nothing was written; recall it and ask the user which holds before superseding"})
         );
+        let error = memory_ledger_error(LedgerError::ChainTaken {
+            key: "choice".into(),
+            existing_id: "abc".into(),
+            resolution: true,
+        });
+        let message = error.detail["message"].as_str().unwrap();
+        assert!(
+            message.contains("tell the user which claim now holds"),
+            "{message}"
+        );
+        assert!(!message.contains("ask the user"), "{message}");
     }
 
     #[test]
