@@ -388,9 +388,9 @@ fn recall_ledger_inner(
         })
         .map(|entry| (*entry, None))
         .collect();
-    // Partial scoring is substring counting, so words that sit inside almost every claim ("to",
-    // "the", a lone digit) would outrank the entry the query is about. They still count for the
-    // all-terms match above; a single CJK character is a word and is kept.
+    // Ignore common words and lone ASCII characters in partial scoring. ASCII terms must start
+    // a word, while non-ASCII terms keep substring matching. The all-terms match above is
+    // unchanged; a single CJK character is a word and is kept.
     let mut distinct = Vec::new();
     for term in &terms {
         let noise =
@@ -399,16 +399,24 @@ fn recall_ledger_inner(
             distinct.push(term.clone());
         }
     }
-    let partial =
-        selected.is_empty() && terms.len() >= 2 && limit.is_none() && !distinct.is_empty();
-    if partial {
+    let partial = selected.is_empty() && terms.len() >= 2 && limit.is_none();
+    if partial && !distinct.is_empty() {
         selected = active
             .iter()
             .filter_map(|entry| {
                 let haystack = format!("{} {}", entry.key, entry.claim).to_lowercase();
                 let matched: Vec<_> = distinct
                     .iter()
-                    .filter(|term| haystack.contains(term.as_str()))
+                    .filter(|term| {
+                        if term.is_ascii() {
+                            haystack.match_indices(term.as_str()).any(|(start, _)| {
+                                start == 0
+                                    || !haystack.as_bytes()[start - 1].is_ascii_alphanumeric()
+                            })
+                        } else {
+                            haystack.contains(term.as_str())
+                        }
+                    })
                     .cloned()
                     .collect();
                 (matched.len() * 2 >= distinct.len()).then_some((*entry, Some(matched)))
@@ -713,8 +721,27 @@ mod tests {
         let only_noise =
             serde_json::to_value(recall_ledger(dir.path(), "to the 7", &ledger, true, None))
                 .unwrap();
-        assert!(only_noise.get("match").is_none());
+        assert_eq!(only_noise["match"], "partial");
         assert!(only_noise["hits"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn recall_partial_ascii_terms_start_words_and_keep_prefixes() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = MemoryLedger {
+            schema: SCHEMA,
+            entries: vec![recall_fixture("1", "choice", "decision hooks", "1")],
+        };
+        let recall = recall_ledger(dir.path(), "ci missing", &ledger, true, None);
+        assert_eq!(recall.match_kind.as_deref(), Some("partial"));
+        assert!(recall.hits.is_empty());
+        let recall = recall_ledger(dir.path(), "hook missing", &ledger, true, None);
+        assert_eq!(recall.hits.len(), 1);
+        assert_eq!(recall.hits[0].matched_terms, Some(vec!["hook".into()]));
+        // The all-terms match still permits substrings inside ASCII words.
+        let recall = recall_ledger(dir.path(), "ci decision", &ledger, true, None);
+        assert!(recall.match_kind.is_none());
+        assert_eq!(recall.hits.len(), 1);
     }
 
     #[test]
@@ -722,7 +749,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ledger = MemoryLedger {
             schema: SCHEMA,
-            entries: vec![recall_fixture("1", "budget", "時間預算 以 秒 計", "1")],
+            entries: vec![recall_fixture("1", "budget", "總時間預算以秒計算", "1")],
         };
         // Only the two CJK terms match; dropping them as noise would leave 0 of 2.
         let json = serde_json::to_value(recall_ledger(

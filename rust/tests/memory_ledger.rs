@@ -720,7 +720,9 @@ fn replace_and_repeated_supersedes_resolve_conflict() {
         matches!(write(&[ids[0].clone(), ids[0].clone()], false), Err(LedgerError::Message(message)) if message.contains("exactly once"))
     );
     let resolved = write(&ids, false).unwrap();
-    assert_eq!(resolved.resolves, vec![replacement.id, other.id]);
+    let mut expected = vec![replacement.id, other.id];
+    expected.sort();
+    assert_eq!(resolved.resolves, expected);
     let status = memory_store::status_with(f.root(), &f.ledger, "test").unwrap();
     assert_eq!(status.active_entries, 1);
 }
@@ -1354,6 +1356,44 @@ fn competing_active_entry_is_rejected() {
         }
     );
     assert_eq!(f.ledger.read(&f.project()).unwrap().entries.len(), 2);
+}
+
+#[test]
+fn chain_taken_lookup_failure_is_not_recorded() {
+    for (status, kind) in [
+        (401, cort::remote::ErrorKind::Unauthorized),
+        (504, cort::remote::ErrorKind::Timeout),
+        (400, cort::remote::ErrorKind::Sql),
+    ] {
+        let f = Fixture::new();
+        f.record("seed", "seed", None).unwrap();
+        f.arm(2, Action::Sql(competing_sql("competing")));
+        f.arm(3, Action::Fail(status));
+        assert_eq!(
+            f.record("choice", "A", None).unwrap_err(),
+            LedgerError::NotRecorded { kind }
+        );
+        let after = f.ledger.read(&f.project()).unwrap();
+        assert_eq!(after.entries.len(), 2);
+        assert!(after.entries.iter().all(|entry| entry.claim != "A"));
+    }
+    let f = Fixture::new();
+    let first = f.record("choice", "A", None).unwrap();
+    f.arm(
+        2,
+        Action::Sql(format!(
+            "DELETE FROM project_memory WHERE id = '{}'",
+            first.id
+        )),
+    );
+    f.arm(3, Action::Fail(504));
+    assert_eq!(
+        f.record("choice", "B", Some(&first.id)).unwrap_err(),
+        LedgerError::NotRecorded {
+            kind: cort::remote::ErrorKind::Timeout
+        }
+    );
+    assert!(f.ledger.read(&f.project()).unwrap().entries.is_empty());
 }
 
 #[test]

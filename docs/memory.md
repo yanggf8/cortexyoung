@@ -70,7 +70,7 @@ only edited notes would return until it is deleted.
 The secret screen is coarse and fail-closed; it is not a privacy guarantee. Run
 `cort memory notes upload --dry-run` to list what would be uploaded before uploading.
 Claude Code's SessionStart context lists up to 15 unreviewed note names from other machines for this project, without their bodies.
-Its usage row carries `stall` on `remote_timeout`/`remote_unreachable`/`watchdog` (the last network phase reached -- or `budget` when the recall gave up before sending its next request, with the previous request's timings -- and completed/current phase milliseconds), or `net` on successful remote reads (`dns_ms`, `connect_ms`, `tls_ms`, `response_ms`); both are absent when no request reached DNS. Normal returns write one row; when the watchdog wins, it instead attempts one `watchdog` row on a separate thread, with at most 300 ms to finish before process exit. It uses the harness/model already parsed by the main thread, or harness `unknown` if those fields are not yet available, without reading stdin. A stalled or failed usage write can still leave no row; the 5 s process envelope is unchanged.
+Its usage row carries `stall` on `remote_timeout`/`remote_unreachable`/`watchdog` (the last network phase reached -- or `budget` when the deadline left too little time to send a request, with the previous request's timings if any -- and completed/current phase milliseconds), or `net` on successful remote reads (`dns_ms`, `connect_ms`, `tls_ms`, `response_ms`). Both are absent when no request reached DNS, except that a `budget` stall is recorded even before the first request. Normal returns write one row; when the watchdog wins, it instead attempts one `watchdog` row on a separate thread, with at most 300 ms to finish before process exit. It uses the harness/model already parsed by the main thread, or harness `unknown` if those fields are not yet available, without reading stdin. A stalled or failed usage write can still leave no row; the 5 s process envelope is unchanged.
 `cort usage` reports `stall_phase` counts and each `net` phase's sample count, p50, p95 and max milliseconds under `hook_census.hook-recall`, including in lean output.
 
 ## Review, record, recall
@@ -99,7 +99,8 @@ whatever order `--supersedes` was given in. If the lookup that names the existin
 write reports `memory_not_recorded` (nothing was written), never `memory_supersedes_missing`.
 Index creation is best-effort so legacy duplicate chains can still be resolved; the index covers
 the whole table, so while any project in the database still holds such a duplicate it is not created
-and concurrent writes fall back to the post-write `memory_conflict` check.
+and concurrent writes fall back to the post-write `memory_conflict` check. A
+resolution appends an entry and keeps both duplicate rows, so resolving does not let it be created.
 Conflicts can still arise from older cort builds or across project aliases because the index is
 per project id. List the active entries and ask the user which holds before using `cort memory resolve`.
 Recall returns active hits with `unsourced`, `source_unchanged`, `source_moved`, `source_changed`, `source_missing`, or
@@ -115,6 +116,8 @@ machine. `recorded_at_utc` is the readable UTC form of `recorded_at` when it can
 For a query of at least two terms with no entry containing every term, recall returns up to five
 entries containing at least half of the distinct terms, marked `match: partial` with `matched_terms`;
 common English function words ("to", "the", ...) and single ASCII characters do not count there.
+In partial scoring, ASCII terms match only at word starts (prefixes such as `hook` in `hooks`
+count); terms containing non-ASCII characters keep substring matching.
 These are candidates, not answers to the query; when no entry reaches half, the output is
 `match: partial` with empty `hits`.
 Older rows without a line hash use the

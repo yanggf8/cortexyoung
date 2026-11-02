@@ -477,12 +477,11 @@ impl Ledger {
             Ok(result) if result.affected_row_count == 0 => {
                 let body = serde_json::to_string(entry)
                     .map_err(|e| LedgerError::Message(e.to_string()))?;
+                // The ignored insert wrote nothing; if its cause cannot be read, say only that.
                 let found = self.db.execute(
                     "SELECT id FROM project_memory WHERE project = ? AND id <> ? AND json_extract(body,'$.key') = json_extract(?,'$.key') AND coalesce(json_extract(body,'$.supersedes'), json_extract(body,'$.resolves'), '') = coalesce(json_extract(?,'$.supersedes'), json_extract(?,'$.resolves'), '') LIMIT 1",
                     vec![Cell::Text(project.into()), Cell::Text(entry.id.clone()), Cell::Text(body.clone()), Cell::Text(body.clone()), Cell::Text(body)],
-                );
-                // The ignored insert wrote nothing; if its cause cannot be read, say only that.
-                let found = found.map_err(|error| LedgerError::NotRecorded { kind: error.kind })?;
+                ).map_err(|error| LedgerError::NotRecorded { kind: error.kind })?;
                 if let Some(Some(Cell::Text(existing_id))) =
                     found.rows.first().map(|row| row.first())
                 {
@@ -1988,6 +1987,7 @@ fn resolve_entry(
     let mut supersedes = resolve_ids(&before, supersedes)?;
     // The chain slot compares the stored JSON, so one set of ids must have one spelling.
     supersedes.sort();
+    supersedes.dedup();
     entry.resolves = supersedes.clone();
     let active_ids: std::collections::HashSet<_> = memory::active_entries(&before)
         .into_iter()
@@ -2297,6 +2297,124 @@ mod tests {
             })
         );
         assert_eq!(ledger.read("p").unwrap().entries.len(), 2);
+    }
+
+    #[test]
+    fn chain_slots_reject_reversed_resolution_ids() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        // Replay the losing writer's preflight read from before the winner committed.
+        #[derive(Default)]
+        struct ReadSnapshot {
+            body: Option<Vec<u8>>,
+            replay: bool,
+        }
+        struct SnapshotTransport {
+            inner: crate::remote::SqliteTransport,
+            snapshot: Rc<RefCell<ReadSnapshot>>,
+        }
+        impl Transport for SnapshotTransport {
+            fn post(
+                &self,
+                url: &str,
+                body: &[u8],
+                headers: &[(&str, &str)],
+            ) -> Result<Vec<u8>, crate::remote::RemoteError> {
+                let read =
+                    String::from_utf8_lossy(body).contains("SELECT body FROM project_memory");
+                if read && self.snapshot.borrow().replay {
+                    self.snapshot.borrow_mut().replay = false;
+                    return Ok(self.snapshot.borrow().body.clone().unwrap());
+                }
+                let response = self.inner.post(url, body, headers)?;
+                if read && self.snapshot.borrow().body.is_none() {
+                    self.snapshot.borrow_mut().body = Some(response.clone());
+                }
+                Ok(response)
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        for args in [
+            vec!["init"],
+            vec![
+                "remote",
+                "add",
+                "origin",
+                "https://example.test/resolution.git",
+            ],
+        ] {
+            assert!(Command::new("git")
+                .args(args)
+                .current_dir(root.path())
+                .output()
+                .unwrap()
+                .status
+                .success());
+        }
+        let snapshot = Rc::new(RefCell::new(ReadSnapshot::default()));
+        let ledger = Ledger::with_transport(
+            "https://example.test",
+            "test",
+            Box::new(SnapshotTransport {
+                inner: crate::remote::SqliteTransport::new().unwrap(),
+                snapshot: snapshot.clone(),
+            }),
+        )
+        .unwrap();
+        let project = project(root.path()).unwrap();
+        ledger.read(&project).unwrap();
+        ledger.db.execute(CREATE_CHAIN_INDEX, vec![]).unwrap();
+        // Conflicting roots in aliased projects still allow the unique index to exist.
+        ledger
+            .db
+            .execute(
+                "INSERT INTO project_aliases VALUES (?, 'other', 'now', 'test')",
+                vec![Cell::Text(project.clone())],
+            )
+            .unwrap();
+        let first = memory::new_unsourced_entry("choice", "A").unwrap();
+        let second = memory::new_unsourced_entry("choice", "B").unwrap();
+        for (project, entry) in [(project.as_str(), &first), ("other", &second)] {
+            ledger
+                .db
+                .execute(
+                    "INSERT INTO project_memory VALUES (?, ?, ?)",
+                    entry_args(project, entry).unwrap(),
+                )
+                .unwrap();
+        }
+        snapshot.borrow_mut().body = None;
+        let mut ids = vec![first.id, second.id];
+        ids.sort();
+        ids.reverse(); // The first writer must canonicalize an unsorted input too.
+        let winner = resolve_entry(
+            root.path(),
+            memory::new_unsourced_entry("choice", "winner").unwrap(),
+            &ids,
+            &ledger,
+        )
+        .unwrap();
+        ids.reverse();
+        assert_eq!(winner.resolves, ids);
+        snapshot.borrow_mut().replay = true;
+        assert_eq!(
+            resolve_entry(
+                root.path(),
+                memory::new_unsourced_entry("choice", "loser").unwrap(),
+                &ids,
+                &ledger
+            )
+            .unwrap_err(),
+            LedgerError::ChainTaken {
+                key: "choice".into(),
+                existing_id: winner.id.clone(),
+                resolution: true,
+            }
+        );
+        let after = ledger.read(&project).unwrap();
+        assert_eq!(after.entries.len(), 3);
+        assert_eq!(memory::active_entries(&after)[0].id, winner.id);
     }
 
     #[test]

@@ -1460,6 +1460,7 @@ fn cmd_hook_recall(
             let projects = cort::memory_store::session_project_ids(&root).map_err(|_| "failed")?;
             let remaining = cort::remote::RECALL_DEADLINE.saturating_sub(started.elapsed());
             if remaining < Duration::from_millis(200) {
+                cort::remote::network_budget_exhausted();
                 return Err("remote_timeout");
             }
             let configured_ms = std::env::var("CORT_RECALL_TIMEOUT_MS")
