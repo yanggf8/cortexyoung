@@ -1460,6 +1460,7 @@ fn cmd_hook_recall(
             let projects = cort::memory_store::session_project_ids(&root).map_err(|_| "failed")?;
             let remaining = cort::remote::RECALL_DEADLINE.saturating_sub(started.elapsed());
             if remaining < Duration::from_millis(200) {
+                cort::remote::network_budget_exhausted();
                 return Err("remote_timeout");
             }
             let configured_ms = std::env::var("CORT_RECALL_TIMEOUT_MS")
@@ -2680,8 +2681,16 @@ fn memory_ledger_error(error: cort::memory_store::LedgerError) -> CortError {
             };
             CortError::new("memory_supersedes_missing", detail)
         }
-        LedgerError::ChainTaken { key, existing_id } => {
-            let message = format!("another entry for key \"{key}\" was recorded first ({existing_id}); nothing was written; recall it and ask the user which holds before superseding");
+        LedgerError::ChainTaken {
+            key,
+            existing_id,
+            resolution,
+        } => {
+            let message = if resolution {
+                format!("another resolution for these ids was recorded first ({existing_id}); nothing was written; recall key \"{key}\" to confirm it holds the intended claim")
+            } else {
+                format!("another entry for key \"{key}\" was recorded first ({existing_id}); nothing was written; recall it and ask the user which holds before superseding")
+            };
             CortError::new(
                 "memory_key_taken",
                 json!({"key":key,"existing_id":existing_id,"message":message}),
@@ -3360,11 +3369,26 @@ mod tests {
         let error = memory_ledger_error(LedgerError::ChainTaken {
             key: "choice".into(),
             existing_id: "abc".into(),
+            resolution: false,
         });
         assert_eq!(error.code, "memory_key_taken");
         assert_eq!(
             error.detail,
             json!({"key":"choice", "existing_id":"abc", "message":"another entry for key \"choice\" was recorded first (abc); nothing was written; recall it and ask the user which holds before superseding"})
+        );
+    }
+
+    #[test]
+    fn chain_taken_resolution_confirms_the_intended_claim() {
+        let error = memory_ledger_error(LedgerError::ChainTaken {
+            key: "choice".into(),
+            existing_id: "abc".into(),
+            resolution: true,
+        });
+        assert_eq!(error.code, "memory_key_taken");
+        assert_eq!(
+            error.detail,
+            json!({"key":"choice", "existing_id":"abc", "message":"another resolution for these ids was recorded first (abc); nothing was written; recall key \"choice\" to confirm it holds the intended claim"})
         );
     }
 

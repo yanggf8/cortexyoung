@@ -769,6 +769,16 @@ fn cli_watchdog_does_not_wait_for_stdin() {
 #[test]
 fn recall_network_row_shapes() {
     use cort::hook_recall::add_network_timings;
+    let mut budget = json!({"hook":"remote_timeout"});
+    add_network_timings(
+        &mut budget,
+        "remote_timeout",
+        Some(json!({"phase":"budget"})),
+    );
+    assert_eq!(
+        budget,
+        json!({"hook":"remote_timeout", "stall":{"phase":"budget"}})
+    );
     let stalled = json!({"phase":"tls", "dns_ms":120, "connect_ms":40, "tls_ms":3500});
     let complete =
         json!({"phase":"response", "dns_ms":120, "connect_ms":40, "tls_ms":80, "response_ms":60});
