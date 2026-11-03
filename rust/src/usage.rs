@@ -279,8 +279,8 @@ pub fn kick_counters_within(path: &Path, busy: Duration) -> Option<KickCounters>
 ///
 /// Hashed for the same reason `project_id` is: a hostname is a name for a person's laptop. The
 /// source is recorded beside it because the sources are not equally trustworthy -- `/etc/machine-id`
-/// is stable across renames, a hostname is not, and `unknown` means the answer is a guess and
-/// should not be leaned on.
+/// and macOS's `IOPlatformUUID` are stable across renames, a hostname is not, and `unknown` means
+/// the answer is a guess and should not be leaned on.
 pub fn machine_id() -> &'static str {
     static ID: std::sync::OnceLock<(String, &'static str)> = std::sync::OnceLock::new();
     &ID.get_or_init(resolve_machine).0
@@ -305,6 +305,8 @@ fn resolve_machine() -> (String, &'static str) {
         (v.trim().to_string(), "etc-machine-id")
     } else if let Ok(v) = std::fs::read_to_string("/var/lib/dbus/machine-id") {
         (v.trim().to_string(), "dbus-machine-id")
+    } else if let Some(v) = mac_platform_uuid() {
+        (v, "io-platform-uuid")
     } else if let Some(v) = std::env::var_os("HOSTNAME").and_then(|h| h.into_string().ok()) {
         (v, "hostname-env")
     } else {
@@ -317,6 +319,48 @@ fn resolve_machine() -> (String, &'static str) {
     // enough to sit in a report line a person reads.
     let full = crate::db::hex_lower(&Sha256::digest(raw.as_bytes()));
     (full[..16].to_string(), source)
+}
+
+// macOS has neither `/etc/machine-id` nor dbus, so without this a Mac answers `unknown` and every
+// row and ledger entry it writes is unattributable -- 2026-11-02, this repo's own MacBook Pro
+// (`Mac14,7`) stamped `unknown/unknown` in `cort usage` and in a `cort memory recall` reply before
+// this branch existed. `IOPlatformUUID` survives reboots, renames and OS reinstalls, so it sits
+// before the `HOSTNAME` fallback, whose instability the doc comment above already warns about.
+#[cfg(target_os = "macos")]
+fn mac_platform_uuid() -> Option<String> {
+    let out = std::process::Command::new("/usr/sbin/ioreg")
+        .args(["-rd", "1", "-c", "IOPlatformExpertDevice"])
+        .output()
+        .ok()?;
+    platform_uuid_from_ioreg(&String::from_utf8_lossy(&out.stdout))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn mac_platform_uuid() -> Option<String> {
+    None
+}
+
+// Pure so the parse is testable on every platform CI runs; the macOS caller is the only production
+// reader. Real input shape: `      "IOPlatformUUID" = "0FF94591-924B-56F0-AA42-CFF414EAB56B"`.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn platform_uuid_from_ioreg(text: &str) -> Option<String> {
+    let key = "\"IOPlatformUUID\"";
+    for line in text.lines() {
+        let Some(rest) = line.find(key).map(|idx| &line[idx + key.len()..]) else {
+            continue;
+        };
+        let Some(start) = rest.find('"') else {
+            continue;
+        };
+        let rest = &rest[start + 1..];
+        let Some(end) = rest.find('"') else {
+            continue;
+        };
+        if end > 0 {
+            return Some(rest[..end].to_string());
+        }
+    }
+    None
 }
 
 #[derive(Debug, Clone)]
@@ -1168,16 +1212,22 @@ fn stamp_instance(conn: &Connection, path: &Path) -> rusqlite::Result<()> {
 /// A pre-existing database from before this key gets stamped on its next open. That is the one case
 /// where the stamp can be wrong, and it is why the report reads `machine_id_source` rather than
 /// treating the stamp as gospel.
+///
+/// A stamp of `unknown` is rewritten on the next open, and only it. It names no origin -- it is
+/// what a platform with no recognized id wrote before that platform grew one (macOS before
+/// `io-platform-uuid`, 2026-11-02) -- so replacing it fixes history instead of rewriting it. A real
+/// stamp is never rewritten: a database carried to a second machine keeps naming its origin.
 fn stamp_machine(conn: &Connection) -> rusqlite::Result<()> {
-    if meta(conn, MACHINE_KEY)?.is_none() {
+    let upgradeable = matches!(meta(conn, MACHINE_KEY)?.as_deref(), None | Some("unknown"));
+    if upgradeable {
         conn.execute(
             "INSERT INTO _usage_meta (key, value) VALUES (?1, ?2)
-             ON CONFLICT(key) DO NOTHING",
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             params![MACHINE_KEY, machine_id()],
         )?;
         conn.execute(
             "INSERT INTO _usage_meta (key, value) VALUES (?1, ?2)
-             ON CONFLICT(key) DO NOTHING",
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             params![MACHINE_SOURCE_KEY, machine_id_source()],
         )?;
     }
@@ -1446,6 +1496,67 @@ pub(crate) fn civil_from_unix_days(days: i64) -> (i32, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ioreg_uuid_parse() {
+        let text = "{\n  \"IOPlatformUUID\" = \"0FF94591-924B-56F0-AA42-CFF414EAB56B\"\n}";
+        assert_eq!(
+            platform_uuid_from_ioreg(text).as_deref(),
+            Some("0FF94591-924B-56F0-AA42-CFF414EAB56B")
+        );
+        assert_eq!(platform_uuid_from_ioreg("\"OtherKey\" = \"x\";"), None);
+        assert_eq!(platform_uuid_from_ioreg("\"IOPlatformUUID\" = \"\";"), None);
+        assert_eq!(platform_uuid_from_ioreg("\"IOPlatformUUID\" ="), None);
+        assert_eq!(platform_uuid_from_ioreg(""), None);
+    }
+
+    #[test]
+    fn stamp_machine_upgrades_unknown_and_keeps_a_real_stamp() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stamp.db");
+        let conn = Connection::open(&path).unwrap();
+        ensure_schema(&conn, &path).unwrap();
+        // ensure_schema already stamped this host's id; pretend the stamp is the `unknown` a
+        // pre-`io-platform-uuid` macOS db wrote.
+        conn.execute(
+            "UPDATE _usage_meta SET value = 'unknown' \
+             WHERE key IN ('MACHINE_ID', 'MACHINE_ID_SOURCE')",
+            [],
+        )
+        .unwrap();
+        stamp_machine(&conn).unwrap();
+        // Whatever this host resolved, the db must now name exactly that -- and on a platform
+        // with a real id, that means no longer `unknown`.
+        assert_eq!(
+            meta(&conn, MACHINE_KEY).unwrap().as_deref(),
+            Some(machine_id())
+        );
+        assert_eq!(
+            meta(&conn, MACHINE_SOURCE_KEY).unwrap().as_deref(),
+            Some(machine_id_source())
+        );
+        // A real stamp survives a re-stamp: this is what keeps a carried database naming its
+        // origin instead of reading as native to whoever opened it last.
+        conn.execute(
+            "UPDATE _usage_meta SET value = 'deadbeef01234567' WHERE key = 'MACHINE_ID'",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE _usage_meta SET value = 'env' WHERE key = 'MACHINE_ID_SOURCE'",
+            [],
+        )
+        .unwrap();
+        stamp_machine(&conn).unwrap();
+        assert_eq!(
+            meta(&conn, MACHINE_KEY).unwrap().as_deref(),
+            Some("deadbeef01234567")
+        );
+        assert_eq!(
+            meta(&conn, MACHINE_SOURCE_KEY).unwrap().as_deref(),
+            Some("env")
+        );
+    }
 
     #[test]
     fn usage_schema_creation_and_unknown_version_rollback() {
