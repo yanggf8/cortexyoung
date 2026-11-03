@@ -40,6 +40,12 @@ serde_json = "1"
 ureq = { version = "2", default-features = false }
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "logging", "std", "tls12"] }
 webpki-roots = "1"
+# The webpki roots above are a floor, not the whole story: a corporate TLS-intercepting proxy
+# (Prisma Access et al.) re-signs every outbound certificate with a CA the OS trusts but webpki
+# does not carry -- 2026-11-02 on this repo's own corporate Mac a `harnessuse` read answered
+# `unreachable` while curl over the system trust store returned 200. The system roots union in
+# beside webpki (remote.rs `tls()`), fail-soft.
+rustls-native-certs = "0.8.5"
 sha2 = "0.11"
 clap = { version = "4", features = ["derive"] }
 # The scan hot path runs the rule pack in-process (src/scan.rs); the CLI stays only for

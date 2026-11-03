@@ -354,9 +354,20 @@ fn tls() -> Result<Arc<AwsLcTls>, RemoteError> {
     ))
     .with_safe_default_protocol_versions()
     .map_err(|_| RemoteError::new(ErrorKind::Unreachable, "TLS configuration failed"))?;
-    let roots = rustls::RootCertStore {
+    let mut roots = rustls::RootCertStore {
         roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
     };
+    // Webpki is the floor, not the whole story. A corporate TLS-intercepting proxy re-signs
+    // every outbound certificate with a CA the OS trusts and webpki does not carry: on
+    // 2026-11-02 this repo's own corporate Mac (Prisma Access, issuer "OEC Group Prisma Access
+    // Trusted RSA 2024") every `harnessuse` read answered `unreachable` while curl over the
+    // system trust store returned 200 on the same endpoint. Union the OS trust store in beside
+    // webpki, fail-soft: a machine with no extra roots adds nothing, a load failure leaves the
+    // webpki set behind, and one unreadable keychain entry is dropped rather than taking the
+    // store down.
+    for cert in rustls_native_certs::load_native_certs().certs {
+        let _ = roots.add(cert);
+    }
     let config = builder.with_root_certificates(roots).with_no_client_auth();
     Ok(TLS
         .get_or_init(|| Arc::new(AwsLcTls(Arc::new(config))))
