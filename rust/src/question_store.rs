@@ -260,6 +260,19 @@ fn question_json(q: &Question, now: i128, with_events: bool) -> Value {
     value
 }
 
+/// `q` as it stands once `written` has landed: its events plus the new one, folded again, so
+/// a reply reports the current answers and conflict after the write rather than before it.
+fn after_write(q: &Question, written: &QuestionEvent, now: i128) -> Value {
+    let mut events = Vec::with_capacity(q.events.len() + 2);
+    events.push(q.ask.clone());
+    events.extend(q.events.iter().cloned());
+    events.push(written.clone());
+    match fold(events, now, stale_days()).questions.first() {
+        Some(folded) => question_json(folded, now, false),
+        None => question_json(q, now, false),
+    }
+}
+
 fn find<'a>(folded: &'a Folded, prefix: &str) -> Result<&'a Question, LedgerError> {
     let id = resolve_prefix(folded.questions.iter().map(|q| q.ask.id.as_str()), prefix)
         .map_err(|code| LedgerError::Message(format!("{code}: {prefix}")))?;
@@ -563,8 +576,7 @@ pub fn answer_with(
         sh(&format!("question {}", &qid[..qid.len().min(8)])),
         sh(&format!("{text} -> {answer}"))
     );
-    let mut question = question_json(q, now, false);
-    question["state"] = json!("answered");
+    let question = after_write(q, &event, now);
     Ok(json!({
         "outcome": "answered",
         "question": question,
@@ -624,9 +636,7 @@ pub fn close_with(
     event.reason = Some(reason.as_str().to_string());
     event.of = of;
     write_event(ledger, &project, &event)?;
-    let mut question = question_json(q, now, false);
-    question["state"] = json!("closed");
-    question["close"] = event_json(&event);
+    let question = after_write(q, &event, now);
     Ok(json!({"outcome": "closed", "question": question}))
 }
 

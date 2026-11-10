@@ -605,3 +605,26 @@ fn the_answer_is_the_headline_of_an_exists() {
     let out = open.add("recall deadline 4300?");
     assert_eq!(first_key(&out), "outcome", "{out}");
 }
+
+#[test]
+fn answer_output_reports_the_state_after_the_write() {
+    let f = Fixture::new();
+    let (id, a, b) = racing_answers(&f);
+    let out = f
+        .answer(&id, "settle", Some("settle it"), Some(vec![a, b]))
+        .unwrap();
+    let current = out["question"]["current_answers"].as_array().unwrap();
+    assert_eq!(current.len(), 1, "{out}");
+    assert_eq!(current[0]["answer"], "settle");
+    assert_eq!(current[0]["id"], out["answer"]["id"]);
+    assert_eq!(out["question"]["answer_conflict"], false, "{out}");
+    assert_eq!(out["question"]["state"], "answered");
+    // A first answer: the output shows it as the one current answer.
+    let fresh = added_id(&f.add("Rename the notes table?"));
+    let out = f.answer(&fresh, "yes", None, None).unwrap();
+    assert_eq!(
+        out["question"]["current_answers"][0]["answer"], "yes",
+        "{out}"
+    );
+    assert_eq!(out["question"]["answered_days_ago"], 0, "{out}");
+}
