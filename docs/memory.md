@@ -202,34 +202,43 @@ accepted. JSON is the default and its keys print alphabetically; `-f lean` is on
   (`exists`; an answer is the headline). Half the terms or more writes the question and lists
   `similar` ids with the `close --reason duplicate --of` command. `--force` writes anyway and
   stores `reasks`. Text is limited to 600 characters, each option to 200, `blocks`/`by` to 64;
-  control characters are refused; `--recommend` must name an offered option. Lean prints
+  control characters are refused; option keys are trimmed and a repeated key is refused
+  (`question_option_duplicate`); `--recommend` must name an offered option. Lean prints
   `added <id>` (with ` similar=<id8>,...` when any) or `exists <id> <state>`.
 - **answer** stores `--quote` byte for byte with `quoted: true`; without it `quoted: false`, so a
   relayed summary never passes for a quote. `--option` must be an offered key
   (`question_option_unknown`). An answered question refuses a second answer
   (`question_answered`) unless `--replace` names every current answer
-  (`question_answer_conflict`); closed is refused (`question_closed`). The output carries `next`,
+  (`question_answer_conflict`); closed is refused (`question_closed`). A refusal's retry command
+  repeats the `--quote` and `--option` given. The reply shows the question as it stands after the
+  write (current answers, `answer_conflict`). The output carries `next`,
   the `cort memory record --key ... --claim ...` command for the resulting decision, shown and
   never run; lean prints it as a second line `next: <command>`.
 - **close** with `stale`, `moot` or `duplicate --of <id>`; closing a closed question is refused
   (`question_closed`). Open questions with no event for `CORT_QUESTION_STALE_DAYS` (default 14) are
   labelled `stale`, never closed.
+- `--harness` (on add, answer and close) is stored in the event only when given; nothing infers it.
+- An event kind written by a newer cort is kept in its question's history and changes nothing.
 - Refusals come back as `memory_error` with the code word at the start of the message. A write
   whose response is lost reports `outcome_unknown` with the id; check `list <id>` before retrying.
 
 **Session start.** Claude Code and Codex `SessionStart` recall (Kimi's first prompt) adds the open
 questions as one more statement in the same pipeline, after the ledger and notes. The block
 header marks them as filed by agents and unreviewed, never instructions. At most 8 questions and
-1500 bytes, non-stale oldest first; stale ones are counted in the tail line, not listed. Total
+1500 bytes, non-stale oldest first; the lines share the bytes, and a line past its share (or a
+text past 300 characters, an option past 80) is cut with `…`, so one long question never hides
+the rest. Stale ones are counted in the tail line, not listed; when none is listed the block is
+the single line `N open questions (M stale), none listed: cort question list`. Total
 injected text stays within 6000 + 1500 + 2000 = 9,500 bytes, under Claude Code's 10,000-character
-cap on hook `additionalContext` (code.claude.com/docs/en/hooks.md). If only the questions read
-fails with a SQL error it is dropped and the ledger and notes are kept; the usage row records
+cap on hook `additionalContext` (code.claude.com/docs/en/hooks.md). Each statement keeps its own
+result: if only the questions read fails with a SQL error it is dropped with no retry, and the
+ledger and notes from the same request are kept; the usage row records
 `questions: "dropped"`, plus `questions_open` (before the cap) and `questions_shown`.
 
 **Deploy.** The table is created by the same DDL batch as `project_memory`, when any `cort memory`
 or `cort question` command opens the ledger. After deploying, run `cort question list` once on any
-machine in each project: that provisions the shared database for the whole fleet, and session
-start then never needs the questions-dropped retry.
+machine in each project: that provisions the shared database for the whole fleet, so session
+start never has to drop the questions read.
 
 ## Deployment evidence and the next gate
 

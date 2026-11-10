@@ -367,9 +367,12 @@ pub fn validate_ask(
         return Err("question_text_empty".to_string());
     }
     check("text", text, MAX_TEXT)?;
-    for o in options {
+    for (i, o) in options.iter().enumerate() {
         check("option key", &o.key, MAX_LABEL)?;
         check("option text", &o.text, MAX_OPTION)?;
+        if options[..i].iter().any(|earlier| earlier.key == o.key) {
+            return Err(format!("question_option_duplicate: {}", o.key));
+        }
     }
     if let Some(b) = blocks {
         check("blocks", b, MAX_LABEL)?;

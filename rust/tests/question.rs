@@ -237,3 +237,14 @@ fn parse_event_reads_an_unknown_kind_with_unfamiliar_fields() {
     assert!(parse_event(r#"{"id":"x","kind":"answer","answer":7,"recorded_at":"1"}"#).is_err());
     assert!(parse_event("not json").is_err());
 }
+
+#[test]
+fn duplicate_option_keys_are_refused() {
+    let option = |key: &str| QuestionOption {
+        key: key.into(),
+        text: "x".into(),
+    };
+    let err = validate_ask("which?", &[option("A"), option("A")], None, None, None).unwrap_err();
+    assert!(err.starts_with("question_option_duplicate"), "{err}");
+    assert!(validate_ask("which?", &[option("A"), option("B")], None, None, None).is_ok());
+}

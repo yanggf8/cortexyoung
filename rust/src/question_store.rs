@@ -446,13 +446,27 @@ fn answers_list(answers: &[QuestionEvent]) -> String {
         .join("; ")
 }
 
-fn retry_command(question: &str, answer: &str, replaces: &[QuestionEvent]) -> String {
-    let ids: Vec<&str> = replaces.iter().map(|a| a.id.as_str()).collect();
-    format!(
-        "cort question answer {question} --answer {} --replace {}",
-        sh(answer),
-        ids.join(" ")
-    )
+/// The command to paste: the same answer, quote and option, naming every answer to replace
+/// (no `--replace` when there is none).
+fn retry_command(
+    question: &str,
+    answer: &str,
+    quote: Option<&str>,
+    option: Option<&str>,
+    replaces: &[QuestionEvent],
+) -> String {
+    let mut command = format!("cort question answer {question} --answer {}", sh(answer));
+    if let Some(quote) = quote {
+        command.push_str(&format!(" --quote {}", sh(quote)));
+    }
+    if let Some(option) = option {
+        command.push_str(&format!(" --option {}", sh(option)));
+    }
+    if !replaces.is_empty() {
+        let ids: Vec<&str> = replaces.iter().map(|a| a.id.as_str()).collect();
+        command.push_str(&format!(" --replace {}", ids.join(" ")));
+    }
+    command
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -517,7 +531,7 @@ pub fn answer_with(
                 "question_answered: {qid} already has {} current answer(s): {}; to change it: {}",
                 current.len(),
                 answers_list(current),
-                retry_command(&qid, answer, current)
+                retry_command(&qid, answer, quote, option, current)
             )))
         }
         Some(named) if named.is_empty() => match current.as_slice() {
@@ -528,7 +542,7 @@ pub fn answer_with(
                 "question_answer_conflict: {qid} has {} current answers: {}; name every one: {}",
                 current.len(),
                 answers_list(current),
-                retry_command(&qid, answer, current)
+                retry_command(&qid, answer, quote, option, current)
             )))
             }
         },
@@ -552,11 +566,7 @@ pub fn answer_with(
                 return Err(LedgerError::Message(format!(
                     "question_answer_conflict: --replace must name every current answer of {qid}: {}; retry: {}",
                     if current.is_empty() { "none".to_string() } else { answers_list(current) },
-                    if current.is_empty() {
-                        format!("cort question answer {qid} --answer {}", sh(answer))
-                    } else {
-                        retry_command(&qid, answer, current)
-                    }
+                    retry_command(&qid, answer, quote, option, current)
                 )));
             }
             resolved
@@ -574,7 +584,7 @@ pub fn answer_with(
     let text = q.ask.text.as_deref().unwrap_or("");
     let next = format!(
         "cort memory record --key {} --claim {}",
-        sh(&format!("question {}", &qid[..qid.len().min(8)])),
+        sh(&format!("question {}", qid.get(..8).unwrap_or(&qid))),
         sh(&format!("{text} -> {answer}"))
     );
     let question = after_write(q, &event, now);

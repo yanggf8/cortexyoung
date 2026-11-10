@@ -664,3 +664,35 @@ fn unknown_kind_row_breaks_neither_list_nor_alias_list() {
     );
     assert!(refused.starts_with("alias_in_use"), "{refused}");
 }
+
+#[test]
+fn retry_command_keeps_the_quote_and_option() {
+    let f = Fixture::new();
+    let mut a = args("Keep the deadline?");
+    a.options = vec![QuestionOption {
+        key: "A".into(),
+        text: "keep".into(),
+    }];
+    let id = added_id(&f.add_args(a).unwrap());
+    let first = f.answer(&id, "keep it", None, None).unwrap();
+    let answer_id = first["answer"]["id"].as_str().unwrap().to_string();
+    let err = message(
+        question_store::answer_with(
+            f.root(),
+            &id,
+            "keep",
+            Some("he said 'keep'"),
+            Some("A"),
+            None,
+            None,
+            &f.ledger,
+        )
+        .unwrap_err(),
+    );
+    assert!(
+        err.contains(&format!(
+            "cort question answer {id} --answer 'keep' --quote 'he said '\\''keep'\\''' --option 'A' --replace {answer_id}"
+        )),
+        "{err}"
+    );
+}

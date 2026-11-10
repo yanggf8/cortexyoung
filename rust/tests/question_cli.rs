@@ -349,3 +349,40 @@ fn lean_list_has_no_empty_field() {
         "closed 01234567\n"
     );
 }
+
+#[test]
+fn option_keys_are_trimmed_and_duplicates_refused_before_network() {
+    let f = Fixture::new();
+    let (output, value) = f.run(&[
+        "question",
+        "add",
+        "--text",
+        "which db?",
+        "--option",
+        "A=turso",
+        "--option",
+        " A =sqlite",
+    ]);
+    assert!(!output.status.success());
+    let message = value["detail"]["message"].as_str().unwrap();
+    assert!(message.starts_with("question_option_duplicate"), "{value}");
+    // A padded key is the key itself: `--recommend A` names it.
+    f.assert_unconfigured(&[
+        "question",
+        "add",
+        "--text",
+        "which db?",
+        "--option",
+        " A =turso",
+        "--recommend",
+        "A",
+    ]);
+}
+
+#[test]
+fn add_help_shows_the_option_format() {
+    let f = Fixture::new();
+    let (_, value) = f.run(&["question", "add", "--help"]);
+    let add = value["commands"]["add"].as_str().unwrap();
+    assert!(add.contains("--option <K=TEXT>"), "{add}");
+}

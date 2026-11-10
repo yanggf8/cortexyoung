@@ -177,9 +177,12 @@ is out of scope.
 `session_recall_with` appends one statement, **last**, to its existing pipeline: the question
 events for the component. Statement order is ledger, notes, notes count, questions.
 
-Fallback becomes per optional statement: a SQL error whose `error.step` is the questions
-statement retries with the questions statement removed and notes kept; an error at a notes step
-removes the notes statements and keeps questions. Each optional read is dropped at most once,
+Fallback becomes per optional statement, and each statement keeps its own result
+(`RemoteDb::pipeline_each`): a SQL error at the questions statement alone keeps the ledger and
+notes from the same request and drops questions with no retry (final review, 2026-11-11: a retry
+there cost a round trip, and with under 200 ms left turned the whole recall into
+`remote_timeout`); an error at a notes step removes the notes statements and keeps questions
+(and drops questions too if they failed in the same answer). Each optional read is dropped at most once,
 inside the existing 200 ms remaining-budget rule. Because the table is provisioned at deploy,
 the retry is a failure path, not the normal path; the usage row records `questions: dropped`
 when it happens, so `cort measure report` shows if it ever is.
@@ -197,7 +200,11 @@ raise one or two at a natural pause; record the human's words with `cort questio
 
 Non-stale open questions first, oldest first (the longest-waiting surface); stale ones are only
 counted in the tail line *(author's call, from the Gemini review: a dead old question must not
-hold a slot forever)*. Capped at 8 questions and 1500 bytes. Text passes the same `clean()`
+hold a slot forever)*. Capped at 8 questions and 1500 bytes; the listed lines share the bytes
+max-min and a line past its share is cut with `…`, as is a text past 300 characters or an
+option past 80, so one long question never hides the rest (final review, 2026-11-11). When no
+question is listed (all stale), the block is one line, `N open questions (M stale), none listed:
+cort question list`, without the header's instruction. Text passes the same `clean()`
 the notes list uses. Total injected text stays within 6000 + 1500 + 2000 = 9,500 bytes, under
 Claude Code's 10,000-character hook-context limit; the builder confirms that limit against the
 current Claude Code docs before landing, and shrinks the notes cap if it is lower. Kimi's

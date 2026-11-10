@@ -105,7 +105,10 @@ fn question_usage_value() -> Value {
 
 fn verbs_usage_value(command: clap::Command, prefix: &str, note: &str) -> Value {
     fn arg_text(arg: &clap::Arg) -> String {
-        let id = arg.get_id().as_str().to_uppercase();
+        let id = arg
+            .get_value_names()
+            .and_then(|names| names.first())
+            .map_or_else(|| arg.get_id().as_str().to_uppercase(), ToString::to_string);
         let choices: Vec<String> = arg
             .get_possible_values()
             .iter()
@@ -790,7 +793,7 @@ enum QuestionAction {
         #[arg(long)]
         text: String,
         /// `K=text`, repeatable.
-        #[arg(long = "option")]
+        #[arg(long = "option", value_name = "K=TEXT")]
         option: Vec<String>,
         #[arg(long)]
         recommend: Option<String>,
@@ -2739,12 +2742,13 @@ fn cmd_memory(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError
     })
 }
 
-/// `K=text`, split at the first `=`; an empty key or text is refused before any network.
+/// `K=text`, split at the first `=`, the key trimmed; an empty key or text is refused before
+/// any network.
 fn parse_question_option(raw: &str) -> Result<cort::question::QuestionOption, CortError> {
     match raw.split_once('=') {
         Some((key, text)) if !key.trim().is_empty() && !text.trim().is_empty() => {
             Ok(cort::question::QuestionOption {
-                key: key.to_string(),
+                key: key.trim().to_string(),
                 text: text.to_string(),
             })
         }
