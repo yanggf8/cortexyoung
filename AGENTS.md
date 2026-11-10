@@ -308,6 +308,8 @@ alone, where no other machine or harness can read it, until the user asked why.
   nothing was written: recall it and ask the user before superseding.
 - A harness-private memory is for how one agent works, never the only copy of a project fact.
 
+- Questions for the human go to `cort question add`, never into a claim or a harness-private memory; the answer keeps the human's words (`--quote`) and the decision is then recorded with `cort memory record`. See `docs/memory.md`.
+
 **Harness notes are a second, unreviewed table beside the ledger** (2026-10-27). `cort memory notes
 upload` copies Claude Code's `projects/*/memory/*.md` into `harness_notes` in the same Turso database,
 for projects opted in per machine with `cort memory notes opt-in`; `list`/`show` read other

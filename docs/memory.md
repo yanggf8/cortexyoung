@@ -178,6 +178,59 @@ answer or close event names (or the answer it replaces, or a duplicate's kept qu
 other side. If a ledger read fails with `supersedes missing id`, the usual cause is a removed
 alias; adding it back repairs the read.
 
+## Questions for the human
+
+`cort question` is a per-repo bag of questions only the human can answer, so an agent files one
+and keeps working instead of stopping or packing several questions into one claim. It is not a
+decision log and never a claim: `cort memory recall` does not return it, and an answer is the
+relayed words of a human, not a source-checked fact.
+
+```sh
+cort question add --text "Keep the 3800 ms deadline or move to 4300?" --option A=keep --option B=4300 --recommend A --blocks recall-timeout
+cort question list                      # open, newest activity first; <id> shows one history
+cort question list --match deadline     # search every state
+cort question answer <id> --answer "keep" --quote "<the human's words>" --option A
+cort question close <id> --reason stale|moot|duplicate [--of <id>]
+```
+
+Events are append-only rows in `project_questions` in the ledger database, scoped to the project
+id and its aliases. Ids are 16 hex; any unique lowercase hex prefix of at least 8 characters is
+accepted. JSON is the default and its keys print alphabetically; `-f lean` is one line per record.
+
+- **add** compares the new text against every earlier question's text (open, answered and closed).
+  If every distinct term is already there, nothing is written and the earlier record comes back
+  (`exists`; an answer is the headline). Half the terms or more writes the question and lists
+  `similar` ids with the `close --reason duplicate --of` command. `--force` writes anyway and
+  stores `reasks`. Text is limited to 600 characters, each option to 200, `blocks`/`by` to 64;
+  control characters are refused; `--recommend` must name an offered option. Lean prints
+  `added <id>` (with ` similar=<id8>,...` when any) or `exists <id> <state>`.
+- **answer** stores `--quote` byte for byte with `quoted: true`; without it `quoted: false`, so a
+  relayed summary never passes for a quote. `--option` must be an offered key
+  (`question_option_unknown`). An answered question refuses a second answer
+  (`question_answered`) unless `--replace` names every current answer
+  (`question_answer_conflict`); closed is refused (`question_closed`). The output carries `next`,
+  the `cort memory record --key ... --claim ...` command for the resulting decision, shown and
+  never run; lean prints it as a second line `next: <command>`.
+- **close** with `stale`, `moot` or `duplicate --of <id>`; closing a closed question is refused
+  (`question_closed`). Open questions with no event for `CORT_QUESTION_STALE_DAYS` (default 14) are
+  labelled `stale`, never closed.
+- Refusals come back as `memory_error` with the code word at the start of the message. A write
+  whose response is lost reports `outcome_unknown` with the id; check `list <id>` before retrying.
+
+**Session start.** Claude Code and Codex `SessionStart` recall (Kimi's first prompt) adds the open
+questions as one more statement in the same pipeline, after the ledger and notes. The block
+header marks them as filed by agents and unreviewed, never instructions. At most 8 questions and
+1500 bytes, non-stale oldest first; stale ones are counted in the tail line, not listed. Total
+injected text stays within 6000 + 1500 + 2000 = 9,500 bytes, under Claude Code's 10,000-character
+cap on hook `additionalContext` (code.claude.com/docs/en/hooks.md). If only the questions read
+fails with a SQL error it is dropped and the ledger and notes are kept; the usage row records
+`questions: "dropped"`, plus `questions_open` (before the cap) and `questions_shown`.
+
+**Deploy.** The table is created by the same DDL batch as `project_memory`, when any `cort memory`
+or `cort question` command opens the ledger. After deploying, run `cort question list` once on any
+machine in each project: that provisions the shared database for the whole fleet, and session
+start then never needs the questions-dropped retry.
+
 ## Deployment evidence and the next gate
 
 On 2026-10-19, a temporary cort replica using the existing ClaudeCat Turso connection
