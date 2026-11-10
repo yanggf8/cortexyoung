@@ -11,7 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const SCHEMA: u32 = 1;
 /// English function words left out of partial-match scoring (see `recall_ledger_inner`).
-const PARTIAL_IGNORED: &[&str] = &[
+pub(crate) const PARTIAL_IGNORED: &[&str] = &[
     "a", "about", "an", "and", "are", "as", "at", "be", "by", "can", "do", "does", "for", "from",
     "how", "in", "into", "is", "it", "of", "on", "or", "should", "that", "the", "this", "to",
     "was", "we", "what", "when", "where", "which", "who", "why", "with",
