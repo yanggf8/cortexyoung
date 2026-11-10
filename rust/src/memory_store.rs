@@ -603,8 +603,22 @@ const SESSION_NOTES: &str = "SELECT n.note_id, n.machine, m.host, n.file_name, n
 const SESSION_NOTES_COUNT: &str =
     "SELECT COUNT(*) FROM harness_notes WHERE project=? AND machine<>? AND deleted=0";
 
-/// Read only. Retry a step-zero SQL error with an unaliased full pipeline, then retry a
-/// notes SQL error with ledger only, subject to the deadline before each retry.
+/// What a session start read: the ledger, other machines' notes and the question bag.
+#[derive(Clone, Debug)]
+pub struct SessionRecall {
+    pub recall: MemoryRecall,
+    pub omitted: usize,
+    pub notes: Vec<notes_upload::NoteBrief>,
+    pub notes_total: usize,
+    /// `None` when the questions statement was dropped after an SQL error.
+    pub questions: Option<Vec<crate::question::Question>>,
+}
+
+/// Read only. Statement order is ledger, notes, notes count, questions. A step-zero SQL error
+/// retries with the unaliased ledger (and questions) read; an SQL error at a notes step drops
+/// the notes statements and keeps questions; one at the questions step drops questions and
+/// keeps notes. Each optional read is dropped at most once, and every retry is subject to the
+/// remaining-budget rule.
 #[doc(hidden)]
 pub fn session_recall_with(
     root: &Path,
@@ -612,20 +626,13 @@ pub fn session_recall_with(
     machine: &str,
     projects: (&str, &str),
     started: Instant,
-) -> Result<(MemoryRecall, usize, Vec<notes_upload::NoteBrief>, usize), ErrorKind> {
+) -> Result<SessionRecall, ErrorKind> {
     // Before the network wait: nothing after it may spend the watchdog's margin on a subprocess.
     let top = memory::source_root(root);
-    let unaliased = Stmt::new(
-        "SELECT body FROM project_memory WHERE project = ?",
-        vec![Cell::Text(projects.0.into())],
-    );
-    let aliased = Stmt::new(
-        format!("SELECT body FROM project_memory WHERE project IN ({COMPONENT})"),
-        vec![Cell::Text(projects.0.into())],
-    );
+    let ledger_args = || vec![Cell::Text(projects.0.into())];
     let note_args = || vec![Cell::Text(projects.1.into()), Cell::Text(machine.into())];
-    let mut ledger_stmt = aliased;
     let mut with_notes = true;
+    let mut with_questions = true;
     let mut retried_alias = false;
     let result = loop {
         if crate::remote::RECALL_DEADLINE.saturating_sub(started.elapsed())
@@ -634,47 +641,58 @@ pub fn session_recall_with(
             crate::remote::network_budget_exhausted();
             return Err(ErrorKind::Timeout);
         }
-        let mut statements = vec![ledger_stmt.clone()];
+        let scope = if retried_alias {
+            "= ?".to_string()
+        } else {
+            format!("IN ({COMPONENT})")
+        };
+        let mut statements = vec![Stmt::new(
+            format!("SELECT body FROM project_memory WHERE project {scope}"),
+            ledger_args(),
+        )];
         if with_notes {
             statements.push(Stmt::new(SESSION_NOTES, note_args()));
             statements.push(Stmt::new(SESSION_NOTES_COUNT, note_args()));
         }
+        let questions_step = with_questions.then_some(statements.len());
+        if with_questions {
+            statements.push(Stmt::new(
+                format!("SELECT body FROM project_questions WHERE project {scope}"),
+                ledger_args(),
+            ));
+        }
         match db.pipeline(&statements) {
-            Err(error)
-                if error.kind == ErrorKind::Sql
-                    && error.step == Some(0)
-                    && !retried_alias
-                    && with_notes =>
-            {
-                ledger_stmt = unaliased.clone();
-                retried_alias = true;
-            }
-            Err(error)
-                if error.kind == ErrorKind::Sql
-                    && error.step.is_some_and(|n| n >= 1)
-                    && with_notes =>
-            {
-                with_notes = false;
-            }
+            Err(error) if error.kind == ErrorKind::Sql => match error.step {
+                Some(0) if !retried_alias && with_notes && with_questions => retried_alias = true,
+                Some(1 | 2) if with_notes => with_notes = false,
+                step if step.is_some() && step == questions_step => with_questions = false,
+                _ => return Err(error.kind),
+            },
             result => break result.map_err(|error| error.kind)?,
         }
     };
-    let (rows, notes, total) = match result {
-        mut results if with_notes => {
-            if results.len() != 3 {
-                return Err(ErrorKind::Sql);
-            }
-            let count = results.pop().ok_or(ErrorKind::Sql)?;
-            let note_rows = results.pop().ok_or(ErrorKind::Sql)?;
-            let ledger = results.pop().ok_or(ErrorKind::Sql)?;
-            let total = match count.rows.first().and_then(|r| r.first()) {
-                Some(Cell::Int(n)) if *n >= 0 => *n as usize,
-                _ => return Err(ErrorKind::Sql),
-            };
-            (ledger.rows, note_rows.rows, total)
-        }
-        mut results => (results.pop().ok_or(ErrorKind::Sql)?.rows, Vec::new(), 0),
+    let mut results = result.into_iter();
+    let mut next = || results.next().ok_or(ErrorKind::Sql);
+    let rows = next()?.rows;
+    let (notes, total) = if with_notes {
+        let note_rows = next()?.rows;
+        let count = next()?;
+        let total = match count.rows.first().and_then(|r| r.first()) {
+            Some(Cell::Int(n)) if *n >= 0 => *n as usize,
+            _ => return Err(ErrorKind::Sql),
+        };
+        (note_rows, total)
+    } else {
+        (Vec::new(), 0)
     };
+    let question_rows = if with_questions {
+        Some(next()?.rows)
+    } else {
+        None
+    };
+    if next().is_ok() {
+        return Err(ErrorKind::Sql);
+    }
     let bodies = rows
         .iter()
         .map(|row| match row.first() {
@@ -706,7 +724,29 @@ pub fn session_recall_with(
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
-    Ok((recall, omitted, briefs, total))
+    // An undecodable question row drops the block (recorded as `questions: dropped`) rather
+    // than the ledger: the questions are optional, the ledger is not.
+    let questions = question_rows.and_then(|rows| {
+        let events = rows
+            .iter()
+            .map(|row| match row.first() {
+                Some(Cell::Text(body)) => serde_json::from_str::<QuestionEvent>(body).ok(),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .and_then(|d| i128::try_from(d.as_nanos()).ok())?;
+        Some(crate::question::fold(events, now, crate::question_store::stale_days()).questions)
+    });
+    Ok(SessionRecall {
+        recall,
+        omitted,
+        notes: briefs,
+        notes_total: total,
+        questions,
+    })
 }
 
 fn notes_machine() -> Value {

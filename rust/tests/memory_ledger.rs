@@ -489,14 +489,15 @@ fn session_recall_from_payload_subdirectory_checks_repository_source() {
         }),
     )
     .unwrap();
-    let (recall, _, _, _) = memory_store::session_recall_with(
+    let recall = memory_store::session_recall_with(
         &sub,
         &db,
         "self",
         (&f.project(), &f.project()),
         std::time::Instant::now(),
     )
-    .unwrap();
+    .unwrap()
+    .recall;
     assert_eq!(recall.hits[0].entry.id, entry.id);
     assert_eq!(recall.hits[0].evidence_status, "source_unchanged");
 }

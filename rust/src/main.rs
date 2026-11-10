@@ -1565,6 +1565,8 @@ fn cmd_hook_recall(
     if let Some(project) = &usage.project_id {
         let _ = RECALL_WATCHDOG_PROJECT.set(project.clone());
     }
+    // Question fields for the usage row, set whenever the shared database was read.
+    let mut question_fields: Vec<(&str, Value)> = Vec::new();
     let (outcome, content, count, notes_count) = if let Some(outcome) = skip {
         (outcome, None, 0, 0)
     } else if parsed.is_none() {
@@ -1618,9 +1620,19 @@ fn cmd_hook_recall(
             })
         })();
         match read {
-            Ok((recall, omitted, notes, total)) => {
-                match cort::hook_recall::render_with_notes(recall, omitted, &notes, total) {
-                    Some((text, count, notes_count)) => {
+            Ok(session) => {
+                let now_ns = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_nanos() as i128);
+                let rendered = cort::hook_recall::render_session(
+                    &session,
+                    now_ns,
+                    cort::question_store::stale_days(),
+                );
+                question_fields.push(cort::hook_recall::questions_usage(&session));
+                match rendered {
+                    Some((text, count, notes_count, questions_shown)) => {
+                        question_fields.push(("questions_shown", json!(questions_shown)));
                         ("injected", Some(text), count, notes_count)
                     }
                     None => ("none", None, 0, 0),
@@ -1635,6 +1647,9 @@ fn cmd_hook_recall(
     if outcome == "injected" {
         row["entries"] = json!(count);
         row["notes"] = json!(notes_count);
+    }
+    for (key, value) in question_fields {
+        row[key] = value;
     }
     usage.args_summary = row.to_string();
     let payload = content
