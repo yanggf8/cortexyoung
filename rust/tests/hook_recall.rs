@@ -1521,3 +1521,32 @@ fn notes_then_questions_failure_keeps_the_ledger() {
     );
     assert!(requests[1][0].contains("project_memory"));
 }
+
+#[test]
+fn unknown_kind_row_leaves_the_session_block_alone() {
+    let (db, read_only, _) = database();
+    seed_ledger(&db);
+    seed_alias(&db);
+    seed_questions(
+        &db,
+        "ledger",
+        &[
+            ask("jjjjjjjj10", "Ship it?", 1),
+            json!({"id": "kkkkkkkk11", "kind": "comment", "question": "jjjjjjjj10",
+                "text": {"rich": true}, "recorded_at": now_ns().to_string()}),
+        ],
+    );
+    read_only.store(true, Ordering::SeqCst);
+    let temp = tempfile::tempdir().unwrap();
+    let session = cort::memory_store::session_recall_with(
+        temp.path(),
+        &db,
+        "self",
+        ("ledger", "origin"),
+        Instant::now(),
+    )
+    .unwrap();
+    let (text, _, _, shown) = cort::hook_recall::render_session(&session, now_ns()).unwrap();
+    assert_eq!(shown, 1);
+    assert!(text.contains("\n- jjjjjjjj  Ship it?  (1d)"), "{text}");
+}

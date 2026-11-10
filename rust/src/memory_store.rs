@@ -761,7 +761,7 @@ pub fn session_recall_with(
         let events = rows
             .iter()
             .map(|row| match row.first() {
-                Some(Cell::Text(body)) => serde_json::from_str::<QuestionEvent>(body).ok(),
+                Some(Cell::Text(body)) => crate::question::parse_event(body).ok(),
                 _ => None,
             })
             .collect::<Option<Vec<_>>>()?;
@@ -1774,7 +1774,7 @@ impl Ledger {
             .iter()
             .map(|row| {
                 let body = text(row, 1)?;
-                let event = serde_json::from_str(&body).map_err(|e| {
+                let event = crate::question::parse_event(&body).map_err(|e| {
                     LedgerError::Message(format!("invalid remote question row: {e}"))
                 })?;
                 Ok((text(row, 0)?, event))

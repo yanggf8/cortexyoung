@@ -628,3 +628,39 @@ fn answer_output_reports_the_state_after_the_write() {
     );
     assert_eq!(out["question"]["answered_days_ago"], 0, "{out}");
 }
+
+#[test]
+fn unknown_kind_row_breaks_neither_list_nor_alias_list() {
+    let f = Fixture::new();
+    let id = added_id(&f.add("Keep the deadline?"));
+    f.answer(&id, "keep", None, None).unwrap();
+    f.insert_event(
+        &json!({"id": "f0f0f0f0f0f0f0f0", "kind": "comment", "question": id,
+        "text": {"rich": true}, "recorded_at": "5"}),
+    );
+    let all = f.list(ListFilter::All);
+    assert_eq!(all["questions"][0]["state"], "answered", "{all}");
+    let one =
+        question_store::list_with(f.root(), ListFilter::Open, Some(&id[..8]), None, &f.ledger)
+            .unwrap();
+    assert_eq!(
+        one["questions"][0]["events"].as_array().unwrap().len(),
+        2,
+        "{one}"
+    );
+    memory_store::alias_list_with(f.root(), &f.ledger).unwrap();
+    // The unknown row's `question` id still counts: removing the alias would split it.
+    move_events_to(&f, "old-repo");
+    alias_from(&f, "old-repo").unwrap();
+    f.query(&format!(
+        "UPDATE project_questions SET project = '{}' WHERE id = 'f0f0f0f0f0f0f0f0'",
+        memory_store::project(f.root()).unwrap()
+    ))
+    .unwrap();
+    memory_store::alias_list_with(f.root(), &f.ledger).unwrap();
+    let refused = message(
+        memory_store::alias_remove_with(f.root(), AliasFrom::Project("old-repo".into()), &f.ledger)
+            .unwrap_err(),
+    );
+    assert!(refused.starts_with("alias_in_use"), "{refused}");
+}

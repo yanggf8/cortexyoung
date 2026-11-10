@@ -193,3 +193,47 @@ fn prefix_rules() {
     assert_eq!(r("ABCDEF12"), Err("question_not_found".into()));
     assert_eq!(r("deadbeef"), Err("question_not_found".into()));
 }
+
+#[test]
+fn unknown_kind_is_kept_in_history_without_changing_state() {
+    let future: QuestionEvent = serde_json::from_value(serde_json::json!({
+        "id": "u1", "kind": "comment", "question": "q1", "recorded_at": (50 * DAY).to_string()
+    }))
+    .unwrap();
+    assert_eq!(future.kind, EventKind::Unknown);
+    let loose: QuestionEvent = serde_json::from_value(serde_json::json!({
+        "id": "u2", "kind": "reopen", "recorded_at": "3"
+    }))
+    .unwrap();
+    let base = vec![ask("q1", "why", 1), answer("a1", "q1", "x", &[], 2)];
+    let plain = fold(base.clone(), 100 * DAY, 14);
+    let mut with = base;
+    with.push(future);
+    with.push(loose);
+    let folded = fold(with, 100 * DAY, 14);
+    let (q, p) = (&folded.questions[0], &plain.questions[0]);
+    assert_eq!(q.state, p.state);
+    assert_eq!(q.current_answers, p.current_answers);
+    assert_eq!(q.answer_conflict, p.answer_conflict);
+    assert_eq!(q.last_activity, p.last_activity);
+    assert_eq!(q.stale, p.stale);
+    assert!(q.events.iter().any(|e| e.id == "u1"));
+    assert_eq!(folded.orphan_events.len(), 1);
+    assert_eq!(folded.orphan_events[0].id, "u2");
+}
+
+#[test]
+fn parse_event_reads_an_unknown_kind_with_unfamiliar_fields() {
+    // A future kind whose fields this version types differently still yields its ids.
+    let body = r#"{"id":"u3","kind":"comment","question":"q1","text":{"rich":true},
+        "replaces":["a1",7],"of":"q2","recorded_at":"9"}"#;
+    let event = parse_event(body).unwrap();
+    assert_eq!(event.kind, EventKind::Unknown);
+    assert_eq!(event.question.as_deref(), Some("q1"));
+    assert_eq!(event.replaces, vec!["a1".to_string()]);
+    assert_eq!(event.of.as_deref(), Some("q2"));
+    assert!(event.text.is_none());
+    // A known kind with a broken field, or a body that is not JSON, is still an error.
+    assert!(parse_event(r#"{"id":"x","kind":"answer","answer":7,"recorded_at":"1"}"#).is_err());
+    assert!(parse_event("not json").is_err());
+}

@@ -117,7 +117,7 @@ fn read_events(ledger: &Ledger, project: &str) -> Result<Events, LedgerError> {
         let Some(Cell::Text(body)) = row.get(1) else {
             return Err(LedgerError::Message("invalid remote question row".into()));
         };
-        let event: QuestionEvent = serde_json::from_str(body)
+        let event = question::parse_event(body)
             .map_err(|e| LedgerError::Message(format!("invalid remote question row: {e}")))?;
         events.push(event);
     }
@@ -144,6 +144,7 @@ fn new_event(
         EventKind::Ask => "ask",
         EventKind::Answer => "answer",
         EventKind::Close => "close",
+        EventKind::Unknown => "unknown",
     };
     let digest =
         crate::memory::hash(format!("{kind_name}\0{seed}\0{machine}\0{timestamp}").as_bytes());

@@ -16,6 +16,10 @@ pub enum EventKind {
     Ask,
     Answer,
     Close,
+    /// A kind written by a newer cort. The fold keeps it in its question's history (or the
+    /// orphans) and lets it change nothing: not the state, the answers, nor the last activity.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -91,6 +95,54 @@ pub struct Folded {
     pub orphan_events: Vec<QuestionEvent>,
 }
 
+/// One stored event body. A row of a kind this version does not know is read leniently, so a
+/// newer cort's fields cannot break an older one: whatever ids it carries (`question`,
+/// `replaces`, `of`) are kept where they are strings. A body that is not JSON, or a known kind
+/// whose fields do not parse, is still an error.
+pub fn parse_event(body: &str) -> Result<QuestionEvent, String> {
+    let error = match serde_json::from_str::<QuestionEvent>(body) {
+        Ok(event) => return Ok(event),
+        Err(error) => error.to_string(),
+    };
+    let value: serde_json::Value = serde_json::from_str(body).map_err(|_| error.clone())?;
+    let text = |key: &str| value.get(key).and_then(|v| v.as_str()).map(str::to_string);
+    match value.get("kind").and_then(|v| v.as_str()) {
+        Some("ask" | "answer" | "close") | None => return Err(error),
+        Some(_) => {}
+    }
+    let id = text("id").ok_or_else(|| error.clone())?;
+    Ok(QuestionEvent {
+        id,
+        kind: EventKind::Unknown,
+        question: text("question"),
+        text: None,
+        options: Vec::new(),
+        recommend: None,
+        blocks: None,
+        by: None,
+        reasks: Vec::new(),
+        answer: None,
+        quote: None,
+        quoted: None,
+        option: None,
+        replaces: value
+            .get("replaces")
+            .and_then(|v| v.as_array())
+            .map(|ids| {
+                ids.iter()
+                    .filter_map(|id| id.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        reason: None,
+        of: text("of"),
+        recorded_at: text("recorded_at").unwrap_or_else(|| "0".to_string()),
+        recorded_machine: text("recorded_machine"),
+        recorded_machine_source: text("recorded_machine_source"),
+        harness: text("harness"),
+    })
+}
+
 fn ns(event: &QuestionEvent) -> i128 {
     event.recorded_at.parse().unwrap_or(0)
 }
@@ -149,7 +201,13 @@ pub fn fold(events: Vec<QuestionEvent>, now_ns: i128, stale_days: u64) -> Folded
             } else {
                 State::Open
             };
-            let last = events.iter().map(ns).chain([ns(&ask)]).max().unwrap_or(0);
+            let last = events
+                .iter()
+                .filter(|e| e.kind != EventKind::Unknown)
+                .map(ns)
+                .chain([ns(&ask)])
+                .max()
+                .unwrap_or(0);
             let stale = state == State::Open && now_ns.saturating_sub(last) > window;
             Question {
                 answer_conflict: current_answers.len() > 1,
