@@ -674,10 +674,10 @@ fn lean_answers(question: &Value) -> String {
     }
 }
 
-/// `-f lean` for `cort question <verb>`: `add` prints `added <id>` or one `exists <id> <state>`
-/// line per matched question; `list` one TSV row per question
+/// `-f lean` for `cort question <verb>`: `add` prints `added <id>` (plus ` similar=<id8>,...`
+/// when similar questions exist) or one `exists <id> <state>` line per matched question; `list` one TSV row per question
 /// (`<id8> <state> <stale|-> <age>d <text> <answers|(no quote)|->`); `answer` and `close`
-/// print `<outcome> <id8>`. No field is ever empty.
+/// print `<outcome> <id8>`, and `answer` adds `next: <record command>`. No field is ever empty.
 pub fn render_lean(verb: &str, payload: &Value) -> String {
     let mut out = String::new();
     match verb {
@@ -694,11 +694,24 @@ pub fn render_lean(verb: &str, payload: &Value) -> String {
                 ));
             }
         }
-        "add" => out.push_str(&format!(
-            "{} {}\n",
-            lean_field(payload["outcome"].as_str().unwrap_or("")),
-            lean_field(payload["question"]["id"].as_str().unwrap_or(""))
-        )),
+        "add" => {
+            out.push_str(&format!(
+                "{} {}",
+                lean_field(payload["outcome"].as_str().unwrap_or("")),
+                lean_field(payload["question"]["id"].as_str().unwrap_or(""))
+            ));
+            let similar: Vec<String> = payload["similar"]
+                .as_array()
+                .map(Vec::as_slice)
+                .unwrap_or_default()
+                .iter()
+                .map(lean_id8)
+                .collect();
+            if !similar.is_empty() {
+                out.push_str(&format!(" similar={}", similar.join(",")));
+            }
+            out.push('\n');
+        }
         "list" => {
             for q in payload["questions"]
                 .as_array()
@@ -720,11 +733,16 @@ pub fn render_lean(verb: &str, payload: &Value) -> String {
                 ));
             }
         }
-        _ => out.push_str(&format!(
-            "{} {}\n",
-            lean_field(payload["outcome"].as_str().unwrap_or("")),
-            lean_id8(&payload["question"])
-        )),
+        _ => {
+            out.push_str(&format!(
+                "{} {}\n",
+                lean_field(payload["outcome"].as_str().unwrap_or("")),
+                lean_id8(&payload["question"])
+            ));
+            if let Some(next) = payload["next"].as_str() {
+                out.push_str(&format!("next: {}\n", lean_field(next)));
+            }
+        }
     }
     out
 }

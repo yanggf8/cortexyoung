@@ -583,3 +583,25 @@ fn alias_remove_refuses_when_answer_would_split_from_ask() {
         1
     );
 }
+
+/// The first key of a serialized object. cort's runtime serde_json has no `preserve_order`
+/// (only a build-dependency's copy does), so objects serialize with sorted keys.
+fn first_key(out: &Value) -> String {
+    out.as_object().unwrap().keys().next().unwrap().clone()
+}
+
+#[test]
+fn the_answer_is_the_headline_of_an_exists() {
+    let f = Fixture::new();
+    let id = added_id(&f.add("Should the recall deadline move to 4300 ms?"));
+    f.answer(&id, "keep it", Some("keep it"), None).unwrap();
+    let out = f.add("recall deadline 4300?");
+    assert_eq!(out["outcome"], "exists", "{out}");
+    assert_eq!(first_key(&out), "answer", "{out}");
+    assert_eq!(out["answer"]["answers"][0]["answer"], "keep it");
+    assert_eq!(out["answer"]["answered_days_ago"], 0);
+    let open = Fixture::new();
+    open.add("Should the recall deadline move to 4300 ms?");
+    let out = open.add("recall deadline 4300?");
+    assert_eq!(first_key(&out), "outcome", "{out}");
+}

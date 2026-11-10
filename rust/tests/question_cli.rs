@@ -323,6 +323,12 @@ fn lean_list_has_no_empty_field() {
         cort::question_store::render_lean("add", &added),
         "added 0123456789abcdef\n"
     );
+    let similar = json!({"similar": [{"id": "aa11bb22ffffffff"}, {"id": "cc33dd44eeeeeeee"}],
+        "outcome": "added", "question": {"id": "0123456789abcdef"}});
+    assert_eq!(
+        cort::question_store::render_lean("add", &similar),
+        "added 0123456789abcdef similar=aa11bb22,cc33dd44\n"
+    );
     let exists = json!({"outcome": "exists", "questions": [
         {"id": "0123456789abcdef", "state": "answered"},
         {"id": "fedcba9876543210", "state": "closed"}
@@ -331,10 +337,11 @@ fn lean_list_has_no_empty_field() {
         cort::question_store::render_lean("add", &exists),
         "exists 0123456789abcdef answered\nexists fedcba9876543210 closed\n"
     );
-    let answered = json!({"outcome": "answered", "question": {"id": "0123456789abcdef"}});
+    let answered = json!({"outcome": "answered", "question": {"id": "0123456789abcdef"},
+        "next": "cort memory record --key 'question 01234567' --claim 'q -> a'"});
     assert_eq!(
         cort::question_store::render_lean("answer", &answered),
-        "answered 01234567\n"
+        "answered 01234567\nnext: cort memory record --key 'question 01234567' --claim 'q -> a'\n"
     );
     let closed = json!({"outcome": "closed", "question": {"id": "0123456789abcdef"}});
     assert_eq!(
