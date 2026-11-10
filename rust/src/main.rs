@@ -33,7 +33,7 @@ use std::time::{Duration, Instant};
 // measurement that has a numerator -- and since the thin trigger landed the row says only that a
 // fire happened, so that pairing is now read from the rows rather than inferred from a verdict.
 // It is not a verb anyone types.
-const KNOWN_COMMANDS: [&str; 16] = [
+const KNOWN_COMMANDS: [&str; 17] = [
     "index",
     "status",
     "projects",
@@ -41,6 +41,7 @@ const KNOWN_COMMANDS: [&str; 16] = [
     "impact",
     "usage",
     "memory",
+    "question",
     "measure",
     "hook-suggest",
     "hook-refresh",
@@ -63,6 +64,7 @@ fn usage_value() -> Value {
             "impact": "cort impact --symbol <name> [--depth <n>] [--coverage] [-f json|lean]",
             "usage": "cort usage [days] [-f json|lean]",
             "memory": "cort memory <configure|import-config|record|resolve|recall|status|check|notes|alias> [options]",
+            "question": "cort question <add|list|answer|close> [options]  (questions for the human, kept per repo in the memory database; cort question --help lists each verb)",
             "measure": "cort measure <configure|show|record|collect|health|status|cron|report> [options]  (uploads start at 2026-10-28 00:00 Taiwan time; collect: scan and upload the batch; --background appends at most one result to measure.log (none when skipped_busy) without stdout; health: observe recently used indexes and write local index_health_log, reading indexes only, with no network; --background appends the result to measure.log without stdout; status: read local collection state, -f json|lean; cron: manual install or removal of the legacy entry, no longer installed automatically; hook kick is the only automatic collection trigger; command_log and index_health_log keep uploaded rows 90 days and rows not yet uploaded 180 days, pruned when a new command is recorded; rows still not uploaded after 180 days are deleted and counted in measure status (pruned_unuploaded_rows) and measure.log)",
             "hook-suggest": "cort hook-suggest  (PreToolUse hook: records one fire row, kicks collection, and relays a configured gate's deny; not a verb to type)",
             "hook-refresh": "cort hook-refresh  (PostToolUse hook: refreshes an existing index and may prompt on a private-memory save; not a verb to type)",
@@ -85,6 +87,23 @@ fn usage_value() -> Value {
 /// cannot be added to the parser without appearing here. clap's own `render_usage` folds every
 /// optional argument into `[OPTIONS]`, which hides exactly the options a caller is looking for.
 fn memory_usage_value() -> Value {
+    verbs_usage_value(
+        MemoryArgs::command(),
+        "cort memory",
+        "Commands read the project at --root (default: the cwd). resolve is an alias for record with repeated --supersedes.",
+    )
+}
+
+/// `cort question --help`, rendered from `QuestionArgs` as the memory usage is from `MemoryArgs`.
+fn question_usage_value() -> Value {
+    verbs_usage_value(
+        QuestionArgs::command(),
+        "cort question",
+        "Commands read the project at --root (default: the cwd). Ids accept a unique lowercase hex prefix of at least 8 characters.",
+    )
+}
+
+fn verbs_usage_value(command: clap::Command, prefix: &str, note: &str) -> Value {
     fn arg_text(arg: &clap::Arg) -> String {
         let id = arg.get_id().as_str().to_uppercase();
         let choices: Vec<String> = arg
@@ -139,25 +158,24 @@ fn memory_usage_value() -> Value {
         }
         parts.join(" ")
     }
-    let command = MemoryArgs::command();
     let mut commands = serde_json::Map::new();
     for verb in command.get_subcommands() {
         commands.insert(
             verb.get_name().to_string(),
-            json!(command_usage(verb, "cort memory")),
+            json!(command_usage(verb, prefix)),
         );
-        let prefix = format!("cort memory {}", verb.get_name());
+        let sub_prefix = format!("{prefix} {}", verb.get_name());
         for sub in verb.get_subcommands() {
             commands.insert(
                 format!("{} {}", verb.get_name(), sub.get_name()),
-                json!(command_usage(sub, &prefix)),
+                json!(command_usage(sub, &sub_prefix)),
             );
         }
     }
     json!({
-        "usage": "cort memory <command> [options]",
+        "usage": format!("{prefix} <command> [options]"),
         "commands": commands,
-        "note": "Commands read the project at --root (default: the cwd). resolve is an alias for record with repeated --supersedes.",
+        "note": note,
     })
 }
 
@@ -169,13 +187,14 @@ fn before_separator(args: &[String]) -> impl Iterator<Item = &String> {
 }
 
 /// `--help` and `-h` are flags and count wherever they appear before `--`. The bare word `help` is
-/// a command word, so it counts only where one can stand: first, or directly after `memory`.
+/// a command word, so it counts only where one can stand: first, or directly after `memory` or
+/// `question`.
 /// Anywhere else it is a value -- `cort memory recall help` searches the ledger for the topic "help".
 fn wants_help(args: &[String]) -> bool {
     let at = |i: usize, word: &str| args.get(i).is_some_and(|a| a == word);
     before_separator(args).any(|a| a == "--help" || a == "-h")
         || at(0, "help")
-        || (at(0, "memory") && at(1, "help"))
+        || ((at(0, "memory") || at(0, "question")) && at(1, "help"))
 }
 
 /// `cort memory record --help` answers with `record` alone, and `cort memory notes --help` with
@@ -441,6 +460,12 @@ fn render_emit(emit: &Emit) -> String {
         Some("hook-recall" | "hook-refresh-raw")
     ) {
         emit.payload.as_str().unwrap_or_default().to_string()
+    } else if let Some(verb) = emit
+        .render_command
+        .and_then(|c| c.strip_prefix("question-"))
+        .filter(|_| emit.format == Format::Lean)
+    {
+        cort::question_store::render_lean(verb, &emit.payload)
     } else if emit.render_command == Some("hook-gate") && emit.format == Format::Lean {
         let p = &emit.payload;
         let field = |key: &str| match p.get(key) {
@@ -727,7 +752,7 @@ enum MemoryAction {
         query: String,
         #[arg(long, default_value = ".")]
         root: PathBuf,
-        #[arg(long, default_value = "unknown", value_parser = ["unknown", "claude-code", "codex", "kimi", "grok", "other"])]
+        #[arg(long, default_value = "unknown", value_parser = HARNESS_VALUES)]
         harness: String,
         #[arg(long)]
         json: bool,
@@ -741,6 +766,98 @@ enum MemoryAction {
     Check {
         #[arg(long, default_value = ".")]
         root: PathBuf,
+    },
+}
+
+/// The harnesses `--harness` may name, on `memory recall` and on the `question` verbs.
+const HARNESS_VALUES: [&str; 6] = ["unknown", "claude-code", "codex", "kimi", "grok", "other"];
+
+#[derive(Parser, Debug)]
+#[command(
+    no_binary_name = true,
+    disable_help_flag = true,
+    disable_version_flag = true
+)]
+struct QuestionArgs {
+    #[command(subcommand)]
+    action: QuestionAction,
+}
+
+#[derive(Subcommand, Debug)]
+enum QuestionAction {
+    /// Ask the human a question; refused as `exists` when it was already asked.
+    Add {
+        #[arg(long)]
+        text: String,
+        /// `K=text`, repeatable.
+        #[arg(long = "option")]
+        option: Vec<String>,
+        #[arg(long)]
+        recommend: Option<String>,
+        #[arg(long)]
+        blocks: Option<String>,
+        #[arg(long)]
+        by: Option<String>,
+        #[arg(long, value_parser = HARNESS_VALUES)]
+        harness: Option<String>,
+        #[arg(long)]
+        force: bool,
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(short = 'f', long = "format", value_parser = ["json", "lean"])]
+        format: Option<String>,
+    },
+    /// Open questions by default; `<id>` shows one with its events, `--match` searches all.
+    List {
+        id: Option<String>,
+        #[arg(long, conflicts_with_all = ["answered", "closed", "all"])]
+        open: bool,
+        #[arg(long, conflicts_with_all = ["closed", "all"])]
+        answered: bool,
+        #[arg(long, conflicts_with = "all")]
+        closed: bool,
+        #[arg(long)]
+        all: bool,
+        #[arg(long = "match", num_args = 1.., action = clap::ArgAction::Append)]
+        terms: Vec<String>,
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(short = 'f', long = "format", value_parser = ["json", "lean"])]
+        format: Option<String>,
+    },
+    /// Record the human's answer; `--quote` is their words, byte for byte.
+    Answer {
+        id: String,
+        #[arg(long)]
+        answer: String,
+        #[arg(long)]
+        quote: Option<String>,
+        /// The offered option's key.
+        #[arg(long)]
+        option: Option<String>,
+        /// Bare: replace the one current answer; with ids: name every current answer.
+        #[arg(long, num_args = 0..)]
+        replace: Option<Vec<String>>,
+        #[arg(long, value_parser = HARNESS_VALUES)]
+        harness: Option<String>,
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(short = 'f', long = "format", value_parser = ["json", "lean"])]
+        format: Option<String>,
+    },
+    /// Close a question as stale, moot, or a duplicate of another.
+    Close {
+        id: String,
+        #[arg(long, value_parser = ["stale", "moot", "duplicate"])]
+        reason: String,
+        #[arg(long)]
+        of: Option<String>,
+        #[arg(long, value_parser = HARNESS_VALUES)]
+        harness: Option<String>,
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(short = 'f', long = "format", value_parser = ["json", "lean"])]
+        format: Option<String>,
     },
 }
 
@@ -924,6 +1041,7 @@ fn dispatch(args: &[String], usage: &mut UsageEvent, started: Instant) -> Result
         Some("impact") => cmd_impact(&args[1..], usage),
         Some("usage") => cmd_usage(&args[1..], usage),
         Some("memory") => cmd_memory(&args[1..], usage),
+        Some("question") => cmd_question(&args[1..], usage),
         Some("measure") => cmd_measure(&args[1..], usage),
         Some("hook-suggest") => cmd_hook_suggest(&args[1..], usage),
         Some("hook-refresh") => cmd_hook_refresh(&args[1..], usage),
@@ -2610,6 +2728,187 @@ fn cmd_memory(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError
     })
 }
 
+/// `K=text`, split at the first `=`; an empty key or text is refused before any network.
+fn parse_question_option(raw: &str) -> Result<cort::question::QuestionOption, CortError> {
+    match raw.split_once('=') {
+        Some((key, text)) if !key.trim().is_empty() && !text.trim().is_empty() => {
+            Ok(cort::question::QuestionOption {
+                key: key.to_string(),
+                text: text.to_string(),
+            })
+        }
+        _ => Err(memory_error(format!(
+            "question_option_invalid: --option needs <K>=<text> with neither empty, got {raw:?}"
+        ))),
+    }
+}
+
+/// Write failures keep the memory vocabulary (`remote: <kind>`, the code word at the start of a
+/// refusal) but name `cort question list` as the way to settle an unknown outcome.
+fn question_error(error: cort::memory_store::LedgerError) -> CortError {
+    use cort::memory_store::LedgerError;
+    match error {
+        LedgerError::Remote(kind) => memory_read_error(LedgerError::Remote(kind)),
+        LedgerError::NotRecorded { kind } => CortError::new(
+            "memory_not_recorded",
+            json!({"kind":kind.as_str(),
+                "message":format!("not recorded: {}; nothing was written; re-run the same command when the database is reachable",kind.as_str())}),
+        ),
+        LedgerError::OutcomeUnknown { id, kind, .. } => CortError::new(
+            "memory_outcome_unknown",
+            json!({"id":id,"kind":kind.as_str(),
+                "message":format!("outcome unknown: {}; question event {id} may or may not have been written; run `cort question list --all` before re-running",kind.as_str())}),
+        ),
+        other => memory_ledger_error(other),
+    }
+}
+
+fn cmd_question(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError> {
+    use cort::question_store::{self, AddArgs, CloseReason, ListFilter};
+    let a = QuestionArgs::try_parse_from(args.iter()).map_err(clap_fail)?;
+    // The row names the verb and the declared harness only: question text, answers, quotes,
+    // option text, search terms and labels are the user's words and never enter usage.db.
+    let (verb, harness, root, format) = match &a.action {
+        QuestionAction::Add {
+            harness,
+            root,
+            format,
+            ..
+        } => ("add", harness, root, format),
+        QuestionAction::List { root, format, .. } => ("list", &None, root, format),
+        QuestionAction::Answer {
+            harness,
+            root,
+            format,
+            ..
+        } => ("answer", harness, root, format),
+        QuestionAction::Close {
+            harness,
+            root,
+            format,
+            ..
+        } => ("close", harness, root, format),
+    };
+    let mut row = json!({"v": 1, "verb": verb});
+    if let Some(h) = harness {
+        row["harness_declared"] = json!(h);
+    }
+    usage.args_summary = row.to_string();
+    usage.project_id = cort::memory_store::project(root).ok();
+    let format = resolve_fmt(format.as_deref())?;
+    let (render_command, payload) = match a.action {
+        QuestionAction::Add {
+            text,
+            option,
+            recommend,
+            blocks,
+            by,
+            harness,
+            force,
+            root,
+            format: _,
+        } => {
+            let options = option
+                .iter()
+                .map(|raw| parse_question_option(raw))
+                .collect::<Result<Vec<_>, _>>()?;
+            cort::question::validate_ask(
+                &text,
+                &options,
+                recommend.as_deref(),
+                blocks.as_deref(),
+                by.as_deref(),
+            )
+            .map_err(memory_error)?;
+            let args = AddArgs {
+                text,
+                options,
+                recommend,
+                blocks,
+                by,
+                harness,
+                force,
+            };
+            (
+                "question-add",
+                question_store::add(&root, args).map_err(question_error)?,
+            )
+        }
+        QuestionAction::List {
+            id,
+            open: _,
+            answered,
+            closed,
+            all,
+            terms,
+            root,
+            format: _,
+        } => {
+            let filter = if all {
+                ListFilter::All
+            } else if closed {
+                ListFilter::Closed
+            } else if answered {
+                ListFilter::Answered
+            } else {
+                ListFilter::Open
+            };
+            let matching = (!terms.is_empty()).then(|| terms.join(" "));
+            (
+                "question-list",
+                question_store::list(&root, filter, id.as_deref(), matching.as_deref())
+                    .map_err(memory_read_error)?,
+            )
+        }
+        QuestionAction::Answer {
+            id,
+            answer,
+            quote,
+            option,
+            replace,
+            harness,
+            root,
+            format: _,
+        } => (
+            "question-answer",
+            question_store::answer(
+                &root,
+                &id,
+                &answer,
+                quote.as_deref(),
+                option.as_deref(),
+                replace,
+                harness,
+            )
+            .map_err(question_error)?,
+        ),
+        QuestionAction::Close {
+            id,
+            reason,
+            of,
+            harness,
+            root,
+            format: _,
+        } => {
+            let reason = match reason.as_str() {
+                "stale" => CloseReason::Stale,
+                "moot" => CloseReason::Moot,
+                _ => CloseReason::Duplicate,
+            };
+            (
+                "question-close",
+                question_store::close(&root, &id, reason, of.as_deref(), harness)
+                    .map_err(question_error)?,
+            )
+        }
+    };
+    Ok(Emit {
+        render_command: Some(render_command),
+        format,
+        payload,
+    })
+}
+
 fn memory_error(message: String) -> CortError {
     CortError::new("memory_error", json!({"message":message}))
 }
@@ -3253,6 +3552,8 @@ fn main() {
     if wants_help(&args) {
         let usage = if args.first().is_some_and(|a| a == "memory") {
             narrow_usage(memory_usage_value(), &args[1..])
+        } else if args.first().is_some_and(|a| a == "question") {
+            narrow_usage(question_usage_value(), &args[1..])
         } else {
             narrow_usage(usage_value(), &args)
         };

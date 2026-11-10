@@ -629,3 +629,102 @@ pub fn close_with(
     question["close"] = event_json(&event);
     Ok(json!({"outcome": "closed", "question": question}))
 }
+
+/// One lean field: control characters (a tab or newline would split the row) become spaces,
+/// and an empty value prints as `-`, because `read` collapses runs of tabs.
+fn lean_field(s: &str) -> String {
+    let cleaned: String = s
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let trimmed = cleaned.trim();
+    if trimmed.is_empty() {
+        "-".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn lean_id8(value: &Value) -> String {
+    let id: String = value["id"].as_str().unwrap_or("").chars().take(8).collect();
+    lean_field(&id)
+}
+
+fn lean_answers(question: &Value) -> String {
+    let answers: Vec<String> = question["current_answers"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
+        .map(|a| {
+            let text = a["answer"].as_str().unwrap_or("");
+            let text = lean_field(text);
+            let quoted = a["quoted"].as_bool() == Some(true);
+            match (text.as_str(), quoted) {
+                ("-", false) => "(no quote)".to_string(),
+                (_, false) => format!("{text} (no quote)"),
+                (_, true) => text,
+            }
+        })
+        .collect();
+    if answers.is_empty() {
+        "-".to_string()
+    } else {
+        answers.join(" | ")
+    }
+}
+
+/// `-f lean` for `cort question <verb>`: `add` prints `added <id>` or one `exists <id> <state>`
+/// line per matched question; `list` one TSV row per question
+/// (`<id8> <state> <stale|-> <age>d <text> <answers|(no quote)|->`); `answer` and `close`
+/// print `<outcome> <id8>`. No field is ever empty.
+pub fn render_lean(verb: &str, payload: &Value) -> String {
+    let mut out = String::new();
+    match verb {
+        "add" if payload["outcome"] == "exists" => {
+            for q in payload["questions"]
+                .as_array()
+                .map(Vec::as_slice)
+                .unwrap_or_default()
+            {
+                out.push_str(&format!(
+                    "exists {} {}\n",
+                    lean_field(q["id"].as_str().unwrap_or("")),
+                    lean_field(q["state"].as_str().unwrap_or(""))
+                ));
+            }
+        }
+        "add" => out.push_str(&format!(
+            "{} {}\n",
+            lean_field(payload["outcome"].as_str().unwrap_or("")),
+            lean_field(payload["question"]["id"].as_str().unwrap_or(""))
+        )),
+        "list" => {
+            for q in payload["questions"]
+                .as_array()
+                .map(Vec::as_slice)
+                .unwrap_or_default()
+            {
+                out.push_str(&format!(
+                    "{}\t{}\t{}\t{}d\t{}\t{}\n",
+                    lean_id8(q),
+                    lean_field(q["state"].as_str().unwrap_or("")),
+                    if q["stale"].as_bool() == Some(true) {
+                        "stale"
+                    } else {
+                        "-"
+                    },
+                    q["age_days"].as_i64().unwrap_or(0),
+                    lean_field(q["text"].as_str().unwrap_or("")),
+                    lean_answers(q)
+                ));
+            }
+        }
+        _ => out.push_str(&format!(
+            "{} {}\n",
+            lean_field(payload["outcome"].as_str().unwrap_or("")),
+            lean_id8(&payload["question"])
+        )),
+    }
+    out
+}
