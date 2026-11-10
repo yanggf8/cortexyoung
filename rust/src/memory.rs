@@ -270,7 +270,7 @@ fn source_bytes(root: &Path, relative: &Path) -> Result<Vec<u8>, String> {
     fs::read(&real_source).map_err(|e| format!("cannot read source {}: {e}", relative.display()))
 }
 
-fn hash(bytes: &[u8]) -> String {
+pub(crate) fn hash(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()
         .map(|byte| format!("{byte:02x}"))

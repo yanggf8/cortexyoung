@@ -235,7 +235,7 @@ pub enum Dedup {
     New,
 }
 
-fn occurs(haystack: &str, term: &str) -> bool {
+pub(crate) fn occurs(haystack: &str, term: &str) -> bool {
     if term.is_ascii() {
         haystack
             .match_indices(term)

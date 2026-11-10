@@ -14,8 +14,9 @@ use std::time::{Duration, Instant};
 
 const CREATE_TABLE: &str = "CREATE TABLE IF NOT EXISTS project_memory (project TEXT NOT NULL, id TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY (project, id))";
 const CREATE_CHAIN_INDEX: &str = "CREATE UNIQUE INDEX IF NOT EXISTS project_memory_chain ON project_memory (project, json_extract(body,'$.key'), coalesce(json_extract(body,'$.supersedes'), json_extract(body,'$.resolves'), ''))";
-const CREATE_ALIASES: &str = "CREATE TABLE IF NOT EXISTS project_aliases (old_project TEXT NOT NULL, new_project TEXT NOT NULL, created_at TEXT NOT NULL, machine TEXT NOT NULL, PRIMARY KEY (old_project, new_project))";
-const COMPONENT: &str = "WITH RECURSIVE g(p) AS (SELECT ? UNION SELECT CASE WHEN a.old_project = g.p THEN a.new_project ELSE a.old_project END FROM project_aliases a JOIN g ON a.old_project = g.p OR a.new_project = g.p) SELECT p FROM g";
+pub(crate) const CREATE_ALIASES: &str = "CREATE TABLE IF NOT EXISTS project_aliases (old_project TEXT NOT NULL, new_project TEXT NOT NULL, created_at TEXT NOT NULL, machine TEXT NOT NULL, PRIMARY KEY (old_project, new_project))";
+pub(crate) const CREATE_QUESTIONS: &str = "CREATE TABLE IF NOT EXISTS project_questions (project TEXT NOT NULL, id TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY (project, id))";
+pub(crate) const COMPONENT: &str = "WITH RECURSIVE g(p) AS (SELECT ? UNION SELECT CASE WHEN a.old_project = g.p THEN a.new_project ELSE a.old_project END FROM project_aliases a JOIN g ON a.old_project = g.p OR a.new_project = g.p) SELECT p FROM g";
 #[derive(Debug, Serialize)]
 pub struct MemoryConflict {
     pub key: String,
@@ -95,6 +96,10 @@ impl Ledger {
         )
     }
 
+    pub(crate) fn db(&self) -> &RemoteDb {
+        &self.db
+    }
+
     #[doc(hidden)]
     pub fn with_transport(
         url: &str,
@@ -113,10 +118,11 @@ impl Ledger {
             .pipeline(&[
                 Stmt::new(CREATE_TABLE, vec![]),
                 Stmt::new(CREATE_ALIASES, vec![]),
+                Stmt::new(CREATE_QUESTIONS, vec![]),
                 Stmt::new(&sql, vec![Cell::Text(project.into())]),
             ])
             .map_err(|e| LedgerError::Remote(e.kind))?;
-        let bodies: Vec<String> = results[2]
+        let bodies: Vec<String> = results[3]
             .rows
             .iter()
             .map(|row| match row.first() {
@@ -484,7 +490,7 @@ fn not_recorded_read(error: LedgerError) -> LedgerError {
 /// server applied the statement; so can `Sql`, which also names an undecodable or mis-shaped
 /// response and a 5xx whose body carries an `SQLITE_*` code. The other kinds are refusals the
 /// server reports before or instead of applying it.
-fn outcome_unknown(kind: ErrorKind) -> bool {
+pub(crate) fn outcome_unknown(kind: ErrorKind) -> bool {
     matches!(
         kind,
         ErrorKind::Timeout | ErrorKind::Unreachable | ErrorKind::Sql
@@ -1646,6 +1652,7 @@ impl Ledger {
             .pipeline(&[
                 Stmt::new(CREATE_TABLE, vec![]),
                 Stmt::new(CREATE_ALIASES, vec![]),
+                Stmt::new(CREATE_QUESTIONS, vec![]),
                 Stmt::new(COMPONENT, arg()),
                 Stmt::new(aliases_sql, arg()),
                 Stmt::new(bodies_sql, arg()),
@@ -1655,13 +1662,13 @@ impl Ledger {
             Some(Cell::Text(value)) => Ok(value.clone()),
             _ => Err(LedgerError::Message("invalid remote alias row".into())),
         };
-        let mut ids = results[2]
+        let mut ids = results[3]
             .rows
             .iter()
             .map(|row| text(row, 0))
             .collect::<Result<Vec<_>, _>>()?;
         ids.sort();
-        let mut aliases = results[3]
+        let mut aliases = results[4]
             .rows
             .iter()
             .map(|row| {
@@ -1676,7 +1683,7 @@ impl Ledger {
         aliases.sort_by(|a, b| {
             (&a.old_project, &a.new_project).cmp(&(&b.old_project, &b.new_project))
         });
-        let bodies = results[4]
+        let bodies = results[5]
             .rows
             .iter()
             .map(|row| {
