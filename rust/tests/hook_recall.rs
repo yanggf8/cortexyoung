@@ -165,7 +165,7 @@ fn pipeline_reads_ledger_and_other_machine_notes_without_writes() {
     .unwrap();
     let total = session.notes_total;
     let (rendered, shown, note_count, _) =
-        cort::hook_recall::render_session(&session, now_ns(), 14).unwrap();
+        cort::hook_recall::render_session(&session, now_ns()).unwrap();
     assert_eq!(shown, 20);
     assert_eq!(note_count, 15);
     assert_eq!(total, 18);
@@ -1118,8 +1118,7 @@ fn notes_section_byte_cap_binds_before_the_count_cap() {
         notes_total: 20,
         questions: None,
     };
-    let (text, entries, shown, _) =
-        cort::hook_recall::render_session(&session, now_ns(), 14).unwrap();
+    let (text, entries, shown, _) = cort::hook_recall::render_session(&session, now_ns()).unwrap();
     assert_eq!(entries, 0);
     assert!(shown > 0 && shown < 15, "{shown}");
     let section = &text[text.find("unreviewed harness notes").unwrap()..];
@@ -1212,7 +1211,7 @@ fn questions_block_follows_ledger_and_precedes_notes() {
     .unwrap();
     assert_eq!(session.questions.as_ref().unwrap().len(), 1);
     let (text, entries, notes, questions) =
-        cort::hook_recall::render_session(&session, now_ns(), 14).unwrap();
+        cort::hook_recall::render_session(&session, now_ns()).unwrap();
     assert_eq!((entries, notes, questions), (20, 15, 1));
     let ledger = text.find("[id-24]").unwrap();
     let block = text.find(QUESTIONS_HEADER).unwrap();
@@ -1249,7 +1248,7 @@ fn questions_only_project_still_injects() {
     .unwrap();
     assert!(session.recall.hits.is_empty());
     let (text, entries, notes, questions) =
-        cort::hook_recall::render_session(&session, now_ns(), 14).unwrap();
+        cort::hook_recall::render_session(&session, now_ns()).unwrap();
     assert_eq!((entries, notes, questions), (0, 0, 1));
     assert!(text.starts_with(cort::hook_recall::HEADER), "{text}");
     assert!(text.contains("\n- aaaaaaaa  Ship it?  (1d)"), "{text}");
@@ -1285,8 +1284,7 @@ fn missing_questions_table_keeps_ledger_and_notes() {
     assert_eq!(session.notes.len(), 15);
     assert_eq!(session.notes_total, 18);
     assert!(session.questions.is_none());
-    let (text, _, _, questions) =
-        cort::hook_recall::render_session(&session, now_ns(), 14).unwrap();
+    let (text, _, _, questions) = cort::hook_recall::render_session(&session, now_ns()).unwrap();
     assert_eq!(questions, 0);
     assert!(!text.contains("Open questions"));
     assert_eq!(
@@ -1341,7 +1339,7 @@ fn stale_questions_are_counted_not_listed() {
         ask("cccccccc33", "Fresh question?", 2),
         ask("dddddddd44", "Old dead question?", 30),
     ]);
-    let (text, _, _, shown) = cort::hook_recall::render_session(&session, now_ns(), 14).unwrap();
+    let (text, _, _, shown) = cort::hook_recall::render_session(&session, now_ns()).unwrap();
     assert_eq!(shown, 1);
     assert!(text.contains("Fresh question?"));
     assert!(!text.contains("Old dead question?"));
@@ -1349,14 +1347,22 @@ fn stale_questions_are_counted_not_listed() {
         text.contains("\n… 0 more open, 1 stale: cort question list"),
         "{text}"
     );
-    // Only stale questions: still worth the tail line, listing none.
-    let session = session_with(vec![ask("dddddddd44", "Old dead question?", 30)]);
-    let (text, _, _, shown) = cort::hook_recall::render_session(&session, now_ns(), 14).unwrap();
+    // Only stale questions: one count line, and no header asking to raise what is not listed.
+    let session = session_with(vec![
+        ask("dddddddd44", "Old dead question?", 30),
+        ask("eeeeeeee45", "Older dead question?", 40),
+    ]);
+    let (text, _, _, shown) = cort::hook_recall::render_session(&session, now_ns()).unwrap();
     assert_eq!(shown, 0);
-    assert!(text.contains("… 0 more open, 1 stale: cort question list"));
+    assert!(!text.contains("Open questions for the human"), "{text}");
+    assert!(!text.contains("raise one or two"), "{text}");
+    assert!(
+        text.ends_with("\n2 open questions (2 stale), none listed: cort question list"),
+        "{text}"
+    );
     // Nothing open, nothing to say.
     let session = session_with(Vec::new());
-    assert!(cort::hook_recall::render_session(&session, now_ns(), 14).is_none());
+    assert!(cort::hook_recall::render_session(&session, now_ns()).is_none());
 }
 
 #[test]
@@ -1372,7 +1378,7 @@ fn block_respects_eight_and_1500_bytes() {
         })
         .collect();
     let (text, _, _, shown) =
-        cort::hook_recall::render_session(&session_with(events), now_ns(), 14).unwrap();
+        cort::hook_recall::render_session(&session_with(events), now_ns()).unwrap();
     assert_eq!(shown, 8);
     assert!(text.find("Short 00?").unwrap() < text.find("Short 01?").unwrap());
     assert!(!text.contains("Short 08?"));
@@ -1391,20 +1397,77 @@ fn block_respects_eight_and_1500_bytes() {
         })
         .collect();
     let (text, _, _, shown) =
-        cort::hook_recall::render_session(&session_with(events), now_ns(), 14).unwrap();
-    assert!(shown < 8, "{shown}");
+        cort::hook_recall::render_session(&session_with(events), now_ns()).unwrap();
+    // Each line is cut to its share of the bytes, so the count cap still binds.
+    assert_eq!(shown, 8);
     let block = &text[text.find("Open questions").unwrap()..];
     assert!(block.len() <= 1500, "{}", block.len());
-    assert!(block.ends_with(&format!(
-        "… {} more open, 0 stale: cort question list",
-        12 - shown
-    )));
+    assert!(
+        block.ends_with("\n… 4 more open, 0 stale: cort question list"),
+        "{block}"
+    );
+    for line in block.lines().filter(|l| l.starts_with("- ")) {
+        assert!(line.ends_with('…'), "{line}");
+    }
+}
+
+#[test]
+fn one_long_cjk_question_does_not_crowd_out_the_rest() {
+    let long_text = "我們要不要把會話開始時的召回期限從三千八百毫秒調整到四千三百毫秒，因為冷啟動的第一次讀取常常逾時，".repeat(8);
+    assert!(long_text.chars().count() > 300);
+    let option = "保持現狀並且在下一個版本再觀察冷啟動逾時的比例與分佈，同時記錄每台機器的網路階段耗時以便比較".repeat(2);
+    assert!(option.chars().count() > 80);
+    let options: Vec<Value> = ["A", "B", "C", "D"]
+        .iter()
+        .map(|k| json!({"key": k, "text": option}))
+        .collect();
+    let long = json!({"id": "1111111111aaaaaa", "kind": "ask", "text": long_text,
+        "options": options, "recommend": "A",
+        "recorded_at": (now_ns() - 3 * NS_PER_DAY).to_string()});
+    let session = session_with(vec![
+        long,
+        ask("2222222222bbbbbb", "Which port?", 2),
+        ask("3333333333cccccc", "Ship on Friday?", 1),
+    ]);
+    let (text, _, _, shown) = cort::hook_recall::render_session(&session, now_ns()).unwrap();
+    assert_eq!(shown, 3, "{text}");
+    let block = &text[text.find("Open questions").unwrap()..];
+    assert!(block.len() <= 1500, "{}", block.len());
+    assert!(block.contains("\n- 22222222  Which port?  (2d)"), "{block}");
+    assert!(
+        block.contains("\n- 33333333  Ship on Friday?  (1d)"),
+        "{block}"
+    );
+    let long_line = block
+        .lines()
+        .find(|l| l.starts_with("- 11111111  "))
+        .expect(block);
+    assert!(long_line.ends_with('…'), "{long_line}");
+    assert!(!block.contains("more open"), "{block}");
+}
+
+#[test]
+fn cut_question_text_and_options_end_with_an_ellipsis() {
+    let text = format!("{}?", "x".repeat(320));
+    let option = "y".repeat(90);
+    let session = session_with(vec![json!({"id": "4444444444dddddd", "kind": "ask",
+        "text": text, "options": [{"key": "A", "text": option}],
+        "recorded_at": (now_ns() - NS_PER_DAY).to_string()})]);
+    let (out, _, _, _) = cort::hook_recall::render_session(&session, now_ns()).unwrap();
+    assert!(
+        out.contains(&format!(
+            "{}…  A={}…  (1d)",
+            "x".repeat(300),
+            "y".repeat(80)
+        )),
+        "{out}"
+    );
 }
 
 #[test]
 fn header_marks_questions_unreviewed() {
     let session = session_with(vec![ask("gggggggg77", "Line\u{202E}one\nInjected", 0)]);
-    let (text, _, _, _) = cort::hook_recall::render_session(&session, now_ns(), 14).unwrap();
+    let (text, _, _, _) = cort::hook_recall::render_session(&session, now_ns()).unwrap();
     assert!(text.contains(&format!("\n{QUESTIONS_HEADER}\n")), "{text}");
     // Agent text is sanitized: no control or bidi characters survive into the block.
     assert!(

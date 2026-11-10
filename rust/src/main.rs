@@ -1624,11 +1624,7 @@ fn cmd_hook_recall(
                 let now_ns = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map_or(0, |d| d.as_nanos() as i128);
-                let rendered = cort::hook_recall::render_session(
-                    &session,
-                    now_ns,
-                    cort::question_store::stale_days(),
-                );
+                let rendered = cort::hook_recall::render_session(&session, now_ns);
                 question_fields.push(cort::hook_recall::questions_usage(&session));
                 match rendered {
                     Some((text, count, notes_count, questions_shown)) => {

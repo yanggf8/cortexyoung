@@ -33,6 +33,8 @@ const MAX_NOTE_BYTES: usize = 2000;
 /// Open questions listed at session start, on their own budget between the ledger and the notes.
 const MAX_QUESTIONS: usize = 8;
 const MAX_QUESTION_BYTES: usize = 1500;
+/// The shortest cut question line worth showing: the id and a few characters of text.
+const MIN_QUESTION_LINE: usize = 32;
 // Ledger 6000 + questions 1500 + notes 2000 = 9,500 bytes, under Claude Code's 10,000-character
 // cap on a hook's `additionalContext` (over it, the text is saved to a file and only a
 // 2,000-character preview is shown): https://code.claude.com/docs/en/hooks.md, checked 2026-11-11.
@@ -116,16 +118,12 @@ pub fn render_with_omitted(recall: MemoryRecall, pre_omitted: usize) -> Option<(
 
 /// Ledger entries, then open questions, then other machines' notes; `None` only when all three
 /// are empty. Returns the text with the counts shown: (entries, notes, questions).
-pub fn render_session(
-    s: &SessionRecall,
-    now_ns: i128,
-    stale_days: u64,
-) -> Option<(String, usize, usize, usize)> {
+pub fn render_session(s: &SessionRecall, now_ns: i128) -> Option<(String, usize, usize, usize)> {
     let ledger = render_with_omitted(s.recall.clone(), s.omitted);
     let questions = s
         .questions
         .as_deref()
-        .and_then(|q| render_questions(q, now_ns, stale_days));
+        .and_then(|q| render_questions(q, now_ns));
     let notes = render_notes(&s.notes, s.notes_total);
     if ledger.is_none() && questions.is_none() && notes.is_none() {
         return None;
@@ -156,14 +154,12 @@ pub fn questions_usage(s: &SessionRecall) -> (&'static str, Value) {
     }
 }
 
-/// Open questions not stale under `stale_days` at `now_ns`, oldest ask first; stale ones are
-/// only counted in the tail line. `None` when no question is open.
-fn render_questions(
-    questions: &[Question],
-    now_ns: i128,
-    stale_days: u64,
-) -> Option<(String, usize)> {
-    let window = i128::from(stale_days).saturating_mul(NS_PER_DAY);
+/// Open questions the fold did not mark stale, oldest ask first; stale ones are only counted.
+/// Every listed line gets a fair share of the byte budget (max-min, so short lines keep their
+/// full text and the long ones split what is left) and is cut with `…` past its share, so one
+/// long question never suppresses the rest. `None` when no question is open; when none is
+/// listed the block is a single count line with no instruction to raise anything.
+fn render_questions(questions: &[Question], now_ns: i128) -> Option<(String, usize)> {
     let ns = |s: &str| s.parse::<i128>().unwrap_or(0);
     let open: Vec<&Question> = questions
         .iter()
@@ -172,55 +168,54 @@ fn render_questions(
     if open.is_empty() {
         return None;
     }
-    let (mut fresh, stale): (Vec<&Question>, Vec<&Question>) = open
-        .into_iter()
-        .partition(|q| now_ns.saturating_sub(ns(&q.last_activity)) <= window);
+    let open_total = open.len();
+    let (mut fresh, stale): (Vec<&Question>, Vec<&Question>) =
+        open.into_iter().partition(|q| !q.stale);
     fresh.sort_by(|a, b| {
         ns(&a.ask.recorded_at)
             .cmp(&ns(&b.ask.recorded_at))
             .then_with(|| a.ask.id.cmp(&b.ask.id))
     });
+    let lines: Vec<String> = fresh
+        .iter()
+        .take(MAX_QUESTIONS)
+        .map(|q| question_line(q, now_ns))
+        .collect();
     let mut section = format!("\n{QUESTIONS_HEADER}");
+    // Keep room for the tail line, including large counts.
+    let mut left = MAX_QUESTION_BYTES.saturating_sub(section.len() + 64);
+    let mut budgets = vec![0; lines.len()];
+    let mut by_length: Vec<usize> = (0..lines.len()).collect();
+    by_length.sort_by_key(|&i| lines[i].len());
+    for (placed, &i) in by_length.iter().enumerate() {
+        let share = left / (lines.len() - placed);
+        budgets[i] = lines[i].len().min(share);
+        left -= budgets[i];
+    }
     let mut shown = 0;
-    for q in fresh.iter().take(MAX_QUESTIONS) {
-        let ask = &q.ask;
-        let id = crate::notes::sanitize(ask.id.get(..8).unwrap_or(&ask.id), Some(8));
-        let text = crate::notes::sanitize(ask.text.as_deref().unwrap_or(""), Some(300));
-        let mut choices: Vec<String> = ask
-            .options
-            .iter()
-            .map(|o| {
-                format!(
-                    "{}={}",
-                    crate::notes::sanitize(&o.key, Some(16)),
-                    crate::notes::sanitize(&o.text, Some(80))
-                )
-            })
-            .collect();
-        if let Some(rec) = &ask.recommend {
-            choices.push(format!("rec={}", crate::notes::sanitize(rec, Some(16))));
-        }
-        let choices = if choices.is_empty() {
-            String::new()
+    for (line, budget) in lines.iter().zip(budgets) {
+        if line.len() <= budget {
+            section.push_str(line);
+        } else if budget >= MIN_QUESTION_LINE {
+            let mut end = budget - '…'.len_utf8();
+            while !line.is_char_boundary(end) {
+                end -= 1;
+            }
+            section.push_str(&line[..end]);
+            section.push('…');
         } else {
-            format!("  {}", choices.join(" "))
-        };
-        let age = (now_ns.saturating_sub(ns(&ask.recorded_at)) / NS_PER_DAY).max(0);
-        let tail = match ask
-            .blocks
-            .as_deref()
-            .map(|b| crate::notes::sanitize(b, Some(64)))
-        {
-            Some(blocks) if !blocks.is_empty() => format!("(blocks: {blocks}, {age}d)"),
-            _ => format!("({age}d)"),
-        };
-        let line = format!("\n- {id}  {text}{choices}  {tail}");
-        // Keep room for the tail line, including large counts.
-        if section.len() + line.len() + 64 > MAX_QUESTION_BYTES {
-            break;
+            continue;
         }
-        section.push_str(&line);
         shown += 1;
+    }
+    if shown == 0 {
+        return Some((
+            format!(
+                "\n{open_total} open questions ({} stale), none listed: cort question list",
+                stale.len()
+            ),
+            0,
+        ));
     }
     let more = fresh.len() - shown;
     if more > 0 || !stale.is_empty() {
@@ -230,6 +225,43 @@ fn render_questions(
         ));
     }
     Some((section, shown))
+}
+
+/// Sanitized, capped at `cap` characters, and marked with `…` when the cap cut it.
+fn capped(value: &str, cap: usize) -> String {
+    let clean = crate::notes::sanitize(value, None);
+    if clean.chars().count() <= cap {
+        return clean;
+    }
+    let mut cut: String = clean.chars().take(cap).collect();
+    cut.push('…');
+    cut
+}
+
+fn question_line(q: &Question, now_ns: i128) -> String {
+    let ask = &q.ask;
+    let id = crate::notes::sanitize(ask.id.get(..8).unwrap_or(&ask.id), Some(8));
+    let text = capped(ask.text.as_deref().unwrap_or(""), 300);
+    let mut choices: Vec<String> = ask
+        .options
+        .iter()
+        .map(|o| format!("{}={}", capped(&o.key, 16), capped(&o.text, 80)))
+        .collect();
+    if let Some(rec) = &ask.recommend {
+        choices.push(format!("rec={}", capped(rec, 16)));
+    }
+    let choices = if choices.is_empty() {
+        String::new()
+    } else {
+        format!("  {}", choices.join(" "))
+    };
+    let recorded = ask.recorded_at.parse::<i128>().unwrap_or(0);
+    let age = (now_ns.saturating_sub(recorded) / NS_PER_DAY).max(0);
+    let tail = match ask.blocks.as_deref().map(|b| capped(b, 64)) {
+        Some(blocks) if !blocks.is_empty() => format!("(blocks: {blocks}, {age}d)"),
+        _ => format!("({age}d)"),
+    };
+    format!("\n- {id}  {text}{choices}  {tail}")
 }
 
 fn render_notes(notes: &[NoteBrief], total: usize) -> Option<(String, usize)> {
