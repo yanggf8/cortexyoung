@@ -141,11 +141,7 @@ pub fn fold(events: Vec<QuestionEvent>, now_ns: i128, stale_days: u64) -> Folded
                 })
                 .map(|a| (*a).clone())
                 .collect();
-            let close = events
-                .iter()
-                .filter(|e| e.kind == EventKind::Close)
-                .next_back()
-                .cloned();
+            let close = events.iter().rfind(|e| e.kind == EventKind::Close).cloned();
             let state = if close.is_some() {
                 State::Closed
             } else if !current_answers.is_empty() {
