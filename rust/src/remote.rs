@@ -658,7 +658,17 @@ impl RemoteDb {
             .pop()
             .ok_or_else(|| RemoteError::sql("missing execute result"))
     }
+    /// Every statement's own result; the first failing step is the error.
     pub fn pipeline(&self, stmts: &[Stmt]) -> Result<Vec<StmtResult>, RemoteError> {
+        self.pipeline_each(stmts)?.into_iter().collect()
+    }
+    /// One request; statements run independently on the server, so each keeps its own result.
+    /// The outer error is the request's (transport, or a response that is not a pipeline
+    /// answer); a statement's error, or an entry that cannot be read, is that statement's.
+    pub fn pipeline_each(
+        &self,
+        stmts: &[Stmt],
+    ) -> Result<Vec<Result<StmtResult, RemoteError>>, RemoteError> {
         let mut requests: Vec<Value> = stmts
             .iter()
             .map(|s| json!({"type":"execute","stmt":s.encode()}))
@@ -672,16 +682,20 @@ impl RemoteDb {
         if entries.len() != stmts.len() + 1 {
             return Err(RemoteError::sql("pipeline result count mismatch"));
         }
-        let mut out = Vec::with_capacity(stmts.len());
-        for (index, entry) in entries.iter().take(stmts.len()).enumerate() {
-            if entry.get("type").and_then(Value::as_str) == Some("error") {
-                return Err(hrana_error(&entry["error"]).at(index));
-            }
-            if entry.get("type").and_then(Value::as_str) != Some("ok") {
-                return Err(RemoteError::sql("invalid pipeline entry").at(index));
-            }
-            out.push(parse_stmt_result(&entry["response"]["result"]).map_err(|e| e.at(index))?);
-        }
+        let out = entries
+            .iter()
+            .take(stmts.len())
+            .enumerate()
+            .map(
+                |(index, entry)| match entry.get("type").and_then(Value::as_str) {
+                    Some("error") => Err(hrana_error(&entry["error"]).at(index)),
+                    Some("ok") => {
+                        parse_stmt_result(&entry["response"]["result"]).map_err(|e| e.at(index))
+                    }
+                    _ => Err(RemoteError::sql("invalid pipeline entry").at(index)),
+                },
+            )
+            .collect();
         let close = &entries[stmts.len()];
         if !matches!(
             close.get("type").and_then(Value::as_str),

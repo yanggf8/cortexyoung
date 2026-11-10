@@ -352,3 +352,25 @@ fn timeout_while_reading_body() {
 fn rustls_has_one_process_provider() {
     let _ = rustls::ClientConfig::builder();
 }
+#[test]
+fn pipeline_each_keeps_every_statement_result() {
+    let (db, transport) = client();
+    let results = db
+        .pipeline_each(&[
+            Stmt::new("SELECT 1", vec![]),
+            Stmt::new("bad sql", vec![]),
+            Stmt::new("SELECT 3", vec![]),
+        ])
+        .unwrap();
+    assert_eq!(results.len(), 3);
+    assert_eq!(results[0].as_ref().unwrap().rows, vec![vec![Cell::Int(1)]]);
+    let err = results[1].as_ref().unwrap_err();
+    assert_eq!((err.kind, err.step), (ErrorKind::Sql, Some(1)));
+    assert_eq!(results[2].as_ref().unwrap().rows, vec![vec![Cell::Int(3)]]);
+    // A transport failure is the outer error: no statement result exists.
+    transport.fail_next_status(504);
+    let err = db
+        .pipeline_each(&[Stmt::new("SELECT 1", vec![])])
+        .unwrap_err();
+    assert_eq!(err.kind, ErrorKind::Timeout);
+}

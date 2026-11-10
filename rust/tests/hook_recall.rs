@@ -1294,7 +1294,7 @@ fn missing_questions_table_keeps_ledger_and_notes() {
             .iter()
             .map(Vec::len)
             .collect::<Vec<_>>(),
-        vec![4, 3]
+        vec![4]
     );
     read_only.store(false, Ordering::SeqCst);
     let tables = db
@@ -1492,4 +1492,32 @@ fn usage_row_counts_open_questions_or_marks_them_dropped() {
         cort::hook_recall::questions_usage(&dropped),
         ("questions", json!("dropped"))
     );
+}
+
+#[test]
+fn notes_then_questions_failure_keeps_the_ledger() {
+    let (db, read_only, requests) = database();
+    seed_ledger(&db);
+    seed_alias(&db);
+    read_only.store(true, Ordering::SeqCst);
+    let temp = tempfile::tempdir().unwrap();
+    let session = cort::memory_store::session_recall_with(
+        temp.path(),
+        &db,
+        "self",
+        ("ledger", "origin"),
+        Instant::now(),
+    )
+    .unwrap();
+    assert_eq!(session.recall.hits.len(), 20);
+    assert!(session.notes.is_empty());
+    assert!(session.questions.is_none());
+    // The notes failure keeps its retry; the questions failure seen in the same answer is
+    // dropped with it, so the retry reads the ledger alone and nothing fails twice.
+    let requests = requests.lock().unwrap();
+    assert_eq!(
+        requests.iter().map(Vec::len).collect::<Vec<_>>(),
+        vec![4, 1]
+    );
+    assert!(requests[1][0].contains("project_memory"));
 }

@@ -614,11 +614,12 @@ pub struct SessionRecall {
     pub questions: Option<Vec<crate::question::Question>>,
 }
 
-/// Read only. Statement order is ledger, notes, notes count, questions. A step-zero SQL error
-/// retries with the unaliased ledger (and questions) read; an SQL error at a notes step drops
-/// the notes statements and keeps questions; one at the questions step drops questions and
-/// keeps notes. Each optional read is dropped at most once, and every retry is subject to the
-/// remaining-budget rule.
+/// Read only. Statement order is ledger, notes, notes count, questions; each statement keeps its
+/// own result. A step-zero SQL error retries with the unaliased ledger (and questions) read; an
+/// SQL error at a notes step retries without the notes statements (and without questions when
+/// they failed in the same answer); an SQL error at the questions step alone keeps the ledger
+/// and notes that arrived with it and reports `questions: None`, with no retry. Each optional
+/// read is dropped at most once, and every retry is subject to the remaining-budget rule.
 #[doc(hidden)]
 pub fn session_recall_with(
     root: &Path,
@@ -661,18 +662,45 @@ pub fn session_recall_with(
                 ledger_args(),
             ));
         }
-        match db.pipeline(&statements) {
-            Err(error) if error.kind == ErrorKind::Sql => match error.step {
-                Some(0) if !retried_alias && with_notes && with_questions => retried_alias = true,
-                Some(1 | 2) if with_notes => with_notes = false,
-                step if step.is_some() && step == questions_step => with_questions = false,
-                _ => return Err(error.kind),
-            },
-            result => break result.map_err(|error| error.kind)?,
+        let results = db.pipeline_each(&statements).map_err(|error| error.kind)?;
+        let questions_sql_failed = questions_step
+            .and_then(|step| results.get(step))
+            .is_some_and(|r| r.as_ref().is_err_and(|e| e.kind == ErrorKind::Sql));
+        let Some((kind, step)) = results
+            .iter()
+            .find_map(|r| r.as_ref().err().map(|e| (e.kind, e.step)))
+        else {
+            break (results, false);
+        };
+        if kind != ErrorKind::Sql {
+            return Err(kind);
+        }
+        match step {
+            Some(0) if !retried_alias && with_notes && with_questions => retried_alias = true,
+            Some(1 | 2) if with_notes => {
+                // A questions failure in the same answer is already known: drop it with the
+                // notes rather than send it again to fail a second time.
+                with_notes = false;
+                if questions_sql_failed {
+                    with_questions = false;
+                }
+            }
+            // The questions read failed alone: keep the ledger and notes that came with it.
+            step if step.is_some() && step == questions_step => break (results, true),
+            _ => return Err(kind),
         }
     };
-    let mut results = result.into_iter();
-    let mut next = || results.next().ok_or(ErrorKind::Sql);
+    let (results, questions_failed) = result;
+    let expected = results.len();
+    let mut results = results.into_iter();
+    let mut taken = 0;
+    let mut next = || {
+        taken += 1;
+        results
+            .next()
+            .ok_or(ErrorKind::Sql)?
+            .map_err(|error| error.kind)
+    };
     let rows = next()?.rows;
     let (notes, total) = if with_notes {
         let note_rows = next()?.rows;
@@ -685,12 +713,15 @@ pub fn session_recall_with(
     } else {
         (Vec::new(), 0)
     };
-    let question_rows = if with_questions {
-        Some(next()?.rows)
-    } else {
-        None
+    let question_rows = match (with_questions, questions_failed) {
+        (true, false) => Some(next()?.rows),
+        (true, true) => {
+            let _ = next();
+            None
+        }
+        (false, _) => None,
     };
-    if next().is_ok() {
+    if taken != expected {
         return Err(ErrorKind::Sql);
     }
     let bodies = rows
