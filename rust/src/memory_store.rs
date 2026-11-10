@@ -1,6 +1,7 @@
 //! Cortexyoung-owned cross-machine project memory backed by a shared Turso database.
 
 use crate::memory::{self, MemoryEntry, MemoryLedger, MemoryRecall};
+use crate::question::QuestionEvent;
 use crate::remote::{Cell, ErrorKind, RemoteDb, Stmt, Transport, UreqTransport};
 use crate::{notes, notes_upload, usage};
 use serde::{Deserialize, Serialize};
@@ -1638,6 +1639,7 @@ pub struct AliasList {
 struct AliasSnapshot {
     aliases: Vec<AliasRow>,
     bodies: Vec<(String, MemoryEntry)>,
+    questions: Vec<(String, QuestionEvent)>,
     ids: Vec<String>,
 }
 
@@ -1646,6 +1648,8 @@ impl Ledger {
         let aliases_sql = format!("SELECT old_project, new_project, created_at, machine FROM project_aliases WHERE old_project IN ({COMPONENT})");
         let bodies_sql =
             format!("SELECT project, body FROM project_memory WHERE project IN ({COMPONENT})");
+        let questions_sql =
+            format!("SELECT project, body FROM project_questions WHERE project IN ({COMPONENT})");
         let arg = || vec![Cell::Text(project.into())];
         let results = self
             .db
@@ -1656,6 +1660,7 @@ impl Ledger {
                 Stmt::new(COMPONENT, arg()),
                 Stmt::new(aliases_sql, arg()),
                 Stmt::new(bodies_sql, arg()),
+                Stmt::new(questions_sql, arg()),
             ])
             .map_err(|e| LedgerError::Remote(e.kind))?;
         let text = |row: &[Cell], index| match row.get(index) {
@@ -1693,9 +1698,21 @@ impl Ledger {
                 Ok((text(row, 0)?, entry))
             })
             .collect::<Result<Vec<_>, LedgerError>>()?;
+        let questions = results[6]
+            .rows
+            .iter()
+            .map(|row| {
+                let body = text(row, 1)?;
+                let event = serde_json::from_str(&body).map_err(|e| {
+                    LedgerError::Message(format!("invalid remote question row: {e}"))
+                })?;
+                Ok((text(row, 0)?, event))
+            })
+            .collect::<Result<Vec<_>, LedgerError>>()?;
         Ok(AliasSnapshot {
             aliases,
             bodies,
+            questions,
             ids,
         })
     }
@@ -1762,7 +1779,7 @@ impl Ledger {
 }
 
 const ALIAS_INSERT: &str = "INSERT INTO project_aliases (old_project, new_project, created_at, machine) SELECT ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM project_aliases WHERE (old_project = ? AND new_project = ?) OR (old_project = ? AND new_project = ?))";
-const ALIAS_EMPTY: &str = "old project component has no memory rows; the URL may be wrong. Use --from-project with the id cort memory status printed before the rename";
+const ALIAS_EMPTY: &str = "old project component has no memory or question rows; the URL may be wrong. Use --from-project with the id cort memory status printed before the rename";
 const ALIAS_COMPATIBILITY: &str =
     "Old binaries see only their own project id; cross-id corrections wait for them to upgrade.";
 
@@ -1797,7 +1814,7 @@ pub fn alias_add_with(
             compatibility_note: None,
         });
     }
-    if snapshot.bodies.is_empty() {
+    if snapshot.bodies.is_empty() && snapshot.questions.is_empty() {
         return Err(ALIAS_EMPTY.into());
     }
     let args = vec![
@@ -1829,7 +1846,12 @@ pub fn alias_list_with(root: &Path, ledger: &Ledger) -> Result<AliasList, Ledger
                 .bodies
                 .iter()
                 .filter(|(project, _)| project == &id)
-                .count();
+                .count()
+                + snapshot
+                    .questions
+                    .iter()
+                    .filter(|(project, _)| project == &id)
+                    .count();
             AliasProject {
                 project_id: id,
                 row_count,
@@ -1892,18 +1914,46 @@ pub fn alias_remove_with(
             .ok_or_else(|| LedgerError::Message("invalid alias component".into()))?;
         locations.entry(&entry.id).or_default().insert(component);
     }
+    let mut question_locations: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    for (project, event) in &snapshot.questions {
+        let component = components
+            .get(project)
+            .ok_or_else(|| LedgerError::Message("invalid alias component".into()))?;
+        question_locations
+            .entry(&event.id)
+            .or_default()
+            .insert(component);
+    }
     let mut crossing = BTreeSet::new();
+    let mut check = |places: &BTreeMap<&str, BTreeSet<&str>>, id: &String, component: &String| {
+        if !places
+            .get(id.as_str())
+            .is_some_and(|places| places.contains(component.as_str()))
+        {
+            crossing.insert(id.clone());
+        }
+    };
     for (project, entry) in &snapshot.bodies {
         let component = components
             .get(project)
             .ok_or_else(|| LedgerError::Message("invalid alias component".into()))?;
         for id in entry.supersedes.iter().chain(entry.resolves.iter()) {
-            if !locations
-                .get(id.as_str())
-                .is_some_and(|places| places.contains(component.as_str()))
-            {
-                crossing.insert(id.clone());
-            }
+            check(&locations, id, component);
+        }
+    }
+    // An answer or close names its ask in `question`, an answer the answers it replaces in
+    // `replaces`, a duplicate close the kept question in `of`: each must stay in its component.
+    for (project, event) in &snapshot.questions {
+        let component = components
+            .get(project)
+            .ok_or_else(|| LedgerError::Message("invalid alias component".into()))?;
+        for id in event
+            .question
+            .iter()
+            .chain(event.replaces.iter())
+            .chain(event.of.iter())
+        {
+            check(&question_locations, id, component);
         }
     }
     if !crossing.is_empty() {

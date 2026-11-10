@@ -160,7 +160,7 @@ cort memory alias list --root .
 id, but any other user or credentials part (`https://user:token@host/...`) stays in the hash, so give
 the old URL as the old `origin` spelled it. When the URL is not known, pass `--from-project <id>` with the
 `project_id` an earlier `cort memory status` printed. `add` refuses the current id itself and an
-old id whose linked ids hold no entries at all (usually a mistyped URL); it answers
+old id whose linked ids hold no entries and no `cort question` events (usually a mistyped URL); it answers
 `already_linked` when the two ids are already connected, directly or through other aliases.
 
 Aliases are read as an undirected graph: every command, and Claude Code's SessionStart recall,
@@ -173,7 +173,8 @@ an entry a newer machine already replaced, which later shows up as a conflict to
 
 `cort memory alias remove --from-remote <url> | --from-project <id>` deletes the one alias row
 joining that id and the current one, whichever way it was stored; it never deletes entries. It
-refuses (`alias_in_use`) when an entry's `--supersedes` or `resolve` target would end up on the
+refuses (`alias_in_use`) when an entry's `--supersedes` or `resolve` target, or the question an
+answer or close event names (or the answer it replaces, or a duplicate's kept question), would end up on the
 other side. If a ledger read fails with `supersedes missing id`, the usual cause is a removed
 alias; adding it back repairs the read.
 

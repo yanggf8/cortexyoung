@@ -1,4 +1,4 @@
-use cort::memory_store::{self, Ledger, LedgerError};
+use cort::memory_store::{self, AliasFrom, Ledger, LedgerError};
 use cort::question::QuestionOption;
 use cort::question_store::{self, AddArgs, CloseReason, ListFilter};
 use cort::remote::{RemoteError, SqliteTransport, Transport};
@@ -517,4 +517,69 @@ fn list_one_id_shows_events_and_orphans_are_reported() {
     assert_eq!(one["questions"][0]["events"].as_array().unwrap().len(), 1);
     let all = f.list(ListFilter::All);
     assert_eq!(all["orphan_events"][0]["id"], "0rphan0000000000");
+}
+
+/// Moves every question event to `old`, as if they were filed before a repository rename.
+fn move_events_to(f: &Fixture, old: &str) {
+    f.query(&format!("UPDATE project_questions SET project = '{old}'"))
+        .unwrap();
+}
+
+fn alias_from(f: &Fixture, old: &str) -> Result<memory_store::AliasOutcome, LedgerError> {
+    memory_store::alias_add_with(f.root(), AliasFrom::Project(old.into()), &f.ledger)
+}
+
+#[test]
+fn alias_add_accepts_questions_only_old_project() {
+    let f = Fixture::new();
+    added_id(&f.add("Keep the deadline?"));
+    move_events_to(&f, "old-questions-only");
+    let linked = alias_from(&f, "old-questions-only").unwrap();
+    assert_eq!(linked.outcome, "linked");
+    let list = memory_store::alias_list_with(f.root(), &f.ledger).unwrap();
+    let old = list
+        .projects
+        .iter()
+        .find(|p| p.project_id == "old-questions-only")
+        .unwrap();
+    assert_eq!(old.row_count, 1);
+    let empty = Fixture::new();
+    let refused = message(alias_from(&empty, "nothing-here").unwrap_err());
+    assert!(refused.contains("no memory or question rows"), "{refused}");
+}
+
+#[test]
+fn answer_across_alias_folds_into_the_ask() {
+    let f = Fixture::new();
+    let id = added_id(&f.add("Keep the deadline?"));
+    move_events_to(&f, "old-repo");
+    alias_from(&f, "old-repo").unwrap();
+    let out = f.answer(&id[..8], "keep", None, None).unwrap();
+    assert_eq!(out["outcome"], "answered", "{out}");
+    let listed = f.list(ListFilter::All);
+    assert_eq!(listed["questions"][0]["id"], id.as_str());
+    assert_eq!(listed["questions"][0]["state"], "answered");
+    assert!(listed.get("orphan_events").is_none(), "{listed}");
+}
+
+#[test]
+fn alias_remove_refuses_when_answer_would_split_from_ask() {
+    let f = Fixture::new();
+    let id = added_id(&f.add("Keep the deadline?"));
+    move_events_to(&f, "old-repo");
+    alias_from(&f, "old-repo").unwrap();
+    f.answer(&id, "keep", None, None).unwrap();
+    let refused = message(
+        memory_store::alias_remove_with(f.root(), AliasFrom::Project("old-repo".into()), &f.ledger)
+            .unwrap_err(),
+    );
+    assert!(refused.starts_with("alias_in_use"), "{refused}");
+    assert!(refused.contains(&id), "{refused}");
+    assert_eq!(
+        memory_store::alias_list_with(f.root(), &f.ledger)
+            .unwrap()
+            .aliases
+            .len(),
+        1
+    );
 }
