@@ -545,7 +545,10 @@ fn alias_add_accepts_questions_only_old_project() {
     assert_eq!(old.row_count, 1);
     let empty = Fixture::new();
     let refused = message(alias_from(&empty, "nothing-here").unwrap_err());
-    assert!(refused.contains("no memory or question rows"), "{refused}");
+    assert!(
+        refused.contains("no memory, question or reminder rows"),
+        "{refused}"
+    );
 }
 
 #[test]

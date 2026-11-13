@@ -3,7 +3,7 @@
 //! The store reads the real clock (`SystemTime::now` inside `now_ns`), so dates are computed
 //! from today rather than pinned: a pinned future date would rot into `remind_date_past`.
 
-use cort::memory_store::{Ledger, LedgerError};
+use cort::memory_store::{self, AliasFrom, Ledger, LedgerError};
 use cort::remind_store::{self, AddArgs, CloseReason, ListFilter};
 use cort::remote::{RemoteError, SqliteTransport, Transport};
 use serde_json::{json, Value};
@@ -511,4 +511,75 @@ fn lean_list_has_no_empty_field() {
     assert!(saw_dash, "the blocks-less row must print -, got {lean}");
     // Labels use _ for spaces (overdue_2d), so the state/label fields stay one field.
     assert!(!lean.contains("overdue "), "{lean}");
+}
+
+/// Moves every reminder event to `old`, as if they were filed before a repository rename.
+fn move_events_to(f: &Fixture, old: &str) {
+    f.query(&format!("UPDATE project_reminders SET project = '{old}'"))
+        .unwrap();
+}
+
+fn alias_from(f: &Fixture, old: &str) -> Result<memory_store::AliasOutcome, LedgerError> {
+    memory_store::alias_add_with(f.root(), AliasFrom::Project(old.into()), &f.ledger)
+}
+
+#[test]
+fn reminders_only_old_id_accepts_alias_add() {
+    let f = Fixture::new();
+    added_id(&f.add_on("NUC boot auto-recovery", &on_in_days(3)));
+    move_events_to(&f, "old-reminders-only");
+    let linked = alias_from(&f, "old-reminders-only").unwrap();
+    assert_eq!(linked.outcome, "linked");
+    // The old id's reminders are read through the alias under the current one.
+    assert_eq!(
+        f.list(ListFilter::Open)["reminders"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let empty = Fixture::new();
+    let refused = message(alias_from(&empty, "nothing-here").unwrap_err());
+    assert!(
+        refused.contains("no memory, question or reminder rows"),
+        "{refused}"
+    );
+}
+
+#[test]
+fn alias_remove_across_defer_is_alias_in_use() {
+    let f = Fixture::new();
+    let id = added_id(&f.add_on("NUC boot auto-recovery", &on_in_days(3)));
+    move_events_to(&f, "old-repo");
+    alias_from(&f, "old-repo").unwrap();
+    // The defer lands under the current id while its add lives under the old one.
+    f.defer(&id, &on_in_days(10), None, None).unwrap();
+    let refused = message(
+        memory_store::alias_remove_with(f.root(), AliasFrom::Project("old-repo".into()), &f.ledger)
+            .unwrap_err(),
+    );
+    assert!(refused.starts_with("alias_in_use"), "{refused}");
+    assert!(refused.contains(&id), "{refused}");
+    assert_eq!(
+        memory_store::alias_list_with(f.root(), &f.ledger)
+            .unwrap()
+            .aliases
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn listed_under_new_id_after_alias() {
+    let f = Fixture::new();
+    let id = added_id(&f.add_on("NUC boot auto-recovery", &on_in_days(3)));
+    move_events_to(&f, "old-repo");
+    alias_from(&f, "old-repo").unwrap();
+    let moved = on_in_days(17);
+    let out = f.defer(&id[..8], &moved, None, None).unwrap();
+    assert_eq!(out["outcome"], "deferred", "{out}");
+    let listed = f.list(ListFilter::All);
+    assert_eq!(listed["reminders"][0]["id"], id.as_str(), "{listed}");
+    assert_eq!(listed["reminders"][0]["on"], json!(moved), "{listed}");
+    assert!(listed.get("orphan_events").is_none(), "{listed}");
 }

@@ -2,6 +2,7 @@
 
 use crate::memory::{self, MemoryEntry, MemoryLedger, MemoryRecall};
 use crate::question::QuestionEvent;
+use crate::remind::ReminderEvent;
 use crate::remote::{Cell, ErrorKind, RemoteDb, Stmt, Transport, UreqTransport};
 use crate::{notes, notes_upload, usage};
 use serde::{Deserialize, Serialize};
@@ -1713,6 +1714,7 @@ struct AliasSnapshot {
     aliases: Vec<AliasRow>,
     bodies: Vec<(String, MemoryEntry)>,
     questions: Vec<(String, QuestionEvent)>,
+    reminders: Vec<(String, ReminderEvent)>,
     ids: Vec<String>,
 }
 
@@ -1723,31 +1725,47 @@ impl Ledger {
             format!("SELECT project, body FROM project_memory WHERE project IN ({COMPONENT})");
         let questions_sql =
             format!("SELECT project, body FROM project_questions WHERE project IN ({COMPONENT})");
+        let reminders_sql =
+            format!("SELECT project, body FROM project_reminders WHERE project IN ({COMPONENT})");
         let arg = || vec![Cell::Text(project.into())];
+        // Each result is named where its statement is pushed, so appending a statement can
+        // never silently shift another's index.
+        let mut stmts = vec![
+            Stmt::new(CREATE_TABLE, vec![]),
+            Stmt::new(CREATE_ALIASES, vec![]),
+            Stmt::new(CREATE_QUESTIONS, vec![]),
+            Stmt::new(CREATE_REMINDERS, vec![]),
+        ];
+        let ids_at = stmts.len();
+        stmts.push(Stmt::new(COMPONENT, arg()));
+        let aliases_at = stmts.len();
+        stmts.push(Stmt::new(aliases_sql, arg()));
+        let bodies_at = stmts.len();
+        stmts.push(Stmt::new(bodies_sql, arg()));
+        let questions_at = stmts.len();
+        stmts.push(Stmt::new(questions_sql, arg()));
+        let reminders_at = stmts.len();
+        stmts.push(Stmt::new(reminders_sql, arg()));
         let results = self
             .db
-            .pipeline(&[
-                Stmt::new(CREATE_TABLE, vec![]),
-                Stmt::new(CREATE_ALIASES, vec![]),
-                Stmt::new(CREATE_QUESTIONS, vec![]),
-                Stmt::new(CREATE_REMINDERS, vec![]),
-                Stmt::new(COMPONENT, arg()),
-                Stmt::new(aliases_sql, arg()),
-                Stmt::new(bodies_sql, arg()),
-                Stmt::new(questions_sql, arg()),
-            ])
+            .pipeline(&stmts)
             .map_err(|e| LedgerError::Remote(e.kind))?;
+        let result = |at: usize| {
+            results
+                .get(at)
+                .ok_or_else(|| LedgerError::Message("missing remote alias result".into()))
+        };
         let text = |row: &[Cell], index| match row.get(index) {
             Some(Cell::Text(value)) => Ok(value.clone()),
             _ => Err(LedgerError::Message("invalid remote alias row".into())),
         };
-        let mut ids = results[4]
+        let mut ids = result(ids_at)?
             .rows
             .iter()
             .map(|row| text(row, 0))
             .collect::<Result<Vec<_>, _>>()?;
         ids.sort();
-        let mut aliases = results[5]
+        let mut aliases = result(aliases_at)?
             .rows
             .iter()
             .map(|row| {
@@ -1762,7 +1780,7 @@ impl Ledger {
         aliases.sort_by(|a, b| {
             (&a.old_project, &a.new_project).cmp(&(&b.old_project, &b.new_project))
         });
-        let bodies = results[6]
+        let bodies = result(bodies_at)?
             .rows
             .iter()
             .map(|row| {
@@ -1772,7 +1790,7 @@ impl Ledger {
                 Ok((text(row, 0)?, entry))
             })
             .collect::<Result<Vec<_>, LedgerError>>()?;
-        let questions = results[7]
+        let questions = result(questions_at)?
             .rows
             .iter()
             .map(|row| {
@@ -1783,10 +1801,22 @@ impl Ledger {
                 Ok((text(row, 0)?, event))
             })
             .collect::<Result<Vec<_>, LedgerError>>()?;
+        let reminders = result(reminders_at)?
+            .rows
+            .iter()
+            .map(|row| {
+                let body = text(row, 1)?;
+                let event = crate::remind::parse_event(&body).map_err(|e| {
+                    LedgerError::Message(format!("invalid remote reminder row: {e}"))
+                })?;
+                Ok((text(row, 0)?, event))
+            })
+            .collect::<Result<Vec<_>, LedgerError>>()?;
         Ok(AliasSnapshot {
             aliases,
             bodies,
             questions,
+            reminders,
             ids,
         })
     }
@@ -1853,7 +1883,7 @@ impl Ledger {
 }
 
 const ALIAS_INSERT: &str = "INSERT INTO project_aliases (old_project, new_project, created_at, machine) SELECT ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM project_aliases WHERE (old_project = ? AND new_project = ?) OR (old_project = ? AND new_project = ?))";
-const ALIAS_EMPTY: &str = "old project component has no memory or question rows; the URL may be wrong. Use --from-project with the id cort memory status printed before the rename";
+const ALIAS_EMPTY: &str = "old project component has no memory, question or reminder rows; the URL may be wrong. Use --from-project with the id cort memory status printed before the rename";
 const ALIAS_COMPATIBILITY: &str =
     "Old binaries see only their own project id; cross-id corrections wait for them to upgrade.";
 
@@ -1888,7 +1918,10 @@ pub fn alias_add_with(
             compatibility_note: None,
         });
     }
-    if snapshot.bodies.is_empty() && snapshot.questions.is_empty() {
+    // An old id holding only reminder rows is accepted: reminders are as real a reason to
+    // link a renamed project as memory or question rows.
+    if snapshot.bodies.is_empty() && snapshot.questions.is_empty() && snapshot.reminders.is_empty()
+    {
         return Err(ALIAS_EMPTY.into());
     }
     let args = vec![
@@ -1998,6 +2031,16 @@ pub fn alias_remove_with(
             .or_default()
             .insert(component);
     }
+    let mut reminder_locations: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    for (project, event) in &snapshot.reminders {
+        let component = components
+            .get(project)
+            .ok_or_else(|| LedgerError::Message("invalid alias component".into()))?;
+        reminder_locations
+            .entry(&event.id)
+            .or_default()
+            .insert(component);
+    }
     let mut crossing = BTreeSet::new();
     let mut check = |places: &BTreeMap<&str, BTreeSet<&str>>, id: &String, component: &String| {
         if !places
@@ -2028,6 +2071,16 @@ pub fn alias_remove_with(
             .chain(event.of.iter())
         {
             check(&question_locations, id, component);
+        }
+    }
+    // A defer or close names its add in `reminder`, exactly as an answer names its ask: the
+    // removal must not leave the add on the other side of the split.
+    for (project, event) in &snapshot.reminders {
+        let component = components
+            .get(project)
+            .ok_or_else(|| LedgerError::Message("invalid alias component".into()))?;
+        for id in event.reminder.iter() {
+            check(&reminder_locations, id, component);
         }
     }
     if !crossing.is_empty() {
