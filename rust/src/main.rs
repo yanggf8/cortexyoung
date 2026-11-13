@@ -1672,6 +1672,11 @@ fn cmd_hook_recall(
     }
     // Question fields for the usage row, set whenever the shared database was read.
     let mut question_fields: Vec<(&str, Value)> = Vec::new();
+    // One clock for the whole run: the folds inside the read and the renderer cannot disagree
+    // about which day it is.
+    let now_ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos() as i128);
     let (outcome, content, count, notes_count) = if let Some(outcome) = skip {
         (outcome, None, 0, 0)
     } else if parsed.is_none() {
@@ -1717,6 +1722,7 @@ fn cmd_hook_recall(
                 cort::usage::machine_id(),
                 (&projects.0, &projects.1),
                 started,
+                now_ns,
             )
             .map_err(|kind| match kind {
                 cort::remote::ErrorKind::Blocked => "remote_blocked",
@@ -1726,9 +1732,6 @@ fn cmd_hook_recall(
         })();
         match read {
             Ok(session) => {
-                let now_ns = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_or(0, |d| d.as_nanos() as i128);
                 let rendered = cort::hook_recall::render_session(&session, now_ns);
                 question_fields.push(cort::hook_recall::questions_usage(&session));
                 match rendered {

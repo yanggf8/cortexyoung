@@ -495,6 +495,9 @@ fn session_recall_from_payload_subdirectory_checks_repository_source() {
         "self",
         (&f.project(), &f.project()),
         std::time::Instant::now(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos() as i128),
     )
     .unwrap()
     .recall;

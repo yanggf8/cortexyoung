@@ -161,6 +161,7 @@ fn pipeline_reads_ledger_and_other_machine_notes_without_writes() {
         "self",
         ("ledger", "origin"),
         Instant::now(),
+        now_ns(),
     )
     .unwrap();
     let total = session.notes_total;
@@ -174,7 +175,7 @@ fn pipeline_reads_ledger_and_other_machine_notes_without_writes() {
     assert!(rendered.contains("[nohost]"));
     assert!(rendered.contains("[host-one]"));
     assert_eq!(requests.lock().unwrap().len(), 1);
-    assert_eq!(requests.lock().unwrap()[0].len(), 4);
+    assert_eq!(requests.lock().unwrap()[0].len(), 5);
 }
 #[test]
 fn missing_notes_schema_retries_ledger_and_creates_nothing() {
@@ -196,6 +197,7 @@ fn missing_notes_schema_retries_ledger_and_creates_nothing() {
         "self",
         ("ledger", "origin"),
         Instant::now(),
+        now_ns(),
     )
     .unwrap();
     assert_eq!(recall.hits.len(), 20);
@@ -209,7 +211,7 @@ fn missing_notes_schema_retries_ledger_and_creates_nothing() {
             .iter()
             .map(Vec::len)
             .collect::<Vec<_>>(),
-        vec![4, 2]
+        vec![5, 2]
     );
     assert!(requests.lock().unwrap()[1][0].contains("project IN (WITH RECURSIVE"));
     read_only.store(false, Ordering::SeqCst);
@@ -242,6 +244,7 @@ fn missing_host_table_keeps_ledger_and_does_not_create_host_table() {
         "self",
         ("ledger", "origin"),
         Instant::now(),
+        now_ns(),
     )
     .unwrap();
     assert_eq!(recall.hits.len(), 20);
@@ -254,7 +257,7 @@ fn missing_host_table_keeps_ledger_and_does_not_create_host_table() {
             .iter()
             .map(Vec::len)
             .collect::<Vec<_>>(),
-        vec![4, 2]
+        vec![5, 2]
     );
     read_only.store(false, Ordering::SeqCst);
     let tables = db
@@ -285,6 +288,7 @@ fn missing_alias_table_retries_full_pipeline_and_keeps_notes() {
         "self",
         ("ledger", "origin"),
         Instant::now(),
+        now_ns(),
     )
     .unwrap();
     assert_eq!(recall.hits.len(), 20);
@@ -293,7 +297,7 @@ fn missing_alias_table_retries_full_pipeline_and_keeps_notes() {
     let requests = requests.lock().unwrap();
     assert_eq!(
         requests.iter().map(Vec::len).collect::<Vec<_>>(),
-        vec![4, 4]
+        vec![5, 5]
     );
     assert!(requests[0][0].contains("project IN (WITH RECURSIVE"));
     assert!(requests[1][0].contains("project = ?"));
@@ -319,6 +323,7 @@ fn missing_alias_and_notes_tables_retries_unaliased_ledger_only() {
         "self",
         ("ledger", "origin"),
         Instant::now(),
+        now_ns(),
     )
     .unwrap();
     assert_eq!(recall.hits.len(), 20);
@@ -327,7 +332,7 @@ fn missing_alias_and_notes_tables_retries_unaliased_ledger_only() {
     let requests = requests.lock().unwrap();
     assert_eq!(
         requests.iter().map(Vec::len).collect::<Vec<_>>(),
-        vec![4, 4, 2]
+        vec![5, 5, 2]
     );
     assert!(requests[0][0].contains("project IN (WITH RECURSIVE"));
     assert!(requests[1][0].contains("project = ?"));
@@ -361,6 +366,7 @@ fn duplicate_aliased_entry_is_returned_once() {
         "self",
         ("ledger", "origin"),
         Instant::now(),
+        now_ns(),
     )
     .unwrap();
     assert_eq!(
@@ -400,6 +406,7 @@ fn conflicting_aliased_entry_returns_sql_error() {
         "self",
         ("ledger", "origin"),
         Instant::now(),
+        now_ns(),
     );
     assert!(matches!(result, Err(cort::remote::ErrorKind::Sql)));
     assert_eq!(requests.lock().unwrap().len(), 1);
@@ -418,6 +425,7 @@ fn alias_failure_without_budget_for_retry_is_timeout() {
         "self",
         ("ledger", "origin"),
         Instant::now() - (cort::remote::RECALL_DEADLINE - Duration::from_millis(1150)),
+        now_ns(),
     );
     assert!(matches!(result, Err(cort::remote::ErrorKind::Timeout)));
     let requests = requests.lock().unwrap();
@@ -436,6 +444,7 @@ fn expired_dispatch_budget_sends_no_request() {
         "self",
         ("ledger", "origin"),
         Instant::now() - (cort::remote::RECALL_DEADLINE - Duration::from_millis(100)),
+        now_ns(),
     );
     assert!(matches!(result, Err(cort::remote::ErrorKind::Timeout)));
     assert!(requests.lock().unwrap().is_empty());
@@ -457,6 +466,7 @@ fn notes_failure_without_budget_for_retry_is_timeout() {
         "self",
         ("ledger", "origin"),
         Instant::now() - (cort::remote::RECALL_DEADLINE - Duration::from_millis(1150)),
+        now_ns(),
     );
     assert!(matches!(result, Err(cort::remote::ErrorKind::Timeout)));
     assert_eq!(
@@ -466,7 +476,7 @@ fn notes_failure_without_budget_for_retry_is_timeout() {
             .iter()
             .map(Vec::len)
             .collect::<Vec<_>>(),
-        vec![4]
+        vec![5]
     );
 }
 fn config(data: &Path, url: &str) {
@@ -1117,6 +1127,7 @@ fn notes_section_byte_cap_binds_before_the_count_cap() {
         notes,
         notes_total: 20,
         questions: None,
+        reminders: None,
     };
     let (text, entries, shown, _) = cort::hook_recall::render_session(&session, now_ns()).unwrap();
     assert_eq!(entries, 0);
@@ -1169,6 +1180,32 @@ fn full_question() -> Value {
         "recommend": "A", "blocks": "recall-timeout",
         "recorded_at": (now_ns() - 3 * NS_PER_DAY - 1_000_000_000).to_string()})
 }
+/// A fixed instant far from the real clock (2027-01): a fold that ran on wall-clock time
+/// could not produce the states the reminder tests assert against it.
+const PINNED_NOW: i128 = 1_800_000_000_000_000_000;
+fn remind_add(id: &str, text: &str, due_at: i128) -> Value {
+    json!({"id": id, "kind": "add", "text": text, "on": "2027-01-15", "utc_offset": "+00:00",
+        "due_at": due_at.to_string(), "lead": 1,
+        "recorded_at": (PINNED_NOW - NS_PER_DAY).to_string()})
+}
+fn seed_reminders(db: &RemoteDb, project: &str, events: &[Value]) {
+    db.execute(
+        "CREATE TABLE project_reminders (project TEXT, id TEXT, body TEXT)",
+        vec![],
+    )
+    .unwrap();
+    for (i, event) in events.iter().enumerate() {
+        db.execute(
+            "INSERT INTO project_reminders VALUES (?, ?, ?)",
+            vec![
+                cort::remote::Cell::Text(project.into()),
+                cort::remote::Cell::Text(format!("e{i}")),
+                cort::remote::Cell::Text(event.to_string()),
+            ],
+        )
+        .unwrap();
+    }
+}
 fn empty_recall() -> cort::memory::MemoryRecall {
     cort::memory::MemoryRecall {
         ledger_status: "present".into(),
@@ -1189,6 +1226,7 @@ fn session_with(events: Vec<Value>) -> cort::memory_store::SessionRecall {
         notes: Vec::new(),
         notes_total: 0,
         questions: Some(folded.questions),
+        reminders: None,
     }
 }
 
@@ -1207,6 +1245,7 @@ fn questions_block_follows_ledger_and_precedes_notes() {
         "self",
         ("ledger", "origin"),
         Instant::now(),
+        now_ns(),
     )
     .unwrap();
     assert_eq!(session.questions.as_ref().unwrap().len(), 1);
@@ -1222,7 +1261,7 @@ fn questions_block_follows_ledger_and_precedes_notes() {
     ), "{text}");
     let requests = requests.lock().unwrap();
     assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].len(), 4);
+    assert_eq!(requests[0].len(), 5);
     assert!(requests[0][3].contains("project_questions WHERE project IN (WITH RECURSIVE"));
 }
 
@@ -1244,6 +1283,7 @@ fn questions_only_project_still_injects() {
         "self",
         ("ledger", "origin"),
         Instant::now(),
+        now_ns(),
     )
     .unwrap();
     assert!(session.recall.hits.is_empty());
@@ -1260,7 +1300,7 @@ fn questions_only_project_still_injects() {
             .iter()
             .map(Vec::len)
             .collect::<Vec<_>>(),
-        vec![4, 2]
+        vec![5, 2]
     );
 }
 
@@ -1278,6 +1318,7 @@ fn missing_questions_table_keeps_ledger_and_notes() {
         "self",
         ("ledger", "origin"),
         Instant::now(),
+        now_ns(),
     )
     .unwrap();
     assert_eq!(session.recall.hits.len(), 20);
@@ -1294,7 +1335,7 @@ fn missing_questions_table_keeps_ledger_and_notes() {
             .iter()
             .map(Vec::len)
             .collect::<Vec<_>>(),
-        vec![4]
+        vec![5]
     );
     read_only.store(false, Ordering::SeqCst);
     let tables = db
@@ -1320,6 +1361,7 @@ fn notes_failure_keeps_questions() {
         "self",
         ("ledger", "origin"),
         Instant::now(),
+        now_ns(),
     )
     .unwrap();
     assert_eq!(session.recall.hits.len(), 20);
@@ -1328,7 +1370,7 @@ fn notes_failure_keeps_questions() {
     let requests = requests.lock().unwrap();
     assert_eq!(
         requests.iter().map(Vec::len).collect::<Vec<_>>(),
-        vec![4, 2]
+        vec![5, 2]
     );
     assert!(requests[1][1].contains("project_questions"));
 }
@@ -1507,6 +1549,7 @@ fn notes_then_questions_failure_keeps_the_ledger() {
         "self",
         ("ledger", "origin"),
         Instant::now(),
+        now_ns(),
     )
     .unwrap();
     assert_eq!(session.recall.hits.len(), 20);
@@ -1517,7 +1560,7 @@ fn notes_then_questions_failure_keeps_the_ledger() {
     let requests = requests.lock().unwrap();
     assert_eq!(
         requests.iter().map(Vec::len).collect::<Vec<_>>(),
-        vec![4, 1]
+        vec![5, 1]
     );
     assert!(requests[1][0].contains("project_memory"));
 }
@@ -1544,9 +1587,252 @@ fn unknown_kind_row_leaves_the_session_block_alone() {
         "self",
         ("ledger", "origin"),
         Instant::now(),
+        now_ns(),
     )
     .unwrap();
     let (text, _, _, shown) = cort::hook_recall::render_session(&session, now_ns()).unwrap();
     assert_eq!(shown, 1);
     assert!(text.contains("\n- jjjjjjjj  Ship it?  (1d)"), "{text}");
+}
+
+#[test]
+fn reminders_read_with_pinned_now() {
+    let (db, read_only, requests) = database();
+    seed_ledger(&db);
+    seed_alias(&db);
+    seed_notes(&db);
+    seed_questions(&db, "ledger", &[]);
+    seed_reminders(
+        &db,
+        "ledger",
+        &[
+            remind_add("aaaaaaaa01", "Reboot the NUC", PINNED_NOW + 3 * NS_PER_DAY),
+            remind_add("bbbbbbbb02", "Ship the report", PINNED_NOW),
+            remind_add(
+                "cccccccc03",
+                "Upgrade the firmware",
+                PINNED_NOW - 2 * NS_PER_DAY,
+            ),
+        ],
+    );
+    read_only.store(true, Ordering::SeqCst);
+    let temp = tempfile::tempdir().unwrap();
+    let session = cort::memory_store::session_recall_with(
+        temp.path(),
+        &db,
+        "self",
+        ("ledger", "origin"),
+        Instant::now(),
+        PINNED_NOW,
+    )
+    .unwrap();
+    // The fold ran on the pinned now: under the real clock every due_at here is months in
+    // the future and nothing could be due or overdue.
+    let reminders = session.reminders.as_ref().expect("reminders read");
+    assert_eq!(reminders.len(), 3);
+    assert_eq!(reminders[0].state, cort::remind::State::Overdue);
+    assert_eq!(reminders[0].label, "overdue 2d");
+    assert_eq!(reminders[1].state, cort::remind::State::Due);
+    assert_eq!(reminders[1].label, "today");
+    assert_eq!(reminders[2].state, cort::remind::State::Scheduled);
+    assert_eq!(reminders[2].label, "in 3d");
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].len(), 5);
+    assert!(requests[0][4].contains("project_reminders WHERE project IN (WITH RECURSIVE"));
+}
+
+#[test]
+fn reminders_failing_alone_keeps_everything_else() {
+    // No project_reminders table: the reminders statement fails SQL while the ledger, notes
+    // and questions succeed, so only the reminders are dropped, in the same single answer.
+    let (db, read_only, requests) = database();
+    seed_ledger(&db);
+    seed_alias(&db);
+    seed_notes(&db);
+    seed_questions(&db, "ledger", &[ask("dddddddd12", "Which port?", 2)]);
+    read_only.store(true, Ordering::SeqCst);
+    let temp = tempfile::tempdir().unwrap();
+    let session = cort::memory_store::session_recall_with(
+        temp.path(),
+        &db,
+        "self",
+        ("ledger", "origin"),
+        Instant::now(),
+        now_ns(),
+    )
+    .unwrap();
+    assert_eq!(session.recall.hits.len(), 20);
+    assert_eq!(session.notes.len(), 15);
+    assert_eq!(session.questions.as_ref().unwrap().len(), 1);
+    assert!(session.reminders.is_none());
+    assert_eq!(
+        requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(Vec::len)
+            .collect::<Vec<_>>(),
+        vec![5]
+    );
+}
+
+#[test]
+fn questions_and_reminders_failing_together_keep_ledger_and_notes() {
+    // Neither optional table exists: both statements fail SQL in one answer, neither is
+    // retried, and the ledger and notes that succeeded with them are kept.
+    let (db, read_only, requests) = database();
+    seed_ledger(&db);
+    seed_alias(&db);
+    seed_notes(&db);
+    read_only.store(true, Ordering::SeqCst);
+    let temp = tempfile::tempdir().unwrap();
+    let session = cort::memory_store::session_recall_with(
+        temp.path(),
+        &db,
+        "self",
+        ("ledger", "origin"),
+        Instant::now(),
+        now_ns(),
+    )
+    .unwrap();
+    assert_eq!(session.recall.hits.len(), 20);
+    assert_eq!(session.notes.len(), 15);
+    assert_eq!(session.notes_total, 18);
+    assert!(session.questions.is_none());
+    assert!(session.reminders.is_none());
+    assert_eq!(
+        requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(Vec::len)
+            .collect::<Vec<_>>(),
+        vec![5]
+    );
+}
+
+#[test]
+fn notes_and_reminders_failing_together_keep_ledger_and_questions() {
+    // The notes failure keeps its retry; the reminders that failed in the same answer are
+    // dropped with the notes rather than sent again to fail a second time; the questions
+    // that succeeded are reread in the retry.
+    let (db, read_only, requests) = database();
+    seed_ledger(&db);
+    seed_alias(&db);
+    seed_questions(&db, "ledger", &[ask("eeeeeeee13", "Which port?", 2)]);
+    read_only.store(true, Ordering::SeqCst);
+    let temp = tempfile::tempdir().unwrap();
+    let session = cort::memory_store::session_recall_with(
+        temp.path(),
+        &db,
+        "self",
+        ("ledger", "origin"),
+        Instant::now(),
+        now_ns(),
+    )
+    .unwrap();
+    assert_eq!(session.recall.hits.len(), 20);
+    assert!(session.notes.is_empty());
+    assert_eq!(session.notes_total, 0);
+    assert_eq!(session.questions.as_ref().unwrap().len(), 1);
+    assert!(session.reminders.is_none());
+    let requests = requests.lock().unwrap();
+    assert_eq!(
+        requests.iter().map(Vec::len).collect::<Vec<_>>(),
+        vec![5, 2]
+    );
+    assert!(requests[1][1].contains("project_questions"));
+}
+
+#[test]
+fn missing_reminders_table_keeps_everything_else() {
+    // A fleet that has not provisioned the table yet: the read is dropped, nothing is
+    // created by a session start.
+    let (db, read_only, requests) = database();
+    seed_ledger(&db);
+    seed_alias(&db);
+    seed_notes(&db);
+    seed_questions(&db, "ledger", &[]);
+    read_only.store(true, Ordering::SeqCst);
+    let temp = tempfile::tempdir().unwrap();
+    let session = cort::memory_store::session_recall_with(
+        temp.path(),
+        &db,
+        "self",
+        ("ledger", "origin"),
+        Instant::now(),
+        now_ns(),
+    )
+    .unwrap();
+    assert_eq!(session.recall.hits.len(), 20);
+    assert_eq!(session.notes.len(), 15);
+    assert!(session.questions.is_some());
+    assert!(session.reminders.is_none());
+    assert_eq!(
+        requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(Vec::len)
+            .collect::<Vec<_>>(),
+        vec![5]
+    );
+    read_only.store(false, Ordering::SeqCst);
+    let tables = db
+        .execute(
+            "SELECT name FROM sqlite_master WHERE name='project_reminders'",
+            vec![],
+        )
+        .unwrap();
+    assert!(tables.rows.is_empty());
+}
+
+#[test]
+fn undecodable_reminder_row_drops_block_not_ledger() {
+    let (db, read_only, requests) = database();
+    seed_ledger(&db);
+    seed_alias(&db);
+    seed_notes(&db);
+    seed_questions(&db, "ledger", &[ask("ffffffff14", "Ship it?", 1)]);
+    seed_reminders(
+        &db,
+        "ledger",
+        &[remind_add("1234567890abcdef", "Reboot the NUC", PINNED_NOW)],
+    );
+    db.execute(
+        "INSERT INTO project_reminders VALUES (?, ?, ?)",
+        vec![
+            cort::remote::Cell::Text("ledger".into()),
+            cort::remote::Cell::Text("e-bad".into()),
+            cort::remote::Cell::Text("not json".into()),
+        ],
+    )
+    .unwrap();
+    read_only.store(true, Ordering::SeqCst);
+    let temp = tempfile::tempdir().unwrap();
+    let session = cort::memory_store::session_recall_with(
+        temp.path(),
+        &db,
+        "self",
+        ("ledger", "origin"),
+        Instant::now(),
+        now_ns(),
+    )
+    .unwrap();
+    // One row that does not decode drops the reminders block, never the ledger or any other
+    // read that succeeded.
+    assert_eq!(session.recall.hits.len(), 20);
+    assert_eq!(session.notes.len(), 15);
+    assert_eq!(session.questions.as_ref().unwrap().len(), 1);
+    assert!(session.reminders.is_none());
+    assert_eq!(
+        requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(Vec::len)
+            .collect::<Vec<_>>(),
+        vec![5]
+    );
 }

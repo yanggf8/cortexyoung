@@ -606,7 +606,8 @@ const SESSION_NOTES: &str = "SELECT n.note_id, n.machine, m.host, n.file_name, n
 const SESSION_NOTES_COUNT: &str =
     "SELECT COUNT(*) FROM harness_notes WHERE project=? AND machine<>? AND deleted=0";
 
-/// What a session start read: the ledger, other machines' notes and the question bag.
+/// What a session start read: the ledger, other machines' notes, the question bag and the
+/// reminder fold.
 #[derive(Clone, Debug)]
 pub struct SessionRecall {
     pub recall: MemoryRecall,
@@ -615,14 +616,20 @@ pub struct SessionRecall {
     pub notes_total: usize,
     /// `None` when the questions statement was dropped after an SQL error.
     pub questions: Option<Vec<crate::question::Question>>,
+    /// `None` when the reminders statement was dropped after an SQL error.
+    pub reminders: Option<Vec<crate::remind::Reminder>>,
 }
 
-/// Read only. Statement order is ledger, notes, notes count, questions; each statement keeps its
-/// own result. A step-zero SQL error retries with the unaliased ledger (and questions) read; an
-/// SQL error at a notes step retries without the notes statements (and without questions when
-/// they failed in the same answer); an SQL error at the questions step alone keeps the ledger
-/// and notes that arrived with it and reports `questions: None`, with no retry. Each optional
-/// read is dropped at most once, and every retry is subject to the remaining-budget rule.
+/// Read only, one pipeline of four reads -- ledger, notes (two statements), questions,
+/// reminders -- where every statement keeps its own result and every read is decided from
+/// that result alone, never by position. The ledger (step zero) is required: an SQL error
+/// there retries the whole pipeline under the unaliased project, and a non-SQL error anywhere
+/// fails the whole recall. Notes, questions and reminders are optional: an SQL error at a
+/// notes step drops the notes and retries without them -- and without the questions or
+/// reminders that failed in the same answer, which are not sent again to fail a second time
+/// -- while an SQL error at the questions or the reminders step drops that one read (`None`),
+/// keeps every other result that arrived with it, and never retries. An optional read is
+/// dropped at most once, and every retry is subject to the remaining-budget rule.
 #[doc(hidden)]
 pub fn session_recall_with(
     root: &Path,
@@ -630,6 +637,7 @@ pub fn session_recall_with(
     machine: &str,
     projects: (&str, &str),
     started: Instant,
+    now_ns: i128,
 ) -> Result<SessionRecall, ErrorKind> {
     // Before the network wait: nothing after it may spend the watchdog's margin on a subprocess.
     let top = memory::source_root(root);
@@ -637,6 +645,7 @@ pub fn session_recall_with(
     let note_args = || vec![Cell::Text(projects.1.into()), Cell::Text(machine.into())];
     let mut with_notes = true;
     let mut with_questions = true;
+    let mut with_reminders = true;
     let mut retried_alias = false;
     let result = loop {
         if crate::remote::RECALL_DEADLINE.saturating_sub(started.elapsed())
@@ -654,26 +663,42 @@ pub fn session_recall_with(
             format!("SELECT body FROM project_memory WHERE project {scope}"),
             ledger_args(),
         )];
-        if with_notes {
+        // Every statement remembers the index it was pushed at: a dropped read changes the
+        // shape of a later answer, so a result can never be taken by position.
+        let notes_steps = with_notes.then(|| {
+            let at = statements.len();
             statements.push(Stmt::new(SESSION_NOTES, note_args()));
             statements.push(Stmt::new(SESSION_NOTES_COUNT, note_args()));
-        }
-        let questions_step = with_questions.then_some(statements.len());
-        if with_questions {
+            (at, at + 1)
+        });
+        let questions_step = with_questions.then(|| {
+            let at = statements.len();
             statements.push(Stmt::new(
                 format!("SELECT body FROM project_questions WHERE project {scope}"),
                 ledger_args(),
             ));
-        }
+            at
+        });
+        let reminders_step = with_reminders.then(|| {
+            let at = statements.len();
+            statements.push(Stmt::new(
+                format!("SELECT body FROM project_reminders WHERE project {scope}"),
+                ledger_args(),
+            ));
+            at
+        });
         let results = db.pipeline_each(&statements).map_err(|error| error.kind)?;
-        let questions_sql_failed = questions_step
-            .and_then(|step| results.get(step))
-            .is_some_and(|r| r.as_ref().is_err_and(|e| e.kind == ErrorKind::Sql));
+        let sql_failed = |step: Option<usize>| {
+            step.and_then(|at| results.get(at))
+                .is_some_and(|r| r.as_ref().is_err_and(|e| e.kind == ErrorKind::Sql))
+        };
+        let questions_sql_failed = sql_failed(questions_step);
+        let reminders_sql_failed = sql_failed(reminders_step);
         let Some((kind, step)) = results
             .iter()
             .find_map(|r| r.as_ref().err().map(|e| (e.kind, e.step)))
         else {
-            break (results, false);
+            break (results, notes_steps, questions_step, reminders_step);
         };
         if kind != ErrorKind::Sql {
             return Err(kind);
@@ -681,52 +706,54 @@ pub fn session_recall_with(
         match step {
             Some(0) if !retried_alias && with_notes && with_questions => retried_alias = true,
             Some(1 | 2) if with_notes => {
-                // A questions failure in the same answer is already known: drop it with the
-                // notes rather than send it again to fail a second time.
+                // Questions or reminders that failed in the same answer are already known:
+                // drop them with the notes rather than send them again to fail a second time.
                 with_notes = false;
                 if questions_sql_failed {
                     with_questions = false;
                 }
+                if reminders_sql_failed {
+                    with_reminders = false;
+                }
             }
-            // The questions read failed alone: keep the ledger and notes that came with it.
-            step if step.is_some() && step == questions_step => break (results, true),
+            // The questions or the reminders read failed, alone or together: keep the answer;
+            // the decode below decides each read from its own result, and neither retries.
+            step if step == questions_step || step == reminders_step => {
+                break (results, notes_steps, questions_step, reminders_step);
+            }
             _ => return Err(kind),
         }
     };
-    let (results, questions_failed) = result;
-    let expected = results.len();
-    let mut results = results.into_iter();
-    let mut taken = 0;
-    let mut next = || {
-        taken += 1;
-        results
-            .next()
-            .ok_or(ErrorKind::Sql)?
-            .map_err(|error| error.kind)
+    let (results, notes_steps, questions_step, reminders_step) = result;
+    // The ledger read is required: every failure path for it was taken inside the loop, so
+    // here it is the result every other read rests on.
+    let rows = match results.first() {
+        Some(Ok(stmt)) => &stmt.rows,
+        _ => return Err(ErrorKind::Sql),
     };
-    let rows = next()?.rows;
-    let (notes, total) = if with_notes {
-        let note_rows = next()?.rows;
-        let count = next()?;
-        let total = match count.rows.first().and_then(|r| r.first()) {
-            Some(Cell::Int(n)) if *n >= 0 => *n as usize,
-            _ => return Err(ErrorKind::Sql),
-        };
-        (note_rows, total)
-    } else {
-        (Vec::new(), 0)
-    };
-    let question_rows = match (with_questions, questions_failed) {
-        (true, false) => Some(next()?.rows),
-        (true, true) => {
-            let _ = next();
-            None
+    let (note_rows, total) = match notes_steps {
+        Some((at, count_at)) => {
+            let (Some(Ok(list)), Some(Ok(count))) = (results.get(at), results.get(count_at)) else {
+                return Err(ErrorKind::Sql);
+            };
+            let total = match count.rows.first().and_then(|r| r.first()) {
+                Some(Cell::Int(n)) if *n >= 0 => *n as usize,
+                _ => return Err(ErrorKind::Sql),
+            };
+            (list.rows.clone(), total)
         }
-        (false, _) => None,
+        None => (Vec::new(), 0),
     };
-    if taken != expected {
-        return Err(ErrorKind::Sql);
-    }
+    // Each optional read speaks for itself: `None` when the loop dropped it or its own
+    // statement failed; every other read keeps what it read.
+    let question_rows = questions_step
+        .and_then(|at| results.get(at))
+        .and_then(|result| result.as_ref().ok())
+        .map(|stmt| stmt.rows.as_slice());
+    let reminder_rows = reminders_step
+        .and_then(|at| results.get(at))
+        .and_then(|result| result.as_ref().ok())
+        .map(|stmt| stmt.rows.as_slice());
     let bodies = rows
         .iter()
         .map(|row| match row.first() {
@@ -737,7 +764,7 @@ pub fn session_recall_with(
     let bodies = merge_bodies(bodies).map_err(|_| ErrorKind::Sql)?;
     let ledger = ledger_from_bodies(bodies).map_err(|_| ErrorKind::Sql)?;
     let (recall, omitted) = memory::recall_ledger_for_hook(&top, &ledger);
-    let briefs = notes
+    let briefs = note_rows
         .iter()
         .map(|row| {
             let text = |i| match row.get(i) {
@@ -759,7 +786,8 @@ pub fn session_recall_with(
         })
         .collect::<Result<Vec<_>, _>>()?;
     // An undecodable question row drops the block (recorded as `questions: dropped`) rather
-    // than the ledger: the questions are optional, the ledger is not.
+    // than the ledger: the questions are optional, the ledger is not. The fold runs on the
+    // caller's `now_ns`, the same instant the renderer will be handed.
     let questions = question_rows.and_then(|rows| {
         let events = rows
             .iter()
@@ -768,11 +796,18 @@ pub fn session_recall_with(
                 _ => None,
             })
             .collect::<Option<Vec<_>>>()?;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .ok()
-            .and_then(|d| i128::try_from(d.as_nanos()).ok())?;
-        Some(crate::question::fold(events, now, crate::question_store::stale_days()).questions)
+        Some(crate::question::fold(events, now_ns, crate::question_store::stale_days()).questions)
+    });
+    // An undecodable reminder row drops the reminders the same way, never the ledger.
+    let reminders = reminder_rows.and_then(|rows| {
+        let events = rows
+            .iter()
+            .map(|row| match row.first() {
+                Some(Cell::Text(body)) => crate::remind::parse_event(body).ok(),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(crate::remind::fold(events, now_ns).reminders)
     });
     Ok(SessionRecall {
         recall,
@@ -780,6 +815,7 @@ pub fn session_recall_with(
         notes: briefs,
         notes_total: total,
         questions,
+        reminders,
     })
 }
 
