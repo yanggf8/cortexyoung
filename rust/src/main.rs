@@ -1670,8 +1670,8 @@ fn cmd_hook_recall(
     if let Some(project) = &usage.project_id {
         let _ = RECALL_WATCHDOG_PROJECT.set(project.clone());
     }
-    // Question fields for the usage row, set whenever the shared database was read.
-    let mut question_fields: Vec<(&str, Value)> = Vec::new();
+    // Optional-block fields for the usage row, set whenever the shared database was read.
+    let mut session_fields: Vec<(&str, Value)> = Vec::new();
     // One clock for the whole run: the folds inside the read and the renderer cannot disagree
     // about which day it is.
     let now_ns = std::time::SystemTime::now()
@@ -1733,11 +1733,18 @@ fn cmd_hook_recall(
         match read {
             Ok(session) => {
                 let rendered = cort::hook_recall::render_session(&session, now_ns);
-                question_fields.push(cort::hook_recall::questions_usage(&session));
+                session_fields.push(cort::hook_recall::questions_usage(&session));
+                session_fields.push(cort::hook_recall::reminders_usage(&session));
                 match rendered {
-                    Some((text, count, notes_count, questions_shown)) => {
-                        question_fields.push(("questions_shown", json!(questions_shown)));
-                        ("injected", Some(text), count, notes_count)
+                    Some(rendered) => {
+                        session_fields.push(("questions_shown", json!(rendered.questions)));
+                        session_fields.push(("reminders_shown", json!(rendered.reminders)));
+                        (
+                            "injected",
+                            Some(rendered.text),
+                            rendered.entries,
+                            rendered.notes,
+                        )
                     }
                     None => ("none", None, 0, 0),
                 }
@@ -1752,7 +1759,7 @@ fn cmd_hook_recall(
         row["entries"] = json!(count);
         row["notes"] = json!(notes_count);
     }
-    for (key, value) in question_fields {
+    for (key, value) in session_fields {
         row[key] = value;
     }
     usage.args_summary = row.to_string();

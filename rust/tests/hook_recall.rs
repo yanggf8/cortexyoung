@@ -165,15 +165,14 @@ fn pipeline_reads_ledger_and_other_machine_notes_without_writes() {
     )
     .unwrap();
     let total = session.notes_total;
-    let (rendered, shown, note_count, _) =
-        cort::hook_recall::render_session(&session, now_ns()).unwrap();
-    assert_eq!(shown, 20);
-    assert_eq!(note_count, 15);
+    let rendered = cort::hook_recall::render_session(&session, now_ns()).unwrap();
+    assert_eq!(rendered.entries, 20);
+    assert_eq!(rendered.notes, 15);
     assert_eq!(total, 18);
-    assert!(rendered.contains("[old-entry]"));
-    assert!(rendered.find("[id-24]").unwrap() < rendered.find("[id-23]").unwrap());
-    assert!(rendered.contains("[nohost]"));
-    assert!(rendered.contains("[host-one]"));
+    assert!(rendered.text.contains("[old-entry]"));
+    assert!(rendered.text.find("[id-24]").unwrap() < rendered.text.find("[id-23]").unwrap());
+    assert!(rendered.text.contains("[nohost]"));
+    assert!(rendered.text.contains("[host-one]"));
     assert_eq!(requests.lock().unwrap().len(), 1);
     assert_eq!(requests.lock().unwrap()[0].len(), 5);
 }
@@ -1129,13 +1128,18 @@ fn notes_section_byte_cap_binds_before_the_count_cap() {
         questions: None,
         reminders: None,
     };
-    let (text, entries, shown, _) = cort::hook_recall::render_session(&session, now_ns()).unwrap();
-    assert_eq!(entries, 0);
-    assert!(shown > 0 && shown < 15, "{shown}");
-    let section = &text[text.find("unreviewed harness notes").unwrap()..];
-    assert!(section.len() <= 2000, "{}", section.len());
+    let rendered = cort::hook_recall::render_session(&session, now_ns()).unwrap();
+    assert_eq!(rendered.entries, 0);
     assert!(
-        section.ends_with(&format!("... {} more notes", 20 - shown)),
+        rendered.notes > 0 && rendered.notes < 15,
+        "{}",
+        rendered.notes
+    );
+    let text = &rendered.text;
+    let section = &text[text.find("unreviewed harness notes").unwrap()..];
+    assert!(section.len() <= 1200, "{}", section.len());
+    assert!(
+        section.ends_with(&format!("... {} more notes", 20 - rendered.notes)),
         "{section}"
     );
     // The file name is capped at 80 characters, so no line carries the full 202.
@@ -1184,9 +1188,16 @@ fn full_question() -> Value {
 /// could not produce the states the reminder tests assert against it.
 const PINNED_NOW: i128 = 1_800_000_000_000_000_000;
 fn remind_add(id: &str, text: &str, due_at: i128) -> Value {
-    json!({"id": id, "kind": "add", "text": text, "on": "2027-01-15", "utc_offset": "+00:00",
+    remind_add_on(id, text, "2027-01-15", due_at)
+}
+fn remind_add_on(id: &str, text: &str, on: &str, due_at: i128) -> Value {
+    json!({"id": id, "kind": "add", "text": text, "on": on, "utc_offset": "+00:00",
         "due_at": due_at.to_string(), "lead": 1,
         "recorded_at": (PINNED_NOW - NS_PER_DAY).to_string()})
+}
+fn remind_close(id: &str, reminder: &str) -> Value {
+    json!({"id": id, "kind": "close", "reminder": reminder, "reason": "done",
+        "recorded_at": PINNED_NOW.to_string()})
 }
 fn seed_reminders(db: &RemoteDb, project: &str, events: &[Value]) {
     db.execute(
@@ -1229,6 +1240,23 @@ fn session_with(events: Vec<Value>) -> cort::memory_store::SessionRecall {
         reminders: None,
     }
 }
+fn folded_reminders(events: Vec<Value>) -> Vec<cort::remind::Reminder> {
+    let events = events
+        .into_iter()
+        .map(|v| serde_json::from_value(v).unwrap())
+        .collect();
+    cort::remind::fold(events, PINNED_NOW).reminders
+}
+fn remind_session(reminders: Vec<cort::remind::Reminder>) -> cort::memory_store::SessionRecall {
+    cort::memory_store::SessionRecall {
+        recall: empty_recall(),
+        omitted: 0,
+        notes: Vec::new(),
+        notes_total: 0,
+        questions: None,
+        reminders: Some(reminders),
+    }
+}
 
 #[test]
 fn questions_block_follows_ledger_and_precedes_notes() {
@@ -1249,9 +1277,12 @@ fn questions_block_follows_ledger_and_precedes_notes() {
     )
     .unwrap();
     assert_eq!(session.questions.as_ref().unwrap().len(), 1);
-    let (text, entries, notes, questions) =
-        cort::hook_recall::render_session(&session, now_ns()).unwrap();
-    assert_eq!((entries, notes, questions), (20, 15, 1));
+    let rendered = cort::hook_recall::render_session(&session, now_ns()).unwrap();
+    assert_eq!(
+        (rendered.entries, rendered.notes, rendered.questions),
+        (20, 15, 1)
+    );
+    let text = &rendered.text;
     let ledger = text.find("[id-24]").unwrap();
     let block = text.find(QUESTIONS_HEADER).unwrap();
     let notes_at = text.find("unreviewed harness notes").unwrap();
@@ -1287,9 +1318,12 @@ fn questions_only_project_still_injects() {
     )
     .unwrap();
     assert!(session.recall.hits.is_empty());
-    let (text, entries, notes, questions) =
-        cort::hook_recall::render_session(&session, now_ns()).unwrap();
-    assert_eq!((entries, notes, questions), (0, 0, 1));
+    let rendered = cort::hook_recall::render_session(&session, now_ns()).unwrap();
+    assert_eq!(
+        (rendered.entries, rendered.notes, rendered.questions),
+        (0, 0, 1)
+    );
+    let text = &rendered.text;
     assert!(text.starts_with(cort::hook_recall::HEADER), "{text}");
     assert!(text.contains("\n- aaaaaaaa  Ship it?  (1d)"), "{text}");
     // Notes tables are missing: the notes statements are dropped, the questions kept.
@@ -1325,8 +1359,9 @@ fn missing_questions_table_keeps_ledger_and_notes() {
     assert_eq!(session.notes.len(), 15);
     assert_eq!(session.notes_total, 18);
     assert!(session.questions.is_none());
-    let (text, _, _, questions) = cort::hook_recall::render_session(&session, now_ns()).unwrap();
-    assert_eq!(questions, 0);
+    let rendered = cort::hook_recall::render_session(&session, now_ns()).unwrap();
+    assert_eq!(rendered.questions, 0);
+    let text = &rendered.text;
     assert!(!text.contains("Open questions"));
     assert_eq!(
         requests
@@ -1381,8 +1416,9 @@ fn stale_questions_are_counted_not_listed() {
         ask("cccccccc33", "Fresh question?", 2),
         ask("dddddddd44", "Old dead question?", 30),
     ]);
-    let (text, _, _, shown) = cort::hook_recall::render_session(&session, now_ns()).unwrap();
-    assert_eq!(shown, 1);
+    let rendered = cort::hook_recall::render_session(&session, now_ns()).unwrap();
+    assert_eq!(rendered.questions, 1);
+    let text = &rendered.text;
     assert!(text.contains("Fresh question?"));
     assert!(!text.contains("Old dead question?"));
     assert!(
@@ -1394,8 +1430,9 @@ fn stale_questions_are_counted_not_listed() {
         ask("dddddddd44", "Old dead question?", 30),
         ask("eeeeeeee45", "Older dead question?", 40),
     ]);
-    let (text, _, _, shown) = cort::hook_recall::render_session(&session, now_ns()).unwrap();
-    assert_eq!(shown, 0);
+    let rendered = cort::hook_recall::render_session(&session, now_ns()).unwrap();
+    let text = &rendered.text;
+    assert_eq!(rendered.questions, 0);
     assert!(!text.contains("Open questions for the human"), "{text}");
     assert!(!text.contains("raise one or two"), "{text}");
     assert!(
@@ -1419,9 +1456,9 @@ fn block_respects_eight_and_1500_bytes() {
             )
         })
         .collect();
-    let (text, _, _, shown) =
-        cort::hook_recall::render_session(&session_with(events), now_ns()).unwrap();
-    assert_eq!(shown, 8);
+    let rendered = cort::hook_recall::render_session(&session_with(events), now_ns()).unwrap();
+    assert_eq!(rendered.questions, 8);
+    let text = &rendered.text;
     assert!(text.find("Short 00?").unwrap() < text.find("Short 01?").unwrap());
     assert!(!text.contains("Short 08?"));
     assert!(
@@ -1438,10 +1475,10 @@ fn block_respects_eight_and_1500_bytes() {
             )
         })
         .collect();
-    let (text, _, _, shown) =
-        cort::hook_recall::render_session(&session_with(events), now_ns()).unwrap();
+    let rendered = cort::hook_recall::render_session(&session_with(events), now_ns()).unwrap();
     // Each line is cut to its share of the bytes, so the count cap still binds.
-    assert_eq!(shown, 8);
+    assert_eq!(rendered.questions, 8);
+    let text = &rendered.text;
     let block = &text[text.find("Open questions").unwrap()..];
     assert!(block.len() <= 1500, "{}", block.len());
     assert!(
@@ -1471,8 +1508,9 @@ fn one_long_cjk_question_does_not_crowd_out_the_rest() {
         ask("2222222222bbbbbb", "Which port?", 2),
         ask("3333333333cccccc", "Ship on Friday?", 1),
     ]);
-    let (text, _, _, shown) = cort::hook_recall::render_session(&session, now_ns()).unwrap();
-    assert_eq!(shown, 3, "{text}");
+    let rendered = cort::hook_recall::render_session(&session, now_ns()).unwrap();
+    assert_eq!(rendered.questions, 3, "{}", rendered.text);
+    let text = &rendered.text;
     let block = &text[text.find("Open questions").unwrap()..];
     assert!(block.len() <= 1500, "{}", block.len());
     assert!(block.contains("\n- 22222222  Which port?  (2d)"), "{block}");
@@ -1495,7 +1533,8 @@ fn cut_question_text_and_options_end_with_an_ellipsis() {
     let session = session_with(vec![json!({"id": "4444444444dddddd", "kind": "ask",
         "text": text, "options": [{"key": "A", "text": option}],
         "recorded_at": (now_ns() - NS_PER_DAY).to_string()})]);
-    let (out, _, _, _) = cort::hook_recall::render_session(&session, now_ns()).unwrap();
+    let rendered = cort::hook_recall::render_session(&session, now_ns()).unwrap();
+    let out = &rendered.text;
     assert!(
         out.contains(&format!(
             "{}…  A={}…  (1d)",
@@ -1509,7 +1548,8 @@ fn cut_question_text_and_options_end_with_an_ellipsis() {
 #[test]
 fn header_marks_questions_unreviewed() {
     let session = session_with(vec![ask("gggggggg77", "Line\u{202E}one\nInjected", 0)]);
-    let (text, _, _, _) = cort::hook_recall::render_session(&session, now_ns()).unwrap();
+    let rendered = cort::hook_recall::render_session(&session, now_ns()).unwrap();
+    let text = &rendered.text;
     assert!(text.contains(&format!("\n{QUESTIONS_HEADER}\n")), "{text}");
     // Agent text is sanitized: no control or bidi characters survive into the block.
     assert!(
@@ -1590,9 +1630,13 @@ fn unknown_kind_row_leaves_the_session_block_alone() {
         now_ns(),
     )
     .unwrap();
-    let (text, _, _, shown) = cort::hook_recall::render_session(&session, now_ns()).unwrap();
-    assert_eq!(shown, 1);
-    assert!(text.contains("\n- jjjjjjjj  Ship it?  (1d)"), "{text}");
+    let rendered = cort::hook_recall::render_session(&session, now_ns()).unwrap();
+    assert_eq!(rendered.questions, 1);
+    assert!(
+        rendered.text.contains("\n- jjjjjjjj  Ship it?  (1d)"),
+        "{}",
+        rendered.text
+    );
 }
 
 #[test]
@@ -1834,5 +1878,315 @@ fn undecodable_reminder_row_drops_block_not_ledger() {
             .map(Vec::len)
             .collect::<Vec<_>>(),
         vec![5]
+    );
+}
+
+#[test]
+fn block_sits_between_ledger_and_questions() {
+    let (db, read_only, requests) = database();
+    seed_ledger(&db);
+    seed_alias(&db);
+    seed_notes(&db);
+    // The question and the reminder folds both run on the pinned now, so the question stays
+    // fresh and the reminder is due under it, not under the real clock.
+    seed_questions(
+        &db,
+        "ledger",
+        &[
+            json!({"id": "llllllll15", "kind": "ask", "text": "Which port?",
+            "recorded_at": (PINNED_NOW - 2 * NS_PER_DAY - 1_000_000_000).to_string()}),
+        ],
+    );
+    seed_reminders(
+        &db,
+        "ledger",
+        &[
+            json!({"id": "aaaaaaaa16", "kind": "add", "text": "Reboot the NUC",
+                "on": "2027-01-15", "utc_offset": "+00:00",
+                "due_at": (PINNED_NOW - NS_PER_DAY).to_string(), "lead": 1,
+                "blocks": "nuc-boot",
+                "recorded_at": (PINNED_NOW - NS_PER_DAY).to_string()}),
+            remind_add(
+                "bbbbbbbb17",
+                "Upgrade the firmware",
+                PINNED_NOW + 3 * NS_PER_DAY,
+            ),
+        ],
+    );
+    read_only.store(true, Ordering::SeqCst);
+    let temp = tempfile::tempdir().unwrap();
+    let session = cort::memory_store::session_recall_with(
+        temp.path(),
+        &db,
+        "self",
+        ("ledger", "origin"),
+        Instant::now(),
+        PINNED_NOW,
+    )
+    .unwrap();
+    let rendered = cort::hook_recall::render_session(&session, PINNED_NOW).unwrap();
+    assert_eq!(
+        (
+            rendered.entries,
+            rendered.reminders,
+            rendered.questions,
+            rendered.notes
+        ),
+        (20, 1, 1, 15)
+    );
+    let text = &rendered.text;
+    let ledger = text.find("[id-24]").unwrap();
+    let reminders = text.find("Reminders for this project").unwrap();
+    let questions = text.find(QUESTIONS_HEADER).unwrap();
+    let notes = text.find("unreviewed harness notes").unwrap();
+    assert!(
+        ledger < reminders && reminders < questions && questions < notes,
+        "{text}"
+    );
+    // The due reminder is listed with its id8, date, label and blocks; the scheduled one only
+    // counted.
+    assert!(
+        text.contains("\n- aaaaaaaa  2027-01-15 overdue 1d  Reboot the NUC  (blocks: nuc-boot)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("\n… 1 scheduled (next 2027-01-15): cort remind list"),
+        "{text}"
+    );
+    assert_eq!(requests.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn five_due_lists_four_and_counts_one_more_due() {
+    let events: Vec<Value> = (1..=5)
+        .map(|k| {
+            remind_add(
+                &format!("aaaaaaaa0{k}ccccccc"),
+                &format!("Task {k}"),
+                PINNED_NOW - i128::from(k) * NS_PER_DAY,
+            )
+        })
+        .collect();
+    let session = remind_session(folded_reminders(events));
+    let rendered = cort::hook_recall::render_session(&session, PINNED_NOW).unwrap();
+    assert_eq!(rendered.reminders, 4);
+    let text = &rendered.text;
+    let block = &text[text.find("Reminders for this project").unwrap()..];
+    assert!(block.len() <= 800, "{}", block.len());
+    // Oldest effective due_at first: the four listed are the four oldest, newest left out.
+    assert!(block.find("Task 5").unwrap() < block.find("Task 2").unwrap());
+    assert!(!block.contains("Task 1"), "{block}");
+    assert!(
+        block.ends_with("\n… 1 more due: cort remind list"),
+        "{block}"
+    );
+}
+
+#[test]
+fn cjk_lines_keep_24_bytes_of_text() {
+    // The motivating shape: four due reminders whose text is 200 CJK characters each. A byte
+    // share that cuts a line to its prefix alone would hide the task entirely.
+    let events: Vec<Value> = (1..=4)
+        .map(|k| {
+            remind_add(
+                &format!("{:08x}dddddddd", k),
+                &"編".repeat(200),
+                PINNED_NOW - i128::from(k) * NS_PER_DAY,
+            )
+        })
+        .collect();
+    let session = remind_session(folded_reminders(events));
+    let rendered = cort::hook_recall::render_session(&session, PINNED_NOW).unwrap();
+    assert_eq!(rendered.reminders, 4);
+    let text = &rendered.text;
+    let block = &text[text.find("Reminders for this project").unwrap()..];
+    assert!(block.len() <= 800, "{}", block.len());
+    assert!(
+        block.find("overdue 4d").unwrap() < block.find("overdue 1d").unwrap(),
+        "{block}"
+    );
+    for k in 1..=4u64 {
+        let prefix = format!("- {k:08x}  2027-01-15 overdue {k}d  ", k = k);
+        let line = block
+            .lines()
+            .find(|l| l.starts_with(&prefix))
+            .unwrap_or_else(|| panic!("{block}"));
+        let cut = line
+            .strip_prefix(&prefix)
+            .unwrap_or_else(|| panic!("{line}"));
+        assert!(cut.ends_with('…'), "{line}");
+        assert!(cut.len() - 3 >= 24, "{line}");
+    }
+}
+
+#[test]
+fn only_scheduled_is_one_line_without_header() {
+    let events = vec![
+        remind_add_on(
+            "aaaaaaaa21",
+            "Later task",
+            "2027-01-24",
+            PINNED_NOW + 9 * NS_PER_DAY,
+        ),
+        remind_add_on(
+            "bbbbbbbb22",
+            "Soon task",
+            "2027-01-17",
+            PINNED_NOW + 2 * NS_PER_DAY,
+        ),
+    ];
+    let session = remind_session(folded_reminders(events));
+    let rendered = cort::hook_recall::render_session(&session, PINNED_NOW).unwrap();
+    assert_eq!(rendered.reminders, 0);
+    // The whole block is one line: no header, no listed task text, earliest date named.
+    assert!(
+        rendered
+            .text
+            .ends_with("\n2 reminders scheduled (next 2027-01-17): cort remind list"),
+        "{}",
+        rendered.text
+    );
+    assert!(
+        !rendered.text.contains("Reminders for this project"),
+        "{}",
+        rendered.text
+    );
+    assert_eq!(
+        cort::hook_recall::reminders_usage(&session),
+        ("reminders_due", json!(0))
+    );
+}
+
+#[test]
+fn closed_only_renders_nothing() {
+    let events = vec![
+        remind_add("cccccccc23", "Done task", PINNED_NOW - NS_PER_DAY),
+        remind_close("e-close", "cccccccc23"),
+    ];
+    let session = remind_session(folded_reminders(events));
+    assert!(cort::hook_recall::render_session(&session, PINNED_NOW).is_none());
+    assert_eq!(
+        cort::hook_recall::reminders_usage(&session),
+        ("reminders_due", json!(0))
+    );
+}
+
+#[test]
+fn every_block_full_stays_within_9500_bytes() {
+    use cort::memory::{MemoryEntry, MemoryHit, MemoryRecall};
+    use cort::notes_upload::NoteBrief;
+    let hits: Vec<MemoryHit> = (0..30)
+        .map(|i| MemoryHit {
+            entry: MemoryEntry {
+                id: format!("id-{i}"),
+                key: format!("key-{i}"),
+                claim: "é".repeat(500),
+                source: "docs/memory.md".into(),
+                source_line: i + 1,
+                source_sha256: String::new(),
+                unsourced: false,
+                source_line_sha256: None,
+                recorded_at: format!("2026-10-{:02}", i + 1),
+                supersedes: None,
+                resolves: vec![],
+                recorded_machine: None,
+                recorded_machine_source: None,
+            },
+            matched_terms: None,
+            evidence_status: "source_unchanged".into(),
+            source_file_changed: Some(false),
+            source_line_status: None,
+            source_line_now: None,
+        })
+        .collect();
+    let reminder_events: Vec<Value> = (1..=5)
+        .map(|k| {
+            remind_add(
+                &format!("{:08x}eeeeeeee", k),
+                &"編".repeat(200),
+                PINNED_NOW - i128::from(k) * NS_PER_DAY,
+            )
+        })
+        .collect();
+    let question_events: Vec<Value> = (0..12)
+        .map(|i| {
+            ask(
+                &format!("{i:02}ffffff66"),
+                &format!("{i:02}{}", "é".repeat(590)),
+                1,
+            )
+        })
+        .collect();
+    let questions = {
+        let events = question_events
+            .into_iter()
+            .map(|v| serde_json::from_value(v).unwrap())
+            .collect();
+        cort::question::fold(events, now_ns(), 14).questions
+    };
+    let notes: Vec<NoteBrief> = (0..15)
+        .map(|i| NoteBrief {
+            note_id: format!("note-{i:02}"),
+            machine: "remote-machine".into(),
+            host: Some("NUC11i5".into()),
+            file_name: format!("{i:02}{}", "é".repeat(200)),
+            updated_at: "2026-10-27T00:00:00Z".into(),
+        })
+        .collect();
+    let session = cort::memory_store::SessionRecall {
+        recall: MemoryRecall {
+            ledger_status: "present".into(),
+            sync_status: None,
+            match_kind: None,
+            hits,
+        },
+        omitted: 0,
+        notes,
+        notes_total: 20,
+        questions: Some(questions),
+        reminders: Some(folded_reminders(reminder_events)),
+    };
+    let rendered = cort::hook_recall::render_session(&session, now_ns()).unwrap();
+    assert!(rendered.entries > 0 && rendered.notes > 0, "{rendered:?}");
+    assert_eq!(rendered.reminders, 4);
+    assert_eq!(rendered.questions, 8);
+    assert!(
+        rendered.text.contains("Reminders for this project")
+            && rendered.text.contains(QUESTIONS_HEADER)
+            && rendered.text.contains("unreviewed harness notes"),
+        "{}",
+        rendered.text
+    );
+    assert!(rendered.text.len() <= 9500, "{}", rendered.text.len());
+}
+
+#[test]
+fn usage_row_records_reminders_due_and_shown() {
+    let events = vec![
+        remind_add("dddddddd24", "Overdue task", PINNED_NOW - 2 * NS_PER_DAY),
+        remind_add("eeeeeeee25", "Task today", PINNED_NOW),
+        remind_add_on(
+            "ffffffff26",
+            "Far task",
+            "2027-01-30",
+            PINNED_NOW + 15 * NS_PER_DAY,
+        ),
+        remind_add("9999999927", "Closed task", PINNED_NOW - NS_PER_DAY),
+        remind_close("e-close", "9999999927"),
+    ];
+    let session = remind_session(folded_reminders(events));
+    // Due-ish before the caps: overdue + due; scheduled and closed are not counted.
+    assert_eq!(
+        cort::hook_recall::reminders_usage(&session),
+        ("reminders_due", json!(2))
+    );
+    let rendered = cort::hook_recall::render_session(&session, PINNED_NOW).unwrap();
+    assert_eq!(rendered.reminders, 2);
+    // A dropped read names the block instead of counting it.
+    let mut dropped = session;
+    dropped.reminders = None;
+    assert_eq!(
+        cort::hook_recall::reminders_usage(&dropped),
+        ("reminders", json!("dropped"))
     );
 }
