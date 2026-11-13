@@ -137,8 +137,14 @@ pub struct SessionRender {
     pub reminders: usize,
 }
 
+/// What a dropped reminders read leaves at the reminders position: one line, never counted as
+/// a shown reminder.
+const DROPPED_REMINDERS: &str = "\nreminders could not be read: cort remind list";
+
 /// Ledger entries, then due reminders, then open questions, then other machines' notes; `None`
-/// only when all four are empty. A reminders-only project still produces context.
+/// only when all four are empty and the reminders read was not dropped. A reminders-only
+/// project still produces context, and a dropped reminders read says so in one line where the
+/// block would have sat.
 pub fn render_session(s: &SessionRecall, now_ns: i128) -> Option<SessionRender> {
     let ledger = render_with_omitted(s.recall.clone(), s.omitted);
     let reminders = s.reminders.as_deref().and_then(render_reminders);
@@ -147,7 +153,13 @@ pub fn render_session(s: &SessionRecall, now_ns: i128) -> Option<SessionRender> 
         .as_deref()
         .and_then(|q| render_questions(q, now_ns));
     let notes = render_notes(&s.notes, s.notes_total);
-    if ledger.is_none() && reminders.is_none() && questions.is_none() && notes.is_none() {
+    let reminders_dropped = s.reminders.is_none();
+    if ledger.is_none()
+        && reminders.is_none()
+        && questions.is_none()
+        && notes.is_none()
+        && !reminders_dropped
+    {
         return None;
     }
     let (text, entries) = ledger.unwrap_or_else(|| (HEADER.to_string(), 0));
@@ -161,6 +173,8 @@ pub fn render_session(s: &SessionRecall, now_ns: i128) -> Option<SessionRender> 
     if let Some((section, shown)) = reminders {
         out.text.push_str(&section);
         out.reminders = shown;
+    } else if reminders_dropped {
+        out.text.push_str(DROPPED_REMINDERS);
     }
     if let Some((section, shown)) = questions {
         out.text.push_str(&section);
@@ -207,12 +221,28 @@ pub fn reminders_usage(s: &SessionRecall) -> (&'static str, Value) {
     }
 }
 
+/// Every optional-block field the hook's usage row carries for a session that was read:
+/// `questions_open` or `questions: "dropped"`, `reminders_due` or `reminders: "dropped"`, and,
+/// when context was injected, `questions_shown` and `reminders_shown`. The hook writes exactly
+/// this list, so a test of it is a test of the row.
+pub fn session_usage_fields(
+    s: &SessionRecall,
+    rendered: Option<&SessionRender>,
+) -> Vec<(&'static str, Value)> {
+    let mut fields = vec![questions_usage(s), reminders_usage(s)];
+    if let Some(rendered) = rendered {
+        fields.push(("questions_shown", Value::from(rendered.questions)));
+        fields.push(("reminders_shown", Value::from(rendered.reminders)));
+    }
+    fields
+}
+
 /// Due reminders the fold marked overdue, due or upcoming, oldest effective `due_at` first; the
 /// scheduled ones are only counted. Every listed line gets a fair share of the byte budget
-/// (max-min, as the questions block) and is cut with `…` past its share; the shortest line worth
-/// showing is its own prefix plus a little text, so a CJK task is never cut to nothing. `None`
-/// when no reminder is non-closed; when nothing is due-ish the block is one count line with no
-/// header.
+/// (max-min, as the questions block) and is cut with `…` past its share; a line that cannot
+/// keep its prefix plus [`MIN_REMINDER_TEXT_BYTES`] bytes of text after the cut is not listed,
+/// so a CJK task is never cut to nothing. `None` when no reminder is non-closed; when nothing
+/// is due-ish the block is one count line with no header.
 fn render_reminders(reminders: &[Reminder]) -> Option<(String, usize)> {
     // Oldest effective due_at first, the fold's own order, restated so the renderer does not
     // depend on the caller having kept it.
@@ -269,17 +299,10 @@ fn render_reminders(reminders: &[Reminder]) -> Option<(String, usize)> {
     }
     let mut shown = 0;
     for ((line, prefix_len), budget) in lines.iter().zip(budgets) {
-        // A line shorter than its prefix plus a little text is not worth listing.
-        let min_line = prefix_len + MIN_REMINDER_TEXT_BYTES;
         if line.len() <= budget {
             section.push_str(line);
-        } else if budget >= min_line {
-            let mut end = budget - '…'.len_utf8();
-            while !line.is_char_boundary(end) {
-                end -= 1;
-            }
-            section.push_str(&line[..end]);
-            section.push('…');
+        } else if let Some(cut) = cut_line(line, *prefix_len, budget) {
+            section.push_str(&cut);
         } else {
             continue;
         }
@@ -302,6 +325,19 @@ fn render_reminders(reminders: &[Reminder]) -> Option<(String, usize)> {
     };
     section.push_str(&tail);
     Some((section, shown))
+}
+
+/// Cut `line` to `budget` bytes with a trailing `…`, keeping at least
+/// [`MIN_REMINDER_TEXT_BYTES`] bytes of text after `prefix_len`; `None` when the ellipsis and
+/// the char-boundary backoff would leave less, so the floor is on the text that actually
+/// survives, not on the budget. A line that fits its budget never comes here: the caller
+/// lists it whole.
+pub(crate) fn cut_line(line: &str, prefix_len: usize, budget: usize) -> Option<String> {
+    let mut end = budget.checked_sub('…'.len_utf8())?;
+    while !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    (end >= prefix_len + MIN_REMINDER_TEXT_BYTES).then(|| format!("{}…", &line[..end]))
 }
 
 /// One reminder line and the byte length of its prefix, so the renderer knows where the text
@@ -492,5 +528,42 @@ pub fn claim_prompt_session(session_id: &str) -> Result<bool, std::io::Error> {
         Ok(_) => Ok(true),
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
         Err(e) => Err(e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cut_line_keeps_exactly_the_floor_and_refuses_one_byte_less() {
+        // An ASCII prefix, then CJK text at 3 bytes a character: the floor lands on a
+        // character boundary, so nothing backs off.
+        let prefix = "\n- 12345678  2027-01-15 today  ";
+        let line = format!("{prefix}{}", "編".repeat(60));
+        let exact = prefix.len() + MIN_REMINDER_TEXT_BYTES;
+        let cut = cut_line(&line, prefix.len(), exact + '…'.len_utf8()).unwrap();
+        assert_eq!(cut, format!("{}…", &line[..exact]));
+        // One byte of budget less backs off to 21 bytes of text: under the floor, so the
+        // line is not worth listing at all.
+        assert_eq!(cut_line(&line, prefix.len(), exact + 2), None);
+    }
+
+    #[test]
+    fn a_line_under_its_budget_is_listed_whole() {
+        // The caller's own path: a line that fits its share is pushed whole, and cut_line
+        // never sees it.
+        let event = r#"{"id":"aaaaaaaa31","kind":"add","text":"Reboot the NUC","on":"2027-01-15","utc_offset":"+00:00","due_at":"0","lead":1,"recorded_at":"0"}"#;
+        let folded = crate::remind::fold(
+            vec![crate::remind::parse_event(event).expect("event")],
+            2 * NS_PER_DAY,
+        );
+        let (section, shown) = render_reminders(&folded.reminders).expect("block");
+        assert_eq!(shown, 1);
+        assert!(
+            section.contains("\n- aaaaaaaa  2027-01-15 overdue 2d  Reboot the NUC"),
+            "{section}"
+        );
+        assert!(!section.contains('…'), "{section}");
     }
 }

@@ -204,9 +204,12 @@ the active entries for the project go into `additionalContext`, newest first, ca
 only, never bodies, capped at 15 and 1200 bytes, and labelled unreviewed. Open questions (1500
 bytes) and dated reminders (`cort remind`, 800 bytes, listed from the day before their date until
 closed, placed right after the ledger entries) come from the same pipeline; each of notes,
-questions and reminders is dropped on its own SQL error without taking the others. It reads the shared
-database over the network in one pipeline (plus one ledger-only retry when the notes statements fail
-with a SQL error and at least 200 ms remain) and never writes to it or takes a local lock. The
+questions and reminders is dropped on its own SQL error without taking the others (a dropped
+reminders read still prints one line saying so); a non-SQL error in any statement fails the whole
+read. It reads the shared database over the network in one pipeline (plus at most two retries, each
+only with at least 200 ms remaining: under the unaliased project id when the ledger read fails with
+a SQL error, and without the notes -- and without any optional read that failed in the same answer --
+when a notes statement does) and never writes to it or takes a local lock. The
 network deadline is 3800 ms from process start (`remote::RECALL_DEADLINE`); the network timeout
 defaults to 3500 ms (`CORT_RECALL_TIMEOUT_MS`), is capped at 3700 ms, and is also limited to the
 remaining deadline minus 100 ms. It was 2500/1500 ms until 2026-10-29, when the first read after an idle

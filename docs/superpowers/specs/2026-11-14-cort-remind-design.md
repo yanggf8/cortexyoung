@@ -196,7 +196,10 @@ them drops that one, records it (`questions: "dropped"`, `reminders: "dropped"`,
 today), and keeps the rest; none is retried except the existing alias/notes retry, which keeps
 its current trigger. A non-SQL error anywhere stays a whole-recall error, as today. An
 undecodable reminder row drops the reminders block (recorded `dropped`), never the ledger, as
-the questions precedent does.
+the questions precedent does. Unlike questions, a dropped reminders read is not silent: the block is
+the single line `reminders could not be read: cort remind list` (code review, 2026-11-14: a due
+reminder must never be missing without a trace). A non-SQL error in any statement, even after an
+earlier optional SQL error, fails the whole read.
 
 The usage row gains `reminders_due` (`upcoming` + `due` + `overdue`, before caps) and
 `reminders_shown`, or `reminders: "dropped"`.

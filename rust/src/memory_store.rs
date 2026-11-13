@@ -688,24 +688,34 @@ pub fn session_recall_with(
             at
         });
         let results = db.pipeline_each(&statements).map_err(|error| error.kind)?;
+        // A non-SQL error in any statement is a whole-recall error, even when an earlier
+        // optional statement failed with an SQL error this loop would have answered by
+        // dropping one read: every result is scanned for one before the first SQL failure is
+        // picked to decide the next move.
+        if let Some(kind) = results.iter().find_map(|r| {
+            r.as_ref()
+                .err()
+                .filter(|error| error.kind != ErrorKind::Sql)
+                .map(|error| error.kind)
+        }) {
+            return Err(kind);
+        }
         let sql_failed = |step: Option<usize>| {
             step.and_then(|at| results.get(at))
                 .is_some_and(|r| r.as_ref().is_err_and(|e| e.kind == ErrorKind::Sql))
         };
         let questions_sql_failed = sql_failed(questions_step);
         let reminders_sql_failed = sql_failed(reminders_step);
-        let Some((kind, step)) = results
+        // Only SQL failures remain, so the first one's step decides what the loop does about it.
+        let Some(step) = results
             .iter()
-            .find_map(|r| r.as_ref().err().map(|e| (e.kind, e.step)))
+            .find_map(|r| r.as_ref().err().and_then(|error| error.step))
         else {
             break (results, notes_steps, questions_step, reminders_step);
         };
-        if kind != ErrorKind::Sql {
-            return Err(kind);
-        }
         match step {
-            Some(0) if !retried_alias && with_notes && with_questions => retried_alias = true,
-            Some(1 | 2) if with_notes => {
+            0 if !retried_alias && with_notes && with_questions => retried_alias = true,
+            1 | 2 if with_notes => {
                 // Questions or reminders that failed in the same answer are already known:
                 // drop them with the notes rather than send them again to fail a second time.
                 with_notes = false;
@@ -718,10 +728,12 @@ pub fn session_recall_with(
             }
             // The questions or the reminders read failed, alone or together: keep the answer;
             // the decode below decides each read from its own result, and neither retries.
-            step if step == questions_step || step == reminders_step => {
+            step if questions_step.is_some_and(|at| at == step)
+                || reminders_step.is_some_and(|at| at == step) =>
+            {
                 break (results, notes_steps, questions_step, reminders_step);
             }
-            _ => return Err(kind),
+            _ => return Err(ErrorKind::Sql),
         }
     };
     let (results, notes_steps, questions_step, reminders_step) = result;

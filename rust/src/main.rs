@@ -1733,12 +1733,9 @@ fn cmd_hook_recall(
         match read {
             Ok(session) => {
                 let rendered = cort::hook_recall::render_session(&session, now_ns);
-                session_fields.push(cort::hook_recall::questions_usage(&session));
-                session_fields.push(cort::hook_recall::reminders_usage(&session));
+                session_fields = cort::hook_recall::session_usage_fields(&session, rendered.as_ref());
                 match rendered {
                     Some(rendered) => {
-                        session_fields.push(("questions_shown", json!(rendered.questions)));
-                        session_fields.push(("reminders_shown", json!(rendered.reminders)));
                         (
                             "injected",
                             Some(rendered.text),

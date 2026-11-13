@@ -261,13 +261,15 @@ written through the same checked-write path as questions (`outcome_unknown` on a
   DST-correct for that date); `YYYY-MM-DD±HH:MM` fixes the offset. The event stores `on`,
   `utc_offset` and the instant `due_at`, so every machine flips at the same moment whatever its own
   zone. `add` and `defer` always print `utc_offset`: on a machine set to UTC a bare date is 08:00 in
-  Taiwan, so check it and re-issue with an explicit offset when it is wrong. A date whose day has
-  already ended is refused (`remind_date_past`).
-- **States.** `scheduled` until `--lead` days before (default 1), then `upcoming` (`tomorrow`),
+  Taiwan, so check it and, when it is wrong, `defer <id> --on YYYY-MM-DD±HH:MM` to the same day with
+  the right offset. A date whose day has already ended is refused (`remind_date_past`).
+- **States.** `scheduled` until `--lead` days before (default 1), then `upcoming` (`tomorrow`, or
+  `in Nd` with a longer lead),
   `due` on the day (`today`), `overdue Nd` after it, `closed` once closed. Reminders never go stale:
   one may never have been shown (no session in that project), so the block is bounded by its caps.
 - **add** returns the earlier record as `exists` only when a non-closed reminder has the same terms
-  and the same `on`; otherwise a reminder sharing half the terms is listed as `similar`. Closed ones
+  and the same instant (`due_at`; the same day written with and without its offset is one instant);
+  otherwise a reminder sharing half the terms is listed as `similar`. Closed ones
   never block an add. **defer** writes a new date (the newest wins) and is refused once closed;
   **close** is refused on a closed reminder; `duplicate` needs `--of`.
 
@@ -276,7 +278,9 @@ questions and rendered right after the ledger entries. Listed: overdue, due and 
 first, at most 4 lines and 800 bytes, cut with `…` like the questions block; the tail line counts
 unlisted due ones first (`N more due`) and then the scheduled ones with the next date. Only
 scheduled ones → the single line `N reminders scheduled (next YYYY-MM-DD): cort remind list`.
-Each of notes, questions and reminders is dropped alone on its own SQL error; the usage row records
+Each of notes, questions and reminders is dropped alone on its own SQL error (a non-SQL error in any
+statement fails the whole read); a dropped reminders read prints the single line `reminders could not
+be read: cort remind list`, so a due reminder is never silently missing. The usage row records
 `reminders_due` and `reminders_shown`, or `reminders: "dropped"`. A session that stays open across
 the day does not re-read; the one-day lead is the mitigation.
 

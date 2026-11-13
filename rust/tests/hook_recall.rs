@@ -14,6 +14,11 @@ struct Recording {
     read_only: Arc<AtomicBool>,
     requests: Arc<Mutex<Vec<Vec<String>>>>,
     delay: Duration,
+    /// Answer the first statement whose SQL contains the text with this Hrana error code
+    /// instead of its result -- the per-step `BLOCKED` / `SQLITE_BUSY` shape no other helper
+    /// can produce: `SqliteTransport::fail_next_step` asserts a batch request, and a missing
+    /// table only ever fails SQL.
+    inject: Option<(&'static str, &'static str)>,
 }
 impl Transport for Recording {
     fn post(
@@ -39,17 +44,40 @@ impl Transport for Recording {
                 statements.iter().all(|s| s.starts_with("SELECT ")),
                 "{statements:?}"
             );
-            self.requests.lock().unwrap().push(statements);
+            self.requests.lock().unwrap().push(statements.clone());
             std::thread::sleep(self.delay);
         }
-        self.inner.post(url, body, headers)
+        let raw = self.inner.post(url, body, headers)?;
+        if let Some((needle, code)) = self.inject {
+            if let Some(at) = statements.iter().position(|s| s.contains(needle)) {
+                let mut answer: Value = serde_json::from_slice(&raw).expect("answer JSON");
+                answer["results"][at] =
+                    json!({"type":"error","error":{"code":code,"message":code},"response":null});
+                return Ok(serde_json::to_vec(&answer).expect("answer encode"));
+            }
+        }
+        Ok(raw)
     }
 }
 type Requests = Arc<Mutex<Vec<Vec<String>>>>;
 fn database() -> (RemoteDb, Arc<AtomicBool>, Requests) {
-    database_with_delay(Duration::ZERO)
+    recording(Duration::ZERO, None)
 }
 fn database_with_delay(delay: Duration) -> (RemoteDb, Arc<AtomicBool>, Requests) {
+    recording(delay, None)
+}
+/// A database whose pipeline answers report `code` for the one statement whose SQL contains
+/// `needle`.
+fn database_with_step_failure(
+    needle: &'static str,
+    code: &'static str,
+) -> (RemoteDb, Arc<AtomicBool>, Requests) {
+    recording(Duration::ZERO, Some((needle, code)))
+}
+fn recording(
+    delay: Duration,
+    inject: Option<(&'static str, &'static str)>,
+) -> (RemoteDb, Arc<AtomicBool>, Requests) {
     let read_only = Arc::new(AtomicBool::new(false));
     let requests = Arc::new(Mutex::new(Vec::new()));
     let db = RemoteDb::new(
@@ -60,6 +88,7 @@ fn database_with_delay(delay: Duration) -> (RemoteDb, Arc<AtomicBool>, Requests)
             read_only: Arc::clone(&read_only),
             requests: Arc::clone(&requests),
             delay,
+            inject,
         }),
     )
     .unwrap();
@@ -1439,9 +1468,11 @@ fn stale_questions_are_counted_not_listed() {
         text.ends_with("\n2 open questions (2 stale), none listed: cort question list"),
         "{text}"
     );
-    // Nothing open, nothing to say.
-    let session = session_with(Vec::new());
-    assert!(cort::hook_recall::render_session(&session, now_ns()).is_none());
+    // Nothing open, nothing to say -- but only because every read arrived: a dropped
+    // reminders read still says so (dropped_reminders_say_so_in_one_line).
+    let mut quiet = session_with(Vec::new());
+    quiet.reminders = Some(Vec::new());
+    assert!(cort::hook_recall::render_session(&quiet, now_ns()).is_none());
 }
 
 #[test]
@@ -1603,6 +1634,33 @@ fn notes_then_questions_failure_keeps_the_ledger() {
         vec![5, 1]
     );
     assert!(requests[1][0].contains("project_memory"));
+}
+
+#[test]
+fn non_sql_error_after_optional_sql_error_fails_the_recall() {
+    // The questions statement fails SQL on its own (no table) while the reminders statement
+    // answers SQLITE_BUSY: the first error is an optional-read SQL failure, but the Busy
+    // behind it is a whole-recall error, not a dropped reminders read recorded quietly
+    // behind the earlier SQL failure.
+    let (db, read_only, requests) = database_with_step_failure("project_reminders", "SQLITE_BUSY");
+    seed_ledger(&db);
+    seed_alias(&db);
+    seed_notes(&db);
+    read_only.store(true, Ordering::SeqCst);
+    let temp = tempfile::tempdir().unwrap();
+    let result = cort::memory_store::session_recall_with(
+        temp.path(),
+        &db,
+        "self",
+        ("ledger", "origin"),
+        Instant::now(),
+        now_ns(),
+    );
+    assert!(
+        matches!(result, Err(cort::remote::ErrorKind::Busy)),
+        "{result:?}"
+    );
+    assert_eq!(requests.lock().unwrap().len(), 1);
 }
 
 #[test]
@@ -1983,9 +2041,11 @@ fn five_due_lists_four_and_counts_one_more_due() {
 }
 
 #[test]
-fn cjk_lines_keep_24_bytes_of_text() {
-    // The motivating shape: four due reminders whose text is 200 CJK characters each. A byte
-    // share that cuts a line to its prefix alone would hide the task entirely.
+fn cjk_lines_share_the_budget() {
+    // The motivating shape: four due reminders whose text is 200 CJK characters each. The
+    // max-min split gives every line a share of the 800 bytes and each is cut to its own
+    // share, so no one long line crowds out the rest (the shortest-share floor is
+    // cut_line's own unit test).
     let events: Vec<Value> = (1..=4)
         .map(|k| {
             remind_add(
@@ -2069,6 +2129,34 @@ fn closed_only_renders_nothing() {
         cort::hook_recall::reminders_usage(&session),
         ("reminders_due", json!(0))
     );
+}
+
+#[test]
+fn dropped_reminders_say_so_in_one_line() {
+    // Alone: the notice line is the whole context, it is not a shown reminder, and it is
+    // enough for the session to return Some.
+    let mut session = remind_session(Vec::new());
+    session.reminders = None;
+    let rendered = cort::hook_recall::render_session(&session, PINNED_NOW).unwrap();
+    assert_eq!((rendered.entries, rendered.reminders), (0, 0));
+    assert!(
+        rendered
+            .text
+            .ends_with("\nreminders could not be read: cort remind list"),
+        "{}",
+        rendered.text
+    );
+    // In company: the line sits in the reminders position, between the ledger and the
+    // questions.
+    let session = session_with(vec![ask("1234567832aaaaaa", "Which port?", 2)]);
+    let rendered = cort::hook_recall::render_session(&session, now_ns()).unwrap();
+    let text = &rendered.text;
+    let notice_at = text
+        .find("reminders could not be read: cort remind list")
+        .unwrap();
+    let questions_at = text.find(QUESTIONS_HEADER).unwrap();
+    assert!(notice_at < questions_at, "{text}");
+    assert_eq!(rendered.reminders, 0);
 }
 
 #[test]
@@ -2188,5 +2276,99 @@ fn usage_row_records_reminders_due_and_shown() {
     assert_eq!(
         cort::hook_recall::reminders_usage(&dropped),
         ("reminders", json!("dropped"))
+    );
+}
+
+#[test]
+fn hook_recall_usage_row_carries_reminder_fields() {
+    // The hook writes exactly `session_usage_fields` into its row. The CLI process itself
+    // cannot read a seeded database -- every URL scheme RemoteDb accepts becomes https:// and
+    // the transport speaks TLS against trusted roots, so a locally spawned hook only ever
+    // reaches remote_unreachable or remote_timeout -- so the fields are asserted through that
+    // shared function, and at the process level only for the fact that a failed read carries
+    // none of them.
+    let (db, read_only, _) = database();
+    seed_ledger(&db);
+    seed_alias(&db);
+    seed_notes(&db);
+    seed_questions(&db, "ledger", &[]);
+    seed_reminders(
+        &db,
+        "ledger",
+        &[remind_add(
+            "aaaaaaaa34",
+            "Reboot the NUC",
+            now_ns() - 2 * NS_PER_DAY,
+        )],
+    );
+    read_only.store(true, Ordering::SeqCst);
+    let temp = tempfile::tempdir().unwrap();
+    let session = cort::memory_store::session_recall_with(
+        temp.path(),
+        &db,
+        "self",
+        ("ledger", "origin"),
+        Instant::now(),
+        now_ns(),
+    )
+    .unwrap();
+    let rendered = cort::hook_recall::render_session(&session, now_ns()).unwrap();
+    let row = Value::Object(
+        cort::hook_recall::session_usage_fields(&session, Some(&rendered))
+            .into_iter()
+            .map(|(key, value)| (key.to_string(), value))
+            .collect(),
+    );
+    assert_eq!(row["reminders_due"], json!(1), "{row}");
+    assert_eq!(row["reminders_shown"], json!(1), "{row}");
+    assert!(row.get("reminders").is_none(), "{row}");
+
+    // A dropped reminders read: the field names the block instead of counting it.
+    let (db, read_only, _) = database();
+    seed_ledger(&db);
+    seed_alias(&db);
+    seed_notes(&db);
+    seed_questions(&db, "ledger", &[]);
+    read_only.store(true, Ordering::SeqCst);
+    let temp = tempfile::tempdir().unwrap();
+    let session = cort::memory_store::session_recall_with(
+        temp.path(),
+        &db,
+        "self",
+        ("ledger", "origin"),
+        Instant::now(),
+        now_ns(),
+    )
+    .unwrap();
+    let rendered = cort::hook_recall::render_session(&session, now_ns());
+    let fields = cort::hook_recall::session_usage_fields(&session, rendered.as_ref());
+    assert!(
+        fields.contains(&("reminders", json!("dropped"))),
+        "{fields:?}"
+    );
+    assert!(
+        !fields.iter().any(|(k, _)| *k == "reminders_due"),
+        "{fields:?}"
+    );
+
+    // Process level: a hook that cannot reach the database records the failure and none of
+    // the reminder fields -- they arrive only with a read that succeeded.
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let repo = git_repo(root);
+    config(&root.join("data"), "turso://127.0.0.1:9");
+    let (out, _) = run(root, root, &json!({"cwd": repo}).to_string(), Some("400"));
+    assert!(out.status.success());
+    let row = outcome(root);
+    let kind = row["hook"].as_str().unwrap().to_owned();
+    assert!(
+        kind == "remote_unreachable" || kind == "remote_timeout",
+        "{kind}"
+    );
+    assert!(
+        row.get("reminders_due").is_none()
+            && row.get("reminders_shown").is_none()
+            && row.get("reminders").is_none(),
+        "{row}"
     );
 }
