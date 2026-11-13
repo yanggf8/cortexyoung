@@ -33,7 +33,7 @@ use std::time::{Duration, Instant};
 // measurement that has a numerator -- and since the thin trigger landed the row says only that a
 // fire happened, so that pairing is now read from the rows rather than inferred from a verdict.
 // It is not a verb anyone types.
-const KNOWN_COMMANDS: [&str; 17] = [
+const KNOWN_COMMANDS: [&str; 18] = [
     "index",
     "status",
     "projects",
@@ -42,6 +42,7 @@ const KNOWN_COMMANDS: [&str; 17] = [
     "usage",
     "memory",
     "question",
+    "remind",
     "measure",
     "hook-suggest",
     "hook-refresh",
@@ -65,6 +66,7 @@ fn usage_value() -> Value {
             "usage": "cort usage [days] [-f json|lean]",
             "memory": "cort memory <configure|import-config|record|resolve|recall|status|check|notes|alias> [options]",
             "question": "cort question <add|list|answer|close> [options]  (questions for the human, kept per repo in the memory database; cort question --help lists each verb)",
+            "remind": "cort remind <add|list|defer|close> [options]  (dated tasks that surface at session start from the day before, kept per repo in the memory database; cort remind --help lists each verb)",
             "measure": "cort measure <configure|show|record|collect|health|status|cron|report> [options]  (uploads start at 2026-10-28 00:00 Taiwan time; collect: scan and upload the batch; --background appends at most one result to measure.log (none when skipped_busy) without stdout; health: observe recently used indexes and write local index_health_log, reading indexes only, with no network; --background appends the result to measure.log without stdout; status: read local collection state, -f json|lean; cron: manual install or removal of the legacy entry, no longer installed automatically; hook kick is the only automatic collection trigger; command_log and index_health_log keep uploaded rows 90 days and rows not yet uploaded 180 days, pruned when a new command is recorded; rows still not uploaded after 180 days are deleted and counted in measure status (pruned_unuploaded_rows) and measure.log)",
             "hook-suggest": "cort hook-suggest  (PreToolUse hook: records one fire row, kicks collection, and relays a configured gate's deny; not a verb to type)",
             "hook-refresh": "cort hook-refresh  (PostToolUse hook: refreshes an existing index and may prompt on a private-memory save; not a verb to type)",
@@ -100,6 +102,16 @@ fn question_usage_value() -> Value {
         QuestionArgs::command(),
         "cort question",
         "Commands read the project at --root (default: the cwd). Ids accept a unique lowercase hex prefix of at least 8 characters.",
+    )
+}
+
+/// `cort remind --help`, rendered from `RemindArgs` as the question usage is from
+/// `QuestionArgs`.
+fn remind_usage_value() -> Value {
+    verbs_usage_value(
+        RemindArgs::command(),
+        "cort remind",
+        "Commands read the project at --root (default: the cwd). Ids accept a unique lowercase hex prefix of at least 8 characters. --on is YYYY-MM-DD or YYYY-MM-DD±HH:MM; a bare date means this machine's local zone, and add and defer always print the offset used (utc_offset).",
     )
 }
 
@@ -190,14 +202,14 @@ fn before_separator(args: &[String]) -> impl Iterator<Item = &String> {
 }
 
 /// `--help` and `-h` are flags and count wherever they appear before `--`. The bare word `help` is
-/// a command word, so it counts only where one can stand: first, or directly after `memory` or
-/// `question`.
+/// a command word, so it counts only where one can stand: first, or directly after `memory`,
+/// `question` or `remind`.
 /// Anywhere else it is a value -- `cort memory recall help` searches the ledger for the topic "help".
 fn wants_help(args: &[String]) -> bool {
     let at = |i: usize, word: &str| args.get(i).is_some_and(|a| a == word);
     before_separator(args).any(|a| a == "--help" || a == "-h")
         || at(0, "help")
-        || ((at(0, "memory") || at(0, "question")) && at(1, "help"))
+        || ((at(0, "memory") || at(0, "question") || at(0, "remind")) && at(1, "help"))
 }
 
 /// `cort memory record --help` answers with `record` alone, and `cort memory notes --help` with
@@ -469,6 +481,12 @@ fn render_emit(emit: &Emit) -> String {
         .filter(|_| emit.format == Format::Lean)
     {
         cort::question_store::render_lean(verb, &emit.payload)
+    } else if let Some(verb) = emit
+        .render_command
+        .and_then(|c| c.strip_prefix("remind-"))
+        .filter(|_| emit.format == Format::Lean)
+    {
+        cort::remind_store::render_lean(verb, &emit.payload)
     } else if emit.render_command == Some("hook-gate") && emit.format == Format::Lean {
         let p = &emit.payload;
         let field = |key: &str| match p.get(key) {
@@ -864,6 +882,89 @@ enum QuestionAction {
     },
 }
 
+#[derive(Parser, Debug)]
+#[command(
+    no_binary_name = true,
+    disable_help_flag = true,
+    disable_version_flag = true
+)]
+struct RemindArgs {
+    #[command(subcommand)]
+    action: RemindAction,
+}
+
+#[derive(Subcommand, Debug)]
+enum RemindAction {
+    /// File a dated task; it surfaces at session start from the day before its date.
+    Add {
+        #[arg(long)]
+        text: String,
+        /// `YYYY-MM-DD` (this machine's local zone) or `YYYY-MM-DD±HH:MM`.
+        #[arg(long)]
+        on: String,
+        /// Days early it surfaces, 0-30.
+        #[arg(long, default_value_t = 1)]
+        lead: u32,
+        #[arg(long)]
+        blocks: Option<String>,
+        #[arg(long)]
+        force: bool,
+        #[arg(long, value_parser = HARNESS_VALUES)]
+        harness: Option<String>,
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(short = 'f', long = "format", value_parser = ["json", "lean"])]
+        format: Option<String>,
+    },
+    /// Not closed by default, soonest first; `<id>` shows one with its events, `--match` searches all.
+    List {
+        id: Option<String>,
+        #[arg(long, conflicts_with_all = ["closed", "all"])]
+        open: bool,
+        #[arg(long, conflicts_with = "all")]
+        closed: bool,
+        #[arg(long)]
+        all: bool,
+        #[arg(long = "match", num_args = 1.., action = clap::ArgAction::Append)]
+        terms: Vec<String>,
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(short = 'f', long = "format", value_parser = ["json", "lean"])]
+        format: Option<String>,
+    },
+    /// Move the effective date to a new `--on`; refused on a closed reminder.
+    Defer {
+        id: String,
+        /// `YYYY-MM-DD` (this machine's local zone) or `YYYY-MM-DD±HH:MM`.
+        #[arg(long)]
+        on: String,
+        #[arg(long)]
+        note: Option<String>,
+        #[arg(long, value_parser = HARNESS_VALUES)]
+        harness: Option<String>,
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(short = 'f', long = "format", value_parser = ["json", "lean"])]
+        format: Option<String>,
+    },
+    /// Close as done, moot, or a duplicate of another reminder.
+    Close {
+        id: String,
+        #[arg(long, value_parser = ["done", "moot", "duplicate"])]
+        reason: String,
+        #[arg(long)]
+        of: Option<String>,
+        #[arg(long)]
+        note: Option<String>,
+        #[arg(long, value_parser = HARNESS_VALUES)]
+        harness: Option<String>,
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(short = 'f', long = "format", value_parser = ["json", "lean"])]
+        format: Option<String>,
+    },
+}
+
 #[derive(clap::Args, Debug)]
 #[command(group(clap::ArgGroup::new("from").required(true).multiple(false).args(["from_remote", "from_project"])))]
 struct AliasWriteArgs {
@@ -1045,6 +1146,7 @@ fn dispatch(args: &[String], usage: &mut UsageEvent, started: Instant) -> Result
         Some("usage") => cmd_usage(&args[1..], usage),
         Some("memory") => cmd_memory(&args[1..], usage),
         Some("question") => cmd_question(&args[1..], usage),
+        Some("remind") => cmd_remind(&args[1..], usage),
         Some("measure") => cmd_measure(&args[1..], usage),
         Some("hook-suggest") => cmd_hook_suggest(&args[1..], usage),
         Some("hook-refresh") => cmd_hook_refresh(&args[1..], usage),
@@ -2778,6 +2880,167 @@ fn question_error(error: cort::memory_store::LedgerError) -> CortError {
     }
 }
 
+/// Write failures keep the memory vocabulary (`remote: <kind>`, the code word at the start of a
+/// refusal) but name `cort remind list` as the way to settle an unknown outcome.
+fn remind_error(error: cort::memory_store::LedgerError) -> CortError {
+    use cort::memory_store::LedgerError;
+    match error {
+        LedgerError::Remote(kind) => memory_read_error(LedgerError::Remote(kind)),
+        LedgerError::NotRecorded { kind } => CortError::new(
+            "memory_not_recorded",
+            json!({"kind":kind.as_str(),
+                "message":format!("not recorded: {}; nothing was written; re-run the same command when the database is reachable",kind.as_str())}),
+        ),
+        LedgerError::OutcomeUnknown { id, kind, .. } => CortError::new(
+            "memory_outcome_unknown",
+            json!({"id":id,"kind":kind.as_str(),
+                "message":format!("outcome unknown: {}; reminder event {id} may or may not have been written; run `cort remind list --all` before re-running",kind.as_str())}),
+        ),
+        other => memory_ledger_error(other),
+    }
+}
+
+fn cmd_remind(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError> {
+    use cort::remind_store::{self, AddArgs, CloseReason, ListFilter};
+    let a = RemindArgs::try_parse_from(args.iter()).map_err(clap_fail)?;
+    // The row names the verb and the declared harness only: reminder text, notes, ids,
+    // dates and search terms are the user's words and never enter usage.db.
+    let (verb, harness, root, format) = match &a.action {
+        RemindAction::Add {
+            harness,
+            root,
+            format,
+            ..
+        } => ("add", harness, root, format),
+        RemindAction::List { root, format, .. } => ("list", &None, root, format),
+        RemindAction::Defer {
+            harness,
+            root,
+            format,
+            ..
+        } => ("defer", harness, root, format),
+        RemindAction::Close {
+            harness,
+            root,
+            format,
+            ..
+        } => ("close", harness, root, format),
+    };
+    let mut row = json!({"v": 1, "verb": verb});
+    if let Some(h) = harness {
+        row["harness_declared"] = json!(h);
+    }
+    usage.args_summary = row.to_string();
+    usage.project_id = cort::memory_store::project(root).ok();
+    let format = resolve_fmt(format.as_deref())?;
+    let (render_command, payload) = match a.action {
+        RemindAction::Add {
+            text,
+            on,
+            lead,
+            blocks,
+            force,
+            harness,
+            root,
+            format: _,
+        } => {
+            // Bounds and the date parse need no network, so they are refused here, before
+            // the store opens the ledger: an unconfigured machine answers them as itself.
+            cort::remind::validate_add(&text, blocks.as_deref(), lead).map_err(memory_error)?;
+            cort::remind::parse_on(&on).map_err(memory_error)?;
+            let args = AddArgs {
+                text,
+                on,
+                lead,
+                blocks,
+                harness,
+                force,
+            };
+            (
+                "remind-add",
+                remind_store::add(&root, args).map_err(remind_error)?,
+            )
+        }
+        RemindAction::List {
+            id,
+            open: _,
+            closed,
+            all,
+            terms,
+            root,
+            format: _,
+        } => {
+            let filter = if all {
+                ListFilter::All
+            } else if closed {
+                ListFilter::Closed
+            } else {
+                ListFilter::Open
+            };
+            let matching = (!terms.is_empty()).then(|| terms.join(" "));
+            (
+                "remind-list",
+                remind_store::list(&root, filter, id.as_deref(), matching.as_deref())
+                    .map_err(memory_read_error)?,
+            )
+        }
+        RemindAction::Defer {
+            id,
+            on,
+            note,
+            harness,
+            root,
+            format: _,
+        } => {
+            // As with add: a malformed --on is refused before the ledger is opened.
+            cort::remind::parse_on(&on).map_err(memory_error)?;
+            (
+                "remind-defer",
+                remind_store::defer(&root, &id, &on, note, harness).map_err(remind_error)?,
+            )
+        }
+        RemindAction::Close {
+            id,
+            reason,
+            of,
+            note,
+            harness,
+            root,
+            format: _,
+        } => {
+            // The --of rule needs no network either: duplicate requires --of, and --of is
+            // only for duplicate. Same words as the store, which re-checks them.
+            match (reason == "duplicate", of.as_deref()) {
+                (true, None) => {
+                    return Err(memory_error(
+                        "remind_of_required: --reason duplicate needs --of <id>".into(),
+                    ))
+                }
+                (false, Some(_)) => {
+                    return Err(memory_error(
+                        "remind_of_unexpected: --of is only for --reason duplicate".into(),
+                    ))
+                }
+                _ => {}
+            }
+            let reason = match reason.as_str() {
+                "done" => CloseReason::Done,
+                "moot" => CloseReason::Moot,
+                _ => CloseReason::Duplicate,
+            };
+            (
+                "remind-close",
+                remind_store::close(&root, &id, reason, of, note, harness).map_err(remind_error)?,
+            )
+        }
+    };
+    Ok(Emit {
+        render_command: Some(render_command),
+        format,
+        payload,
+    })
+}
+
 fn cmd_question(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError> {
     use cort::question_store::{self, AddArgs, CloseReason, ListFilter};
     let a = QuestionArgs::try_parse_from(args.iter()).map_err(clap_fail)?;
@@ -3569,6 +3832,8 @@ fn main() {
             narrow_usage(memory_usage_value(), &args[1..])
         } else if args.first().is_some_and(|a| a == "question") {
             narrow_usage(question_usage_value(), &args[1..])
+        } else if args.first().is_some_and(|a| a == "remind") {
+            narrow_usage(remind_usage_value(), &args[1..])
         } else {
             narrow_usage(usage_value(), &args)
         };

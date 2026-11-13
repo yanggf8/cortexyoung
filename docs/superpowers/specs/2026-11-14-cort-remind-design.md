@@ -72,7 +72,7 @@ every other cort command; no reminder text goes into it.
 
 ### Dates
 
-`--on` is `YYYY-MM-DD` or `YYYY-MM-DD±HH:MM`. Stored on the event: the date as given (`on`), the
+`--on` is `YYYY-MM-DD` or `YYYY-MM-DD±HH:MM`. Stored on the event: the date (`on`, always `YYYY-MM-DD`, the offset dropped), the
 offset used (`utc_offset`, e.g. `+08:00`), and the instant of midnight at that offset (`due_at`,
 ns since the epoch, the same unit as `recorded_at`). Every reader compares `now` against
 `due_at`, so all machines flip at the same instant; the day shown is always `on`.
@@ -101,7 +101,7 @@ motivated this) carries it into the day.
 ### add, defer, close
 
 **add** dedups against reminders that are **not closed**, using `question::terms`: the same term
-set **and** the same `on` → nothing written, the earlier record comes back as `exists`;
+set **and** the same instant (`due_at`) → nothing written, the earlier record comes back as `exists`;
 otherwise, half or more of the new terms present in a non-closed reminder → written, with
 `similar` ids and the `close --reason duplicate --of` command. Closed reminders never block an
 add (the same task next month is normal). `--force` writes even past `exists`. Bounds as
