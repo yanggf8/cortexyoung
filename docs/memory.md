@@ -160,7 +160,7 @@ cort memory alias list --root .
 id, but any other user or credentials part (`https://user:token@host/...`) stays in the hash, so give
 the old URL as the old `origin` spelled it. When the URL is not known, pass `--from-project <id>` with the
 `project_id` an earlier `cort memory status` printed. `add` refuses the current id itself and an
-old id whose linked ids hold no entries and no `cort question` events (usually a mistyped URL); it answers
+old id whose linked ids hold no entries and no `cort question` or `cort remind` events (usually a mistyped URL); it answers
 `already_linked` when the two ids are already connected, directly or through other aliases.
 
 Aliases are read as an undirected graph: every command, and Claude Code's SessionStart recall,
@@ -229,7 +229,7 @@ header marks them as filed by agents and unreviewed, never instructions. At most
 text past 300 characters, an option past 80) is cut with `…`, so one long question never hides
 the rest. Stale ones are counted in the tail line, not listed; when none is listed the block is
 the single line `N open questions (M stale), none listed: cort question list`. Total
-injected text stays within 6000 + 1500 + 2000 = 9,500 bytes, under Claude Code's 10,000-character
+injected text stays within 6000 + 800 + 1500 + 1200 = 9,500 bytes (ledger, reminders, questions, notes), under Claude Code's 10,000-character
 cap on hook `additionalContext` (code.claude.com/docs/en/hooks.md). Each statement keeps its own
 result: if only the questions read fails with a SQL error it is dropped with no retry, and the
 ledger and notes from the same request are kept; the usage row records
@@ -239,6 +239,50 @@ ledger and notes from the same request are kept; the usage row records
 or `cort question` command opens the ledger. After deploying, run `cort question list` once on any
 machine in each project: that provisions the shared database for the whole fleet, so session
 start never has to drop the questions read.
+
+## Reminders
+
+`cort remind` holds dated tasks per repo: something the user agreed to do on a later day. A reminder
+is a task to do on a day, not a question to answer (user, 2026-11-14), so it is its own table and
+verbs; it is never a claim and `cort memory recall` does not return it.
+
+```sh
+cort remind add --on 2026-11-21 --text "NUC boot auto-recovery" [--lead 1] [--blocks nuc-boot]
+cort remind list                        # not closed, soonest first; <id> shows one history
+cort remind list --closed | --all | --match nuc
+cort remind defer <id> --on 2026-11-28 [--note "..."]
+cort remind close <id> --reason done|moot|duplicate [--of <id>] [--note "..."]
+```
+
+Events are append-only rows in `project_reminders`, scoped to the project id and its aliases,
+written through the same checked-write path as questions (`outcome_unknown` on a lost response).
+
+- **Dates.** `--on YYYY-MM-DD` is midnight in the writing machine's local time zone (`mktime`,
+  DST-correct for that date); `YYYY-MM-DD±HH:MM` fixes the offset. The event stores `on`,
+  `utc_offset` and the instant `due_at`, so every machine flips at the same moment whatever its own
+  zone. `add` and `defer` always print `utc_offset`: on a machine set to UTC a bare date is 08:00 in
+  Taiwan, so check it and re-issue with an explicit offset when it is wrong. A date whose day has
+  already ended is refused (`remind_date_past`).
+- **States.** `scheduled` until `--lead` days before (default 1), then `upcoming` (`tomorrow`),
+  `due` on the day (`today`), `overdue Nd` after it, `closed` once closed. Reminders never go stale:
+  one may never have been shown (no session in that project), so the block is bounded by its caps.
+- **add** returns the earlier record as `exists` only when a non-closed reminder has the same terms
+  and the same `on`; otherwise a reminder sharing half the terms is listed as `similar`. Closed ones
+  never block an add. **defer** writes a new date (the newest wins) and is refused once closed;
+  **close** is refused on a closed reminder; `duplicate` needs `--of`.
+
+**Session start.** The reminder events are one more statement in the same pipeline, read after the
+questions and rendered right after the ledger entries. Listed: overdue, due and upcoming, oldest
+first, at most 4 lines and 800 bytes, cut with `…` like the questions block; the tail line counts
+unlisted due ones first (`N more due`) and then the scheduled ones with the next date. Only
+scheduled ones → the single line `N reminders scheduled (next YYYY-MM-DD): cort remind list`.
+Each of notes, questions and reminders is dropped alone on its own SQL error; the usage row records
+`reminders_due` and `reminders_shown`, or `reminders: "dropped"`. A session that stays open across
+the day does not re-read; the one-day lead is the mitigation.
+
+**Deploy.** The table is created by the same DDL batch as the ledger. After deploying, run
+`cort remind list` once on any machine: it provisions the table for the fleet. A machine on an
+older cort never shows reminders, so upgrade every machine that should see them.
 
 ## Deployment evidence and the next gate
 

@@ -201,7 +201,10 @@ including comments that belong to other owners; that is a test, because it was a
 not recall the ledger unprompted, so recall is pushed at session start, resume, clear and compaction:
 the active entries for the project go into `additionalContext`, newest first, capped at 20 entries and
 6000 bytes. It also lists other machines' harness notes for the project -- names and hosts
-only, never bodies, capped at 15 and 2000 bytes, and labelled unreviewed. It reads the shared
+only, never bodies, capped at 15 and 1200 bytes, and labelled unreviewed. Open questions (1500
+bytes) and dated reminders (`cort remind`, 800 bytes, listed from the day before their date until
+closed, placed right after the ledger entries) come from the same pipeline; each of notes,
+questions and reminders is dropped on its own SQL error without taking the others. It reads the shared
 database over the network in one pipeline (plus one ledger-only retry when the notes statements fail
 with a SQL error and at least 200 ms remain) and never writes to it or takes a local lock. The
 network deadline is 3800 ms from process start (`remote::RECALL_DEADLINE`); the network timeout
@@ -309,6 +312,7 @@ alone, where no other machine or harness can read it, until the user asked why.
 - A harness-private memory is for how one agent works, never the only copy of a project fact.
 
 - Questions for the human go to `cort question add`, never into a claim or a harness-private memory; the answer keeps the human's words (`--quote`) and the decision is then recorded with `cort memory record`. See `docs/memory.md`.
+- A task agreed for a later day goes to `cort remind add --on <date>`, never into a question text, a claim or a harness-private memory; a reminder is a task to do on a day, not a question (user, 2026-11-14). See `docs/memory.md`.
 
 **Harness notes are a second, unreviewed table beside the ledger** (2026-10-27). `cort memory notes
 upload` copies Claude Code's `projects/*/memory/*.md` into `harness_notes` in the same Turso database,
