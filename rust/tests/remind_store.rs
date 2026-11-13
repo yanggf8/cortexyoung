@@ -1,0 +1,514 @@
+//! Task 2 tests for the reminder store (`cort::remind_store`): table, checked writes, verbs.
+//!
+//! The store reads the real clock (`SystemTime::now` inside `now_ns`), so dates are computed
+//! from today rather than pinned: a pinned future date would rot into `remind_date_past`.
+
+use cort::memory_store::{Ledger, LedgerError};
+use cort::remind_store::{self, AddArgs, CloseReason, ListFilter};
+use cort::remote::{RemoteError, SqliteTransport, Transport};
+use serde_json::{json, Value};
+use std::path::Path;
+use std::process::Command;
+use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+#[derive(Clone)]
+enum Action {
+    ForwardThenTimeout,
+}
+
+#[derive(Default)]
+struct Control {
+    posts: usize,
+    next: Vec<(usize, Action)>,
+}
+
+struct Wrapped {
+    inner: Arc<SqliteTransport>,
+    control: Arc<Mutex<Control>>,
+}
+
+impl Transport for Wrapped {
+    fn post(
+        &self,
+        url: &str,
+        body: &[u8],
+        headers: &[(&str, &str)],
+    ) -> Result<Vec<u8>, RemoteError> {
+        let action = {
+            let mut control = self.control.lock().unwrap();
+            control.posts += 1;
+            control
+                .next
+                .iter()
+                .position(|(n, _)| *n == control.posts)
+                .map(|index| control.next.remove(index).1)
+        };
+        match action {
+            Some(Action::ForwardThenTimeout) => {
+                self.inner.post(url, body, headers)?;
+                let transport = SqliteTransport::new().unwrap();
+                transport.fail_next_status(504);
+                Err(transport.post(url, body, headers).unwrap_err())
+            }
+            None => self.inner.post(url, body, headers),
+        }
+    }
+}
+
+struct Fixture {
+    _temp: tempfile::TempDir,
+    ledger: Ledger,
+    control: Arc<Mutex<Control>>,
+    inner: Arc<SqliteTransport>,
+}
+
+impl Fixture {
+    fn new() -> Self {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        for args in [
+            vec!["init"],
+            vec![
+                "remote",
+                "add",
+                "origin",
+                "https://example.test/reminders.git",
+            ],
+        ] {
+            assert!(Command::new("git")
+                .current_dir(root)
+                .args(args)
+                .output()
+                .unwrap()
+                .status
+                .success());
+        }
+        let inner = Arc::new(SqliteTransport::new().unwrap());
+        let control = Arc::new(Mutex::new(Control::default()));
+        let ledger = Ledger::with_transport(
+            "https://example.test",
+            "test",
+            Box::new(Wrapped {
+                inner: inner.clone(),
+                control: control.clone(),
+            }),
+        )
+        .unwrap();
+        Self {
+            _temp: temp,
+            ledger,
+            control,
+            inner,
+        }
+    }
+    fn root(&self) -> &Path {
+        self._temp.path()
+    }
+    fn arm(&self, offset: usize, action: Action) {
+        let mut control = self.control.lock().unwrap();
+        let post = control.posts + offset;
+        control.next.push((post, action));
+    }
+    fn posts(&self) -> usize {
+        self.control.lock().unwrap().posts
+    }
+    fn query(&self, sql: &str) -> Result<Vec<Value>, String> {
+        let body =
+            json!({"requests":[{"type":"execute","stmt":{"sql":sql,"args":[]}},{"type":"close"}]})
+                .to_string();
+        let response = self
+            .inner
+            .post("https://example.test", body.as_bytes(), &[])
+            .unwrap();
+        let value: Value = serde_json::from_slice(&response).unwrap();
+        if value["results"][0]["type"] != "ok" {
+            return Err(value.to_string());
+        }
+        Ok(value["results"][0]["response"]["result"]["rows"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default())
+    }
+    fn rows(&self) -> usize {
+        self.query("SELECT id FROM project_reminders")
+            .map(|rows| rows.len())
+            .unwrap_or(0)
+    }
+    fn add_args(&self, args: AddArgs) -> Result<Value, LedgerError> {
+        remind_store::add_with(self.root(), args, &self.ledger)
+    }
+    fn add_on(&self, text: &str, on: &str) -> Value {
+        self.add_args(args(text, on)).unwrap()
+    }
+    fn defer(
+        &self,
+        id: &str,
+        on: &str,
+        note: Option<String>,
+        harness: Option<String>,
+    ) -> Result<Value, LedgerError> {
+        remind_store::defer_with(self.root(), id, on, note, harness, &self.ledger)
+    }
+    fn close(
+        &self,
+        id: &str,
+        reason: CloseReason,
+        of: Option<String>,
+        note: Option<String>,
+        harness: Option<String>,
+    ) -> Result<Value, LedgerError> {
+        remind_store::close_with(self.root(), id, reason, of, note, harness, &self.ledger)
+    }
+    fn list(&self, filter: ListFilter) -> Value {
+        remind_store::list_with(self.root(), filter, None, None, &self.ledger).unwrap()
+    }
+}
+
+fn args(text: &str, on: &str) -> AddArgs {
+    AddArgs {
+        text: text.into(),
+        on: on.into(),
+        lead: 1,
+        blocks: None,
+        harness: None,
+        force: false,
+    }
+}
+
+/// `YYYY-MM-DD+08:00` for the UTC day `days` from today: an explicit offset keeps `due_at`
+/// deterministic whatever the host's zone is set to.
+fn on_in_days(days: i64) -> String {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i128;
+    let day = secs.div_euclid(86_400) + i128::from(days);
+    // Howard Hinnant's `civil_from_days`, the inverse of the core's `days_from_civil`.
+    let z = day + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = y + i128::from(m <= 2);
+    format!("{y:04}-{m:02}-{d:02}+08:00")
+}
+
+fn added_id(out: &Value) -> String {
+    assert_eq!(out["outcome"], "added", "{out}");
+    out["reminder"]["id"].as_str().unwrap().to_string()
+}
+
+fn message(err: LedgerError) -> String {
+    match err {
+        LedgerError::Message(m) => m,
+        other => panic!("expected a message, got {other:?}"),
+    }
+}
+
+#[test]
+fn add_then_list_shows_due_order() {
+    let f = Fixture::new();
+    let soon = on_in_days(3);
+    let later = on_in_days(10);
+    // Added out of order: the list is by effective due_at ascending, not by insertion.
+    let b = added_id(&f.add_on("ThinkPad hotspot plan", &later));
+    let a = added_id(&f.add_on("NUC boot auto-recovery", &soon));
+    assert_eq!(a.len(), 16);
+    assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+    let listed = f.list(ListFilter::Open);
+    let reminders = listed["reminders"].as_array().unwrap();
+    assert_eq!(reminders.len(), 2, "{listed}");
+    assert_eq!(reminders[0]["id"], a.as_str());
+    assert_eq!(reminders[0]["on"], json!(soon));
+    assert_eq!(reminders[0]["utc_offset"], "+08:00");
+    assert_eq!(
+        reminders[0]["due_at"],
+        cort::remind::parse_on(&soon).unwrap().due_at.to_string()
+    );
+    assert_eq!(reminders[0]["text"], "NUC boot auto-recovery");
+    assert_eq!(reminders[0]["lead"], 1);
+    assert!(reminders[0]["state"].is_string());
+    assert!(reminders[0]["label"].is_string());
+    assert!(reminders[0].get("blocks").is_none());
+    assert_eq!(reminders[1]["id"], b.as_str());
+    assert!(listed.get("orphan_events").is_none());
+    assert!(listed.get("events_total").is_none());
+}
+
+#[test]
+fn add_exists_returns_earlier_without_write() {
+    let f = Fixture::new();
+    let on = on_in_days(5);
+    let first = added_id(&f.add_on("Reboot the NUC", &on));
+    let before = f.rows();
+    let out = f.add_args(args("reboot NUC", &on)).unwrap();
+    assert_eq!(out["outcome"], "exists", "{out}");
+    assert_eq!(out["reminder"]["id"], first.as_str());
+    assert_eq!(out["reminder"]["on"], json!(on));
+    assert_eq!(f.rows(), before);
+    // The same task filed for another day is written, with the earlier one as similar.
+    let other = f.add_args(args("reboot NUC", &on_in_days(12))).unwrap();
+    let second = added_id(&other);
+    let similar = other["similar"].as_array().unwrap();
+    assert_eq!(similar.len(), 1, "{other}");
+    assert_eq!(similar[0]["id"], first.as_str());
+    let command = similar[0]["duplicate_command"].as_str().unwrap();
+    assert!(
+        command.contains(&format!("cort remind close {second}")),
+        "{command}"
+    );
+    assert!(
+        command.contains(&format!("--reason duplicate --of {first}")),
+        "{command}"
+    );
+    assert_eq!(f.rows(), before + 1);
+}
+
+#[test]
+fn add_past_refused_before_write() {
+    let f = Fixture::new();
+    let err = message(f.add_args(args("Too late", &on_in_days(-30))).unwrap_err());
+    assert!(err.starts_with("remind_date_past"), "{err}");
+    assert_eq!(f.rows(), 0);
+    // Refused before any network round trip, not just before the write.
+    assert_eq!(f.posts(), 0);
+}
+
+#[test]
+fn defer_moves_date_and_reply_has_offset() {
+    let f = Fixture::new();
+    let id = added_id(&f.add_on("NUC boot auto-recovery", &on_in_days(3)));
+    let moved = on_in_days(17);
+    let out = f
+        .defer(
+            &id[..8],
+            &moved,
+            Some("not this Saturday, the next one".into()),
+            None,
+        )
+        .unwrap();
+    assert_eq!(out["outcome"], "deferred", "{out}");
+    assert_eq!(out["reminder"]["id"], id.as_str());
+    assert_eq!(out["reminder"]["on"], json!(moved));
+    assert_eq!(out["reminder"]["utc_offset"], "+08:00");
+    assert_eq!(
+        out["reminder"]["due_at"],
+        cort::remind::parse_on(&moved).unwrap().due_at.to_string()
+    );
+    let one =
+        remind_store::list_with(f.root(), ListFilter::Open, Some(&id), None, &f.ledger).unwrap();
+    assert_eq!(one["reminders"][0]["on"], json!(moved), "{one}");
+    let events = one["reminders"][0]["events"].as_array().unwrap();
+    assert_eq!(events.len(), 1, "{one}");
+    assert_eq!(events[0]["kind"], "defer");
+    assert_eq!(events[0]["note"], "not this Saturday, the next one");
+}
+
+#[test]
+fn defer_closed_refused() {
+    let f = Fixture::new();
+    let id = added_id(&f.add_on("NUC boot auto-recovery", &on_in_days(3)));
+    f.close(&id, CloseReason::Done, None, None, None).unwrap();
+    let before = f.rows();
+    let err = message(f.defer(&id, &on_in_days(10), None, None).unwrap_err());
+    assert!(err.starts_with("remind_closed"), "{err}");
+    assert_eq!(f.rows(), before);
+}
+
+#[test]
+fn close_done_then_close_again_refused() {
+    let f = Fixture::new();
+    let id = added_id(&f.add_on("NUC boot auto-recovery", &on_in_days(3)));
+    let out = f
+        .close(
+            &id,
+            CloseReason::Done,
+            None,
+            None,
+            Some("claude-code".into()),
+        )
+        .unwrap();
+    assert_eq!(out["outcome"], "closed", "{out}");
+    assert_eq!(out["reminder"]["state"], "closed");
+    assert_eq!(out["reminder"]["label"], "done");
+    assert_eq!(out["reminder"]["close"]["reason"], "done");
+    assert_eq!(out["reminder"]["close"]["harness"], "claude-code");
+    assert_eq!(
+        out["reminder"]["close"]["recorded_machine"],
+        cort::usage::machine_id()
+    );
+    let before = f.rows();
+    let err = message(
+        f.close(&id, CloseReason::Moot, None, None, None)
+            .unwrap_err(),
+    );
+    assert!(err.starts_with("remind_closed"), "{err}");
+    assert_eq!(f.rows(), before);
+    assert_eq!(
+        f.list(ListFilter::Closed)["reminders"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn duplicate_requires_of() {
+    let f = Fixture::new();
+    let id = added_id(&f.add_on("Reboot the NUC", &on_in_days(3)));
+    let other = added_id(&f.add_on("Upgrade cort on the NUC", &on_in_days(4)));
+    let before = f.rows();
+    let err = message(
+        f.close(&id, CloseReason::Duplicate, None, None, None)
+            .unwrap_err(),
+    );
+    assert!(err.starts_with("remind_of_required"), "{err}");
+    // `--of` on done or moot is refused: it belongs to duplicate only.
+    for reason in [CloseReason::Done, CloseReason::Moot] {
+        let err = message(
+            f.close(&id, reason, Some(other.clone()), None, None)
+                .unwrap_err(),
+        );
+        assert!(err.starts_with("remind_of_unexpected"), "{err}");
+    }
+    assert_eq!(f.rows(), before);
+    let out = f
+        .close(
+            &id,
+            CloseReason::Duplicate,
+            Some(other[..8].to_string()),
+            None,
+            None,
+        )
+        .unwrap();
+    assert_eq!(out["outcome"], "closed", "{out}");
+    assert_eq!(out["reminder"]["close"]["of"], other.as_str());
+    assert_eq!(out["reminder"]["close"]["reason"], "duplicate");
+}
+
+#[test]
+fn lost_response_reports_outcome_unknown() {
+    let f = Fixture::new();
+    // Post 1 reads the events, post 2 is the insert, post 3 the read-back: the insert is
+    // forwarded (so it commits) and then both answers are lost.
+    f.arm(2, Action::ForwardThenTimeout);
+    f.arm(3, Action::ForwardThenTimeout);
+    let err = f
+        .add_args(args("NUC boot auto-recovery", &on_in_days(3)))
+        .unwrap_err();
+    match err {
+        LedgerError::OutcomeUnknown { id, .. } => {
+            assert_eq!(id.len(), 16);
+            assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
+        }
+        other => panic!("expected OutcomeUnknown, got {other:?}"),
+    }
+    // The write landed; only the answers were lost.
+    assert_eq!(f.rows(), 1);
+    assert_eq!(
+        f.list(ListFilter::Open)["reminders"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn fresh_database_lists_empty() {
+    let f = Fixture::new();
+    let listed = f.list(ListFilter::Open);
+    assert_eq!(listed["reminders"].as_array().unwrap().len(), 0, "{listed}");
+    assert!(listed["project_id"].is_string());
+    assert!(listed.get("orphan_events").is_none());
+    assert!(listed.get("events_total").is_none());
+}
+
+#[test]
+fn list_match_searches_closed() {
+    let f = Fixture::new();
+    let nuc = added_id(&f.add_on("Reboot the NUC", &on_in_days(3)));
+    let upgrade = added_id(&f.add_on("Upgrade cort on the ThinkPad", &on_in_days(4)));
+    f.close(&upgrade, CloseReason::Done, None, None, None)
+        .unwrap();
+    // The default list drops the closed one; --match searches every state.
+    assert_eq!(
+        f.list(ListFilter::Open)["reminders"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let out =
+        remind_store::list_with(f.root(), ListFilter::Open, None, Some("nuc"), &f.ledger).unwrap();
+    let hits = out["reminders"].as_array().unwrap();
+    assert_eq!(hits.len(), 1, "{out}");
+    assert_eq!(hits[0]["id"], nuc.as_str());
+    assert_eq!(hits[0]["match"], "all");
+    let out = remind_store::list_with(
+        f.root(),
+        ListFilter::Closed,
+        None,
+        Some("thinkpad"),
+        &f.ledger,
+    )
+    .unwrap();
+    let hits = out["reminders"].as_array().unwrap();
+    assert_eq!(hits.len(), 1, "{out}");
+    assert_eq!(hits[0]["id"], upgrade.as_str());
+    assert_eq!(hits[0]["state"], "closed");
+    assert_eq!(hits[0]["match"], "all");
+}
+
+#[test]
+fn lean_add_prints_id_on_offset() {
+    let f = Fixture::new();
+    let on = on_in_days(7);
+    let out = f.add_args(args("NUC boot auto-recovery", &on)).unwrap();
+    let id = added_id(&out);
+    let line = remind_store::render_lean("add", &out);
+    assert_eq!(line, format!("added {id} {on} +08:00\n"), "{line}");
+    // exists carries the earlier record's on and state.
+    let exists = f.add_args(args("nuc boot auto recovery", &on)).unwrap();
+    assert_eq!(exists["outcome"], "exists", "{exists}");
+    let line = remind_store::render_lean("add", &exists);
+    let fields: Vec<&str> = line.trim_end().split(' ').collect();
+    assert_eq!(fields.len(), 4, "{line}");
+    assert_eq!(fields[0], "exists");
+    assert_eq!(fields[1], id.as_str());
+    assert_eq!(fields[2], on.as_str());
+    assert!(!fields[3].is_empty());
+}
+
+#[test]
+fn lean_list_has_no_empty_field() {
+    let f = Fixture::new();
+    let mut a = args("NUC boot auto-recovery", &on_in_days(3));
+    a.blocks = Some("nuc-boot".into());
+    f.add_args(a).unwrap();
+    f.add_on("ThinkPad hotspot plan", &on_in_days(5));
+    let listed = f.list(ListFilter::Open);
+    let lean = remind_store::render_lean("list", &listed);
+    let lines: Vec<&str> = lean.lines().collect();
+    assert_eq!(lines.len(), 2, "{lean}");
+    let mut saw_dash = false;
+    for line in lines {
+        let fields: Vec<&str> = line.split('\t').collect();
+        assert_eq!(fields.len(), 6, "{line}");
+        assert!(
+            fields.iter().all(|field| !field.is_empty()),
+            "empty field in {line:?}"
+        );
+        saw_dash |= fields[5] == "-";
+        assert_eq!(fields[1], fields[1].trim(), "{line}");
+    }
+    assert!(saw_dash, "the blocks-less row must print -, got {lean}");
+    // Labels use _ for spaces (overdue_2d), so the state/label fields stay one field.
+    assert!(!lean.contains("overdue "), "{lean}");
+}

@@ -17,6 +17,7 @@ const CREATE_TABLE: &str = "CREATE TABLE IF NOT EXISTS project_memory (project T
 const CREATE_CHAIN_INDEX: &str = "CREATE UNIQUE INDEX IF NOT EXISTS project_memory_chain ON project_memory (project, json_extract(body,'$.key'), coalesce(json_extract(body,'$.supersedes'), json_extract(body,'$.resolves'), ''))";
 pub(crate) const CREATE_ALIASES: &str = "CREATE TABLE IF NOT EXISTS project_aliases (old_project TEXT NOT NULL, new_project TEXT NOT NULL, created_at TEXT NOT NULL, machine TEXT NOT NULL, PRIMARY KEY (old_project, new_project))";
 pub(crate) const CREATE_QUESTIONS: &str = "CREATE TABLE IF NOT EXISTS project_questions (project TEXT NOT NULL, id TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY (project, id))";
+pub(crate) const CREATE_REMINDERS: &str = "CREATE TABLE IF NOT EXISTS project_reminders (project TEXT NOT NULL, id TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY (project, id))";
 pub(crate) const COMPONENT: &str = "WITH RECURSIVE g(p) AS (SELECT ? UNION SELECT CASE WHEN a.old_project = g.p THEN a.new_project ELSE a.old_project END FROM project_aliases a JOIN g ON a.old_project = g.p OR a.new_project = g.p) SELECT p FROM g";
 #[derive(Debug, Serialize)]
 pub struct MemoryConflict {
@@ -120,10 +121,11 @@ impl Ledger {
                 Stmt::new(CREATE_TABLE, vec![]),
                 Stmt::new(CREATE_ALIASES, vec![]),
                 Stmt::new(CREATE_QUESTIONS, vec![]),
+                Stmt::new(CREATE_REMINDERS, vec![]),
                 Stmt::new(&sql, vec![Cell::Text(project.into())]),
             ])
             .map_err(|e| LedgerError::Remote(e.kind))?;
-        let bodies: Vec<String> = results[3]
+        let bodies: Vec<String> = results[4]
             .rows
             .iter()
             .map(|row| match row.first() {
@@ -1728,6 +1730,7 @@ impl Ledger {
                 Stmt::new(CREATE_TABLE, vec![]),
                 Stmt::new(CREATE_ALIASES, vec![]),
                 Stmt::new(CREATE_QUESTIONS, vec![]),
+                Stmt::new(CREATE_REMINDERS, vec![]),
                 Stmt::new(COMPONENT, arg()),
                 Stmt::new(aliases_sql, arg()),
                 Stmt::new(bodies_sql, arg()),
@@ -1738,13 +1741,13 @@ impl Ledger {
             Some(Cell::Text(value)) => Ok(value.clone()),
             _ => Err(LedgerError::Message("invalid remote alias row".into())),
         };
-        let mut ids = results[3]
+        let mut ids = results[4]
             .rows
             .iter()
             .map(|row| text(row, 0))
             .collect::<Result<Vec<_>, _>>()?;
         ids.sort();
-        let mut aliases = results[4]
+        let mut aliases = results[5]
             .rows
             .iter()
             .map(|row| {
@@ -1759,7 +1762,7 @@ impl Ledger {
         aliases.sort_by(|a, b| {
             (&a.old_project, &a.new_project).cmp(&(&b.old_project, &b.new_project))
         });
-        let bodies = results[5]
+        let bodies = results[6]
             .rows
             .iter()
             .map(|row| {
@@ -1769,7 +1772,7 @@ impl Ledger {
                 Ok((text(row, 0)?, entry))
             })
             .collect::<Result<Vec<_>, LedgerError>>()?;
-        let questions = results[6]
+        let questions = results[7]
             .rows
             .iter()
             .map(|row| {

@@ -29,6 +29,7 @@ pub mod pack;
 pub mod question;
 pub mod question_store;
 pub mod remind;
+pub mod remind_store;
 pub mod remote;
 pub mod render;
 pub mod scan;
