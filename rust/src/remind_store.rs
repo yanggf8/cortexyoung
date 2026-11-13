@@ -8,8 +8,8 @@ use crate::memory_store::{
 use crate::question;
 use crate::question::Dedup;
 use crate::remind::{
-    self, check_not_past, classify, fold, parse_on, resolve_prefix, validate_add, validate_note,
-    EventKind, Folded, Reminder, ReminderEvent, State,
+    self, check_not_past, classify, fold, kind_name, parse_on, resolve_prefix, validate_add,
+    validate_note, EventKind, Folded, Reminder, ReminderEvent, State,
 };
 use crate::remote::{Cell, Stmt};
 use serde_json::{json, Value};
@@ -112,14 +112,9 @@ fn new_event(
 ) -> Result<ReminderEvent, LedgerError> {
     let timestamp = now_ns()?;
     let machine = crate::usage::machine_id();
-    let kind_name = match kind {
-        EventKind::Add => "add",
-        EventKind::Defer => "defer",
-        EventKind::Close => "close",
-        EventKind::Unknown => "unknown",
-    };
-    let digest =
-        crate::memory::hash(format!("{kind_name}\0{seed}\0{machine}\0{timestamp}").as_bytes());
+    let digest = crate::memory::hash(
+        format!("{}\0{seed}\0{machine}\0{timestamp}", kind_name(kind)).as_bytes(),
+    );
     Ok(ReminderEvent {
         id: digest[..16].to_string(),
         kind,
@@ -251,7 +246,7 @@ pub fn add_with(root: &Path, args: AddArgs, ledger: &Ledger) -> Result<Value, Le
     check_not_past(&due, now_ns()?)?;
     let (folded, _, now) = load(ledger, &project).map_err(not_recorded)?;
     let by_id = |id: &String| folded.reminders.iter().find(|r| &r.add.id == id);
-    let similar = match classify(&args.text, &due.on, &folded.reminders) {
+    let similar = match classify(&args.text, due.due_at, &folded.reminders) {
         Dedup::Exists(ids) if !args.force => {
             let earlier = by_id(ids.first().ok_or_else(|| {
                 LedgerError::Message("matched reminder is missing from the fold".into())
@@ -403,6 +398,9 @@ pub fn defer_with(
     }
     let due = parse_on(on)?;
     let project = project(root)?;
+    // Refused before any network round trip, exactly as `add`: a past date needs no read
+    // to answer.
+    check_not_past(&due, now_ns()?)?;
     let (folded, _, now) = load(ledger, &project).map_err(not_recorded)?;
     let r = find(&folded, id)?;
     let rid = r.add.id.clone();
@@ -412,7 +410,6 @@ pub fn defer_with(
             close.reason.as_deref().unwrap_or("-")
         )));
     }
-    check_not_past(&due, now)?;
     let mut event = new_event(EventKind::Defer, &format!("{rid}\0{on}"), harness)?;
     event.reminder = Some(rid);
     event.on = Some(due.on.clone());
@@ -449,6 +446,18 @@ pub fn close_with(
     if let Some(note) = note.as_deref() {
         validate_note(note)?;
     }
+    // Refused before any read: the `--of` shape is answerable from the arguments alone.
+    // Only a duplicate's `--of` prefix needs the fold to resolve.
+    let of_prefix = match (reason, of) {
+        (CloseReason::Duplicate, None) => {
+            return Err("remind_of_required: --reason duplicate needs --of <id>".into());
+        }
+        (CloseReason::Duplicate, Some(prefix)) => Some(prefix),
+        (_, Some(_)) => {
+            return Err("remind_of_unexpected: --of is only for --reason duplicate".into());
+        }
+        (_, None) => None,
+    };
     let project = project(root)?;
     let (folded, _, now) = load(ledger, &project).map_err(not_recorded)?;
     let r = find(&folded, id)?;
@@ -459,11 +468,8 @@ pub fn close_with(
             close.reason.as_deref().unwrap_or("-")
         )));
     }
-    let of = match (reason, of) {
-        (CloseReason::Duplicate, None) => {
-            return Err("remind_of_required: --reason duplicate needs --of <id>".into())
-        }
-        (CloseReason::Duplicate, Some(prefix)) => {
+    let of = match of_prefix {
+        Some(prefix) => {
             let other = find(&folded, &prefix)?;
             if other.add.id == rid {
                 return Err(LedgerError::Message(format!(
@@ -472,10 +478,7 @@ pub fn close_with(
             }
             Some(other.add.id.clone())
         }
-        (_, Some(_)) => {
-            return Err("remind_of_unexpected: --of is only for --reason duplicate".into())
-        }
-        (_, None) => None,
+        None => None,
     };
     let mut event = new_event(EventKind::Close, &rid, harness)?;
     event.reminder = Some(rid);

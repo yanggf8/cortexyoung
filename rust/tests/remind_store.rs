@@ -14,7 +14,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Clone)]
 enum Action {
+    /// Forward the post (so it commits), then lose both answers.
     ForwardThenTimeout,
+    /// Lose the answer without forwarding: the write never lands.
+    TimeoutOnly,
 }
 
 #[derive(Default)]
@@ -47,6 +50,11 @@ impl Transport for Wrapped {
         match action {
             Some(Action::ForwardThenTimeout) => {
                 self.inner.post(url, body, headers)?;
+                let transport = SqliteTransport::new().unwrap();
+                transport.fail_next_status(504);
+                Err(transport.post(url, body, headers).unwrap_err())
+            }
+            Some(Action::TimeoutOnly) => {
                 let transport = SqliteTransport::new().unwrap();
                 transport.fail_next_status(504);
                 Err(transport.post(url, body, headers).unwrap_err())
@@ -134,6 +142,17 @@ impl Fixture {
         self.query("SELECT id FROM project_reminders")
             .map(|rows| rows.len())
             .unwrap_or(0)
+    }
+    /// Writes one event straight through the fixture's transport, as other tests seed rows
+    /// (an `add` with a past due_at cannot go through `add_with`).
+    fn insert_event(&self, event: &Value) {
+        let project = memory_store::project(self.root()).unwrap();
+        let body = event.to_string().replace('\'', "''");
+        self.query(&format!(
+            "INSERT INTO project_reminders VALUES ('{project}', '{}', '{body}')",
+            event["id"].as_str().unwrap()
+        ))
+        .unwrap();
     }
     fn add_args(&self, args: AddArgs) -> Result<Value, LedgerError> {
         remind_store::add_with(self.root(), args, &self.ledger)
@@ -224,7 +243,7 @@ fn add_then_list_shows_due_order() {
     let reminders = listed["reminders"].as_array().unwrap();
     assert_eq!(reminders.len(), 2, "{listed}");
     assert_eq!(reminders[0]["id"], a.as_str());
-    assert_eq!(reminders[0]["on"], json!(soon));
+    assert_eq!(reminders[0]["on"], json!(&soon[..10]));
     assert_eq!(reminders[0]["utc_offset"], "+08:00");
     assert_eq!(
         reminders[0]["due_at"],
@@ -249,7 +268,7 @@ fn add_exists_returns_earlier_without_write() {
     let out = f.add_args(args("reboot NUC", &on)).unwrap();
     assert_eq!(out["outcome"], "exists", "{out}");
     assert_eq!(out["reminder"]["id"], first.as_str());
-    assert_eq!(out["reminder"]["on"], json!(on));
+    assert_eq!(out["reminder"]["on"], json!(&on[..10]));
     assert_eq!(f.rows(), before);
     // The same task filed for another day is written, with the earlier one as similar.
     let other = f.add_args(args("reboot NUC", &on_in_days(12))).unwrap();
@@ -294,7 +313,7 @@ fn defer_moves_date_and_reply_has_offset() {
         .unwrap();
     assert_eq!(out["outcome"], "deferred", "{out}");
     assert_eq!(out["reminder"]["id"], id.as_str());
-    assert_eq!(out["reminder"]["on"], json!(moved));
+    assert_eq!(out["reminder"]["on"], json!(&moved[..10]));
     assert_eq!(out["reminder"]["utc_offset"], "+08:00");
     assert_eq!(
         out["reminder"]["due_at"],
@@ -302,7 +321,7 @@ fn defer_moves_date_and_reply_has_offset() {
     );
     let one =
         remind_store::list_with(f.root(), ListFilter::Open, Some(&id), None, &f.ledger).unwrap();
-    assert_eq!(one["reminders"][0]["on"], json!(moved), "{one}");
+    assert_eq!(one["reminders"][0]["on"], json!(&moved[..10]), "{one}");
     let events = one["reminders"][0]["events"].as_array().unwrap();
     assert_eq!(events.len(), 1, "{one}");
     assert_eq!(events[0]["kind"], "defer");
@@ -364,6 +383,7 @@ fn duplicate_requires_of() {
     let id = added_id(&f.add_on("Reboot the NUC", &on_in_days(3)));
     let other = added_id(&f.add_on("Upgrade cort on the NUC", &on_in_days(4)));
     let before = f.rows();
+    let posts = f.posts();
     let err = message(
         f.close(&id, CloseReason::Duplicate, None, None, None)
             .unwrap_err(),
@@ -377,6 +397,8 @@ fn duplicate_requires_of() {
         );
         assert!(err.starts_with("remind_of_unexpected"), "{err}");
     }
+    // Both shapes are refused from the arguments alone, before any read.
+    assert_eq!(f.posts(), posts);
     assert_eq!(f.rows(), before);
     let out = f
         .close(
@@ -418,6 +440,75 @@ fn lost_response_reports_outcome_unknown() {
             .len(),
         1
     );
+}
+
+#[test]
+fn lost_response_read_back_found_is_ok() {
+    let f = Fixture::new();
+    // Post 1 reads the events, post 2 is the insert: forwarded (so it commits), then the
+    // answer is lost; the read-back finds the id and the add reports success.
+    f.arm(2, Action::ForwardThenTimeout);
+    let out = f
+        .add_args(args("NUC boot auto-recovery", &on_in_days(3)))
+        .unwrap();
+    assert_eq!(out["outcome"], "added", "{out}");
+    assert_eq!(f.rows(), 1);
+    let rows = f.query("SELECT id FROM project_reminders").unwrap();
+    assert_eq!(rows[0][0]["value"], out["reminder"]["id"], "{out}");
+}
+
+#[test]
+fn lost_response_read_back_absent_is_not_recorded() {
+    let f = Fixture::new();
+    // Post 1 reads the events, post 2 is the insert: it times out without landing, and the
+    // read-back finds nothing.
+    f.arm(2, Action::TimeoutOnly);
+    let err = f
+        .add_args(args("NUC boot auto-recovery", &on_in_days(3)))
+        .unwrap_err();
+    match err {
+        LedgerError::NotRecorded { .. } => {}
+        other => panic!("expected NotRecorded, got {other:?}"),
+    }
+    assert_eq!(f.rows(), 0);
+}
+
+#[test]
+fn defer_past_refused() {
+    let f = Fixture::new();
+    let id = added_id(&f.add_on("NUC boot auto-recovery", &on_in_days(3)));
+    let before = f.rows();
+    let posts = f.posts();
+    let err = message(f.defer(&id, &on_in_days(-5), None, None).unwrap_err());
+    assert!(err.starts_with("remind_date_past"), "{err}");
+    assert_eq!(f.rows(), before);
+    // Refused before the read, exactly as `add` refuses the past.
+    assert_eq!(f.posts(), posts);
+}
+
+#[test]
+fn force_writes_past_exists() {
+    let f = Fixture::new();
+    let on = on_in_days(6);
+    let first = added_id(&f.add_on("Reboot the NUC", &on));
+    let mut a = args("reboot NUC", &on);
+    a.force = true;
+    let second = added_id(&f.add_args(a).unwrap());
+    assert_ne!(first, second);
+    assert_eq!(f.rows(), 2);
+}
+
+#[test]
+fn orphan_events_listed() {
+    let f = Fixture::new();
+    added_id(&f.add_on("NUC boot auto-recovery", &on_in_days(3)));
+    f.insert_event(&json!({
+        "id": "0rphan0000000000", "kind": "close", "reminder": "nope",
+        "reason": "moot", "recorded_at": "1",
+    }));
+    let all = f.list(ListFilter::All);
+    assert_eq!(all["reminders"].as_array().unwrap().len(), 1, "{all}");
+    assert_eq!(all["orphan_events"][0]["id"], "0rphan0000000000", "{all}");
 }
 
 #[test]
@@ -473,7 +564,7 @@ fn lean_add_prints_id_on_offset() {
     let out = f.add_args(args("NUC boot auto-recovery", &on)).unwrap();
     let id = added_id(&out);
     let line = remind_store::render_lean("add", &out);
-    assert_eq!(line, format!("added {id} {on} +08:00\n"), "{line}");
+    assert_eq!(line, format!("added {id} {} +08:00\n", &on[..10]), "{line}");
     // exists carries the earlier record's on and state.
     let exists = f.add_args(args("nuc boot auto recovery", &on)).unwrap();
     assert_eq!(exists["outcome"], "exists", "{exists}");
@@ -482,7 +573,7 @@ fn lean_add_prints_id_on_offset() {
     assert_eq!(fields.len(), 4, "{line}");
     assert_eq!(fields[0], "exists");
     assert_eq!(fields[1], id.as_str());
-    assert_eq!(fields[2], on.as_str());
+    assert_eq!(fields[2], &on[..10]);
     assert!(!fields[3].is_empty());
 }
 
@@ -493,12 +584,28 @@ fn lean_list_has_no_empty_field() {
     a.blocks = Some("nuc-boot".into());
     f.add_args(a).unwrap();
     f.add_on("ThinkPad hotspot plan", &on_in_days(5));
+    // A genuinely overdue row, seeded straight through the transport (`add` refuses the
+    // past): 3 days ago, at any offset, is overdue on every read after this one.
+    let now_ns = i128::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos(),
+    )
+    .unwrap();
+    f.insert_event(&json!({
+        "id": "deadbeef0000000f", "kind": "add", "text": "Rotate the NUC log",
+        "on": "2026-11-11", "utc_offset": "+00:00",
+        "due_at": (now_ns - 3 * 86_400_000_000_000).to_string(),
+        "lead": 1, "recorded_at": "1",
+    }));
     let listed = f.list(ListFilter::Open);
     let lean = remind_store::render_lean("list", &listed);
     let lines: Vec<&str> = lean.lines().collect();
-    assert_eq!(lines.len(), 2, "{lean}");
+    assert_eq!(lines.len(), 3, "{lean}");
     let mut saw_dash = false;
-    for line in lines {
+    let mut saw_overdue = false;
+    for line in &lines {
         let fields: Vec<&str> = line.split('\t').collect();
         assert_eq!(fields.len(), 6, "{line}");
         assert!(
@@ -507,10 +614,15 @@ fn lean_list_has_no_empty_field() {
         );
         saw_dash |= fields[5] == "-";
         assert_eq!(fields[1], fields[1].trim(), "{line}");
+        if fields[2] == "overdue" {
+            saw_overdue = true;
+            // The label is one field (overdue_3d): a space would split the row for `read`.
+            assert_eq!(fields[3], "overdue_3d", "{lean}");
+            assert!(!fields[3].contains(' '), "{lean}");
+        }
     }
     assert!(saw_dash, "the blocks-less row must print -, got {lean}");
-    // Labels use _ for spaces (overdue_2d), so the state/label fields stay one field.
-    assert!(!lean.contains("overdue "), "{lean}");
+    assert!(saw_overdue, "the overdue row must be listed, got {lean}");
 }
 
 /// Moves every reminder event to `old`, as if they were filed before a repository rename.
@@ -570,6 +682,38 @@ fn alias_remove_across_defer_is_alias_in_use() {
 }
 
 #[test]
+fn existing_orphan_does_not_block_alias_remove() {
+    let f = Fixture::new();
+    added_id(&f.add_on("NUC boot auto-recovery", &on_in_days(3)));
+    move_events_to(&f, "old-repo");
+    alias_from(&f, "old-repo").unwrap();
+    // A defer and a duplicate close whose `reminder`/`of` ids no component holds at all --
+    // orphans an older cort already split off. They name nothing the split could separate,
+    // so the removal goes through; only an id present on the other side counts.
+    let on = on_in_days(9);
+    let due_at = cort::remind::parse_on(&on).unwrap().due_at.to_string();
+    f.insert_event(&json!({
+        "id": "d1fe000000000001", "kind": "defer", "reminder": "gone0000000000ff",
+        "on": &on[..10], "utc_offset": "+08:00", "due_at": due_at, "recorded_at": "5",
+    }));
+    f.insert_event(&json!({
+        "id": "c105e000000000002", "kind": "close", "reminder": "gone0000000000ff",
+        "reason": "duplicate", "of": "l0st00000000000f", "recorded_at": "6",
+    }));
+    let removed =
+        memory_store::alias_remove_with(f.root(), AliasFrom::Project("old-repo".into()), &f.ledger)
+            .unwrap();
+    assert_eq!(removed.outcome, "removed");
+    assert_eq!(
+        memory_store::alias_list_with(f.root(), &f.ledger)
+            .unwrap()
+            .aliases
+            .len(),
+        0
+    );
+}
+
+#[test]
 fn listed_under_new_id_after_alias() {
     let f = Fixture::new();
     let id = added_id(&f.add_on("NUC boot auto-recovery", &on_in_days(3)));
@@ -580,6 +724,10 @@ fn listed_under_new_id_after_alias() {
     assert_eq!(out["outcome"], "deferred", "{out}");
     let listed = f.list(ListFilter::All);
     assert_eq!(listed["reminders"][0]["id"], id.as_str(), "{listed}");
-    assert_eq!(listed["reminders"][0]["on"], json!(moved), "{listed}");
+    assert_eq!(
+        listed["reminders"][0]["on"],
+        json!(&moved[..10]),
+        "{listed}"
+    );
     assert!(listed.get("orphan_events").is_none(), "{listed}");
 }

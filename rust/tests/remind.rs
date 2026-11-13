@@ -53,7 +53,7 @@ fn explicit_offset_due_at() {
     let due = parse_on("2026-11-21+08:00").unwrap();
     assert_eq!(due.due_at, DUE);
     assert_eq!(due.utc_offset, "+08:00");
-    assert_eq!(due.on, "2026-11-21+08:00");
+    assert_eq!(due.on, "2026-11-21");
     let west = parse_on("2026-11-21-05:30").unwrap();
     assert_eq!(west.utc_offset, "-05:30");
     assert_eq!(west.due_at, DUE_UTC + (5 * 3600 + 30 * 60) * 1_000_000_000);
@@ -63,57 +63,99 @@ fn explicit_offset_due_at() {
 }
 
 #[test]
+fn explicit_offset_on_is_date_only() {
+    // `Due.on` is always the ten-character date; the offset lives only in `utc_offset`, so
+    // the two spellings of one day compare equal downstream.
+    let due = parse_on("2026-11-21+08:00").unwrap();
+    assert_eq!(due.on, "2026-11-21");
+    assert_eq!(due.utc_offset, "+08:00");
+    let west = parse_on("2026-11-21-05:30").unwrap();
+    assert_eq!(west.on, "2026-11-21");
+    assert_eq!(west.utc_offset, "-05:30");
+}
+
+#[test]
 fn invalid_dates_refused() {
     for raw in [
         "2026-02-30",
         "2026-11-21+8",
         "21/11/2026",
         "2026-11-21+15:00",
+        "2026-11-21+14:01",
+        "2026-11-21+14:59",
+        "2026-11-21-14:30",
+        "2026-11-21+00:75",
     ] {
         let err = parse_on(raw).unwrap_err();
         assert!(err.starts_with("remind_date_invalid"), "{raw}: {err}");
     }
 }
 
+/// Midnight of `YYYY-MM-DD` read as UTC, in ns since the epoch: Howard Hinnant's
+/// `days_from_civil`, a test-side copy of the core's private helper.
+fn naive_utc_ns(date: &str) -> i128 {
+    let b = date.as_bytes();
+    let num = |at: usize| i128::from((b[at] - b'0') * 10 + (b[at + 1] - b'0'));
+    let (y, m, d) = (num(0) * 100 + num(2), num(5), num(8));
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    (era * 146_097 + doe - 719_468) * 86_400_000_000_000
+}
+
 #[test]
 fn bare_date_uses_local_tz() {
     // POSIX TZ strings, not zone names: no tzdata file is read, so a host without tzdata
-    // cannot silently fall back. TZ is set for a child process -- never set_var in-process.
-    for (tz, offset) in [("CST-8", "+08:00"), ("UTC0", "+00:00")] {
+    // cannot silently fall back. The DST rule reads EDT in July and EST in January. TZ is
+    // set for a child process -- never set_var in-process.
+    let cases = [
+        ("CST-8", "2026-11-21", "+08:00"),
+        ("UTC0", "2026-11-21", "+00:00"),
+        ("EST5EDT,M3.2.0,M11.1.0", "2026-07-01", "-04:00"),
+        ("EST5EDT,M3.2.0,M11.1.0", "2026-01-15", "-05:00"),
+    ];
+    for (tz, date, offset) in cases {
         let out = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--ignored", "--exact", "tz_child", "--nocapture"])
             .env("TZ", tz)
+            .env("REMIND_TZ_DATE", date)
             .env("REMIND_EXPECT_OFFSET", offset)
             .output()
             .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        // A filter that matches nothing also exits 0, so the summary must be checked.
         assert!(
-            out.status.success(),
-            "TZ={tz} tz_child failed:\n{}{}",
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr),
+            out.status.success() && stdout.contains("1 passed"),
+            "TZ={tz} {date} tz_child failed:\n{stdout}{stderr}",
         );
     }
 }
 
-/// Runs only as a subprocess of `bare_date_uses_local_tz`, which sets TZ and the expected
-/// offset; `#[ignore]` keeps it out of normal runs.
+/// Runs only as a subprocess of `bare_date_uses_local_tz`, which sets TZ, the date and the
+/// expected offset; `#[ignore]` keeps it out of normal runs.
 #[ignore]
 #[test]
 fn tz_child() {
+    let date = std::env::var("REMIND_TZ_DATE").unwrap();
     let expect = std::env::var("REMIND_EXPECT_OFFSET").unwrap();
-    let due = parse_on("2026-11-21").unwrap();
+    let due = parse_on(&date).unwrap();
+    assert_eq!(due.on, date);
     assert_eq!(due.utc_offset, expect);
-    let expected: i128 = match expect.as_str() {
-        "+08:00" => DUE,
-        "+00:00" => DUE_UTC,
-        other => panic!("unexpected REMIND_EXPECT_OFFSET: {other}"),
-    };
-    assert_eq!(due.due_at, expected);
-    assert_eq!(due.on, "2026-11-21");
+    let sign: i128 = if expect.starts_with('-') { -1 } else { 1 };
+    let offset_ns = sign
+        * (expect[1..3].parse::<i128>().unwrap() * 3600
+            + expect[4..6].parse::<i128>().unwrap() * 60)
+        * 1_000_000_000;
+    assert_eq!(due.due_at, naive_utc_ns(&date) - offset_ns);
     // An explicit offset ignores TZ entirely.
-    let explicit = parse_on("2026-11-21+00:00").unwrap();
+    let explicit = parse_on(&format!("{date}+00:00")).unwrap();
     assert_eq!(explicit.utc_offset, "+00:00");
-    assert_eq!(explicit.due_at, DUE_UTC);
+    assert_eq!(explicit.due_at, naive_utc_ns(&date));
+    assert_eq!(explicit.on, date);
 }
 
 #[test]
@@ -206,19 +248,26 @@ fn orphan_and_unknown_events() {
 #[test]
 fn dedup() {
     let now = DUE - 2 * DAY;
-    // Same term set on the same on, open -> exists.
+    // Same term set at the same instant, open -> exists.
     let same = fold(
         vec![add("a1", "reboot NUC", "2026-11-21+08:00", DUE, 1)],
         now,
     )
     .reminders;
     assert!(matches!(
-        classify("reboot NUC", "2026-11-21+08:00", &same),
+        classify("reboot NUC", DUE, &same),
         Dedup::Exists(ids) if ids == ["a1"]
     ));
-    // Same terms, other on -> similar, not exists.
+    // A bare-date reminder and an explicit-offset add at the same instant are the same day:
+    // `Exists` is decided by the instant, never by the `on` spelling.
+    let bare = fold(vec![add("a4", "reboot NUC", "2026-11-21", DUE, 1)], now).reminders;
     assert!(matches!(
-        classify("reboot NUC", "2026-12-21+08:00", &same),
+        classify("reboot NUC", DUE, &bare),
+        Dedup::Exists(ids) if ids == ["a4"]
+    ));
+    // Same terms, other instant -> similar, not exists.
+    assert!(matches!(
+        classify("reboot NUC", DUE + 30 * DAY, &same),
         Dedup::Similar(_)
     ));
     // A term subset of an open reminder -> similar, not exists.
@@ -234,7 +283,7 @@ fn dedup() {
     )
     .reminders;
     assert!(matches!(
-        classify("reboot NUC", "2026-11-21+08:00", &wider),
+        classify("reboot NUC", DUE, &wider),
         Dedup::Similar(_)
     ));
     // A match only in a closed reminder never blocks: the same task next month is normal.
@@ -246,10 +295,31 @@ fn dedup() {
         now,
     )
     .reminders;
-    assert!(matches!(
-        classify("reboot NUC", "2026-11-21+08:00", &closed),
-        Dedup::New
-    ));
+    assert!(matches!(classify("reboot NUC", DUE, &closed), Dedup::New));
+}
+
+#[test]
+fn add_without_due_at_is_an_error() {
+    let err = parse_event(
+        r#"{"id":"a1","kind":"add","text":"task","on":"2026-11-21","recorded_at":"1"}"#,
+    )
+    .unwrap_err();
+    assert!(err.starts_with("remind_due_at_invalid"), "{err}");
+}
+
+#[test]
+fn defer_with_bad_due_at_is_an_error() {
+    let err = parse_event(
+        r#"{"id":"d1","kind":"defer","reminder":"a1","on":"2026-11-21","due_at":"soon","recorded_at":"1"}"#,
+    )
+    .unwrap_err();
+    assert!(err.starts_with("remind_due_at_invalid"), "{err}");
+    // A close carries no due_at and stays readable.
+    let close = parse_event(
+        r#"{"id":"c1","kind":"close","reminder":"a1","reason":"done","recorded_at":"2"}"#,
+    )
+    .unwrap();
+    assert_eq!(close.kind, EventKind::Close);
 }
 
 #[test]

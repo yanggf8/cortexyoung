@@ -59,13 +59,41 @@ pub struct ReminderEvent {
     pub harness: Option<String>,
 }
 
+/// The kind as it is spelled in a stored body.
+pub fn kind_name(kind: EventKind) -> &'static str {
+    match kind {
+        EventKind::Add => "add",
+        EventKind::Defer => "defer",
+        EventKind::Close => "close",
+        EventKind::Unknown => "unknown",
+    }
+}
+
+/// An add or a defer carries its instant in `due_at`. A remote row of those kinds without a
+/// decimal integer there is an error like any known kind whose fields do not parse: letting
+/// it through would fold the reminder to the epoch (1970) and mark every read of it overdue.
+fn check_due_at(event: &ReminderEvent) -> Result<(), String> {
+    let decimal = event
+        .due_at
+        .as_deref()
+        .is_some_and(|raw| raw.parse::<i128>().is_ok());
+    if matches!(event.kind, EventKind::Add | EventKind::Defer) && !decimal {
+        return Err(format!(
+            "remind_due_at_invalid: {} {} needs a decimal due_at",
+            kind_name(event.kind),
+            event.id
+        ));
+    }
+    Ok(())
+}
+
 /// One stored event body. A row of a kind this version does not know is read leniently, so a
 /// newer cort's fields cannot break an older one: whatever ids it carries (`reminder`, `of`)
 /// are kept where they are strings. A body that is not JSON, or a known kind whose fields do
 /// not parse, is still an error.
 pub fn parse_event(body: &str) -> Result<ReminderEvent, String> {
     let error = match serde_json::from_str::<ReminderEvent>(body) {
-        Ok(event) => return Ok(event),
+        Ok(event) => return check_due_at(&event).map(|()| event),
         Err(error) => error.to_string(),
     };
     let value: serde_json::Value = serde_json::from_str(body).map_err(|_| error.clone())?;
@@ -95,8 +123,10 @@ pub fn parse_event(body: &str) -> Result<ReminderEvent, String> {
     })
 }
 
-/// The date as given, the offset used and the instant of midnight at that offset (ns since
-/// the epoch). Every reader compares `now` against `due_at`, so all machines flip at the
+/// The date (always the first ten characters, `YYYY-MM-DD`), the offset used and the
+/// instant of midnight at that offset (ns since the epoch). An explicit offset lives only
+/// in `utc_offset`, never in `on`, so the two spellings of one day compare equal
+/// downstream. Every reader compares `now` against `due_at`, so all machines flip at the
 /// same instant; the day shown is always `on`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Due {
@@ -220,8 +250,9 @@ fn two(b: &[u8], at: usize) -> Option<u32> {
 }
 
 /// Parse `--on`: `YYYY-MM-DD` (midnight in this machine's local zone, offset reported) or
-/// `YYYY-MM-DD±HH:MM` (offsets up to ±14:00, `due_at` is pure arithmetic). The date must
-/// be a real calendar date; anything else is `remind_date_invalid`.
+/// `YYYY-MM-DD±HH:MM` (offsets up to ±14:00, `due_at` is pure arithmetic). In both forms
+/// `Due.on` is the ten-character date; the offset lives only in `utc_offset`. The date
+/// must be a real calendar date; anything else is `remind_date_invalid`.
 pub fn parse_on(raw: &str) -> Result<Due, String> {
     let invalid = || format!("remind_date_invalid: {raw}");
     let b = raw.as_bytes();
@@ -259,13 +290,14 @@ pub fn parse_on(raw: &str) -> Result<Due, String> {
         (Some(h), Some(m), Some(b':')) => (h, m),
         _ => return Err(invalid()),
     };
-    if hours > 14 || minutes > 59 {
+    // ±14:00 is the whole zone range: +14:01..+14:59 is refused, and so is any minute past 59.
+    if minutes > 59 || hours * 60 + minutes > 14 * 60 {
         return Err(invalid());
     }
     let offset = sign * (i64::from(hours) * 3600 + i64::from(minutes) * 60);
     let due_at = (naive_utc_seconds(year, month, day) - i128::from(offset)) * NS_PER_SEC;
     Ok(Due {
-        on: raw.to_string(),
+        on: raw[..10].to_string(),
         utc_offset: format_offset(offset),
         due_at,
     })
@@ -438,11 +470,11 @@ pub fn fold(events: Vec<ReminderEvent>, now_ns: i128) -> Folded {
     }
 }
 
-/// Classify a new reminder's text and `on` against the folded reminders. `Exists` needs
-/// the same term set AND the same effective `on`, in a reminder that is not closed; a
-/// half-or-more term overlap is `Similar`; closed reminders never block an add (the same
-/// task next month is normal).
-pub fn classify(text: &str, on: &str, reminders: &[Reminder]) -> Dedup {
+/// Classify a new reminder's text and instant against the folded reminders. `Exists` needs
+/// the same term set AND the same effective `due_at` (the instant), in a reminder that is
+/// not closed; a half-or-more term overlap is `Similar`; closed reminders never block an
+/// add (the same task next month is normal).
+pub fn classify(text: &str, due_at: i128, reminders: &[Reminder]) -> Dedup {
     let wanted = question::terms(text);
     if wanted.is_empty() {
         return Dedup::New;
@@ -451,7 +483,7 @@ pub fn classify(text: &str, on: &str, reminders: &[Reminder]) -> Dedup {
         .iter()
         .filter(|r| r.state != State::Closed)
         .filter(|r| {
-            r.effective.on == on && {
+            r.effective.due_at == due_at && {
                 let have = question::terms(r.add.text.as_deref().unwrap_or(""));
                 have.len() == wanted.len() && wanted.iter().all(|t| have.contains(t))
             }

@@ -2,7 +2,7 @@
 
 use crate::memory::{self, MemoryEntry, MemoryLedger, MemoryRecall};
 use crate::question::QuestionEvent;
-use crate::remind::ReminderEvent;
+use crate::remind::{EventKind, ReminderEvent};
 use crate::remote::{Cell, ErrorKind, RemoteDb, Stmt, Transport, UreqTransport};
 use crate::{notes, notes_upload, usage};
 use serde::{Deserialize, Serialize};
@@ -2073,14 +2073,25 @@ pub fn alias_remove_with(
             check(&question_locations, id, component);
         }
     }
-    // A defer or close names its add in `reminder`, exactly as an answer names its ask: the
-    // removal must not leave the add on the other side of the split.
+    // A defer or close names its add in `reminder`, a duplicate close the kept add in `of`
+    // (exactly as a duplicate close names its question there): an id that exists somewhere
+    // must stay in its component. An id no component holds at all is an orphan an older
+    // cort already split off -- it blocks nothing.
     for (project, event) in &snapshot.reminders {
         let component = components
             .get(project)
             .ok_or_else(|| LedgerError::Message("invalid alias component".into()))?;
-        for id in event.reminder.iter() {
-            check(&reminder_locations, id, component);
+        let close_of = (event.kind == EventKind::Close)
+            .then(|| event.of.iter())
+            .into_iter()
+            .flatten();
+        for id in event.reminder.iter().chain(close_of) {
+            if reminder_locations
+                .get(id.as_str())
+                .is_some_and(|places| !places.contains(component.as_str()))
+            {
+                crossing.insert(id.clone());
+            }
         }
     }
     if !crossing.is_empty() {
