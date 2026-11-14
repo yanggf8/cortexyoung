@@ -53,7 +53,7 @@ impl CloseReason {
     }
 }
 
-fn now_ns() -> Result<i128, LedgerError> {
+pub(crate) fn now_ns() -> Result<i128, LedgerError> {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|e| LedgerError::Message(format!("clock error: {e}")))?

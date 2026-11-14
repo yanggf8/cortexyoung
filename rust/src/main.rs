@@ -780,6 +780,9 @@ enum MemoryAction {
         harness: String,
         #[arg(long)]
         json: bool,
+        /// Also show entries the lifecycle hides (archived or dropped), each labelled.
+        #[arg(long)]
+        all: bool,
     },
     Status {
         #[arg(long, default_value = ".")]
@@ -3055,11 +3058,12 @@ fn cmd_memory(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError
             root,
             harness,
             json: _,
+            all,
         } => {
             usage.project_id = Some(cort::memory_store::project(&root).map_err(memory_error)?);
             usage.args_summary = json!({"v":1,"harness_declared":harness}).to_string();
             let mut report = serde_json::to_value(
-                cort::memory_store::recall(&root, &query).map_err(memory_read_error)?,
+                cort::memory_store::recall_all(&root, &query, all).map_err(memory_read_error)?,
             )
             .unwrap_or(Value::Null);
             report["harness_declared"] = json!(harness);
@@ -3089,7 +3093,9 @@ fn cmd_memory(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError
             };
             let project = cort::memory_store::project(&root).map_err(memory_error)?;
             usage.project_id = Some(project.clone());
-            let recall = cort::memory_store::recall(&root, "").map_err(memory_read_error)?;
+            // Phase 0 lists every active entry; Task 5 teaches list the lifecycle.
+            let recall =
+                cort::memory_store::recall_all(&root, "", true).map_err(memory_read_error)?;
             let report = cort::memory_tiers::build(&project, &epoch, epoch_ns, now, &recall);
             if lean {
                 return Ok(Emit {

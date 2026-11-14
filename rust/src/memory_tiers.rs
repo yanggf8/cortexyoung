@@ -173,7 +173,7 @@ pub struct Report {
     rows: Vec<Row>,
 }
 
-/// Place every hit of an all-active recall (`memory_store::recall(root, "")`).
+/// Place every hit of an all-active recall (`memory_store::recall_all(root, "", true)`, hidden entries included).
 pub fn build(
     project_id: &str,
     epoch: &str,

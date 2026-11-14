@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- Disabled project (no `on`, or latest switch `off`), dropped lifecycle read, or unaliased-retry answer: output byte-identical to today's everywhere.
+- Disabled project (no `on`, or latest switch `off`), dropped lifecycle read, or unaliased-retry answer: output byte-identical to today's everywhere, except that a foreground read still reports `lifecycle_unreadable` + hint when the project has unreadable lifecycle rows (one of them may be the lost `on`; decided 2026-11-14 during Task 3).
 - Table: `CREATE TABLE IF NOT EXISTS project_memory_lifecycle (project TEXT NOT NULL, id TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY (project, id))`; writes `INSERT OR IGNORE`; never update/delete.
 - Short-term 7 days, forgetting 60 days (reuse `memory_tiers::place`, `SHORT_TERM_NS`, `FORGETTING_NS`).
 - `quote` 1-600 bytes, not blank; `note` ≤ 300 bytes.

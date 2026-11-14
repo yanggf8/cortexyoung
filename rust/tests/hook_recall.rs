@@ -1070,6 +1070,7 @@ fn render_orders_and_caps_entries() {
             source_file_changed: Some(false),
             source_line_status: None,
             source_line_now: None,
+            lifecycle: None,
         })
         .collect();
     let (text, count) = cort::hook_recall::render(MemoryRecall {
@@ -1077,6 +1078,8 @@ fn render_orders_and_caps_entries() {
         sync_status: None,
         match_kind: None,
         hits,
+        lifecycle_unreadable: None,
+        lifecycle_hint: None,
     })
     .unwrap();
     assert!(text.len() <= 6000);
@@ -1115,6 +1118,7 @@ fn render_orders_and_caps_entries() {
             source_file_changed: (i == 29).then_some(true),
             source_line_status: (i == 29).then(|| "moved".into()),
             source_line_now: (i == 29).then_some(7),
+            lifecycle: None,
         })
         .collect();
     let (short, count) = cort::hook_recall::render(MemoryRecall {
@@ -1122,6 +1126,8 @@ fn render_orders_and_caps_entries() {
         sync_status: None,
         match_kind: None,
         hits: short_hits,
+        lifecycle_unreadable: None,
+        lifecycle_hint: None,
     })
     .unwrap();
     assert_eq!(count, 20);
@@ -1148,6 +1154,8 @@ fn notes_section_byte_cap_binds_before_the_count_cap() {
         sync_status: None,
         match_kind: None,
         hits: Vec::new(),
+        lifecycle_unreadable: None,
+        lifecycle_hint: None,
     };
     let session = cort::memory_store::SessionRecall {
         recall,
@@ -1253,6 +1261,8 @@ fn empty_recall() -> cort::memory::MemoryRecall {
         sync_status: None,
         match_kind: None,
         hits: Vec::new(),
+        lifecycle_unreadable: None,
+        lifecycle_hint: None,
     }
 }
 fn session_with(events: Vec<Value>) -> cort::memory_store::SessionRecall {
@@ -2188,6 +2198,7 @@ fn every_block_full_stays_within_9500_bytes() {
             source_file_changed: Some(false),
             source_line_status: None,
             source_line_now: None,
+            lifecycle: None,
         })
         .collect();
     let reminder_events: Vec<Value> = (1..=5)
@@ -2230,6 +2241,8 @@ fn every_block_full_stays_within_9500_bytes() {
             sync_status: None,
             match_kind: None,
             hits,
+            lifecycle_unreadable: None,
+            lifecycle_hint: None,
         },
         omitted: 0,
         notes,

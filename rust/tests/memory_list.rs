@@ -112,7 +112,7 @@ impl Fixture {
         self.report_at(NOW_NS)
     }
     fn report_at(&self, now_ns: i128) -> memory_tiers::Report {
-        let recall = memory_store::recall_with(self.root(), "", &self.ledger).unwrap();
+        let recall = memory_store::recall_all_with(self.root(), "", &self.ledger, true).unwrap();
         memory_tiers::build(&self.project(), "2026-11-14", EPOCH_NS, now_ns, &recall)
     }
 }

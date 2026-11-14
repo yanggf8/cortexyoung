@@ -109,6 +109,9 @@ pub struct MemoryHit {
     /// `source_missing`. Absent for rows recorded without a line hash.
     pub source_line_status: Option<String>,
     pub source_line_now: Option<usize>,
+    /// The lifecycle state, set only on an enabled project and only when the entry is due for
+    /// review or hidden; healthy hits carry none.
+    pub lifecycle: Option<String>,
 }
 
 impl Serialize for MemoryHit {
@@ -130,6 +133,9 @@ impl Serialize for MemoryHit {
         if let Some(terms) = &self.matched_terms {
             fields.insert("matched_terms".into(), terms.clone().into());
         }
+        if let Some(state) = &self.lifecycle {
+            fields.insert("lifecycle".into(), state.clone().into());
+        }
         fields.serialize(serializer)
     }
 }
@@ -143,7 +149,14 @@ pub struct MemoryRecall {
     #[serde(rename = "match", skip_serializing_if = "Option::is_none")]
     pub match_kind: Option<String>,
     pub hits: Vec<MemoryHit>,
+    /// Lifecycle rows that could not be read (set only when more than zero).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lifecycle_unreadable: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lifecycle_hint: Option<String>,
 }
+
+pub(crate) const LIFECYCLE_UNREADABLE_HINT: &str = "some lifecycle rows could not be read; cort memory review --all lists what was applied, cort memory recall --all finds anything hidden";
 
 pub(crate) fn validate(ledger: &MemoryLedger) -> Result<(), String> {
     if ledger.schema != SCHEMA {
@@ -328,12 +341,29 @@ pub(crate) fn active_entries(ledger: &MemoryLedger) -> Vec<&MemoryEntry> {
         .collect()
 }
 
+/// Recall with no lifecycle: today's behaviour, the baseline `recall_ledger_view` must equal.
+#[cfg(test)]
 pub(crate) fn recall_ledger(
     root: &Path,
     query: &str,
     ledger: &MemoryLedger,
     present: bool,
     sync_status: Option<String>,
+) -> MemoryRecall {
+    recall_ledger_view(root, query, ledger, present, sync_status, None, false)
+}
+
+/// `recall_ledger` under a lifecycle fold. `None`, or a view of a disabled project, is exactly
+/// `recall_ledger`; on an enabled project hidden entries are removed before term selection
+/// unless `include_hidden`.
+pub(crate) fn recall_ledger_view(
+    root: &Path,
+    query: &str,
+    ledger: &MemoryLedger,
+    present: bool,
+    sync_status: Option<String>,
+    view: Option<&crate::memory_lifecycle::LifecycleView>,
+    include_hidden: bool,
 ) -> MemoryRecall {
     recall_ledger_inner(
         &source_root(root),
@@ -342,6 +372,8 @@ pub(crate) fn recall_ledger(
         present,
         sync_status,
         None,
+        view,
+        include_hidden,
     )
     .0
 }
@@ -356,6 +388,8 @@ pub(crate) fn recall_ledger_for_hook(top: &Path, ledger: &MemoryLedger) -> (Memo
         !ledger.entries.is_empty(),
         Some("shared_database".into()),
         Some(20),
+        None,
+        false,
     )
 }
 
@@ -442,6 +476,7 @@ pub fn recall_selection(query: &str, active: &[MemoryEntry]) -> (Vec<String>, bo
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn recall_ledger_inner(
     root: &Path,
     query: &str,
@@ -449,12 +484,20 @@ fn recall_ledger_inner(
     present: bool,
     sync_status: Option<String>,
     limit: Option<usize>,
+    view: Option<&crate::memory_lifecycle::LifecycleView>,
+    include_hidden: bool,
 ) -> (MemoryRecall, usize) {
     let terms: Vec<_> = query.split_whitespace().map(|s| s.to_lowercase()).collect();
     let mut active = active_entries(ledger);
+    // Conflict counts every active entry under a key, hidden ones included: the key is still
+    // taken for `record`.
     let mut counts: HashMap<&str, usize> = HashMap::new();
     for entry in &active {
         *counts.entry(&entry.key).or_default() += 1;
+    }
+    let state_of = |id: &str| view.and_then(|v| v.state_of(id));
+    if !include_hidden {
+        active.retain(|entry| !state_of(&entry.id).is_some_and(|s| s.is_hidden()));
     }
     if limit.is_some() {
         active.sort_by(|a, b| b.recorded_at.cmp(&a.recorded_at).then(b.id.cmp(&a.id)));
@@ -504,6 +547,9 @@ fn recall_ledger_inner(
                 (Some(true), None) => "source_changed",
             }
         };
+        let lifecycle = state_of(&entry.id)
+            .filter(|s| s.is_due() || s.is_hidden())
+            .map(|s| s.as_str().to_string());
         hits.push(MemoryHit {
             entry: entry.clone(),
             matched_terms,
@@ -511,6 +557,7 @@ fn recall_ledger_inner(
             source_file_changed,
             source_line_status,
             source_line_now,
+            lifecycle,
         });
     }
     if !partial {
@@ -527,6 +574,8 @@ fn recall_ledger_inner(
             sync_status,
             match_kind: partial.then(|| "partial".into()),
             hits,
+            lifecycle_unreadable: None,
+            lifecycle_hint: None,
         },
         omitted,
     )
@@ -1047,5 +1096,332 @@ mod tests {
         fields.remove("recorded_machine_source");
         let old: MemoryEntry = serde_json::from_value(body).unwrap();
         assert_eq!(old.recorded_machine, None);
+    }
+
+    const DAY_NS: i128 = crate::memory_tiers::DAY_NS;
+    const NOW: i128 = 2_000_000 * DAY_NS;
+
+    fn lifecycle_event(
+        id: &str,
+        kind: &str,
+        entry: Option<&str>,
+        at: i128,
+    ) -> crate::memory_lifecycle::LifecycleEvent {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "kind": kind, "entry": entry, "recorded_at": at.to_string()
+        }))
+        .unwrap()
+    }
+
+    /// Fresh entries recorded a day before `NOW`, the switch turned on two days before.
+    fn fresh(id: &str, key: &str, claim: &str) -> MemoryEntry {
+        recall_fixture(id, key, claim, &(NOW - DAY_NS).to_string())
+    }
+
+    fn lifecycle_view(
+        entries: &[MemoryEntry],
+        events: Vec<(&str, &str, &str)>,
+        switch_on: bool,
+    ) -> crate::memory_lifecycle::LifecycleView {
+        let ledger = MemoryLedger {
+            entries: entries.to_vec(),
+            ..MemoryLedger::default()
+        };
+        let mut all = Vec::new();
+        if switch_on {
+            all.push(lifecycle_event("on1", "on", None, NOW - 2 * DAY_NS));
+        }
+        for (n, (kind, entry, _)) in events.iter().enumerate() {
+            all.push(lifecycle_event(
+                &format!("ev{n}"),
+                kind,
+                Some(entry),
+                NOW - DAY_NS / 2 + n as i128,
+            ));
+        }
+        crate::memory_lifecycle::fold(&ledger, all, 0, NOW, None)
+    }
+
+    fn ledger_of(entries: &[MemoryEntry]) -> MemoryLedger {
+        MemoryLedger {
+            entries: entries.to_vec(),
+            ..MemoryLedger::default()
+        }
+    }
+
+    fn json_of(recall: MemoryRecall) -> serde_json::Value {
+        serde_json::to_value(recall).unwrap()
+    }
+
+    #[test]
+    fn hidden_entries_do_not_change_partial_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let x = fresh("x1", "kx", "alpha only");
+        let y = fresh("y1", "ky", "beta only");
+        let both = [x.clone(), y.clone()];
+        let view = lifecycle_view(&both, vec![("archive", "y1", "")], true);
+        let with_view = recall_ledger_view(
+            dir.path(),
+            "alpha beta",
+            &ledger_of(&both),
+            true,
+            None,
+            Some(&view),
+            false,
+        );
+        let without = recall_ledger(dir.path(), "alpha beta", &ledger_of(&[x]), true, None);
+        assert_eq!(with_view.match_kind.as_deref(), Some("partial"));
+        assert_eq!(json_of(with_view), json_of(without));
+    }
+
+    #[test]
+    fn hidden_full_match_falls_back_to_partial_on_visible() {
+        let dir = tempfile::tempdir().unwrap();
+        let x = fresh("x1", "kx", "alpha only");
+        let y = fresh("y1", "ky", "alpha beta");
+        let both = [x, y];
+        let view = lifecycle_view(&both, vec![("archive", "y1", "")], true);
+        let recall = recall_ledger_view(
+            dir.path(),
+            "alpha beta",
+            &ledger_of(&both),
+            true,
+            None,
+            Some(&view),
+            false,
+        );
+        assert_eq!(recall.match_kind.as_deref(), Some("partial"));
+        let ids: Vec<_> = recall.hits.iter().map(|h| h.entry.id.as_str()).collect();
+        assert_eq!(ids, ["x1"]);
+    }
+
+    #[test]
+    fn hidden_high_scorers_do_not_crowd_out_visible_partial() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut entries = vec![recall_fixture(
+            "vis",
+            "kv",
+            "alpha beta",
+            &(NOW - 5 * DAY_NS).to_string(),
+        )];
+        let mut events = Vec::new();
+        for n in 0..6 {
+            entries.push(recall_fixture(
+                &format!("h{n}"),
+                &format!("kh{n}"),
+                "alpha beta gamma",
+                &(NOW - DAY_NS).to_string(),
+            ));
+        }
+        for n in 0..6 {
+            events.push(("archive", ["h0", "h1", "h2", "h3", "h4", "h5"][n], ""));
+        }
+        let view = lifecycle_view(&entries, events, true);
+        let recall = recall_ledger_view(
+            dir.path(),
+            "alpha beta gamma delta",
+            &ledger_of(&entries),
+            true,
+            None,
+            Some(&view),
+            false,
+        );
+        assert_eq!(recall.match_kind.as_deref(), Some("partial"));
+        let ids: Vec<_> = recall.hits.iter().map(|h| h.entry.id.as_str()).collect();
+        assert_eq!(ids, ["vis"]);
+    }
+
+    #[test]
+    fn due_states_carry_exact_labels_and_healthy_ones_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let entries = [
+            recall_fixture("exp", "k1", "alpha", &(NOW - 15 * DAY_NS).to_string()),
+            recall_fixture("old", "k2", "alpha", &(NOW - 100 * DAY_NS).to_string()),
+            recall_fixture("lng", "k3", "alpha", &(NOW - 30 * DAY_NS).to_string()),
+            fresh("shr", "k4", "alpha"),
+        ];
+        // The switch went on 20 days ago, so a 15-day-old entry's seven days are over.
+        let view = crate::memory_lifecycle::fold(
+            &ledger_of(&entries),
+            vec![lifecycle_event("on1", "on", None, NOW - 20 * DAY_NS)],
+            0,
+            NOW,
+            None,
+        );
+        let json = json_of(recall_ledger_view(
+            dir.path(),
+            "alpha",
+            &ledger_of(&entries),
+            true,
+            None,
+            Some(&view),
+            false,
+        ));
+        let label = |id: &str| {
+            json["hits"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|h| h["id"] == id)
+                .unwrap()
+                .get("lifecycle")
+                .cloned()
+        };
+        assert_eq!(label("exp"), Some("short_term_expired".into()));
+        assert_eq!(label("old"), Some("forgetting_candidate".into()));
+        assert_eq!(label("lng"), None);
+        assert_eq!(label("shr"), None);
+    }
+
+    #[test]
+    fn include_hidden_labels_archived() {
+        let dir = tempfile::tempdir().unwrap();
+        let x = fresh("x1", "kx", "alpha live");
+        let y = fresh("y1", "ky", "alpha shelved");
+        let both = [x, y];
+        let view = lifecycle_view(&both, vec![("archive", "y1", "")], true);
+        let all = json_of(recall_ledger_view(
+            dir.path(),
+            "alpha",
+            &ledger_of(&both),
+            true,
+            None,
+            Some(&view),
+            true,
+        ));
+        let hits = all["hits"].as_array().unwrap();
+        assert_eq!(hits.len(), 2);
+        for hit in hits {
+            match hit["id"].as_str().unwrap() {
+                "y1" => assert_eq!(hit["lifecycle"], "archived"),
+                _ => assert!(hit.get("lifecycle").is_none(), "{hit}"),
+            }
+        }
+        let hidden = json_of(recall_ledger_view(
+            dir.path(),
+            "alpha",
+            &ledger_of(&both),
+            true,
+            None,
+            Some(&view),
+            false,
+        ));
+        assert_eq!(hidden["hits"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn healthy_hits_serialize_without_lifecycle() {
+        let dir = tempfile::tempdir().unwrap();
+        let entries = [fresh("x1", "kx", "alpha"), fresh("y1", "ky", "alpha two")];
+        let view = lifecycle_view(&entries, vec![], true);
+        assert!(view.enabled);
+        let plain = json_of(recall_ledger(
+            dir.path(),
+            "alpha",
+            &ledger_of(&entries),
+            true,
+            None,
+        ));
+        let viewed = json_of(recall_ledger_view(
+            dir.path(),
+            "alpha",
+            &ledger_of(&entries),
+            true,
+            None,
+            Some(&view),
+            false,
+        ));
+        assert_eq!(plain, viewed);
+        assert!(!viewed.to_string().contains("lifecycle"));
+    }
+
+    #[test]
+    fn disabled_view_is_byte_identical() {
+        let dir = tempfile::tempdir().unwrap();
+        let entries = [fresh("x1", "kx", "alpha"), fresh("y1", "ky", "alpha two")];
+        let view = lifecycle_view(&entries, vec![("archive", "y1", "")], false);
+        assert!(!view.enabled);
+        for include_hidden in [false, true] {
+            let plain = serde_json::to_string(&recall_ledger(
+                dir.path(),
+                "alpha",
+                &ledger_of(&entries),
+                true,
+                None,
+            ))
+            .unwrap();
+            let viewed = serde_json::to_string(&recall_ledger_view(
+                dir.path(),
+                "alpha",
+                &ledger_of(&entries),
+                true,
+                None,
+                Some(&view),
+                include_hidden,
+            ))
+            .unwrap();
+            assert_eq!(plain, viewed);
+        }
+    }
+
+    #[test]
+    fn conflict_counts_hidden_partner() {
+        let dir = tempfile::tempdir().unwrap();
+        let entries = [
+            fresh("x1", "same", "alpha live"),
+            fresh("y1", "same", "alpha old"),
+        ];
+        let view = lifecycle_view(&entries, vec![("archive", "y1", "")], true);
+        let json = json_of(recall_ledger_view(
+            dir.path(),
+            "alpha",
+            &ledger_of(&entries),
+            true,
+            None,
+            Some(&view),
+            false,
+        ));
+        let hits = json["hits"].as_array().unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0]["id"], "x1");
+        assert_eq!(hits[0]["evidence_status"], "conflict");
+    }
+
+    #[test]
+    fn only_hidden_matches_reads_as_no_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let entries = [
+            fresh("x1", "kx", "unrelated"),
+            fresh("y1", "ky", "zebra shelved"),
+        ];
+        let view = lifecycle_view(&entries, vec![("drop", "y1", "")], true);
+        let plain = json_of(recall_ledger(
+            dir.path(),
+            "zebra",
+            &ledger_of(&entries[..1]),
+            true,
+            None,
+        ));
+        let hidden = json_of(recall_ledger_view(
+            dir.path(),
+            "zebra",
+            &ledger_of(&entries),
+            true,
+            None,
+            Some(&view),
+            false,
+        ));
+        assert_eq!(plain, hidden);
+        assert_eq!(hidden["ledger_status"], "present");
+        let all = json_of(recall_ledger_view(
+            dir.path(),
+            "zebra",
+            &ledger_of(&entries),
+            true,
+            None,
+            Some(&view),
+            true,
+        ));
+        assert_eq!(all["hits"][0]["lifecycle"], "dropped");
     }
 }

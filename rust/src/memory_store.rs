@@ -1802,14 +1802,51 @@ mod lock_tests {
 }
 
 pub fn recall(root: &Path, query: &str) -> Result<MemoryRecall, LedgerError> {
+    recall_all(root, query, false)
+}
+
+/// `recall`, optionally keeping the entries a lifecycle fold hides (`cort memory recall --all`).
+pub fn recall_all(
+    root: &Path,
+    query: &str,
+    include_hidden: bool,
+) -> Result<MemoryRecall, LedgerError> {
     let ledger = Ledger::open()?;
-    recall_with(root, query, &ledger)
+    recall_all_with(root, query, &ledger, include_hidden)
 }
 
 pub fn recall_with(root: &Path, query: &str, ledger: &Ledger) -> Result<MemoryRecall, LedgerError> {
-    let entries = ledger.read(&project(root)?)?;
+    recall_all_with(root, query, ledger, false)
+}
+
+/// Reads the ledger with the project's lifecycle events and folds them at the current time. On
+/// an enabled project hidden entries are left out unless `include_hidden`; a project that never
+/// switched lifecycle on answers exactly as before the lifecycle table existed.
+pub fn recall_all_with(
+    root: &Path,
+    query: &str,
+    ledger: &Ledger,
+    include_hidden: bool,
+) -> Result<MemoryRecall, LedgerError> {
+    let (entries, rows) = ledger.read_with_lifecycle(&project(root)?)?;
     let present = !entries.entries.is_empty();
-    Ok(memory::recall_ledger(root, query, &entries, present, None))
+    let unreadable = rows.unreadable;
+    let now_ns = crate::remind_store::now_ns()?;
+    let view = crate::memory_lifecycle::fold(&entries, rows.events, unreadable, now_ns, None);
+    let mut recall = memory::recall_ledger_view(
+        root,
+        query,
+        &entries,
+        present,
+        None,
+        Some(&view),
+        include_hidden,
+    );
+    if unreadable > 0 {
+        recall.lifecycle_unreadable = Some(unreadable);
+        recall.lifecycle_hint = Some(memory::LIFECYCLE_UNREADABLE_HINT.to_string());
+    }
+    Ok(recall)
 }
 
 fn conflicts(ledger: &MemoryLedger) -> Vec<MemoryConflict> {

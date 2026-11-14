@@ -158,6 +158,19 @@ impl State {
         }
     }
 
+    /// The inverse of `as_str`.
+    pub fn parse(s: &str) -> Option<State> {
+        Some(match s {
+            "short_term" => Self::ShortTerm,
+            "short_term_expired" => Self::ShortTermExpired,
+            "long_term" => Self::LongTerm,
+            "forgetting_candidate" => Self::ForgettingCandidate,
+            "archived" => Self::Archived,
+            "dropped" => Self::Dropped,
+            _ => return None,
+        })
+    }
+
     pub fn is_hidden(self) -> bool {
         matches!(self, Self::Archived | Self::Dropped)
     }
@@ -383,6 +396,21 @@ pub fn stamp(now_ns: i128, events: &[LifecycleEvent], entry: Option<&str>) -> i1
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn state_parse_round_trips_as_str() {
+        for s in [
+            State::ShortTerm,
+            State::ShortTermExpired,
+            State::LongTerm,
+            State::ForgettingCandidate,
+            State::Archived,
+            State::Dropped,
+        ] {
+            assert_eq!(State::parse(s.as_str()), Some(s));
+        }
+        assert_eq!(State::parse("nope"), None);
+    }
 
     const DAY: i128 = crate::memory_tiers::DAY_NS;
     const EPOCH: i128 = 1_000_000 * 1_000_000_000;
