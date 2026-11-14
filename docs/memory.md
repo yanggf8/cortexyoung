@@ -85,6 +85,13 @@ cort memory recall 'deployment option' --harness claude-code
 `cort memory --help` lists every memory verb with all of its options, rendered from the parser;
 `cort memory <verb> --help` (or a group such as `notes`) answers with just that part.
 
+`cort memory list [--root <ROOT>] [--epoch <YYYY-MM-DD>] [--lean]` is a read-only listing of the
+active entries (oldest first) with the tier each would get under the two-tier proposal (issue #11,
+phase 0): long-term when recorded before `epoch - 7d`, otherwise short-term expiring at
+`max(recorded, epoch) + 7d`; `--epoch` defaults to today's local midnight. JSON by default (summary
+counts, forgetting-due entries per UTC week, evidence statuses); `--lean` prints a count line and
+one TSV row per entry. It writes nothing; it exists to size the proposal against the real ledger.
+
 `record` accepts a claim without a source. When a natural source exists, pass `--source` and
 `--line` together; the file must be tracked and committed, and the cited line nonblank. For a correction,
 pass `--replace` for the sole active entry, or `--supersedes <active-id>` (a unique prefix of at

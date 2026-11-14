@@ -376,6 +376,7 @@ fn memory_help_lists_each_memory_verb_with_its_options() {
                 "check",
                 "configure",
                 "import-config",
+                "list",
                 "notes",
                 "notes list",
                 "notes opt-in",

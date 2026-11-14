@@ -65,7 +65,7 @@ fn usage_value() -> Value {
             "delete": "cort delete [root]",
             "impact": "cort impact --symbol <name> [--depth <n>] [--coverage] [-f json|lean]",
             "usage": "cort usage [days] [-f json|lean]",
-            "memory": "cort memory <configure|import-config|record|resolve|recall|status|check|notes|alias> [options]",
+            "memory": "cort memory <configure|import-config|record|resolve|recall|status|list|check|notes|alias> [options]",
             "question": "cort question <add|list|answer|close> [options]  (questions for the human, kept per repo in the memory database; cort question --help lists each verb)",
             "remind": "cort remind <add|list|defer|close> [options]  (dated tasks that surface at session start from the day before, kept per repo in the memory database; cort remind --help lists each verb)",
             "measure": "cort measure <configure|show|record|collect|health|status|cron|report> [options]  (uploads start at 2026-10-28 00:00 Taiwan time; collect: scan and upload the batch; --background appends at most one result to measure.log (none when skipped_busy) without stdout; health: observe recently used indexes and write local index_health_log, reading indexes only, with no network; --background appends the result to measure.log without stdout; status: read local collection state, -f json|lean; cron: manual install or removal of the legacy entry, no longer installed automatically; hook kick is the only automatic collection trigger; command_log and index_health_log keep uploaded rows 90 days and rows not yet uploaded 180 days, pruned when a new command is recorded; rows still not uploaded after 180 days are deleted and counted in measure status (pruned_unuploaded_rows) and measure.log)",
@@ -463,6 +463,7 @@ fn render_emit(emit: &Emit) -> String {
         usage::render_usage_lean(&emit.payload)
     } else if emit.render_command == Some("hook-install-all-lean")
         || emit.render_command == Some("internal-shim-lean")
+        || emit.render_command == Some("memory-list-lean")
     {
         // Emitted raw. Wrapping these lines in a JSON string would put the installer back where it
         // started -- reaching into a serialised object with a regex -- which is the whole thing
@@ -785,6 +786,17 @@ enum MemoryAction {
         root: PathBuf,
         #[arg(long)]
         json: bool,
+    },
+    /// Read-only listing of the active entries with the tier each would get (issue #11 phase 0);
+    /// writes nothing.
+    List {
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        /// Tiers epoch as a local date; default: today.
+        #[arg(long, value_name = "YYYY-MM-DD")]
+        epoch: Option<String>,
+        #[arg(long)]
+        lean: bool,
     },
     Check {
         #[arg(long, default_value = ".")]
@@ -3061,6 +3073,32 @@ fn cmd_memory(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError
         MemoryAction::Status { root, json: _ } => {
             serde_json::to_value(cort::memory_store::status(&root).map_err(memory_read_error)?)
                 .unwrap_or(Value::Null)
+        }
+        MemoryAction::List { root, epoch, lean } => {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|e| memory_error(format!("clock error: {e}")))?
+                .as_nanos();
+            let now = i128::try_from(now).map_err(|_| memory_error("clock overflow".into()))?;
+            let (epoch, epoch_ns) = match epoch {
+                Some(raw) => (
+                    raw.clone(),
+                    cort::memory_tiers::parse_epoch(&raw).map_err(memory_error)?,
+                ),
+                None => cort::memory_tiers::default_epoch(now).map_err(memory_error)?,
+            };
+            let project = cort::memory_store::project(&root).map_err(memory_error)?;
+            usage.project_id = Some(project.clone());
+            let recall = cort::memory_store::recall(&root, "").map_err(memory_read_error)?;
+            let report = cort::memory_tiers::build(&project, &epoch, epoch_ns, now, &recall);
+            if lean {
+                return Ok(Emit {
+                    render_command: Some("memory-list-lean"),
+                    format: Format::Lean,
+                    payload: json!({"lean": report.lean()}),
+                });
+            }
+            report.to_json()
         }
         MemoryAction::Check { root } => {
             cort::memory_store::check(&root).map_err(memory_read_error)?
