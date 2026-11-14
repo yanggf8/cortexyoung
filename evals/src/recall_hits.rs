@@ -428,6 +428,56 @@ pub fn load_ledger(path: &Path) -> Result<Vec<MemoryEntry>, String> {
         .collect()
 }
 
+/// Every readable query of every `cort memory recall` call in the transcripts, in file then line
+/// order, one entry per call (repeats kept). Same file set, time window and extraction as `scan`.
+pub fn queries(
+    dir: &Path,
+    project: Option<&str>,
+    days: Option<u64>,
+    now_ms: i64,
+) -> Result<Vec<String>, String> {
+    let since_ms = match days {
+        Some(d) => Some(
+            i64::try_from(d)
+                .ok()
+                .and_then(|d| d.checked_mul(DAY_MS))
+                .and_then(|span| now_ms.checked_sub(span))
+                .ok_or("--days is too large")?,
+        ),
+        None => None,
+    };
+    let mut out = Vec::new();
+    for (_, path) in files(dir, project)? {
+        let file = fs::File::open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        for line in BufReader::new(file).lines() {
+            let line = line.map_err(|e| format!("{}: {e}", path.display()))?;
+            let Ok(value) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            if value["type"] != "assistant" {
+                continue;
+            }
+            let Some(content) = value["message"]["content"].as_array() else {
+                continue;
+            };
+            for item in content.iter().filter(|v| v["type"] == "tool_use") {
+                let command = item["input"]["command"].as_str().unwrap_or("");
+                if item["name"] != "Bash" || !command.contains(MARK) {
+                    continue;
+                }
+                if let Some(since) = since_ms {
+                    match value["timestamp"].as_str().map(time::parse_since) {
+                        Some(Ok(t)) if t >= since => {}
+                        _ => continue,
+                    }
+                }
+                out.extend(invocations(command).into_iter().flatten());
+            }
+        }
+    }
+    Ok(out)
+}
+
 pub fn scan(
     dir: &Path,
     project: Option<&str>,
