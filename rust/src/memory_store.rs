@@ -708,18 +708,27 @@ pub struct SessionRecall {
     /// False when the answer came from the unaliased retry, whose `= ?` scope is narrower than
     /// the alias component: such a reminder list must never become a snapshot.
     pub reminders_full_scope: bool,
+    /// The lifecycle fold at the caller's `now_ns`; `None` when the lifecycle statement was
+    /// dropped after an SQL error (no table yet) or the answer came from the unaliased retry.
+    pub lifecycle: Option<crate::memory_lifecycle::LifecycleView>,
+    /// False when the answer came from the unaliased retry, whose `= ?` scope could miss an
+    /// `on` or `off` written under another alias id: the lifecycle is then not read at all.
+    pub lifecycle_full_scope: bool,
 }
 
-/// Read only, one pipeline of four reads -- ledger, notes (two statements), questions,
-/// reminders -- where every statement keeps its own result and every read is decided from
-/// that result alone, never by position. The ledger (step zero) is required: an SQL error
+/// Read only, one pipeline of five reads -- ledger, notes (two statements), questions,
+/// reminders, lifecycle -- where every statement keeps its own result and every read is decided
+/// from that result alone, never by position. The ledger (step zero) is required: an SQL error
 /// there retries the whole pipeline under the unaliased project, and a non-SQL error anywhere
-/// fails the whole recall. Notes, questions and reminders are optional: an SQL error at a
-/// notes step drops the notes and retries without them -- and without the questions or
-/// reminders that failed in the same answer, which are not sent again to fail a second time
-/// -- while an SQL error at the questions or the reminders step drops that one read (`None`),
-/// keeps every other result that arrived with it, and never retries. An optional read is
-/// dropped at most once, and every retry is subject to the remaining-budget rule.
+/// fails the whole recall. Notes, questions, reminders and lifecycle are optional: an SQL error
+/// at a notes step drops the notes and retries without them -- and without the questions,
+/// reminders or lifecycle that failed in the same answer, which are not sent again to fail a
+/// second time -- while an SQL error at the questions, reminders or lifecycle step drops that
+/// one read (`None`), keeps every other result that arrived with it, and never retries. The
+/// lifecycle statement is never sent in the unaliased retry, and no `CREATE` is ever sent: on a
+/// database without the table the read fails with an SQL error, the normal dropped path. An
+/// optional read is dropped at most once, and every retry is subject to the remaining-budget
+/// rule.
 #[doc(hidden)]
 pub fn session_recall_with(
     root: &Path,
@@ -736,6 +745,7 @@ pub fn session_recall_with(
     let mut with_notes = true;
     let mut with_questions = true;
     let mut with_reminders = true;
+    let mut with_lifecycle = true;
     let mut retried_alias = false;
     let result = loop {
         if crate::remote::RECALL_DEADLINE.saturating_sub(started.elapsed())
@@ -777,6 +787,17 @@ pub fn session_recall_with(
             ));
             at
         });
+        // Last, so every earlier step keeps its position. Not sent under the unaliased scope:
+        // its answer would be ignored. No CREATE: a missing table is an SQL error, which drops
+        // this read alone.
+        let lifecycle_step = (with_lifecycle && !retried_alias).then(|| {
+            let at = statements.len();
+            statements.push(Stmt::new(
+                format!("SELECT body FROM project_memory_lifecycle WHERE project {scope}"),
+                ledger_args(),
+            ));
+            at
+        });
         let results = db.pipeline_each(&statements).map_err(|error| error.kind)?;
         // A non-SQL error in any statement is a whole-recall error, even when an earlier
         // optional statement failed with an SQL error this loop would have answered by
@@ -796,18 +817,26 @@ pub fn session_recall_with(
         };
         let questions_sql_failed = sql_failed(questions_step);
         let reminders_sql_failed = sql_failed(reminders_step);
+        let lifecycle_sql_failed = sql_failed(lifecycle_step);
         // Only SQL failures remain, so the first one's step decides what the loop does about it.
         let Some(step) = results
             .iter()
             .find_map(|r| r.as_ref().err().and_then(|error| error.step))
         else {
-            break (results, notes_steps, questions_step, reminders_step);
+            break (
+                results,
+                notes_steps,
+                questions_step,
+                reminders_step,
+                lifecycle_step,
+            );
         };
         match step {
             0 if !retried_alias && with_notes && with_questions => retried_alias = true,
             1 | 2 if with_notes => {
-                // Questions or reminders that failed in the same answer are already known:
-                // drop them with the notes rather than send them again to fail a second time.
+                // Questions, reminders or lifecycle that failed in the same answer are already
+                // known: drop them with the notes rather than send them again to fail a second
+                // time.
                 with_notes = false;
                 if questions_sql_failed {
                     with_questions = false;
@@ -815,18 +844,29 @@ pub fn session_recall_with(
                 if reminders_sql_failed {
                     with_reminders = false;
                 }
+                if lifecycle_sql_failed {
+                    with_lifecycle = false;
+                }
             }
-            // The questions or the reminders read failed, alone or together: keep the answer;
-            // the decode below decides each read from its own result, and neither retries.
+            // The questions, the reminders or the lifecycle read failed, alone or together:
+            // keep the answer; the decode below decides each read from its own result, and
+            // none of them retries.
             step if questions_step.is_some_and(|at| at == step)
-                || reminders_step.is_some_and(|at| at == step) =>
+                || reminders_step.is_some_and(|at| at == step)
+                || lifecycle_step.is_some_and(|at| at == step) =>
             {
-                break (results, notes_steps, questions_step, reminders_step);
+                break (
+                    results,
+                    notes_steps,
+                    questions_step,
+                    reminders_step,
+                    lifecycle_step,
+                );
             }
             _ => return Err(ErrorKind::Sql),
         }
     };
-    let (results, notes_steps, questions_step, reminders_step) = result;
+    let (results, notes_steps, questions_step, reminders_step, lifecycle_step) = result;
     // The ledger read is required: every failure path for it was taken inside the loop, so
     // here it is the result every other read rests on.
     let rows = match results.first() {
@@ -856,6 +896,10 @@ pub fn session_recall_with(
         .and_then(|at| results.get(at))
         .and_then(|result| result.as_ref().ok())
         .map(|stmt| stmt.rows.as_slice());
+    let lifecycle_rows_read = lifecycle_step
+        .and_then(|at| results.get(at))
+        .and_then(|result| result.as_ref().ok())
+        .map(|stmt| stmt.rows.clone());
     let bodies = rows
         .iter()
         .map(|row| match row.first() {
@@ -865,7 +909,13 @@ pub fn session_recall_with(
         .collect::<Result<Vec<_>, _>>()?;
     let bodies = merge_bodies(bodies).map_err(|_| ErrorKind::Sql)?;
     let ledger = ledger_from_bodies(bodies).map_err(|_| ErrorKind::Sql)?;
-    let (recall, omitted) = memory::recall_ledger_for_hook(&top, &ledger);
+    // The fold runs on the caller's `now_ns`, like the questions and reminders folds. A row the
+    // build cannot decode is counted by `lifecycle_rows`, never a reason to drop the read.
+    let lifecycle = lifecycle_rows_read.map(|rows| {
+        let read = lifecycle_rows(rows);
+        crate::memory_lifecycle::fold(&ledger, read.events, read.unreadable, now_ns, None)
+    });
+    let (recall, omitted) = memory::recall_ledger_for_hook(&top, &ledger, lifecycle.as_ref());
     let briefs = note_rows
         .iter()
         .map(|row| {
@@ -919,6 +969,8 @@ pub fn session_recall_with(
         questions,
         reminders,
         reminders_full_scope: !retried_alias,
+        lifecycle,
+        lifecycle_full_scope: !retried_alias,
     })
 }
 

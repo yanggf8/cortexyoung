@@ -321,3 +321,68 @@ pub fn local_stamp(ns: i128) -> String {
 pub fn local_date(ns: i128) -> String {
     local_parts(ns).map_or_else(|| format!("{ns}ns"), |(date, _)| date)
 }
+
+/// The weekday of a `YYYY-MM-DD` civil date, 0 = Monday .. 6 = Sunday; `None` for anything that
+/// is not a real date in that exact form.
+pub(crate) fn weekday(date: &str) -> Option<u8> {
+    let bytes = date.as_bytes();
+    if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
+        return None;
+    }
+    let digits = |range: std::ops::Range<usize>| -> Option<i64> {
+        let part = &date[range];
+        part.bytes()
+            .all(|b| b.is_ascii_digit())
+            .then(|| part.parse().ok())?
+    };
+    let (year, month, day) = (digits(0..4)?, digits(5..7)?, digits(8..10)?);
+    let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    let month_days = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return None,
+    };
+    if day < 1 || day > month_days {
+        return None;
+    }
+    // Days since 1970-01-01 (a Thursday), by the civil-from-days inverse with March-based years.
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * ((month + 9) % 12) + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    u8::try_from((days + 3).rem_euclid(7)).ok()
+}
+
+#[cfg(test)]
+mod weekday_tests {
+    use super::weekday;
+
+    #[test]
+    fn weekday_known_dates() {
+        assert_eq!(weekday("2026-11-14"), Some(5));
+        assert_eq!(weekday("2026-11-15"), Some(6));
+        assert_eq!(weekday("2026-11-16"), Some(0));
+        assert_eq!(weekday("2000-02-29"), Some(1));
+        assert_eq!(weekday("1970-01-01"), Some(3));
+        for bad in [
+            "",
+            "2026-11",
+            "2026-13-01",
+            "2026-00-10",
+            "2026-02-29",
+            "2026-11-31",
+            "2026-11-00",
+            "2026/11/14",
+            "26-11-14",
+            "2026-11-14T00:00",
+            "20x6-11-14",
+            "2026-1a-14",
+        ] {
+            assert_eq!(weekday(bad), None, "{bad}");
+        }
+    }
+}

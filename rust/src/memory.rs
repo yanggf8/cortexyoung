@@ -380,7 +380,13 @@ pub(crate) fn recall_ledger_view(
 
 /// SessionStart evaluates evidence only for entries it can display. `top` is the work-tree top
 /// level, resolved by the caller before its network wait so no subprocess runs after it.
-pub(crate) fn recall_ledger_for_hook(top: &Path, ledger: &MemoryLedger) -> (MemoryRecall, usize) {
+/// Under an enabled lifecycle view hidden entries are removed before the sort and the cut and
+/// do not count as omitted; `None` or a disabled view is today's behaviour.
+pub(crate) fn recall_ledger_for_hook(
+    top: &Path,
+    ledger: &MemoryLedger,
+    view: Option<&crate::memory_lifecycle::LifecycleView>,
+) -> (MemoryRecall, usize) {
     recall_ledger_inner(
         top,
         "",
@@ -388,7 +394,7 @@ pub(crate) fn recall_ledger_for_hook(top: &Path, ledger: &MemoryLedger) -> (Memo
         !ledger.entries.is_empty(),
         Some("shared_database".into()),
         Some(20),
-        None,
+        view,
         false,
     )
 }
@@ -500,7 +506,15 @@ fn recall_ledger_inner(
         active.retain(|entry| !state_of(&entry.id).is_some_and(|s| s.is_hidden()));
     }
     if limit.is_some() {
-        active.sort_by(|a, b| b.recorded_at.cmp(&a.recorded_at).then(b.id.cmp(&a.id)));
+        // Entries due for review go last, so the cut drops them before any current rule; the
+        // renderer sorts by the same key.
+        let due = |id: &str| state_of(id).is_some_and(|s| s.is_due());
+        active.sort_by(|a, b| {
+            due(&a.id)
+                .cmp(&due(&b.id))
+                .then(b.recorded_at.cmp(&a.recorded_at))
+                .then(b.id.cmp(&a.id))
+        });
     }
     let omitted = limit.map_or(0, |n| active.len().saturating_sub(n));
     if let Some(n) = limit {
@@ -905,7 +919,7 @@ mod tests {
             Some("shared_database".into()),
         ))
         .unwrap();
-        let (hook, omitted) = recall_ledger_for_hook(dir.path(), &ledger);
+        let (hook, omitted) = recall_ledger_for_hook(dir.path(), &ledger, None);
         assert_eq!(omitted, 0);
         assert_eq!(serde_json::to_value(hook).unwrap(), normal);
         assert!(normal.get("match").is_none());

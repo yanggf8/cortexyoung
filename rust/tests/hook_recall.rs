@@ -203,7 +203,7 @@ fn pipeline_reads_ledger_and_other_machine_notes_without_writes() {
     assert!(rendered.text.contains("[nohost]"));
     assert!(rendered.text.contains("[host-one]"));
     assert_eq!(requests.lock().unwrap().len(), 1);
-    assert_eq!(requests.lock().unwrap()[0].len(), 5);
+    assert_eq!(requests.lock().unwrap()[0].len(), 6);
 }
 #[test]
 fn missing_notes_schema_retries_ledger_and_creates_nothing() {
@@ -239,7 +239,7 @@ fn missing_notes_schema_retries_ledger_and_creates_nothing() {
             .iter()
             .map(Vec::len)
             .collect::<Vec<_>>(),
-        vec![5, 2]
+        vec![6, 2]
     );
     assert!(requests.lock().unwrap()[1][0].contains("project IN (WITH RECURSIVE"));
     read_only.store(false, Ordering::SeqCst);
@@ -285,7 +285,7 @@ fn missing_host_table_keeps_ledger_and_does_not_create_host_table() {
             .iter()
             .map(Vec::len)
             .collect::<Vec<_>>(),
-        vec![5, 2]
+        vec![6, 2]
     );
     read_only.store(false, Ordering::SeqCst);
     let tables = db
@@ -325,7 +325,7 @@ fn missing_alias_table_retries_full_pipeline_and_keeps_notes() {
     let requests = requests.lock().unwrap();
     assert_eq!(
         requests.iter().map(Vec::len).collect::<Vec<_>>(),
-        vec![5, 5]
+        vec![6, 5]
     );
     assert!(requests[0][0].contains("project IN (WITH RECURSIVE"));
     assert!(requests[1][0].contains("project = ?"));
@@ -360,7 +360,7 @@ fn missing_alias_and_notes_tables_retries_unaliased_ledger_only() {
     let requests = requests.lock().unwrap();
     assert_eq!(
         requests.iter().map(Vec::len).collect::<Vec<_>>(),
-        vec![5, 5, 2]
+        vec![6, 5, 2]
     );
     assert!(requests[0][0].contains("project IN (WITH RECURSIVE"));
     assert!(requests[1][0].contains("project = ?"));
@@ -504,7 +504,7 @@ fn notes_failure_without_budget_for_retry_is_timeout() {
             .iter()
             .map(Vec::len)
             .collect::<Vec<_>>(),
-        vec![5]
+        vec![6]
     );
 }
 fn config(data: &Path, url: &str) {
@@ -1165,6 +1165,8 @@ fn notes_section_byte_cap_binds_before_the_count_cap() {
         questions: None,
         reminders: None,
         reminders_full_scope: true,
+        lifecycle: None,
+        lifecycle_full_scope: true,
     };
     let rendered = cort::hook_recall::render_session(&session, now_ns()).unwrap();
     assert_eq!(rendered.entries, 0);
@@ -1279,6 +1281,8 @@ fn session_with(events: Vec<Value>) -> cort::memory_store::SessionRecall {
         questions: Some(folded.questions),
         reminders: None,
         reminders_full_scope: true,
+        lifecycle: None,
+        lifecycle_full_scope: true,
     }
 }
 fn folded_reminders(events: Vec<Value>) -> Vec<cort::remind::Reminder> {
@@ -1297,6 +1301,8 @@ fn remind_session(reminders: Vec<cort::remind::Reminder>) -> cort::memory_store:
         questions: None,
         reminders: Some(reminders),
         reminders_full_scope: true,
+        lifecycle: None,
+        lifecycle_full_scope: true,
     }
 }
 
@@ -1334,7 +1340,7 @@ fn questions_block_follows_ledger_and_precedes_notes() {
     ), "{text}");
     let requests = requests.lock().unwrap();
     assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].len(), 5);
+    assert_eq!(requests[0].len(), 6);
     assert!(requests[0][3].contains("project_questions WHERE project IN (WITH RECURSIVE"));
 }
 
@@ -1376,7 +1382,7 @@ fn questions_only_project_still_injects() {
             .iter()
             .map(Vec::len)
             .collect::<Vec<_>>(),
-        vec![5, 2]
+        vec![6, 2]
     );
 }
 
@@ -1412,7 +1418,7 @@ fn missing_questions_table_keeps_ledger_and_notes() {
             .iter()
             .map(Vec::len)
             .collect::<Vec<_>>(),
-        vec![5]
+        vec![6]
     );
     read_only.store(false, Ordering::SeqCst);
     let tables = db
@@ -1447,7 +1453,7 @@ fn notes_failure_keeps_questions() {
     let requests = requests.lock().unwrap();
     assert_eq!(
         requests.iter().map(Vec::len).collect::<Vec<_>>(),
-        vec![5, 2]
+        vec![6, 2]
     );
     assert!(requests[1][1].contains("project_questions"));
 }
@@ -1644,7 +1650,7 @@ fn notes_then_questions_failure_keeps_the_ledger() {
     let requests = requests.lock().unwrap();
     assert_eq!(
         requests.iter().map(Vec::len).collect::<Vec<_>>(),
-        vec![5, 1]
+        vec![6, 1]
     );
     assert!(requests[1][0].contains("project_memory"));
 }
@@ -1753,7 +1759,7 @@ fn reminders_read_with_pinned_now() {
     assert_eq!(reminders[2].label, "in 3d");
     let requests = requests.lock().unwrap();
     assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].len(), 5);
+    assert_eq!(requests[0].len(), 6);
     assert!(requests[0][4].contains("project_reminders WHERE project IN (WITH RECURSIVE"));
 }
 
@@ -1788,7 +1794,7 @@ fn reminders_failing_alone_keeps_everything_else() {
             .iter()
             .map(Vec::len)
             .collect::<Vec<_>>(),
-        vec![5]
+        vec![6]
     );
 }
 
@@ -1823,7 +1829,7 @@ fn questions_and_reminders_failing_together_keep_ledger_and_notes() {
             .iter()
             .map(Vec::len)
             .collect::<Vec<_>>(),
-        vec![5]
+        vec![6]
     );
 }
 
@@ -1855,7 +1861,7 @@ fn notes_and_reminders_failing_together_keep_ledger_and_questions() {
     let requests = requests.lock().unwrap();
     assert_eq!(
         requests.iter().map(Vec::len).collect::<Vec<_>>(),
-        vec![5, 2]
+        vec![6, 2]
     );
     assert!(requests[1][1].contains("project_questions"));
 }
@@ -1891,7 +1897,7 @@ fn missing_reminders_table_keeps_everything_else() {
             .iter()
             .map(Vec::len)
             .collect::<Vec<_>>(),
-        vec![5]
+        vec![6]
     );
     read_only.store(false, Ordering::SeqCst);
     let tables = db
@@ -1948,7 +1954,7 @@ fn undecodable_reminder_row_drops_block_not_ledger() {
             .iter()
             .map(Vec::len)
             .collect::<Vec<_>>(),
-        vec![5]
+        vec![6]
     );
 }
 
@@ -2250,6 +2256,8 @@ fn every_block_full_stays_within_9500_bytes() {
         questions: Some(questions),
         reminders: Some(folded_reminders(reminder_events)),
         reminders_full_scope: true,
+        lifecycle: None,
+        lifecycle_full_scope: true,
     };
     let rendered = cort::hook_recall::render_session(&session, now_ns()).unwrap();
     assert!(rendered.entries > 0 && rendered.notes > 0, "{rendered:?}");
@@ -2654,4 +2662,757 @@ fn kimi_later_prompt_shows_newly_due() {
         .contains("the local snapshot is from"));
     let (quiet, _) = run(root, root, &kimi_prompt(&repo, "k2"), Some("400"));
     assert!(quiet.stdout.is_empty());
+}
+
+// ---- lifecycle at session start (issue #11 phase 1a, Task 6) ----
+
+/// 2026-11-14 12:00 UTC: a Saturday in every zone from UTC-12 to UTC+14 (Sunday at the far end).
+const SAT_NOON: i128 = 1_794_657_600_000_000_000;
+/// 2026-11-13 03:00 UTC: Thursday or Friday in every zone, never a weekend.
+const FRI_EARLY: i128 = 1_794_538_800_000_000_000;
+const HOUR_NS: i128 = NS_PER_DAY / 24;
+
+fn weekend_line(n: usize) -> String {
+    format!("{n} memory entries await review: cort memory review")
+}
+fn lc_entry(id: &str, claim: &str, recorded: i128) -> String {
+    json!({"id":id,"key":id,"claim":claim,"source":"missing.md","source_line":1,
+        "source_sha256":"missing","recorded_at":recorded.to_string(),"supersedes":null})
+    .to_string()
+}
+fn seed_entries(db: &RemoteDb, entries: &[(&str, &str, i128)]) {
+    db.execute(
+        "CREATE TABLE project_memory (project TEXT, id TEXT, body TEXT)",
+        vec![],
+    )
+    .unwrap();
+    for (id, claim, recorded) in entries {
+        db.execute(
+            "INSERT INTO project_memory VALUES (?, ?, ?)",
+            vec![
+                cort::remote::Cell::Text("ledger".into()),
+                cort::remote::Cell::Text((*id).into()),
+                cort::remote::Cell::Text(lc_entry(id, claim, *recorded)),
+            ],
+        )
+        .unwrap();
+    }
+}
+fn lc_event(id: &str, kind: &str, entry: Option<&str>, at: i128) -> Value {
+    json!({"id": id, "kind": kind, "entry": entry, "recorded_at": at.to_string()})
+}
+fn seed_lifecycle_bodies(db: &RemoteDb, bodies: &[String]) {
+    db.execute(
+        "CREATE TABLE project_memory_lifecycle (project TEXT, id TEXT, body TEXT)",
+        vec![],
+    )
+    .unwrap();
+    for (i, body) in bodies.iter().enumerate() {
+        db.execute(
+            "INSERT INTO project_memory_lifecycle VALUES (?, ?, ?)",
+            vec![
+                cort::remote::Cell::Text("ledger".into()),
+                cort::remote::Cell::Text(format!("l{i}")),
+                cort::remote::Cell::Text(body.clone()),
+            ],
+        )
+        .unwrap();
+    }
+}
+fn seed_lifecycle(db: &RemoteDb, events: &[Value]) {
+    let bodies: Vec<String> = events.iter().map(Value::to_string).collect();
+    seed_lifecycle_bodies(db, &bodies);
+}
+/// Every optional table present and empty, so a pipeline answers in one request.
+fn seed_empty_optionals(db: &RemoteDb, alias: bool) {
+    if alias {
+        seed_alias(db);
+    }
+    db.execute("CREATE TABLE harness_notes (project TEXT, machine TEXT, source_dir TEXT, file_name TEXT, note_id TEXT, deleted INTEGER, updated_at TEXT)", vec![]).unwrap();
+    db.execute(
+        "CREATE TABLE harness_machines (machine TEXT, host TEXT)",
+        vec![],
+    )
+    .unwrap();
+    seed_questions(db, "ledger", &[]);
+    seed_reminders(db, "ledger", &[]);
+}
+fn read_session(db: &RemoteDb, now: i128) -> cort::memory_store::SessionRecall {
+    let temp = tempfile::tempdir().unwrap();
+    cort::memory_store::session_recall_with(
+        temp.path(),
+        db,
+        "self",
+        ("ledger", "origin"),
+        Instant::now(),
+        now,
+    )
+    .unwrap()
+}
+fn request_sizes(requests: &Requests) -> Vec<usize> {
+    requests.lock().unwrap().iter().map(Vec::len).collect()
+}
+fn lifecycle_field(
+    session: &cort::memory_store::SessionRecall,
+    rendered: Option<&cort::hook_recall::SessionRender>,
+) -> Value {
+    cort::hook_recall::session_usage_fields(session, rendered)
+        .into_iter()
+        .find(|(key, _)| *key == "lifecycle")
+        .map(|(_, value)| value)
+        .expect("lifecycle field")
+}
+/// A view with `due` entries due for review, built by hand so a render test needs no database.
+fn due_view(due: usize, hidden: usize) -> cort::memory_lifecycle::LifecycleView {
+    use cort::memory_lifecycle::{EntryState, LifecycleView, State};
+    let mut entries = std::collections::HashMap::new();
+    for i in 0..due {
+        entries.insert(
+            format!("due{i}"),
+            EntryState {
+                state: State::ShortTermExpired,
+                due_at_ns: Some(0),
+                history: Vec::new(),
+            },
+        );
+    }
+    for i in 0..hidden {
+        entries.insert(
+            format!("hid{i}"),
+            EntryState {
+                state: State::Archived,
+                due_at_ns: None,
+                history: Vec::new(),
+            },
+        );
+    }
+    LifecycleView {
+        enabled: true,
+        epoch_ns: Some(0),
+        entries,
+        superseded: Vec::new(),
+        orphans: Vec::new(),
+        unreadable: 0,
+    }
+}
+fn hand_hit(id: &str, claim: &str, recorded: &str, state: Option<&str>) -> cort::memory::MemoryHit {
+    cort::memory::MemoryHit {
+        entry: cort::memory::MemoryEntry {
+            id: id.into(),
+            key: id.into(),
+            claim: claim.into(),
+            source: "x".into(),
+            source_line: 1,
+            source_sha256: String::new(),
+            unsourced: false,
+            source_line_sha256: None,
+            recorded_at: recorded.into(),
+            supersedes: None,
+            resolves: vec![],
+            recorded_machine: None,
+            recorded_machine_source: None,
+        },
+        matched_terms: None,
+        evidence_status: "source_missing".into(),
+        source_file_changed: None,
+        source_line_status: None,
+        source_line_now: None,
+        lifecycle: state.map(str::to_string),
+    }
+}
+fn hand_session(
+    hits: Vec<cort::memory::MemoryHit>,
+    lifecycle: Option<cort::memory_lifecycle::LifecycleView>,
+) -> cort::memory_store::SessionRecall {
+    let mut session = remind_session(Vec::new());
+    session.recall.hits = hits;
+    session.lifecycle = lifecycle;
+    session
+}
+
+#[test]
+fn lifecycle_sql_error_drops_only_that_read_and_prints_nothing() {
+    // No project_memory_lifecycle table: only that statement fails SQL, in the one answer that
+    // also carried the ledger, notes, questions and reminders. Nothing is created or retried.
+    let (db, read_only, requests) = database();
+    seed_ledger(&db);
+    seed_alias(&db);
+    seed_notes(&db);
+    seed_questions(&db, "ledger", &[ask("dddddddd12", "Which port?", 2)]);
+    seed_reminders(&db, "ledger", &[overdue_event("aaaaaaaa11")]);
+    read_only.store(true, Ordering::SeqCst);
+    let session = read_session(&db, now_ns());
+    assert!(session.lifecycle.is_none());
+    assert_eq!(session.recall.hits.len(), 20);
+    assert_eq!(session.notes.len(), 15);
+    assert_eq!(session.questions.as_ref().unwrap().len(), 1);
+    assert_eq!(session.reminders.as_ref().unwrap().len(), 1);
+    assert_eq!(request_sizes(&requests), vec![6]);
+    let rendered = cort::hook_recall::render_session(&session, now_ns()).unwrap();
+    assert!(!rendered.text.contains("lifecycle"));
+    assert!(!rendered.text.contains("await review"));
+    assert_eq!(lifecycle_field(&session, Some(&rendered)), json!("dropped"));
+    read_only.store(false, Ordering::SeqCst);
+    let tables = db
+        .execute(
+            "SELECT name FROM sqlite_master WHERE name='project_memory_lifecycle'",
+            vec![],
+        )
+        .unwrap();
+    assert!(tables.rows.is_empty());
+}
+
+#[test]
+fn notes_and_lifecycle_fail_together() {
+    // Neither the notes tables nor the lifecycle table exist: both fail in one answer, the
+    // retry drops both (neither is sent again to fail a second time) and keeps the rest.
+    let (db, read_only, requests) = database();
+    seed_ledger(&db);
+    seed_alias(&db);
+    seed_questions(&db, "ledger", &[ask("dddddddd12", "Which port?", 2)]);
+    seed_reminders(&db, "ledger", &[overdue_event("aaaaaaaa11")]);
+    read_only.store(true, Ordering::SeqCst);
+    let session = read_session(&db, now_ns());
+    assert!(session.lifecycle.is_none());
+    assert!(session.notes.is_empty());
+    assert_eq!(session.recall.hits.len(), 20);
+    assert_eq!(session.questions.as_ref().unwrap().len(), 1);
+    assert_eq!(session.reminders.as_ref().unwrap().len(), 1);
+    assert_eq!(request_sizes(&requests), vec![6, 3]);
+}
+
+#[test]
+fn notes_failing_alone_keeps_a_lifecycle_that_read() {
+    let (db, read_only, requests) = database();
+    seed_entries(&db, &[("e1", "one", SAT_NOON - HOUR_NS)]);
+    seed_alias(&db);
+    seed_questions(&db, "ledger", &[]);
+    seed_reminders(&db, "ledger", &[]);
+    seed_lifecycle(
+        &db,
+        &[lc_event("on1", "on", None, SAT_NOON - 10 * NS_PER_DAY)],
+    );
+    read_only.store(true, Ordering::SeqCst);
+    let session = read_session(&db, SAT_NOON);
+    assert!(session.lifecycle.as_ref().unwrap().enabled);
+    assert_eq!(request_sizes(&requests), vec![6, 4]);
+}
+
+#[test]
+fn unaliased_retry_ignores_lifecycle() {
+    // No alias table: step 0 fails and the pipeline retries under `= ?`, whose scope could miss
+    // an `on` written under another alias id, so the lifecycle is not trusted: the archived
+    // entry stays visible, exactly as before lifecycle existed.
+    let (db, read_only, _) = database();
+    seed_entries(
+        &db,
+        &[
+            ("e0", "zero", SAT_NOON - HOUR_NS),
+            ("e1", "one", SAT_NOON - 2 * HOUR_NS),
+        ],
+    );
+    seed_empty_optionals(&db, false);
+    seed_lifecycle(
+        &db,
+        &[
+            lc_event("on1", "on", None, SAT_NOON - 10 * NS_PER_DAY),
+            lc_event("a1", "archive", Some("e1"), SAT_NOON - HOUR_NS),
+        ],
+    );
+    read_only.store(true, Ordering::SeqCst);
+    let session = read_session(&db, SAT_NOON);
+    assert!(session.lifecycle.is_none());
+    assert!(!session.lifecycle_full_scope);
+    assert_eq!(session.recall.hits.len(), 2);
+    let rendered = cort::hook_recall::render_session(&session, SAT_NOON).unwrap();
+    assert!(rendered.text.contains("[e1]"));
+    assert_eq!(lifecycle_field(&session, Some(&rendered)), json!("dropped"));
+}
+
+#[test]
+fn hidden_removed_before_cut() {
+    let (db, read_only, _) = database();
+    let ids: Vec<String> = (0..26).map(|i| format!("e{i:02}")).collect();
+    let entries: Vec<(&str, &str, i128)> = ids
+        .iter()
+        .enumerate()
+        .map(|(i, id)| (id.as_str(), "claim", SAT_NOON - (i as i128 + 1) * HOUR_NS))
+        .collect();
+    seed_entries(&db, &entries);
+    seed_empty_optionals(&db, true);
+    let mut events = vec![lc_event("on1", "on", None, SAT_NOON - 10 * NS_PER_DAY)];
+    for (i, id) in ids.iter().take(5).enumerate() {
+        events.push(lc_event(
+            &format!("a{i}"),
+            "archive",
+            Some(id),
+            SAT_NOON - HOUR_NS / 2,
+        ));
+    }
+    seed_lifecycle(&db, &events);
+    read_only.store(true, Ordering::SeqCst);
+    // Friday: no weekend line, so the text is the ledger block alone.
+    let session = read_session(&db, SAT_NOON);
+    let rendered = cort::hook_recall::render_session(&session, FRI_EARLY).unwrap();
+    assert_eq!(rendered.entries, 20);
+    assert!(
+        rendered.text.ends_with("\n... 1 entries left out"),
+        "{}",
+        rendered.text
+    );
+    for hidden in 0..5 {
+        assert!(!rendered.text.contains(&format!("[e{hidden:02}]")));
+    }
+    assert!(rendered.text.contains("[e05]"));
+    assert!(rendered.text.contains("[e24]"));
+    assert!(!rendered.text.contains("[e25]"));
+}
+
+#[test]
+fn due_entries_after_rest_and_render_keeps_order() {
+    let (db, read_only, _) = database();
+    // `aaa` was recorded 9 days ago, the switch went on 10 days ago: expired 2 days ago, due.
+    seed_entries(
+        &db,
+        &[
+            ("aaa", "due", SAT_NOON - 9 * NS_PER_DAY),
+            ("bbb", "fresh", SAT_NOON - NS_PER_DAY),
+            ("ccc", "older", SAT_NOON - 2 * NS_PER_DAY),
+        ],
+    );
+    seed_empty_optionals(&db, true);
+    seed_lifecycle(
+        &db,
+        &[lc_event("on1", "on", None, SAT_NOON - 10 * NS_PER_DAY)],
+    );
+    read_only.store(true, Ordering::SeqCst);
+    let session = read_session(&db, SAT_NOON);
+    let text = cort::hook_recall::render_session(&session, SAT_NOON)
+        .unwrap()
+        .text;
+    let at = |key: &str| text.find(&format!("[{key}]")).unwrap();
+    assert!(at("bbb") < at("ccc") && at("ccc") < at("aaa"), "{text}");
+    // The same hits handed over in any order render in the same one.
+    let mut shuffled = session.clone();
+    shuffled.recall.hits.reverse();
+    assert_eq!(
+        cort::hook_recall::render_session(&shuffled, SAT_NOON)
+            .unwrap()
+            .text,
+        text
+    );
+
+    // The cut drops due entries first: 21 fresh ones and two due ones that are older still.
+    let (db, read_only, _) = database();
+    let ids: Vec<String> = (0..21).map(|i| format!("f{i:02}")).collect();
+    let mut entries: Vec<(&str, &str, i128)> = ids
+        .iter()
+        .enumerate()
+        .map(|(i, id)| (id.as_str(), "fresh", SAT_NOON - NS_PER_DAY - i as i128))
+        .collect();
+    entries.push(("due1", "due", SAT_NOON - 9 * NS_PER_DAY));
+    entries.push(("due2", "due", SAT_NOON - 8 * NS_PER_DAY));
+    seed_entries(&db, &entries);
+    seed_empty_optionals(&db, true);
+    seed_lifecycle(
+        &db,
+        &[lc_event("on1", "on", None, SAT_NOON - 10 * NS_PER_DAY)],
+    );
+    read_only.store(true, Ordering::SeqCst);
+    let session = read_session(&db, SAT_NOON);
+    let rendered = cort::hook_recall::render_session(&session, FRI_EARLY).unwrap();
+    assert_eq!(rendered.entries, 20);
+    assert!(!rendered.text.contains("[due1]"), "{}", rendered.text);
+    assert!(!rendered.text.contains("[due2]"), "{}", rendered.text);
+    assert!(rendered.text.contains("3 entries left out"));
+}
+
+#[test]
+fn due_suffix() {
+    let (db, read_only, _) = database();
+    seed_entries(
+        &db,
+        &[
+            ("aaa", "due", SAT_NOON - 9 * NS_PER_DAY),
+            ("bbb", "fresh", SAT_NOON - NS_PER_DAY),
+        ],
+    );
+    seed_empty_optionals(&db, true);
+    seed_lifecycle(
+        &db,
+        &[lc_event("on1", "on", None, SAT_NOON - 10 * NS_PER_DAY)],
+    );
+    read_only.store(true, Ordering::SeqCst);
+    let session = read_session(&db, SAT_NOON);
+    let text = cort::hook_recall::render_session(&session, FRI_EARLY)
+        .unwrap()
+        .text;
+    assert!(
+        text.contains("\n- [aaa] due (missing.md:1, source_missing) [short_term_expired]"),
+        "{text}"
+    );
+    assert!(
+        text.contains("\n- [bbb] fresh (missing.md:1, source_missing)\n"),
+        "{text}"
+    );
+    assert_eq!(text.matches("[short_term_expired]").count(), 1);
+}
+
+#[test]
+fn render_orders_by_the_hit_lifecycle_label_alone() {
+    // No view in sight: only `MemoryHit.lifecycle` says an entry is due, and it sorts last.
+    let hits = vec![
+        hand_hit("old", "plain", "001", None),
+        hand_hit("new", "due", "009", Some("forgetting_candidate")),
+        hand_hit("mid", "plain", "005", None),
+    ];
+    let (text, count) = cort::hook_recall::render(cort::memory::MemoryRecall {
+        ledger_status: "present".into(),
+        sync_status: None,
+        match_kind: None,
+        hits,
+        lifecycle_unreadable: None,
+        lifecycle_hint: None,
+    })
+    .unwrap();
+    assert_eq!(count, 3);
+    let at = |key: &str| text.find(&format!("[{key}]")).unwrap();
+    assert!(at("mid") < at("old") && at("old") < at("new"), "{text}");
+    assert!(text.contains("[forgetting_candidate]"));
+}
+
+#[test]
+fn weekend_line_saturday_not_friday_not_without_local_parts() {
+    let (db, read_only, _) = database();
+    seed_entries(
+        &db,
+        &[
+            ("aaa", "due", SAT_NOON - 9 * NS_PER_DAY),
+            ("bbb", "fresh", SAT_NOON - NS_PER_DAY),
+        ],
+    );
+    seed_empty_optionals(&db, true);
+    seed_lifecycle(
+        &db,
+        &[lc_event("on1", "on", None, SAT_NOON - 10 * NS_PER_DAY)],
+    );
+    read_only.store(true, Ordering::SeqCst);
+    let session = read_session(&db, SAT_NOON);
+    let saturday = cort::hook_recall::render_session(&session, SAT_NOON)
+        .unwrap()
+        .text;
+    assert!(
+        saturday.ends_with(&format!("\n{}", weekend_line(1))),
+        "{saturday}"
+    );
+    let friday = cort::hook_recall::render_session(&session, FRI_EARLY)
+        .unwrap()
+        .text;
+    assert!(!friday.contains("await review"), "{friday}");
+    // An instant the local clock cannot turn into a date: no line.
+    let unknown = cort::hook_recall::render_session(&session, i128::MAX / 2)
+        .unwrap()
+        .text;
+    assert!(!unknown.contains("await review"), "{unknown}");
+    // A project that is not enabled never prints it, whatever day it is.
+    let mut off = session.clone();
+    off.lifecycle.as_mut().unwrap().enabled = false;
+    let off_text = cort::hook_recall::render_session(&off, SAT_NOON)
+        .unwrap()
+        .text;
+    assert!(!off_text.contains("await review"));
+    // Nothing due: no line.
+    let calm = hand_session(
+        vec![hand_hit("a", "plain", "001", None)],
+        Some(due_view(0, 0)),
+    );
+    let calm_text = cort::hook_recall::render_session(&calm, SAT_NOON)
+        .unwrap()
+        .text;
+    assert!(!calm_text.contains("await review"));
+}
+
+#[test]
+fn weekend_reserve_only_when_line_prints() {
+    let mut strictly_fewer = false;
+    for pad in 100..300 {
+        let hits = || {
+            (0..60)
+                .map(|i| {
+                    hand_hit(
+                        &format!("k{i:02}"),
+                        &"x".repeat(pad),
+                        &format!("{i:03}"),
+                        None,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        // Nothing due: Saturday cuts exactly as Friday does.
+        let calm = hand_session(hits(), Some(due_view(0, 0)));
+        let calm_sat = cort::hook_recall::render_session(&calm, SAT_NOON).unwrap();
+        let calm_fri = cort::hook_recall::render_session(&calm, FRI_EARLY).unwrap();
+        assert_eq!(calm_sat.text, calm_fri.text);
+        assert_eq!(calm_sat.entries, calm_fri.entries);
+        // Something due: the line fits inside the ledger's 6000 bytes, at the cost of entries.
+        let busy = hand_session(hits(), Some(due_view(1, 0)));
+        let sat = cort::hook_recall::render_session(&busy, SAT_NOON).unwrap();
+        let fri = cort::hook_recall::render_session(&busy, FRI_EARLY).unwrap();
+        assert!(sat.text.len() <= 6000, "{}", sat.text.len());
+        assert!(sat.text.ends_with(&weekend_line(1)));
+        assert!(sat.entries <= fri.entries);
+        strictly_fewer |= sat.entries < fri.entries;
+    }
+    assert!(strictly_fewer, "the reserve never bound in 200 pad sizes");
+}
+
+#[test]
+fn all_hidden_project_prints_only_weekend_line() {
+    // Every entry archived: no ledger block, no "left out" line, and nothing else to print.
+    let (db, read_only, _) = database();
+    seed_entries(
+        &db,
+        &[
+            ("aaa", "one", SAT_NOON - NS_PER_DAY),
+            ("bbb", "two", SAT_NOON - 2 * NS_PER_DAY),
+        ],
+    );
+    seed_empty_optionals(&db, true);
+    seed_lifecycle(
+        &db,
+        &[
+            lc_event("on1", "on", None, SAT_NOON - 10 * NS_PER_DAY),
+            lc_event("a1", "archive", Some("aaa"), SAT_NOON - HOUR_NS),
+            lc_event("a2", "archive", Some("bbb"), SAT_NOON - HOUR_NS),
+        ],
+    );
+    read_only.store(true, Ordering::SeqCst);
+    let session = read_session(&db, SAT_NOON);
+    assert!(session.recall.hits.is_empty());
+    assert!(cort::hook_recall::render_session(&session, SAT_NOON).is_none());
+    // When review does have an item while the ledger block is empty, the line stands alone: no
+    // header over nothing.
+    let lonely = hand_session(Vec::new(), Some(due_view(2, 0)));
+    let rendered = cort::hook_recall::render_session(&lonely, SAT_NOON).unwrap();
+    assert_eq!(rendered.text, weekend_line(2));
+    assert_eq!(rendered.entries, 0);
+    assert!(cort::hook_recall::render_session(&lonely, FRI_EARLY).is_none());
+}
+
+#[test]
+fn disabled_project_byte_identical() {
+    // A lifecycle table with an archive but no `on`: the project is off, so the answer is the
+    // one a database without the table gives, on a Saturday too.
+    let build = |with_table: bool| {
+        let (db, read_only, _) = database();
+        seed_entries(
+            &db,
+            &[
+                ("aaa", "old", SAT_NOON - 30 * NS_PER_DAY),
+                ("bbb", "fresh", SAT_NOON - NS_PER_DAY),
+                ("ccc", "middle", SAT_NOON - 3 * NS_PER_DAY),
+            ],
+        );
+        seed_empty_optionals(&db, true);
+        if with_table {
+            seed_lifecycle(
+                &db,
+                &[lc_event("a1", "archive", Some("bbb"), SAT_NOON - HOUR_NS)],
+            );
+        }
+        read_only.store(true, Ordering::SeqCst);
+        read_session(&db, SAT_NOON)
+    };
+    let off = build(true);
+    let none = build(false);
+    assert!(off.lifecycle.as_ref().is_some_and(|view| !view.enabled));
+    assert!(none.lifecycle.is_none());
+    for now in [SAT_NOON, FRI_EARLY] {
+        let a = cort::hook_recall::render_session(&off, now).unwrap();
+        let b = cort::hook_recall::render_session(&none, now).unwrap();
+        assert_eq!(a.text, b.text);
+        assert_eq!(a.entries, b.entries);
+        assert!(!a.text.contains("await review"));
+        assert!(a.text.contains("[bbb]"));
+    }
+    assert_eq!(lifecycle_field(&off, None), json!("off"));
+}
+
+#[test]
+fn usage_row_carries_lifecycle_field() {
+    let (db, read_only, _) = database();
+    seed_entries(
+        &db,
+        &[
+            ("aaa", "due", SAT_NOON - 9 * NS_PER_DAY),
+            ("bbb", "fresh", SAT_NOON - NS_PER_DAY),
+            ("ccc", "gone", SAT_NOON - 2 * NS_PER_DAY),
+        ],
+    );
+    seed_empty_optionals(&db, true);
+    let mut bodies: Vec<String> = [
+        lc_event("on1", "on", None, SAT_NOON - 10 * NS_PER_DAY),
+        lc_event("a1", "archive", Some("ccc"), SAT_NOON - HOUR_NS),
+    ]
+    .iter()
+    .map(Value::to_string)
+    .collect();
+    bodies.push("not json".into());
+    seed_lifecycle_bodies(&db, &bodies);
+    read_only.store(true, Ordering::SeqCst);
+    let session = read_session(&db, SAT_NOON);
+    let rendered = cort::hook_recall::render_session(&session, SAT_NOON);
+    assert_eq!(
+        lifecycle_field(&session, rendered.as_ref()),
+        json!({"due": 1, "hidden": 1, "unreadable": 1})
+    );
+    let mut dropped = session.clone();
+    dropped.lifecycle = None;
+    assert_eq!(unreadable_field(&session), Some(json!(1)));
+    assert_eq!(lifecycle_field(&dropped, None), json!("dropped"));
+    assert_eq!(unreadable_field(&dropped), None);
+    let mut off = session;
+    off.lifecycle.as_mut().unwrap().enabled = false;
+    assert_eq!(lifecycle_field(&off, None), json!("off"));
+    // Off with a skipped row: the row may be the lost `on`, so the count still reaches the row.
+    assert_eq!(unreadable_field(&off), Some(json!(1)));
+    off.lifecycle.as_mut().unwrap().unreadable = 0;
+    assert_eq!(unreadable_field(&off), None);
+}
+
+fn unreadable_field(session: &cort::memory_store::SessionRecall) -> Option<Value> {
+    cort::hook_recall::session_usage_fields(session, None)
+        .into_iter()
+        .find(|(key, _)| *key == "lifecycle_unreadable")
+        .map(|(_, value)| value)
+}
+
+/// 2026-11-15 06:00 UTC: Saturday evening to Sunday evening in every zone, Sunday in UTC.
+const SUN_MORNING: i128 = SAT_NOON + 18 * HOUR_NS;
+
+#[test]
+fn weekend_line_on_sunday_too() {
+    let session = hand_session(
+        vec![
+            hand_hit("a", "plain", "002", None),
+            hand_hit("b", "old", "001", Some("short_term_expired")),
+        ],
+        Some(due_view(1, 0)),
+    );
+    let text = cort::hook_recall::render_session(&session, SUN_MORNING)
+        .unwrap()
+        .text;
+    assert!(text.ends_with(&format!("\n{}", weekend_line(1))), "{text}");
+}
+
+#[test]
+fn byte_cut_due_entry_keeps_its_suffix() {
+    // Five 1 KB current entries fit the 5920-byte body; the first due one, sorted after them,
+    // is the line the byte budget cuts.
+    let mut hits: Vec<_> = (0..5)
+        .map(|i| {
+            hand_hit(
+                &format!("p{i}"),
+                &"x".repeat(1000),
+                &format!("1{i:02}"),
+                None,
+            )
+        })
+        .collect();
+    hits.extend((0..4).map(|i| {
+        hand_hit(
+            &format!("d{i}"),
+            &"y".repeat(1000),
+            &format!("0{i:02}"),
+            Some("short_term_expired"),
+        )
+    }));
+    let session = hand_session(hits, Some(due_view(4, 0)));
+    let text = cort::hook_recall::render_session(&session, FRI_EARLY)
+        .unwrap()
+        .text;
+    let cut = text
+        .lines()
+        .find(|line| line.contains(" ..."))
+        .expect("a line cut by the byte budget");
+    assert!(cut.starts_with("- [d"), "{cut}");
+    assert!(cut.ends_with(" ... [short_term_expired]"), "{cut}");
+    assert!(text.len() <= 6000, "{}", text.len());
+}
+
+#[test]
+fn non_sql_error_at_the_lifecycle_step_fails_the_recall() {
+    // Only SQL errors make the lifecycle read optional; a Busy there fails the whole recall.
+    let (db, read_only, requests) =
+        database_with_step_failure("FROM project_memory_lifecycle", "SQLITE_BUSY");
+    seed_ledger(&db);
+    seed_empty_optionals(&db, true);
+    seed_lifecycle(&db, &[lc_event("on1", "on", None, SAT_NOON)]);
+    read_only.store(true, Ordering::SeqCst);
+    let temp = tempfile::tempdir().unwrap();
+    let result = cort::memory_store::session_recall_with(
+        temp.path(),
+        &db,
+        "self",
+        ("ledger", "origin"),
+        Instant::now(),
+        SAT_NOON,
+    );
+    assert!(
+        matches!(result, Err(cort::remote::ErrorKind::Busy)),
+        "{result:?}"
+    );
+    assert_eq!(requests.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn every_block_full_with_weekend_line_stays_within_9500_bytes() {
+    let hits: Vec<_> = (0..30)
+        .map(|i| {
+            let state = (i % 3 == 0).then_some("short_term_expired");
+            hand_hit(
+                &format!("k{i:02}"),
+                &"é".repeat(500),
+                &format!("{i:03}"),
+                state,
+            )
+        })
+        .collect();
+    let mut session = hand_session(hits, Some(due_view(10, 0)));
+    session.notes = (0..15)
+        .map(|i| cort::notes_upload::NoteBrief {
+            note_id: format!("note-{i:02}"),
+            machine: "remote-machine".into(),
+            host: Some("NUC11i5".into()),
+            file_name: format!("{i:02}{}", "é".repeat(200)),
+            updated_at: "2026-10-27T00:00:00Z".into(),
+        })
+        .collect();
+    session.notes_total = 20;
+    session.reminders = Some(folded_reminders(
+        (1..=5)
+            .map(|k| {
+                remind_add(
+                    &format!("{:08x}eeeeeeee", k),
+                    &"編".repeat(200),
+                    PINNED_NOW - i128::from(k) * NS_PER_DAY,
+                )
+            })
+            .collect(),
+    ));
+    let rendered = cort::hook_recall::render_session(&session, SAT_NOON).unwrap();
+    assert!(
+        rendered.text.contains(&weekend_line(10))
+            && rendered.text.contains("Reminders for this project")
+            && rendered.text.contains("unreviewed harness notes"),
+        "{}",
+        rendered.text
+    );
+    let ledger_block = rendered
+        .text
+        .split("\nReminders for this project")
+        .next()
+        .unwrap();
+    assert!(ledger_block.len() <= 6000, "{}", ledger_block.len());
+    assert!(rendered.text.len() <= 9500, "{}", rendered.text.len());
 }

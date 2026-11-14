@@ -1,6 +1,7 @@
 //! Session-start context from the shared memory database.
 
-use crate::memory::MemoryRecall;
+use crate::memory::{MemoryHit, MemoryRecall};
+use crate::memory_lifecycle::State as LifecycleState;
 use crate::memory_store::SessionRecall;
 use crate::notes_upload::NoteBrief;
 use crate::question::{Question, State};
@@ -60,20 +61,40 @@ pub fn render(recall: MemoryRecall) -> Option<(String, usize)> {
 }
 
 pub fn render_with_omitted(recall: MemoryRecall, pre_omitted: usize) -> Option<(String, usize)> {
+    render_with_budget(recall, pre_omitted, MAX_BYTES)
+}
+
+/// Whether a hit is due for review, from the label `recall_ledger_inner` set on it.
+fn hit_is_due(hit: &MemoryHit) -> bool {
+    hit.lifecycle
+        .as_deref()
+        .and_then(LifecycleState::parse)
+        .is_some_and(LifecycleState::is_due)
+}
+
+/// `render_with_omitted` inside `max_bytes` instead of the ledger's whole budget: the caller
+/// reserves room for a line it will print after the block.
+fn render_with_budget(
+    recall: MemoryRecall,
+    pre_omitted: usize,
+    max_bytes: usize,
+) -> Option<(String, usize)> {
     if recall.hits.is_empty() {
         return None;
     }
     let mut hits = recall.hits;
+    // The cut's own key (`recall_ledger_inner`): due for review last, then newest first. With no
+    // lifecycle label on any hit this is `recorded_at` newest first, as it always was.
     hits.sort_by(|a, b| {
-        b.entry
-            .recorded_at
-            .cmp(&a.entry.recorded_at)
+        hit_is_due(a)
+            .cmp(&hit_is_due(b))
+            .then(b.entry.recorded_at.cmp(&a.entry.recorded_at))
             .then(b.entry.id.cmp(&a.entry.id))
     });
     let mut out = String::from(HEADER);
     let mut shown = 0;
     // Reserve enough space for the omitted-count suffix, even for a large ledger.
-    let body_limit = MAX_BYTES - 80;
+    let body_limit = max_bytes - 80;
     for hit in &hits {
         if shown == MAX_ENTRIES {
             break;
@@ -99,26 +120,35 @@ pub fn render_with_omitted(recall: MemoryRecall, pre_omitted: usize) -> Option<(
                 hit.evidence_status
             )
         };
-        let line = format!(
+        let due_suffix = match hit.lifecycle.as_deref() {
+            Some(state) if hit_is_due(hit) => format!(" [{state}]"),
+            _ => String::new(),
+        };
+        let head = format!(
             "\n- [{}] {} ({})",
             clean(&hit.entry.key),
             clean(&hit.entry.claim),
             evidence
         );
-        if out.len() + line.len() > body_limit {
+        if out.len() + head.len() + due_suffix.len() > body_limit {
+            // A cut line keeps its due suffix: due entries sort last, so they are the ones the
+            // byte cut reaches, and without the suffix one would read as a current rule.
             let room = body_limit.saturating_sub(out.len());
-            if room > 4 {
-                let mut end = room - 4;
-                while !line.is_char_boundary(end) {
+            let tail = 4 + due_suffix.len();
+            if room > tail {
+                let mut end = room - tail;
+                while !head.is_char_boundary(end) {
                     end -= 1;
                 }
-                out.push_str(&line[..end]);
+                out.push_str(&head[..end]);
                 out.push_str(" ...");
+                out.push_str(&due_suffix);
                 shown += 1;
             }
             break;
         }
-        out.push_str(&line);
+        out.push_str(&head);
+        out.push_str(&due_suffix);
         shown += 1;
     }
     let omitted = hits.len() - shown + pre_omitted;
@@ -149,7 +179,11 @@ const DROPPED_REMINDERS: &str = "\nreminders could not be read: cort remind list
 /// project still produces context, and a dropped reminders read says so in one line where the
 /// block would have sat.
 pub fn render_session(s: &SessionRecall, now_ns: i128) -> Option<SessionRender> {
-    let ledger = render_with_omitted(s.recall.clone(), s.omitted);
+    // The line's bytes come out of the ledger's own budget, and only when it will print, so
+    // every other session cuts exactly as it always did.
+    let weekend = weekend_review_line(s, now_ns);
+    let reserve = weekend.as_ref().map_or(0, |line| line.len() + 1);
+    let ledger = render_with_budget(s.recall.clone(), s.omitted, MAX_BYTES - reserve);
     let reminders = s.reminders.as_deref().and_then(render_reminders);
     let questions = s
         .questions
@@ -157,15 +191,22 @@ pub fn render_session(s: &SessionRecall, now_ns: i128) -> Option<SessionRender> 
         .and_then(|q| render_questions(q, now_ns));
     let notes = render_notes(&s.notes, s.notes_total);
     let reminders_dropped = s.reminders.is_none();
-    if ledger.is_none()
-        && reminders.is_none()
-        && questions.is_none()
-        && notes.is_none()
-        && !reminders_dropped
-    {
+    let others = reminders.is_some() || questions.is_some() || notes.is_some() || reminders_dropped;
+    if ledger.is_none() && !others && weekend.is_none() {
         return None;
     }
-    let (text, entries) = ledger.unwrap_or_else(|| (HEADER.to_string(), 0));
+    let (mut text, entries) = match ledger {
+        Some(ledger) => ledger,
+        // Nothing but the review line to say: no header over an empty ledger block.
+        None if !others => (String::new(), 0),
+        None => (HEADER.to_string(), 0),
+    };
+    if let Some(line) = &weekend {
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(line);
+    }
     let mut out = SessionRender {
         text,
         entries,
@@ -190,6 +231,35 @@ pub fn render_session(s: &SessionRecall, now_ns: i128) -> Option<SessionRender> 
         out.notes = shown;
     }
     Some(out)
+}
+
+/// `N memory entries await review: cort memory review`, only on a local Saturday or Sunday, on
+/// an enabled project with at least one entry due for review. `None` when the local clock
+/// cannot name the date.
+fn weekend_review_line(s: &SessionRecall, now_ns: i128) -> Option<String> {
+    let view = s.lifecycle.as_ref().filter(|view| view.enabled)?;
+    let due = view.entries.values().filter(|e| e.state.is_due()).count();
+    if due == 0 {
+        return None;
+    }
+    let (date, _) = crate::remind_snapshot::local_parts(now_ns)?;
+    matches!(crate::remind_snapshot::weekday(&date)?, 5 | 6)
+        .then(|| format!("{due} memory entries await review: cort memory review"))
+}
+
+/// The usage-row field for the lifecycle read: `"off"` when the project is not enabled,
+/// `"dropped"` when the read was dropped or the answer came from the narrow scope, else the
+/// counts the session saw.
+pub fn lifecycle_usage(s: &SessionRecall) -> Value {
+    match &s.lifecycle {
+        None => Value::from("dropped"),
+        Some(view) if !view.enabled => Value::from("off"),
+        Some(view) => serde_json::json!({
+            "due": view.entries.values().filter(|e| e.state.is_due()).count(),
+            "hidden": view.entries.values().filter(|e| e.state.is_hidden()).count(),
+            "unreadable": view.unreadable,
+        }),
+    }
 }
 
 /// The usage-row field for the question read: `questions_open` (every open question, before
@@ -227,14 +297,29 @@ pub fn reminders_usage(s: &SessionRecall) -> (&'static str, Value) {
 }
 
 /// Every optional-block field the hook's usage row carries for a session that was read:
-/// `questions_open` or `questions: "dropped"`, `reminders_due` or `reminders: "dropped"`, and,
+/// `questions_open` or `questions: "dropped"`, `reminders_due` or `reminders: "dropped"`,
+/// `lifecycle` (`"off"`, `"dropped"` or due/hidden/unreadable counts), `lifecycle_unreadable`
+/// when the read skipped rows it could not decode (enabled or not), and,
 /// when context was injected, `questions_shown` and `reminders_shown`. The hook writes exactly
 /// this list, so a test of it is a test of the row.
 pub fn session_usage_fields(
     s: &SessionRecall,
     rendered: Option<&SessionRender>,
 ) -> Vec<(&'static str, Value)> {
-    let mut fields = vec![questions_usage(s), reminders_usage(s)];
+    let mut fields = vec![
+        questions_usage(s),
+        reminders_usage(s),
+        ("lifecycle", lifecycle_usage(s)),
+    ];
+    // Also on a project that reads as off: the one undecodable row may be its lost `on`.
+    if let Some(n) = s
+        .lifecycle
+        .as_ref()
+        .map(|v| v.unreadable)
+        .filter(|n| *n > 0)
+    {
+        fields.push(("lifecycle_unreadable", Value::from(n)));
+    }
     if let Some(rendered) = rendered {
         fields.push(("questions_shown", Value::from(rendered.questions)));
         fields.push(("reminders_shown", Value::from(rendered.reminders)));

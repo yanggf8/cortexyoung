@@ -188,6 +188,15 @@ from the events, the ledger and the clock on every read.
   `cort memory recall --all` includes the hidden ones, each labelled `archived` or `dropped`.
   `cort memory list` shows the state as its `tier` column once the switch is on; with the switch
   off it is unchanged, and `--epoch` on an enabled project replaces only the epoch.
+- **Session start:** `hook-recall` reads the lifecycle table as one more optional statement, like
+  reminders (an SQL error, such as no table yet, drops that read alone and prints nothing; the
+  unaliased retry never reads it). On an enabled project it leaves hidden entries out of the
+  20-entry cut, puts entries due for review after the rest with a ` [<state>]` suffix, and on a
+  local Saturday or Sunday with at least one due entry adds `N memory entries await review: cort
+  memory review`, its bytes taken from the ledger's 6000 only when it prints. The usage row
+  records `lifecycle`: `"off"`, `"dropped"`, or `{"due", "hidden", "unreadable"}`, plus
+  `lifecycle_unreadable: <n>` whenever rows were skipped, even on a project that reads as off. A
+  due entry cut short by the byte budget keeps its suffix after the ` ...`.
 - **Unreadable rows:** a lifecycle row this build cannot decode is skipped and counted; reads then
   carry `lifecycle_unreadable` and a hint. A row of a kind this build does not know is applied as
   a no-op when it has an `id` and a `recorded_at`; without them it is skipped and not counted.

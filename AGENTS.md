@@ -206,7 +206,7 @@ bytes) and dated reminders (`cort remind`, 800 bytes, listed from the day before
 closed, placed right after the ledger entries) come from the same pipeline; each of notes,
 questions and reminders is dropped on its own SQL error without taking the others (a dropped
 reminders read still prints one line saying so); a non-SQL error in any statement fails the whole
-read. It reads the shared database over the network in one pipeline (plus at most two retries, each
+read. The memory lifecycle table (#11) is one more such optional read, dropped silently on an SQL error and never sent in the unaliased retry, and on an enabled project it leaves hidden entries out of the cut, puts due-for-review entries last with a ` [<state>]` suffix, and adds a weekend `N memory entries await review` line inside the ledger's 6000 bytes. It reads the shared database over the network in one pipeline (plus at most two retries, each
 only with at least 200 ms remaining: under the unaliased project id when the ledger read fails with
 a SQL error, and without the notes -- and without any optional read that failed in the same answer --
 when a notes statement does) and never writes to it or takes a local lock. The
