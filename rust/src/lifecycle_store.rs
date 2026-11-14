@@ -443,6 +443,281 @@ fn switch_inner(
     Ok(with_unreadable(out, loaded.unreadable))
 }
 
+const STATES: [State; 6] = [
+    State::ShortTerm,
+    State::ShortTermExpired,
+    State::LongTerm,
+    State::ForgettingCandidate,
+    State::Archived,
+    State::Dropped,
+];
+
+pub fn review(root: &Path, all: bool) -> Result<Value, LedgerError> {
+    review_with(root, &Ledger::open()?, all, now_ns()?)
+}
+
+/// What is due for review, and how to settle each item. Read-only. A project whose lifecycle is
+/// off answers `lifecycle: "off"` with a what-if: the fold with the epoch set to `now_ns` and
+/// every existing event applied, which is what `cort memory lifecycle on` would place today.
+pub fn review_with(
+    root: &Path,
+    ledger: &Ledger,
+    all: bool,
+    now_ns: i128,
+) -> Result<Value, LedgerError> {
+    let project = project(root)?;
+    let (data, rows) = ledger.read_with_lifecycle(&project)?;
+    let unreadable = rows.unreadable;
+    let mut view = fold(&data, rows.events.clone(), unreadable, now_ns, None);
+    let enabled = view.enabled;
+    if !enabled {
+        view = fold(&data, rows.events, unreadable, now_ns, Some(now_ns));
+    }
+    let entries = active_entries(&data);
+    let mut counts = serde_json::Map::new();
+    for state in STATES {
+        let n = entries
+            .iter()
+            .filter(|e| view.entries.get(&e.id).is_some_and(|s| s.state == state))
+            .count();
+        counts.insert(state.as_str().to_string(), json!(n));
+    }
+    let recorded_utc = |entry: &MemoryEntry| {
+        crate::memory_tiers::parse_recorded_ns(&entry.recorded_at).map(crate::memory_tiers::utc_iso)
+    };
+    let mut due: Vec<(i128, &MemoryEntry, State)> = entries
+        .iter()
+        .filter_map(|e| {
+            let s = view.entries.get(&e.id)?;
+            s.state
+                .is_due()
+                .then(|| (s.due_at_ns.unwrap_or(i128::MAX), *e, s.state))
+        })
+        .collect();
+    due.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.id.cmp(&b.1.id)));
+    let items: Vec<Value> = due
+        .iter()
+        .map(|(due_at, entry, state)| {
+            let mut item = json!({
+                "id": entry.id,
+                "key": entry.key,
+                "claim": entry.claim,
+                "state": state.as_str(),
+                "mentions_user": mentions_user(&entry.key, &entry.claim),
+                "id_ref": id_ref(&data, &entry.id),
+                "commands": if enabled {
+                    commands(&id_ref(&data, &entry.id), entry, *state)
+                } else {
+                    Vec::new()
+                },
+            });
+            if let Some(at) = recorded_utc(entry) {
+                item["recorded_at_utc"] = json!(at);
+            }
+            if *due_at != i128::MAX {
+                item["due_at_utc"] = json!(crate::memory_tiers::utc_iso(*due_at));
+            }
+            item
+        })
+        .collect();
+    let mut out = json!({
+        "lifecycle": if enabled { "on" } else { "off" },
+        "epoch_utc": view.epoch_ns.map(crate::memory_tiers::utc_iso),
+        "counts": counts,
+        "items": items,
+    });
+    if !enabled {
+        out["what_if"] = json!(
+            "epoch = now: what `cort memory lifecycle on` would place today; nothing is switched on or written"
+        );
+    }
+    if all {
+        let mut hidden: Vec<&MemoryEntry> = entries
+            .iter()
+            .copied()
+            .filter(|e| view.entries.get(&e.id).is_some_and(|s| s.state.is_hidden()))
+            .collect();
+        hidden.sort_by(|a, b| a.id.cmp(&b.id));
+        out["hidden"] = json!(hidden
+            .iter()
+            .filter_map(|entry| {
+                let s = view.entries.get(&entry.id)?;
+                let mut item = json!({"id": entry.id, "id_ref": id_ref(&data, &entry.id), "key": entry.key, "state": s.state.as_str()});
+                if let Some(at) = recorded_utc(entry) {
+                    item["recorded_at_utc"] = json!(at);
+                }
+                if let Some(last) = last_applied_release(s.state, &s.history) {
+                    for (field, value) in [
+                        ("quote", &last.quote),
+                        ("superseded_by", &last.superseded_by),
+                        ("note", &last.note),
+                    ] {
+                        if let Some(v) = value {
+                            item[field] = json!(v);
+                        }
+                    }
+                }
+                Some(item)
+            })
+            .collect::<Vec<_>>());
+        out["superseded"] = json!(view
+            .superseded
+            .iter()
+            .map(|(id, events)| json!({"id": id, "events": events.len()}))
+            .collect::<Vec<_>>());
+        out["orphans"] = json!(view
+            .orphans
+            .iter()
+            .map(|e| {
+                let mut orphan = json!({"id": e.id, "kind": kind_name(e.kind)});
+                if let Some(entry) = &e.entry {
+                    orphan["entry"] = json!(entry);
+                }
+                orphan
+            })
+            .collect::<Vec<_>>());
+    }
+    Ok(with_unreadable(out, unreadable))
+}
+
+/// What an `archive`/`drop` command names an entry by: the 8-character prefix when the id is
+/// lowercase hex and no other ledger id starts with it, else the shortest prefix (8 or more) that
+/// is unique, else the full id (a non-hex, imported id is only accepted whole).
+fn id_ref(data: &MemoryLedger, id: &str) -> String {
+    let hex = id
+        .bytes()
+        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    if hex {
+        for n in 8..id.len() {
+            let prefix = &id[..n];
+            if !data
+                .entries
+                .iter()
+                .any(|e| e.id != id && e.id.starts_with(prefix))
+            {
+                return prefix.to_string();
+            }
+        }
+    }
+    id.to_string()
+}
+
+/// The `archive`/`drop` event that put the entry in its hidden state: replay the history, taking
+/// only events of the kind the final state names, skipping those that arrive while hidden and
+/// letting a `restore` of a hidden entry reopen it. Inert and unknown events never qualify.
+fn last_applied_release(state: State, history: &[LifecycleEvent]) -> Option<&LifecycleEvent> {
+    let kind = match state {
+        State::Archived => Kind::Archive,
+        State::Dropped => Kind::Drop,
+        _ => return None,
+    };
+    let mut hidden = false;
+    let mut applied = None;
+    for event in history {
+        if event.kind == kind && !hidden {
+            hidden = true;
+            applied = Some(event);
+        } else if event.kind == Kind::Restore && hidden {
+            hidden = false;
+        }
+    }
+    applied
+}
+
+/// The commands that settle an item, complete and runnable apart from the two placeholders
+/// (`<id>`, `<the user's words>`) an entry that mentions the user needs filled in.
+fn commands(id8: &str, entry: &MemoryEntry, state: State) -> Vec<String> {
+    let release = |verb: &str| {
+        if mentions_user(&entry.key, &entry.claim) {
+            vec![
+                format!("cort memory {verb} {id8} --superseded-by <id>"),
+                format!("cort memory {verb} {id8} --quote '<the user's words>'"),
+            ]
+        } else {
+            vec![format!("cort memory {verb} {id8}")]
+        }
+    };
+    match state {
+        State::ShortTermExpired => {
+            let mut out = vec![format!("cort memory promote {id8}")];
+            out.extend(release("drop"));
+            out
+        }
+        State::ForgettingCandidate => release("archive"),
+        _ => Vec::new(),
+    }
+}
+
+/// `--lean` for `review`: a header `review lifecycle=<on|off> epoch_utc=<..> due=<n>` plus a
+/// count per state, then one TSV line per item
+/// `<id ref>\t<state>\t<due_at_utc>\t<mentions_user y|n>\t<key>` (the id as the commands name it);
+/// with `--all`, one line each for `hidden`, `superseded` and `orphan` entries. No field is ever
+/// empty (`-`).
+pub fn render_review_lean(report: &Value) -> String {
+    let mut out = format!(
+        "review lifecycle={} epoch_utc={} due={}",
+        lean_field(report["lifecycle"].as_str().unwrap_or("")),
+        lean_field(report["epoch_utc"].as_str().unwrap_or("")),
+        report["items"].as_array().map_or(0, Vec::len)
+    );
+    for state in STATES {
+        let n = report["counts"][state.as_str()].as_u64().unwrap_or(0);
+        out.push_str(&format!(" {}={n}", state.as_str()));
+    }
+    if let Some(n) = report["lifecycle_unreadable"].as_u64().filter(|n| *n > 0) {
+        out.push_str(&format!(" lifecycle_unreadable={n}"));
+    }
+    out.push('\n');
+    for item in report["items"].as_array().into_iter().flatten() {
+        let fields = [
+            lean_field(item["id_ref"].as_str().unwrap_or("")),
+            lean_field(item["state"].as_str().unwrap_or("")),
+            lean_field(item["due_at_utc"].as_str().unwrap_or("")),
+            if item["mentions_user"] == true {
+                "y"
+            } else {
+                "n"
+            }
+            .to_string(),
+            lean_field(item["key"].as_str().unwrap_or("")),
+        ];
+        out.push_str(&fields.join("\t"));
+        out.push('\n');
+    }
+    // `--all` sections: one line each, led by the section name.
+    let text = |v: &Value, k: &str| lean_field(v[k].as_str().unwrap_or(""));
+    for h in report["hidden"].as_array().into_iter().flatten() {
+        let fields = [
+            "hidden".to_string(),
+            text(h, "id_ref"),
+            text(h, "state"),
+            text(h, "key"),
+        ];
+        out.push_str(&fields.join("\t"));
+        out.push('\n');
+    }
+    for s in report["superseded"].as_array().into_iter().flatten() {
+        let fields = [
+            "superseded".to_string(),
+            text(s, "id"),
+            s["events"].as_u64().unwrap_or(0).to_string(),
+        ];
+        out.push_str(&fields.join("\t"));
+        out.push('\n');
+    }
+    for o in report["orphans"].as_array().into_iter().flatten() {
+        let fields = [
+            "orphan".to_string(),
+            text(o, "id"),
+            text(o, "kind"),
+            text(o, "entry"),
+        ];
+        out.push_str(&fields.join("\t"));
+        out.push('\n');
+    }
+    out
+}
+
 /// `--lean` for the lifecycle verbs, one line, no empty field: a verb prints
 /// `<outcome> <entry id> <state>`; `lifecycle` prints `lifecycle_on` / `lifecycle_off`, or
 /// `unchanged on|off` when the switch already stood there. When the read could not use some

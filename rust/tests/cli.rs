@@ -392,6 +392,7 @@ fn memory_help_lists_each_memory_verb_with_its_options() {
                 "record",
                 "resolve",
                 "restore",
+                "review",
                 "status",
             ]
         );

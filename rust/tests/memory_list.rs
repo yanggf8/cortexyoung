@@ -113,7 +113,14 @@ impl Fixture {
     }
     fn report_at(&self, now_ns: i128) -> memory_tiers::Report {
         let recall = memory_store::recall_all_with(self.root(), "", &self.ledger, true).unwrap();
-        memory_tiers::build(&self.project(), "2026-11-14", EPOCH_NS, now_ns, &recall)
+        memory_tiers::build(
+            &self.project(),
+            "2026-11-14",
+            EPOCH_NS,
+            now_ns,
+            &recall,
+            None,
+        )
     }
 }
 
@@ -367,4 +374,151 @@ fn invalid_epoch_is_refused_before_any_network_use() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(text.contains("memory_list_epoch_invalid"), "{text}");
+}
+
+impl Fixture {
+    fn event(&self, id: &str, kind: &str, entry: Option<&str>, at_ns: i128) {
+        let event = json!({"id":id,"kind":kind,"entry":entry,"recorded_at":at_ns.to_string()});
+        self.sql(&format!(
+            "INSERT INTO project_memory_lifecycle VALUES ('{}', '{id}', '{}')",
+            self.project(),
+            event.to_string().replace('\'', "''")
+        ));
+    }
+    fn list(&self, epoch: Option<(&str, i128)>) -> memory_tiers::Report {
+        memory_store::list_report_with(
+            self.root(),
+            &self.ledger,
+            epoch.map(|(label, ns)| (label.to_string(), ns)),
+            NOW_NS,
+        )
+        .unwrap()
+    }
+}
+
+#[test]
+fn list_disabled_unchanged() {
+    let f = Fixture::new();
+    seed(&f);
+    // An event without an `on` changes nothing: the project is still disabled.
+    f.event("arc00001", "archive", Some("dddddddd44444444"), NOW_NS);
+    let golden = f.report();
+    let listed = f.list(Some(("2026-11-14", EPOCH_NS)));
+    assert_eq!(listed.to_json(), golden.to_json());
+    assert_eq!(listed.lean(), golden.lean());
+    let v = listed.to_json();
+    assert_eq!(v["entries"][1]["tier"], "short");
+    assert!(v["summary"].get("hidden").is_none(), "{v}");
+}
+
+#[test]
+fn list_enabled_shows_state_and_hidden() {
+    let f = Fixture::new();
+    seed(&f);
+    f.event("on000001", "on", None, EPOCH_NS - 30 * DAY);
+    f.event(
+        "arc00001",
+        "archive",
+        Some("dddddddd44444444"),
+        EPOCH_NS + DAY / 2,
+    );
+    let report = f.list(None);
+    let v = report.to_json();
+    assert_eq!(v["epoch_utc"], "2026-10-15T00:00:00Z", "{v}");
+    assert_eq!(v["lifecycle"], "on");
+    let tiers: Vec<(&str, &str)> = v["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| (e["id"].as_str().unwrap(), e["tier"].as_str().unwrap()))
+        .collect();
+    assert_eq!(
+        tiers,
+        [
+            ("aaaaaaaa11111111", "long_term"),
+            ("dddddddd44444444", "archived"),
+            ("cccccccc33333333", "short_term"),
+        ]
+    );
+    assert_eq!(v["summary"]["hidden"], 1);
+    assert_eq!(v["summary"]["active"], 2);
+    assert_eq!(v["summary"]["by_state"]["archived"], 1);
+    let hidden = &v["entries"][1];
+    assert!(hidden.get("expires_at_utc").is_none(), "{hidden}");
+    let lean = report.lean();
+    let header = lean.lines().next().unwrap();
+    assert!(header.contains(" lifecycle=on"), "{header}");
+    assert!(header.contains(" hidden=1"), "{header}");
+    let row: Vec<&str> = lean.lines().nth(2).unwrap().split('\t').collect();
+    assert_eq!(row[3], "archived", "{lean}");
+}
+
+#[test]
+fn list_epoch_override_keeps_events() {
+    let f = Fixture::new();
+    seed(&f);
+    f.event("on000001", "on", None, EPOCH_NS - 30 * DAY);
+    f.event(
+        "arc00001",
+        "archive",
+        Some("dddddddd44444444"),
+        EPOCH_NS + DAY / 2,
+    );
+    // epoch = 2026-11-14: the archive still holds; alpha (45 days old) is long-term.
+    let v = f.list(Some(("2026-11-14", EPOCH_NS))).to_json();
+    assert_eq!(v["epoch_utc"], "2026-11-14T00:00:00Z");
+    assert_eq!(v["lifecycle"], "on");
+    assert_eq!(v["summary"]["by_state"]["archived"], 1, "{v}");
+    assert_eq!(v["summary"]["by_state"]["long_term"], 1);
+    let by_id = |v: &Value, id: &str| -> Value {
+        v["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["id"] == id)
+            .unwrap()
+            .clone()
+    };
+    // The override epoch (not the real one, 2026-10-15) places cccccccc: EPOCH + 7d.
+    assert_eq!(
+        by_id(&v, "cccccccc33333333")["expires_at_utc"],
+        "2026-11-21T00:00:00Z",
+        "{v}"
+    );
+    let real = f.list(None).to_json();
+    assert_eq!(
+        by_id(&real, "cccccccc33333333")["expires_at_utc"],
+        "2026-11-20T00:00:00Z",
+        "{real}"
+    );
+    // Disabled project with --epoch: phase 0, no lifecycle field, events not applied.
+    let g = Fixture::new();
+    seed(&g);
+    g.event("arc00001", "archive", Some("dddddddd44444444"), NOW_NS);
+    let v = g.list(Some(("2026-11-14", EPOCH_NS))).to_json();
+    assert!(v.get("lifecycle").is_none(), "{v}");
+    assert_eq!(by_id(&v, "dddddddd44444444")["tier"], "short", "{v}");
+}
+
+#[test]
+fn enabled_summary_counts_exclude_hidden() {
+    let f = Fixture::new();
+    seed(&f);
+    f.event("on000001", "on", None, EPOCH_NS - 30 * DAY);
+    // alpha ("the User chose A") is the only entry that mentions the user.
+    let before = f.list(None).to_json();
+    assert_eq!(before["summary"]["mentions_user"], 1);
+    assert_eq!(before["summary"]["by_evidence"], json!({"unsourced": 3}));
+    f.event("arc00001", "archive", Some("aaaaaaaa11111111"), NOW_NS);
+    let after = f.list(None).to_json();
+    assert_eq!(after["summary"]["hidden"], 1, "{after}");
+    assert_eq!(after["summary"]["mentions_user"], 0, "{after}");
+    assert_eq!(after["summary"]["by_evidence"], json!({"unsourced": 2}));
+    assert!(f
+        .list(None)
+        .lean()
+        .lines()
+        .next()
+        .unwrap()
+        .contains(" mentions_user=0 "));
 }

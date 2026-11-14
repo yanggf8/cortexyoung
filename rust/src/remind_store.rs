@@ -560,7 +560,13 @@ pub fn close_with(
 pub(crate) fn lean_field(s: &str) -> String {
     let cleaned: String = s
         .chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
+        .map(|c| {
+            if c.is_control() || c == '\u{2028}' || c == '\u{2029}' {
+                ' '
+            } else {
+                c
+            }
+        })
         .collect();
     let trimmed = cleaned.trim();
     if trimmed.is_empty() {

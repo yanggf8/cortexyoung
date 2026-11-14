@@ -65,7 +65,7 @@ fn usage_value() -> Value {
             "delete": "cort delete [root]",
             "impact": "cort impact --symbol <name> [--depth <n>] [--coverage] [-f json|lean]",
             "usage": "cort usage [days] [-f json|lean]",
-            "memory": "cort memory <configure|import-config|record|resolve|recall|status|list|check|promote|archive|drop|restore|lifecycle|notes|alias> [options]",
+            "memory": "cort memory <configure|import-config|record|resolve|recall|status|list|check|promote|archive|drop|restore|lifecycle|review|notes|alias> [options]",
             "question": "cort question <add|list|answer|close> [options]  (questions for the human, kept per repo in the memory database; cort question --help lists each verb)",
             "remind": "cort remind <add|list|defer|close> [options]  (dated tasks that surface at session start from the day before, kept per repo in the memory database; cort remind --help lists each verb)",
             "measure": "cort measure <configure|show|record|collect|health|status|cron|report> [options]  (uploads start at 2026-10-28 00:00 Taiwan time; collect: scan and upload the batch; --background appends at most one result to measure.log (none when skipped_busy) without stdout; health: observe recently used indexes and write local index_health_log, reading indexes only, with no network; --background appends the result to measure.log without stdout; status: read local collection state, -f json|lean; cron: manual install or removal of the legacy entry, no longer installed automatically; hook kick is the only automatic collection trigger; command_log and index_health_log keep uploaded rows 90 days and rows not yet uploaded 180 days, pruned when a new command is recorded; rows still not uploaded after 180 days are deleted and counted in measure status (pruned_unuploaded_rows) and measure.log)",
@@ -871,6 +871,16 @@ enum MemoryAction {
         root: PathBuf,
         #[arg(long, value_parser = HARNESS_VALUES)]
         harness: Option<String>,
+        #[arg(long)]
+        lean: bool,
+    },
+    /// Entries due for review, oldest first, each with the commands that settle it; --all adds
+    /// hidden entries, superseded entries' events and orphan events. Read-only.
+    Review {
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(long)]
+        all: bool,
         #[arg(long)]
         lean: bool,
     },
@@ -3153,19 +3163,19 @@ fn cmd_memory(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError
                 .map_err(|e| memory_error(format!("clock error: {e}")))?
                 .as_nanos();
             let now = i128::try_from(now).map_err(|_| memory_error("clock overflow".into()))?;
-            let (epoch, epoch_ns) = match epoch {
-                Some(raw) => (
-                    raw.clone(),
-                    cort::memory_tiers::parse_epoch(&raw).map_err(memory_error)?,
-                ),
-                None => cort::memory_tiers::default_epoch(now).map_err(memory_error)?,
+            // A bad --epoch is refused here, before any network use.
+            let epoch = match epoch {
+                Some(raw) => {
+                    let ns = cort::memory_tiers::parse_epoch(&raw).map_err(memory_error)?;
+                    Some((raw, ns))
+                }
+                None => None,
             };
             let project = cort::memory_store::project(&root).map_err(memory_error)?;
-            usage.project_id = Some(project.clone());
-            // Phase 0 lists every active entry; Task 5 teaches list the lifecycle.
-            let recall =
-                cort::memory_store::recall_all(&root, "", true).map_err(memory_read_error)?;
-            let report = cort::memory_tiers::build(&project, &epoch, epoch_ns, now, &recall);
+            usage.project_id = Some(project);
+            let ledger = cort::memory_store::Ledger::open().map_err(memory_read_error)?;
+            let report = cort::memory_store::list_report_with(&root, &ledger, epoch, now)
+                .map_err(memory_read_error)?;
             if lean {
                 return Ok(Emit {
                     render_command: Some("memory-list-lean"),
@@ -3295,6 +3305,20 @@ fn cmd_memory(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError
                 lean,
                 cort::lifecycle_store::switch(&root, state == "on", note, harness.clone()),
             )
+        }
+        MemoryAction::Review { root, all, lean } => {
+            usage.args_summary = json!({"v":1,"verb":"review"}).to_string();
+            usage.project_id = cort::memory_store::project(&root).ok();
+            let report = cort::lifecycle_store::review(&root, all)
+                .map_err(|e| lifecycle_error("review", e))?;
+            if lean {
+                return Ok(Emit {
+                    render_command: Some("memory-list-lean"),
+                    format: Format::Lean,
+                    payload: json!({"lean": cort::lifecycle_store::render_review_lean(&report)}),
+                });
+            }
+            report
         }
     };
     Ok(Emit {

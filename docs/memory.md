@@ -156,6 +156,43 @@ The earlier `.claudecat/memory.json` ledger and its `import-legacy` importer wer
 2026-10-30. (The unrelated `cort read` / `cort recall` file-reading verbs were removed on
 2026-10-23; they never read this decision ledger.)
 
+## Lifecycle (issue #11 phase 1a)
+
+A per-project switch that lets old entries age out of recall without deleting anything. Events
+live in the shared table `project_memory_lifecycle` (insert-only); the state of an entry is folded
+from the events, the ledger and the clock on every read.
+
+- **Switch:** `cort memory lifecycle on|off [--note ...]`. Until `on`, every read and every
+  SessionStart answers exactly as before. `on` starts the epoch; entries recorded more than 7 days
+  before it are long-term, newer ones are short-term for 7 days. Events recorded earlier still
+  apply after an `off` and a later `on`.
+- **States:** `short_term`, `short_term_expired` (due), `long_term`, `forgetting_candidate` (due, 60
+  days after the last activity), `archived`, `dropped` (both hidden from recall).
+- **Verbs** (each takes an id or a unique hex prefix of 8+ characters; `--note` up to 300 bytes):
+  `promote` (short-term to long-term), `archive` (hide a short- or long-term entry), `drop` (hide a
+  short-term entry only), `restore` (bring a hidden entry back and restart its clock). A verb the state does not allow is refused with the
+  allowed list and writes nothing.
+- **Guard:** an entry whose key or claim mentions the user (`user`, `用戶`, `用户`, `使用者`) is
+  released only with `--superseded-by <id>` (another active, visible entry that covers it, never the entry itself) or `--quote
+  '<the user's words>'` (1-600 bytes, with a word in it). Ask the user and pass their words.
+- **Review:** `cort memory review [--all] [--lean]` lists the due entries, oldest first, each with
+  complete commands (the id is the 8-character prefix when that is unique, a longer unique prefix
+  otherwise, or the whole id when it is not hex; the placeholders `<id>` and `<the user's words>`
+  are yours to fill). `--all` adds `hidden` (with the last event's quote, `superseded_by` and note),
+  `superseded` (events naming an entry that has since been superseded) and `orphans` (events whose
+  entry the ledger does not have). On a project with the switch off it answers `lifecycle: "off"`
+  plus a what-if: the epoch set to now, existing events applied; its items carry no commands,
+  because the verbs refuse until `lifecycle on`. `--lean --all` adds one `hidden`, `superseded` or
+  `orphan` line per entry.
+- **Recall:** `cort memory recall` leaves hidden entries out and labels due ones with `lifecycle`;
+  `cort memory recall --all` includes the hidden ones, each labelled `archived` or `dropped`.
+  `cort memory list` shows the state as its `tier` column once the switch is on; with the switch
+  off it is unchanged, and `--epoch` on an enabled project replaces only the epoch.
+- **Unreadable rows:** a lifecycle row this build cannot decode is skipped and counted; reads then
+  carry `lifecycle_unreadable` and a hint. A row of a kind this build does not know is applied as
+  a no-op when it has an `id` and a `recorded_at`; without them it is skipped and not counted.
+- **Older builds** never read the table: they keep showing archived and dropped entries as active.
+
 ## After a repository rename
 
 The project id is a hash of the normalized `origin` URL, so renaming the repository (or moving

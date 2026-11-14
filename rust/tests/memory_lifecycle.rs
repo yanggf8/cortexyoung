@@ -1,7 +1,9 @@
 //! `cort memory promote|archive|drop|restore` and `lifecycle on|off` against the fake transport
 //! only; no test touches the network or a shared database.
 
-use cort::lifecycle_store::{act_with, render_lean, switch_with, Release, Verb};
+use cort::lifecycle_store::{
+    act_with, render_lean, render_review_lean, review_with, switch_with, Release, Verb,
+};
 use cort::memory_store::{self, Ledger, LedgerError};
 use cort::remote::{SqliteTransport, Transport};
 use serde_json::{json, Value};
@@ -855,4 +857,300 @@ fn lean_lines_have_no_empty_field() {
     switch_with(f.root(), &f.ledger, true, None).unwrap();
     let on_again = switch_with(f.root(), &f.ledger, true, None).unwrap();
     assert_eq!(render_lean("lifecycle", &on_again), "unchanged on\n");
+}
+
+fn ids(v: &Value, field: &str) -> Vec<String> {
+    v[field]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["id"].as_str().unwrap().to_string())
+        .collect()
+}
+
+fn review(f: &Fixture, all: bool) -> Value {
+    review_with(f.root(), &f.ledger, all, f.now).unwrap()
+}
+
+#[test]
+fn review_lists_due_oldest_first_with_commands() {
+    let f = Fixture::enabled();
+    f.short("sssssss1f0");
+    f.due("ddddddd1f0");
+    // Recorded 70 days ago: long-term, forgetting review due 10 days ago.
+    f.entry(
+        "fffffff1f0",
+        "k-forget",
+        "old plain claim",
+        f.now - 70 * DAY,
+    );
+    // Mentions the user, expired 18 days ago: the oldest due entry.
+    f.entry("uuuuuuu1f0", "k-user", "the user chose A", f.now - 25 * DAY);
+    let v = review(&f, false);
+    assert_eq!(v["lifecycle"], "on");
+    assert!(v["epoch_utc"].as_str().unwrap().ends_with('Z'));
+    assert_eq!(v["counts"]["short_term"], 1, "{v}");
+    assert_eq!(v["counts"]["short_term_expired"], 2);
+    assert_eq!(v["counts"]["forgetting_candidate"], 1);
+    assert_eq!(v["counts"]["archived"], 0);
+    assert_eq!(
+        ids(&v, "items"),
+        ["uuuuuuu1f0", "ddddddd1f0", "fffffff1f0"],
+        "{v}"
+    );
+    assert!(v.get("hidden").is_none());
+    let items = v["items"].as_array().unwrap();
+    assert_eq!(items[0]["state"], "short_term_expired");
+    assert_eq!(items[0]["mentions_user"], true);
+    assert_eq!(items[0]["key"], "k-user");
+    assert!(items[0]["due_at_utc"].as_str().unwrap().ends_with('Z'));
+    assert!(items[0]["recorded_at_utc"].as_str().unwrap().ends_with('Z'));
+    let cmds = |i: usize| -> Vec<&str> {
+        items[i]["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c.as_str().unwrap())
+            .collect()
+    };
+    assert_eq!(
+        cmds(0),
+        [
+            // `u` is not hex, so the id is named whole.
+            "cort memory promote uuuuuuu1f0",
+            "cort memory drop uuuuuuu1f0 --superseded-by <id>",
+            "cort memory drop uuuuuuu1f0 --quote '<the user's words>'",
+        ]
+    );
+    assert_eq!(
+        cmds(1),
+        ["cort memory promote ddddddd1", "cort memory drop ddddddd1"]
+    );
+    assert_eq!(cmds(2), ["cort memory archive fffffff1"]);
+    // The plain commands are accepted by the verbs.
+    f.plain(Verb::Promote, "ddddddd1").unwrap();
+    f.plain(Verb::Archive, "fffffff1").unwrap();
+    let again = review(&f, false);
+    assert_eq!(ids(&again, "items"), ["uuuuuuu1f0"]);
+}
+
+#[test]
+fn review_all_adds_hidden_superseded_orphans() {
+    let f = Fixture::enabled();
+    f.entry("aaaaaaa1f0", "k-a", "the user said so", f.now - 3 * DAY);
+    f.entry("bbbbbbb1f0", "k-b", "plain", f.now - 3 * DAY);
+    f.entry("ccccccc1f0", "k-c", "old plain", f.now - 3 * DAY);
+    f.entry_with(
+        "ccccccc2f0",
+        "k-c",
+        "new plain",
+        f.now - 2 * DAY,
+        json!({"supersedes":"ccccccc1f0"}),
+    );
+    f.act(
+        Verb::Archive,
+        "aaaaaaa1",
+        quoted("it is not needed any more"),
+        Some("cleanup"),
+    )
+    .unwrap();
+    f.plain(Verb::Drop, "bbbbbbb1").unwrap();
+    f.lifecycle("sup00001", "promote", Some("ccccccc1f0"), f.now - DAY);
+    f.lifecycle("orph0001", "archive", Some("nosuchentry"), f.now - DAY);
+    // A later `drop` on the archived entry is inert: its quote must not be reported.
+    let inert = json!({"id":"inert001","kind":"drop","entry":"aaaaaaa1f0","quote":"inert words",
+        "recorded_at":(f.now + DAY).to_string()});
+    f.query(&format!(
+        "INSERT INTO project_memory_lifecycle VALUES ('{}', 'inert001', '{}')",
+        f.project(),
+        inert.to_string().replace('\'', "''")
+    ));
+    let plain = review(&f, false);
+    assert!(plain.get("hidden").is_none() && plain.get("orphans").is_none());
+    assert_eq!(plain["counts"]["archived"], 1);
+    assert_eq!(plain["counts"]["dropped"], 1);
+    let v = review(&f, true);
+    let hidden = v["hidden"].as_array().unwrap();
+    assert_eq!(hidden.len(), 2, "{v}");
+    let archived = hidden.iter().find(|h| h["id"] == "aaaaaaa1f0").unwrap();
+    assert_eq!(archived["state"], "archived");
+    assert_eq!(archived["quote"], "it is not needed any more");
+    assert_eq!(archived["note"], "cleanup");
+    assert_ne!(archived["quote"], "inert words");
+    let dropped = hidden.iter().find(|h| h["id"] == "bbbbbbb1f0").unwrap();
+    assert_eq!(dropped["state"], "dropped");
+    assert!(dropped.get("quote").is_none());
+    assert_eq!(v["superseded"], json!([{"id":"ccccccc1f0","events":1}]));
+    assert_eq!(
+        v["orphans"],
+        json!([{"id":"orph0001","kind":"archive","entry":"nosuchentry"}])
+    );
+    let lean = render_review_lean(&v);
+    for prefix in ["hidden\t", "superseded\t", "orphan\t"] {
+        assert!(
+            lean.lines().any(|l| l.starts_with(prefix)),
+            "{prefix}: {lean}"
+        );
+    }
+    for line in lean.lines().skip(1) {
+        assert!(line.split('\t').all(|c| !c.trim().is_empty()), "{line:?}");
+    }
+    assert!(
+        lean.contains("orphan\torph0001\tarchive\tnosuchentry"),
+        "{lean}"
+    );
+}
+
+#[test]
+fn review_commands_use_unique_id_refs() {
+    let f = Fixture::enabled();
+    // Two ids share their first 8 characters; one id is not hex at all (imported).
+    f.due("abcdef01aa");
+    f.due("abcdef01bb");
+    f.due("ABC-import");
+    let v = review(&f, false);
+    let refs: Vec<(String, String)> = v["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| {
+            (
+                i["id"].as_str().unwrap().to_string(),
+                i["commands"][0].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    let cmd = |id: &str| refs.iter().find(|(i, _)| i == id).unwrap().1.clone();
+    assert_eq!(cmd("abcdef01aa"), "cort memory promote abcdef01a");
+    assert_eq!(cmd("abcdef01bb"), "cort memory promote abcdef01b");
+    assert_eq!(cmd("ABC-import"), "cort memory promote ABC-import");
+    let lean = render_review_lean(&v);
+    for r in ["abcdef01a\t", "abcdef01b\t", "ABC-import\t"] {
+        assert!(lean.lines().any(|l| l.starts_with(r)), "{r}: {lean}");
+    }
+    // The printed references are accepted by the verbs.
+    f.plain(Verb::Promote, "abcdef01a").unwrap();
+    f.plain(Verb::Promote, "ABC-import").unwrap();
+}
+
+#[test]
+fn review_and_list_report_unreadable_rows() {
+    let f = Fixture::enabled();
+    f.due("ddddddd1f0");
+    f.query(&format!(
+        "INSERT INTO project_memory_lifecycle VALUES ('{}', 'bad00001', 'not json')",
+        f.project()
+    ));
+    let v = review(&f, false);
+    assert_eq!(v["lifecycle_unreadable"], 1, "{v}");
+    assert!(v["lifecycle_hint"]
+        .as_str()
+        .unwrap()
+        .contains("review --all"));
+    let lean = render_review_lean(&v);
+    assert!(
+        lean.lines()
+            .next()
+            .unwrap()
+            .contains(" lifecycle_unreadable=1"),
+        "{lean}"
+    );
+    let report = memory_store::list_report_with(
+        f.root(),
+        &f.ledger,
+        Some(("2026-11-14".to_string(), f.now - 10 * DAY)),
+        f.now,
+    )
+    .unwrap();
+    let json = report.to_json();
+    assert_eq!(json["lifecycle_unreadable"], 1, "{json}");
+    assert!(json["lifecycle_hint"].is_string());
+    assert!(
+        report
+            .lean()
+            .lines()
+            .next()
+            .unwrap()
+            .contains(" lifecycle_unreadable=1"),
+        "{}",
+        report.lean()
+    );
+}
+
+#[test]
+fn review_disabled_reports_off_and_what_if_with_events() {
+    let f = Fixture::new();
+    f.short("sssssss1f0");
+    f.entry("ooooooo1f0", "k-old", "old plain claim", f.now - 70 * DAY);
+    f.entry("aaaaaaa1f0", "k-arc", "plain", f.now - 70 * DAY);
+    f.lifecycle("arc00001", "archive", Some("aaaaaaa1f0"), f.now - DAY);
+    let v = review(&f, true);
+    assert_eq!(v["lifecycle"], "off");
+    assert!(v["what_if"]
+        .as_str()
+        .unwrap()
+        .contains("what `cort memory lifecycle on` would place today"));
+    // epoch = now: the 70-day-old entry is long-term and past its forgetting date.
+    assert_eq!(v["counts"]["short_term"], 1, "{v}");
+    assert_eq!(v["counts"]["forgetting_candidate"], 1);
+    assert_eq!(v["counts"]["archived"], 1);
+    assert_eq!(ids(&v, "items"), ["ooooooo1f0"]);
+    assert_eq!(ids(&v, "hidden"), ["aaaaaaa1f0"]);
+    assert_eq!(
+        v["epoch_utc"].as_str().unwrap(),
+        cort::memory_tiers::utc_iso(f.now),
+        "{v}"
+    );
+    // The switch is untouched: nothing was written.
+    assert_eq!(f.count(), 1);
+    // A disabled project offers no commands (the verbs would refuse), but still lists the item.
+    assert_eq!(v["items"][0]["commands"], json!([]));
+    let lean = render_review_lean(&v);
+    assert!(lean.starts_with("review lifecycle=off"), "{lean}");
+    assert!(
+        lean.lines().any(|l| l.starts_with("ooooooo1f0\t")),
+        "{lean}"
+    );
+}
+
+#[test]
+fn review_lean_has_no_empty_field() {
+    let f = Fixture::enabled();
+    f.entry(
+        "uuuuuuu1f0",
+        "k\tuser",
+        "the user chose A",
+        f.now - 25 * DAY,
+    );
+    f.entry("ddddddd1f0", "k-plain", "plain", f.now - 20 * DAY);
+    let v = review(&f, false);
+    let lean = render_review_lean(&v);
+    let mut lines = lean.lines();
+    let header = lines.next().unwrap();
+    assert!(
+        header.starts_with("review lifecycle=on epoch_utc="),
+        "{header}"
+    );
+    assert!(header.contains(" due=2 "), "{header}");
+    assert!(header.contains(" short_term_expired=2"), "{header}");
+    let rows: Vec<Vec<&str>> = lines.map(|l| l.split('\t').collect()).collect();
+    assert_eq!(rows.len(), 2);
+    for row in &rows {
+        assert_eq!(row.len(), 5, "{row:?}");
+        assert!(row.iter().all(|c| !c.trim().is_empty()), "{row:?}");
+    }
+    assert_eq!(rows[0][0], "uuuuuuu1f0");
+    assert_eq!(rows[0][1], "short_term_expired");
+    assert_eq!(rows[0][3], "y");
+    assert_eq!(rows[0][4], "k user");
+    assert_eq!(rows[1][3], "n");
+    assert_eq!(rows[1][4], "k-plain");
+    // Off: the header says so and no item lines follow.
+    let off = Fixture::new();
+    let line = render_review_lean(&review(&off, false));
+    assert!(
+        line.starts_with("review lifecycle=off epoch_utc="),
+        "{line}"
+    );
+    assert_eq!(line.lines().count(), 1);
 }

@@ -4,6 +4,7 @@
 //! the clock, so the report can size the proposal before any schema exists.
 
 use crate::memory::MemoryRecall;
+use crate::memory_lifecycle::{LifecycleView, State};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 
@@ -115,7 +116,7 @@ pub fn parse_epoch(raw: &str) -> Result<i128, String> {
 }
 
 /// The local calendar date of `ns` as `YYYY-MM-DD`, or `None` when the zone cannot be resolved.
-fn local_date_of(ns: i128) -> Option<String> {
+pub(crate) fn local_date_of(ns: i128) -> Option<String> {
     crate::remind_snapshot::local_parts(ns).map(|(date, _)| date)
 }
 
@@ -162,6 +163,8 @@ struct Row {
     recorded_at_ns: Option<i128>,
     age_days: Option<i128>,
     placement: Option<Placement>,
+    /// The lifecycle state (with a view only): the `tier` column, and hidden when archived/dropped.
+    state: Option<State>,
     mentions_user: bool,
     evidence_status: String,
 }
@@ -170,6 +173,10 @@ impl Row {
     fn tier_is(&self, tier: Tier) -> bool {
         self.placement.is_some_and(|p| p.tier == tier)
     }
+
+    fn hidden(&self) -> bool {
+        self.state.is_some_and(State::is_hidden)
+    }
 }
 
 pub struct Report {
@@ -177,16 +184,45 @@ pub struct Report {
     epoch: String,
     epoch_ns: i128,
     unparsed_recorded_at: usize,
+    /// Set with a lifecycle view: the report speaks in lifecycle states.
+    lifecycle: bool,
+    lifecycle_unreadable: usize,
     rows: Vec<Row>,
 }
 
-/// Place every hit of an all-active recall (`memory_store::recall_all(root, "", true)`, hidden entries included).
+/// The placement a lifecycle state stands for, with the fold's own due time (events included);
+/// hidden states have none.
+fn placement_of(state: State, due_at_ns: Option<i128>) -> Option<Placement> {
+    let short = |expired| Placement {
+        tier: Tier::Short,
+        expires_at_ns: due_at_ns,
+        short_term_expired: expired,
+        forgetting_due_at_ns: None,
+    };
+    let long = Placement {
+        tier: Tier::Long,
+        expires_at_ns: None,
+        short_term_expired: false,
+        forgetting_due_at_ns: due_at_ns,
+    };
+    match state {
+        State::ShortTerm => Some(short(false)),
+        State::ShortTermExpired => Some(short(true)),
+        State::LongTerm | State::ForgettingCandidate => Some(long),
+        State::Archived | State::Dropped => None,
+    }
+}
+
+/// Place every hit of an all-active recall (`memory_store::recall_all(root, "", true)`, hidden
+/// entries included). Without a view the output is the phase 0 report; with one, each entry's
+/// tier is its lifecycle state and the epoch is the one the view was folded with.
 pub fn build(
     project_id: &str,
     epoch: &str,
     epoch_ns: i128,
     now_ns: i128,
     recall: &MemoryRecall,
+    view: Option<&LifecycleView>,
 ) -> Report {
     let mut unparsed = 0;
     let mut rows: Vec<Row> = recall
@@ -198,13 +234,18 @@ pub fn build(
             if recorded.is_none() {
                 unparsed += 1;
             }
+            let folded = view.and_then(|v| v.entries.get(&hit.entry.id));
             Row {
                 id: hit.entry.id.clone(),
                 key: hit.entry.key.clone(),
                 claim: hit.entry.claim.clone(),
                 recorded_at_ns: recorded,
                 age_days: recorded.map(|r| (now_ns - r).div_euclid(DAY_NS).max(0)),
-                placement: recorded.map(|r| place(r, epoch_ns, now_ns)),
+                placement: match folded {
+                    Some(s) => placement_of(s.state, s.due_at_ns),
+                    None => recorded.map(|r| place(r, epoch_ns, now_ns)),
+                },
+                state: folded.map(|s| s.state),
                 mentions_user: mentions_user(&hit.entry.key, &hit.entry.claim),
                 evidence_status: hit.evidence_status.clone(),
             }
@@ -223,11 +264,19 @@ pub fn build(
         epoch: epoch.to_string(),
         epoch_ns,
         unparsed_recorded_at: unparsed,
+        lifecycle: view.is_some(),
+        lifecycle_unreadable: 0,
         rows,
     }
 }
 
 impl Report {
+    /// Lifecycle rows the read could not use; reported beside the listing when above zero.
+    pub fn with_lifecycle_unreadable(mut self, unreadable: usize) -> Self {
+        self.lifecycle_unreadable = unreadable;
+        self
+    }
+
     fn count(&self, pred: impl Fn(&Row) -> bool) -> usize {
         self.rows.iter().filter(|r| pred(r)).count()
     }
@@ -235,23 +284,34 @@ impl Report {
     pub fn to_json(&self) -> Value {
         let mut by_week = BTreeMap::<String, usize>::new();
         let mut by_evidence = BTreeMap::<String, usize>::new();
-        for row in &self.rows {
+        for row in self.rows.iter().filter(|r| !r.hidden()) {
             if let Some(due) = row.placement.and_then(|p| p.forgetting_due_at_ns) {
                 *by_week.entry(week_monday(due)).or_default() += 1;
             }
             *by_evidence.entry(row.evidence_status.clone()).or_default() += 1;
         }
+        let hidden = self.count(Row::hidden);
         let mut summary = json!({
-            "active": self.rows.len(),
+            "active": self.rows.len() - hidden,
             "short": self.count(|r| r.tier_is(Tier::Short)),
             "long": self.count(|r| r.tier_is(Tier::Long)),
             "short_term_expired": self.count(|r| r.placement.is_some_and(|p| p.short_term_expired)),
-            "mentions_user": self.count(|r| r.mentions_user),
+            "mentions_user": self.count(|r| r.mentions_user && !r.hidden()),
             "forgetting_due_by_week": by_week,
             "by_evidence": by_evidence,
         });
         if self.unparsed_recorded_at > 0 {
             summary["unparsed_recorded_at"] = json!(self.unparsed_recorded_at);
+        }
+        if self.lifecycle {
+            let mut by_state = BTreeMap::<&str, usize>::new();
+            for row in &self.rows {
+                if let Some(state) = row.state {
+                    *by_state.entry(state.as_str()).or_default() += 1;
+                }
+            }
+            summary["hidden"] = json!(hidden);
+            summary["by_state"] = json!(by_state);
         }
         let entries: Vec<Value> = self
             .rows
@@ -266,7 +326,7 @@ impl Report {
                 if let Some(age) = row.age_days {
                     e.insert("age_days".into(), json!(age));
                 }
-                e.insert("tier".into(), json!(tier_name(row.placement)));
+                e.insert("tier".into(), json!(tier_name(row)));
                 if let Some(ns) = row.placement.and_then(|p| p.expires_at_ns) {
                     e.insert("expires_at_utc".into(), json!(utc_parts(ns).1));
                 }
@@ -279,13 +339,21 @@ impl Report {
                 Value::Object(e)
             })
             .collect();
-        json!({
+        let mut out = json!({
             "project_id": self.project_id,
             "epoch": self.epoch,
             "epoch_utc": utc_parts(self.epoch_ns).1,
             "summary": summary,
             "entries": entries,
-        })
+        });
+        if self.lifecycle {
+            out["lifecycle"] = json!("on");
+        }
+        if self.lifecycle_unreadable > 0 {
+            out["lifecycle_unreadable"] = json!(self.lifecycle_unreadable);
+            out["lifecycle_hint"] = json!(crate::memory::LIFECYCLE_UNREADABLE_HINT);
+        }
+        out
     }
 
     /// Header line, then one TSV row per entry; no field is ever empty (`-` stands in), because
@@ -293,18 +361,27 @@ impl Report {
     pub fn lean(&self) -> String {
         let mut out = format!(
             "active={} short={} long={} short_term_expired={} mentions_user={} epoch={} epoch_utc={}",
-            self.rows.len(),
+            self.rows.len() - self.count(Row::hidden),
             self.count(|r| r.tier_is(Tier::Short)),
             self.count(|r| r.tier_is(Tier::Long)),
             self.count(|r| r.placement.is_some_and(|p| p.short_term_expired)),
-            self.count(|r| r.mentions_user),
+            self.count(|r| r.mentions_user && !r.hidden()),
             self.epoch,
             utc_parts(self.epoch_ns).1
         );
+        if self.lifecycle {
+            out.push_str(&format!(" lifecycle=on hidden={}", self.count(Row::hidden)));
+        }
         if self.unparsed_recorded_at > 0 {
             out.push_str(&format!(
                 " unparsed_recorded_at={}",
                 self.unparsed_recorded_at
+            ));
+        }
+        if self.lifecycle_unreadable > 0 {
+            out.push_str(&format!(
+                " lifecycle_unreadable={}",
+                self.lifecycle_unreadable
             ));
         }
         out.push('\n');
@@ -316,7 +393,7 @@ impl Report {
                     .map_or_else(|| "-".to_string(), |ns| utc_parts(ns).0),
                 row.age_days
                     .map_or_else(|| "-".to_string(), |a| a.to_string()),
-                tier_name(row.placement).to_string(),
+                tier_name(row).to_string(),
                 lean_field(&row.evidence_status),
                 if row.mentions_user { "y" } else { "n" }.to_string(),
                 lean_field(&row.key),
@@ -329,8 +406,11 @@ impl Report {
     }
 }
 
-fn tier_name(placement: Option<Placement>) -> &'static str {
-    placement.map_or("unknown", |p| p.tier.as_str())
+fn tier_name(row: &Row) -> &'static str {
+    match row.state {
+        Some(state) => state.as_str(),
+        None => row.placement.map_or("unknown", |p| p.tier.as_str()),
+    }
 }
 
 fn cut_claim(claim: &str) -> String {

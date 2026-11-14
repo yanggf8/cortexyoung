@@ -1856,6 +1856,53 @@ pub fn recall_all_with(
     Ok(recall)
 }
 
+/// `cort memory list`: every active entry, hidden ones included and labelled. A disabled project
+/// is listed exactly as phase 0 did (`epoch` or today's local midnight); an enabled one speaks in
+/// lifecycle states, folded with its own epoch -- or with `epoch` when given, events still applied.
+pub fn list_report_with(
+    root: &Path,
+    ledger: &Ledger,
+    epoch: Option<(String, i128)>,
+    now_ns: i128,
+) -> Result<crate::memory_tiers::Report, LedgerError> {
+    use crate::memory_tiers::{build, default_epoch};
+    let project = project(root)?;
+    let (data, rows) = ledger.read_with_lifecycle(&project)?;
+    let unreadable = rows.unreadable;
+    let present = !data.entries.is_empty();
+    let real = crate::memory_lifecycle::fold(&data, rows.events.clone(), unreadable, now_ns, None);
+    let recall = memory::recall_ledger_view(root, "", &data, present, None, Some(&real), true);
+    let (label, epoch_ns, view) = match (epoch, real.enabled) {
+        (Some((label, ns)), false) => (label, ns, None),
+        (None, false) => {
+            let (label, ns) = default_epoch(now_ns).map_err(LedgerError::Message)?;
+            (label, ns, None)
+        }
+        (Some((label, ns)), true) => {
+            let view =
+                crate::memory_lifecycle::fold(&data, rows.events, unreadable, now_ns, Some(ns));
+            (label, ns, Some(view))
+        }
+        (None, true) => {
+            let ns = real
+                .epoch_ns
+                .ok_or_else(|| LedgerError::Message("lifecycle epoch missing".into()))?;
+            // The label is the local date, as phase 0 and `--epoch` give it.
+            let label = crate::memory_tiers::local_date_of(ns).ok_or_else(|| {
+                LedgerError::Message(
+                    "memory_list_epoch_unresolved: local time zone unavailable; pass --epoch YYYY-MM-DD"
+                        .into(),
+                )
+            })?;
+            (label, ns, Some(real))
+        }
+    };
+    Ok(
+        build(&project, &label, epoch_ns, now_ns, &recall, view.as_ref())
+            .with_lifecycle_unreadable(unreadable),
+    )
+}
+
 fn conflicts(ledger: &MemoryLedger) -> Vec<MemoryConflict> {
     let mut by_key = std::collections::BTreeMap::<String, Vec<String>>::new();
     for entry in memory::active_entries(ledger) {
