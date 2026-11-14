@@ -143,25 +143,27 @@ use std::os::raw::{c_char, c_int, c_long};
 /// `tm_zone: *const c_char` (musl matches). Only the first nine are inputs here; the tail
 /// is zeroed so the struct is the size the ABI expects. One function, no libc crate --
 /// the same minimal-FFI style as `heal.rs`'s `setsid`.
+/// `remind_snapshot` reads local time through the same struct and `localtime_r`.
 #[cfg(unix)]
 #[repr(C)]
-struct Tm {
-    tm_sec: c_int,
-    tm_min: c_int,
-    tm_hour: c_int,
-    tm_mday: c_int,
-    tm_mon: c_int,
-    tm_year: c_int,
-    tm_wday: c_int,
-    tm_yday: c_int,
-    tm_isdst: c_int,
-    tm_gmtoff: c_long,
-    tm_zone: *const c_char,
+pub(crate) struct Tm {
+    pub(crate) tm_sec: c_int,
+    pub(crate) tm_min: c_int,
+    pub(crate) tm_hour: c_int,
+    pub(crate) tm_mday: c_int,
+    pub(crate) tm_mon: c_int,
+    pub(crate) tm_year: c_int,
+    pub(crate) tm_wday: c_int,
+    pub(crate) tm_yday: c_int,
+    pub(crate) tm_isdst: c_int,
+    pub(crate) tm_gmtoff: c_long,
+    pub(crate) tm_zone: *const c_char,
 }
 
 #[cfg(unix)]
 extern "C" {
     fn mktime(tm: *mut Tm) -> c_long;
+    pub(crate) fn localtime_r(time: *const c_long, out: *mut Tm) -> *mut Tm;
 }
 
 /// Midnight of a calendar date in this machine's local zone, as ns since the epoch.
