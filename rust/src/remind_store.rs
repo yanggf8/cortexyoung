@@ -98,11 +98,60 @@ pub fn read_events_with(ledger: &Ledger, project: &str) -> Result<Vec<ReminderEv
     Ok(events)
 }
 
-fn load(ledger: &Ledger, project: &str) -> Result<(Folded, usize, i128), LedgerError> {
+/// The folded component, the event count, the fold's `now`, and the clock reading taken just
+/// before the read was sent (the snapshot's `read_at`).
+fn load(ledger: &Ledger, project: &str) -> Result<(Folded, usize, i128, i128), LedgerError> {
+    let read_at = now_ns()?;
     let events = read_events_with(ledger, project)?;
     let total = events.len();
     let now = now_ns()?;
-    Ok((fold(events, now), total, now))
+    Ok((fold(events, now), total, now, read_at))
+}
+
+/// What a successful read leaves for the prompt hook: the local reminder snapshot. Built from
+/// the events of the reminders that are not closed, plus -- after a write was confirmed -- the
+/// event it wrote. Every error is ignored: a snapshot problem never changes a command's output.
+struct Snap<'a> {
+    project: &'a str,
+    read_at: i128,
+    now: i128,
+    events: Vec<ReminderEvent>,
+}
+
+impl<'a> Snap<'a> {
+    fn new(project: &'a str, folded: &Folded, read_at: i128, now: i128) -> Self {
+        Snap {
+            project,
+            read_at,
+            now,
+            events: crate::remind_snapshot::snapshot_events(&folded.reminders),
+        }
+    }
+
+    fn save(&self, written: Option<&ReminderEvent>) {
+        let events = match written {
+            None => self.events.clone(),
+            Some(event) => {
+                let mut all = self.events.clone();
+                all.push(event.clone());
+                crate::remind_snapshot::snapshot_events(&fold(all, self.now).reminders)
+            }
+        };
+        let snapshot = crate::remind_snapshot::Snapshot::new(self.project, self.read_at, events);
+        let _ = crate::remind_snapshot::write_snapshot(&crate::data_dir::data_dir(), &snapshot);
+    }
+
+    /// Write `event`, then settle the snapshot: confirmed adds it, a refusal keeps the read's
+    /// events, and an unknown outcome writes nothing.
+    fn write(&self, ledger: &Ledger, event: &ReminderEvent) -> Result<(), LedgerError> {
+        let result = write_event(ledger, self.project, event);
+        match &result {
+            Ok(()) => self.save(Some(event)),
+            Err(LedgerError::OutcomeUnknown { .. }) => {}
+            Err(_) => self.save(None),
+        }
+        result
+    }
 }
 
 fn new_event(
@@ -244,10 +293,12 @@ pub fn add_with(root: &Path, args: AddArgs, ledger: &Ledger) -> Result<Value, Le
     let project = project(root)?;
     // Refused before any network round trip: a past date needs no read to answer.
     check_not_past(&due, now_ns()?)?;
-    let (folded, _, now) = load(ledger, &project).map_err(not_recorded)?;
+    let (folded, _, now, read_at) = load(ledger, &project).map_err(not_recorded)?;
+    let snap = Snap::new(&project, &folded, read_at, now);
     let by_id = |id: &String| folded.reminders.iter().find(|r| &r.add.id == id);
     let similar = match classify(&args.text, due.due_at, &folded.reminders) {
         Dedup::Exists(ids) if !args.force => {
+            snap.save(None);
             let earlier = by_id(ids.first().ok_or_else(|| {
                 LedgerError::Message("matched reminder is missing from the fold".into())
             })?)
@@ -270,7 +321,7 @@ pub fn add_with(root: &Path, args: AddArgs, ledger: &Ledger) -> Result<Value, Le
     event.on = Some(due.on.clone());
     event.utc_offset = Some(due.utc_offset.clone());
     event.due_at = Some(due.due_at.to_string());
-    write_event(ledger, &project, &event)?;
+    snap.write(ledger, &event)?;
     let similar: Vec<Value> = similar
         .iter()
         .filter_map(by_id)
@@ -315,7 +366,8 @@ pub fn list_with(
     ledger: &Ledger,
 ) -> Result<Value, LedgerError> {
     let project = project(root)?;
-    let (folded, total, _now) = load(ledger, &project)?;
+    let (folded, total, now, read_at) = load(ledger, &project)?;
+    Snap::new(&project, &folded, read_at, now).save(None);
     let reminders: Vec<Value> = if let Some(prefix) = id {
         vec![reminder_json(find(&folded, prefix)?, true)]
     } else if let Some(matching) = matching {
@@ -401,10 +453,12 @@ pub fn defer_with(
     // Refused before any network round trip, exactly as `add`: a past date needs no read
     // to answer.
     check_not_past(&due, now_ns()?)?;
-    let (folded, _, now) = load(ledger, &project).map_err(not_recorded)?;
-    let r = find(&folded, id)?;
+    let (folded, _, now, read_at) = load(ledger, &project).map_err(not_recorded)?;
+    let snap = Snap::new(&project, &folded, read_at, now);
+    let r = find(&folded, id).inspect_err(|_| snap.save(None))?;
     let rid = r.add.id.clone();
     if let Some(close) = &r.close {
+        snap.save(None);
         return Err(LedgerError::Message(format!(
             "remind_closed: {rid} is already closed ({})",
             close.reason.as_deref().unwrap_or("-")
@@ -416,7 +470,7 @@ pub fn defer_with(
     event.utc_offset = Some(due.utc_offset.clone());
     event.due_at = Some(due.due_at.to_string());
     event.note = note;
-    write_event(ledger, &project, &event)?;
+    snap.write(ledger, &event)?;
     Ok(json!({
         "outcome": "deferred",
         "reminder": after_write(r, &event, now),
@@ -459,10 +513,12 @@ pub fn close_with(
         (_, None) => None,
     };
     let project = project(root)?;
-    let (folded, _, now) = load(ledger, &project).map_err(not_recorded)?;
-    let r = find(&folded, id)?;
+    let (folded, _, now, read_at) = load(ledger, &project).map_err(not_recorded)?;
+    let snap = Snap::new(&project, &folded, read_at, now);
+    let r = find(&folded, id).inspect_err(|_| snap.save(None))?;
     let rid = r.add.id.clone();
     if let Some(close) = &r.close {
+        snap.save(None);
         return Err(LedgerError::Message(format!(
             "remind_closed: {rid} is already closed ({})",
             close.reason.as_deref().unwrap_or("-")
@@ -470,8 +526,9 @@ pub fn close_with(
     }
     let of = match of_prefix {
         Some(prefix) => {
-            let other = find(&folded, &prefix)?;
+            let other = find(&folded, &prefix).inspect_err(|_| snap.save(None))?;
             if other.add.id == rid {
+                snap.save(None);
                 return Err(LedgerError::Message(format!(
                     "remind_of_unexpected: {rid} cannot be a duplicate of itself"
                 )));
@@ -485,7 +542,7 @@ pub fn close_with(
     event.reason = Some(reason.as_str().to_string());
     event.of = of;
     event.note = note;
-    write_event(ledger, &project, &event)?;
+    snap.write(ledger, &event)?;
     Ok(json!({
         "outcome": "closed",
         "reminder": after_write(r, &event, now),

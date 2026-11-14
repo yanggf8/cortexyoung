@@ -618,6 +618,9 @@ pub struct SessionRecall {
     pub questions: Option<Vec<crate::question::Question>>,
     /// `None` when the reminders statement was dropped after an SQL error.
     pub reminders: Option<Vec<crate::remind::Reminder>>,
+    /// False when the answer came from the unaliased retry, whose `= ?` scope is narrower than
+    /// the alias component: such a reminder list must never become a snapshot.
+    pub reminders_full_scope: bool,
 }
 
 /// Read only, one pipeline of four reads -- ledger, notes (two statements), questions,
@@ -828,7 +831,42 @@ pub fn session_recall_with(
         notes_total: total,
         questions,
         reminders,
+        reminders_full_scope: !retried_alias,
     })
+}
+
+/// What `hook-recall` leaves on disk for the prompt hook once its output is written; every
+/// error is ignored, because a lost write costs one repeated or missed reminder at most.
+///
+/// - The snapshot is written only from a successful read whose reminders were read over the
+///   full alias component (`reminders_full_scope`); a failed, dropped or alias-retry read
+///   writes nothing.
+/// - A session start (`session_start`) with a `session_id` replaces the shown set with
+///   `printed` -- the keys of the reminder lines the recall printed, empty when it printed
+///   none or failed (`session` is `None`) -- so the next prompt re-shows from the snapshot.
+pub fn persist_recall_reminders(
+    dir: &Path,
+    project: Option<&str>,
+    session_id: Option<&str>,
+    session_start: bool,
+    session: Option<&SessionRecall>,
+    printed: &[crate::remind_snapshot::ShownKey],
+    read_at_ns: i128,
+) {
+    if let (Some(project), Some(session)) = (project, session) {
+        if let (Some(reminders), true) = (&session.reminders, session.reminders_full_scope) {
+            let snapshot = crate::remind_snapshot::Snapshot::new(
+                project,
+                read_at_ns,
+                crate::remind_snapshot::snapshot_events(reminders),
+            );
+            let _ = crate::remind_snapshot::write_snapshot(dir, &snapshot);
+        }
+    }
+    if let (true, Some(id)) = (session_start, session_id) {
+        let keys = if session.is_some() { printed } else { &[] };
+        let _ = crate::remind_snapshot::replace_shown(dir, id, keys);
+    }
 }
 
 fn notes_machine() -> Value {

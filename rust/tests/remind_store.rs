@@ -71,18 +71,33 @@ struct Fixture {
     inner: Arc<SqliteTransport>,
 }
 
+/// The store writes a reminder snapshot under `data_dir()` after every successful read; every
+/// test in this file points it at one temp directory (set once, before any fixture runs) so
+/// none of them touches the real one. Fixtures that share an origin share a project id and so a
+/// snapshot file: a test that reads its snapshot back takes its own origin.
+fn snapshot_dir() -> &'static Path {
+    static DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("CORT_MEMORY_DIR", dir.path());
+        dir
+    })
+    .path()
+}
+
 impl Fixture {
     fn new() -> Self {
+        Self::with_origin("reminders")
+    }
+
+    fn with_origin(name: &str) -> Self {
+        snapshot_dir();
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
+        let origin = format!("https://example.test/{name}.git");
         for args in [
             vec!["init"],
-            vec![
-                "remote",
-                "add",
-                "origin",
-                "https://example.test/reminders.git",
-            ],
+            vec!["remote", "add", "origin", origin.as_str()],
         ] {
             assert!(Command::new("git")
                 .current_dir(root)
@@ -730,4 +745,86 @@ fn listed_under_new_id_after_alias() {
         "{listed}"
     );
     assert!(listed.get("orphan_events").is_none(), "{listed}");
+}
+
+fn snapshot_ids(f: &Fixture) -> Vec<String> {
+    let project = memory_store::project(f.root()).unwrap();
+    let snap = cort::remind_snapshot::read_snapshot(snapshot_dir(), &project)
+        .expect("a snapshot after a successful read");
+    snap.events.iter().map(|e| e.id.clone()).collect()
+}
+
+fn snapshot_file(f: &Fixture) -> std::path::PathBuf {
+    let project = memory_store::project(f.root()).unwrap();
+    snapshot_dir().join(format!("remind-snapshot/{project}.json"))
+}
+
+#[test]
+fn remind_list_and_close_refresh_snapshot() {
+    let f = Fixture::with_origin("snap-list-close");
+    // A list of an empty component writes an empty snapshot rather than skipping it.
+    f.list(ListFilter::Open);
+    assert!(snapshot_ids(&f).is_empty());
+    let a = added_id(&f.add_on("NUC boot auto-recovery", &on_in_days(3)));
+    assert_eq!(snapshot_ids(&f), vec![a.clone()]);
+    let b = added_id(&f.add_on("ThinkPad hotspot plan", &on_in_days(10)));
+    let mut ids = snapshot_ids(&f);
+    ids.sort();
+    let mut want = vec![a.clone(), b.clone()];
+    want.sort();
+    assert_eq!(ids, want);
+    // An event from another writer shows up on the next list: insert it straight through the
+    // transport, then list.
+    let c = "c0c0c0c0c0c0c0c0";
+    let ns = |days: i64| {
+        (SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as i128
+            + i128::from(days) * 86_400_000_000_000)
+            .to_string()
+    };
+    f.insert_event(
+        &json!({"id": c, "kind": "add", "text": "Rotate the Turso token",
+        "on": "2030-01-01", "utc_offset": "+00:00", "due_at": ns(30), "lead": 1,
+        "recorded_at": ns(0)}),
+    );
+    assert_eq!(snapshot_ids(&f).len(), 2);
+    f.list(ListFilter::Closed);
+    assert!(snapshot_ids(&f).contains(&c.to_string()));
+    // A close drops the closed reminder with its events; a defer keeps add and defer.
+    f.close(&a, CloseReason::Done, None, None, None).unwrap();
+    let ids = snapshot_ids(&f);
+    assert!(!ids.contains(&a), "{ids:?}");
+    assert!(ids.contains(&b) && ids.contains(&c.to_string()), "{ids:?}");
+    f.defer(&b, &on_in_days(12), None, None).unwrap();
+    let ids = snapshot_ids(&f);
+    assert_eq!(ids.len(), 3, "{ids:?}");
+    // An `exists` answer refreshes it too, and a refusal before the read writes nothing.
+    let before = std::fs::read(snapshot_file(&f)).unwrap();
+    let out = f
+        .add_args(args("ThinkPad hotspot plan", &on_in_days(12)))
+        .unwrap();
+    assert_eq!(out["outcome"], "exists", "{out}");
+    assert_ne!(std::fs::read(snapshot_file(&f)).unwrap(), before);
+    let before = std::fs::read(snapshot_file(&f)).unwrap();
+    assert!(f.add_args(args("Too late", "2001-01-01")).is_err());
+    assert_eq!(std::fs::read(snapshot_file(&f)).unwrap(), before);
+}
+
+#[test]
+fn outcome_unknown_leaves_snapshot() {
+    let f = Fixture::with_origin("snap-unknown");
+    added_id(&f.add_on("NUC boot auto-recovery", &on_in_days(3)));
+    let before = std::fs::read(snapshot_file(&f)).unwrap();
+    // Post 1 reads the events, post 2 is the insert, post 3 the read-back: the insert lands and
+    // both answers are lost, so the outcome is unknown.
+    f.arm(2, Action::ForwardThenTimeout);
+    f.arm(3, Action::ForwardThenTimeout);
+    let err = f
+        .add_args(args("ThinkPad hotspot plan", &on_in_days(10)))
+        .unwrap_err();
+    assert!(matches!(err, LedgerError::OutcomeUnknown { .. }), "{err:?}");
+    assert_eq!(f.rows(), 2);
+    assert_eq!(std::fs::read(snapshot_file(&f)).unwrap(), before);
 }

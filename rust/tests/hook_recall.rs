@@ -1156,6 +1156,7 @@ fn notes_section_byte_cap_binds_before_the_count_cap() {
         notes_total: 20,
         questions: None,
         reminders: None,
+        reminders_full_scope: true,
     };
     let rendered = cort::hook_recall::render_session(&session, now_ns()).unwrap();
     assert_eq!(rendered.entries, 0);
@@ -1267,6 +1268,7 @@ fn session_with(events: Vec<Value>) -> cort::memory_store::SessionRecall {
         notes_total: 0,
         questions: Some(folded.questions),
         reminders: None,
+        reminders_full_scope: true,
     }
 }
 fn folded_reminders(events: Vec<Value>) -> Vec<cort::remind::Reminder> {
@@ -1284,6 +1286,7 @@ fn remind_session(reminders: Vec<cort::remind::Reminder>) -> cort::memory_store:
         notes_total: 0,
         questions: None,
         reminders: Some(reminders),
+        reminders_full_scope: true,
     }
 }
 
@@ -2233,6 +2236,7 @@ fn every_block_full_stays_within_9500_bytes() {
         notes_total: 20,
         questions: Some(questions),
         reminders: Some(folded_reminders(reminder_events)),
+        reminders_full_scope: true,
     };
     let rendered = cort::hook_recall::render_session(&session, now_ns()).unwrap();
     assert!(rendered.entries > 0 && rendered.notes > 0, "{rendered:?}");
@@ -2371,4 +2375,270 @@ fn hook_recall_usage_row_carries_reminder_fields() {
             && row.get("reminders").is_none(),
         "{row}"
     );
+}
+
+// --- Task 2 of the live-session reminders plan: what hook-recall leaves on disk -------------
+//
+// A spawned `cort` can never read a seeded database (every URL becomes https:// against the
+// trusted roots, see `hook_recall_usage_row_carries_reminder_fields`), so the success paths run
+// the library half -- `session_recall_with` over the fake database, then the very function the
+// binary's deferred action calls, `persist_recall_reminders` -- and the process-level tests
+// cover what a spawned hook can reach: a failed recall, and Kimi's later prompts.
+
+fn overdue_event(id: &str) -> Value {
+    remind_add_on(
+        id,
+        "Reboot the NUC",
+        "2026-11-12",
+        now_ns() - 2 * NS_PER_DAY,
+    )
+}
+
+fn reminder_event(value: Value) -> cort::remind::ReminderEvent {
+    serde_json::from_value(value).unwrap()
+}
+
+/// A recall over the fake database holding one overdue reminder under `ledger`; `aliased`
+/// false drops the alias table so the pipeline retries with the unaliased `= ?` scope.
+fn recall_with_reminder(aliased: bool) -> cort::memory_store::SessionRecall {
+    let (db, read_only, _) = database();
+    seed_ledger(&db);
+    if aliased {
+        seed_alias(&db);
+    }
+    seed_notes(&db);
+    seed_questions(&db, "ledger", &[]);
+    seed_reminders(&db, "ledger", &[overdue_event("aaaaaaaa11")]);
+    read_only.store(true, Ordering::SeqCst);
+    let temp = tempfile::tempdir().unwrap();
+    cort::memory_store::session_recall_with(
+        temp.path(),
+        &db,
+        "self",
+        ("ledger", "origin"),
+        Instant::now(),
+        now_ns(),
+    )
+    .unwrap()
+}
+
+fn old_key() -> cort::remind_snapshot::ShownKey {
+    ("deadbeef00".to_string(), "due", "1".to_string())
+}
+
+#[test]
+fn session_start_writes_snapshot_and_replaces_shown_set() {
+    let session = recall_with_reminder(true);
+    assert!(session.reminders_full_scope);
+    let read_at = now_ns();
+    let rendered = cort::hook_recall::render_session(&session, read_at).unwrap();
+    assert_eq!(rendered.reminder_keys.len(), 1);
+    let dir = tempfile::tempdir().unwrap();
+    cort::remind_snapshot::replace_shown(dir.path(), "sid", &[old_key()]).unwrap();
+    cort::memory_store::persist_recall_reminders(
+        dir.path(),
+        Some("proj"),
+        Some("sid"),
+        true,
+        Some(&session),
+        &rendered.reminder_keys,
+        read_at,
+    );
+    let snap = cort::remind_snapshot::read_snapshot(dir.path(), "proj").expect("snapshot");
+    assert_eq!(snap.read_at_ns(), read_at);
+    assert_eq!(snap.events.len(), 1);
+    assert_eq!(snap.events[0].id, "aaaaaaaa11");
+    let shown = cort::remind_snapshot::read_shown(dir.path(), "sid");
+    assert_eq!(shown, rendered.reminder_keys.iter().cloned().collect());
+    assert!(!shown.contains(&old_key()));
+    // A run that is not a session start leaves the shown set alone; no session id, no set.
+    cort::memory_store::persist_recall_reminders(
+        dir.path(),
+        Some("proj"),
+        Some("sid"),
+        false,
+        Some(&session),
+        &[],
+        read_at,
+    );
+    assert_eq!(cort::remind_snapshot::read_shown(dir.path(), "sid"), shown);
+    cort::memory_store::persist_recall_reminders(
+        dir.path(),
+        Some("proj"),
+        None,
+        true,
+        Some(&session),
+        &[],
+        read_at,
+    );
+    assert_eq!(cort::remind_snapshot::read_shown(dir.path(), "sid"), shown);
+}
+
+#[test]
+fn failed_recall_clears_shown_set_and_keeps_snapshot() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let repo = git_repo(root);
+    config(&root.join("data"), "turso://127.0.0.1:9");
+    let data = root.join("data");
+    let project = cort::memory_store::session_project_ids(&repo).unwrap().0;
+    let snapshot = cort::remind_snapshot::Snapshot::new(
+        &project,
+        now_ns() - NS_PER_DAY / 24,
+        vec![reminder_event(overdue_event("aaaaaaaa11"))],
+    );
+    assert!(cort::remind_snapshot::write_snapshot(&data, &snapshot).unwrap());
+    let snapshot_file = data.join(format!("remind-snapshot/{project}.json"));
+    let before = fs::read(&snapshot_file).unwrap();
+    cort::remind_snapshot::replace_shown(&data, "s-fail", &[old_key()]).unwrap();
+    let payload = json!({"hook_event_name":"SessionStart","session_id":"s-fail","cwd":repo});
+    let (out, _) = run(root, root, &payload.to_string(), Some("400"));
+    assert!(out.status.success());
+    let kind = outcome(root)["hook"].as_str().unwrap().to_owned();
+    assert!(kind.starts_with("remote_"), "{kind}");
+    assert!(cort::remind_snapshot::read_shown(&data, "s-fail").is_empty());
+    assert_eq!(fs::read(&snapshot_file).unwrap(), before);
+    // No session id: no shown set is written, and another session's set is untouched.
+    cort::remind_snapshot::replace_shown(&data, "other", &[old_key()]).unwrap();
+    let payload = json!({"hook_event_name":"SessionStart","cwd":repo});
+    let (out, _) = run(root, root, &payload.to_string(), Some("400"));
+    assert!(out.status.success());
+    assert_eq!(cort::remind_snapshot::read_shown(&data, "other").len(), 1);
+    assert_eq!(fs::read(&snapshot_file).unwrap(), before);
+}
+
+#[test]
+fn alias_retry_does_not_write_snapshot() {
+    let session = recall_with_reminder(false);
+    assert!(session.reminders.is_some());
+    assert!(!session.reminders_full_scope);
+    let rendered = cort::hook_recall::render_session(&session, now_ns()).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    cort::memory_store::persist_recall_reminders(
+        dir.path(),
+        Some("proj"),
+        Some("sid"),
+        true,
+        Some(&session),
+        &rendered.reminder_keys,
+        now_ns(),
+    );
+    assert!(cort::remind_snapshot::read_snapshot(dir.path(), "proj").is_none());
+    assert!(!dir.path().join("remind-snapshot").exists());
+    // What was printed is still what the session has been shown.
+    assert_eq!(
+        cort::remind_snapshot::read_shown(dir.path(), "sid"),
+        rendered.reminder_keys.iter().cloned().collect()
+    );
+    // A dropped reminders read writes none either.
+    let mut dropped = session;
+    dropped.reminders_full_scope = true;
+    dropped.reminders = None;
+    cort::memory_store::persist_recall_reminders(
+        dir.path(),
+        Some("proj"),
+        Some("sid"),
+        true,
+        Some(&dropped),
+        &[],
+        now_ns(),
+    );
+    assert!(cort::remind_snapshot::read_snapshot(dir.path(), "proj").is_none());
+}
+
+fn kimi_prompt(repo: &Path, sid: &str) -> String {
+    json!({"hook_event_name":"UserPromptSubmit","session_id":sid,"cwd":repo}).to_string()
+}
+
+#[test]
+fn kimi_first_prompt_records_keys_second_prompt_silent() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let repo = git_repo(root);
+    let data = root.join("data");
+    config(&data, "turso://127.0.0.1:9");
+    let project = cort::memory_store::session_project_ids(&repo).unwrap().0;
+    // First prompt: claims the marker and replaces the shown set (here the recall fails, so
+    // it replaces it with nothing).
+    cort::remind_snapshot::replace_shown(&data, "k1", &[old_key()]).unwrap();
+    let (first, _) = run(root, root, &kimi_prompt(&repo, "k1"), Some("400"));
+    assert!(first.status.success());
+    assert!(!first.stdout.is_empty());
+    assert!(cort::remind_snapshot::read_shown(&data, "k1").is_empty());
+    // What a successful first recall would have left, written by the function the binary runs.
+    let session = recall_with_reminder(true);
+    let rendered = cort::hook_recall::render_session(&session, now_ns()).unwrap();
+    cort::memory_store::persist_recall_reminders(
+        &data,
+        Some(&project),
+        Some("k1"),
+        true,
+        Some(&session),
+        &rendered.reminder_keys,
+        now_ns(),
+    );
+    assert_eq!(cort::remind_snapshot::read_shown(&data, "k1").len(), 1);
+    // Second prompt: the marker is claimed, the due reminder is already shown, nothing prints.
+    // An invalid config proves it reads none.
+    fs::write(data.join("turso-memory.json"), "invalid").unwrap();
+    let (second, _) = run(root, root, &kimi_prompt(&repo, "k1"), Some("400"));
+    assert!(second.status.success() && second.stdout.is_empty());
+    let row = outcome(root);
+    assert_eq!(row["hook"], "already_injected");
+    assert_eq!(row["reminders_shown"], json!(0), "{row}");
+}
+
+#[test]
+fn kimi_later_prompt_shows_newly_due() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let repo = git_repo(root);
+    let data = root.join("data");
+    config(&data, "turso://127.0.0.1:9");
+    let project = cort::memory_store::session_project_ids(&repo).unwrap().0;
+    let (first, _) = run(root, root, &kimi_prompt(&repo, "k2"), Some("400"));
+    assert!(first.status.success());
+    assert!(cort::remind_snapshot::read_shown(&data, "k2").is_empty());
+    // With no snapshot the later prompt is silent.
+    let (quiet, _) = run(root, root, &kimi_prompt(&repo, "k2"), Some("400"));
+    assert!(quiet.status.success() && quiet.stdout.is_empty());
+    assert_eq!(outcome(root)["hook"], "already_injected");
+    // The reminder came due after the session started: a snapshot says so, the shown set is empty.
+    let snapshot = cort::remind_snapshot::Snapshot::new(
+        &project,
+        now_ns() - NS_PER_DAY / 24,
+        vec![reminder_event(overdue_event("aaaaaaaa11"))],
+    );
+    assert!(cort::remind_snapshot::write_snapshot(&data, &snapshot).unwrap());
+    fs::write(data.join("turso-memory.json"), "invalid").unwrap();
+    let (later, _) = run(root, root, &kimi_prompt(&repo, "k2"), Some("400"));
+    assert!(later.status.success());
+    let value: Value = serde_json::from_slice(&later.stdout).unwrap();
+    let message = value["message"].as_str().unwrap();
+    assert!(
+        message.contains("Reminders not yet shown in this session"),
+        "{message}"
+    );
+    assert!(message.contains("aaaaaaaa"), "{message}");
+    let row = outcome(root);
+    assert_eq!(row["hook"], "already_injected");
+    assert_eq!(row["reminders_shown"], json!(1), "{row}");
+    assert_eq!(cort::remind_snapshot::read_shown(&data, "k2").len(), 1);
+    // Once: the next prompt is silent.
+    let (again, _) = run(root, root, &kimi_prompt(&repo, "k2"), Some("400"));
+    assert!(again.status.success() && again.stdout.is_empty());
+    assert_eq!(outcome(root)["reminders_shown"], json!(0));
+    // A snapshot older than three days says so once.
+    let stale_at = now_ns() - 4 * NS_PER_DAY;
+    let stale = cort::remind_snapshot::Snapshot::new(&project, stale_at, Vec::new());
+    fs::remove_dir_all(data.join("remind-snapshot")).unwrap();
+    assert!(cort::remind_snapshot::write_snapshot(&data, &stale).unwrap());
+    let (note, _) = run(root, root, &kimi_prompt(&repo, "k2"), Some("400"));
+    let value: Value = serde_json::from_slice(&note.stdout).unwrap();
+    assert!(value["message"]
+        .as_str()
+        .unwrap()
+        .contains("the local snapshot is from"));
+    let (quiet, _) = run(root, root, &kimi_prompt(&repo, "k2"), Some("400"));
+    assert!(quiet.stdout.is_empty());
 }

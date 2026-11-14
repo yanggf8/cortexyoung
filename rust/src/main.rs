@@ -1614,6 +1614,56 @@ fn cmd_hook_suggest(args: &[String], usage: &mut UsageEvent) -> Result<Emit, Cor
 static RECALL_WATCHDOG_ROW: OnceLock<Value> = OnceLock::new();
 static RECALL_WATCHDOG_PROJECT: OnceLock<String> = OnceLock::new();
 
+/// Work `main` runs after the command's stdout is written and its usage row recorded, and only
+/// when the main path (not the recall watchdog) owns the exit: the reminder snapshot and
+/// shown-set writes of `hook-recall`.
+type AfterOutput = Box<dyn FnOnce() + Send>;
+static AFTER_OUTPUT: std::sync::Mutex<Option<AfterOutput>> = std::sync::Mutex::new(None);
+
+fn set_after_output(action: AfterOutput) {
+    if let Ok(mut slot) = AFTER_OUTPUT.lock() {
+        *slot = Some(action);
+    }
+}
+
+fn run_after_output() {
+    let action = AFTER_OUTPUT.lock().ok().and_then(|mut slot| slot.take());
+    if let Some(action) = action {
+        action();
+    }
+}
+
+/// Kimi's later prompts: from the local snapshot and the session's shown set only -- no
+/// network, no memory config. The text, the keys to record once it is printed, and the number
+/// of reminder lines in it (0 for the stale notice). `None`: stay silent.
+fn later_prompt_reminders(
+    root: &Path,
+    session_id: &str,
+    now_ns: i128,
+) -> Option<(String, Vec<cort::remind_snapshot::ShownKey>, usize)> {
+    use cort::remind_snapshot as snap;
+    let dir = cort::data_dir::data_dir();
+    let project = cort::memory_store::session_project_ids(root).ok()?.0;
+    let snapshot = snap::read_snapshot(&dir, &project)?;
+    let shown = snap::read_shown(&dir, session_id);
+    let read_at = snapshot.read_at_ns();
+    if now_ns.saturating_sub(read_at) > snap::STALE_AFTER_NS {
+        let key = snap::stale_key(read_at);
+        if shown.contains(&key) {
+            return None;
+        }
+        return Some((
+            cort::hook_recall::render_stale_snapshot(read_at),
+            vec![key],
+            0,
+        ));
+    }
+    let selected = snap::select_unshown(&snapshot, &shown, now_ns);
+    let (text, keys) = cort::hook_recall::render_prompt_reminders(&selected, read_at, now_ns)?;
+    let lines = keys.len();
+    Some((text, keys, lines))
+}
+
 /// Recall reads shared memory without waiting on a local writer.
 fn cmd_hook_recall(
     args: &[String],
@@ -1640,13 +1690,15 @@ fn cmd_hook_recall(
         .and_then(|v| v.get("hook_event_name"))
         .and_then(Value::as_str)
         == Some("UserPromptSubmit");
+    // Read on every path: the shown-set files are keyed by it, SessionStart included.
+    let session_id: Option<String> = parsed
+        .as_ref()
+        .and_then(|v| v.get("session_id"))
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
     let skip = if prompt {
-        match parsed
-            .as_ref()
-            .and_then(|v| v.get("session_id"))
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-        {
+        match session_id.as_deref() {
             None => Some("missing_session_id"),
             Some(id) => match cort::hook_recall::claim_prompt_session(id) {
                 Ok(true) => None,
@@ -1657,6 +1709,9 @@ fn cmd_hook_recall(
     } else {
         None
     };
+    // SessionStart, or Kimi's first prompt (the marker was just claimed): the run that replaces
+    // the session's shown set.
+    let session_start = !prompt || skip.is_none();
     let root = parsed
         .as_ref()
         .and_then(|v| v.get("cwd"))
@@ -1674,11 +1729,28 @@ fn cmd_hook_recall(
     let mut session_fields: Vec<(&str, Value)> = Vec::new();
     // One clock for the whole run: the folds inside the read and the renderer cannot disagree
     // about which day it is.
+    // Also the snapshot's `read_at`: taken before the network read is sent, so a slower recall
+    // never looks newer than a `cort remind` that read after it started.
     let now_ns = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos() as i128);
+    // Written to disk only after stdout and the usage row, by `main` (see `AFTER_OUTPUT`).
+    let mut recalled: Option<(cort::memory_store::SessionRecall, String)> = None;
+    let mut printed_keys: Vec<cort::remind_snapshot::ShownKey> = Vec::new();
+    let mut later_keys: Vec<cort::remind_snapshot::ShownKey> = Vec::new();
+    let mut later_shown: Option<usize> = None;
     let (outcome, content, count, notes_count) = if let Some(outcome) = skip {
-        (outcome, None, 0, 0)
+        let mut content = None;
+        if let (true, "already_injected", Some(id)) = (prompt, outcome, session_id.as_deref()) {
+            let (text, keys, shown) = match later_prompt_reminders(&root, id, now_ns) {
+                Some((text, keys, shown)) => (Some(text), keys, shown),
+                None => (None, Vec::new(), 0),
+            };
+            content = text;
+            later_keys = keys;
+            later_shown = Some(shown);
+        }
+        (outcome, content, 0, 0)
     } else if parsed.is_none() {
         ("failed", None, 0, 0)
     } else {
@@ -1724,6 +1796,7 @@ fn cmd_hook_recall(
                 started,
                 now_ns,
             )
+            .map(|session| (session, projects.0.clone()))
             .map_err(|kind| match kind {
                 cort::remote::ErrorKind::Blocked => "remote_blocked",
                 cort::remote::ErrorKind::Timeout => "remote_timeout",
@@ -1731,9 +1804,13 @@ fn cmd_hook_recall(
             })
         })();
         match read {
-            Ok(session) => {
+            Ok((session, project)) => {
                 let rendered = cort::hook_recall::render_session(&session, now_ns);
                 session_fields = cort::hook_recall::session_usage_fields(&session, rendered.as_ref());
+                if let Some(rendered) = &rendered {
+                    printed_keys = rendered.reminder_keys.clone();
+                }
+                recalled = Some((session, project));
                 match rendered {
                     Some(rendered) => {
                         (
@@ -1756,10 +1833,37 @@ fn cmd_hook_recall(
         row["entries"] = json!(count);
         row["notes"] = json!(notes_count);
     }
+    if let Some(shown) = later_shown {
+        row["reminders_shown"] = json!(shown);
+    }
     for (key, value) in session_fields {
         row[key] = value;
     }
     usage.args_summary = row.to_string();
+    // Disk writes wait until stdout and the usage row are done; the watchdog skips them by
+    // winning the claim first. Every error in them is ignored.
+    let data = cort::data_dir::data_dir();
+    if outcome == "already_injected" {
+        if let (Some(id), false) = (session_id.clone(), later_keys.is_empty()) {
+            set_after_output(Box::new(move || {
+                let _ = cort::remind_snapshot::append_shown(&data, &id, &later_keys);
+            }));
+        }
+    } else if session_start && (session_id.is_some() || recalled.is_some()) {
+        let project = recalled.as_ref().map(|(_, project)| project.clone());
+        let session = recalled.map(|(session, _)| session);
+        set_after_output(Box::new(move || {
+            cort::memory_store::persist_recall_reminders(
+                &data,
+                project.as_deref(),
+                session_id.as_deref(),
+                true,
+                session.as_ref(),
+                &printed_keys,
+                now_ns,
+            );
+        }));
+    }
     let payload = content
         .map(|text| {
             if prompt {
@@ -3889,6 +3993,9 @@ fn main() {
                     rendered.len()
                 },
             );
+            // Only here: never after an error, and never when the watchdog won the claim
+            // (that case parked above).
+            run_after_output();
         }
         Err(err) => {
             // `cmd_hook_recall` answers every outcome with Ok today, but an error here must still
