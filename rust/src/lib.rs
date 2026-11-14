@@ -16,6 +16,7 @@ pub mod impact;
 pub mod incremental;
 pub mod indexer;
 pub mod install;
+pub mod lifecycle_store;
 pub mod measure;
 pub mod measure_progress;
 pub mod measure_store;

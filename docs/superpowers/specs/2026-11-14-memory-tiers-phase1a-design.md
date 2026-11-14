@@ -118,7 +118,7 @@ next step: `memory_lifecycle_off`, `memory_id_unknown`, `memory_id_ambiguous`,
 `remind add` reports it (`outcome_unknown`) and never retried automatically.
 
 **Archive guard, moved forward from 1b** (call C2): `archive` and `drop` of an entry that mentions
-the user (`memory_tiers::mentions_user`: `user`, `用戶`, `使用者`, case-insensitive, in key or claim)
+the user (`memory_tiers::mentions_user`: `user` case-insensitive, `用戶`, simplified `用户` (added during Task 4 review), `使用者`, in key or claim)
 are refused with `memory_archive_needs_release` unless the command carries `--superseded-by` naming
 a different, active, non-hidden entry, or a valid `--quote`. As explained to the user on 2026-11-14
 (relayed by bsr): when an old fact goes stale the agent records a new sourced fact and archives the
@@ -189,7 +189,7 @@ Thinkpade15 and gpu is the usual release step.
 - Decoding: one undecodable row skipped and counted while the rest apply; the count reaches recall, review and the SessionStart usage row.
 - Writer stamp: an existing event later than `now` makes the new event land after it.
 - Placement at the boundaries (`epoch - 7d` exactly; expiry exactly at `now`).
-- Guard: `user`/`用戶`/`使用者` in key or in claim refused without a release; `--superseded-by`
+- Guard: `user`/`用戶`/`用户`/`使用者` in key or in claim refused without a release; `--superseded-by`
   naming itself, a hidden, superseded or unknown entry refused; `--quote ''`, a blank quote and a
   601-byte quote refused with `memory_quote_invalid`.
 - Prefix: exact non-hex id, ambiguous prefix, prefix of a superseded entry.

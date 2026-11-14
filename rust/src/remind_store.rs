@@ -62,7 +62,7 @@ pub(crate) fn now_ns() -> Result<i128, LedgerError> {
 }
 
 /// A read before a write: a failure there means nothing was written.
-fn not_recorded(error: LedgerError) -> LedgerError {
+pub(crate) fn not_recorded(error: LedgerError) -> LedgerError {
     match error {
         LedgerError::Remote(kind) => LedgerError::NotRecorded { kind },
         other => other,
@@ -557,7 +557,7 @@ pub fn close_with(
 
 /// One lean field: control characters (a tab or newline would split the row) become spaces,
 /// and an empty value prints as `-`, because `read` collapses runs of tabs.
-fn lean_field(s: &str) -> String {
+pub(crate) fn lean_field(s: &str) -> String {
     let cleaned: String = s
         .chars()
         .map(|c| if c.is_control() { ' ' } else { c })

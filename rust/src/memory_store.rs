@@ -70,6 +70,13 @@ pub enum LedgerError {
         key: String,
         active_ids: Vec<String>,
     },
+    /// A refusal with a code of its own (the lifecycle verbs'): `code` becomes the error code,
+    /// `message` and `detail` the body. Nothing was written.
+    Refused {
+        code: &'static str,
+        message: String,
+        detail: Value,
+    },
 }
 
 impl From<String> for LedgerError {
@@ -2485,39 +2492,85 @@ fn resolve_entry(
     Ok(entry)
 }
 
+/// Why an id named no single ledger entry.
+enum ResolveFailure {
+    /// Not an exact id and not 8-64 lowercase hex characters.
+    Malformed,
+    Missing,
+    Ambiguous(Vec<String>),
+}
+
+/// An exact id always names itself, whatever it looks like (imported ids need not be hex);
+/// anything else is a unique lowercase-hex prefix of at least 8 characters, over all entries.
+fn resolve_entry_id(before: &MemoryLedger, id: &str) -> Result<String, ResolveFailure> {
+    if before.entries.iter().any(|entry| entry.id == id) {
+        return Ok(id.to_string());
+    }
+    if !(8..=64).contains(&id.len())
+        || !id
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return Err(ResolveFailure::Malformed);
+    }
+    let matches: BTreeSet<&str> = before
+        .entries
+        .iter()
+        .filter(|entry| entry.id.starts_with(id))
+        .map(|entry| entry.id.as_str())
+        .collect();
+    let mut found = matches.into_iter();
+    match (found.next(), found.next()) {
+        (None, _) => Err(ResolveFailure::Missing),
+        (Some(only), None) => Ok(only.to_string()),
+        (Some(first), Some(second)) => Err(ResolveFailure::Ambiguous(
+            [first, second]
+                .into_iter()
+                .chain(found)
+                .map(str::to_string)
+                .collect(),
+        )),
+    }
+}
+
+/// `resolve_entry_id` for the lifecycle verbs: the failures carry the spec's codes.
+pub(crate) fn resolve_one(before: &MemoryLedger, id: &str) -> Result<String, LedgerError> {
+    resolve_entry_id(before, id).map_err(|failure| match failure {
+        ResolveFailure::Malformed => LedgerError::Refused {
+            code: "memory_id_unknown",
+            message: format!(
+                "{id:?} is not a ledger id; give a full id or at least 8 lowercase hex characters"
+            ),
+            detail: json!({"id": id}),
+        },
+        ResolveFailure::Missing => LedgerError::Refused {
+            code: "memory_id_unknown",
+            message: format!("no ledger entry has the id or id prefix {id}"),
+            detail: json!({"id": id}),
+        },
+        ResolveFailure::Ambiguous(ids) => LedgerError::Refused {
+            code: "memory_id_ambiguous",
+            message: format!("{id} matches {}; give more characters", ids.join(", ")),
+            detail: json!({"id": id, "matches": ids}),
+        },
+    })
+}
+
 fn resolve_ids(before: &MemoryLedger, ids: &[String]) -> Result<Vec<String>, LedgerError> {
     ids.iter()
         .map(|id| {
-            // An exact id always names itself, whatever it looks like (imported ids need not be
-            // hex); anything else is a prefix.
-            if before.entries.iter().any(|entry| entry.id == *id) {
-                return Ok(id.clone());
-            }
-            if !(8..=64).contains(&id.len())
-                || !id
-                    .bytes()
-                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-            {
-                return Err(LedgerError::Message(
+            resolve_entry_id(before, id).map_err(|failure| match failure {
+                ResolveFailure::Malformed => LedgerError::Message(
                     "--supersedes requires a full id or at least 8 lowercase hex characters".into(),
-                ));
-            }
-            let matches: BTreeSet<_> = before
-                .entries
-                .iter()
-                .filter(|entry| entry.id.starts_with(id))
-                .map(|entry| entry.id.as_str())
-                .collect();
-            match matches.len() {
-                0 => Err(LedgerError::SupersedesMissing {
+                ),
+                ResolveFailure::Missing => LedgerError::SupersedesMissing {
                     superseded: vec![id.clone()],
-                }),
-                1 => Ok(matches.into_iter().next().unwrap_or_default().to_string()),
-                _ => Err(LedgerError::Message(format!(
+                },
+                ResolveFailure::Ambiguous(matches) => LedgerError::Message(format!(
                     "ambiguous --supersedes {id}: {}",
-                    matches.into_iter().collect::<Vec<_>>().join(", ")
-                ))),
-            }
+                    matches.join(", ")
+                )),
+            })
         })
         .collect()
 }

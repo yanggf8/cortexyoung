@@ -65,13 +65,20 @@ pub fn place(recorded_at_ns: i128, epoch_ns: i128, now_ns: i128) -> Placement {
     }
 }
 
-/// `user` (ASCII case-insensitive, as a substring), `用戶` or `使用者` in the key or the claim.
+/// `user` (ASCII case-insensitive, as a substring), `用戶`, the simplified `用户`, or `使用者`
+/// in the key or the claim.
 pub fn mentions_user(key: &str, claim: &str) -> bool {
     [key, claim].iter().any(|text| {
         text.to_ascii_lowercase().contains("user")
             || text.contains("用戶")
+            || text.contains("用户")
             || text.contains("使用者")
     })
+}
+
+/// `YYYY-MM-DDTHH:MM:SSZ` for a nanosecond instant: the form `recorded_at_utc` uses.
+pub fn utc_iso(ns: i128) -> String {
+    utc_parts(ns).1
 }
 
 /// `YYYY-MM-DD` -> midnight in this machine's local zone (ns). Refuses anything else.
@@ -397,7 +404,7 @@ mod tests {
         assert!(mentions_user("k", "使用者說"));
         assert!(mentions_user("使用者", "x"));
         assert!(!mentions_user("deploy", "Option B is current"));
-        assert!(!mentions_user("k", "用户"));
+        assert!(mentions_user("k", "用户"));
     }
 
     #[test]

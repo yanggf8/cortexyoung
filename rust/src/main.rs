@@ -65,7 +65,7 @@ fn usage_value() -> Value {
             "delete": "cort delete [root]",
             "impact": "cort impact --symbol <name> [--depth <n>] [--coverage] [-f json|lean]",
             "usage": "cort usage [days] [-f json|lean]",
-            "memory": "cort memory <configure|import-config|record|resolve|recall|status|list|check|notes|alias> [options]",
+            "memory": "cort memory <configure|import-config|record|resolve|recall|status|list|check|promote|archive|drop|restore|lifecycle|notes|alias> [options]",
             "question": "cort question <add|list|answer|close> [options]  (questions for the human, kept per repo in the memory database; cort question --help lists each verb)",
             "remind": "cort remind <add|list|defer|close> [options]  (dated tasks that surface at session start from the day before, kept per repo in the memory database; cort remind --help lists each verb)",
             "measure": "cort measure <configure|show|record|collect|health|status|cron|report> [options]  (uploads start at 2026-10-28 00:00 Taiwan time; collect: scan and upload the batch; --background appends at most one result to measure.log (none when skipped_busy) without stdout; health: observe recently used indexes and write local index_health_log, reading indexes only, with no network; --background appends the result to measure.log without stdout; status: read local collection state, -f json|lean; cron: manual install or removal of the legacy entry, no longer installed automatically; hook kick is the only automatic collection trigger; command_log and index_health_log keep uploaded rows 90 days and rows not yet uploaded 180 days, pruned when a new command is recorded; rows still not uploaded after 180 days are deleted and counted in measure status (pruned_unuploaded_rows) and measure.log)",
@@ -804,6 +804,75 @@ enum MemoryAction {
     Check {
         #[arg(long, default_value = ".")]
         root: PathBuf,
+    },
+    /// Short-term entry to long-term (needs `lifecycle on`).
+    Promote {
+        id: String,
+        #[arg(long)]
+        note: Option<String>,
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(long, value_parser = HARNESS_VALUES)]
+        harness: Option<String>,
+        #[arg(long)]
+        lean: bool,
+    },
+    /// Hide an entry from recall; an entry that mentions the user needs --superseded-by or --quote.
+    Archive {
+        id: String,
+        #[arg(long = "superseded-by", value_name = "ID", conflicts_with = "quote")]
+        superseded_by: Option<String>,
+        #[arg(long, value_name = "TEXT")]
+        quote: Option<String>,
+        #[arg(long)]
+        note: Option<String>,
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(long, value_parser = HARNESS_VALUES)]
+        harness: Option<String>,
+        #[arg(long)]
+        lean: bool,
+    },
+    /// Discard a short-term entry; same release rule as archive.
+    Drop {
+        id: String,
+        #[arg(long = "superseded-by", value_name = "ID", conflicts_with = "quote")]
+        superseded_by: Option<String>,
+        #[arg(long, value_name = "TEXT")]
+        quote: Option<String>,
+        #[arg(long)]
+        note: Option<String>,
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(long, value_parser = HARNESS_VALUES)]
+        harness: Option<String>,
+        #[arg(long)]
+        lean: bool,
+    },
+    /// Bring an archived or dropped entry back.
+    Restore {
+        id: String,
+        #[arg(long)]
+        note: Option<String>,
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(long, value_parser = HARNESS_VALUES)]
+        harness: Option<String>,
+        #[arg(long)]
+        lean: bool,
+    },
+    /// Switch the lifecycle (tiers, hiding) on or off for this project.
+    Lifecycle {
+        #[arg(value_parser = ["on", "off"])]
+        state: String,
+        #[arg(long)]
+        note: Option<String>,
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(long, value_parser = HARNESS_VALUES)]
+        harness: Option<String>,
+        #[arg(long)]
+        lean: bool,
     },
 }
 
@@ -3109,12 +3178,189 @@ fn cmd_memory(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError
         MemoryAction::Check { root } => {
             cort::memory_store::check(&root).map_err(memory_read_error)?
         }
+        MemoryAction::Promote {
+            id,
+            note,
+            root,
+            harness,
+            lean,
+        } => {
+            return lifecycle_emit(
+                usage,
+                "promote",
+                &root,
+                &harness,
+                lean,
+                cort::lifecycle_store::act(
+                    &root,
+                    cort::lifecycle_store::Verb::Promote,
+                    &id,
+                    cort::lifecycle_store::Release::default(),
+                    note,
+                    harness.clone(),
+                ),
+            )
+        }
+        MemoryAction::Restore {
+            id,
+            note,
+            root,
+            harness,
+            lean,
+        } => {
+            return lifecycle_emit(
+                usage,
+                "restore",
+                &root,
+                &harness,
+                lean,
+                cort::lifecycle_store::act(
+                    &root,
+                    cort::lifecycle_store::Verb::Restore,
+                    &id,
+                    cort::lifecycle_store::Release::default(),
+                    note,
+                    harness.clone(),
+                ),
+            )
+        }
+        MemoryAction::Archive {
+            id,
+            superseded_by,
+            quote,
+            note,
+            root,
+            harness,
+            lean,
+        } => {
+            return lifecycle_emit(
+                usage,
+                "archive",
+                &root,
+                &harness,
+                lean,
+                cort::lifecycle_store::act(
+                    &root,
+                    cort::lifecycle_store::Verb::Archive,
+                    &id,
+                    cort::lifecycle_store::Release {
+                        superseded_by,
+                        quote,
+                    },
+                    note,
+                    harness.clone(),
+                ),
+            )
+        }
+        MemoryAction::Drop {
+            id,
+            superseded_by,
+            quote,
+            note,
+            root,
+            harness,
+            lean,
+        } => {
+            return lifecycle_emit(
+                usage,
+                "drop",
+                &root,
+                &harness,
+                lean,
+                cort::lifecycle_store::act(
+                    &root,
+                    cort::lifecycle_store::Verb::Drop,
+                    &id,
+                    cort::lifecycle_store::Release {
+                        superseded_by,
+                        quote,
+                    },
+                    note,
+                    harness.clone(),
+                ),
+            )
+        }
+        MemoryAction::Lifecycle {
+            state,
+            note,
+            root,
+            harness,
+            lean,
+        } => {
+            return lifecycle_emit(
+                usage,
+                "lifecycle",
+                &root,
+                &harness,
+                lean,
+                cort::lifecycle_store::switch(&root, state == "on", note, harness.clone()),
+            )
+        }
     };
     Ok(Emit {
         render_command: None,
         format: Format::Json,
         payload: value,
     })
+}
+
+/// The answer of a lifecycle verb. The usage row names the verb and the declared harness only:
+/// ids, notes and quotes are the user's words and never enter usage.db.
+fn lifecycle_emit(
+    usage: &mut UsageEvent,
+    verb: &'static str,
+    root: &Path,
+    harness: &Option<String>,
+    lean: bool,
+    result: Result<Value, cort::memory_store::LedgerError>,
+) -> Result<Emit, CortError> {
+    let mut row = json!({"v": 1, "verb": verb});
+    if let Some(h) = harness {
+        row["harness_declared"] = json!(h);
+    }
+    usage.args_summary = row.to_string();
+    usage.project_id = cort::memory_store::project(root).ok();
+    let payload = result.map_err(|e| lifecycle_error(verb, e))?;
+    if lean {
+        return Ok(Emit {
+            render_command: Some("memory-list-lean"),
+            format: Format::Lean,
+            payload: json!({"lean": cort::lifecycle_store::render_lean(verb, &payload)}),
+        });
+    }
+    Ok(Emit {
+        render_command: None,
+        format: Format::Json,
+        payload,
+    })
+}
+
+/// Write failures keep the memory vocabulary (the code word at the start of a refusal) but name
+/// `cort memory recall --all` as the way to settle an unknown outcome.
+fn lifecycle_error(verb: &str, error: cort::memory_store::LedgerError) -> CortError {
+    use cort::memory_store::LedgerError;
+    match error {
+        LedgerError::Remote(kind) => memory_read_error(LedgerError::Remote(kind)),
+        LedgerError::NotRecorded { kind } => CortError::new(
+            "memory_not_recorded",
+            json!({"kind":kind.as_str(),
+                "message":format!("not recorded: {}; nothing was written; re-run the same command when the database is reachable",kind.as_str())}),
+        ),
+        // For the entry verbs `key` carries the entry id the event acts on; the switch has none.
+        LedgerError::OutcomeUnknown { id, key, kind } => {
+            let next = match (verb, key.as_deref()) {
+                ("lifecycle", _) => "re-running `cort memory lifecycle on|off` is safe: it answers `unchanged` if the first attempt landed".to_string(),
+                (_, Some(entry)) => format!("run `cort memory recall --all \"<topic>\"` to see the state of entry {entry} before re-running"),
+                (_, None) => "run `cort memory recall --all \"<topic>\"` to see the entry's state before re-running".to_string(),
+            };
+            CortError::new(
+                "memory_outcome_unknown",
+                json!({"id":id,"entry":key,"kind":kind.as_str(),
+                    "message":format!("outcome unknown: {}; lifecycle event {id} may or may not have been written; {next}",kind.as_str())}),
+            )
+        }
+        other => memory_ledger_error(other),
+    }
 }
 
 /// `K=text`, split at the first `=`, the key trimmed; an empty key or text is refused before
@@ -3549,6 +3795,19 @@ fn memory_ledger_error(error: cort::memory_store::LedgerError) -> CortError {
                 "memory_key_taken",
                 json!({"key":key,"existing_id":existing_id,"message":message}),
             )
+        }
+        LedgerError::Refused {
+            code,
+            message,
+            detail,
+        } => {
+            let mut body = json!({"message": message});
+            if let (Some(map), Some(extra)) = (body.as_object_mut(), detail.as_object()) {
+                for (k, v) in extra {
+                    map.insert(k.clone(), v.clone());
+                }
+            }
+            CortError::new(code, body)
         }
         LedgerError::Conflict {
             id,
@@ -4193,10 +4452,51 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{memory_alias_error, memory_ledger_error};
+    use super::{lifecycle_error, memory_alias_error, memory_ledger_error};
     use cort::memory_store::LedgerError;
     use cort::remote::ErrorKind;
     use serde_json::json;
+
+    #[test]
+    fn lifecycle_refusals_keep_their_code_and_detail() {
+        let error = lifecycle_error(
+            "archive",
+            LedgerError::Refused {
+                code: "memory_lifecycle_not_allowed",
+                message: "no".into(),
+                detail: json!({"state":"long_term","allowed":["archive"]}),
+            },
+        );
+        assert_eq!(error.code, "memory_lifecycle_not_allowed");
+        assert_eq!(error.detail["message"], "no");
+        assert_eq!(error.detail["state"], "long_term");
+        assert_eq!(error.detail["allowed"], json!(["archive"]));
+    }
+
+    #[test]
+    fn lifecycle_outcome_unknown_names_the_safe_next_step() {
+        let unknown = |verb: &str, key: Option<&str>| {
+            lifecycle_error(
+                verb,
+                LedgerError::OutcomeUnknown {
+                    id: "ev".into(),
+                    key: key.map(str::to_string),
+                    kind: ErrorKind::Timeout,
+                },
+            )
+        };
+        let switch = unknown("lifecycle", None);
+        assert_eq!(switch.code, "memory_outcome_unknown");
+        assert!(switch.detail["message"]
+            .as_str()
+            .unwrap()
+            .contains("lifecycle on|off` is safe"));
+        let entry = unknown("archive", Some("aaaaaaa1"));
+        assert!(entry.detail["message"]
+            .as_str()
+            .unwrap()
+            .contains("entry aaaaaaa1"));
+    }
 
     #[test]
     fn alias_errors_use_alias_specific_guidance() {
