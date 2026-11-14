@@ -12,6 +12,7 @@ pub mod demand;
 pub mod gate_audit;
 pub mod grade;
 pub mod recall;
+pub mod recall_hits;
 pub mod stream;
 pub mod summary;
 pub mod time;

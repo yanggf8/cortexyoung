@@ -9,6 +9,7 @@
 //!   cort-evals demand        [--claude-dir DIR] [--codex-dir DIR] [--exclude a,b]
 //!                            [--show] [--out FILE]
 //!   cort-evals capture-gap   [--claude-dir DIR] [--project NAME] [--since RFC3339] [--until RFC3339] [--out FILE] [--show]
+//!   cort-evals recall-hits   [--dir DIR] [--project NAME] [--days N] [--ledger FILE]
 //!   cort-evals memory-uptake [--claude-dir DIR] [--since RFC3339] [--out FILE] [--private DIR [--sample N] [--seed S]] [--judged FILE [--audit-seed S]]
 //!   cort-evals cost-audit    --since UTC --until UTC [--claude-dir DIR] [--out FILE]
 //!   cort-evals cost-collect  [--day YYYY-MM-DD] [--claude-dir DIR]
@@ -122,8 +123,11 @@ const UPTAKE_FLAGS: &[&str] = &[
     "--audit-seed",
 ];
 
+const RECALL_HITS_FLAGS: &[&str] = &["--dir", "--project", "--days", "--ledger"];
+const USAGE_RECALL_HITS: &str = "usage: cort-evals recall-hits [--dir DIR] [--project NAME] [--days N] [--ledger FILE]  (hit-count distribution of real `cort memory recall` results in Claude Code transcripts; read-only. --ledger FILE, the JSON of `cort memory list`, replays each recall's query against that ledger snapshot; the ledger belongs to one project, so --ledger without --project mixes projects)";
+
 const USAGE_TOP: &str =
-    "usage: cort-evals <run-agents|verify-impact|summarize|demand|capture-gap|memory-uptake|recall-exp|cost-audit|cost-collect|cost-trial|gate-audit|gate> [options]";
+    "usage: cort-evals <run-agents|verify-impact|summarize|demand|capture-gap|recall-hits|memory-uptake|recall-exp|cost-audit|cost-collect|cost-trial|gate-audit|gate> [options]";
 const USAGE_RUN_AGENTS: &str = "usage: cort-evals run-agents --venue DIR [--tasks FILE] [--only ID[,ID...]] [--arms a,b] [--max-turns N] [--config-dir DIR] [--cache-dir DIR] [--jail-dir DIR] [--jail] [--out DIR] [--concurrency N] [--delay-secs N]";
 const USAGE_VERIFY_IMPACT: &str =
     "usage: cort-evals verify-impact --repo DIR --symbols A,B [--depth N]";
@@ -899,6 +903,62 @@ fn capture_gap_main(argv: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+fn recall_hits_main(argv: &[String]) -> Result<(), String> {
+    guard_options(argv, RECALL_HITS_FLAGS, USAGE_RECALL_HITS)?;
+    for (i, arg) in argv.iter().enumerate() {
+        if RECALL_HITS_FLAGS.contains(&arg.as_str())
+            && argv
+                .get(i + 1)
+                .is_none_or(|v| v.is_empty() || v.starts_with("--"))
+        {
+            return Err(format!("{arg} needs a value"));
+        }
+    }
+    let dir = if has(argv, "--dir") {
+        at(argv, "--dir", "")
+    } else {
+        let home = std::env::var("HOME")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .ok_or("HOME is unset: pass --dir explicitly")?;
+        format!("{home}/.claude/projects")
+    };
+    let project = has(argv, "--project").then(|| at(argv, "--project", ""));
+    let days = if has(argv, "--days") {
+        let raw = at(argv, "--days", "");
+        Some(
+            raw.parse::<u64>()
+                .map_err(|_| format!("--days {raw}: expected a whole number"))?,
+        )
+    } else {
+        None
+    };
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| e.to_string())
+        .and_then(|d| i64::try_from(d.as_millis()).map_err(|e| e.to_string()))?;
+    let ledger = if has(argv, "--ledger") {
+        Some(cort_evals::recall_hits::load_ledger(Path::new(&at(
+            argv, "--ledger", "",
+        )))?)
+    } else {
+        None
+    };
+    let mut report = cort_evals::recall_hits::scan(
+        Path::new(&dir),
+        project.as_deref(),
+        days,
+        now_ms,
+        ledger.as_deref(),
+    )?;
+    stamp_machine(&mut report);
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?
+    );
+    Ok(())
+}
+
 fn uptake_main(argv: &[String]) -> Result<(), String> {
     guard_options(argv, UPTAKE_FLAGS, USAGE_UPTAKE)?;
     // Every uptake flag takes a value; a missing one would fall back to a default and change the
@@ -1116,6 +1176,7 @@ fn main() {
         Some("summarize") => summarize_main(&argv[1..]),
         Some("demand") => demand_main(&argv[1..]),
         Some("capture-gap") => capture_gap_main(&argv[1..]),
+        Some("recall-hits") => recall_hits_main(&argv[1..]),
         Some("memory-uptake") => uptake_main(&argv[1..]),
         Some("recall-exp") => recall_exp_main(&argv[1..]),
         Some("gate-audit") => gate_audit_main(&argv[1..]),
@@ -1135,6 +1196,7 @@ fn main() {
                 println!("  {USAGE_SUMMARIZE}");
                 println!("  {USAGE_DEMAND}");
                 println!("  {USAGE_CAPTURE_GAP}");
+                println!("  {USAGE_RECALL_HITS}");
                 println!("  {USAGE_UPTAKE}");
                 println!("  {USAGE_RECALL_EXP}");
                 println!("  {USAGE_GATE_AUDIT}");
@@ -1406,6 +1468,7 @@ mod whitelist_coverage {
                         .chain(SUMMARIZE_FLAGS.iter())
                         .chain(DEMAND_FLAGS.iter())
                         .chain(CAPTURE_GAP_FLAGS.iter())
+                        .chain(RECALL_HITS_FLAGS.iter())
                         .chain(UPTAKE_FLAGS.iter())
                         .chain(RECALL_EXP_FLAGS.iter())
                         .chain(GATE_AUDIT_FLAGS.iter())

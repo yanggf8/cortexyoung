@@ -359,28 +359,17 @@ pub(crate) fn recall_ledger_for_hook(top: &Path, ledger: &MemoryLedger) -> (Memo
     )
 }
 
-fn recall_ledger_inner(
-    root: &Path,
-    query: &str,
-    ledger: &MemoryLedger,
-    present: bool,
-    sync_status: Option<String>,
-    limit: Option<usize>,
-) -> (MemoryRecall, usize) {
-    let terms: Vec<_> = query.split_whitespace().map(|s| s.to_lowercase()).collect();
-    let mut active = active_entries(ledger);
-    let mut counts: HashMap<&str, usize> = HashMap::new();
-    for entry in &active {
-        *counts.entry(&entry.key).or_default() += 1;
-    }
-    if limit.is_some() {
-        active.sort_by(|a, b| b.recorded_at.cmp(&a.recorded_at).then(b.id.cmp(&a.id)));
-    }
-    let omitted = limit.map_or(0, |n| active.len().saturating_sub(n));
-    if let Some(n) = limit {
-        active.truncate(n);
-    }
-    let mut selected: Vec<_> = active
+type Selected<'a> = Vec<(&'a MemoryEntry, Option<Vec<String>>)>;
+
+/// The term-matching decision of a recall: every entry holding all terms, else (when
+/// `allow_partial`, at least two terms) the partial fallback. Returns the selection and whether
+/// the partial rule applied. Shared by `recall_ledger_inner` and `recall_selection`.
+fn select_terms<'a>(
+    terms: &[String],
+    active: &[&'a MemoryEntry],
+    allow_partial: bool,
+) -> (Selected<'a>, bool) {
+    let mut selected: Selected<'a> = active
         .iter()
         .filter(|entry| {
             let haystack = format!("{} {}", entry.key, entry.claim).to_lowercase();
@@ -392,14 +381,14 @@ fn recall_ledger_inner(
     // a word, while non-ASCII terms keep substring matching. The all-terms match above is
     // unchanged; a single CJK character is a word and is kept.
     let mut distinct = Vec::new();
-    for term in &terms {
+    for term in terms {
         let noise =
             PARTIAL_IGNORED.contains(&term.as_str()) || (term.len() == 1 && term.is_ascii());
         if !noise && !distinct.contains(term) {
             distinct.push(term.clone());
         }
     }
-    let partial = selected.is_empty() && terms.len() >= 2 && limit.is_none();
+    let partial = selected.is_empty() && terms.len() >= 2 && allow_partial;
     if partial && !distinct.is_empty() {
         selected = active
             .iter()
@@ -423,16 +412,54 @@ fn recall_ledger_inner(
             })
             .collect();
         selected.sort_by(|(a, a_terms), (b, b_terms)| {
-            b_terms
-                .as_ref()
-                .unwrap()
-                .len()
-                .cmp(&a_terms.as_ref().unwrap().len())
+            let count = |t: &Option<Vec<String>>| t.as_ref().map_or(0, Vec::len);
+            count(b_terms)
+                .cmp(&count(a_terms))
                 .then(b.recorded_at.cmp(&a.recorded_at))
                 .then(a.id.cmp(&b.id))
         });
         selected.truncate(5);
     }
+    (selected, partial)
+}
+
+/// The ids a recall of `query` would match among `active` entries, in recall's output order, and
+/// whether the match was partial. For replaying recorded queries against a ledger snapshot.
+pub fn recall_selection(query: &str, active: &[MemoryEntry]) -> (Vec<String>, bool) {
+    let terms: Vec<_> = query.split_whitespace().map(|s| s.to_lowercase()).collect();
+    let refs: Vec<&MemoryEntry> = active.iter().collect();
+    let (mut selected, partial) = select_terms(&terms, &refs, true);
+    if !partial {
+        selected.sort_by(|(a, _), (b, _)| a.key.cmp(&b.key).then(a.id.cmp(&b.id)));
+    }
+    (
+        selected.into_iter().map(|(e, _)| e.id.clone()).collect(),
+        partial,
+    )
+}
+
+fn recall_ledger_inner(
+    root: &Path,
+    query: &str,
+    ledger: &MemoryLedger,
+    present: bool,
+    sync_status: Option<String>,
+    limit: Option<usize>,
+) -> (MemoryRecall, usize) {
+    let terms: Vec<_> = query.split_whitespace().map(|s| s.to_lowercase()).collect();
+    let mut active = active_entries(ledger);
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    for entry in &active {
+        *counts.entry(&entry.key).or_default() += 1;
+    }
+    if limit.is_some() {
+        active.sort_by(|a, b| b.recorded_at.cmp(&a.recorded_at).then(b.id.cmp(&a.id)));
+    }
+    let omitted = limit.map_or(0, |n| active.len().saturating_sub(n));
+    if let Some(n) = limit {
+        active.truncate(n);
+    }
+    let (selected, partial) = select_terms(&terms, &active, limit.is_none());
     let mut hits = Vec::new();
     for (entry, matched_terms) in selected {
         let source = if entry.unsourced {
@@ -587,6 +614,33 @@ mod tests {
             "source": "unused", "source_line": 1, "source_sha256": "", "unsourced": true
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn recall_selection_agrees_with_recall_ledger() {
+        let dir = tempfile::tempdir().unwrap();
+        let entries = vec![
+            recall_fixture("2", "z", "alpha beta", "2"),
+            recall_fixture("1", "a", "alpha beta", "1"),
+            recall_fixture("3", "partial", "alpha", "3"),
+        ];
+        let ledger = MemoryLedger {
+            schema: SCHEMA,
+            entries: entries.clone(),
+        };
+        for query in ["ALPHA beta", "alpha gamma", "nothing here"] {
+            let json = serde_json::to_value(recall_ledger(dir.path(), query, &ledger, true, None))
+                .unwrap();
+            let ids: Vec<String> = json["hits"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|h| h["id"].as_str().unwrap().to_string())
+                .collect();
+            let (selected, partial) = recall_selection(query, &entries);
+            assert_eq!(selected, ids, "{query}");
+            assert_eq!(partial, json["match"] == "partial", "{query}");
+        }
     }
 
     #[test]
