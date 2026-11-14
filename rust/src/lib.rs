@@ -20,6 +20,7 @@ pub mod measure;
 pub mod measure_progress;
 pub mod measure_store;
 pub mod memory;
+pub mod memory_lifecycle;
 pub mod memory_store;
 pub mod memory_tiers;
 mod network_timeout;

@@ -8,9 +8,9 @@ use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 
 const NS_PER_SEC: i128 = 1_000_000_000;
-const DAY_NS: i128 = 86_400 * NS_PER_SEC;
-const SHORT_TERM_NS: i128 = 7 * DAY_NS;
-const FORGETTING_NS: i128 = 60 * DAY_NS;
+pub(crate) const DAY_NS: i128 = 86_400 * NS_PER_SEC;
+pub(crate) const SHORT_TERM_NS: i128 = 7 * DAY_NS;
+pub(crate) const FORGETTING_NS: i128 = 60 * DAY_NS;
 const CLAIM_CHARS: usize = 160;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -34,6 +34,14 @@ pub struct Placement {
     pub expires_at_ns: Option<i128>,
     pub short_term_expired: bool,
     pub forgetting_due_at_ns: Option<i128>,
+}
+
+/// `recorded_at` as ns, or `None` when it is not an integer or lies outside the UTC-day range in
+/// which a date can be printed. The one guard shared by `build` and the lifecycle fold.
+pub(crate) fn parse_recorded_ns(raw: &str) -> Option<i128> {
+    raw.parse::<i128>()
+        .ok()
+        .filter(|ns| (-719_528..=2_932_896).contains(&ns.div_euclid(DAY_NS)))
 }
 
 /// The spec's read-time rule: recorded before `epoch - 7d` is long-term (forgetting review due
@@ -179,12 +187,7 @@ pub fn build(
         .iter()
         .map(|hit| {
             // Same UTC-day guard as `memory.rs`: outside it the date cannot be printed.
-            let recorded = hit
-                .entry
-                .recorded_at
-                .parse::<i128>()
-                .ok()
-                .filter(|ns| (-719_528..=2_932_896).contains(&ns.div_euclid(DAY_NS)));
+            let recorded = parse_recorded_ns(&hit.entry.recorded_at);
             if recorded.is_none() {
                 unparsed += 1;
             }
