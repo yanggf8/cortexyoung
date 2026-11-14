@@ -41,11 +41,15 @@ compaction), not at the next prompt. Ledger key `remind-live-session-surfacing`.
   equal to SessionStart's, `cwd`, whether `additionalContext` is accepted, the trust key name,
   firing without a matcher), writes the findings here, then adds the event.
 
-## Precondition (verify before building)
+## Precondition (verified 2026-11-14)
 
-The issue's own case must actually fire `UserPromptSubmit`: ask the agent-portal-tpm NUC session how
-its 30-minute heartbeat enters the session (asked on aib #3419). If the heartbeat is typed in as a
-prompt, it fires; if not, this design does not cover that session and the plan changes.
+The issue's own case fires `UserPromptSubmit`. The agent-portal-tpm NUC session answered (aib #3419
+and a direct message): its heartbeat (`ap-compact-watch`, every 5 minutes via nullclaw) types into
+the pane with `tmux send-keys -l` plus Enter, and the session sees `UserPromptSubmit` hook context on
+every wake; it is Claude Code with no `disableAllHooks`; after a compaction the whole cort memory
+block reappears, reminders line included; it compacts at least once a day, so cross-machine changes
+reaching it at the next `SessionStart` is acceptable. Overdue once per session is acceptable because
+the SessionStart block keeps listing overdue reminders (unchanged by this design).
 
 ## Design
 
