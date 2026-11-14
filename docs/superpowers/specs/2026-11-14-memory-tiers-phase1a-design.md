@@ -1,6 +1,6 @@
 # Memory tiers phase 1a: lifecycle table, review and hiding (issue #11)
 
-Status: draft, 2026-11-14, revised once after an external review (2 BLOCK, 11 SHOULD). Implements
+Status: draft, 2026-11-14, revised twice after external review (round 1: 2 BLOCK, 11 SHOULD; round 2: 4 SHOULD). Implements
 phase 1a of `2026-11-14-memory-tiers-design.md` (the parent spec; its decisions U1-U5 stand). Phase 0
 evidence: ledger key `memory-tiers-decisions` and commits `90789b29..b29bd4ad`. The calls this spec
 makes that the parent left open are listed under **Calls for the user to check**; everything else
@@ -47,22 +47,33 @@ projects, so an event recorded under an old project id still applies.
 
 **Decoding.** A row whose JSON or known-kind fields do not parse is skipped and counted; every other
 row still applies. Every read that folds reports the count as `lifecycle_unreadable: <n>` when n > 0
-(recall, review, list, the write verbs' answers). One bad row therefore costs at most the one event
-it held, never the whole project's hiding, and needs no probe or repair row in the shared database.
+(recall, review, list, the write verbs' answers), and SessionStart records it in its usage row as
+`lifecycle_unreadable: <n>`. A bad row loses only the event it held -- never the whole project's
+lifecycle, and no probe or repair row is written to the shared database -- but that event's loss
+can cut either way: a lost `restore` leaves an entry hidden, a lost `off` leaves the project
+enabled, a lost first `on` moves the epoch or leaves the project off. So whenever n > 0 the answer
+also says `cort memory review --all` lists what the fold applied, and `recall --all` finds anything
+hidden.
 
 **Clock skew between machines.** A writer stamps `recorded_at = max(now, latest event on the same
 entry -- or, for `on`/`off`, the latest switch event -- + 1 ns)`, from the rows it just read. A
-confirmed write is then never ordered before the event it was checked against.
+confirmed write is then never ordered before the event it was checked against. Two machines writing
+to the same entry at the same moment can still stamp the same instant; the random event id then
+decides the order, and the loser's event stays inert in the history (its writer printed a success
+the fold does not honour -- rare, visible in `review --all`, and undone by one more command).
 
 ## The fold (`memory_lifecycle.rs`, pure)
 
 Input: the ledger, the decoded events, `now`. Events are ordered by `recorded_at`, then `id`.
 
 **Switch and epoch.** The project is *enabled* when its latest `on`/`off` event is `on`. Its
-**tiers epoch** is the `recorded_at` of its *first* `on` event ever (a later `off`/`on` does not move
-it). This replaces the parent's single code constant: each project's derived placement starts the
-day it is switched on, so a project enabled months later is placed the way the parent's U2 placed
-agent-portal-tpm, not dumped wholesale into review. A project with no `on` event behaves exactly as
+**tiers epoch** is the `recorded_at` of the `on` that began its current enabled run: the first `on`
+after its latest `off`, or its first `on` ever when it was never turned off (repeated `on` events
+inside a run do not move it). This replaces the parent's single code constant: each project's
+derived placement starts the day it is switched on, so a project enabled months later -- or
+re-enabled after a long `off` -- is placed the way the parent's U2 placed agent-portal-tpm, not
+dumped wholesale into review. Events written during an earlier run still apply on top of the new
+placement (a promoted entry stays long-term, an archived one stays hidden). A project with no `on` event behaves exactly as
 today everywhere; lifecycle write verbs other than `lifecycle on` refuse with `memory_lifecycle_off`.
 
 **Placement before events** is phase 0's `memory_tiers::place` with that epoch: long-term with last
@@ -123,8 +134,8 @@ review, oldest `due_at` first, each with id, key, claim, state, `recorded_at`, `
 `mentions_user`, and the commands that apply (`promote`; `drop` or `archive`, with the guard's flag
 when `mentions_user`). A header carries counts per state and the epoch. `--all` adds hidden and
 superseded-with-events entries and orphans. On a disabled project it prints `lifecycle: off` and a
-what-if computed with epoch = now (what switching on today would place), so the pilot decision can
-rest on data.
+what-if of switching on now -- epoch = now, with every existing event applied -- which is exactly
+what the epoch rule above would place, so the pilot decision can rest on data.
 
 **`cort memory recall`.** `Ledger::read_bodies` adds the lifecycle `CREATE` and `SELECT`. On an
 enabled project, hidden entries are removed before `select_terms` (they neither appear nor change
@@ -152,12 +163,15 @@ session. When the read succeeds over the full component and the project is enabl
 - `omitted` and the "N entries left out" text count visible entries only; hidden entries are not
   mentioned.
 - Entries due for review carry a ` [<state>]` suffix.
-- On Saturday and Sunday (local time from `remind_snapshot::local_parts`; no line when it returns
-  `None`), when review has at least one item, one line follows the ledger block:
-  `N memory entries await review: cort memory review`. It prints at every session start that
-  weekend, on every machine and harness -- deliberate: the first agent to act on it empties the
-  count, and the line costs ~60 bytes, reserved inside the ledger's 6000-byte budget so the
-  9,500-byte total in `hook_recall.rs` stands. On other days the derived demotion above is what keeps
+- On Saturday and Sunday, when review has at least one item, one line follows the ledger block:
+  `N memory entries await review: cort memory review`. The weekday comes from the local date that
+  `remind_snapshot::local_parts` returns (it gives only date and time strings, so 1a adds a small
+  civil-date-to-weekday helper beside it, with its own tests); no line when `local_parts` returns
+  `None`. It prints at every session start that weekend, on every machine and harness --
+  deliberate: the first agent to act on it empties the count. The line's bytes (~60) are reserved
+  inside the ledger's 6000-byte budget **only when the line will print** (enabled, weekend, count >
+  0), so the 9,500-byte total in `hook_recall.rs` stands and every other session's cut is
+  unchanged. On other days the derived demotion above is what keeps
   stale entries from reading as current rules.
 No write, no lock, no extra round trip; deadline and watchdog unchanged. A disabled project's
 output is byte-identical to today's.
@@ -171,8 +185,8 @@ Thinkpade15 and gpu is the usual release step.
 
 - Fold: every transition row, a not-allowed event kept inert, `restore` of a short-term entry, equal
   `recorded_at` ordered by id, `unknown` kind, orphans, events on a superseded entry, `off` after
-  `on`, no switch = disabled, epoch = first `on` across an `off`/`on` pair.
-- Decoding: one undecodable row skipped and counted while the rest apply.
+  `on`, no switch = disabled, epoch = the `on` that began the current run (unchanged by a repeated `on`, moved by `off` then `on`; events from the earlier run still applied).
+- Decoding: one undecodable row skipped and counted while the rest apply; the count reaches recall, review and the SessionStart usage row.
 - Writer stamp: an existing event later than `now` makes the new event land after it.
 - Placement at the boundaries (`epoch - 7d` exactly; expiry exactly at `now`).
 - Guard: `user`/`用戶`/`使用者` in key or in claim refused without a release; `--superseded-by`
@@ -188,11 +202,11 @@ Thinkpade15 and gpu is the usual release step.
   not on a fixed Friday, not when `local_parts` is `None`; disabled project byte-identical.
 - Write verbs against the fake transport: one `INSERT OR IGNORE` per command; nothing written on any
   refusal or on a disabled project.
-- `review` on a disabled project: `lifecycle: off` plus the epoch-now what-if.
+- `review` on a disabled project: `lifecycle: off` plus the epoch-now what-if with existing events applied; weekend line bytes reserved only when it prints (a full ledger on a Saturday with nothing due cuts exactly as on a Friday).
 
 ## Calls for the user to check
 
-- **C1 Epoch per project = its first `lifecycle on`** (replaces the parent's single code constant;
+- **C1 Epoch per project = the `lifecycle on` that began its current run** (replaces the parent's single code constant;
   same placement for the pilot, and no wholesale review when another project is switched on later).
   For agent-portal-tpm switched on in the week of 2026-11-16, phase 0's numbers apply: the first
   short-term expiries a week later, the first forgetting candidates around 2026-12-23.
