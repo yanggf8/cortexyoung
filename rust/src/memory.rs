@@ -425,6 +425,10 @@ fn select_terms<'a>(
 
 /// The ids a recall of `query` would match among `active` entries, in recall's output order, and
 /// whether the match was partial. For replaying recorded queries against a ledger snapshot.
+///
+/// `active` must already be the active entries only: unlike `recall_ledger`, nothing here filters
+/// out superseded or resolved entries, so the caller does (a `cort memory list` snapshot already
+/// has).
 pub fn recall_selection(query: &str, active: &[MemoryEntry]) -> (Vec<String>, bool) {
     let terms: Vec<_> = query.split_whitespace().map(|s| s.to_lowercase()).collect();
     let refs: Vec<&MemoryEntry> = active.iter().collect();

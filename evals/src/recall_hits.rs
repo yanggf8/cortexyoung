@@ -26,7 +26,8 @@ fn bucket(hits: usize) -> usize {
     }
 }
 
-fn files(dir: &Path, project: Option<&str>) -> Result<Vec<PathBuf>, String> {
+/// Transcript files as `(project directory name, path)`, session files and subagent files alike.
+fn files(dir: &Path, project: Option<&str>) -> Result<Vec<(String, PathBuf)>, String> {
     let mut projects = Vec::new();
     if let Some(name) = project {
         if Path::new(name).components().count() != 1
@@ -52,20 +53,44 @@ fn files(dir: &Path, project: Option<&str>) -> Result<Vec<PathBuf>, String> {
     }
     let mut out = Vec::new();
     for project in projects {
+        let name = project
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let mut found = Vec::new();
+        jsonl_in(&project, &mut found)?;
+        // `<project>/<session>/subagents/*.jsonl`: a subagent's recalls are recalls too.
         for entry in fs::read_dir(&project).map_err(|e| format!("{}: {e}", project.display()))? {
             let entry = entry.map_err(|e| format!("{}: {e}", project.display()))?;
-            if entry.path().extension().is_some_and(|s| s == "jsonl")
-                && entry
-                    .file_type()
-                    .map_err(|e| format!("{}: {e}", entry.path().display()))?
-                    .is_file()
+            let sub = entry.path().join("subagents");
+            if entry
+                .file_type()
+                .map_err(|e| format!("{}: {e}", entry.path().display()))?
+                .is_dir()
+                && sub.is_dir()
             {
-                out.push(entry.path());
+                jsonl_in(&sub, &mut found)?;
             }
         }
+        out.extend(found.into_iter().map(|p| (name.clone(), p)));
     }
-    out.sort();
+    out.sort_by(|a, b| a.1.cmp(&b.1));
     Ok(out)
+}
+
+fn jsonl_in(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
+    for entry in fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))? {
+        let entry = entry.map_err(|e| format!("{}: {e}", dir.display()))?;
+        if entry.path().extension().is_some_and(|s| s == "jsonl")
+            && entry
+                .file_type()
+                .map_err(|e| format!("{}: {e}", entry.path().display()))?
+                .is_file()
+        {
+            out.push(entry.path());
+        }
+    }
+    Ok(())
 }
 
 /// The text of a `tool_result`: a string, or the concatenated `text` parts of an array.
@@ -115,59 +140,269 @@ fn bucket_map(counts: &[u64; 5]) -> Value {
     Value::Object(map)
 }
 
-/// The first shell word after `cort memory recall`: double-quoted, single-quoted or bare. Flags
-/// before it are skipped together with their value (`--harness x`; `--k=v` is one word). `None`
-/// when nothing query-like follows (end of command, a pipe, a redirection).
-pub fn extract_query(command: &str) -> Option<String> {
-    const MARK: &str = "cort memory recall";
-    let rest = &command[command.find(MARK)? + MARK.len()..];
-    let mut chars = rest.chars().peekable();
-    let mut skip_value = false;
-    loop {
-        while chars.next_if(|c| c.is_whitespace()).is_some() {}
-        let first = *chars.peek()?;
-        if matches!(first, '|' | ';' | '&' | '>' | '<' | ')' | '\n') {
-            return None;
-        }
-        let word: String = if first == '"' || first == '\'' {
-            chars.next();
-            let mut w = String::new();
-            for c in chars.by_ref() {
-                if c == first {
-                    break;
-                }
-                w.push(c);
-            }
-            if skip_value {
-                skip_value = false;
+const MARK: &str = "cort memory recall";
+
+/// For each char: is it outside quotes, backticks and heredoc bodies? Only plain text can hold a
+/// command, so a `cort memory recall` that is not plain is prose (`grep 'cort memory recall'`,
+/// a commit message in a heredoc, a `sed` script) and is not an invocation.
+fn plain_mask(cs: &[char]) -> Vec<bool> {
+    let mut plain = vec![true; cs.len()];
+    let mut heredocs: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < cs.len() {
+        match cs[i] {
+            '\\' => {
+                i += 2;
                 continue;
             }
-            return Some(w).filter(|w| !w.trim().is_empty());
-        } else {
-            let mut w = String::new();
-            while let Some(c) = chars.next_if(|c| !c.is_whitespace() && !"|;&<>)".contains(*c)) {
-                w.push(c);
+            q @ ('\'' | '`') => {
+                plain[i] = false;
+                i += 1;
+                while i < cs.len() && cs[i] != q {
+                    plain[i] = false;
+                    i += 1;
+                }
+                if i < cs.len() {
+                    plain[i] = false;
+                }
+                i += 1;
+                continue;
             }
-            if chars.peek().is_some_and(|c| matches!(c, '>' | '<'))
-                && w.chars().all(|c| c.is_ascii_digit())
-            {
-                return None; // `2>&1`, not a query
+            '"' => {
+                plain[i] = false;
+                i += 1;
+                while i < cs.len() && cs[i] != '"' {
+                    if cs[i] == '\\' && i + 1 < cs.len() {
+                        plain[i] = false;
+                        i += 1;
+                    }
+                    plain[i] = false;
+                    i += 1;
+                }
+                if i < cs.len() {
+                    plain[i] = false;
+                }
+                i += 1;
+                continue;
             }
-            w
-        };
-        if skip_value {
-            skip_value = false;
-            continue;
+            '<' if cs.get(i + 1) == Some(&'<') && cs.get(i + 2) != Some(&'<') => {
+                let mut j = i + 2;
+                if cs.get(j) == Some(&'-') {
+                    j += 1;
+                }
+                while matches!(cs.get(j), Some(' ' | '\t')) {
+                    j += 1;
+                }
+                let quote = cs.get(j).copied().filter(|c| matches!(c, '\'' | '"'));
+                if quote.is_some() {
+                    j += 1;
+                }
+                let mut word = String::new();
+                while let Some(&c) = cs.get(j) {
+                    let ends = match quote {
+                        Some(q) => c == q,
+                        None => c.is_whitespace() || "|;&<>()".contains(c),
+                    };
+                    if ends {
+                        break;
+                    }
+                    word.push(c);
+                    j += 1;
+                }
+                if !word.is_empty() {
+                    heredocs.push(word);
+                }
+                // step over the closing quote of `<<'EOF'`
+                i = if quote.is_some() { j + 1 } else { j };
+                continue;
+            }
+            '\n' => {
+                i += 1;
+                for terminator in std::mem::take(&mut heredocs) {
+                    while i < cs.len() {
+                        let end = cs[i..]
+                            .iter()
+                            .position(|&c| c == '\n')
+                            .map_or(cs.len(), |p| i + p);
+                        let line: String = cs[i..end].iter().collect();
+                        for p in &mut plain[i..end] {
+                            *p = false;
+                        }
+                        i = (end + 1).min(cs.len());
+                        if line.trim() == terminator {
+                            break;
+                        }
+                    }
+                }
+                continue;
+            }
+            _ => {}
         }
-        if word.starts_with("--") {
-            skip_value = !word.contains('=');
-            continue;
+        i += 1;
+    }
+    plain
+}
+
+/// Is the `cort` at `p` where a shell would run a command? After the start, `;`, `&`, `|`, `(`
+/// (so `$(` and `&&`/`||` too), a newline, `do `/`then `, or a path ending in `/`.
+fn at_command_position(cs: &[char], p: usize) -> bool {
+    let mut q = p;
+    if q > 0 && cs[q - 1] == '/' {
+        while q > 0 && !cs[q - 1].is_whitespace() && !";&|()".contains(cs[q - 1]) {
+            q -= 1;
         }
-        return Some(word).filter(|w| !w.is_empty());
+    }
+    let mut r = q;
+    while r > 0 && matches!(cs[r - 1], ' ' | '\t') {
+        r -= 1;
+    }
+    if r == 0 || matches!(cs[r - 1], ';' | '&' | '|' | '(' | '\n') {
+        return true;
+    }
+    if r == q {
+        return false;
+    }
+    let before: String = cs[..r].iter().collect();
+    ["do", "then"].iter().any(|k| {
+        before.strip_suffix(k).is_some_and(|rest| {
+            rest.chars()
+                .next_back()
+                .is_none_or(|c| !(c.is_alphanumeric() || c == '_'))
+        })
+    })
+}
+
+fn skip_blanks(cs: &[char], i: &mut usize) {
+    loop {
+        match (cs.get(*i), cs.get(*i + 1)) {
+            (Some(' ' | '\t' | '\r'), _) => *i += 1,
+            (Some('\\'), Some('\n')) => *i += 2,
+            _ => break,
+        }
     }
 }
 
-/// Active ledger entries from a `cort memory list` JSON file.
+/// One shell word starting at `i`: quotes removed, `\"` and `\\` unescaped inside double quotes.
+/// The flag says the word holds an expansion (`$`, backtick) that cannot be replayed. `None` at
+/// the end of the command or at an operator.
+fn read_word(cs: &[char], i: &mut usize) -> Option<(String, bool)> {
+    skip_blanks(cs, i);
+    let first = *cs.get(*i)?;
+    if "|;&<>)\n".contains(first) {
+        return None;
+    }
+    let (mut word, mut expands, mut any) = (String::new(), false, false);
+    while let Some(&c) = cs.get(*i) {
+        match c {
+            '\'' => {
+                any = true;
+                *i += 1;
+                while let Some(&d) = cs.get(*i).filter(|&&d| d != '\'') {
+                    word.push(d);
+                    *i += 1;
+                }
+                *i += 1;
+            }
+            '"' => {
+                any = true;
+                *i += 1;
+                while let Some(&d) = cs.get(*i).filter(|&&d| d != '"') {
+                    if d == '\\' && matches!(cs.get(*i + 1), Some('"' | '\\')) {
+                        word.push(cs[*i + 1]);
+                        *i += 2;
+                        continue;
+                    }
+                    expands |= d == '$' || d == '`';
+                    word.push(d);
+                    *i += 1;
+                }
+                *i += 1;
+            }
+            '\\' => {
+                if cs.get(*i + 1) == Some(&'\n') {
+                    break;
+                }
+                any = true;
+                if let Some(&n) = cs.get(*i + 1) {
+                    word.push(n);
+                }
+                *i += 2;
+            }
+            _ if c.is_whitespace() || "|;&<>)".contains(c) => break,
+            _ => {
+                any = true;
+                expands |= c == '$' || c == '`';
+                word.push(c);
+                *i += 1;
+            }
+        }
+    }
+    // `2>&1` and friends: a number glued to a redirection is not a word.
+    if matches!(cs.get(*i), Some('<' | '>')) && word.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    any.then_some((word, expands))
+}
+
+/// The query of the invocation whose arguments start at `i`. Only `--root` and `--harness` take a
+/// value; `--json`/`--help` do not, and after `--` the next word is the query.
+fn query_at(cs: &[char], mut i: usize) -> Option<String> {
+    let mut after_dashes = false;
+    loop {
+        let (word, expands) = read_word(cs, &mut i)?;
+        if !after_dashes {
+            match word.as_str() {
+                "--" => {
+                    after_dashes = true;
+                    continue;
+                }
+                "--root" | "--harness" => {
+                    read_word(cs, &mut i)?;
+                    continue;
+                }
+                w if w.len() > 1 && w.starts_with('-') => continue,
+                _ => {}
+            }
+        }
+        return Some(word).filter(|w| !expands && !w.trim().is_empty());
+    }
+}
+
+/// Every `cort memory recall` invocation in a shell command, as the query it was given (`None`
+/// when none can be read: no argument, or an expansion like `"$q"`). A mention that is not at
+/// command position or sits in quotes, backticks or a heredoc body is not an invocation.
+pub fn invocations(command: &str) -> Vec<Option<String>> {
+    let cs: Vec<char> = command.chars().collect();
+    let mark: Vec<char> = MARK.chars().collect();
+    let plain = plain_mask(&cs);
+    let mut out = Vec::new();
+    let mut p = 0;
+    while p + mark.len() <= cs.len() {
+        let end = p + mark.len();
+        if cs[p..end] == mark[..]
+            && plain[p]
+            && cs
+                .get(end)
+                .is_none_or(|c| !(c.is_alphanumeric() || matches!(c, '-' | '_' | '.')))
+            && at_command_position(&cs, p)
+        {
+            out.push(query_at(&cs, end));
+            p = end;
+        } else {
+            p += 1;
+        }
+    }
+    out
+}
+
+/// The query of the first invocation in `command`, if it has one that can be read.
+pub fn extract_query(command: &str) -> Option<String> {
+    invocations(command).into_iter().next().flatten()
+}
+
+/// Active ledger entries from a `cort memory list` JSON file. `recorded_at` is the listing's
+/// ISO-seconds string, not the ledger's nanoseconds: it exists only so the entry deserialises,
+/// and the replay uses these entries for counting, never for ordering by time.
 pub fn load_ledger(path: &Path) -> Result<Vec<MemoryEntry>, String> {
     let text = fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let value: Value =
@@ -220,12 +455,9 @@ pub fn scan(
     let mut r_partial = [0u64; 5];
     let mut r_query_unparsed = 0u64;
     let mut r_queries: HashSet<String> = HashSet::new();
-    for path in &paths {
-        let name = path
-            .parent()
-            .and_then(|p| p.file_name())
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
+    let mut not_invoked = 0u64;
+    for (name, path) in &paths {
+        let name = name.clone();
         let file = fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
         // tool_use id -> slot in `settled`, removed once its result arrives
         let mut settled: Vec<Option<(usize, bool)>> = Vec::new();
@@ -244,9 +476,10 @@ pub fn scan(
                     let Some(id) = item["id"].as_str() else {
                         continue;
                     };
-                    if item["name"] != "Bash" || !command.contains("cort memory recall") {
+                    if item["name"] != "Bash" || !command.contains(MARK) {
                         continue;
                     }
+                    let calls = invocations(command);
                     if let Some(since) = since_ms {
                         match value["timestamp"].as_str().map(time::parse_since) {
                             Some(Ok(t)) if t >= since => {}
@@ -257,14 +490,20 @@ pub fn scan(
                             }
                         }
                     }
+                    if calls.is_empty() {
+                        not_invoked += 1;
+                        continue;
+                    }
                     if let Some(entries) = ledger {
-                        match extract_query(command) {
-                            None => r_query_unparsed += 1,
-                            Some(query) => {
-                                let (ids, partial) = recall_selection(&query, entries);
-                                let counts = if partial { &mut r_partial } else { &mut r_full };
-                                counts[bucket(ids.len())] += 1;
-                                r_queries.insert(query);
+                        for query in calls {
+                            match query {
+                                None => r_query_unparsed += 1,
+                                Some(query) => {
+                                    let (ids, partial) = recall_selection(&query, entries);
+                                    let counts = if partial { &mut r_partial } else { &mut r_full };
+                                    counts[bucket(ids.len())] += 1;
+                                    r_queries.insert(query);
+                                }
                             }
                         }
                     }
@@ -313,7 +552,9 @@ pub fn scan(
         let full_total: u64 = r_full.iter().sum();
         json!({
             "ledger_entries": entries.len(),
-            "queries": r_queries.len(),
+            "reading": "today's ledger snapshot answers past queries: entries recorded after a query are counted, entries superseded since are not; counts only, not order",
+            "calls": r_full.iter().sum::<u64>() + r_partial.iter().sum::<u64>(),
+            "distinct_queries": r_queries.len(),
             "query_unparsed": r_query_unparsed,
             "full": bucket_map(&r_full),
             "partial": bucket_map(&r_partial),
@@ -331,6 +572,7 @@ pub fn scan(
         "project": project,
         "files_read": paths.len(),
         "recalls": full_total + partial_total + unparsed,
+        "not_invoked": not_invoked,
         "unparsed": unparsed,
         "full": bucket_map(&full),
         "partial": bucket_map(&partial),
@@ -449,6 +691,118 @@ mod tests {
     }
 
     #[test]
+    fn only_command_position_counts_as_an_invocation() {
+        let n = |c: &str| invocations(c).len();
+        // prose, quoted text, heredoc bodies, sed scripts and backticks are not invocations
+        assert_eq!(n("echo see `cort memory recall` for details"), 0);
+        assert_eq!(n("grep -l 'cort memory recall' *.jsonl"), 0);
+        assert_eq!(n("echo \"run cort memory recall x\""), 0);
+        assert_eq!(
+            n("git commit -F - <<'EOF'\nnote\ncort memory recall x\nEOF"),
+            0
+        );
+        assert_eq!(n("cat <<-EOF\n\tcort memory recall x\n\tEOF\n"), 0);
+        assert_eq!(n("sed 's/cort memory recall/x/' f"), 0);
+        // command positions
+        assert_eq!(n("cort memory recall a"), 1);
+        assert_eq!(n("cd r && cort memory recall a"), 1);
+        assert_eq!(n("x || cort memory recall a"), 1);
+        assert_eq!(n("(cort memory recall a)"), 1);
+        assert_eq!(n("echo $(cort memory recall a)"), 1);
+        assert_eq!(n("echo hi\ncort memory recall a"), 1);
+        assert_eq!(n("for q in a; do cort memory recall a; done"), 1);
+        assert_eq!(n("if x; then cort memory recall a; fi"), 1);
+        assert_eq!(n("/home/u/.local/bin/cort memory recall a"), 1);
+        // after a heredoc ends, commands count again
+        assert_eq!(
+            n("cat <<'E'\ncort memory recall x\nE\ncort memory recall y"),
+            1
+        );
+        // several invocations in one command
+        assert_eq!(
+            invocations("cort memory recall a; cort memory recall \"b c\""),
+            vec![Some("a".to_string()), Some("b c".to_string())]
+        );
+    }
+
+    #[test]
+    fn query_extraction_handles_flags_escapes_and_expansions() {
+        let q = extract_query;
+        // shell expansions cannot be replayed
+        assert_eq!(
+            invocations("for q in \"a\" \"b\"; do cort memory recall \"$q\"; done"),
+            vec![None]
+        );
+        assert_eq!(q("cort memory recall `date`"), None);
+        assert_eq!(q("cort memory recall '$x'"), Some("$x".to_string()));
+        // only --root and --harness take a value; --json and --help do not
+        assert_eq!(
+            q("cort memory recall --json \"a b\""),
+            Some("a b".to_string())
+        );
+        assert_eq!(q("cort memory recall --help \"a\""), Some("a".to_string()));
+        assert_eq!(
+            q("cort memory recall --root /r --harness codex q1"),
+            Some("q1".to_string())
+        );
+        assert_eq!(q("cort memory recall --root=/r q1"), Some("q1".to_string()));
+        // after `--` the next word is the query, even if it looks like a flag
+        assert_eq!(q("cort memory recall -- \"q\""), Some("q".to_string()));
+        assert_eq!(q("cort memory recall -- --odd"), Some("--odd".to_string()));
+        // escapes inside double quotes, and line continuations between words
+        assert_eq!(
+            q("cort memory recall \"say \\\"hi\\\" there\""),
+            Some("say \"hi\" there".to_string())
+        );
+        assert_eq!(q("cort memory recall \"a\\\\b\""), Some("a\\b".to_string()));
+        assert_eq!(
+            q("cort memory recall \\\n  \"two words\""),
+            Some("two words".to_string())
+        );
+    }
+
+    #[test]
+    fn scan_separates_not_invoked_and_replays_every_invocation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("proj-a");
+        let sub = project.join("sess1/subagents");
+        fs::create_dir_all(&sub).unwrap();
+        let ts = "2026-11-13T00:00:00Z";
+        let ledger_path = tmp.path().join("ledger.json");
+        fs::write(
+            &ledger_path,
+            json!({"entries":[{"id":"i1","key":"k","claim":"alpha beta","recorded_at_utc":"2026-11-01T00:00:00Z"}]}).to_string(),
+        )
+        .unwrap();
+        write_lines(
+            &project.join("s1.jsonl"),
+            &[
+                call("a", "grep -l 'cort memory recall' *.jsonl", ts),
+                call(
+                    "b",
+                    "cort memory recall alpha; cort memory recall nomatch",
+                    ts,
+                ),
+                result("b", json!(answer(1, "full"))),
+            ],
+        );
+        write_lines(
+            &sub.join("agent-1.jsonl"),
+            &[call("c", "cort memory recall beta", ts)],
+        );
+        let ledger = load_ledger(&ledger_path).unwrap();
+        let report = scan(tmp.path(), Some("proj-a"), None, now(), Some(&ledger)).unwrap();
+        assert_eq!(report["files_read"], 2);
+        assert_eq!(report["not_invoked"], 1);
+        // one observed tool_result per command, two replayed invocations in it
+        assert_eq!(report["recalls"], 2);
+        assert_eq!(report["replay"]["calls"], 3);
+        assert_eq!(report["replay"]["full"]["0"], 1);
+        assert_eq!(report["replay"]["full"]["1"], 2);
+        assert_eq!(report["by_project"]["proj-a"]["recalls"], 2);
+    }
+
+    #[test]
     fn replay_matches_recorded_queries_against_the_ledger() {
         let tmp = tempfile::tempdir().unwrap();
         let project = tmp.path().join("proj-a");
@@ -481,7 +835,11 @@ mod tests {
         assert_eq!(ledger.len(), 7);
         let report = scan(tmp.path(), Some("proj-a"), None, now(), Some(&ledger)).unwrap();
         let replay = &report["replay"];
-        assert_eq!(replay["queries"], 3);
+        assert_eq!(replay["distinct_queries"], 3);
+        assert_eq!(replay["calls"], 4);
+        assert!(replay["reading"]
+            .as_str()
+            .is_some_and(|r| r.contains("entries recorded after a query are counted")));
         assert_eq!(replay["query_unparsed"], 1);
         assert_eq!(replay["full"]["2-5"], 1);
         assert_eq!(replay["full"]["6-20"], 2);

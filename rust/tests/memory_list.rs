@@ -309,6 +309,9 @@ fn unparsable_recorded_at_is_unknown_not_1970() {
     assert_eq!(s["unparsed_recorded_at"], 2);
     assert_eq!(s["forgetting_due_by_week"], json!({}));
     let entries = v["entries"].as_array().unwrap();
+    // Unknown rows sort last, so the listing stays oldest first.
+    assert_eq!(entries[0]["key"], "ok", "{v}");
+    assert!(entries[1..].iter().all(|e| e["tier"] == "unknown"), "{v}");
     let bad = entries.iter().find(|e| e["key"] == "bad").unwrap();
     assert_eq!(bad["tier"], "unknown");
     for field in [

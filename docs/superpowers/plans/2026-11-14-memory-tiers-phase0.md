@@ -55,7 +55,14 @@ epoch+7d); `list_json_summary_counts` (fake server with 4 entries incl. one supe
 **Files:** `evals/src/recall_hits.rs`, `evals/src/main.rs` (subcommand + help), tests in the module
 or `evals/tests/`. Template: `evals/src/capture_gap.rs` (transcript walk, `--project` validation).
 
-**Interface:** `cort-evals recall-hits [--dir <~/.claude/projects>] [--project <dirname>] [--days N]`
+**Interface:** `cort-evals recall-hits [--dir <~/.claude/projects>] [--project <dirname>] [--days N] [--ledger FILE]`
+- `--ledger FILE` (the JSON of `cort memory list`) adds a `replay` block: each recall invocation's
+  query is run against that ledger snapshot with the product's own `memory::recall_selection` and
+  bucketed like the observed side (`calls`, `distinct_queries`, `query_unparsed`, `full`, `partial`,
+  `share_full_le_5`, `reading`). Only invocations at shell command position count (not text inside
+  quotes, backticks or heredocs; those go to `not_invoked`); queries containing `$` or a backtick
+  cannot be replayed. The ledger belongs to one project, so use it with `--project`. Subagent
+  transcripts (`<project>/<session>/subagents/*.jsonl`) are read too.
 - For each Claude Code transcript line with a `Bash` `tool_use` whose command contains
   `cort memory recall`, find the matching `tool_result` (by `tool_use_id`), parse its text as JSON;
   count `hits` length and `match` (`partial` or full). Unparsable → `unparsed`.

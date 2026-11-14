@@ -40,12 +40,12 @@ pub struct Placement {
 /// 60 days after `recorded_at`); otherwise short-term, expiring at `max(recorded_at, epoch) + 7d`.
 /// An expired short-term entry stays short-term -- it waits for review, it never ages into long.
 pub fn place(recorded_at_ns: i128, epoch_ns: i128, now_ns: i128) -> Placement {
-    if recorded_at_ns < epoch_ns - SHORT_TERM_NS {
+    if recorded_at_ns < epoch_ns.saturating_sub(SHORT_TERM_NS) {
         return Placement {
             tier: Tier::Long,
             expires_at_ns: None,
             short_term_expired: false,
-            forgetting_due_at_ns: Some(recorded_at_ns + FORGETTING_NS),
+            forgetting_due_at_ns: Some(recorded_at_ns.saturating_add(FORGETTING_NS)),
         };
     }
     let expires = recorded_at_ns.max(epoch_ns).saturating_add(SHORT_TERM_NS);
@@ -85,12 +85,15 @@ pub fn parse_epoch(raw: &str) -> Result<i128, String> {
     if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
         return Err(invalid());
     }
-    let ns = crate::remind::local_midnight(y as i32, m, d).map_err(|_| {
+    let unresolved = || {
         "memory_list_epoch_unresolved: local time zone unavailable; pass --epoch YYYY-MM-DD"
             .to_string()
-    })?;
-    // `mktime` normalises 2026-02-31 to March; a date that does not round-trip is refused.
-    if local_date_of(ns) != Some(raw.to_string()) {
+    };
+    let ns = crate::remind::local_midnight(y as i32, m, d).map_err(|_| unresolved())?;
+    // `mktime` normalises 2026-02-31 to March, and a day whose local midnight does not exist
+    // (a DST gap) lands on 01:00; a date that does not round-trip to 00:00 is refused.
+    let (date, time) = crate::remind_snapshot::local_parts(ns).ok_or_else(unresolved)?;
+    if date != raw || time != "00:00" {
         return Err(invalid());
     }
     Ok(ns)
@@ -197,9 +200,12 @@ pub fn build(
             }
         })
         .collect();
+    // Oldest first; rows with an unknown time go last (`None` would sort before every `Some`).
     rows.sort_by(|a, b| {
         a.recorded_at_ns
-            .cmp(&b.recorded_at_ns)
+            .is_none()
+            .cmp(&b.recorded_at_ns.is_none())
+            .then(a.recorded_at_ns.cmp(&b.recorded_at_ns))
             .then(a.id.cmp(&b.id))
     });
     Report {
@@ -436,6 +442,21 @@ mod tests {
         let (_, ns) = default_epoch(now).unwrap();
         assert!(ns <= now);
         assert!(now - ns < 25 * 3_600 * NS_PER_SEC);
+    }
+
+    #[test]
+    fn place_never_overflows_at_either_extreme() {
+        let p = place(i128::MIN + 1, i128::MIN + 2, 0);
+        assert_eq!(p.tier, Tier::Short);
+        let long = place(i128::MIN, i128::MAX, 0);
+        assert_eq!(long.tier, Tier::Long);
+        let near_max = place(i128::MAX - 1, i128::MAX, 0);
+        assert_eq!(near_max.tier, Tier::Short);
+        // epoch - 7d saturates at i128::MIN rather than wrapping.
+        assert_eq!(place(0, i128::MIN, 0).tier, Tier::Short);
+        let far = place(i128::MAX - 8 * DAY_NS, i128::MAX, 0);
+        assert_eq!(far.tier, Tier::Long);
+        assert_eq!(far.forgetting_due_at_ns, Some(i128::MAX));
     }
 
     #[test]
