@@ -1,8 +1,9 @@
-# Two-tier project memory with links, decay and forgetting (issue #11) -- DRAFT for the user
+# Two-tier project memory with links, decay and forgetting (issue #11)
 
-Status: draft, revised once after an external design review (2 BLOCK, 6 SHOULD). Nothing is built
-until the user approves it (relayed through the agent-portal-tpm NUC session, per the user's
-2026-11-14 routing).
+Status: approved 2026-11-14 with the recommendations below (user's words relayed by the
+agent-portal-tpm NUC session: 「先按你的推薦做，出了問題我們再處理就好，這個工具的主要用戶也是你」;
+ledger key `memory-tiers-decisions`). Revised once after an external design review (2 BLOCK,
+6 SHOULD). Each phase still gets its own spec review, gate and push approval.
 
 ## Why
 
@@ -140,7 +141,17 @@ is **open question U5**.
    `record`/`resolve` refuse (same-key only) -- phase 3 extends write validation and the chain index.
 Each phase is spec → external review → small delegated tasks → gate → user approval to push.
 
-## Open questions for the user
+## Decisions (were open questions; decided 2026-11-14)
+
+- U1: (b) + (c), plus (d) -- a recall whose full-term match returns ≤ 5 entries writes one use row
+  per entry per day, best effort after the answer is printed; `cort memory use <id>` for the rest.
+- U2: derived placement.
+- U3: agreed as written.
+- U4: merges are not shown to the user first; each part's user quote is copied verbatim, the merge
+  is reversible, and the review log lists it afterwards.
+- U5: review runs in the first session of the weekend.
+
+The questions as they were put:
 
 - **U1 What counts as use.** (a) every recall hit writes a row: unbounded writes, not feasible;
   (b) a recall whose full-term match returns ≤ 5 entries writes one row naming them, best effort after
@@ -161,8 +172,8 @@ Each phase is spec → external review → small delegated tasks → gate → us
   whenever the review line appears? What happens when review falls behind is already safe (derived
   demotion), so this is about effort, not correctness.
 
-Decided by the agent (the user may override): pilot on agent-portal-tpm for one weekly cycle before
-enabling for every project (cortexyoung's own ledger included).
+Pilot on agent-portal-tpm for one weekly cycle before enabling for every project (cortexyoung's own
+ledger included) -- proposed by the agent, confirmed by the user with the rest.
 
 ## What does not change
 
