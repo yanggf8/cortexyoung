@@ -48,7 +48,7 @@ pub fn place(recorded_at_ns: i128, epoch_ns: i128, now_ns: i128) -> Placement {
             forgetting_due_at_ns: Some(recorded_at_ns + FORGETTING_NS),
         };
     }
-    let expires = recorded_at_ns.max(epoch_ns) + SHORT_TERM_NS;
+    let expires = recorded_at_ns.max(epoch_ns).saturating_add(SHORT_TERM_NS);
     Placement {
         tier: Tier::Short,
         expires_at_ns: Some(expires),
@@ -74,7 +74,7 @@ pub fn parse_epoch(raw: &str) -> Result<i128, String> {
         return Err(invalid());
     }
     let num = |range: std::ops::Range<usize>| -> Result<u32, String> {
-        let part = &raw[range];
+        let part = raw.get(range).ok_or_else(invalid)?;
         if part.bytes().all(|c| c.is_ascii_digit()) {
             part.parse().map_err(|_| invalid())
         } else {
@@ -85,7 +85,10 @@ pub fn parse_epoch(raw: &str) -> Result<i128, String> {
     if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
         return Err(invalid());
     }
-    let ns = crate::remind::local_midnight(y as i32, m, d)?;
+    let ns = crate::remind::local_midnight(y as i32, m, d).map_err(|_| {
+        "memory_list_epoch_unresolved: local time zone unavailable; pass --epoch YYYY-MM-DD"
+            .to_string()
+    })?;
     // `mktime` normalises 2026-02-31 to March; a date that does not round-trip is refused.
     if local_date_of(ns) != Some(raw.to_string()) {
         return Err(invalid());
@@ -95,9 +98,7 @@ pub fn parse_epoch(raw: &str) -> Result<i128, String> {
 
 /// The local calendar date of `ns` as `YYYY-MM-DD`, or `None` when the zone cannot be resolved.
 fn local_date_of(ns: i128) -> Option<String> {
-    let stamp = crate::remind_snapshot::local_stamp(ns);
-    let date = stamp.get(..10)?;
-    (stamp.len() == 16).then(|| date.to_string())
+    crate::remind_snapshot::local_parts(ns).map(|(date, _)| date)
 }
 
 /// Today's local midnight as `(YYYY-MM-DD, ns)`; refused when the zone cannot be resolved.
@@ -139,16 +140,24 @@ struct Row {
     id: String,
     key: String,
     claim: String,
-    recorded_at_ns: i128,
-    age_days: i128,
-    placement: Placement,
+    /// `None` when `recorded_at` is unparsable or outside the representable UTC range.
+    recorded_at_ns: Option<i128>,
+    age_days: Option<i128>,
+    placement: Option<Placement>,
     mentions_user: bool,
     evidence_status: String,
+}
+
+impl Row {
+    fn tier_is(&self, tier: Tier) -> bool {
+        self.placement.is_some_and(|p| p.tier == tier)
+    }
 }
 
 pub struct Report {
     project_id: String,
     epoch: String,
+    epoch_ns: i128,
     unparsed_recorded_at: usize,
     rows: Vec<Row>,
 }
@@ -166,17 +175,23 @@ pub fn build(
         .hits
         .iter()
         .map(|hit| {
-            let recorded = hit.entry.recorded_at.parse::<i128>().unwrap_or_else(|_| {
+            // Same UTC-day guard as `memory.rs`: outside it the date cannot be printed.
+            let recorded = hit
+                .entry
+                .recorded_at
+                .parse::<i128>()
+                .ok()
+                .filter(|ns| (-719_528..=2_932_896).contains(&ns.div_euclid(DAY_NS)));
+            if recorded.is_none() {
                 unparsed += 1;
-                0
-            });
+            }
             Row {
                 id: hit.entry.id.clone(),
                 key: hit.entry.key.clone(),
                 claim: hit.entry.claim.clone(),
                 recorded_at_ns: recorded,
-                age_days: (now_ns - recorded).div_euclid(DAY_NS).max(0),
-                placement: place(recorded, epoch_ns, now_ns),
+                age_days: recorded.map(|r| (now_ns - r).div_euclid(DAY_NS).max(0)),
+                placement: recorded.map(|r| place(r, epoch_ns, now_ns)),
                 mentions_user: mentions_user(&hit.entry.key, &hit.entry.claim),
                 evidence_status: hit.evidence_status.clone(),
             }
@@ -190,6 +205,7 @@ pub fn build(
     Report {
         project_id: project_id.to_string(),
         epoch: epoch.to_string(),
+        epoch_ns,
         unparsed_recorded_at: unparsed,
         rows,
     }
@@ -204,16 +220,16 @@ impl Report {
         let mut by_week = BTreeMap::<String, usize>::new();
         let mut by_evidence = BTreeMap::<String, usize>::new();
         for row in &self.rows {
-            if let Some(due) = row.placement.forgetting_due_at_ns {
+            if let Some(due) = row.placement.and_then(|p| p.forgetting_due_at_ns) {
                 *by_week.entry(week_monday(due)).or_default() += 1;
             }
             *by_evidence.entry(row.evidence_status.clone()).or_default() += 1;
         }
         let mut summary = json!({
             "active": self.rows.len(),
-            "short": self.count(|r| r.placement.tier == Tier::Short),
-            "long": self.count(|r| r.placement.tier == Tier::Long),
-            "short_term_expired": self.count(|r| r.placement.short_term_expired),
+            "short": self.count(|r| r.tier_is(Tier::Short)),
+            "long": self.count(|r| r.tier_is(Tier::Long)),
+            "short_term_expired": self.count(|r| r.placement.is_some_and(|p| p.short_term_expired)),
             "mentions_user": self.count(|r| r.mentions_user),
             "forgetting_due_by_week": by_week,
             "by_evidence": by_evidence,
@@ -228,16 +244,17 @@ impl Report {
                 let mut e = Map::new();
                 e.insert("id".into(), json!(row.id));
                 e.insert("key".into(), json!(row.key));
-                e.insert(
-                    "recorded_at_utc".into(),
-                    json!(utc_parts(row.recorded_at_ns).1),
-                );
-                e.insert("age_days".into(), json!(row.age_days));
-                e.insert("tier".into(), json!(row.placement.tier.as_str()));
-                if let Some(ns) = row.placement.expires_at_ns {
+                if let Some(ns) = row.recorded_at_ns {
+                    e.insert("recorded_at_utc".into(), json!(utc_parts(ns).1));
+                }
+                if let Some(age) = row.age_days {
+                    e.insert("age_days".into(), json!(age));
+                }
+                e.insert("tier".into(), json!(tier_name(row.placement)));
+                if let Some(ns) = row.placement.and_then(|p| p.expires_at_ns) {
                     e.insert("expires_at_utc".into(), json!(utc_parts(ns).1));
                 }
-                if let Some(ns) = row.placement.forgetting_due_at_ns {
+                if let Some(ns) = row.placement.and_then(|p| p.forgetting_due_at_ns) {
                     e.insert("forgetting_due_at_utc".into(), json!(utc_parts(ns).1));
                 }
                 e.insert("mentions_user".into(), json!(row.mentions_user));
@@ -249,6 +266,7 @@ impl Report {
         json!({
             "project_id": self.project_id,
             "epoch": self.epoch,
+            "epoch_utc": utc_parts(self.epoch_ns).1,
             "summary": summary,
             "entries": entries,
         })
@@ -258,21 +276,31 @@ impl Report {
     /// tab is IFS whitespace and `read` would collapse an empty field away.
     pub fn lean(&self) -> String {
         let mut out = format!(
-            "active={} short={} long={} short_term_expired={} mentions_user={} epoch={}\n",
+            "active={} short={} long={} short_term_expired={} mentions_user={} epoch={} epoch_utc={}",
             self.rows.len(),
-            self.count(|r| r.placement.tier == Tier::Short),
-            self.count(|r| r.placement.tier == Tier::Long),
-            self.count(|r| r.placement.short_term_expired),
+            self.count(|r| r.tier_is(Tier::Short)),
+            self.count(|r| r.tier_is(Tier::Long)),
+            self.count(|r| r.placement.is_some_and(|p| p.short_term_expired)),
             self.count(|r| r.mentions_user),
-            self.epoch
+            self.epoch,
+            utc_parts(self.epoch_ns).1
         );
+        if self.unparsed_recorded_at > 0 {
+            out.push_str(&format!(
+                " unparsed_recorded_at={}",
+                self.unparsed_recorded_at
+            ));
+        }
+        out.push('\n');
         for row in &self.rows {
             let id8: String = row.id.chars().take(8).collect();
             let fields = [
                 lean_field(&id8),
-                utc_parts(row.recorded_at_ns).0,
-                row.age_days.to_string(),
-                row.placement.tier.as_str().to_string(),
+                row.recorded_at_ns
+                    .map_or_else(|| "-".to_string(), |ns| utc_parts(ns).0),
+                row.age_days
+                    .map_or_else(|| "-".to_string(), |a| a.to_string()),
+                tier_name(row.placement).to_string(),
                 lean_field(&row.evidence_status),
                 if row.mentions_user { "y" } else { "n" }.to_string(),
                 lean_field(&row.key),
@@ -283,6 +311,10 @@ impl Report {
         }
         out
     }
+}
+
+fn tier_name(placement: Option<Placement>) -> &'static str {
+    placement.map_or("unknown", |p| p.tier.as_str())
 }
 
 fn cut_claim(claim: &str) -> String {
@@ -297,7 +329,13 @@ fn cut_claim(claim: &str) -> String {
 fn lean_field(raw: &str) -> String {
     let cleaned: String = raw
         .chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
+        .map(|c| {
+            if c.is_control() || c == '\u{2028}' || c == '\u{2029}' {
+                ' '
+            } else {
+                c
+            }
+        })
         .collect();
     if cleaned.trim().is_empty() {
         "-".to_string()
@@ -367,5 +405,42 @@ mod tests {
         assert_eq!(lean_field(""), "-");
         assert_eq!(lean_field(" \t\n"), "-");
         assert_eq!(lean_field("a\tb\nc\rd"), "a b c d");
+        assert_eq!(lean_field("a\u{2028}b\u{2029}c"), "a b c");
+        assert_eq!(lean_field("\u{2028}\u{2029}"), "-");
+    }
+
+    #[test]
+    fn parse_epoch_rejects_malformed_dates() {
+        for bad in [
+            "2026-02-31",
+            "2026-1-01",
+            "2026-13-01",
+            "abcd-ef-gh",
+            "２０２６-11-14",
+            "é2026-11-1",
+        ] {
+            let err = parse_epoch(bad).unwrap_err();
+            assert!(err.starts_with("memory_list_epoch_invalid"), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn parse_epoch_round_trips_local_date() {
+        let ns = parse_epoch("2026-11-14").unwrap();
+        assert_eq!(local_date_of(ns), Some("2026-11-14".to_string()));
+    }
+
+    #[test]
+    fn default_epoch_is_todays_local_midnight() {
+        let now = 1_794_650_000 * NS_PER_SEC;
+        let (_, ns) = default_epoch(now).unwrap();
+        assert!(ns <= now);
+        assert!(now - ns < 25 * 3_600 * NS_PER_SEC);
+    }
+
+    #[test]
+    fn place_saturates_at_the_extreme() {
+        let p = place(i128::MAX, EPOCH, EPOCH);
+        assert_eq!(p.expires_at_ns, Some(i128::MAX));
     }
 }

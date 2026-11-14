@@ -87,8 +87,19 @@ impl Fixture {
         at_ns: i128,
         sup: Option<&str>,
     ) {
+        self.insert_raw(project, id, key, claim, &at_ns.to_string(), sup);
+    }
+    fn insert_raw(
+        &self,
+        project: &str,
+        id: &str,
+        key: &str,
+        claim: &str,
+        recorded_at: &str,
+        sup: Option<&str>,
+    ) {
         let mut entry = json!({"id":id,"key":key,"claim":claim,"source":format!(".cort-unsourced/{id}"),"source_line":1,
-            "source_sha256":"","unsourced":true,"recorded_at":at_ns.to_string()});
+            "source_sha256":"","unsourced":true,"recorded_at":recorded_at});
         if let Some(s) = sup {
             entry["supersedes"] = json!(s);
         }
@@ -98,8 +109,11 @@ impl Fixture {
         ));
     }
     fn report(&self) -> memory_tiers::Report {
+        self.report_at(NOW_NS)
+    }
+    fn report_at(&self, now_ns: i128) -> memory_tiers::Report {
         let recall = memory_store::recall_with(self.root(), "", &self.ledger).unwrap();
-        memory_tiers::build(&self.project(), "2026-11-14", EPOCH_NS, NOW_NS, &recall)
+        memory_tiers::build(&self.project(), "2026-11-14", EPOCH_NS, now_ns, &recall)
     }
 }
 
@@ -147,6 +161,7 @@ fn list_json_summary_counts() {
     let v = f.report().to_json();
     assert_eq!(v["project_id"], f.project());
     assert_eq!(v["epoch"], "2026-11-14");
+    assert_eq!(v["epoch_utc"], "2026-11-14T00:00:00Z");
     let s = &v["summary"];
     assert_eq!(s["active"], 3, "{v}");
     assert_eq!(s["long"], 1);
@@ -199,7 +214,7 @@ fn list_lean_has_no_empty_field_and_escapes_tabs() {
     let mut lines = lean.lines();
     assert_eq!(
         lines.next().unwrap(),
-        "active=2 short=2 long=0 short_term_expired=0 mentions_user=0 epoch=2026-11-14"
+        "active=2 short=2 long=0 short_term_expired=0 mentions_user=0 epoch=2026-11-14 epoch_utc=2026-11-14T00:00:00Z"
     );
     let rows: Vec<&str> = lines.collect();
     assert_eq!(rows.len(), 2, "{lean}");
@@ -267,4 +282,86 @@ fn list_reads_alias_component() {
         .map(|e| e["key"].as_str().unwrap())
         .collect();
     assert_eq!(keys, ["current", "legacy"]);
+}
+
+#[test]
+fn unparsable_recorded_at_is_unknown_not_1970() {
+    let f = Fixture::new();
+    let p = f.project();
+    f.insert_raw(&p, "99999999aaaaaaaa", "bad", "no date", "x", None);
+    // Parses as an integer but lies far outside the printable UTC range.
+    f.insert_raw(
+        &p,
+        "88888888bbbbbbbb",
+        "huge",
+        "overflow",
+        &i128::MAX.to_string(),
+        None,
+    );
+    f.insert(&p, "77777777cccccccc", "ok", "fine", EPOCH_NS - DAY, None);
+    let report = f.report();
+    let v = report.to_json();
+    let s = &v["summary"];
+    assert_eq!(s["active"], 3, "{v}");
+    assert_eq!(s["short"], 1);
+    assert_eq!(s["long"], 0);
+    assert_eq!(s["short_term_expired"], 0);
+    assert_eq!(s["unparsed_recorded_at"], 2);
+    assert_eq!(s["forgetting_due_by_week"], json!({}));
+    let entries = v["entries"].as_array().unwrap();
+    let bad = entries.iter().find(|e| e["key"] == "bad").unwrap();
+    assert_eq!(bad["tier"], "unknown");
+    for field in [
+        "recorded_at_utc",
+        "age_days",
+        "expires_at_utc",
+        "forgetting_due_at_utc",
+    ] {
+        assert!(bad.get(field).is_none(), "{field}: {bad}");
+    }
+    let lean = report.lean();
+    let header = lean.lines().next().unwrap();
+    assert!(header.ends_with(" unparsed_recorded_at=2"), "{header}");
+    let row = lean.lines().find(|l| l.contains("\tbad\t")).unwrap();
+    let fields: Vec<&str> = row.split('\t').collect();
+    assert_eq!(&fields[1..4], ["-", "-", "unknown"], "{row:?}");
+}
+
+#[test]
+fn expired_short_term_is_counted_in_json_and_lean() {
+    let f = Fixture::new();
+    let p = f.project();
+    // Expires epoch + 7d: gone by epoch + 8d.
+    f.insert(&p, "a1a1a1a1a1a1a1a1", "old", "x", EPOCH_NS - 3 * DAY, None);
+    // Expires epoch + 10d: still live at epoch + 8d.
+    f.insert(&p, "b2b2b2b2b2b2b2b2", "new", "y", EPOCH_NS + 3 * DAY, None);
+    let report = f.report_at(EPOCH_NS + 8 * DAY);
+    assert_eq!(report.to_json()["summary"]["short_term_expired"], 1);
+    let lean = report.lean();
+    assert!(
+        lean.lines()
+            .next()
+            .unwrap()
+            .contains(" short_term_expired=1 "),
+        "{lean}"
+    );
+}
+
+#[test]
+fn invalid_epoch_is_refused_before_any_network_use() {
+    let temp = tempfile::tempdir().unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_cort"))
+        .args(["memory", "list", "--epoch", "2026-02-31"])
+        .current_dir(temp.path())
+        .env("CORT_CACHE_DIR", temp.path().join("cache"))
+        .env("CORT_MEMORY_DIR", temp.path().join("data"))
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(text.contains("memory_list_epoch_invalid"), "{text}");
 }

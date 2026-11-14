@@ -7,11 +7,12 @@
 tiers, and how many hits real `cort memory recall` calls return.
 
 **Spec:** `docs/superpowers/specs/2026-11-14-memory-tiers-design.md` (Phases → 0, and "Tiers are
-derived"). Phase 0 writes nothing to the shared database and adds no table.
+derived"). Phase 0 writes no rows to the shared database and adds no table; like every read, it may create
+missing tables (idempotent `CREATE TABLE IF NOT EXISTS`).
 
 ## Global Constraints
 
-- Read-only against the shared database: no DDL, no INSERT, no new table.
+- Read-only against the shared database: no INSERT, no new table (the shared read path may send idempotent `CREATE TABLE IF NOT EXISTS`).
 - Pure Rust, no new crate, no `.unwrap()`/`.expect()` outside tests; fmt + clippy `-D warnings` clean.
 - Agent-first output: JSON by default like `memory status`, `--lean` TSV with no empty field.
 

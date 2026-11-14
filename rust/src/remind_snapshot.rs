@@ -272,7 +272,7 @@ pub fn select_unshown(
 /// `(YYYY-MM-DD, HH:MM)` of an instant in this machine's local zone; `None` when it cannot say.
 /// Uses `remind.rs`'s `Tm` and its `localtime_r` declaration, one FFI home for both.
 #[cfg(unix)]
-fn local_parts(ns: i128) -> Option<(String, String)> {
+pub(crate) fn local_parts(ns: i128) -> Option<(String, String)> {
     let secs = std::os::raw::c_long::try_from(ns.div_euclid(1_000_000_000)).ok()?;
     let mut tm = crate::remind::Tm {
         tm_sec: 0,
@@ -305,7 +305,7 @@ fn local_parts(ns: i128) -> Option<(String, String)> {
 }
 
 #[cfg(not(unix))]
-fn local_parts(_ns: i128) -> Option<(String, String)> {
+pub(crate) fn local_parts(_ns: i128) -> Option<(String, String)> {
     None
 }
 
