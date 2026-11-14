@@ -19,6 +19,7 @@ const CREATE_CHAIN_INDEX: &str = "CREATE UNIQUE INDEX IF NOT EXISTS project_memo
 pub(crate) const CREATE_ALIASES: &str = "CREATE TABLE IF NOT EXISTS project_aliases (old_project TEXT NOT NULL, new_project TEXT NOT NULL, created_at TEXT NOT NULL, machine TEXT NOT NULL, PRIMARY KEY (old_project, new_project))";
 pub(crate) const CREATE_QUESTIONS: &str = "CREATE TABLE IF NOT EXISTS project_questions (project TEXT NOT NULL, id TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY (project, id))";
 pub(crate) const CREATE_REMINDERS: &str = "CREATE TABLE IF NOT EXISTS project_reminders (project TEXT NOT NULL, id TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY (project, id))";
+pub(crate) const CREATE_LIFECYCLE: &str = "CREATE TABLE IF NOT EXISTS project_memory_lifecycle (project TEXT NOT NULL, id TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY (project, id))";
 pub(crate) const COMPONENT: &str = "WITH RECURSIVE g(p) AS (SELECT ? UNION SELECT CASE WHEN a.old_project = g.p THEN a.new_project ELSE a.old_project END FROM project_aliases a JOIN g ON a.old_project = g.p OR a.new_project = g.p) SELECT p FROM g";
 #[derive(Debug, Serialize)]
 pub struct MemoryConflict {
@@ -115,18 +116,46 @@ impl Ledger {
     }
 
     fn read_bodies(&self, project: &str) -> Result<Vec<String>, LedgerError> {
+        Ok(self.read_bodies_with(project, false)?.bodies)
+    }
+
+    /// The ledger read, optionally with the lifecycle rows in the same pipeline. The lifecycle
+    /// table is created by every read, so a later lifecycle read never meets a missing one; its
+    /// rows are returned as raw cells, to be counted rather than failed on.
+    fn read_bodies_with(
+        &self,
+        project: &str,
+        with_lifecycle: bool,
+    ) -> Result<BodiesRead, LedgerError> {
         let sql = format!("SELECT body FROM project_memory WHERE project IN ({COMPONENT})");
-        let results = self
+        let lifecycle_sql =
+            format!("SELECT body FROM project_memory_lifecycle WHERE project IN ({COMPONENT})");
+        let arg = || vec![Cell::Text(project.into())];
+        // Each result is named where its statement is pushed, so appending a statement can
+        // never silently shift another's index.
+        let mut stmts = vec![
+            Stmt::new(CREATE_TABLE, vec![]),
+            Stmt::new(CREATE_ALIASES, vec![]),
+            Stmt::new(CREATE_QUESTIONS, vec![]),
+            Stmt::new(CREATE_REMINDERS, vec![]),
+            Stmt::new(CREATE_LIFECYCLE, vec![]),
+        ];
+        let bodies_at = stmts.len();
+        stmts.push(Stmt::new(&sql, arg()));
+        let lifecycle_at = with_lifecycle.then(|| {
+            stmts.push(Stmt::new(&lifecycle_sql, arg()));
+            stmts.len() - 1
+        });
+        let mut results = self
             .db
-            .pipeline(&[
-                Stmt::new(CREATE_TABLE, vec![]),
-                Stmt::new(CREATE_ALIASES, vec![]),
-                Stmt::new(CREATE_QUESTIONS, vec![]),
-                Stmt::new(CREATE_REMINDERS, vec![]),
-                Stmt::new(&sql, vec![Cell::Text(project.into())]),
-            ])
+            .pipeline(&stmts)
             .map_err(|e| LedgerError::Remote(e.kind))?;
-        let bodies: Vec<String> = results[4]
+        // Defensive: `pipeline()` already guarantees one result per statement.
+        if results.len() != stmts.len() {
+            return Err(LedgerError::Message("missing remote memory result".into()));
+        }
+        let lifecycle = lifecycle_at.map(|at| std::mem::take(&mut results[at].rows));
+        let bodies: Vec<String> = results[bodies_at]
             .rows
             .iter()
             .map(|row| match row.first() {
@@ -134,7 +163,10 @@ impl Ledger {
                 _ => Err(LedgerError::Message("invalid remote memory row".into())),
             })
             .collect::<Result<_, _>>()?;
-        merge_bodies(bodies).map_err(LedgerError::Message)
+        Ok(BodiesRead {
+            bodies: merge_bodies(bodies).map_err(LedgerError::Message)?,
+            lifecycle,
+        })
     }
 
     fn project_ids(&self, project: &str) -> Result<Vec<String>, LedgerError> {
@@ -157,16 +189,64 @@ impl Ledger {
     }
 
     pub fn read(&self, project: &str) -> Result<MemoryLedger, LedgerError> {
-        ledger_from_bodies(self.read_bodies(project)?).map_err(|message| {
-            if message.contains("supersedes missing id") {
-                LedgerError::Message(format!(
-                    "{message}; re-add the alias with cort memory alias add"
-                ))
-            } else {
-                LedgerError::Message(message)
-            }
-        })
+        ledger_for_read(self.read_bodies(project)?)
     }
+
+    /// `read` plus the project's lifecycle events, from one pipeline. The ledger and its errors
+    /// are exactly `read`'s; a lifecycle row that is not a text cell, or whose body does not
+    /// decode, is counted as unreadable and never fails the read.
+    pub fn read_with_lifecycle(
+        &self,
+        project: &str,
+    ) -> Result<(MemoryLedger, LifecycleRows), LedgerError> {
+        let read = self.read_bodies_with(project, true)?;
+        let ledger = ledger_for_read(read.bodies)?;
+        Ok((ledger, lifecycle_rows(read.lifecycle.unwrap_or_default())))
+    }
+}
+
+/// Lifecycle rows (first cell = body) to events: a non-text cell is unreadable, then the rest
+/// go through `decode_rows`. Shared by every read that folds lifecycle.
+pub(crate) fn lifecycle_rows(rows: Vec<Vec<Cell>>) -> LifecycleRows {
+    let mut texts = Vec::new();
+    let mut not_text = 0;
+    for row in rows {
+        match row.into_iter().next() {
+            Some(Cell::Text(body)) => texts.push(body),
+            _ => not_text += 1,
+        }
+    }
+    let (events, unreadable) = crate::memory_lifecycle::decode_rows(&texts);
+    LifecycleRows {
+        events,
+        unreadable: unreadable + not_text,
+    }
+}
+
+/// What one ledger read returned: merged bodies, and the raw lifecycle rows when asked for.
+struct BodiesRead {
+    bodies: Vec<String>,
+    lifecycle: Option<Vec<Vec<Cell>>>,
+}
+
+/// The lifecycle events one read found, and how many rows it could not use.
+#[derive(Debug)]
+pub struct LifecycleRows {
+    pub events: Vec<crate::memory_lifecycle::LifecycleEvent>,
+    pub unreadable: usize,
+}
+
+/// `read`'s mapping from merged bodies to a ledger, shared with `read_with_lifecycle`.
+fn ledger_for_read(bodies: Vec<String>) -> Result<MemoryLedger, LedgerError> {
+    ledger_from_bodies(bodies).map_err(|message| {
+        if message.contains("supersedes missing id") {
+            LedgerError::Message(format!(
+                "{message}; re-add the alias with cort memory alias add"
+            ))
+        } else {
+            LedgerError::Message(message)
+        }
+    })
 }
 
 #[derive(Deserialize, Serialize)]
@@ -1801,6 +1881,9 @@ struct AliasSnapshot {
     bodies: Vec<(String, MemoryEntry)>,
     questions: Vec<(String, QuestionEvent)>,
     reminders: Vec<(String, ReminderEvent)>,
+    /// Decodable lifecycle events with the project each is filed under; a row that does not
+    /// decode is skipped here exactly as the folding read skips it.
+    lifecycle: Vec<(String, crate::memory_lifecycle::LifecycleEvent)>,
     ids: Vec<String>,
 }
 
@@ -1813,6 +1896,9 @@ impl Ledger {
             format!("SELECT project, body FROM project_questions WHERE project IN ({COMPONENT})");
         let reminders_sql =
             format!("SELECT project, body FROM project_reminders WHERE project IN ({COMPONENT})");
+        let lifecycle_sql = format!(
+            "SELECT project, body FROM project_memory_lifecycle WHERE project IN ({COMPONENT})"
+        );
         let arg = || vec![Cell::Text(project.into())];
         // Each result is named where its statement is pushed, so appending a statement can
         // never silently shift another's index.
@@ -1821,6 +1907,7 @@ impl Ledger {
             Stmt::new(CREATE_ALIASES, vec![]),
             Stmt::new(CREATE_QUESTIONS, vec![]),
             Stmt::new(CREATE_REMINDERS, vec![]),
+            Stmt::new(CREATE_LIFECYCLE, vec![]),
         ];
         let ids_at = stmts.len();
         stmts.push(Stmt::new(COMPONENT, arg()));
@@ -1832,6 +1919,8 @@ impl Ledger {
         stmts.push(Stmt::new(questions_sql, arg()));
         let reminders_at = stmts.len();
         stmts.push(Stmt::new(reminders_sql, arg()));
+        let lifecycle_at = stmts.len();
+        stmts.push(Stmt::new(lifecycle_sql, arg()));
         let results = self
             .db
             .pipeline(&stmts)
@@ -1898,11 +1987,24 @@ impl Ledger {
                 Ok((text(row, 0)?, event))
             })
             .collect::<Result<Vec<_>, LedgerError>>()?;
+        let mut lifecycle = Vec::new();
+        for row in &result(lifecycle_at)?.rows {
+            let project = text(row, 0)?;
+            // Deliberately not an error (unlike a reminder row): the fold never applies a row
+            // that does not decode, so it can neither hold an id in place nor separate one, and
+            // a bad row must not block linking or unlinking a project.
+            if let Some(Cell::Text(body)) = row.get(1) {
+                let (events, _unreadable) =
+                    crate::memory_lifecycle::decode_rows(std::slice::from_ref(body));
+                lifecycle.extend(events.into_iter().map(|event| (project.clone(), event)));
+            }
+        }
         Ok(AliasSnapshot {
             aliases,
             bodies,
             questions,
             reminders,
+            lifecycle,
             ids,
         })
     }
@@ -2004,9 +2106,12 @@ pub fn alias_add_with(
             compatibility_note: None,
         });
     }
-    // An old id holding only reminder rows is accepted: reminders are as real a reason to
-    // link a renamed project as memory or question rows.
-    if snapshot.bodies.is_empty() && snapshot.questions.is_empty() && snapshot.reminders.is_empty()
+    // An old id holding only reminder or lifecycle rows is accepted: both are as real a reason
+    // to link a renamed project as memory or question rows.
+    if snapshot.bodies.is_empty()
+        && snapshot.questions.is_empty()
+        && snapshot.reminders.is_empty()
+        && snapshot.lifecycle.is_empty()
     {
         return Err(ALIAS_EMPTY.into());
     }
@@ -2173,6 +2278,22 @@ pub fn alias_remove_with(
             .flatten();
         for id in event.reminder.iter().chain(close_of) {
             if reminder_locations
+                .get(id.as_str())
+                .is_some_and(|places| !places.contains(component.as_str()))
+            {
+                crossing.insert(id.clone());
+            }
+        }
+    }
+    // A lifecycle event names the ledger entry it acts on in `entry` and the entry covering it in
+    // `superseded_by`: an id that exists somewhere must stay in its component, exactly as for a
+    // reminder. An id no component holds is an orphan and blocks nothing.
+    for (project, event) in &snapshot.lifecycle {
+        let component = components
+            .get(project)
+            .ok_or_else(|| LedgerError::Message("invalid alias component".into()))?;
+        for id in event.entry.iter().chain(event.superseded_by.iter()) {
+            if locations
                 .get(id.as_str())
                 .is_some_and(|places| !places.contains(component.as_str()))
             {

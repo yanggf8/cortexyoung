@@ -1580,3 +1580,262 @@ fn ignored_insert_with_failed_lookup_is_not_recorded() {
         }
     );
 }
+
+/// Records every request body, so a test can see exactly what one read sent.
+struct Recording {
+    inner: Arc<SqliteTransport>,
+    bodies: Arc<Mutex<Vec<String>>>,
+}
+
+impl Transport for Recording {
+    fn post(
+        &self,
+        url: &str,
+        body: &[u8],
+        headers: &[(&str, &str)],
+    ) -> Result<Vec<u8>, RemoteError> {
+        self.bodies
+            .lock()
+            .unwrap()
+            .push(String::from_utf8_lossy(body).into_owned());
+        self.inner.post(url, body, headers)
+    }
+}
+
+fn recording_ledger() -> (Ledger, Arc<Mutex<Vec<String>>>) {
+    let bodies = Arc::new(Mutex::new(Vec::new()));
+    let ledger = Ledger::with_transport(
+        "https://example.test",
+        "test",
+        Box::new(Recording {
+            inner: Arc::new(SqliteTransport::new().unwrap()),
+            bodies: bodies.clone(),
+        }),
+    )
+    .unwrap();
+    (ledger, bodies)
+}
+
+#[test]
+fn read_with_lifecycle_one_round_trip() {
+    let (ledger, bodies) = recording_ledger();
+    let (read, rows) = ledger.read_with_lifecycle("p").unwrap();
+    assert!(read.entries.is_empty());
+    assert!(rows.events.is_empty());
+    assert_eq!(rows.unreadable, 0);
+    let bodies = bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 1, "one pipeline, got {bodies:?}");
+    let sent = &bodies[0];
+    for needle in [
+        "CREATE TABLE IF NOT EXISTS project_memory_lifecycle",
+        "SELECT body FROM project_memory WHERE project IN (WITH RECURSIVE",
+        "SELECT body FROM project_memory_lifecycle WHERE project IN (WITH RECURSIVE",
+    ] {
+        assert!(sent.contains(needle), "{needle} missing from {sent}");
+    }
+    // The plain read creates the table too, but does not select from it.
+    let (plain, plain_bodies) = recording_ledger();
+    plain.read("p").unwrap();
+    let plain_bodies = plain_bodies.lock().unwrap();
+    assert_eq!(plain_bodies.len(), 1);
+    assert!(plain_bodies[0].contains("CREATE TABLE IF NOT EXISTS project_memory_lifecycle"));
+    assert!(!plain_bodies[0].contains("SELECT body FROM project_memory_lifecycle"));
+}
+
+#[test]
+fn read_with_lifecycle_counts_bad_rows() {
+    let f = Fixture::new();
+    f.ledger.read(&f.project()).unwrap();
+    let project = f.project();
+    let good = json!({"id":"e1","kind":"on","recorded_at":"5"}).to_string();
+    for (id, body) in [
+        ("e1", good.as_str()),
+        ("bad-json", "{not json"),
+        (
+            "no-entry",
+            r#"{"id":"e2","kind":"archive","recorded_at":"6"}"#,
+        ),
+    ] {
+        f.sql(&format!(
+            "INSERT INTO project_memory_lifecycle VALUES ('{project}', '{id}', '{}')",
+            body.replace('\'', "''")
+        ));
+    }
+    // (A non-text cell also counts as unreadable in `read_with_lifecycle`; the fake transport
+    // cannot carry a blob or a multi-statement injected cell, so only the decode path is run.)
+    let (read, rows) = f.ledger.read_with_lifecycle(&project).unwrap();
+    assert!(read.entries.is_empty());
+    assert_eq!(rows.events.len(), 1);
+    assert_eq!(rows.events[0].id, "e1");
+    assert_eq!(rows.unreadable, 2);
+}
+
+fn lifecycle_row(f: &Fixture, project: &str, event: &serde_json::Value) {
+    f.sql(&format!(
+        "INSERT INTO project_memory_lifecycle VALUES ('{project}', '{}', '{}')",
+        event["id"].as_str().unwrap(),
+        event.to_string().replace('\'', "''")
+    ));
+}
+
+#[test]
+fn alias_remove_refuses_when_lifecycle_rows_cross() {
+    use memory_store::AliasFrom;
+    let f = Fixture::new();
+    let current = f.project();
+    f.record("one", "A", None).unwrap();
+    let old_entry: cort::memory::MemoryEntry = serde_json::from_value(json!({"id":"oldentry00","key":"other","claim":"B","source":"decision.md","source_line":1,"source_sha256":"hash","recorded_at":"1"})).unwrap();
+    f.insert("old", &old_entry);
+    f.alias(&current, "old");
+    // The event lives under the current id while the entry it acts on lives under the old one.
+    lifecycle_row(
+        &f,
+        &current,
+        &json!({"id":"ev000001","kind":"archive","entry":"oldentry00","recorded_at":"9"}),
+    );
+    let refused = match memory_store::alias_remove_with(
+        f.root(),
+        AliasFrom::Project("old".into()),
+        &f.ledger,
+    ) {
+        Err(LedgerError::Message(message)) => message,
+        other => panic!("expected alias_in_use, got {other:?}"),
+    };
+    assert!(refused.starts_with("alias_in_use"), "{refused}");
+    assert!(refused.contains("oldentry00"), "{refused}");
+    assert_eq!(
+        memory_store::alias_list_with(f.root(), &f.ledger)
+            .unwrap()
+            .aliases
+            .len(),
+        1
+    );
+    // An event naming an id no component holds is an orphan and blocks nothing.
+    let g = Fixture::new();
+    let current = g.project();
+    g.record("one", "A", None).unwrap();
+    g.insert("old", &old_entry);
+    g.alias(&current, "old");
+    lifecycle_row(
+        &g,
+        &current,
+        &json!({"id":"ev000002","kind":"archive","entry":"nobodyholds","recorded_at":"9"}),
+    );
+    assert_eq!(
+        memory_store::alias_remove_with(g.root(), AliasFrom::Project("old".into()), &g.ledger)
+            .unwrap()
+            .outcome,
+        "removed"
+    );
+}
+
+#[test]
+fn alias_add_accepts_old_id_with_only_lifecycle_rows() {
+    use memory_store::AliasFrom;
+    let f = Fixture::new();
+    f.ledger.read(&f.project()).unwrap();
+    lifecycle_row(
+        &f,
+        "old-lifecycle-only",
+        &json!({"id":"ev000003","kind":"on","recorded_at":"3"}),
+    );
+    let linked = memory_store::alias_add_with(
+        f.root(),
+        AliasFrom::Project("old-lifecycle-only".into()),
+        &f.ledger,
+    )
+    .unwrap();
+    assert_eq!(linked.outcome, "linked");
+    let empty = Fixture::new();
+    assert!(matches!(
+        memory_store::alias_add_with(empty.root(), AliasFrom::Project("nothing".into()), &empty.ledger),
+        Err(LedgerError::Message(message)) if message.contains("URL may be wrong")
+    ));
+}
+
+fn old_entry(id: &str, key: &str) -> cort::memory::MemoryEntry {
+    serde_json::from_value(json!({"id":id,"key":key,"claim":"B","source":"decision.md","source_line":1,"source_sha256":"hash","recorded_at":"1"})).unwrap()
+}
+
+fn remove_old(f: &Fixture) -> Result<memory_store::AliasOutcome, LedgerError> {
+    memory_store::alias_remove_with(
+        f.root(),
+        memory_store::AliasFrom::Project("old".into()),
+        &f.ledger,
+    )
+}
+
+#[test]
+fn alias_remove_lifecycle_event_and_entry_in_same_component_is_removed() {
+    let f = Fixture::new();
+    f.record("one", "A", None).unwrap();
+    f.insert("old", &old_entry("oldentry00", "other"));
+    f.alias(&f.project(), "old");
+    // Both sit under `old`: after the removal they still share a component.
+    lifecycle_row(
+        &f,
+        "old",
+        &json!({"id":"ev000010","kind":"archive","entry":"oldentry00","recorded_at":"9"}),
+    );
+    assert_eq!(remove_old(&f).unwrap().outcome, "removed");
+}
+
+#[test]
+fn alias_remove_lifecycle_event_under_old_naming_current_entry_is_refused() {
+    let f = Fixture::new();
+    let one = f.record("one", "A", None).unwrap();
+    f.insert("old", &old_entry("oldentry00", "other"));
+    f.alias(&f.project(), "old");
+    lifecycle_row(
+        &f,
+        "old",
+        &json!({"id":"ev000011","kind":"archive","entry":one.id,"recorded_at":"9"}),
+    );
+    let refused = match remove_old(&f) {
+        Err(LedgerError::Message(message)) => message,
+        other => panic!("expected alias_in_use, got {other:?}"),
+    };
+    assert!(refused.starts_with("alias_in_use"), "{refused}");
+    assert!(refused.contains(&one.id), "{refused}");
+}
+
+#[test]
+fn alias_remove_crossing_superseded_by_alone_is_refused() {
+    let f = Fixture::new();
+    let one = f.record("one", "A", None).unwrap();
+    f.insert("old", &old_entry("oldentry00", "other"));
+    f.alias(&f.project(), "old");
+    // `entry` stays in the current component; only `superseded_by` crosses.
+    lifecycle_row(
+        &f,
+        &f.project(),
+        &json!({"id":"ev000012","kind":"archive","entry":one.id,"superseded_by":"oldentry00","recorded_at":"9"}),
+    );
+    let refused = match remove_old(&f) {
+        Err(LedgerError::Message(message)) => message,
+        other => panic!("expected alias_in_use, got {other:?}"),
+    };
+    assert!(refused.starts_with("alias_in_use"), "{refused}");
+    assert!(refused.contains("oldentry00"), "{refused}");
+    assert!(!refused.contains(&one.id), "{refused}");
+}
+
+#[test]
+fn undecodable_lifecycle_row_blocks_neither_alias_add_nor_remove() {
+    let f = Fixture::new();
+    f.record("one", "A", None).unwrap();
+    f.insert("old", &old_entry("oldentry00", "other"));
+    for project in [f.project(), "old".to_string()] {
+        f.sql(&format!(
+            "INSERT INTO project_memory_lifecycle VALUES ('{project}', 'bad-{project}', '{{not json')"
+        ));
+    }
+    let linked = memory_store::alias_add_with(
+        f.root(),
+        memory_store::AliasFrom::Project("old".into()),
+        &f.ledger,
+    )
+    .unwrap();
+    assert_eq!(linked.outcome, "linked");
+    assert_eq!(remove_old(&f).unwrap().outcome, "removed");
+}
