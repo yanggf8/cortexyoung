@@ -33,7 +33,7 @@ use std::time::{Duration, Instant};
 // measurement that has a numerator -- and since the thin trigger landed the row says only that a
 // fire happened, so that pairing is now read from the rows rather than inferred from a verdict.
 // It is not a verb anyone types.
-const KNOWN_COMMANDS: [&str; 18] = [
+const KNOWN_COMMANDS: [&str; 19] = [
     "index",
     "status",
     "projects",
@@ -47,6 +47,7 @@ const KNOWN_COMMANDS: [&str; 18] = [
     "hook-suggest",
     "hook-refresh",
     "hook-recall",
+    "hook-remind",
     "hook-gate",
     "hook-install",
     "internal-shim",
@@ -71,8 +72,9 @@ fn usage_value() -> Value {
             "hook-suggest": "cort hook-suggest  (PreToolUse hook: records one fire row, kicks collection, and relays a configured gate's deny; not a verb to type)",
             "hook-refresh": "cort hook-refresh  (PostToolUse hook: refreshes an existing index and may prompt on a private-memory save; not a verb to type)",
             "hook-recall": "cort hook-recall --harness <h>  (SessionStart hook: reads the shared memory database; not a verb to type)",
+            "hook-remind": "cort hook-remind --harness <h>  (UserPromptSubmit hook: shows reminders from the local snapshot that entered their window since last shown; no network; not a verb to type)",
             "hook-gate": "cort hook-gate <set [--timeout-ms N] -- <argv...>|clear|status [-f json|lean]>",
-            "hook-install": "cort hook-install [--all|--settings <path>] [--event pre|post|session] [--command <cmd>] [--remove|--status]  (installer-invoked hook wiring; not a verb to type)",
+            "hook-install": "cort hook-install [--all|--settings <path>] [--event pre|post|session|prompt] [--command <cmd>] [--remove|--status]  (installer-invoked hook wiring; not a verb to type)",
             "internal-shim": "cort internal-shim --cort-home <dir>  (installer-invoked: renders the $BIN_DIR/cort shim for a CORT_HOME; not a verb to type)",
             "internal-ast-grep": "cort internal-ast-grep  (installer-invoked: prints the pinned ast-grep release and its checksums as lean TSV; not a verb to type)",
             "internal-manifest-keys": "cort internal-manifest-keys  (installer-invoked: prints known and legacy manifest keys as lean TSV; not a verb to type)",
@@ -472,7 +474,7 @@ fn render_emit(emit: &Emit) -> String {
             .to_string()
     } else if matches!(
         emit.render_command,
-        Some("hook-recall" | "hook-refresh-raw")
+        Some("hook-recall" | "hook-remind" | "hook-refresh-raw")
     ) {
         emit.payload.as_str().unwrap_or_default().to_string()
     } else if let Some(verb) = emit
@@ -1151,6 +1153,7 @@ fn dispatch(args: &[String], usage: &mut UsageEvent, started: Instant) -> Result
         Some("hook-suggest") => cmd_hook_suggest(&args[1..], usage),
         Some("hook-refresh") => cmd_hook_refresh(&args[1..], usage),
         Some("hook-recall") => cmd_hook_recall(&args[1..], usage, started),
+        Some("hook-remind") => cmd_hook_remind(&args[1..], usage),
         Some("hook-gate") => cmd_hook_gate(&args[1..]),
         Some("hook-install") => cmd_hook_install(&args[1..], usage),
         Some("internal-shim") => cmd_internal_shim(&args[1..], usage),
@@ -1633,35 +1636,146 @@ fn run_after_output() {
     }
 }
 
-/// Kimi's later prompts: from the local snapshot and the session's shown set only -- no
-/// network, no memory config. The text, the keys to record once it is printed, and the number
-/// of reminder lines in it (0 for the stale notice). `None`: stay silent.
-fn later_prompt_reminders(
-    root: &Path,
-    session_id: &str,
-    now_ns: i128,
-) -> Option<(String, Vec<cort::remind_snapshot::ShownKey>, usize)> {
+/// What a prompt-time reminder pick found: the `usage.db` outcome, the text to print (if any),
+/// the keys to record once it is printed, and the number of reminder lines in it (0 for the stale
+/// notice).
+struct PromptPick {
+    outcome: &'static str,
+    text: Option<String>,
+    keys: Vec<cort::remind_snapshot::ShownKey>,
+    lines: usize,
+}
+
+impl PromptPick {
+    fn silent(outcome: &'static str) -> Self {
+        PromptPick {
+            outcome,
+            text: None,
+            keys: Vec::new(),
+            lines: 0,
+        }
+    }
+}
+
+/// The one selection both prompt-time paths run (`hook-remind`, and Kimi's later prompts through
+/// `hook-recall`): from the local snapshot and the session's shown set only -- no network, no
+/// memory config.
+fn pick_prompt_reminders(root: &Path, session_id: &str, now_ns: i128) -> PromptPick {
     use cort::remind_snapshot as snap;
     let dir = cort::data_dir::data_dir();
-    let project = cort::memory_store::session_project_ids(root).ok()?.0;
-    let snapshot = snap::read_snapshot(&dir, &project)?;
+    let project = match cort::memory_store::session_project_ids(root) {
+        Ok(ids) => ids.0,
+        Err(cort::memory_store::SessionProjectError::NoProject) => {
+            return PromptPick::silent("no_project")
+        }
+        Err(cort::memory_store::SessionProjectError::Failed(_)) => {
+            return PromptPick::silent("failed")
+        }
+    };
+    let Some(snapshot) = snap::read_snapshot(&dir, &project) else {
+        return PromptPick::silent("no_snapshot");
+    };
     let shown = snap::read_shown(&dir, session_id);
     let read_at = snapshot.read_at_ns();
     if now_ns.saturating_sub(read_at) > snap::STALE_AFTER_NS {
         let key = snap::stale_key(read_at);
         if shown.contains(&key) {
-            return None;
+            return PromptPick::silent("none");
         }
-        return Some((
-            cort::hook_recall::render_stale_snapshot(read_at),
-            vec![key],
-            0,
-        ));
+        return PromptPick {
+            outcome: "stale_snapshot",
+            text: Some(cort::hook_recall::render_stale_snapshot(read_at)),
+            keys: vec![key],
+            lines: 0,
+        };
     }
     let selected = snap::select_unshown(&snapshot, &shown, now_ns);
-    let (text, keys) = cort::hook_recall::render_prompt_reminders(&selected, read_at, now_ns)?;
-    let lines = keys.len();
-    Some((text, keys, lines))
+    match cort::hook_recall::render_prompt_reminders(&selected, read_at, now_ns) {
+        Some((text, keys)) => PromptPick {
+            outcome: "shown",
+            lines: keys.len(),
+            text: Some(text),
+            keys,
+        },
+        None => PromptPick::silent("none"),
+    }
+}
+
+/// Kimi's later prompts: the pick above, as text, keys and line count. `None`: stay silent.
+fn later_prompt_reminders(
+    root: &Path,
+    session_id: &str,
+    now_ns: i128,
+) -> Option<(String, Vec<cort::remind_snapshot::ShownKey>, usize)> {
+    let pick = pick_prompt_reminders(root, session_id, now_ns);
+    Some((pick.text?, pick.keys, pick.lines))
+}
+
+/// `UserPromptSubmit` for Claude Code: reminders from the local snapshot that entered their
+/// window since they were last shown in this session. Reads no memory config and makes no
+/// network call; every failure is empty stdout with exit 0, because a non-zero exit would block
+/// the user's prompt.
+fn cmd_hook_remind(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError> {
+    let declared = HookSuggestArgs::try_parse_from(args.iter())
+        .ok()
+        .and_then(|a| a.harness)
+        .unwrap_or_else(|| "unspecified".to_string());
+    let mut input = String::new();
+    let parsed = std::io::stdin()
+        .read_to_string(&mut input)
+        .ok()
+        .and_then(|_| serde_json::from_str::<Value>(&input).ok());
+    let (harness, differs) = parsed
+        .as_ref()
+        .map(|v| harness_of(v, &declared))
+        .unwrap_or((declared, None));
+    let model = parsed.as_ref().and_then(model_of_payload);
+    let session_id: Option<String> = parsed
+        .as_ref()
+        .and_then(|v| v.get("session_id"))
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let root = parsed
+        .as_ref()
+        .and_then(|v| v.get("cwd"))
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(cwd);
+    usage.project_id = std::fs::canonicalize(&root)
+        .ok()
+        .and_then(|p| p.to_str().map(project_id_for));
+    let now_ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos() as i128);
+    let pick = match (&parsed, session_id.as_deref()) {
+        (None, _) => PromptPick::silent("failed"),
+        (Some(_), None) => PromptPick::silent("missing_session_id"),
+        (Some(_), Some(id)) => pick_prompt_reminders(&root, id, now_ns),
+    };
+    let mut row = hook_row(pick.outcome, &harness, differs.as_deref(), model);
+    row["reminders_shown"] = json!(pick.lines);
+    usage.args_summary = row.to_string();
+    if let (Some(id), false) = (session_id, pick.keys.is_empty()) {
+        let data = cort::data_dir::data_dir();
+        let keys = pick.keys;
+        set_after_output(Box::new(move || {
+            let _ = cort::remind_snapshot::append_shown(&data, &id, &keys);
+        }));
+    }
+    let payload = pick
+        .text
+        .map(|text| {
+            json!({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": text}})
+                .to_string()
+        })
+        .unwrap_or_default();
+    Ok(Emit {
+        payload: Value::String(payload),
+        format: Format::Lean,
+        render_command: Some("hook-remind"),
+    })
 }
 
 /// Recall reads shared memory without waiting on a local writer.
@@ -2323,7 +2437,7 @@ fn cmd_hook_install(args: &[String], _usage: &mut UsageEvent) -> Result<Emit, Co
         Some(s) => cort::settings::HookEvent::parse(s).ok_or_else(|| {
             CortError::new(
                 "bad_flag",
-                json!({ "message": format!("--event must be pre, post or session, not `{s}`") }),
+                json!({ "message": format!("--event must be pre, post, session or prompt, not `{s}`") }),
             )
         })?,
     };

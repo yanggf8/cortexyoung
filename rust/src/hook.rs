@@ -112,4 +112,19 @@ pub const RECALL_OUTCOMES: [&str; 12] = [
     "missing_session_id",
     "marker_unavailable",
 ];
+/// Closed outcome vocabulary for `hook-remind`, Claude Code's `UserPromptSubmit` reminder hook
+/// (local snapshot only, no network). `shown`: at least one reminder line printed. `none`:
+/// nothing new to show. `no_snapshot`: this project has no local snapshot yet. `stale_snapshot`:
+/// the snapshot is older than three days and the one-line notice was printed. `missing_session_id`
+/// and `no_project`: the payload lacks the session id, or its cwd has no origin. `failed`: stdin
+/// was not JSON, or git failed.
+pub const REMIND_OUTCOMES: [&str; 7] = [
+    "shown",
+    "none",
+    "no_snapshot",
+    "stale_snapshot",
+    "missing_session_id",
+    "no_project",
+    "failed",
+];
 pub const LEGACY_RECALL_OUTCOMES: [&str; 3] = ["no_replica", "unsynced_replica", "busy"];

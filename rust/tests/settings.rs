@@ -679,3 +679,82 @@ fn an_entry_with_our_command_but_a_foreign_matcher_is_not_in_shape() {
         command
     ));
 }
+
+/// Claude Code now wires four events; the fourth is a `UserPromptSubmit` group with no matcher,
+/// and install-then-uninstall of all four returns the file byte for byte.
+#[test]
+fn claude_code_wires_four_events_and_round_trips_byte_for_byte() {
+    let (_d, p) = tmp();
+    with_existing_hooks(&p);
+    let body = fs::read_to_string(&p).unwrap();
+    fs::write(&p, format!("{body}\n")).unwrap();
+    let before = fs::read(&p).unwrap();
+    let events = cort::settings::events_for("claude-code");
+    assert_eq!(events.len(), 4);
+    assert!(events.contains(&HookEvent::Remind));
+    for &event in events {
+        let command = format!("/bin/cort {} --harness claude-code", event.subcommand());
+        install_hook(&p, &command, event).unwrap();
+        assert!(cort::settings::entry_shape_ok(
+            "claude-code",
+            &p,
+            event,
+            &command
+        ));
+    }
+    let groups = read(&p)["hooks"]["UserPromptSubmit"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(groups.len(), 1);
+    assert!(groups[0].get("matcher").is_none());
+    assert_eq!(
+        groups[0]["hooks"][0]["command"],
+        "/bin/cort hook-remind --harness claude-code"
+    );
+    // A second pass changes nothing.
+    let installed = fs::read(&p).unwrap();
+    for &event in events {
+        let command = format!("/bin/cort {} --harness claude-code", event.subcommand());
+        assert_eq!(
+            install_hook(&p, &command, event).unwrap().change,
+            Change::AlreadyPresent
+        );
+    }
+    assert_eq!(fs::read(&p).unwrap(), installed);
+    remove_hook(&p).unwrap();
+    assert_eq!(fs::read(&p).unwrap(), before);
+}
+
+#[test]
+fn codex_and_kimi_keep_three_events_and_refuse_the_prompt_reminder() {
+    assert_eq!(cort::settings::events_for("codex").len(), 3);
+    assert_eq!(cort::settings::events_for("kimi-code").len(), 3);
+    assert!(!cort::settings::events_for("codex").contains(&HookEvent::Remind));
+    assert!(!cort::settings::events_for("kimi-code").contains(&HookEvent::Remind));
+    let (d, _) = tmp();
+    let toml = d.path().join("config.toml");
+    assert!(cort::settings_toml::install_hook(
+        &toml,
+        "/bin/cort hook-remind --harness codex",
+        HookEvent::Remind
+    )
+    .is_err());
+    let kimi = d.path().join("kimi.toml");
+    assert!(cort::settings_kimi::install_hook(
+        &kimi,
+        "/bin/cort hook-remind --harness kimi-code",
+        HookEvent::Remind
+    )
+    .is_err());
+}
+
+#[test]
+fn prompt_parses_to_the_remind_event_and_only_prompt_and_remind_do() {
+    assert_eq!(HookEvent::parse("prompt"), Some(HookEvent::Remind));
+    assert_eq!(HookEvent::parse("remind"), Some(HookEvent::Remind));
+    assert_eq!(HookEvent::parse("UserPromptSubmit"), None);
+    assert_eq!(HookEvent::Remind.flag_name(), "prompt");
+    assert_eq!(HookEvent::Remind.name(), "UserPromptSubmit");
+    assert_eq!(HookEvent::Remind.subcommand(), "hook-remind");
+}

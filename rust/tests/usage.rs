@@ -1249,6 +1249,9 @@ fn golden_json_and_lean_snapshots() {
     "hook-refresh": {
       "_total": 0
     },
+    "hook-remind": {
+      "_total": 0
+    },
     "hook-suggest": {
       "_total": 0
     }
@@ -1790,6 +1793,13 @@ fn the_usage_report_carries_the_hook_census_and_the_lean_says_what_cannot_close(
     ] {
         assert_eq!(recall[hook], 1);
     }
+
+    assert_eq!(report["hook_census"]["hook-remind"]["_total"], 0);
+    assert_eq!(
+        cort::hook::REMIND_OUTCOMES.len(),
+        7,
+        "the new rows are attributed, not unknown/"
+    );
 
     let lean = render_usage_lean(&report);
     assert!(

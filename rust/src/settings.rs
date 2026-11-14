@@ -116,9 +116,23 @@ pub enum HookEvent {
     Refresh,
     /// Recall reviewed project memory at session start or Kimi's first prompt.
     Recall,
+    /// Show reminders that entered their window since they were last shown in this session, from
+    /// a local snapshot (Claude Code's `UserPromptSubmit`; Codex waits for an intercepted payload).
+    Remind,
 }
 
-pub const EVENTS: [HookEvent; 3] = [HookEvent::Suggest, HookEvent::Refresh, HookEvent::Recall];
+/// Every event we know, which is what JSON remove/prune and `ours_subcommand` recognise.
+pub const EVENTS: [HookEvent; 4] = [
+    HookEvent::Suggest,
+    HookEvent::Refresh,
+    HookEvent::Recall,
+    HookEvent::Remind,
+];
+
+/// Codex and Kimi keep three events: Kimi's `UserPromptSubmit` entry is already `hook-recall`, and
+/// Codex's `UserPromptSubmit` payload has not been intercepted yet (stage 2).
+const EVENTS_WITHOUT_REMIND: [HookEvent; 3] =
+    [HookEvent::Suggest, HookEvent::Refresh, HookEvent::Recall];
 
 /// Every harness we wire, in `HOOK_TARGETS` order. This is the one home for the list: main.rs
 /// builds its format mapping from these indices, and `entry_shape_ok` dispatches on these
@@ -128,7 +142,8 @@ pub const HOOK_HARNESSES: [&str; 3] = ["claude-code", "codex", "kimi-code"];
 /// Kimi recalls on UserPromptSubmit because it discards SessionStart output.
 pub fn events_for(harness: &str) -> &'static [HookEvent] {
     match harness {
-        "claude-code" | "codex" | "kimi-code" => &EVENTS,
+        "claude-code" => &EVENTS,
+        "codex" | "kimi-code" => &EVENTS_WITHOUT_REMIND,
         _ => &[],
     }
 }
@@ -139,6 +154,7 @@ impl HookEvent {
             HookEvent::Suggest => "PreToolUse",
             HookEvent::Refresh => "PostToolUse",
             HookEvent::Recall => "SessionStart",
+            HookEvent::Remind => "UserPromptSubmit",
         }
     }
     pub fn subcommand(self) -> &'static str {
@@ -146,6 +162,7 @@ impl HookEvent {
             HookEvent::Suggest => "hook-suggest",
             HookEvent::Refresh => "hook-refresh",
             HookEvent::Recall => "hook-recall",
+            HookEvent::Remind => "hook-remind",
         }
     }
     pub fn parse(s: &str) -> Option<Self> {
@@ -153,6 +170,7 @@ impl HookEvent {
             "pre" | "suggest" | "PreToolUse" => Some(HookEvent::Suggest),
             "post" | "refresh" | "PostToolUse" => Some(HookEvent::Refresh),
             "session" | "recall" | "SessionStart" => Some(HookEvent::Recall),
+            "prompt" | "remind" => Some(HookEvent::Remind),
             _ => None,
         }
     }
@@ -163,6 +181,7 @@ impl HookEvent {
             HookEvent::Suggest => "pre",
             HookEvent::Refresh => "post",
             HookEvent::Recall => "session",
+            HookEvent::Remind => "prompt",
         }
     }
 }
@@ -231,7 +250,7 @@ fn matcher_for(event: HookEvent) -> Option<&'static str> {
     match event {
         HookEvent::Suggest => Some(MATCHER),
         HookEvent::Refresh => Some(EDIT_MATCHER),
-        HookEvent::Recall => None,
+        HookEvent::Recall | HookEvent::Remind => None,
     }
 }
 

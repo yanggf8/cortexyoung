@@ -1689,8 +1689,17 @@ fn the_lean_hook_report_has_six_non_empty_fields_on_every_line() {
     let lines: Vec<&str> = r.stdout.lines().filter(|l| !l.is_empty()).collect();
     assert_eq!(
         lines.len(),
-        9,
-        "all harnesses have recall plus the two tool events: {lines:?}"
+        10,
+        "all harnesses have recall plus the two tool events, Claude Code also the prompt reminder: {lines:?}"
+    );
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|l| l.split('\t').nth(1) == Some("prompt"))
+            .map(|l| l.split('\t').next().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["claude-code"],
+        "only Claude Code wires the prompt reminder: {lines:?}"
     );
     for l in &lines {
         let f: Vec<&str> = l.split('\t').collect();
@@ -1725,7 +1734,16 @@ fn the_lean_hook_report_has_six_non_empty_fields_on_every_line() {
         .filter(|l| !l.is_empty())
         .map(|l| l.split('\t').nth(3).unwrap())
         .collect();
-    assert_eq!(files.len(), 9);
+    assert_eq!(files.len(), 10);
+    assert_eq!(
+        s.stdout
+            .lines()
+            .filter(|l| l.split('\t').nth(1) == Some("prompt"))
+            .map(|l| l.split('\t').next().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["claude-code"],
+        "--status lists the prompt event for claude-code only"
+    );
     assert_eq!(
         s.stdout
             .lines()
@@ -1750,12 +1768,12 @@ fn the_lean_hook_report_has_six_non_empty_fields_on_every_line() {
     assert_eq!(
         files.iter().collect::<std::collections::HashSet<_>>().len(),
         3,
-        "nine entries across three files: {files:?}"
+        "ten entries across three files: {files:?}"
     );
     let removed = run(&["--all", "--remove", "--lean"]);
     assert_eq!(removed.code, 0, "{}", removed.stderr);
     let removed_rows: Vec<&str> = removed.stdout.lines().collect();
-    assert_eq!(removed_rows.len(), 9);
+    assert_eq!(removed_rows.len(), 10);
     assert_eq!(
         removed_rows
             .iter()

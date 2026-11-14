@@ -282,7 +282,17 @@ Each of notes, questions and reminders is dropped alone on its own SQL error (a 
 statement fails the whole read); a dropped reminders read prints the single line `reminders could not
 be read: cort remind list`, so a due reminder is never silently missing. The usage row records
 `reminders_due` and `reminders_shown`, or `reminders: "dropped"`. A session that stays open across
-the day does not re-read; the one-day lead is the mitigation.
+the day does not re-read the database; the next paragraph covers what its later prompts show.
+
+**Later prompts of a live session.** Session-start recall and the `cort remind` commands also write
+a local snapshot of the project's reminders (`remind-snapshot/<project>.json` under the memory data
+directory). On Claude Code a `UserPromptSubmit` hook (`cort hook-remind`) reads only that snapshot
+and the session's shown set (`remind-sessions/`), with no network and no memory config, and prints
+each `upcoming`, `due` or `overdue` reminder once per session when it enters its window or is
+deferred to a new date; Kimi's later prompts do the same through `hook-recall`. A close, defer or
+new reminder made on another machine reaches a running session at its next session start, not its
+next prompt. A snapshot older than 3 days is not replayed: one line says its date and to run
+`cort remind list`, which stays the authoritative answer. Codex is not wired yet.
 
 **Deploy.** The table is created by the same DDL batch as the ledger. After deploying, run
 `cort remind list` once on any machine: it provisions the table for the fleet. A machine on an

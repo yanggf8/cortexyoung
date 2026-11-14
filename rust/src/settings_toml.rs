@@ -69,7 +69,9 @@ fn matcher_for(event: HookEvent) -> Option<&'static str> {
         HookEvent::Suggest => Some(MATCHER),
         HookEvent::Refresh => Some(EDIT_MATCHER),
         // The 2026-10-29 Codex SessionStart probe fired without a matcher key.
-        HookEvent::Recall => None,
+        // Remind is never wired for Codex (`events_for("codex")` omits it, `install` refuses it
+        // with `Unsupported`); no matcher keeps this arm harmless if that ever changes.
+        HookEvent::Recall | HookEvent::Remind => None,
     }
 }
 
@@ -477,6 +479,8 @@ fn trusted_at(path: &Path, hooks: &Table, gi: usize, hi: usize, event: HookEvent
         HookEvent::Suggest => "pre_tool_use",
         HookEvent::Refresh => "post_tool_use",
         HookEvent::Recall => "session_start",
+        // Not wired for Codex; the key Codex would use for a `UserPromptSubmit` entry, unverified.
+        HookEvent::Remind => "user_prompt_submit",
     };
     let basename = path
         .file_name()

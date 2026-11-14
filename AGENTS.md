@@ -222,6 +222,11 @@ stays inside 5 s. On
 Kimi discards `SessionStart` output, so its `UserPromptSubmit` entry prints the same text as a `message` on
 the first prompt of each session only (a local marker per session id under the memory data directory).
 `settings::events_for` is the one place that says which harness gets which event.
+Claude Code also has a `UserPromptSubmit` entry (`cort hook-remind`) that shows, once per session, the
+reminders from a local snapshot (written by session-start recall and by `cort remind` commands; it
+reads no config and makes no network call) that entered their window since they were last shown; Kimi's
+later prompts do the same through `hook-recall`, and Codex waits for an intercepted payload
+(`docs/superpowers/specs/2026-11-14-remind-live-session-design.md`).
 
 **Both staleness checks are one-sided, and they lean opposite ways.** The head comparison
 (`main.rs`, what `hook-suggest` read while it still judged) missed an edited-but-uncommitted tree;

@@ -1413,17 +1413,19 @@ fi
 # No wiring restore: Test 20 below brings its own HOME, so nothing later reads this one.
 rm -rf "$STALEBIN"
 
-# ── 20. all nine wired entries, not just the one this file used to check ──
-# Nine entries ship: each of three harnesses has two tool events and recall -- SessionStart for Claude
-# Code and Codex, UserPromptSubmit for Kimi, which discards SessionStart output. Until 2026-09-03 every hook assertion in this
+# ── 20. all ten wired entries, not just the one this file used to check ──
+# Ten entries ship: each of three harnesses has two tool events and recall -- SessionStart for Claude
+# Code and Codex, UserPromptSubmit for Kimi, which discards SessionStart output -- and Claude Code
+# also has the UserPromptSubmit reminder entry (Claude Code 4, Codex 3, Kimi 3). Until 2026-09-03 every hook assertion in this
 # file pointed at `~/.claude/settings.json` and at the pre event, so five of the six were deployed
 # with no install-level test at all -- including both of Kimi's, whose file is a third TOML dialect,
 # and both post events. A deploy path with no assertion is the failure mode this whole file exists
 # for; `--check` reading green is not the same claim, because `--check` asks the same binary that
 # wrote the entry.
-echo "--- Test 20: all nine hook entries are deployed, per harness per shipped event ---"
+echo "--- Test 20: all ten hook entries are deployed, per harness per shipped event ---"
 fresh_home_with_install
 CLAUDE_CFG="$HOME/.claude/settings.json"
+assert_contains "$CLAUDE_CFG" "hook-remind --harness claude-code" "Claude Code prompt reminder is wired"
 assert_contains "$CLAUDE_CFG" '"SessionStart"' "Claude Code has a SessionStart group"
 assert_contains "$CLAUDE_CFG" "hook-recall --harness claude-code" "Claude Code recall is wired"
 SESSION_COUNT="$(grep -c 'hook-recall --harness claude-code' "$CLAUDE_CFG" || true)"
@@ -1438,6 +1440,8 @@ CODEX_CFG="$HOME/.codex/config.toml"
 KIMI_CFG="$HOME/.kimi-code/config.toml"
 assert_file_exists "$CODEX_CFG" "Codex config.toml written by the hook deploy"
 assert_file_exists "$KIMI_CFG"  "Kimi config.toml written by the hook deploy"
+assert_not_contains "$CODEX_CFG" "hook-remind" "Codex has no prompt reminder entry (stage 2)"
+assert_not_contains "$KIMI_CFG" "hook-remind" "Kimi has no prompt reminder entry (its recall entry does it)"
 for pair in "claude-code:$HOME/.claude/settings.json" "codex:$CODEX_CFG" "kimi-code:$KIMI_CFG"; do
   h="${pair%%:*}"; f="${pair#*:}"
   assert_contains "$f" "hook-suggest --harness $h" "$h pre-event wired in $(basename "$f")"

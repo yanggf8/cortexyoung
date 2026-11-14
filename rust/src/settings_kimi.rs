@@ -47,7 +47,9 @@ fn matcher_for(event: HookEvent) -> Option<&'static str> {
     match event {
         HookEvent::Suggest => Some(MATCHER),
         HookEvent::Refresh => Some(EDIT_MATCHER),
-        HookEvent::Recall => None,
+        // Remind is never wired for Kimi: its `UserPromptSubmit` entry is already `hook-recall`,
+        // and `events_for("kimi-code")` omits Remind, so `install` refuses it with `Unsupported`.
+        HookEvent::Recall | HookEvent::Remind => None,
     }
 }
 fn event_name(event: HookEvent) -> &'static str {
