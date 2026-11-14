@@ -42,10 +42,13 @@ with strength (supersedes, co-use, same topic / same source file); consolidate o
 
 ### Tiers are derived, so migration writes nothing
 
+The rule needs one fixed instant, the **tiers epoch** (when phase 1a ships, a constant in the code).
 An entry with no lifecycle events is placed by a rule evaluated at read time:
-- recorded less than 7 days ago → short-term, expiring at `recorded_at + 7d`;
-- older → long-term, last activity = its `recorded_at` (so the first forgetting reviews of the
-  October entries fall due around 2026-12-23).
+- recorded before `epoch - 7d` → long-term, last activity = its `recorded_at` (so the first
+  forgetting reviews of the October entries fall due around 2026-12-23);
+- otherwise → short-term, expiring at `max(recorded_at, epoch) + 7d`; once expired without a
+  `promote`, `merge`, `archive` or `drop`, it is `short_term_expired` and waits for review (it never
+  turns long-term by age alone).
 Migration of the existing 247 is a read rule, not a bulk write to the shared database.
 
 ### Anchors: confirmed only, guarded at archive
