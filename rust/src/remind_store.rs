@@ -129,15 +129,21 @@ impl<'a> Snap<'a> {
     }
 
     fn save(&self, written: Option<&ReminderEvent>) {
-        let events = match written {
-            None => self.events.clone(),
+        // A confirmed write is stamped with the clock after the confirmation, not before the
+        // read: otherwise a recall that started between this read and the write, and so never
+        // saw the event, would look newer and could drop a close this machine just confirmed.
+        let (events, read_at) = match written {
+            None => (self.events.clone(), self.read_at),
             Some(event) => {
                 let mut all = self.events.clone();
                 all.push(event.clone());
-                crate::remind_snapshot::snapshot_events(&fold(all, self.now).reminders)
+                (
+                    crate::remind_snapshot::snapshot_events(&fold(all, self.now).reminders),
+                    now_ns().unwrap_or(self.read_at),
+                )
             }
         };
-        let snapshot = crate::remind_snapshot::Snapshot::new(self.project, self.read_at, events);
+        let snapshot = crate::remind_snapshot::Snapshot::new(self.project, read_at, events);
         let _ = crate::remind_snapshot::write_snapshot(&crate::data_dir::data_dir(), &snapshot);
     }
 

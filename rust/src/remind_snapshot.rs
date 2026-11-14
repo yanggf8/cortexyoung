@@ -19,8 +19,24 @@ pub const STALE_AFTER_NS: i128 = 3 * 86_400_000_000_000;
 
 const SNAPSHOT_DIR: &str = "remind-snapshot";
 const SESSIONS_DIR: &str = "remind-sessions";
+/// How far in the future a `read_at` may lie before it is distrusted (a clock that jumped back,
+/// common under WSL2, or a damaged file). A distrusted snapshot never blocks a newer write and
+/// reads as stale, so it cannot freeze the list.
+pub const FUTURE_SLACK_NS: i128 = 5 * 60 * 1_000_000_000;
 const SNAPSHOT_VERSION: u32 = 1;
-const PRUNE_AFTER: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+/// Shown sets of sessions untouched this long are removed. Long, because removing a live
+/// session's set replays its overdue reminders once; a session alive a month without a single
+/// session start (compaction included) is the cost accepted.
+const PRUNE_AFTER: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+/// Temp files a killed writer left behind (the recall watchdog exits the process).
+const TMP_PRUNE_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Whether a snapshot read at `read_at_ns` should be treated as stale at `now_ns`: older than
+/// [`STALE_AFTER_NS`], or further in the future than [`FUTURE_SLACK_NS`].
+pub fn is_stale(read_at_ns: i128, now_ns: i128) -> bool {
+    now_ns.saturating_sub(read_at_ns) > STALE_AFTER_NS
+        || read_at_ns.saturating_sub(now_ns) > FUTURE_SLACK_NS
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Snapshot {
@@ -127,10 +143,19 @@ fn write_rename(path: &Path, content: &[u8]) -> io::Result<()> {
 /// Write the snapshot unless the one on disk was read later. `Ok(false)`: nothing written.
 pub fn write_snapshot(dir: &Path, snap: &Snapshot) -> io::Result<bool> {
     let path = snapshot_path(dir, &snap.project)?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as i128)
+        .unwrap_or(0);
     if let Some(existing) = read_snapshot(dir, &snap.project) {
-        if existing.read_at_ns() > snap.read_at_ns() {
+        let existing_at = existing.read_at_ns();
+        // A future `read_at` is distrusted, so it can never freeze the snapshot.
+        if existing_at > snap.read_at_ns() && existing_at.saturating_sub(now) <= FUTURE_SLACK_NS {
             return Ok(false);
         }
+    }
+    if let Some(parent) = path.parent() {
+        prune_old(parent, TMP_PRUNE_AFTER, |name| name.starts_with(".tmp."));
     }
     let body = serde_json::to_vec(snap).map_err(io::Error::other)?;
     write_rename(&path, &body)?;
@@ -144,21 +169,30 @@ pub fn read_snapshot(dir: &Path, project: &str) -> Option<Snapshot> {
     (snap.version == SNAPSHOT_VERSION).then_some(snap)
 }
 
-fn prune_sessions(sessions: &Path) {
-    let Ok(entries) = fs::read_dir(sessions) else {
+/// Remove regular files in `dir` whose name passes `matches` and that were last modified more
+/// than `after` ago. Errors are ignored.
+fn prune_old(dir: &Path, after: Duration, matches: impl Fn(&str) -> bool) {
+    let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
     for entry in entries.flatten() {
+        if !entry.file_name().to_str().is_some_and(&matches) {
+            continue;
+        }
         let old = entry
             .metadata()
             .and_then(|m| m.modified())
             .ok()
             .and_then(|time| SystemTime::now().duration_since(time).ok())
-            .is_some_and(|age| age > PRUNE_AFTER);
+            .is_some_and(|age| age > after);
         if old && entry.file_type().is_ok_and(|t| t.is_file()) {
             let _ = fs::remove_file(entry.path());
         }
     }
+}
+
+fn prune_sessions(sessions: &Path) {
+    prune_old(sessions, PRUNE_AFTER, |_| true);
 }
 
 fn state_name(raw: &str) -> Option<&'static str> {

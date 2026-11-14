@@ -1677,7 +1677,7 @@ fn pick_prompt_reminders(root: &Path, session_id: &str, now_ns: i128) -> PromptP
     };
     let shown = snap::read_shown(&dir, session_id);
     let read_at = snapshot.read_at_ns();
-    if now_ns.saturating_sub(read_at) > snap::STALE_AFTER_NS {
+    if snap::is_stale(read_at, now_ns) {
         let key = snap::stale_key(read_at);
         if shown.contains(&key) {
             return PromptPick::silent("none");
@@ -1963,7 +1963,11 @@ fn cmd_hook_recall(
                 let _ = cort::remind_snapshot::append_shown(&data, &id, &later_keys);
             }));
         }
-    } else if session_start && (session_id.is_some() || recalled.is_some()) {
+    } else if session_start
+        && (session_id.is_some() || recalled.is_some())
+        // No project or no memory config: no reminders to track, so no shown-set file.
+        && !matches!(outcome, "no_project" | "not_configured" | "failed")
+    {
         let project = recalled.as_ref().map(|(_, project)| project.clone());
         let session = recalled.map(|(session, _)| session);
         set_after_output(Box::new(move || {

@@ -219,3 +219,40 @@ fn stale_notice_and_threshold() {
     );
     assert!(line.ends_with("; run cort remind list"), "{line}");
 }
+
+fn wall_ns() -> i128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as i128
+}
+
+#[test]
+fn future_read_at_never_freezes_the_snapshot() {
+    // A clock that jumped back leaves a snapshot "read" a day from now; a write stamped with the
+    // real clock must still replace it, and a read must call it stale rather than replay it.
+    let dir = temp();
+    let now = wall_ns();
+    assert!(write_snapshot(
+        dir.path(),
+        &snap(now + DAY, vec![add(&id(1), DUE, "old", 1)])
+    )
+    .unwrap());
+    assert!(write_snapshot(dir.path(), &snap(now, vec![])).unwrap());
+    let kept = read_snapshot(dir.path(), "proj").unwrap();
+    assert!(kept.events.is_empty());
+    // A newer read inside the slack still wins over an older one.
+    assert!(write_snapshot(dir.path(), &snap(now + 60_000_000_000, vec![])).unwrap());
+    assert!(!write_snapshot(dir.path(), &snap(now, vec![add(&id(2), DUE, "x", 1)])).unwrap());
+}
+
+#[test]
+fn stale_in_both_directions() {
+    use cort::remind_snapshot::{is_stale, FUTURE_SLACK_NS};
+    let now = 1_000 * DAY;
+    assert!(!is_stale(now, now));
+    assert!(!is_stale(now - STALE_AFTER_NS, now));
+    assert!(is_stale(now - STALE_AFTER_NS - 1, now));
+    assert!(!is_stale(now + FUTURE_SLACK_NS, now));
+    assert!(is_stale(now + FUTURE_SLACK_NS + 1, now));
+}

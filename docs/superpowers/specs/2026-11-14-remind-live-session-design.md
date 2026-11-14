@@ -107,7 +107,18 @@ and the prompt hook use it.
 The watchdog exits the process 900 ms after the recall deadline (`main.rs` ~3749). Snapshot and
 shown-set writes happen **after** stdout has been written and the usage row recorded, in the main
 path only; if the watchdog has claimed the exit they are skipped. Cost of being cut: the next prompt
-may repeat a reminder once.
+may repeat a reminder once -- or, after a compaction whose recall ran past the watchdog, the shown
+set from before the compaction stays, so a reminder already shown is not re-shown until its state
+changes (only when recall takes longer than ~4.7 s).
+
+A confirmed `cort remind` write stamps its snapshot with the clock after the confirmation, so a
+recall that started before the write landed cannot drop it. A `read_at` more than 5 minutes in the
+future (a clock that jumped back) is distrusted: it never blocks a write and reads as stale.
+
+Test coverage note (implementation review): the integration tests cannot make a spawned `cort`
+complete a successful recall against the fake server (it always speaks TLS), so the successful
+SessionStart → snapshot path is tested through `persist_recall_reminders` directly, and the binary
+wiring is verified live after deploy (Verification below).
 
 ### Prompt hook
 
