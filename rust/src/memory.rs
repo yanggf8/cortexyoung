@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
@@ -361,12 +361,15 @@ pub(crate) fn recall_ledger(
     present: bool,
     sync_status: Option<String>,
 ) -> MemoryRecall {
-    recall_ledger_view(root, query, ledger, present, sync_status, None, false)
+    recall_ledger_view(root, query, ledger, present, sync_status, None, false, None)
 }
 
 /// `recall_ledger` under a lifecycle fold. `None`, or a view of a disabled project, is exactly
 /// `recall_ledger`; on an enabled project hidden entries are removed before term selection
-/// unless `include_hidden`.
+/// unless `include_hidden`. `conflicts` names the keys holding two or more active entries; `None`
+/// counts them over `ledger` itself, which must then be the whole ledger (a subset read passes
+/// the set the database computed over every row).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn recall_ledger_view(
     root: &Path,
     query: &str,
@@ -375,6 +378,7 @@ pub(crate) fn recall_ledger_view(
     sync_status: Option<String>,
     view: Option<&crate::memory_lifecycle::LifecycleView>,
     include_hidden: bool,
+    conflicts: Option<&BTreeSet<String>>,
 ) -> MemoryRecall {
     recall_ledger_inner(
         &source_root(root),
@@ -385,6 +389,7 @@ pub(crate) fn recall_ledger_view(
         None,
         view,
         include_hidden,
+        conflicts,
     )
     .0
 }
@@ -407,6 +412,7 @@ pub(crate) fn recall_ledger_for_hook(
         Some(20),
         view,
         false,
+        None,
     )
 }
 
@@ -536,15 +542,22 @@ fn recall_ledger_inner(
     limit: Option<usize>,
     view: Option<&crate::memory_lifecycle::LifecycleView>,
     include_hidden: bool,
+    conflicts: Option<&BTreeSet<String>>,
 ) -> (MemoryRecall, usize) {
     let terms: Vec<_> = query.split_whitespace().map(|s| s.to_lowercase()).collect();
     let mut active = active_entries(ledger);
     // Conflict counts every active entry under a key, hidden ones included: the key is still
-    // taken for `record`.
+    // taken for `record`. A given set was computed the same way over the whole ledger.
     let mut counts: HashMap<&str, usize> = HashMap::new();
-    for entry in &active {
-        *counts.entry(&entry.key).or_default() += 1;
+    if conflicts.is_none() {
+        for entry in &active {
+            *counts.entry(&entry.key).or_default() += 1;
+        }
     }
+    let in_conflict = |key: &str| match conflicts {
+        Some(keys) => keys.contains(key),
+        None => counts.get(key).is_some_and(|n| *n > 1),
+    };
     let state_of = |id: &str| view.and_then(|v| v.state_of(id));
     if !include_hidden {
         active.retain(|entry| !state_of(&entry.id).is_some_and(|s| s.is_hidden()));
@@ -591,7 +604,7 @@ fn recall_ledger_inner(
             .as_ref()
             .ok()
             .map(|bytes| hash(bytes) != entry.source_sha256);
-        let evidence_status = if counts[entry.key.as_str()] > 1 {
+        let evidence_status = if in_conflict(entry.key.as_str()) {
             "conflict"
         } else if entry.unsourced {
             "unsourced"
@@ -1274,6 +1287,7 @@ mod tests {
             None,
             Some(&view),
             false,
+            None,
         );
         let without = recall_ledger(dir.path(), "alpha beta", &ledger_of(&[x]), true, None);
         assert_eq!(with_view.match_kind.as_deref(), Some("partial"));
@@ -1295,6 +1309,7 @@ mod tests {
             None,
             Some(&view),
             false,
+            None,
         );
         assert_eq!(recall.match_kind.as_deref(), Some("partial"));
         let ids: Vec<_> = recall.hits.iter().map(|h| h.entry.id.as_str()).collect();
@@ -1331,6 +1346,7 @@ mod tests {
             None,
             Some(&view),
             false,
+            None,
         );
         assert_eq!(recall.match_kind.as_deref(), Some("partial"));
         let ids: Vec<_> = recall.hits.iter().map(|h| h.entry.id.as_str()).collect();
@@ -1362,6 +1378,7 @@ mod tests {
             None,
             Some(&view),
             false,
+            None,
         ));
         let label = |id: &str| {
             json["hits"]
@@ -1394,6 +1411,7 @@ mod tests {
             None,
             Some(&view),
             true,
+            None,
         ));
         let hits = all["hits"].as_array().unwrap();
         assert_eq!(hits.len(), 2);
@@ -1411,6 +1429,7 @@ mod tests {
             None,
             Some(&view),
             false,
+            None,
         ));
         assert_eq!(hidden["hits"].as_array().unwrap().len(), 1);
     }
@@ -1436,6 +1455,7 @@ mod tests {
             None,
             Some(&view),
             false,
+            None,
         ));
         assert_eq!(plain, viewed);
         assert!(!viewed.to_string().contains("lifecycle"));
@@ -1464,6 +1484,7 @@ mod tests {
                 None,
                 Some(&view),
                 include_hidden,
+                None,
             ))
             .unwrap();
             assert_eq!(plain, viewed);
@@ -1486,6 +1507,7 @@ mod tests {
             None,
             Some(&view),
             false,
+            None,
         ));
         let hits = json["hits"].as_array().unwrap();
         assert_eq!(hits.len(), 1);
@@ -1516,6 +1538,7 @@ mod tests {
             None,
             Some(&view),
             false,
+            None,
         ));
         assert_eq!(plain, hidden);
         assert_eq!(hidden["ledger_status"], "present");
@@ -1527,6 +1550,7 @@ mod tests {
             None,
             Some(&view),
             true,
+            None,
         ));
         assert_eq!(all["hits"][0]["lifecycle"], "dropped");
     }

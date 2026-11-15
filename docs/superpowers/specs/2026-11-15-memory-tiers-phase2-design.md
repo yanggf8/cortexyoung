@@ -190,7 +190,10 @@ recognise as suspect:
 
 The client runs today's decoding and checks on those rows, plus the rows they name, and reports
 the first error with today's message. That includes serde's own text, because the screen returns
-the body.
+the body. With one fault the message is the one today's read gives. With two or more, it is one of
+the messages today's read could give, not necessarily the same one: today's read has no row order
+(its `SELECT` has no `ORDER BY`) and checks collisions row by row as it decodes, while the screen
+decodes every row before it checks collisions (Task 4 external review, 2026-11-16).
 
 The checks that need serde's or `validate()`'s full reading of every row do not stay on recall:
 - a well-formed JSON body that serde still rejects (a wrong field type, a negative

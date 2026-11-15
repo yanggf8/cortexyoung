@@ -1,6 +1,7 @@
 //! Cortexyoung-owned cross-machine project memory backed by a shared Turso database.
 
-use crate::memory::{self, MemoryEntry, MemoryLedger, MemoryRecall, Scope};
+use crate::memory::{self, Haystack, MemoryEntry, MemoryLedger, MemoryRecall, Scope};
+use crate::memory_search::{self, query_terms, QueryTerms, Stage2, StageQuery};
 use crate::question::QuestionEvent;
 use crate::remind::{EventKind, ReminderEvent};
 use crate::remote::{Cell, ErrorKind, RemoteDb, Stmt, Transport, UreqTransport};
@@ -549,10 +550,12 @@ fn merge_bodies(bodies: Vec<String>) -> Result<Vec<String>, String> {
 }
 
 /// Checks the rows of `memory_search::integrity_screen` (`(body, suspect)`, already in `$.id`,
-/// `project` order) and reports the error today's whole read would, in its phase order: decode,
-/// id collision, a suspect row's predecessor missing from the returned ids, then the subset
-/// topological order and `validate`. `suspect` is a screen, not a verdict: a suspect row that passes
-/// these checks is not an error.
+/// `project` order) and reports an error today's whole read would. Its phases run in this order:
+/// decode every row, id collision, a suspect row's predecessor missing from the returned ids, then
+/// the subset topological order and `validate`. With one fault the message is today's; with two or
+/// more it is one today's read could give, not necessarily the same one, because today's read has
+/// no row order and checks collisions as it decodes each row. `suspect` is a screen, not a verdict:
+/// a suspect row that passes these checks is not an error.
 pub fn screen_check(rows: Vec<(String, bool)>) -> Result<(), String> {
     screen_check_inner(rows).map_err(with_alias_hint)
 }
@@ -1932,10 +1935,50 @@ pub fn recall_with(root: &Path, query: &str, ledger: &Ledger) -> Result<MemoryRe
     recall_all_with(root, query, ledger, false)
 }
 
-/// Reads the ledger with the project's lifecycle events and folds them at the current time. On
-/// an enabled project hidden entries are left out unless `include_hidden`; a project that never
-/// switched lifecycle on answers exactly as before the lifecycle table existed.
+/// Folds the project's lifecycle events at the current time. On an enabled project hidden entries
+/// are left out unless `include_hidden`; a project that never switched lifecycle on answers
+/// exactly as before the lifecycle table existed. Reads only the rows the query can match, plus
+/// the whole-ledger facts recall needs (`search_with`), and answers exactly as
+/// `recall_whole_with`.
 pub fn recall_all_with(
+    root: &Path,
+    query: &str,
+    ledger: &Ledger,
+    include_hidden: bool,
+) -> Result<MemoryRecall, LedgerError> {
+    let project = project(root)?;
+    let now_ns = crate::remind_store::now_ns()?;
+    let queries = [query.to_string()];
+    let searched = search_with(
+        ledger,
+        &project,
+        &SearchRequest {
+            queries: &queries,
+            haystack: Haystack::KeyClaim,
+            include_hidden,
+        },
+        now_ns,
+    )?;
+    let mut recall = memory::recall_ledger_view(
+        root,
+        query,
+        &searched.ledger,
+        searched.present,
+        None,
+        Some(&searched.view),
+        include_hidden,
+        Some(&searched.conflicts),
+    );
+    if searched.unreadable > 0 {
+        recall.lifecycle_unreadable = Some(searched.unreadable);
+        recall.lifecycle_hint = Some(memory::LIFECYCLE_UNREADABLE_HINT.to_string());
+    }
+    Ok(recall)
+}
+
+/// Today's whole-ledger recall: every row read and decoded, then the same decision. Kept as the
+/// oracle `recall_all_with` is tested against, and as the eval's baseline.
+pub fn recall_whole_with(
     root: &Path,
     query: &str,
     ledger: &Ledger,
@@ -1954,12 +1997,303 @@ pub fn recall_all_with(
         None,
         Some(&view),
         include_hidden,
+        None,
     );
     if unreadable > 0 {
         recall.lifecycle_unreadable = Some(unreadable);
         recall.lifecycle_hint = Some(memory::LIFECYCLE_UNREADABLE_HINT.to_string());
     }
     Ok(recall)
+}
+
+/// What a search asks for: one or more queries over one haystack.
+pub struct SearchRequest<'a> {
+    pub queries: &'a [String],
+    pub haystack: Haystack,
+    pub include_hidden: bool,
+}
+
+/// What a search read. `ledger` is the merged, subset-decoded union of every query's stage rows,
+/// all of them active; `present`, `conflicts` (keys with two or more active ids, hidden ones
+/// included) and `view`'s lifecycle rows were read over the whole ledger in the same snapshot.
+pub struct Searched {
+    pub ledger: MemoryLedger,
+    pub present: bool,
+    pub conflicts: BTreeSet<String>,
+    pub view: crate::memory_lifecycle::LifecycleView,
+    pub unreadable: usize,
+    pub trips: usize,
+}
+
+/// One snapshot read, decoded; `resend` says the narrow form's answer cannot be trusted.
+struct TripRead {
+    searched: Searched,
+    /// Stage rows the trip returned, before deduplication.
+    rows: usize,
+    resend: bool,
+}
+
+/// Reads only the rows the queries can match, in one read transaction, and at most one more when
+/// the first answer cannot be trusted: an entry the SQL's archived condition excluded is one the
+/// fold shows, or a gated stage 2 stayed shut while the client's full match over the visible
+/// stage-1 rows is empty. The second read has no archived condition and no gate, and replaces the
+/// first entirely. The integrity screen fails the search with today's whole-read message.
+pub fn search_with(
+    ledger: &Ledger,
+    project: &str,
+    req: &SearchRequest,
+    now_ns: i128,
+) -> Result<Searched, LedgerError> {
+    search_counted(ledger, project, req, now_ns).map(|(searched, _)| searched)
+}
+
+/// `search_with`, and the stage rows every trip returned.
+fn search_counted(
+    ledger: &Ledger,
+    project: &str,
+    req: &SearchRequest,
+    now_ns: i128,
+) -> Result<(Searched, usize), LedgerError> {
+    let terms: Vec<QueryTerms> = req.queries.iter().map(|q| query_terms(q)).collect();
+    let first = ledger.search_trip(project, req, &terms, true, now_ns)?;
+    if !first.resend {
+        let mut searched = first.searched;
+        searched.trips = 1;
+        return Ok((searched, first.rows));
+    }
+    let second = ledger.search_trip(project, req, &terms, false, now_ns)?;
+    let mut searched = second.searched;
+    searched.trips = 2;
+    Ok((searched, first.rows + second.rows))
+}
+
+impl Ledger {
+    /// One round trip. `narrow` is the first form: the archived condition in SQL (unless
+    /// `include_hidden`), its exclusions returned for checking, and stage 2 gated unless a term is
+    /// exempt. The wide form drops all three.
+    fn search_trip(
+        &self,
+        project: &str,
+        req: &SearchRequest,
+        terms: &[QueryTerms],
+        narrow: bool,
+        now_ns: i128,
+    ) -> Result<TripRead, LedgerError> {
+        let archived_in_sql = narrow && !req.include_hidden;
+        let mut stmts = vec![
+            Stmt::new(CREATE_TABLE, vec![]),
+            Stmt::new(CREATE_ALIASES, vec![]),
+            Stmt::new(CREATE_QUESTIONS, vec![]),
+            Stmt::new(CREATE_REMINDERS, vec![]),
+            Stmt::new(CREATE_LIFECYCLE, vec![]),
+        ];
+        // Each result is named where its statement is pushed, so appending a statement can
+        // never silently shift another's index.
+        let mut push = |stmt: Stmt| {
+            stmts.push(stmt);
+            stmts.len() - 1
+        };
+        let count_at = push(memory_search::ledger_count(project));
+        let conflicts_at = push(memory_search::conflict_keys(project));
+        let screen_at = push(memory_search::integrity_screen(project));
+        let lifecycle_at = push(memory_search::lifecycle_rows(project));
+        let excluded_at = archived_in_sql.then(|| push(memory_search::archived_excluded(project)));
+        let mut stages = Vec::with_capacity(terms.len());
+        for t in terms {
+            let q = StageQuery {
+                terms: t,
+                haystack: req.haystack,
+                archived_in_sql,
+                stage2: if narrow && !t.exempt {
+                    Stage2::Gated
+                } else {
+                    Stage2::Ungated
+                },
+            };
+            let first = push(memory_search::stage1(project, &q));
+            let second = memory_search::stage2(project, &q).map(&mut push);
+            let gated = second.is_some() && q.stage2 == Stage2::Gated;
+            stages.push((first, second, gated));
+        }
+        let mut results = self
+            .db
+            .read_snapshot(&stmts)
+            .map_err(|e| LedgerError::Remote(e.kind))?;
+        // Defensive: `read_snapshot()` already guarantees one result per statement.
+        if results.len() != stmts.len() {
+            return Err(LedgerError::Message("missing remote memory result".into()));
+        }
+
+        let screen = results[screen_at]
+            .rows
+            .iter()
+            .map(|row| match (row.first(), row.get(1)) {
+                (Some(Cell::Text(body)), Some(Cell::Int(suspect))) => {
+                    Ok((body.clone(), *suspect == 1))
+                }
+                _ => Err(LedgerError::Message("invalid remote memory row".into())),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        screen_check(screen).map_err(LedgerError::Message)?;
+
+        let present = match results[count_at].rows.first().and_then(|row| row.first()) {
+            Some(Cell::Int(n)) => *n > 0,
+            _ => return Err(LedgerError::Message("invalid remote memory count".into())),
+        };
+        // A key that is not text belongs to a row serde rejects, so it can name no decoded entry.
+        let conflicts: BTreeSet<String> = results[conflicts_at]
+            .rows
+            .iter()
+            .filter_map(|row| match row.first() {
+                Some(Cell::Text(key)) => Some(key.clone()),
+                _ => None,
+            })
+            .collect();
+        let lifecycle = lifecycle_rows(std::mem::take(&mut results[lifecycle_at].rows));
+
+        let mut rows = 0;
+        let mut all_bodies = Vec::new();
+        let mut first_bodies = Vec::with_capacity(stages.len());
+        for (first, second, _) in &stages {
+            let ones = stage_bodies(&results[*first].rows)?;
+            let twos = match second {
+                Some(at) => stage_bodies(&results[*at].rows)?,
+                None => Vec::new(),
+            };
+            rows += ones.len() + twos.len();
+            all_bodies.extend(ones.iter().cloned());
+            all_bodies.extend(twos);
+            first_bodies.push(ones);
+        }
+        let excluded = match excluded_at {
+            Some(at) => stage_bodies(&results[at].rows)?,
+            None => Vec::new(),
+        };
+        let subset = |bodies: Vec<String>| {
+            merge_bodies(bodies)
+                .and_then(|merged| ledger_from_bodies(merged, Scope::Subset))
+                .map_err(|message| LedgerError::Message(with_alias_hint(message)))
+        };
+        let answer = subset(all_bodies.clone())?;
+        // The excluded entries are folded with the rest, so the check sees the states the
+        // answer's fold would give them.
+        let checked = if excluded.is_empty() {
+            None
+        } else {
+            let mut union = all_bodies;
+            union.extend(excluded.iter().cloned());
+            Some(subset(union)?)
+        };
+        let view = crate::memory_lifecycle::fold(
+            checked.as_ref().unwrap_or(&answer),
+            lifecycle.events,
+            lifecycle.unreadable,
+            now_ns,
+            None,
+        );
+        let hidden = |id: &str| view.state_of(id).is_some_and(|s| s.is_hidden());
+
+        let mut resend = false;
+        for body in &excluded {
+            let entry: MemoryEntry = serde_json::from_str(body)
+                .map_err(|e| LedgerError::Message(format!("invalid remote memory row: {e}")))?;
+            resend |= !hidden(&entry.id);
+        }
+        for ((_, _, gated), (query, (t, ones))) in stages
+            .iter()
+            .zip(req.queries.iter().zip(terms.iter().zip(&first_bodies)))
+        {
+            if !gated || ones.is_empty() || t.terms.len() < 2 {
+                continue;
+            }
+            let ids: BTreeSet<String> = ones
+                .iter()
+                .map(|body| serde_json::from_str::<MemoryEntry>(body).map(|e| e.id))
+                .collect::<Result<_, _>>()
+                .map_err(|e| LedgerError::Message(format!("invalid remote memory row: {e}")))?;
+            let visible: Vec<MemoryEntry> = answer
+                .entries
+                .iter()
+                .filter(|e| ids.contains(&e.id) && (req.include_hidden || !hidden(&e.id)))
+                .cloned()
+                .collect();
+            let (selected, partial) = memory::recall_selection_in(query, &visible, req.haystack);
+            resend |= partial || selected.is_empty();
+        }
+
+        Ok(TripRead {
+            searched: Searched {
+                ledger: answer,
+                present,
+                conflicts,
+                unreadable: lifecycle.unreadable,
+                view,
+                trips: 0,
+            },
+            rows,
+            resend,
+        })
+    }
+}
+
+/// The bodies of `(project, body)` stage rows.
+fn stage_bodies(rows: &[Vec<Cell>]) -> Result<Vec<String>, LedgerError> {
+    rows.iter()
+        .map(|row| match row.get(1) {
+            Some(Cell::Text(body)) => Ok(body.clone()),
+            _ => Err(LedgerError::Message("invalid remote memory row".into())),
+        })
+        .collect()
+}
+
+/// The ids and partial flag recall would print over `ledger`'s active entries, hidden ones left
+/// out unless `include_hidden`.
+fn select_visible(
+    query: &str,
+    ledger: &MemoryLedger,
+    view: &crate::memory_lifecycle::LifecycleView,
+    include_hidden: bool,
+) -> (Vec<String>, bool) {
+    let visible: Vec<MemoryEntry> = memory::active_entries(ledger)
+        .into_iter()
+        .filter(|e| include_hidden || !view.state_of(&e.id).is_some_and(|s| s.is_hidden()))
+        .cloned()
+        .collect();
+    memory::recall_selection_in(query, &visible, Haystack::KeyClaim)
+}
+
+/// Recall's selection over the whole ledger, read as `recall_whole_with` reads it: ids in output
+/// order and the partial flag, with no root and no source checks. The eval's baseline.
+pub fn select_whole_with(
+    ledger: &Ledger,
+    project: &str,
+    query: &str,
+    include_hidden: bool,
+    now_ns: i128,
+) -> Result<(Vec<String>, bool), LedgerError> {
+    let (entries, rows) = ledger.read_with_lifecycle(project)?;
+    let view = crate::memory_lifecycle::fold(&entries, rows.events, rows.unreadable, now_ns, None);
+    Ok(select_visible(query, &entries, &view, include_hidden))
+}
+
+/// `select_whole_with` through `search_with`, plus the stage rows returned (every trip's, before
+/// deduplication) and the round trips spent.
+pub fn select_search_with(
+    ledger: &Ledger,
+    project: &str,
+    query: &str,
+    include_hidden: bool,
+    now_ns: i128,
+) -> Result<(Vec<String>, bool, usize, usize), LedgerError> {
+    let queries = [query.to_string()];
+    let req = SearchRequest {
+        queries: &queries,
+        haystack: Haystack::KeyClaim,
+        include_hidden,
+    };
+    let (searched, rows) = search_counted(ledger, project, &req, now_ns)?;
+    let (ids, partial) = select_visible(query, &searched.ledger, &searched.view, include_hidden);
+    Ok((ids, partial, rows, searched.trips))
 }
 
 /// `cort memory list`: every active entry, hidden ones included and labelled. A disabled project
@@ -1977,7 +2311,8 @@ pub fn list_report_with(
     let unreadable = rows.unreadable;
     let present = !data.entries.is_empty();
     let real = crate::memory_lifecycle::fold(&data, rows.events.clone(), unreadable, now_ns, None);
-    let recall = memory::recall_ledger_view(root, "", &data, present, None, Some(&real), true);
+    let recall =
+        memory::recall_ledger_view(root, "", &data, present, None, Some(&real), true, None);
     let (label, epoch_ns, view) = match (epoch, real.enabled) {
         (Some((label, ns)), false) => (label, ns, None),
         (None, false) => {

@@ -133,6 +133,20 @@ In partial scoring, ASCII terms match only at word starts (prefixes such as `hoo
 count); terms containing non-ASCII characters keep substring matching.
 These are candidates, not answers to the query; when no entry reaches half, the output is
 `match: partial` with empty `hits`.
+Since phase 2a of issue #11, `recall` reads only the rows its query can match, plus a few
+whole-ledger facts (whether the ledger has any entry, which keys hold two or more active entries,
+the lifecycle rows, and an integrity screen), all inside one read transaction; it makes at most
+two round trips (a Busy answer is retried inside a trip and is not a second trip), and its answer
+is the one a whole-ledger read gives. A term with a cased non-ASCII letter or a combining accent
+cannot be case-folded in SQL, so it filters nothing there and a query made only of such terms
+reads every active row. The screen fails recall with today's message for a body that is not
+JSON or lacks a field, an empty `id`, a blank `key` or `claim`, a missing or own-id predecessor, a
+predecessor under another key, and one id with two contents. Five checks need every row decoded, so over
+the whole ledger they moved to `cort memory status` and `cort memory list`, which still read every row and fail as before: a JSON body serde rejects (a wrong field type), a
+key or claim made only of non-ASCII whitespace, an invalid source or resolution, a superseded id
+repeated, and a supersession cycle (whose entries recall now leaves out silently, since each is
+named as a predecessor). Recall still applies them to the rows it returns. Session-start recall
+still reads the whole ledger and names any integrity error (`ledger_invalid`).
 Older rows without a line hash use the
 whole-file hash for their evidence status. Whenever the file is readable, `source_file_changed`
 reports whether its bytes differ from the recorded file hash. Neither label checks the
