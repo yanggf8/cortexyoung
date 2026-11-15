@@ -380,6 +380,32 @@ pub(crate) fn recall_ledger_view(
     include_hidden: bool,
     conflicts: Option<&BTreeSet<String>>,
 ) -> MemoryRecall {
+    recall_ledger_view_in(
+        root,
+        query,
+        ledger,
+        present,
+        sync_status,
+        view,
+        include_hidden,
+        conflicts,
+        Haystack::KeyClaim,
+    )
+}
+
+/// `recall_ledger_view` over a chosen haystack; `Key` is layer 1 (`cort memory recall --keys`).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn recall_ledger_view_in(
+    root: &Path,
+    query: &str,
+    ledger: &MemoryLedger,
+    present: bool,
+    sync_status: Option<String>,
+    view: Option<&crate::memory_lifecycle::LifecycleView>,
+    include_hidden: bool,
+    conflicts: Option<&BTreeSet<String>>,
+    haystack: Haystack,
+) -> MemoryRecall {
     recall_ledger_inner(
         &source_root(root),
         query,
@@ -390,6 +416,7 @@ pub(crate) fn recall_ledger_view(
         view,
         include_hidden,
         conflicts,
+        haystack,
     )
     .0
 }
@@ -413,6 +440,7 @@ pub(crate) fn recall_ledger_for_hook(
         view,
         false,
         None,
+        Haystack::KeyClaim,
     )
 }
 
@@ -543,6 +571,7 @@ fn recall_ledger_inner(
     view: Option<&crate::memory_lifecycle::LifecycleView>,
     include_hidden: bool,
     conflicts: Option<&BTreeSet<String>>,
+    haystack: Haystack,
 ) -> (MemoryRecall, usize) {
     let terms: Vec<_> = query.split_whitespace().map(|s| s.to_lowercase()).collect();
     let mut active = active_entries(ledger);
@@ -577,7 +606,7 @@ fn recall_ledger_inner(
     if let Some(n) = limit {
         active.truncate(n);
     }
-    let (selected, partial) = select_terms(&terms, &active, limit.is_none(), Haystack::KeyClaim);
+    let (selected, partial) = select_terms(&terms, &active, limit.is_none(), haystack);
     let mut hits = Vec::new();
     for (entry, matched_terms) in selected {
         let source = if entry.unsourced {

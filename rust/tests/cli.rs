@@ -3317,3 +3317,144 @@ fn a_query_word_help_is_a_query_and_not_a_request_for_usage() {
     );
     assert_ne!(r.code, 0);
 }
+
+/// Several queries take `--also`; a second positional word is still clap's error, so an
+/// unquoted `recall deploy plan` can never silently become two one-word queries.
+#[test]
+fn unquoted_two_word_query_is_refused() {
+    let (_p, cwd, _c, cache) = sandbox();
+    let empty_memory = tempfile::tempdir().unwrap();
+    let mem = empty_memory.path().to_str().unwrap();
+    let r = run_cort_env(
+        &["memory", "recall", "deploy", "plan"],
+        &cwd,
+        &cache,
+        &[("CORT_MEMORY_DIR", mem)],
+    );
+    assert_ne!(r.code, 0);
+    let p = payload(&r);
+    assert_eq!(p["error"], "unknown_command", "stdout={:?}", r.stdout);
+    assert!(
+        p["detail"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("unexpected argument"),
+        "stdout={:?}",
+        r.stdout
+    );
+}
+
+/// `--also` and `--keys [--lean]` parse and reach the read (here: no connection configured,
+/// so a memory error, never the network); `--lean` belongs to `--keys` alone.
+#[test]
+fn recall_also_keys_and_lean_parse() {
+    let (_p, cwd, _c, cache) = sandbox();
+    let empty_memory = tempfile::tempdir().unwrap();
+    let mem = empty_memory.path().to_str().unwrap();
+    for args in [
+        vec!["memory", "recall", "部署", "--also", "deploy"],
+        vec![
+            "memory", "recall", "部署", "--also", "deploy", "--also", "x",
+        ],
+        vec!["memory", "recall", "--keys", "deploy"],
+        vec!["memory", "recall", "--keys", "deploy", "--lean"],
+        vec![
+            "memory", "recall", "--keys", "deploy", "--also", "部署", "--all",
+        ],
+    ] {
+        let r = run_cort_env(&args, &cwd, &cache, &[("CORT_MEMORY_DIR", mem)]);
+        assert_ne!(r.code, 0);
+        assert_eq!(
+            payload(&r)["error"],
+            "memory_error",
+            "{args:?} {:?}",
+            r.stdout
+        );
+    }
+    let r = run_cort_env(
+        &["memory", "recall", "deploy", "--lean"],
+        &cwd,
+        &cache,
+        &[("CORT_MEMORY_DIR", mem)],
+    );
+    assert_ne!(r.code, 0);
+    let p = payload(&r);
+    assert_eq!(p["error"], "unknown_command", "stdout={:?}", r.stdout);
+    let message = p["detail"]["message"].as_str().unwrap();
+    assert!(message.contains("--keys"), "{message}");
+}
+
+/// An empty or blank `--also` is refused at parse time with a message naming the fix, before
+/// any read.
+#[test]
+fn blank_also_is_refused() {
+    let (_p, cwd, _c, cache) = sandbox();
+    let empty_memory = tempfile::tempdir().unwrap();
+    let mem = empty_memory.path().to_str().unwrap();
+    for blank in ["", "   ", "\t"] {
+        let r = run_cort_env(
+            &["memory", "recall", "deploy", "--also", blank],
+            &cwd,
+            &cache,
+            &[("CORT_MEMORY_DIR", mem)],
+        );
+        assert_ne!(r.code, 0);
+        let p = payload(&r);
+        assert_eq!(p["error"], "unknown_command", "stdout={:?}", r.stdout);
+        let message = p["detail"]["message"].as_str().unwrap();
+        assert!(message.contains("--also needs a query"), "{message}");
+    }
+}
+
+/// The usage row names `--also`, `--keys` and `--lean` only when given, so a single-query row
+/// is today's row byte for byte.
+#[test]
+fn recall_usage_row_names_also_keys_and_lean_only_when_given() {
+    let (_p, cwd, _c, cache) = sandbox();
+    let empty_memory = tempfile::tempdir().unwrap();
+    let mem = empty_memory.path().to_str().unwrap();
+    let envs = [
+        ("CORT_MEMORY_DIR", mem),
+        ("CORT_MEMORY_PROJECT", "usage-row-test"),
+    ];
+    let raw_row = || -> String {
+        let conn = rusqlite::Connection::open_with_flags(
+            cache.join("usage.db"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        conn.query_row(
+            "SELECT args_summary FROM command_log WHERE command = 'memory' ORDER BY id DESC LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    let r = run_cort_env(&["memory", "recall", "deploy"], &cwd, &cache, &envs);
+    assert_eq!(payload(&r)["error"], "memory_error", "{:?}", r.stdout);
+    assert_eq!(raw_row(), r#"{"harness_declared":"unknown","v":1}"#);
+    let r = run_cort_env(
+        &[
+            "memory", "recall", "--keys", "deploy", "--also", "部署", "--also", "x", "--lean",
+        ],
+        &cwd,
+        &cache,
+        &envs,
+    );
+    assert_eq!(payload(&r)["error"], "memory_error", "{:?}", r.stdout);
+    assert_eq!(
+        raw_row(),
+        r#"{"also":2,"harness_declared":"unknown","keys":true,"lean":true,"v":1}"#
+    );
+    let r = run_cort_env(
+        &["memory", "recall", "deploy", "--also", "部署"],
+        &cwd,
+        &cache,
+        &envs,
+    );
+    assert_eq!(payload(&r)["error"], "memory_error", "{:?}", r.stdout);
+    assert_eq!(
+        raw_row(),
+        r#"{"also":1,"harness_declared":"unknown","v":1}"#
+    );
+}

@@ -297,17 +297,17 @@ ClaudeCat collects nothing, and its `claudecat telemetry sync` is retired.
 **Use the ledger in this repo; do not wait to be asked.** The product is only evidence if its own
 developers lean on it, and on 2026-10-27 an agent kept a next-day plan in its harness-private memory
 alone, where no other machine or harness can read it, until the user asked why.
-- **Recall** with `cort memory recall "<topic>"` at the start of work, after a compaction, and
-  before asserting a project fact (a decision, a machine's state, what was retired). For
+- **Recall** with `cort memory recall "<topic>"` (add `--also "<the same words in the other
+  language>"` to search Chinese and English in one read) at the start of work, after a compaction,
+  and before asserting a project fact (a decision, a machine's state, what was retired). For
   `source_moved`, read the line at `source_line_now` and its section; `source_changed`,
   `source_missing`, and `conflict` are leads to re-check, not facts; when the current source
   contradicts the claim, or `conflict` shows several active entries for one key, state both
-  versions and ask the user which holds instead of picking one,
-  because the edit may be unreviewed or the entry may need `--replace` (user, 2026-10-31: Codex
-  picked "the current file wins" 4 of 4 times in the memory answer trial); when the source is
-  missing, say the claim could not be re-checked rather than asserting it. The label follows the
-  cited line only, so when a claim depends on its section and `source_file_changed` is true, read
-  the section too.
+  versions and ask the user which holds instead of picking one, because the edit may be unreviewed
+  or the entry may need `--replace` (user, 2026-10-31: Codex picked "the current file wins"
+  4 of 4 times in the memory answer trial); when the source is missing, say the claim could
+  not be re-checked rather than asserting it. The label follows the cited line only, so when
+  a claim depends on its section and `source_file_changed` is true, read the section too.
 - **Record** with `cort memory record --key <key> --claim <claim>` when a decision is made or
   changed, when the user corrects a working assumption, and when a deployment changes what a machine
   runs. Cite a naturally existing line with `--source <repo file> --line <n>` when it states the

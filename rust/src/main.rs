@@ -473,6 +473,8 @@ fn render_emit(emit: &Emit) -> String {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string()
+    } else if emit.render_command == Some("memory-recall-lean") {
+        cort::memory_store::render_keys_lean(&emit.payload)
     } else if matches!(
         emit.render_command,
         Some("hook-recall" | "hook-remind" | "hook-refresh-raw")
@@ -525,6 +527,18 @@ fn parse_i64_flag(raw: Option<&str>, default: i64) -> i64 {
     raw.and_then(|s| s.parse::<f64>().ok())
         .map(|n| n as i64)
         .unwrap_or(default)
+}
+
+/// `--also` takes words: a blank value would be a second query that selects everything.
+fn also_query(raw: &str) -> Result<String, String> {
+    if raw.trim().is_empty() {
+        Err(
+            "--also needs a query: give the same words in the other language, or drop --also"
+                .into(),
+        )
+    } else {
+        Ok(raw.to_string())
+    }
 }
 
 fn clap_fail(err: clap::Error) -> CortError {
@@ -783,6 +797,16 @@ enum MemoryAction {
         /// Also show entries the lifecycle hides (archived or dropped), each labelled.
         #[arg(long)]
         all: bool,
+        /// One more query in the same read (repeatable), e.g. the same words in the other
+        /// language; the answer lists each query's own hits under `queries`.
+        #[arg(long, value_parser = also_query)]
+        also: Vec<String>,
+        /// Layer 1: search the keys alone; one compact row per hit, no claims.
+        #[arg(long)]
+        keys: bool,
+        /// With --keys: one tab-separated line per hit.
+        #[arg(long, requires = "keys")]
+        lean: bool,
     },
     Status {
         #[arg(long, default_value = ".")]
@@ -3142,13 +3166,46 @@ fn cmd_memory(args: &[String], usage: &mut UsageEvent) -> Result<Emit, CortError
             harness,
             json: _,
             all,
+            also,
+            keys,
+            lean,
         } => {
             usage.project_id = Some(cort::memory_store::project(&root).map_err(memory_error)?);
-            usage.args_summary = json!({"v":1,"harness_declared":harness}).to_string();
-            let mut report = serde_json::to_value(
-                cort::memory_store::recall_all(&root, &query, all).map_err(memory_read_error)?,
+            // The new flags appear only when given, so a single-query row is unchanged.
+            let mut row = json!({"v":1,"harness_declared":harness});
+            if !also.is_empty() {
+                row["also"] = json!(also.len());
+            }
+            if keys {
+                row["keys"] = json!(true);
+            }
+            if lean {
+                row["lean"] = json!(true);
+            }
+            usage.args_summary = row.to_string();
+            let ledger = cort::memory_store::Ledger::open().map_err(memory_read_error)?;
+            let mut report = cort::memory_store::recall_report_with(
+                &root,
+                &cort::memory_store::RecallRequest {
+                    query: &query,
+                    also: &also,
+                    keys,
+                    include_hidden: all,
+                },
+                &ledger,
             )
-            .unwrap_or(Value::Null);
+            .map_err(memory_read_error)?;
+            if lean {
+                // Stdout stays hit lines, status lines and `next`; the disclosure goes to stderr.
+                if let Some(line) = cort::memory_store::lifecycle_unreadable_line(&report) {
+                    eprintln!("{line}");
+                }
+                return Ok(Emit {
+                    render_command: Some("memory-recall-lean"),
+                    format: Format::Lean,
+                    payload: report,
+                });
+            }
             report["harness_declared"] = json!(harness);
             report["remote"] = json!("ok");
             report["machine"] = json!({
@@ -4484,6 +4541,29 @@ mod tests {
     use cort::memory_store::LedgerError;
     use cort::remote::ErrorKind;
     use serde_json::json;
+
+    /// `--keys --lean` reaches the lean text through `render_emit`, not the JSON renderer.
+    #[test]
+    fn memory_recall_lean_renders_the_lean_text() {
+        let payload = json!({
+            "ledger_status": "present",
+            "queries": [{"query": "deploy", "match_kind": "all", "hits": [{"id": "abc"}]}],
+            "hits": [{"key": "deploy-plan", "id": "abc", "recorded_at_utc": "2026-11-16T00:00:00Z"}],
+            "next": "cort memory recall \"deploy\" --also \"<the same words in the other language>\"",
+        });
+        let emit = super::Emit {
+            render_command: Some("memory-recall-lean"),
+            format: super::Format::Lean,
+            payload: payload.clone(),
+        };
+        let text = super::render_emit(&emit);
+        assert_eq!(text, cort::memory_store::render_keys_lean(&payload));
+        assert_eq!(
+            text,
+            "deploy-plan\tabc\t2026-11-16T00:00:00Z\t-\t-\n\
+             cort memory recall \"deploy\" --also \"<the same words in the other language>\"\n"
+        );
+    }
 
     #[test]
     fn lifecycle_refusals_keep_their_code_and_detail() {

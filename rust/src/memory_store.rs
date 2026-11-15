@@ -9,7 +9,7 @@ use crate::{notes, notes_upload, usage};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -2004,6 +2004,302 @@ pub fn recall_whole_with(
         recall.lifecycle_hint = Some(memory::LIFECYCLE_UNREADABLE_HINT.to_string());
     }
     Ok(recall)
+}
+
+/// What `cort memory recall` was asked: the positional query, every `--also`, `--keys` and
+/// `--all`. Named fields, so the two flags cannot be passed in each other's place.
+pub struct RecallRequest<'a> {
+    pub query: &'a str,
+    pub also: &'a [String],
+    pub keys: bool,
+    pub include_hidden: bool,
+}
+
+/// What `cort memory recall` answers. One query without `--also` or `--keys` is
+/// `recall_all_with`'s answer, exactly as before those flags existed; `--keys` is
+/// `recall_keys_with` and `--also` alone is `recall_many_with`, the positional query first.
+pub fn recall_report_with(
+    root: &Path,
+    req: &RecallRequest,
+    ledger: &Ledger,
+) -> Result<Value, LedgerError> {
+    if !req.keys && req.also.is_empty() {
+        return Ok(serde_json::to_value(recall_all_with(
+            root,
+            req.query,
+            ledger,
+            req.include_hidden,
+        )?)
+        .unwrap_or(Value::Null));
+    }
+    let queries: Vec<String> = std::iter::once(req.query.to_string())
+        .chain(req.also.iter().cloned())
+        .collect();
+    if req.keys {
+        recall_keys_with(root, &queries, ledger, req.include_hidden)
+    } else {
+        recall_many_with(root, &queries, ledger, req.include_hidden)
+    }
+}
+
+/// The one stderr line `--keys --lean` prints when lifecycle rows could not be read (stdout keeps
+/// its five-field hit lines); `None` when every row was read.
+pub fn lifecycle_unreadable_line(report: &Value) -> Option<String> {
+    let n = report
+        .get("lifecycle_unreadable")?
+        .as_u64()
+        .filter(|n| *n > 0)?;
+    let hint = memory::LIFECYCLE_UNREADABLE_HINT;
+    // The hint opens by saying what the count already says.
+    let hint = hint
+        .strip_prefix("some lifecycle rows could not be read; ")
+        .unwrap_or(hint);
+    Some(format!(
+        "cort memory: {n} lifecycle rows could not be read; {hint}"
+    ))
+}
+
+/// `s` as one double-quoted shell word: `\`, `"`, `$` and backtick escaped.
+fn shell_quote(s: &str) -> String {
+    let mut out = String::from("\"");
+    for c in s.chars() {
+        if matches!(c, '\\' | '"' | '$' | '`') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out.push('"');
+    out
+}
+
+/// The step `--keys` names after its rows: the content search of the same queries. One query
+/// asks for the same words in the other language; several are repeated as `--also`.
+fn keys_next(queries: &[String], include_hidden: bool) -> String {
+    let mut next = String::from("cort memory recall");
+    for (i, query) in queries.iter().enumerate() {
+        if i > 0 {
+            next.push_str(" --also");
+        }
+        next.push(' ');
+        next.push_str(&shell_quote(query));
+    }
+    if queries.len() < 2 {
+        next.push_str(" --also \"<the same words in the other language>\"");
+    }
+    if include_hidden {
+        next.push_str(" --all");
+    }
+    next
+}
+
+/// Several queries over one search: each query's own recall over the merged rows, with the
+/// conflict keys the database computed over every row.
+fn recall_each(
+    root: &Path,
+    queries: &[String],
+    ledger: &Ledger,
+    include_hidden: bool,
+    haystack: Haystack,
+) -> Result<(Vec<MemoryRecall>, Searched), LedgerError> {
+    let project = project(root)?;
+    let now_ns = crate::remind_store::now_ns()?;
+    let searched = search_with(
+        ledger,
+        &project,
+        &SearchRequest {
+            queries,
+            haystack,
+            include_hidden,
+        },
+        now_ns,
+    )?;
+    let recalls = queries
+        .iter()
+        .map(|query| {
+            memory::recall_ledger_view_in(
+                root,
+                query,
+                &searched.ledger,
+                searched.present,
+                None,
+                Some(&searched.view),
+                include_hidden,
+                Some(&searched.conflicts),
+                haystack,
+            )
+        })
+        .collect();
+    Ok((recalls, searched))
+}
+
+/// Every query's hits in its own order, the queries in argument order, each entry once at its
+/// first occurrence with the indexes of every query that found it.
+fn first_occurrences(recalls: &[MemoryRecall]) -> Vec<(&memory::MemoryHit, Vec<usize>)> {
+    let mut out: Vec<(&memory::MemoryHit, Vec<usize>)> = Vec::new();
+    let mut at: HashMap<&str, usize> = HashMap::new();
+    for (index, recall) in recalls.iter().enumerate() {
+        for hit in &recall.hits {
+            match at.get(hit.entry.id.as_str()) {
+                Some(&n) => out[n].1.push(index),
+                None => {
+                    at.insert(&hit.entry.id, out.len());
+                    out.push((hit, vec![index]));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The fields `--also` and `--keys` share: `ledger_status`, each query's own answer under
+/// `queries` (`match_kind` `all` or `partial`, hits as ids with their own `matched_terms`), the
+/// combined `hits`, and the lifecycle disclosure recall gives.
+fn many_report(
+    queries: &[String],
+    recalls: &[MemoryRecall],
+    searched: &Searched,
+    hits: Vec<Value>,
+) -> Value {
+    let per_query: Vec<Value> = queries
+        .iter()
+        .zip(recalls)
+        .map(|(query, recall)| {
+            let hits: Vec<Value> = recall
+                .hits
+                .iter()
+                .map(|hit| {
+                    let mut row = json!({"id": hit.entry.id});
+                    if let Some(terms) = &hit.matched_terms {
+                        row["matched_terms"] = json!(terms);
+                    }
+                    row
+                })
+                .collect();
+            json!({
+                "query": query,
+                "match_kind": if recall.match_kind.is_some() { "partial" } else { "all" },
+                "hits": hits,
+            })
+        })
+        .collect();
+    let mut report = json!({
+        "ledger_status": if searched.present { "present" } else { "absent" },
+        "queries": per_query,
+        "hits": hits,
+    });
+    if searched.unreadable > 0 {
+        report["lifecycle_unreadable"] = json!(searched.unreadable);
+        report["lifecycle_hint"] = json!(memory::LIFECYCLE_UNREADABLE_HINT);
+    }
+    report
+}
+
+/// `cort memory recall "<q1>" --also "<q2>"`: every query in one search. Each top-level hit is
+/// recall's hit for its entry without `matched_terms`, plus `matched_queries`; each query's own
+/// answer is under `queries`.
+pub fn recall_many_with(
+    root: &Path,
+    queries: &[String],
+    ledger: &Ledger,
+    include_hidden: bool,
+) -> Result<Value, LedgerError> {
+    let (recalls, searched) =
+        recall_each(root, queries, ledger, include_hidden, Haystack::KeyClaim)?;
+    let hits = first_occurrences(&recalls)
+        .into_iter()
+        .map(|(hit, matched)| {
+            let mut row = serde_json::to_value(hit).unwrap_or(Value::Null);
+            if let Value::Object(fields) = &mut row {
+                fields.remove("matched_terms");
+                fields.insert("matched_queries".into(), json!(matched));
+            }
+            row
+        })
+        .collect();
+    Ok(many_report(queries, &recalls, &searched, hits))
+}
+
+/// `cort memory recall --keys "<q>"`: layer 1, the keys alone searched. Each hit is
+/// `{key, id, recorded_at_utc, state?, conflict?, matched_queries?}` -- `state` only on an
+/// enabled project, `conflict: true` only when the key holds two or more active entries,
+/// `matched_queries` only with two or more queries -- and `next` is the content search of the
+/// same queries, as a shell command.
+pub fn recall_keys_with(
+    root: &Path,
+    queries: &[String],
+    ledger: &Ledger,
+    include_hidden: bool,
+) -> Result<Value, LedgerError> {
+    let (recalls, searched) = recall_each(root, queries, ledger, include_hidden, Haystack::Key)?;
+    let hits = first_occurrences(&recalls)
+        .into_iter()
+        .map(|(hit, matched)| {
+            let mut row = serde_json::Map::new();
+            row.insert("key".into(), json!(hit.entry.key));
+            row.insert("id".into(), json!(hit.entry.id));
+            if let Some(utc) = memory::entry_view(&hit.entry).get("recorded_at_utc") {
+                row.insert("recorded_at_utc".into(), utc.clone());
+            }
+            if let Some(state) = searched.view.state_of(&hit.entry.id) {
+                row.insert("state".into(), json!(state.as_str()));
+            }
+            if hit.evidence_status == "conflict" {
+                row.insert("conflict".into(), json!(true));
+            }
+            if queries.len() > 1 {
+                row.insert("matched_queries".into(), json!(matched));
+            }
+            Value::Object(row)
+        })
+        .collect();
+    let mut report = many_report(queries, &recalls, &searched, hits);
+    report["next"] = json!(keys_next(queries, include_hidden));
+    Ok(report)
+}
+
+/// `--keys --lean`: one line per hit, `key id recorded_at_utc state conflict`, five
+/// TAB-separated fields always and none empty (`-` for no state, `-` or `conflict` last). Then
+/// status lines, which hold no TAB: `ledger absent`, or `no hits`, or one line per partial query
+/// that has rows. The `next` line is last.
+pub fn render_keys_lean(report: &Value) -> String {
+    use crate::memory_tiers::lean_field;
+    let mut out = String::new();
+    for hit in report["hits"].as_array().into_iter().flatten() {
+        let text = |name: &str| lean_field(hit.get(name).and_then(Value::as_str).unwrap_or(""));
+        let conflict = if hit.get("conflict") == Some(&Value::Bool(true)) {
+            "conflict"
+        } else {
+            "-"
+        };
+        let fields = [
+            text("key"),
+            text("id"),
+            text("recorded_at_utc"),
+            text("state"),
+            conflict.to_string(),
+        ];
+        out.push_str(&fields.join("\t"));
+        out.push('\n');
+    }
+    let no_hits = report["hits"].as_array().is_none_or(Vec::is_empty);
+    if report["ledger_status"] == "absent" {
+        out.push_str("ledger absent\n");
+    } else if no_hits {
+        out.push_str("no hits\n");
+    }
+    for query in report["queries"].as_array().into_iter().flatten() {
+        let has_rows = query["hits"].as_array().is_some_and(|h| !h.is_empty());
+        if query["match_kind"] == "partial" && has_rows {
+            let text = lean_field(query["query"].as_str().unwrap_or(""));
+            out.push_str(&format!(
+                "partial {}: no key held every term; these rows are candidates\n",
+                shell_quote(&text)
+            ));
+        }
+    }
+    out.push_str(&lean_field(report["next"].as_str().unwrap_or("")));
+    out.push('\n');
+    out
 }
 
 /// What a search asks for: one or more queries over one haystack.

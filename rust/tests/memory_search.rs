@@ -30,6 +30,38 @@ fn query_terms_lowercases_and_flags_exempt() {
     assert!(q.exempt);
 }
 
+/// SQLite's `lower()` folds ASCII only, so a stored non-ASCII character whose Rust lowercase
+/// differs would make the SQL haystack disagree with the client's. Every such character either
+/// lowercases to something holding an ASCII letter -- exactly the two the SQL haystack folds
+/// itself -- or to characters that make any term holding them `sql_exempt`, so no SQL condition
+/// can meet them. Checked over every scalar value, not assumed.
+#[test]
+fn rust_lowercase_reaches_ascii_only_from_kelvin_and_dotted_i() {
+    let mut reaches_ascii = Vec::new();
+    for c in (0..=0x10FFFFu32).filter_map(char::from_u32) {
+        if c.is_ascii() {
+            continue;
+        }
+        let low: String = c.to_lowercase().collect();
+        if low == c.to_string() {
+            continue;
+        }
+        if low.chars().any(|d| d.is_ascii()) {
+            reaches_ascii.push((c, low));
+            continue;
+        }
+        for d in low.chars() {
+            assert!(sql_exempt(&d.to_string()), "{c:?} lowercases to {low:?}");
+        }
+    }
+    assert_eq!(
+        reaches_ascii,
+        vec![
+            ('\u{130}', "i\u{307}".to_string()),
+            ('\u{212a}', "k".to_string())
+        ]
+    );
+}
 // ---------------------------------------------------------------------------------------------
 // Stage statements, run against an in-memory SQLite behind the Hrana client.
 // ---------------------------------------------------------------------------------------------
@@ -2055,5 +2087,404 @@ mod search {
         let answer = assert_same(&f, "alpha", false);
         assert_eq!(answer["lifecycle_unreadable"], 1);
         assert!(answer["lifecycle_hint"].is_string());
+    }
+
+    fn strings(queries: &[&str]) -> Vec<String> {
+        queries.iter().map(|q| q.to_string()).collect()
+    }
+
+    fn query_ids(query: &Value) -> Vec<String> {
+        query["hits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|h| h["id"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    const OTHER: &str = "\"<the same words in the other language>\"";
+
+    fn request<'a>(
+        query: &'a str,
+        also: &'a [String],
+        keys: bool,
+        include_hidden: bool,
+    ) -> memory_store::RecallRequest<'a> {
+        memory_store::RecallRequest {
+            query,
+            also,
+            keys,
+            include_hidden,
+        }
+    }
+
+    fn report(f: &Fixture, req: &memory_store::RecallRequest) -> Value {
+        memory_store::recall_report_with(f.root(), req, &f.ledger).unwrap()
+    }
+
+    /// The command's branch selection: one query without `--also` or `--keys` is today's
+    /// `recall_all_with` answer, byte for byte as the handler serializes it. (The binary only
+    /// speaks HTTPS, so no process test can serve it a database; the handler adds its own three
+    /// fields to this value unchanged.)
+    #[test]
+    fn single_query_cli_output_is_unchanged() {
+        let f = rich();
+        for query in ["deploy plan", "部署", "alpha zzz"] {
+            for include_hidden in [false, true] {
+                let new = report(&f, &request(query, &[], false, include_hidden));
+                let old = f.old_recall(query, include_hidden).unwrap();
+                assert_eq!(
+                    serde_json::to_string_pretty(&new).unwrap(),
+                    serde_json::to_string_pretty(&old).unwrap(),
+                    "{query:?} {include_hidden}"
+                );
+            }
+        }
+        // The partial form is among the compared answers.
+        assert_eq!(
+            f.old_recall("alpha zzz", false).unwrap()["match"],
+            "partial"
+        );
+    }
+
+    /// `部署` and `deploy` share one entry; each query alone also finds one the other does not.
+    fn also_fixture() -> Fixture {
+        let f = fixture();
+        let at = now_ns() - 20 * DAY;
+        f.entry("b1000001", "deploy-plan", "部署 runs on the nuc", at);
+        f.entry("b1000002", "other", "部署 only in chinese", at);
+        f.entry("b1000003", "deploy-x", "english only", at);
+        f
+    }
+
+    #[test]
+    fn also_shape() {
+        let f = also_fixture();
+        let queries = strings(&["部署", "deploy"]);
+        let before = f.posts.load(Ordering::SeqCst);
+        let v = memory_store::recall_many_with(f.root(), &queries, &f.ledger, false).unwrap();
+        assert_eq!(f.posts.load(Ordering::SeqCst) - before, 1, "one search");
+        assert_eq!(report(&f, &request("部署", &queries[1..], false, false)), v);
+        assert_eq!(v["ledger_status"], "present");
+        assert!(v.get("match").is_none(), "{v}");
+        assert!(v.get("next").is_none(), "{v}");
+        let qs = v["queries"].as_array().unwrap();
+        assert_eq!(qs.len(), 2);
+        for (i, query) in queries.iter().enumerate() {
+            let alone = f.old_recall(query, false).unwrap();
+            assert_eq!(qs[i]["query"], query.as_str());
+            assert_eq!(qs[i]["match_kind"], "all");
+            assert_eq!(query_ids(&qs[i]), ids(&alone), "{query}");
+            for h in qs[i]["hits"].as_array().unwrap() {
+                assert_eq!(h.as_object().unwrap().len(), 1, "{h}");
+            }
+        }
+        // Query order, each query's own order, the first occurrence kept.
+        assert_eq!(ids(&v), ["b1000001", "b1000002", "b1000003"]);
+        let both = hit(&v, "b1000001").unwrap();
+        assert_eq!(both["matched_queries"], json!([0, 1]));
+        assert!(both.get("matched_terms").is_none());
+        assert_eq!(hit(&v, "b1000002").unwrap()["matched_queries"], json!([0]));
+        assert_eq!(hit(&v, "b1000003").unwrap()["matched_queries"], json!([1]));
+        // A top-level hit is today's hit for its entry, plus `matched_queries`.
+        let alone = f.old_recall("部署", false).unwrap();
+        let mut expected = hit(&alone, "b1000001").unwrap().clone();
+        expected["matched_queries"] = json!([0, 1]);
+        assert_eq!(both, &expected);
+    }
+
+    #[test]
+    fn also_partial_hits_carry_their_own_matched_terms() {
+        let f = also_fixture();
+        let queries = strings(&["部署", "deploy zzz"]);
+        let v = memory_store::recall_many_with(f.root(), &queries, &f.ledger, false).unwrap();
+        let qs = v["queries"].as_array().unwrap();
+        assert_eq!(qs[0]["match_kind"], "all");
+        assert_eq!(qs[1]["match_kind"], "partial");
+        let alone = f.old_recall("deploy zzz", false).unwrap();
+        assert_eq!(alone["match"], "partial");
+        let want: Vec<Value> = alone["hits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|h| json!({"id": h["id"], "matched_terms": h["matched_terms"]}))
+            .collect();
+        assert!(!want.is_empty());
+        assert_eq!(qs[1]["hits"], Value::Array(want));
+        for h in v["hits"].as_array().unwrap() {
+            assert!(h.get("matched_terms").is_none(), "{h}");
+        }
+    }
+
+    /// The conflict set is the database's, over every row: a partner the query does not match is
+    /// still counted (fails if `recall_each` counts over the returned rows alone).
+    #[test]
+    fn also_conflict_counts_a_partner_the_query_did_not_match() {
+        let f = fixture();
+        let at = now_ns() - 20 * DAY;
+        f.entry("c2000001", "dup-key", "alpha one", at);
+        f.entry("c2000002", "dup-key", "beta two", at);
+        let v =
+            memory_store::recall_many_with(f.root(), &strings(&["alpha", "zzz"]), &f.ledger, false)
+                .unwrap();
+        assert_eq!(ids(&v), ["c2000001"]);
+        assert_eq!(hit(&v, "c2000001").unwrap()["evidence_status"], "conflict");
+        assert_eq!(
+            hit(&f.old_recall("alpha", false).unwrap(), "c2000001").unwrap()["evidence_status"],
+            "conflict"
+        );
+    }
+
+    #[test]
+    fn keys_rows() {
+        let f = fixture();
+        let at = now_ns() - 20 * DAY;
+        f.entry("k2000001", "deploy-plan", "nuc runs it", at);
+        f.entry("k2000002", "other", "deploy plan in the claim only", at);
+        f.entry("k2000003", "deploy-dup", "first", at);
+        f.entry("k2000004", "deploy-dup", "second", at + 1);
+        let v = memory_store::recall_keys_with(f.root(), &strings(&["deploy"]), &f.ledger, false)
+            .unwrap();
+        assert_eq!(report(&f, &request("deploy", &[], true, false)), v);
+        let next = format!("cort memory recall \"deploy\" --also {OTHER}");
+        assert_eq!(v["next"], next.as_str());
+        assert_eq!(v["ledger_status"], "present");
+        // The key alone is searched: the claim-only match is today's, not layer 1's.
+        let whole = f.old_recall("deploy", false).unwrap();
+        assert!(hit(&whole, "k2000002").is_some());
+        assert_eq!(ids(&v), ["k2000003", "k2000004", "k2000001"]);
+        assert_eq!(
+            v["queries"],
+            json!([{"query":"deploy","match_kind":"all",
+                "hits":[{"id":"k2000003"},{"id":"k2000004"},{"id":"k2000001"}]}])
+        );
+        let utc = hit(&whole, "k2000001").unwrap()["recorded_at_utc"].clone();
+        assert!(utc.is_string());
+        // One query: no `matched_queries`.
+        assert_eq!(
+            v["hits"],
+            json!([
+                {"key":"deploy-dup","id":"k2000003","recorded_at_utc":utc,"conflict":true},
+                {"key":"deploy-dup","id":"k2000004","recorded_at_utc":utc,"conflict":true},
+                {"key":"deploy-plan","id":"k2000001","recorded_at_utc":utc},
+            ])
+        );
+        let utc = utc.as_str().unwrap();
+        let lean = memory_store::render_keys_lean(&v);
+        assert_eq!(
+            lean,
+            format!(
+                "deploy-dup\tk2000003\t{utc}\t-\tconflict\n\
+                 deploy-dup\tk2000004\t{utc}\t-\tconflict\n\
+                 deploy-plan\tk2000001\t{utc}\t-\t-\n\
+                 {next}\n"
+            )
+        );
+        assert_five_fields(&lean);
+        assert_eq!(memory_store::lifecycle_unreadable_line(&v), None);
+    }
+
+    /// Hit lines are exactly five TAB-separated non-empty fields; every other line has no TAB.
+    fn assert_five_fields(lean: &str) {
+        for line in lean.lines().filter(|l| l.contains('\t')) {
+            let fields: Vec<&str> = line.split('\t').collect();
+            assert_eq!(fields.len(), 5, "{line:?}");
+            assert!(fields.iter().all(|f| !f.trim().is_empty()), "{line:?}");
+        }
+    }
+
+    #[test]
+    fn keys_lean_status_lines() {
+        let f = fixture();
+        let next = format!("cort memory recall \"deploy zzz\" --also {OTHER}");
+        // No entry at all.
+        let v =
+            memory_store::recall_keys_with(f.root(), &strings(&["deploy zzz"]), &f.ledger, false)
+                .unwrap();
+        assert_eq!(v["ledger_status"], "absent");
+        assert_eq!(
+            memory_store::render_keys_lean(&v),
+            format!("ledger absent\n{next}\n")
+        );
+        // Entries, none matching.
+        let at = now_ns() - 20 * DAY;
+        f.entry("k4000001", "other-key", "deploy in the claim", at);
+        let v =
+            memory_store::recall_keys_with(f.root(), &strings(&["deploy zzz"]), &f.ledger, false)
+                .unwrap();
+        assert_eq!(
+            memory_store::render_keys_lean(&v),
+            format!("no hits\n{next}\n")
+        );
+        // A partial query names itself after the hit lines; a full one adds nothing.
+        f.entry("k4000002", "deploy-plan", "x", at);
+        let queries = strings(&["deploy zzz", "plan"]);
+        let v = memory_store::recall_keys_with(f.root(), &queries, &f.ledger, false).unwrap();
+        assert_eq!(v["queries"][0]["match_kind"], "partial");
+        assert_eq!(v["queries"][1]["match_kind"], "all");
+        let utc = hit(&v, "k4000002").unwrap()["recorded_at_utc"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let lean = memory_store::render_keys_lean(&v);
+        assert_eq!(
+            lean,
+            format!(
+                "deploy-plan\tk4000002\t{utc}\t-\t-\n\
+                 partial \"deploy zzz\": no key held every term; these rows are candidates\n\
+                 cort memory recall \"deploy zzz\" --also \"plan\"\n"
+            )
+        );
+        assert_five_fields(&lean);
+        // Two queries: every hit says which found it.
+        assert_eq!(
+            hit(&v, "k4000002").unwrap()["matched_queries"],
+            json!([0, 1])
+        );
+    }
+
+    /// `next` is a shell command: each query double-quoted with `\`, `"`, `$` and backtick
+    /// escaped, `--all` kept.
+    #[test]
+    fn keys_next_names_the_queries_as_a_shell_command() {
+        let f = fixture();
+        let odd = "say \"hi\" $HOME `id` a\\b";
+        let quoted = "\"say \\\"hi\\\" \\$HOME \\`id\\` a\\\\b\"";
+        let v =
+            memory_store::recall_keys_with(f.root(), &strings(&[odd]), &f.ledger, false).unwrap();
+        assert_eq!(
+            v["next"],
+            format!("cort memory recall {quoted} --also {OTHER}").as_str()
+        );
+        let v = memory_store::recall_keys_with(
+            f.root(),
+            &strings(&["deploy", odd, "部署"]),
+            &f.ledger,
+            true,
+        )
+        .unwrap();
+        let next = format!("cort memory recall \"deploy\" --also {quoted} --also \"部署\" --all");
+        assert_eq!(v["next"], next.as_str());
+        assert!(memory_store::render_keys_lean(&v).ends_with(&format!("{next}\n")));
+    }
+
+    #[test]
+    fn keys_lifecycle_unreadable_goes_to_its_own_line() {
+        let f = fixture();
+        let now = now_ns();
+        f.entry("k5000001", "deploy-live", "kept", now - 20 * DAY);
+        f.life("l1", "on", None, now - 30 * DAY);
+        f.life_body("l2", "{not json");
+        let v = memory_store::recall_keys_with(f.root(), &strings(&["deploy"]), &f.ledger, false)
+            .unwrap();
+        assert_eq!(v["lifecycle_unreadable"], 1);
+        // The hint without its own opening clause, which would repeat the count's.
+        let hint = v["lifecycle_hint"].as_str().unwrap();
+        let rest = hint
+            .strip_prefix("some lifecycle rows could not be read; ")
+            .unwrap();
+        assert_eq!(
+            memory_store::lifecycle_unreadable_line(&v),
+            Some(format!(
+                "cort memory: 1 lifecycle rows could not be read; {rest}"
+            ))
+        );
+        assert!(rest.starts_with("cort memory review --all"), "{rest}");
+        // Stdout's lean text does not carry it.
+        let lean = memory_store::render_keys_lean(&v);
+        assert!(!lean.contains("lifecycle"), "{lean}");
+    }
+
+    #[test]
+    fn keys_with_also_and_all() {
+        let f = fixture();
+        let now = now_ns();
+        f.entry("k3000001", "deploy-live", "kept", now - 20 * DAY);
+        f.entry("k3000002", "deploy-old", "shelved", now - 20 * DAY);
+        f.entry("k3000003", "部署-key", "a key in chinese", now - 20 * DAY);
+        f.life("l1", "on", None, now - 30 * DAY);
+        f.life("l2", "archive", Some("k3000002"), now - 10 * DAY);
+        let queries = strings(&["deploy", "部署"]);
+        let all = memory_store::recall_keys_with(f.root(), &queries, &f.ledger, true).unwrap();
+        assert_eq!(
+            report(&f, &request("deploy", &queries[1..], true, true)),
+            all
+        );
+        assert_eq!(
+            all["next"],
+            "cort memory recall \"deploy\" --also \"部署\" --all"
+        );
+        assert_eq!(all["queries"].as_array().unwrap().len(), 2);
+        assert_eq!(ids(&all), ["k3000001", "k3000002", "k3000003"]);
+        assert_eq!(hit(&all, "k3000002").unwrap()["state"], "archived");
+        for id in ["k3000001", "k3000003"] {
+            let state = hit(&all, id).unwrap()["state"].as_str().unwrap();
+            assert!(!state.is_empty() && state != "archived", "{id} {state}");
+        }
+        for (id, matched) in [("k3000001", [0]), ("k3000002", [0]), ("k3000003", [1])] {
+            assert_eq!(hit(&all, id).unwrap()["matched_queries"], json!(matched));
+        }
+        let lean = memory_store::render_keys_lean(&all);
+        assert!(
+            lean.contains("deploy-old\tk3000002\t") && lean.contains("\tarchived\t-\n"),
+            "{lean}"
+        );
+        assert_five_fields(&lean);
+        let shown = memory_store::recall_keys_with(f.root(), &queries, &f.ledger, false).unwrap();
+        assert_eq!(ids(&shown), ["k3000001", "k3000003"]);
+        assert_eq!(
+            shown["next"],
+            "cort memory recall \"deploy\" --also \"部署\""
+        );
+    }
+
+    /// The conflict set is the database's: a partner the archived condition kept out of the
+    /// returned rows still makes the visible hit a conflict (fails if `recall_each` counts over
+    /// the returned rows alone).
+    #[test]
+    fn keys_conflict_counts_an_archived_partner() {
+        let f = fixture();
+        let now = now_ns();
+        f.entry("k6000001", "deploy-dup", "kept", now - 20 * DAY);
+        f.entry("k6000002", "deploy-dup", "shelved", now - 20 * DAY);
+        f.life("l1", "on", None, now - 30 * DAY);
+        f.life("l2", "archive", Some("k6000002"), now - 10 * DAY);
+        let v = memory_store::recall_keys_with(f.root(), &strings(&["deploy"]), &f.ledger, false)
+            .unwrap();
+        assert_eq!(ids(&v), ["k6000001"]);
+        assert_eq!(hit(&v, "k6000001").unwrap()["conflict"], true);
+    }
+
+    /// Rust lowercases U+212A KELVIN SIGN to `k` and U+0130 to `i` + U+0307; SQLite's `lower()`
+    /// leaves both, so the SQL haystack folds them itself or loses rows the whole read finds.
+    #[test]
+    fn kelvin_sign_and_dotted_i_match_as_today() {
+        let f = fixture();
+        let at = now_ns() - 20 * DAY;
+        f.entry("t1000001", "temperature", "measured in \u{212a}elvin", at);
+        f.entry("t1000002", "city", "\u{130}stanbul office", at);
+        f.entry("t1000003", "spooler", "the PR\u{130}NT queue", at);
+        f.entry("t1000004", "\u{212a}elvin-scale", "a key with the sign", at);
+        f.entry("t1000005", "plain", "nothing special", at);
+        for query in [
+            "kelvin",
+            "elvin",
+            "stanbul",
+            "i\u{307}stanbul",
+            "pri",
+            "kelvin scale",
+            "pri queue",
+            "kelvin zzz",
+        ] {
+            for include_hidden in [false, true] {
+                let answer = assert_same(&f, query, include_hidden);
+                assert!(!ids(&answer).is_empty(), "{query:?}");
+            }
+        }
+        // Layer 1 folds the key the same way.
+        let keys =
+            memory_store::recall_keys_with(f.root(), &["kelvin".to_string()], &f.ledger, false)
+                .unwrap();
+        assert_eq!(ids(&keys), ["t1000004"]);
     }
 }

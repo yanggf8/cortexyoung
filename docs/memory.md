@@ -85,6 +85,31 @@ cort memory recall 'deployment option' --harness claude-code
 `cort memory --help` lists every memory verb with all of its options, rendered from the parser;
 `cort memory <verb> --help` (or a group such as `notes`) answers with just that part.
 
+`cort memory recall "<q1>" --also "<q2>"` (repeatable) runs several queries in one read; the
+intended use is the same words once in Chinese and once in English. The positional argument stays
+one query, so an unquoted `recall deploy plan` is still refused, and an empty or blank `--also` is
+refused before any read. Each query is selected as it would be alone. The answer has no top-level
+`match`: `queries: [{query, match_kind, hits: [{id, matched_terms?}]}]` (`match_kind` is `all` or
+`partial`) holds each query's own answer, and `hits` lists each query's hits in its own order, the
+queries in argument order, each entry once with `matched_queries` (the indexes of the queries that
+found it) and no `matched_terms`.
+`cort memory recall --keys "<q>"` (with `--also` and `--all` allowed) is layer 1: it matches the
+keys alone and returns one compact row per hit, `{key, id, recorded_at_utc, state?, conflict?,
+matched_queries?}` (`state` only on a project with lifecycle on, `conflict: true` when the key
+holds two or more active entries, `matched_queries` only with two or more queries), with no claim
+and no source status (the check still runs, but its result is not reported), plus `queries` as
+above and `next`: the content search of the same queries as a shell command, each query in double
+quotes with `\`, `"`, `$` and backtick escaped -- one query asks for
+`--also "<the same words in the other language>"`, several repeat `--also`, and `--all` is kept.
+`--lean`, accepted only with `--keys`, prints one line per hit with exactly five TAB-separated
+fields, `key`, `id` (the full id, unlike `list --lean`'s 8-character one), `recorded_at_utc`,
+`state` and `conflict`, `-` for no state or no conflict. After the hit lines come status lines --
+`ledger absent`; or `no hits`; and `partial "<q>": no key held every term; these rows are
+candidates` for each partial query that has rows -- and the `next` line is last. Status lines and
+`next` hold no TAB, so a reader tells them from hit lines by field count. When lifecycle rows could
+not be read, `--lean` says so in one stderr line instead. A single query without either flag
+answers exactly as before.
+
 `cort memory list [--root <ROOT>] [--epoch <YYYY-MM-DD>] [--lean]` is a read-only listing of the
 active entries (oldest first) with the tier each would get under the two-tier proposal (issue #11,
 phase 0): long-term when recorded before `epoch - 7d`, otherwise short-term expiring at

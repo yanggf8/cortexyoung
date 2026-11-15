@@ -55,10 +55,20 @@ fn jt(col: &str, path: &str) -> String {
     format!("CASE WHEN json_valid({col}) THEN json_type({col},'{path}') END")
 }
 
+/// The client's `to_lowercase()` in SQL: SQLite's `lower()` folds ASCII only, and the two
+/// non-ASCII characters whose Rust lowercase holds an ASCII letter are folded here -- U+212A
+/// KELVIN SIGN to `k`, U+0130 to `i` + U+0307 (`tests/memory_search.rs` checks every scalar
+/// value). Any other non-ASCII lowercase difference lands only in `sql_exempt` terms.
+fn lower_sql(expr: &str) -> String {
+    format!("replace(replace(lower({expr}), char(8490), 'k'), char(304), 'i' || char(775))")
+}
+
 fn haystack_sql(h: Haystack) -> String {
     match h {
-        Haystack::KeyClaim => "lower(CASE WHEN json_valid(m.body) THEN json_extract(m.body,'$.key') || ' ' || json_extract(m.body,'$.claim') END)".to_string(),
-        Haystack::Key => format!("lower({})", jx("m.body", "$.key")),
+        Haystack::KeyClaim => lower_sql(
+            "CASE WHEN json_valid(m.body) THEN json_extract(m.body,'$.key') || ' ' || json_extract(m.body,'$.claim') END",
+        ),
+        Haystack::Key => lower_sql(&jx("m.body", "$.key")),
     }
 }
 

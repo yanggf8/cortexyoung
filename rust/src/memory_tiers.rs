@@ -422,7 +422,7 @@ fn cut_claim(claim: &str) -> String {
     }
 }
 
-fn lean_field(raw: &str) -> String {
+pub(crate) fn lean_field(raw: &str) -> String {
     let cleaned: String = raw
         .chars()
         .map(|c| {
