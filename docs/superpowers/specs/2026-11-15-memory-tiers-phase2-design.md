@@ -1,6 +1,6 @@
 # Memory tiers phase 2: layered cloud search, a tree, and per-entry strength (issue #11)
 
-Status: draft, 2026-11-15, revised once after external review (round 1: 2 BLOCK, 5 SHOULD, 4 NIT). Replaces phase 2 of `2026-11-14-memory-tiers-design.md` (the parent
+Status: draft, 2026-11-15, revised twice after external review (round 1: 2 BLOCK, 5 SHOULD, 4 NIT; round 2: 4 SHOULD, 7 NIT). Replaces phase 2 of `2026-11-14-memory-tiers-design.md` (the parent
 spec). The user redesigned phase 2 on 2026-11-14; their words and the agreed reading are in the
 ledger under key `memory-tiers-phase2-search` (ce043cf4). The measurement behind 2a is under key
 `memory-tiers-phase2-search-replay` (6b349e5e) and commit e88ffcd4. Phase 1a shipped in
@@ -90,13 +90,17 @@ eval's own SQL goes away. Terms are bound as parameters, never interpolated.
   done by the client: `drop`, and every case the SQL does not express, are hidden by the 1a fold
   run on what came back.
 
-  The SQL's notion of a canonical row and 1a's `classify` can disagree. `parse_recorded_ns`
-  accepts a leading `+` or `-` and rejects digits out of the date range; serde rejects a wrong
-  field type such as `"note": 5`. The client receives every lifecycle row anyway, so it can tell.
-  If any row is unreadable to the fold, or any readable event's `recorded_at` is not digits only,
-  the client discards the answer and re-sends the query without the archived condition. That
-  costs one more round trip, and only on a ledger already reporting `lifecycle_unreadable`, or one
-  carrying a non-canonical timestamp, which cort itself never writes.
+  The SQL's reading of a lifecycle row can still differ from 1a's `classify`:
+  - `parse_recorded_ns` accepts a leading `+` or `-` and rejects digits out of the date range.
+  - A digit string beyond i64 saturates SQLite's `CAST`.
+  - serde rejects a wrong field type such as `"note": 5`.
+  - A duplicated JSON key is read first-wins by SQLite and last-wins by serde.
+
+  So the SQL's decision is checked, not trusted. One more statement in the same pipeline returns
+  the ids and bodies of the entries the archived condition excluded; archived entries are few. The
+  client folds those entries with the lifecycle rows it already has. If the fold shows any of them,
+  the client discards the answer and sends the query again without the archived condition, in one
+  more round trip. Only a ledger carrying a row cort itself never writes can trigger that.
 
   `--all` drops the archived condition.
 - **Stage 1.** Active, not archived, every term matches. This is today's full-term match.
@@ -114,8 +118,11 @@ eval's own SQL goes away. Terms are bound as parameters, never interpolated.
   measured (expect fewer than the 200+ rows a common term pulled).
   Stage 2 is not sent when that list is empty (n = 0), because today's partial rule then selects
   nothing, and a threshold of 0 would return every row.
-- **Client decision.** `recall_selection` runs unchanged on the stage-1 rows, or the stage-2 rows.
-  It decides the selection, the order, and the cap of 5 on partial matches.
+- **Client decision.** `recall_selection` runs unchanged on the union of the returned stage-1
+  and stage-2 rows, deduplicated by id. It decides the selection, the order, and the cap of 5 on
+  partial matches. The union contains every entry the client's full-term match would select,
+  because SQL stage 1 is a superset of it. When that match is empty, the union contains every row
+  the partial rule could keep, because stage 2 is a superset of those.
 - **Same id under two aliases.** Rows are deduplicated by id with `merge_bodies`' rule before
   anything else, keeping the body with more machine-stamp fields.
 - **When the SQL's stage 1 and the client's disagree.** The SQL can find a stage-1 match where the
@@ -126,8 +133,17 @@ eval's own SQL goes away. Terms are bound as parameters, never interpolated.
   Today's recall would then fall through to the partial rule. Two rules cover this:
   - When any term contributed no condition, stage 2 is sent without its `NOT EXISTS` gate, in the
     same pipeline.
-  - When the client's full-term match is empty, there are two or more terms, and no stage-2 rows
-    came back, the client sends stage 2 in a second round trip, excluding the stage-1 ids.
+  - The client sends stage 2 in a second round trip, ungated and excluding the stage-1 ids, only
+    when all of these hold:
+    - stage 1 returned rows;
+    - stage 2 was sent gated;
+    - the client's full-term match over the stage-1 rows is empty;
+    - there are two or more terms.
+
+    A query that matches nothing at all therefore costs no extra trip.
+
+  A re-sent query (see the archived condition) carries an ungated stage 2, so a recall makes at
+  most two round trips.
 
   Tests pin both: `café 部署`, and a full match that is only on a dropped entry.
 
@@ -135,7 +151,9 @@ eval's own SQL goes away. Terms are bound as parameters, never interpolated.
 cased non-ASCII letter (one whose upper and lower forms differ: Latin accents, Greek, full-width
 Latin) contributes no condition in SQL: it is treated as matching in stage 1 and counted as matched
 in stage 2. That keeps the SQL a superset of what the client matches, and the client still
-decides. CJK has no case, so CJK terms keep their condition. One gap remains, on the haystack side:
+decides. A term containing a combining mark (U+0300-U+036F) is exempt the same way, because
+`İstanbul` lowercases to `i`, U+0307, `stanbul`, which the SQL haystack's `İ` never contains. CJK
+has no case, so CJK terms keep their condition. One gap remains, on the haystack side:
 a non-ASCII character that Rust lowercases to ASCII can make an ASCII term match in today's recall
 and miss in SQL. Two such characters exist: the Kelvin sign K (U+212A), which lowercases to `k`,
 and İ (U+0130), which lowercases to `i` followed by U+0307. None of the 247 entries has either.
@@ -144,7 +162,7 @@ The replay gate below would show it.
 ### Whole-ledger facts recall still needs
 
 Today recall reads every row, so these come for free. In 2a each is one more statement in the same
-pipeline, and each returns counts or ids, never bodies.
+pipeline. Each returns counts or ids, except the integrity screen and the archived-exclusion check, which return the few bodies the client must decode itself.
 
 | Fact | Statement | Behaviour |
 |---|---|---|
@@ -157,11 +175,13 @@ pipeline, and each returns counts or ids, never bodies.
 recall fails on any of eight errors. In 2a a statement returns the bodies of rows the SQL can
 recognise as suspect:
 - not valid JSON;
-- a missing or empty `id`, `key` or `claim`;
-- a `supersedes` naming an id that is not in the component;
-- a `supersedes` naming an entry under a different key;
-- one id stored under two aliases with different claim fields. This is today's `merge_bodies`
-  check, compared over the fields `same_claim` compares.
+- a missing `id`, `key` or `claim`, or one that is empty after trimming ASCII whitespace;
+- a predecessor that is not in the component: `supersedes`, or any element of `resolves` (via
+  `json_each`), naming a missing id;
+- a predecessor under a different key, or naming the entry's own id;
+- one id appearing in two or more rows whose bodies are not byte-equal. The client runs today's
+  `merge_bodies` on those rows, so `same_claim`'s tolerance of missing machine stamps is applied by
+  the same code.
 
 The client runs today's decoding and checks on those rows, plus the rows they name, and reports
 the first error with today's message. That includes serde's own text, because the screen returns
@@ -170,16 +190,23 @@ the body.
 The checks that need serde's or `validate()`'s full reading of every row do not stay on recall:
 - a well-formed JSON body that serde still rejects (a wrong field type, a negative
   `source_line`);
+- a key or claim made only of non-ASCII whitespace;
 - an invalid source or resolution;
 - a superseded id repeated;
-- a supersession cycle.
+- a supersession cycle of two or more entries.
 
-These are checked only on the rows recall returns. Over the whole ledger they move to
-`cort memory status` and `list`, which still read every row and fail as today.
+A cycle's entries are all named as predecessors, so the active rule drops them from recall
+silently instead of failing. All of these are checked only on the rows recall returns. Over the
+whole ledger they move to `cort memory status` and `list`, which still read every row and fail as
+today.
 
-The returned subset is decoded with one rule: a `supersedes` target that was not returned is not
-an error, because the screen already checked that it exists. Without that, every hit whose
-predecessor did not match would read as "supersedes missing id".
+The returned subset is decoded with one rule: a predecessor (`supersedes` or `resolves`) that was
+not returned is not an error, because the screen already checked that it exists. Without that,
+every hit whose predecessor did not match would read as "supersedes missing id". The rule touches
+three places that assume the whole ledger is present:
+- `ledger_from_bodies`' all-ids check;
+- its topological ordering, which otherwise reports "missing id or cycle";
+- `validate()`'s `by_id` lookup.
 
 **The fold on a subset.** For every hit, 1a's fold run over the returned rows must give the same
 state as the fold over the whole ledger. A test pins this with a ledger whose events name entries
@@ -198,10 +225,12 @@ that do not match the query.
   Each query runs its own stages and selection, all in one pipeline. Hits are each query's hits in
   its own order, the queries taken in argument order, deduplicated by id with the first
   occurrence kept. The top-level `match_kind` is replaced by
-  `queries: [{query, match_kind, hits}]`. A hit gains `matched_queries: [index, ...]`, and its
-  `matched_terms` come from the first query that selected it. All of this appears only when
-  `--also` is given, so a single query stays byte-identical.
-- **`cort memory recall --keys "<q>"`** (with `--also`, `--all` and `--lean` allowed) is layer 1.
+  `queries: [{query, match_kind, hits: [{id, matched_terms?}]}]`. Each top-level hit gains
+  `matched_queries: [index, ...]` and carries no `matched_terms` of its own. A per-query answer
+  can then never be read as another query's. All of this appears only when `--also` is given, so a
+  single query stays byte-identical.
+- **`cort memory recall --keys "<q>"`** (with `--also` and `--all` allowed) is layer 1. It adds
+  `--lean`, a new flag that layer 1 alone accepts; recall today has only `--json`.
   It uses the same stages and the same decision. `select_terms` gains a haystack parameter, key
   alone here and key plus claim everywhere else, so the decision is still a single function; the
   stage-2 superset test runs for both haystacks.
@@ -226,8 +255,9 @@ that do not match the query.
     - a drop the fold ignores;
     - an archive written in an earlier run, which stays excluded;
     - a project switched off;
-    - an unreadable lifecycle row, and a `+`-prefixed `recorded_at`, each sending the query again
-      without the condition;
+    - an excluded entry that the fold shows (a `+`-prefixed `recorded_at` on its `restore`, an
+      `archive` row with `"note": 5`, a duplicated `kind` key), each sending the query again without
+      the condition, in at most two round trips;
   - the stage-2 threshold, and its superset property against the word-start rule, for both
     haystacks;
   - `café 部署`, and a full match that is only on a dropped entry;
@@ -293,18 +323,25 @@ that do not match the query.
    by the client, using the 1a fold on the returned rows. Expressing the whole fold in SQL would
    put a second copy of that decision on the server. The project rule is "a parser may be plural;
    the decision may not".
+3. **Default recall stays layer 2**, with today's key-and-claim results. Layer 1 is `--keys`, so
+   the replay requirement holds and nothing an agent does today changes.
+4. **2b and 2c are sketched, not specified.** Each gets its own detailed spec after 2a ships and
+   has been measured.
 5. **Some integrity errors move from recall to `status` and `list`.** Recall still fails, with
    today's message, on every error the SQL screen can recognise. The rest are checked over the
-   whole ledger only by `status` and `list`, which still read every row. Those are: a JSON body
-   serde rejects, an invalid source or resolution, a repeated superseded id, and a cycle. Keeping
-   them all on recall would mean reading every row on every recall, which is what 2a removes.
+   whole ledger only by `status` and `list`, which still read every row:
+   - a JSON body serde rejects;
+   - a key or claim made only of non-ASCII whitespace;
+   - an invalid source or resolution;
+   - a repeated superseded id;
+   - a cycle of two or more entries, whose entries then drop out of recall silently instead of
+     failing it.
+
+   Keeping them all on recall would mean reading every row on every recall, which is what 2a
+   removes.
 6. **Multiple queries take `--also`, not more positional arguments.** Today an unquoted
    `recall deploy plan` is an error. Under positional arguments it would silently become a union
    of two one-word queries.
 7. **2c's score ignores the tree.** An earlier draft added strength for active children. That
    would make strength flow along a tree edge, against "樹只帶 parent/child、不帶權重", so it was
    removed.
-3. **Default recall stays layer 2**, with today's key-and-claim results. Layer 1 is `--keys`, so
-   the replay requirement holds and nothing an agent does today changes.
-4. **2b and 2c are sketched, not specified.** Each gets its own detailed spec after 2a ships and
-   has been measured.
