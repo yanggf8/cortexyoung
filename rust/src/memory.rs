@@ -399,6 +399,37 @@ pub(crate) fn recall_ledger_for_hook(
     )
 }
 
+/// The text recall matches terms against: key and claim (recall), or the key alone (layer 1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Haystack {
+    KeyClaim,
+    Key,
+}
+
+impl Haystack {
+    pub fn text(self, entry: &MemoryEntry) -> String {
+        match self {
+            Haystack::KeyClaim => format!("{} {}", entry.key, entry.claim).to_lowercase(),
+            Haystack::Key => entry.key.to_lowercase(),
+        }
+    }
+}
+
+/// Terms the partial fallback scores: distinct, in first-occurrence order, without common words
+/// or lone ASCII characters; a single CJK character is a word and is kept. Shared with the SQL
+/// stage 2 (`memory_search::query_terms`), so both count the same terms.
+pub(crate) fn partial_terms(terms: &[String]) -> Vec<String> {
+    let mut distinct = Vec::new();
+    for term in terms {
+        let noise =
+            PARTIAL_IGNORED.contains(&term.as_str()) || (term.len() == 1 && term.is_ascii());
+        if !noise && !distinct.contains(term) {
+            distinct.push(term.clone());
+        }
+    }
+    distinct
+}
+
 type Selected<'a> = Vec<(&'a MemoryEntry, Option<Vec<String>>)>;
 
 /// The term-matching decision of a recall: every entry holding all terms, else (when
@@ -408,32 +439,25 @@ fn select_terms<'a>(
     terms: &[String],
     active: &[&'a MemoryEntry],
     allow_partial: bool,
+    hay: Haystack,
 ) -> (Selected<'a>, bool) {
     let mut selected: Selected<'a> = active
         .iter()
         .filter(|entry| {
-            let haystack = format!("{} {}", entry.key, entry.claim).to_lowercase();
+            let haystack = hay.text(entry);
             terms.iter().all(|term| haystack.contains(term))
         })
         .map(|entry| (*entry, None))
         .collect();
-    // Ignore common words and lone ASCII characters in partial scoring. ASCII terms must start
-    // a word, while non-ASCII terms keep substring matching. The all-terms match above is
-    // unchanged; a single CJK character is a word and is kept.
-    let mut distinct = Vec::new();
-    for term in terms {
-        let noise =
-            PARTIAL_IGNORED.contains(&term.as_str()) || (term.len() == 1 && term.is_ascii());
-        if !noise && !distinct.contains(term) {
-            distinct.push(term.clone());
-        }
-    }
+    // Partial scoring: ASCII terms must start a word, while non-ASCII terms keep substring
+    // matching. The all-terms match above is unchanged.
+    let distinct = partial_terms(terms);
     let partial = selected.is_empty() && terms.len() >= 2 && allow_partial;
     if partial && !distinct.is_empty() {
         selected = active
             .iter()
             .filter_map(|entry| {
-                let haystack = format!("{} {}", entry.key, entry.claim).to_lowercase();
+                let haystack = hay.text(entry);
                 let matched: Vec<_> = distinct
                     .iter()
                     .filter(|term| {
@@ -470,9 +494,18 @@ fn select_terms<'a>(
 /// out superseded or resolved entries, so the caller does (a `cort memory list` snapshot already
 /// has).
 pub fn recall_selection(query: &str, active: &[MemoryEntry]) -> (Vec<String>, bool) {
+    recall_selection_in(query, active, Haystack::KeyClaim)
+}
+
+/// `recall_selection` over a chosen haystack.
+pub fn recall_selection_in(
+    query: &str,
+    active: &[MemoryEntry],
+    haystack: Haystack,
+) -> (Vec<String>, bool) {
     let terms: Vec<_> = query.split_whitespace().map(|s| s.to_lowercase()).collect();
     let refs: Vec<&MemoryEntry> = active.iter().collect();
-    let (mut selected, partial) = select_terms(&terms, &refs, true);
+    let (mut selected, partial) = select_terms(&terms, &refs, true, haystack);
     if !partial {
         selected.sort_by(|(a, _), (b, _)| a.key.cmp(&b.key).then(a.id.cmp(&b.id)));
     }
@@ -520,7 +553,7 @@ fn recall_ledger_inner(
     if let Some(n) = limit {
         active.truncate(n);
     }
-    let (selected, partial) = select_terms(&terms, &active, limit.is_none());
+    let (selected, partial) = select_terms(&terms, &active, limit.is_none(), Haystack::KeyClaim);
     let mut hits = Vec::new();
     for (entry, matched_terms) in selected {
         let source = if entry.unsourced {
@@ -681,6 +714,51 @@ mod tests {
             "source": "unused", "source_line": 1, "source_sha256": "", "unsourced": true
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn key_haystack_ignores_claim_text() {
+        let entries = vec![
+            recall_fixture("1", "deploy-plan", "nuc runs it", "1"),
+            recall_fixture("2", "other", "deploy plan", "2"),
+        ];
+        let (ids, _) = recall_selection_in("deploy", &entries, Haystack::Key);
+        assert_eq!(ids, vec!["1".to_string()]);
+        let (ids, _) = recall_selection_in("deploy", &entries, Haystack::KeyClaim);
+        assert_eq!(ids.len(), 2);
+    }
+
+    #[test]
+    fn key_haystack_applies_to_the_partial_rule() {
+        let entries = vec![
+            recall_fixture("1", "deploy-plan", "x", "1"),
+            recall_fixture("2", "other", "deploy nuc", "2"),
+        ];
+        let (ids, partial) = recall_selection_in("deploy zzz", &entries, Haystack::Key);
+        assert!(partial);
+        assert_eq!(ids, vec!["1".to_string()]);
+        let (ids, partial) = recall_selection_in("deploy zzz", &entries, Haystack::KeyClaim);
+        assert!(partial);
+        assert_eq!(ids.len(), 2);
+    }
+
+    #[test]
+    fn ascii_upper_case_in_claim_matches() {
+        let entries = vec![recall_fixture("1", "k", "Deploy PLAN", "1")];
+        let (ids, _) = recall_selection_in("deploy", &entries, Haystack::KeyClaim);
+        assert_eq!(ids, vec!["1".to_string()]);
+    }
+
+    #[test]
+    fn partial_terms_matches_select_terms_rule() {
+        let terms: Vec<String> = ["the", "a", "部署", "部署", "nuc"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(
+            partial_terms(&terms),
+            vec!["部署".to_string(), "nuc".to_string()]
+        );
     }
 
     #[test]
