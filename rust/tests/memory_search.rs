@@ -2630,4 +2630,241 @@ mod search {
                 .unwrap();
         assert_eq!(ids(&keys), ["t1000004"]);
     }
+
+    /// Answers the batch step `step` (BEGIN is step 0, statement i is step i + 1) with a Hrana
+    /// error of `code` and `message`, as a server refusing that statement would.
+    struct StepFailing {
+        inner: Arc<SqliteTransport>,
+        step: usize,
+        code: &'static str,
+        message: String,
+    }
+
+    impl Transport for StepFailing {
+        fn post(
+            &self,
+            url: &str,
+            body: &[u8],
+            headers: &[(&str, &str)],
+        ) -> Result<Vec<u8>, cort::remote::RemoteError> {
+            let request: Value = serde_json::from_slice(body).unwrap();
+            let bytes = self.inner.post(url, body, headers)?;
+            if request["requests"][0]["type"] != "batch" {
+                return Ok(bytes);
+            }
+            let mut value: Value = serde_json::from_slice(&bytes).unwrap();
+            let result = &mut value["results"][0]["response"]["result"];
+            result["step_results"][self.step] = Value::Null;
+            result["step_errors"][self.step] = json!({"code": self.code, "message": self.message});
+            Ok(serde_json::to_vec(&value).unwrap())
+        }
+    }
+
+    /// Records the SQL of every statement the ledger sends.
+    struct Logging {
+        inner: Arc<SqliteTransport>,
+        sql: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl Transport for Logging {
+        fn post(
+            &self,
+            url: &str,
+            body: &[u8],
+            headers: &[(&str, &str)],
+        ) -> Result<Vec<u8>, cort::remote::RemoteError> {
+            let text = String::from_utf8_lossy(body).to_string();
+            self.sql.lock().unwrap().push(text);
+            self.inner.post(url, body, headers)
+        }
+    }
+
+    impl Fixture {
+        fn failing_at(&self, step: usize, code: &'static str, message: &str) -> Ledger {
+            Ledger::with_transport(
+                "https://example.test",
+                "test",
+                Box::new(StepFailing {
+                    inner: self.inner.clone(),
+                    step,
+                    code,
+                    message: message.to_string(),
+                }),
+            )
+            .unwrap()
+        }
+        fn logging(&self) -> (Ledger, Arc<std::sync::Mutex<Vec<String>>>) {
+            let sql = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let ledger = Ledger::with_transport(
+                "https://example.test",
+                "test",
+                Box::new(Logging {
+                    inner: self.inner.clone(),
+                    sql: sql.clone(),
+                }),
+            )
+            .unwrap();
+            (ledger, sql)
+        }
+    }
+
+    /// The trip's statements: five CREATEs (steps 1-5), count 6, conflicts 7, screen 8,
+    /// lifecycle 9, excluded 10 (unless `--all`), then per query stage 1 and stage 2.
+    #[test]
+    fn a_refused_statement_is_named_with_the_server_message() {
+        let f = fixture();
+        f.entry("s3000001", "deploy-plan", "nuc runs it", now_ns() - DAY);
+        let msg = "no such function: row_number";
+        for (step, include_hidden, query, kind, q) in [
+            (9, false, "deploy", "lifecycle", None),
+            (10, false, "deploy", "excluded", None),
+            (11, false, "deploy", "stage1", Some(0)),
+            (12, false, "deploy plan", "stage2", Some(0)),
+            (10, true, "deploy", "stage1", Some(0)),
+            (8, false, "deploy", "screen", None),
+        ] {
+            let ledger = f.failing_at(step, "SQLITE_ERROR", msg);
+            let err = memory_store::recall_all_with(f.root(), query, &ledger, include_hidden)
+                .unwrap_err();
+            assert_eq!(
+                err,
+                LedgerError::RemoteStatement(memory_store::StatementFailure {
+                    trip: 1,
+                    statement: Some(step - 1),
+                    statement_kind: kind,
+                    query: q,
+                    message: msg.to_string(),
+                }),
+                "step {step}"
+            );
+        }
+        // BEGIN has no statement of its own.
+        let err = memory_store::recall_all_with(
+            f.root(),
+            "deploy",
+            &f.failing_at(0, "SQLITE_ERROR", msg),
+            false,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, LedgerError::RemoteStatement(s)
+                if s.statement.is_none() && s.statement_kind == "begin"),
+            "{err:?}"
+        );
+        // The message reaches one JSON line: control characters flattened, at most 300 bytes,
+        // cut on a character boundary.
+        let long = format!("near \"x\":\nsyntax\terror {}", "é".repeat(200));
+        let err = memory_store::recall_all_with(
+            f.root(),
+            "deploy",
+            &f.failing_at(11, "SQLITE_ERROR", &long),
+            false,
+        )
+        .unwrap_err();
+        let LedgerError::RemoteStatement(s) = &err else {
+            panic!("{err:?}")
+        };
+        assert!(s.message.starts_with("near \"x\": syntax error é"), "{s:?}");
+        assert_eq!(s.message.len(), 299, "{s:?}");
+        // A refusal that is not a SQL error keeps today's shape.
+        let err = memory_store::recall_all_with(
+            f.root(),
+            "deploy",
+            &f.failing_at(11, "BLOCKED", "blocked"),
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(err, LedgerError::Remote(cort::remote::ErrorKind::Blocked));
+    }
+
+    fn words(n: usize) -> String {
+        (0..n)
+            .map(|i| format!("w{i}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// A query past the term cap answers through the whole read, as before the search existed:
+    /// SQLite's expression depth would refuse its chain of `instr` terms.
+    #[test]
+    fn a_query_over_the_term_cap_reads_the_whole_ledger() {
+        let f = rich();
+        let (ledger, sql) = f.logging();
+        let long = format!("deploy plan {}", words(99));
+        assert_eq!(long.split_whitespace().count(), 101);
+        let new = memory_store::recall_all_with(f.root(), &long, &ledger, false).unwrap();
+        let searched: Vec<String> = sql.lock().unwrap().drain(..).collect();
+        let old = memory_store::recall_whole_with(f.root(), &long, &ledger, false).unwrap();
+        let whole: Vec<String> = sql.lock().unwrap().drain(..).collect();
+        assert_eq!(
+            serde_json::to_value(new).unwrap(),
+            serde_json::to_value(old).unwrap()
+        );
+        assert_eq!(searched, whole, "the same requests as the whole read");
+        assert!(searched.iter().all(|s| !s.contains("instr(")));
+        // The eval's replay selects through the same read recall ships.
+        let now = now_ns();
+        let replay =
+            memory_store::select_search_with(&ledger, &f.project(), &long, false, now).unwrap();
+        let replayed: Vec<String> = sql.lock().unwrap().drain(..).collect();
+        let base =
+            memory_store::select_whole_with(&ledger, &f.project(), &long, false, now).unwrap();
+        sql.lock().unwrap().clear();
+        assert_eq!(replay, base);
+        assert_eq!(replayed, whole);
+        // At the cap, the search.
+        let at_cap = format!("deploy plan {}", words(98));
+        assert_eq!(at_cap.split_whitespace().count(), 100);
+        assert_same(&f, &at_cap, false);
+        memory_store::recall_all_with(f.root(), &at_cap, &ledger, false).unwrap();
+        assert!(sql.lock().unwrap().iter().any(|s| s.contains("instr(")));
+        assert_eq!(memory_search_cap(), 100);
+    }
+
+    fn memory_search_cap() -> usize {
+        cort::memory_search::MAX_QUERY_TERMS
+    }
+
+    #[test]
+    fn also_and_keys_over_the_term_cap_are_refused_before_any_read() {
+        let f = rich();
+        let long = words(101);
+        let also = [long.clone()];
+        for (query, also, keys, refused) in [
+            ("deploy", &also[..], false, 1),
+            (long.as_str(), &[][..], true, 0),
+            ("deploy", &also[..], true, 1),
+        ] {
+            let before = f.posts.load(Ordering::SeqCst);
+            let err = memory_store::recall_report_with(
+                f.root(),
+                &memory_store::RecallRequest {
+                    query,
+                    also,
+                    keys,
+                    include_hidden: false,
+                },
+                &f.ledger,
+            )
+            .unwrap_err();
+            assert_eq!(f.posts.load(Ordering::SeqCst), before, "no request");
+            match err {
+                LedgerError::Refused {
+                    code,
+                    message,
+                    detail,
+                } => {
+                    assert_eq!(code, "memory_recall_too_many_terms");
+                    assert_eq!(
+                        message,
+                        format!(
+                            "query {refused} has 101 terms; --also and --keys take at most 100 per query"
+                        )
+                    );
+                    assert_eq!(detail, json!({"query": refused, "terms": 101, "max": 100}));
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+    }
 }

@@ -344,34 +344,47 @@ fn read_word(cs: &[char], i: &mut usize) -> Option<(String, bool)> {
     any.then_some((word, expands))
 }
 
-/// The query of the invocation whose arguments start at `i`. Only `--root` and `--harness` take a
-/// value; `--json`/`--help` do not, and after `--` the next word is the query.
-fn query_at(cs: &[char], mut i: usize) -> Option<String> {
+/// One invocation whose arguments start at `i`: its query, and whether it asked for `--keys`.
+/// `--root`, `--harness` and `--also` take a value; `--keys`, `--lean`, `--all`, `--json` and
+/// `--help` do not. The first other word is the query, and after `--` the next word is, even if
+/// it looks like a flag. Words are read to the end of the command, so a flag after the query
+/// still counts.
+fn call_at(cs: &[char], mut i: usize) -> (Option<String>, bool) {
     let mut after_dashes = false;
-    loop {
-        let (word, expands) = read_word(cs, &mut i)?;
+    let mut query: Option<Option<String>> = None;
+    let mut keys = false;
+    while let Some((word, expands)) = read_word(cs, &mut i) {
         if !after_dashes {
             match word.as_str() {
                 "--" => {
                     after_dashes = true;
                     continue;
                 }
-                "--root" | "--harness" => {
-                    read_word(cs, &mut i)?;
+                "--root" | "--harness" | "--also" => {
+                    if read_word(cs, &mut i).is_none() {
+                        break;
+                    }
+                    continue;
+                }
+                "--keys" => {
+                    keys = true;
                     continue;
                 }
                 w if w.len() > 1 && w.starts_with('-') => continue,
                 _ => {}
             }
         }
-        return Some(word).filter(|w| !expands && !w.trim().is_empty());
+        if query.is_none() {
+            query = Some(Some(word).filter(|w| !expands && !w.trim().is_empty()));
+        }
     }
+    (query.flatten(), keys)
 }
 
-/// Every `cort memory recall` invocation in a shell command, as the query it was given (`None`
-/// when none can be read: no argument, or an expansion like `"$q"`). A mention that is not at
-/// command position or sits in quotes, backticks or a heredoc body is not an invocation.
-pub fn invocations(command: &str) -> Vec<Option<String>> {
+/// Every `cort memory recall` invocation in a shell command, as its query and its `--keys` flag.
+/// A mention that is not at command position or sits in quotes, backticks or a heredoc body is
+/// not an invocation.
+fn calls(command: &str) -> Vec<(Option<String>, bool)> {
     let cs: Vec<char> = command.chars().collect();
     let mark: Vec<char> = MARK.chars().collect();
     let plain = plain_mask(&cs);
@@ -386,13 +399,29 @@ pub fn invocations(command: &str) -> Vec<Option<String>> {
                 .is_none_or(|c| !(c.is_alphanumeric() || matches!(c, '-' | '_' | '.')))
             && at_command_position(&cs, p)
         {
-            out.push(query_at(&cs, end));
+            out.push(call_at(&cs, end));
             p = end;
         } else {
             p += 1;
         }
     }
     out
+}
+
+/// Every `cort memory recall` invocation in a shell command that is not a `--keys` call, as the
+/// query it was given (`None` when none can be read: no argument, or an expansion like `"$q"`).
+/// A `--keys` call answers in another shape and is counted by `keys_calls` instead.
+pub fn invocations(command: &str) -> Vec<Option<String>> {
+    calls(command)
+        .into_iter()
+        .filter(|(_, keys)| !keys)
+        .map(|(query, _)| query)
+        .collect()
+}
+
+/// How many `cort memory recall --keys` invocations `command` holds.
+pub fn keys_calls(command: &str) -> usize {
+    calls(command).iter().filter(|(_, keys)| *keys).count()
 }
 
 /// The query of the first invocation in `command`, if it has one that can be read.
@@ -428,6 +457,15 @@ pub fn load_ledger(path: &Path) -> Result<Vec<MemoryEntry>, String> {
         .collect()
 }
 
+/// What `queries` found.
+#[derive(Debug)]
+pub struct Found {
+    /// The positional query of each call, `--also` values not included.
+    pub queries: Vec<String>,
+    /// `--keys` calls, left out of `queries`: their answer has another shape.
+    pub skipped_keys: u64,
+}
+
 /// Every readable query of every `cort memory recall` call in the transcripts, in file then line
 /// order, one entry per call (repeats kept). Same file set, time window and extraction as `scan`.
 pub fn queries(
@@ -435,7 +473,7 @@ pub fn queries(
     project: Option<&str>,
     days: Option<u64>,
     now_ms: i64,
-) -> Result<Vec<String>, String> {
+) -> Result<Found, String> {
     let since_ms = match days {
         Some(d) => Some(
             i64::try_from(d)
@@ -447,6 +485,7 @@ pub fn queries(
         None => None,
     };
     let mut out = Vec::new();
+    let mut skipped_keys = 0u64;
     for (_, path) in files(dir, project)? {
         let file = fs::File::open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
         for line in BufReader::new(file).lines() {
@@ -471,11 +510,15 @@ pub fn queries(
                         _ => continue,
                     }
                 }
+                skipped_keys += keys_calls(command) as u64;
                 out.extend(invocations(command).into_iter().flatten());
             }
         }
     }
-    Ok(out)
+    Ok(Found {
+        queries: out,
+        skipped_keys,
+    })
 }
 
 pub fn scan(
@@ -506,6 +549,7 @@ pub fn scan(
     let mut r_query_unparsed = 0u64;
     let mut r_queries: HashSet<String> = HashSet::new();
     let mut not_invoked = 0u64;
+    let mut skipped_keys = 0u64;
     for (name, path) in &paths {
         let name = name.clone();
         let file = fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -539,6 +583,13 @@ pub fn scan(
                                 continue;
                             }
                         }
+                    }
+                    // A command holding a `--keys` call has one result, partly in the keys
+                    // shape, so none of its calls is counted or replayed.
+                    let keys = keys_calls(command) as u64;
+                    if keys > 0 {
+                        skipped_keys += keys;
+                        continue;
                     }
                     if calls.is_empty() {
                         not_invoked += 1;
@@ -623,6 +674,7 @@ pub fn scan(
         "files_read": paths.len(),
         "recalls": full_total + partial_total + unparsed,
         "not_invoked": not_invoked,
+        "skipped_keys": skipped_keys,
         "unparsed": unparsed,
         "full": bucket_map(&full),
         "partial": bucket_map(&partial),
@@ -896,5 +948,77 @@ mod tests {
         assert_eq!(replay["partial"]["2-5"], 1);
         assert_eq!(replay["share_full_le_5"], 1.0 / 3.0);
         assert_eq!(report["recalls"], 5);
+    }
+
+    #[test]
+    fn also_takes_a_value_and_keys_calls_are_set_apart() {
+        let q = extract_query;
+        assert_eq!(
+            q("cort memory recall --also \"部署\" \"deploy\""),
+            Some("deploy".to_string())
+        );
+        assert_eq!(
+            q("cort memory recall \"deploy\" --also \"部署\""),
+            Some("deploy".to_string())
+        );
+        assert_eq!(
+            q("cort memory recall --all --json --also a --also b deploy"),
+            Some("deploy".to_string())
+        );
+        // `--keys` answers in another shape: its call is no recall to replay, wherever the flag sits.
+        for keys in [
+            "cort memory recall --keys \"deploy\"",
+            "cort memory recall \"deploy\" --keys --lean",
+            "cort memory recall deploy --also x --keys | head",
+        ] {
+            assert_eq!(invocations(keys), Vec::<Option<String>>::new(), "{keys}");
+            assert_eq!(keys_calls(keys), 1, "{keys}");
+        }
+        let mixed = "cort memory recall --keys a; cort memory recall b --lean";
+        assert_eq!(invocations(mixed), vec![Some("b".to_string())]);
+        assert_eq!(keys_calls(mixed), 1);
+        // a flag after a later operator belongs to the next command
+        let next = "cort memory recall a | grep --keys";
+        assert_eq!(invocations(next), vec![Some("a".to_string())]);
+        assert_eq!(keys_calls(next), 0);
+    }
+
+    #[test]
+    fn keys_calls_are_skipped_and_counted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("proj-a");
+        fs::create_dir_all(&project).unwrap();
+        let ts = "2026-11-13T00:00:00Z";
+        let ledger_path = tmp.path().join("ledger.json");
+        fs::write(
+            &ledger_path,
+            json!({"entries":[{"id":"i1","key":"k","claim":"alpha","recorded_at_utc":"2026-11-01T00:00:00Z"}]}).to_string(),
+        )
+        .unwrap();
+        write_lines(
+            &project.join("s1.jsonl"),
+            &[
+                call("a", "cort memory recall alpha", ts),
+                result("a", json!(answer(1, "full"))),
+                call("k", "cort memory recall --keys alpha --also beta", ts),
+                result("k", json!("{\"queries\":[]}")),
+                call(
+                    "m",
+                    "cort memory recall --keys x; cort memory recall alpha",
+                    ts,
+                ),
+                result("m", json!("{\"queries\":[]}")),
+            ],
+        );
+        let ledger = load_ledger(&ledger_path).unwrap();
+        let report = scan(tmp.path(), Some("proj-a"), None, now(), Some(&ledger)).unwrap();
+        assert_eq!(report["recalls"], 1);
+        assert_eq!(report["unparsed"], 0);
+        assert_eq!(report["skipped_keys"], 2);
+        assert_eq!(report["not_invoked"], 0);
+        assert_eq!(report["replay"]["calls"], 1);
+        let found = queries(tmp.path(), Some("proj-a"), None, now()).unwrap();
+        assert_eq!(found.queries, ["alpha", "alpha"]);
+        assert_eq!(found.skipped_keys, 2);
     }
 }

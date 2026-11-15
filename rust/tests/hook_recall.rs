@@ -3518,8 +3518,12 @@ fn ledger_with_invalid_supersession_is_ledger_invalid() {
 
 #[test]
 fn ledger_with_missing_predecessor_keeps_alias_hint() {
-    let (db, _, _) = database();
+    let (db, read_only, requests) = database();
     seed_two_rows(&db, &[("b", ledger_row("b", "key-b", "gone"))]);
+    // The aliased read succeeds, so the whole component was read: a missing predecessor there is
+    // an integrity error.
+    seed_alias(&db);
+    read_only.store(true, Ordering::SeqCst);
     match try_session(&db) {
         Err(cort::memory_store::SessionRecallError::LedgerInvalid(m)) => {
             assert!(
@@ -3530,6 +3534,44 @@ fn ledger_with_missing_predecessor_keeps_alias_hint() {
         }
         other => panic!("{:?}", other.map(|_| ())),
     }
+    let requests = requests.lock().unwrap();
+    assert!(!requests.is_empty());
+    assert!(
+        requests.iter().all(|r| r[0].contains("project IN (")),
+        "never the unaliased retry: {requests:?}"
+    );
+}
+
+/// The unaliased retry reads `project = ?` alone, so a predecessor under an alias is legitimately
+/// absent there: the retry decodes as a subset and answers, it does not report `ledger_invalid`.
+#[test]
+fn unaliased_retry_accepts_a_predecessor_under_an_alias() {
+    let (db, read_only, requests) = database();
+    seed_two_rows(&db, &[("b", ledger_row("b", "key-a", "a"))]);
+    // The predecessor, under the old alias id; no alias table, so the aliased read fails with an
+    // SQL error and the retry reads the current id alone.
+    db.execute(
+        "INSERT INTO project_memory VALUES (?, ?, ?)",
+        vec![
+            cort::remote::Cell::Text("old".into()),
+            cort::remote::Cell::Text("a".into()),
+            cort::remote::Cell::Text(ledger_row("a", "key-a", "").to_string()),
+        ],
+    )
+    .unwrap();
+    read_only.store(true, Ordering::SeqCst);
+    let recall = match try_session(&db) {
+        Ok(session) => session.recall,
+        Err(e) => panic!("{e:?}"),
+    };
+    let ids: Vec<&str> = recall.hits.iter().map(|h| h.entry.id.as_str()).collect();
+    assert_eq!(ids, ["b"]);
+    let requests = requests.lock().unwrap();
+    assert!(requests[0][0].contains("project IN ("), "{requests:?}");
+    assert!(
+        requests.last().unwrap()[0].contains("project = ?"),
+        "{requests:?}"
+    );
 }
 
 #[test]

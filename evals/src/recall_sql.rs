@@ -3,14 +3,16 @@
 //! Replays every real `cort memory recall "<query>"` found in Claude Code transcripts (the walk
 //! and the query extraction are `recall_hits`'s) twice through the product itself: once with
 //! `select_whole_with`, today's selection over every row of the ledger (the baseline), and once
-//! with `select_search_with`, the search `cort memory recall` ships, which reads only the rows its
-//! query can match. The eval owns no SQL: it grades the statements that ship, not a copy of them.
+//! with `select_search_with`, the search `cort memory recall` ships, which returns only the rows
+//! its query can match (a query past the term cap goes through the whole read, as recall answers
+//! it). Only a call's positional query is replayed, never its `--also` values; a `--keys` call is
+//! skipped and counted. The eval owns no SQL: it grades the statements that ship, not a copy of them.
 //! It compares the selection (ids in order and the partial flag), not the rendered recall output.
 //! Hidden entries are left out on both sides, as a plain `recall` leaves them out. Both reads
 //! create any of the five memory tables that are missing (`CREATE TABLE IF NOT EXISTS`) and write
 //! nothing else.
 
-use crate::recall_hits::queries;
+use crate::recall_hits::{queries, Found};
 use cort::memory_store::{select_search_with, select_whole_with, Ledger};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
@@ -75,11 +77,14 @@ fn elapsed_ms(started: Instant) -> u64 {
 /// report, naming its place, its side and how many were equal before it: an integrity error fails
 /// every query alike, and a figure computed past an outage would not describe the ledger. No
 /// queries, or a baseline that is empty for every query (a wrong project id reads an empty
-/// ledger), is an error rather than a vacuous pass.
+/// ledger), is an error rather than a vacuous pass. `skipped_keys` is reported as given: the `--keys`
+/// calls the transcript walk left out. A statement the server refused in the replay is named
+/// with its trip, step, kind, query and the server's message.
 pub fn report(
     ledger: &Ledger,
     project: &str,
     queries: &[String],
+    skipped_keys: u64,
     now_ns: i128,
 ) -> Result<Value, String> {
     if queries.is_empty() {
@@ -91,8 +96,14 @@ pub fn report(
     let mut equal = 0u64;
     for (i, query) in queries.iter().enumerate() {
         let failed = |side: &str, e: cort::memory_store::LedgerError| {
+            let why = match e {
+                cort::memory_store::LedgerError::RemoteStatement(f) => {
+                    format!("remote sql: {}", f.to_json())
+                }
+                other => format!("{other:?}"),
+            };
             format!(
-                "query {} of {n} {query:?}: {side} failed after {equal} equal: {e:?}",
+                "query {} of {n} {query:?}: {side} failed after {equal} equal: {why}",
                 i + 1
             )
         };
@@ -153,22 +164,23 @@ pub fn report(
         "memory_project": project,
         "now_ns": i64::try_from(now_ns).map_err(|e| format!("now_ns {now_ns}: {e}"))?,
         "queries": n,
+        "skipped_keys": skipped_keys,
         "equal": equal,
         "groups": Value::Object(out),
         "mismatches": mismatches,
     }))
 }
 
-/// The queries `recall-hits` would replay, in transcript order, one per call. None is an error:
-/// a report over nothing would read as a pass.
+/// The queries `recall-hits` would replay, in transcript order, one per call, and how many `--keys`
+/// calls were left out. No query is an error: a report over nothing would read as a pass.
 pub fn transcript_queries(
     dir: &std::path::Path,
     project: &str,
     days: Option<u64>,
     now_ms: i64,
-) -> Result<Vec<String>, String> {
+) -> Result<Found, String> {
     let found = queries(dir, Some(project), days, now_ms)?;
-    if found.is_empty() {
+    if found.queries.is_empty() {
         let span = days.map_or("all days".to_string(), |d| format!("{d} days"));
         return Err(format!(
             "no recall queries found in {}/{project} over {span}",
@@ -211,6 +223,8 @@ mod tests {
         Insert(String),
         /// Answer every later request with a body that is not Hrana: the read fails.
         Break,
+        /// Fail this step of the next batch with this SQLite code: the server refuses a statement.
+        FailStep(usize, &'static str),
     }
 
     /// Passes requests through, then acts once `after` of them have been answered.
@@ -232,6 +246,11 @@ mod tests {
             if seen >= self.after {
                 if let Act::Break = self.act {
                     return Ok(b"{}".to_vec());
+                }
+            }
+            if seen == self.after {
+                if let Act::FailStep(step, code) = self.act {
+                    self.inner.fail_next_step(step, code);
                 }
             }
             let answer = self.inner.post(url, body, headers)?;
@@ -335,7 +354,7 @@ mod tests {
         }
         fn report(&self, queries: &[&str]) -> Result<Value, String> {
             let queries: Vec<String> = queries.iter().map(|q| q.to_string()).collect();
-            report(&self.ledger, PROJECT, &queries, self.now)
+            report(&self.ledger, PROJECT, &queries, 0, self.now)
         }
     }
 
@@ -530,7 +549,7 @@ mod tests {
             .iter()
             .map(|q| q.to_string())
             .collect();
-        let r = report(&ledger, PROJECT, &queries, f.now).unwrap();
+        let r = report(&ledger, PROJECT, &queries, 0, f.now).unwrap();
         let mismatches = r["mismatches"].as_array().unwrap();
         assert_eq!(mismatches.len(), 1, "{r:#}");
         assert_eq!(
@@ -554,17 +573,42 @@ mod tests {
         // "deploy" takes two requests (baseline, one-trip replay), so the third request is
         // "rollout"'s baseline.
         let ledger = f.tampered(2, Act::Break);
-        let err = report(&ledger, PROJECT, &queries, f.now).unwrap_err();
+        let err = report(&ledger, PROJECT, &queries, 0, f.now).unwrap_err();
         assert!(
             err.starts_with("query 2 of 3 \"rollout\": baseline failed after 1 equal: "),
             "{err}"
         );
         let ledger = f.tampered(3, Act::Break);
-        let err = report(&ledger, PROJECT, &queries, f.now).unwrap_err();
+        let err = report(&ledger, PROJECT, &queries, 0, f.now).unwrap_err();
         assert!(
             err.starts_with("query 2 of 3 \"rollout\": replay failed after 1 equal: "),
             "{err}"
         );
+    }
+
+    #[test]
+    fn a_refused_search_statement_is_named_in_the_error() {
+        let f = fixture();
+        let queries = vec!["deploy".to_string()];
+        // Request 0 is the baseline; request 1 the replay's trip, whose step 11 is the first
+        // query's stage 1 (five CREATEs, count, conflicts, screen, lifecycle, excluded).
+        let ledger = f.tampered(1, Act::FailStep(11, "SQLITE_ERROR"));
+        let err = report(&ledger, PROJECT, &queries, 0, f.now).unwrap_err();
+        assert_eq!(
+            err,
+            "query 1 of 1 \"deploy\": replay failed after 0 equal: remote sql: \
+             {\"message\":\"SQLITE_ERROR\",\"query\":0,\"statement\":10,\
+             \"statement_kind\":\"stage1\",\"trip\":1}"
+        );
+    }
+
+    #[test]
+    fn skipped_keys_calls_are_reported() {
+        let f = fixture();
+        let queries = vec!["deploy".to_string()];
+        let r = report(&f.ledger, PROJECT, &queries, 3, f.now).unwrap();
+        assert_eq!(r["skipped_keys"], 3);
+        assert_eq!(r["queries"], 1);
     }
 
     #[test]
@@ -578,7 +622,7 @@ mod tests {
         // The wrong memory project reads an empty ledger: the same refusal.
         let queries = vec!["deploy".to_string()];
         assert_eq!(
-            report(&f.ledger, "not-a-project", &queries, f.now).unwrap_err(),
+            report(&f.ledger, "not-a-project", &queries, 0, f.now).unwrap_err(),
             "every baseline answer is empty: check --memory-project and the aliases"
         );
         let dir = tempfile::tempdir().unwrap();

@@ -3802,6 +3802,11 @@ fn memory_read_error(error: cort::memory_store::LedgerError) -> CortError {
             "memory_remote_unavailable",
             json!({"remote":kind.as_str(),"message":format!("remote: {}",kind.as_str())}),
         ),
+        // The same error, plus the statement the server refused.
+        LedgerError::RemoteStatement(failure) => CortError::new(
+            "memory_remote_unavailable",
+            json!({"remote":"sql","message":"remote: sql","detail":failure.to_json()}),
+        ),
         other => memory_ledger_error(other),
     }
 }
@@ -3827,6 +3832,10 @@ fn memory_ledger_error(error: cort::memory_store::LedgerError) -> CortError {
     use cort::memory_store::LedgerError;
     match error {
         LedgerError::Message(message) => memory_error(message),
+        // Only reads produce it, and a read's error is `memory_read_error`'s to word.
+        LedgerError::RemoteStatement(failure) => {
+            memory_read_error(LedgerError::RemoteStatement(failure))
+        }
         LedgerError::Remote(kind) | LedgerError::NotRecorded { kind } => CortError::new(
             "memory_not_recorded",
             json!({"kind":kind.as_str(),
@@ -4541,6 +4550,33 @@ mod tests {
     use cort::memory_store::LedgerError;
     use cort::remote::ErrorKind;
     use serde_json::json;
+
+    /// A statement the server refused keeps recall's error code and adds the statement under
+    /// `detail.detail`; every other remote failure is unchanged.
+    #[test]
+    fn a_refused_search_statement_is_named_in_the_recall_error() {
+        let failure = cort::memory_store::StatementFailure {
+            trip: 2,
+            statement: Some(10),
+            statement_kind: "stage1",
+            query: Some(0),
+            message: "no such function: row_number".into(),
+        };
+        let error = super::memory_read_error(LedgerError::RemoteStatement(failure)).to_json();
+        assert_eq!(
+            error,
+            json!({"error":"memory_remote_unavailable","detail":{"remote":"sql",
+                "message":"remote: sql","detail":{"trip":2,"statement":10,
+                "statement_kind":"stage1","query":0,
+                "message":"no such function: row_number"}}})
+        );
+        let plain = super::memory_read_error(LedgerError::Remote(ErrorKind::Sql)).to_json();
+        assert_eq!(
+            plain,
+            json!({"error":"memory_remote_unavailable","detail":{"remote":"sql",
+                "message":"remote: sql"}})
+        );
+    }
 
     /// `--keys --lean` reaches the lean text through `render_emit`, not the JSON renderer.
     #[test]

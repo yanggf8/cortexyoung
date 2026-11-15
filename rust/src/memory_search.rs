@@ -5,6 +5,11 @@ use crate::memory::{partial_terms, Haystack};
 use crate::memory_store::COMPONENT;
 use crate::remote::{Cell, Stmt};
 
+/// The most terms (after `split_whitespace`, repeats counted) a query may give the SQL search:
+/// each adds an `instr` term to one expression, and SQLite refuses an expression deeper than
+/// 1000. A longer single query answers through the whole read; `--also` and `--keys` refuse it.
+pub const MAX_QUERY_TERMS: usize = 100;
+
 /// True when SQLite's ASCII-only `lower()` cannot be trusted to agree with Rust's Unicode
 /// `to_lowercase()` for this term: it has a cased non-ASCII letter, or a combining mark
 /// (U+0300..=U+036F). Such a term contributes no SQL condition.

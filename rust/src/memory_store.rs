@@ -40,10 +40,42 @@ pub struct MemoryStatus {
     pub conflicts: Vec<MemoryConflict>,
 }
 
+/// A search statement the server refused with an SQL error: which trip, which statement of it
+/// (its index in the trip's list; `None` for the transaction's own BEGIN or COMMIT), what kind of
+/// statement, for a stage which query, and the server's message.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StatementFailure {
+    pub trip: usize,
+    pub statement: Option<usize>,
+    pub statement_kind: &'static str,
+    pub query: Option<usize>,
+    pub message: String,
+}
+
+impl StatementFailure {
+    pub fn to_json(&self) -> Value {
+        let mut out = json!({
+            "trip": self.trip,
+            "statement_kind": self.statement_kind,
+            "message": self.message,
+        });
+        if let Some(at) = self.statement {
+            out["statement"] = json!(at);
+        }
+        if let Some(query) = self.query {
+            out["query"] = json!(query);
+        }
+        out
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum LedgerError {
     Message(String),
     Remote(ErrorKind),
+    /// An SQL error from the search read, with the statement the server refused. Only the
+    /// search produces it; every other read reports `Remote(ErrorKind::Sql)`.
+    RemoteStatement(StatementFailure),
     NotRecorded {
         kind: ErrorKind,
     },
@@ -999,7 +1031,14 @@ pub fn session_recall_with(
         .collect::<Result<Vec<_>, _>>()?;
     let bodies = merge_bodies(bodies)
         .map_err(|message| SessionRecallError::LedgerInvalid(with_alias_hint(message)))?;
-    let ledger = ledger_from_bodies(bodies, Scope::Whole)
+    // The unaliased retry reads one project of a component it could not resolve, so a supersedes
+    // naming a row under an alias is absent from it, not invalid.
+    let scope = if retried_alias {
+        Scope::Subset
+    } else {
+        Scope::Whole
+    };
+    let ledger = ledger_from_bodies(bodies, scope)
         .map_err(|message| SessionRecallError::LedgerInvalid(with_alias_hint(message)))?;
     // The fold runs on the caller's `now_ns`, like the questions and reminders folds. A row the
     // build cannot decode is counted by `lifecycle_rows`, never a reason to drop the read.
@@ -1981,6 +2020,9 @@ pub fn recall_all_with(
     ledger: &Ledger,
     include_hidden: bool,
 ) -> Result<MemoryRecall, LedgerError> {
+    if query.split_whitespace().count() > memory_search::MAX_QUERY_TERMS {
+        return recall_whole_with(root, query, ledger, include_hidden);
+    }
     let project = project(root)?;
     let now_ns = crate::remind_store::now_ns()?;
     let queries = [query.to_string()];
@@ -2136,6 +2178,19 @@ fn recall_each(
     include_hidden: bool,
     haystack: Haystack,
 ) -> Result<(Vec<MemoryRecall>, Searched), LedgerError> {
+    let max = memory_search::MAX_QUERY_TERMS;
+    for (i, query) in queries.iter().enumerate() {
+        let terms = query.split_whitespace().count();
+        if terms > max {
+            return Err(LedgerError::Refused {
+                code: "memory_recall_too_many_terms",
+                message: format!(
+                    "query {i} has {terms} terms; --also and --keys take at most {max} per query"
+                ),
+                detail: json!({"query": i, "terms": terms, "max": max}),
+            });
+        }
+    }
     let project = project(root)?;
     let now_ns = crate::remind_store::now_ns()?;
     let searched = search_with(
@@ -2406,6 +2461,51 @@ fn search_counted(
     Ok((searched, first.rows + second.rows))
 }
 
+/// The longest server message a refused search statement carries, in bytes.
+const STATEMENT_MESSAGE_MAX: usize = 300;
+
+/// A search read's error: an SQL error at a numbered step names the statement and keeps the
+/// server's text (every user term in the search SQL is a bound parameter, so that text quotes
+/// only our SQL); any other error is its kind alone, as every other read reports it.
+/// `read_snapshot` numbers `BEGIN` step 0, statement `i` step `i + 1`, then `COMMIT`, `ROLLBACK`
+/// and the stream close.
+fn refused_statement(
+    e: &crate::remote::RemoteError,
+    labels: &[(&'static str, Option<usize>)],
+    trip: usize,
+) -> LedgerError {
+    let Some(step) = e.step.filter(|_| e.kind == ErrorKind::Sql) else {
+        return LedgerError::Remote(e.kind);
+    };
+    let (statement, (statement_kind, query)) = match step {
+        0 => (None, ("begin", None)),
+        s if s <= labels.len() => (Some(s - 1), labels[s - 1]),
+        s if s == labels.len() + 1 => (None, ("commit", None)),
+        s if s == labels.len() + 2 => (None, ("rollback", None)),
+        _ => (None, ("close", None)),
+    };
+    let mut message: String = e
+        .server_message()
+        .unwrap_or("(no server message)")
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    if message.len() > STATEMENT_MESSAGE_MAX {
+        let mut end = STATEMENT_MESSAGE_MAX;
+        while !message.is_char_boundary(end) {
+            end -= 1;
+        }
+        message.truncate(end);
+    }
+    LedgerError::RemoteStatement(StatementFailure {
+        trip,
+        statement,
+        statement_kind,
+        query,
+        message,
+    })
+}
+
 impl Ledger {
     /// One round trip. `narrow` is the first form: the archived condition in SQL (unless
     /// `include_hidden`), its exclusions returned for checking, and stage 2 gated unless a term is
@@ -2454,10 +2554,24 @@ impl Ledger {
             let gated = second.is_some() && q.stage2 == Stage2::Gated;
             stages.push((first, second, gated));
         }
+        let mut labels: Vec<(&'static str, Option<usize>)> = vec![("create", None); stmts.len()];
+        labels[count_at].0 = "count";
+        labels[conflicts_at].0 = "conflicts";
+        labels[screen_at].0 = "screen";
+        labels[lifecycle_at].0 = "lifecycle";
+        if let Some(at) = excluded_at {
+            labels[at].0 = "excluded";
+        }
+        for (query, (first, second, _)) in stages.iter().enumerate() {
+            labels[*first] = ("stage1", Some(query));
+            if let Some(at) = second {
+                labels[*at] = ("stage2", Some(query));
+            }
+        }
         let mut results = self
             .db
             .read_snapshot(&stmts)
-            .map_err(|e| LedgerError::Remote(e.kind))?;
+            .map_err(|e| refused_statement(&e, &labels, if narrow { 1 } else { 2 }))?;
         // Defensive: `read_snapshot()` already guarantees one result per statement.
         if results.len() != stmts.len() {
             return Err(LedgerError::Message("missing remote memory result".into()));
@@ -2647,7 +2761,8 @@ pub fn select_whole_with(
     })
 }
 
-/// `select_whole_with` through `search_with`.
+/// `select_whole_with` through `search_with`, or through the whole read for a query past the
+/// term cap, as `recall_all_with` answers it.
 pub fn select_search_with(
     ledger: &Ledger,
     project: &str,
@@ -2655,6 +2770,9 @@ pub fn select_search_with(
     include_hidden: bool,
     now_ns: i128,
 ) -> Result<Selection, LedgerError> {
+    if query.split_whitespace().count() > memory_search::MAX_QUERY_TERMS {
+        return select_whole_with(ledger, project, query, include_hidden, now_ns);
+    }
     let queries = [query.to_string()];
     let req = SearchRequest {
         queries: &queries,

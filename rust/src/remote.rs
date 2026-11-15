@@ -72,17 +72,25 @@ pub struct RemoteError {
     pub kind: ErrorKind,
     pub step: Option<usize>,
     detail: String,
+    server_message: Option<String>,
 }
 impl RemoteError {
     /// Diagnostic detail for trusted logs only; never include it in user-facing output.
     pub fn detail(&self) -> &str {
         &self.detail
     }
+    /// The server's own text for a statement error, verbatim. It can quote request data, so a
+    /// caller may show it only for statements whose user input travels as bound parameters
+    /// (the SQL search's), never for one that inlines it.
+    pub fn server_message(&self) -> Option<&str> {
+        self.server_message.as_deref()
+    }
     fn new(kind: ErrorKind, detail: impl Into<String>) -> Self {
         Self {
             kind,
             step: None,
             detail: detail.into(),
+            server_message: None,
         }
     }
     fn sql(detail: impl Into<String>) -> Self {
@@ -182,11 +190,14 @@ fn status_error(status: u16, body: &[u8]) -> RemoteError {
 fn hrana_error(value: &Value) -> RemoteError {
     let code = value.get("code").and_then(Value::as_str);
     let message = value.get("message").and_then(Value::as_str);
-    // Server text can contain request data, so only the symbolic code reaches the log detail.
-    RemoteError::new(
+    // Server text can contain request data, so only the symbolic code reaches the log detail;
+    // the text itself is kept apart, for the caller that knows its statements bind their input.
+    let mut error = RemoteError::new(
         classify(code, message, None, None),
         format!("Hrana statement error {}", code.unwrap_or("(no code)")),
-    )
+    );
+    error.server_message = message.map(str::to_owned);
+    error
 }
 
 pub trait Transport {

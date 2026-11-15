@@ -48,7 +48,7 @@ link strength, cascade candidates). Supersession stays the same-key version chai
 
 ## Phases
 
-- **2a: cloud search.** `cort memory recall` reads only matching rows; layer 1 (`--keys`); several
+- **2a: cloud search.** `cort memory recall` returns only matching rows; layer 1 (`--keys`); several
   queries in one call. This is the part the evidence supports; it is specified in full below.
 - **2b: tree and tags.** Parent at promotion, derived re-parenting, tag events, `--tag` filters.
   Sketched below; it gets its own detailed spec after 2a ships.
@@ -219,7 +219,7 @@ it:
 
 `cort memory: the shared ledger has an integrity problem (<today's message>); run \`cort memory status\` to see it, and do not trust recall's silence until it is fixed`
 
-The unaliased retry is unchanged. The usage row records the outcome as `ledger_invalid`.
+The unaliased retry reads `project = ?` alone, so it decodes with the subset rule: a predecessor under an alias is legitimately absent there (whole-branch review, 2026-11-16). The usage row records the outcome as `ledger_invalid`.
 
 The returned subset is decoded with one rule: a predecessor (`supersedes` or `resolves`) that was
 not returned is not an error, because the screen already checked that it exists. Without that,

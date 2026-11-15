@@ -127,7 +127,7 @@ const UPTAKE_FLAGS: &[&str] = &[
 ];
 
 const RECALL_HITS_FLAGS: &[&str] = &["--dir", "--project", "--days", "--ledger"];
-const USAGE_RECALL_HITS: &str = "usage: cort-evals recall-hits [--dir DIR] [--project NAME] [--days N] [--ledger FILE]  (hit-count distribution of real `cort memory recall` results in Claude Code transcripts; read-only. --ledger FILE, the JSON of `cort memory list`, replays each recall's query against that ledger snapshot; the ledger belongs to one project, so --ledger without --project mixes projects)";
+const USAGE_RECALL_HITS: &str = "usage: cort-evals recall-hits [--dir DIR] [--project NAME] [--days N] [--ledger FILE]  (hit-count distribution of real `cort memory recall` results in Claude Code transcripts; read-only. --ledger FILE, the JSON of `cort memory list`, replays each recall's query against that ledger snapshot; the ledger belongs to one project, so --ledger without --project mixes projects. A command holding a `--keys` call is left out and its `--keys` calls are counted in `skipped_keys`)";
 
 const USAGE_TOP: &str =
     "usage: cort-evals <run-agents|verify-impact|summarize|demand|capture-gap|recall-hits|recall-sql|memory-uptake|recall-exp|cost-audit|cost-collect|cost-trial|gate-audit|gate> [options]";
@@ -970,7 +970,7 @@ const RECALL_SQL_FLAGS: &[&str] = &[
     "--url",
     "--token-file",
 ];
-const USAGE_RECALL_SQL: &str = "usage: cort-evals recall-sql --project NAME --memory-project ID --url URL --token-file FILE [--dir DIR] [--days N]  (replays the real `cort memory recall` queries of a Claude Code project (--project, the transcript directory name) against memory project ID (its aliases come from `project_aliases` in the database) through the product twice: `select_whole_with` over the whole ledger as the baseline and `select_search_with`, the search recall ships, as the replay, hidden entries left out on both. It compares the selection (ids in order and the partial flag), not the rendered recall output. Reports `queries`, `equal` and `now_ns`, every mismatch, and per query group: `queries`, `equal`, `baseline_hits` (baseline non-empty), `partial` (baseline partial); `rows` {sum,max}, the memory rows the replay's statements returned, summed over its trips, before deduplication; `trips` {sum,max}, logical round trips (Busy retries inside a trip are not counted); `server_rows_read` and `baseline_server_rows_read` {sum,max}, the server's own `rows_read` counter over every statement of every trip (rows it scanned, not rows returned), null when the server did not report it; `ms` and `baseline_ms` {p50,max}. No queries, or an empty baseline for every query, is an error. Both reads create any of the five memory tables that are missing (CREATE TABLE IF NOT EXISTS) and write nothing else)";
+const USAGE_RECALL_SQL: &str = "usage: cort-evals recall-sql --project NAME --memory-project ID --url URL --token-file FILE [--dir DIR] [--days N]  (replays the positional query (never an `--also` value) of every real `cort memory recall` call of a Claude Code project (--project, the transcript directory name) against memory project ID (its aliases come from `project_aliases` in the database) through the product twice: `select_whole_with` over the whole ledger as the baseline and `select_search_with`, the search recall ships (a query past 100 terms goes through the whole read, as recall answers it), as the replay, hidden entries left out on both. It compares the selection (ids in order and the partial flag), not the rendered recall output. `--keys` calls are skipped and counted in `skipped_keys`. Reports `queries`, `equal`, `skipped_keys` and `now_ns`, every mismatch, and per query group: `queries`, `equal`, `baseline_hits` (baseline non-empty), `partial` (baseline partial); `rows` {sum,max}, the memory rows the replay's statements returned, summed over its trips, before deduplication; `trips` {sum,max}, logical round trips (Busy retries inside a trip are not counted); `server_rows_read` and `baseline_server_rows_read` {sum,max}, the server's own `rows_read` counter over every statement of every trip (rows it scanned, not rows returned), null when the server did not report it; `ms` and `baseline_ms` {p50,max}. No queries, or an empty baseline for every query, is an error; a statement the server refused names its trip, statement, kind, query and message. Both reads create any of the five memory tables that are missing (CREATE TABLE IF NOT EXISTS) and write nothing else)";
 
 fn recall_sql_main(argv: &[String]) -> Result<(), String> {
     guard_options(argv, RECALL_SQL_FLAGS, USAGE_RECALL_SQL)?;
@@ -1028,13 +1028,19 @@ fn recall_sql_main(argv: &[String]) -> Result<(), String> {
         }),
     )
     .map_err(|e| format!("{e:?}"))?;
-    let queries = cort_evals::recall_sql::transcript_queries(
+    let found = cort_evals::recall_sql::transcript_queries(
         Path::new(&dir),
         &at(argv, "--project", ""),
         days,
         now_ms,
     )?;
-    let mut report = cort_evals::recall_sql::report(&ledger, &memory_project, &queries, now_ns)?;
+    let mut report = cort_evals::recall_sql::report(
+        &ledger,
+        &memory_project,
+        &found.queries,
+        found.skipped_keys,
+        now_ns,
+    )?;
     stamp_machine(&mut report);
     println!(
         "{}",
