@@ -1,6 +1,6 @@
 # Memory tiers phase 2: layered cloud search, a tree, and per-entry strength (issue #11)
 
-Status: draft, 2026-11-15, revised twice after external review (round 1: 2 BLOCK, 5 SHOULD, 4 NIT; round 2: 4 SHOULD, 7 NIT). Replaces phase 2 of `2026-11-14-memory-tiers-design.md` (the parent
+Status: draft, 2026-11-15, revised twice after external review (round 1: 2 BLOCK, 5 SHOULD, 4 NIT; round 2: 4 SHOULD, 7 NIT), then reviewed by the agent that uses recall daily (2026-11-15). Replaces phase 2 of `2026-11-14-memory-tiers-design.md` (the parent
 spec). The user redesigned phase 2 on 2026-11-14; their words and the agreed reading are in the
 ledger under key `memory-tiers-phase2-search` (ce043cf4). The measurement behind 2a is under key
 `memory-tiers-phase2-search-replay` (6b349e5e) and commit e88ffcd4. Phase 1a shipped in
@@ -133,8 +133,7 @@ eval's own SQL goes away. Terms are bound as parameters, never interpolated.
   Today's recall would then fall through to the partial rule. Two rules cover this:
   - When any term contributed no condition, stage 2 is sent without its `NOT EXISTS` gate, in the
     same pipeline.
-  - The client sends stage 2 in a second round trip, ungated and excluding the stage-1 ids, only
-    when all of these hold:
+  - The client sends a second round trip only when all of these hold:
     - stage 1 returned rows;
     - stage 2 was sent gated;
     - the client's full-term match over the stage-1 rows is empty;
@@ -142,8 +141,10 @@ eval's own SQL goes away. Terms are bound as parameters, never interpolated.
 
     A query that matches nothing at all therefore costs no extra trip.
 
-  A re-sent query (see the archived condition) carries an ungated stage 2, so a recall makes at
-  most two round trips.
+  There is one form of second round trip, used both here and for the archived check: the whole
+  pipeline again, without the archived condition and with every stage 2 ungated. It can only
+  return more rows than either narrower re-send would, and the client still decides, so a recall
+  makes at most two round trips.
 
   Tests pin both: `café 部署`, and a full match that is only on a dropped entry.
 
@@ -200,6 +201,19 @@ silently instead of failing. All of these are checked only on the rows recall re
 whole ledger they move to `cort memory status` and `list`, which still read every row and fail as
 today.
 
+**SessionStart says so (agent review, 2026-11-15).** An entry missing silently from recall is worse
+for an agent than an error, because the agent takes the absence as an answer. SessionStart still
+reads the whole ledger and still fails on every one of the eight errors, so every session already
+sees a line. Today that line is wrong: `session_recall_with` returns `ErrorKind::Sql` for a ledger
+that does not decode, and `main.rs` reports it as
+`the shared database could not be read at session start (remote_unreachable)`. 2a gives this case
+its own outcome, `ledger_invalid`, and its own line, naming the error and the command that shows
+it:
+
+`cort memory: the shared ledger has an integrity problem (<today's message>); run \`cort memory status\` to see it, and do not trust recall's silence until it is fixed`
+
+The unaliased retry is unchanged. The usage row records the outcome as `ledger_invalid`.
+
 The returned subset is decoded with one rule: a predecessor (`supersedes` or `resolves`) that was
 not returned is not an error, because the screen already checked that it exists. Without that,
 every hit whose predecessor did not match would read as "supersedes missing id". The rule touches
@@ -239,8 +253,8 @@ that do not match the query.
   project is enabled, and `conflict: true` when the key holds two or more active entries. There
   are no claims and no source checks; `--lean` prints one line per hit. The output names the next
   step: `cort memory recall "<words>" --also "<words in the other language>"` for the content.
-- **SessionStart, `list`, `review`, `status` and the write verbs** are unchanged: they still read
-  the whole ledger.
+- **SessionStart, `list`, `review`, `status` and the write verbs** still read the whole ledger.
+  SessionStart changes only its integrity-error line (above).
 
 ### Tests and the gate
 
@@ -316,6 +330,9 @@ that do not match the query.
 
 ## Calls for the user to check
 
+The agent that uses recall daily (the NUC bsr session) reviewed these on 2026-11-15 and accepted
+all seven, the fifth with the condition noted there.
+
 1. **`instr` rather than `LIKE`.** Both measured equal on all 109 queries. `instr` needs no
    escaping of `%`, `_` and `\`, which are common in identifiers. The user's words were "文字比對",
    and both are text matching.
@@ -338,7 +355,8 @@ that do not match the query.
      failing it.
 
    Keeping them all on recall would mean reading every row on every recall, which is what 2a
-   removes.
+   removes. The agent review accepted this on one condition, now in the spec: SessionStart, which
+   still reads every row, names the integrity error and points at `cort memory status`.
 6. **Multiple queries take `--also`, not more positional arguments.** Today an unquoted
    `recall deploy plan` is an error. Under positional arguments it would silently become a union
    of two one-word queries.
