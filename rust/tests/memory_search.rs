@@ -1109,6 +1109,8 @@ mod search {
         /// The same database, uncounted, for seeding.
         db: RemoteDb,
         posts: Arc<AtomicUsize>,
+        /// The in-memory server itself, for a ledger over a transport of a test's own.
+        inner: Arc<SqliteTransport>,
     }
 
     fn now_ns() -> i128 {
@@ -1160,7 +1162,7 @@ mod search {
         let db = RemoteDb::new(
             "https://example.test",
             "test",
-            Box::new(SharedTransport(inner)),
+            Box::new(SharedTransport(inner.clone())),
         )
         .unwrap();
         Fixture {
@@ -1168,6 +1170,7 @@ mod search {
             ledger,
             db,
             posts,
+            inner,
         }
     }
 
@@ -1603,7 +1606,7 @@ mod search {
                     .unwrap();
                     assert_eq!(
                         select_in(&searched, query, include_hidden),
-                        whole,
+                        (whole.ids, whole.partial),
                         "{queries:?} {query:?} {include_hidden}"
                     );
                 }
@@ -1640,10 +1643,10 @@ mod search {
                     now,
                 )
                 .unwrap();
-                assert!(!whole.0.is_empty(), "{query:?}");
+                assert!(!whole.ids.is_empty(), "{query:?}");
                 assert_eq!(
                     select_in(&searched, query, include_hidden),
-                    whole,
+                    (whole.ids, whole.partial),
                     "{query:?} {include_hidden}"
                 );
             }
@@ -1665,7 +1668,12 @@ mod search {
                     now,
                 )
                 .unwrap();
-                let (ids, partial, _, trips) = memory_store::select_search_with(
+                let memory_store::Selection {
+                    ids,
+                    partial,
+                    trips,
+                    ..
+                } = memory_store::select_search_with(
                     &f.ledger,
                     &project,
                     query,
@@ -1673,7 +1681,11 @@ mod search {
                     now,
                 )
                 .unwrap();
-                assert_eq!((ids, partial), whole, "{query:?} {include_hidden}");
+                assert_eq!(
+                    (ids, partial),
+                    (whole.ids, whole.partial),
+                    "{query:?} {include_hidden}"
+                );
                 assert!((1..=2).contains(&trips));
             }
         }
@@ -1945,6 +1957,126 @@ mod search {
         assert_eq!(ids(&answer), ["p1000002"]);
     }
 
+    /// Which `rows_read` counters a `Recording` transport deletes from the server's answers.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Strip {
+        None,
+        /// The first in each response: on a pipeline, the first statement's.
+        First,
+        All,
+    }
+
+    /// Passes every request to the in-memory server and adds up every `rows_read` its responses
+    /// carry (any depth: a pipeline's per-statement results and a batch's step results alike).
+    struct Recording {
+        inner: Arc<SqliteTransport>,
+        reported: Arc<std::sync::atomic::AtomicU64>,
+        strip: Strip,
+    }
+
+    fn rows_read_in(value: &mut Value, strip: &mut Strip) -> u64 {
+        match value {
+            Value::Object(map) => {
+                let mut sum = 0;
+                if *strip != Strip::None && map.contains_key("rows_read") {
+                    map.remove("rows_read");
+                    if *strip == Strip::First {
+                        *strip = Strip::None;
+                    }
+                } else if let Some(n) = map.get("rows_read").and_then(Value::as_u64) {
+                    sum += n;
+                }
+                for v in map.values_mut() {
+                    sum += rows_read_in(v, strip);
+                }
+                sum
+            }
+            Value::Array(items) => items.iter_mut().map(|v| rows_read_in(v, strip)).sum(),
+            _ => 0,
+        }
+    }
+
+    impl Transport for Recording {
+        fn post(
+            &self,
+            url: &str,
+            body: &[u8],
+            headers: &[(&str, &str)],
+        ) -> Result<Vec<u8>, cort::remote::RemoteError> {
+            let bytes = self.inner.post(url, body, headers)?;
+            let mut value: Value = serde_json::from_slice(&bytes).unwrap();
+            let mut strip = self.strip;
+            let n = rows_read_in(&mut value, &mut strip);
+            self.reported.fetch_add(n, Ordering::SeqCst);
+            Ok(serde_json::to_vec(&value).unwrap())
+        }
+    }
+
+    impl Fixture {
+        fn recording(&self, strip: Strip) -> (Ledger, Arc<std::sync::atomic::AtomicU64>) {
+            let reported = Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let ledger = Ledger::with_transport(
+                "https://example.test",
+                "test",
+                Box::new(Recording {
+                    inner: self.inner.clone(),
+                    reported: reported.clone(),
+                    strip,
+                }),
+            )
+            .unwrap();
+            (ledger, reported)
+        }
+    }
+
+    #[test]
+    fn server_rows_read_is_what_the_server_reported() {
+        let f = fixture();
+        let now = now_ns();
+        f.entry("d1000001", "gone", "deploy plan dropped", now - 20 * DAY);
+        f.entry("d1000002", "half", "deploy notes", now - 20 * DAY);
+        f.entry("d1000003", "other-half", "plan alpha", now - 20 * DAY);
+        f.life("l1", "on", None, now - 30 * DAY);
+        f.life("l2", "drop", Some("d1000001"), now - 10 * DAY);
+        let project = f.project();
+        // Every statement of both trips (the resend) and of the whole read, summed; the
+        // in-memory server reports returned rows, and `BEGIN`/`COMMIT` return none.
+        let (ledger, reported) = f.recording(Strip::None);
+        let search =
+            memory_store::select_search_with(&ledger, &project, "deploy plan", false, now).unwrap();
+        assert_eq!(search.trips, 2);
+        let n = reported.swap(0, Ordering::SeqCst);
+        assert!(n > 0);
+        assert_eq!(search.server_rows_read, Some(n));
+        let whole =
+            memory_store::select_whole_with(&ledger, &project, "deploy plan", false, now).unwrap();
+        let n = reported.swap(0, Ordering::SeqCst);
+        // Three memory rows and two lifecycle rows came back.
+        assert_eq!(n, 5);
+        assert_eq!(whole.server_rows_read, Some(n));
+        assert_eq!((whole.rows, whole.trips), (3, 1));
+        assert_eq!(
+            (&search.ids, search.partial),
+            (&whole.ids, whole.partial),
+            "the counter changes no answer"
+        );
+        // A server that reports no counter is unknown, not zero; so is one that leaves out a
+        // single statement's, since the sum would understate the read.
+        let (ledger, _) = f.recording(Strip::All);
+        let search =
+            memory_store::select_search_with(&ledger, &project, "deploy plan", false, now).unwrap();
+        assert_eq!(search.server_rows_read, None);
+        assert_eq!(search.ids, whole.ids);
+        let all =
+            memory_store::select_whole_with(&ledger, &project, "deploy plan", false, now).unwrap();
+        assert_eq!(all.server_rows_read, None);
+        let (ledger, _) = f.recording(Strip::First);
+        let one =
+            memory_store::select_whole_with(&ledger, &project, "deploy plan", false, now).unwrap();
+        assert_eq!(one.server_rows_read, None);
+        assert_eq!(one.ids, whole.ids);
+    }
+
     #[test]
     fn reads_only_matching_rows() {
         let f = fixture();
@@ -1962,13 +2094,23 @@ mod search {
         }
         let project = f.project();
         let now = now_ns();
-        let (ids, partial, rows, trips) =
-            memory_store::select_search_with(&f.ledger, &project, "deploy", false, now).unwrap();
+        let memory_store::Selection {
+            ids,
+            partial,
+            rows,
+            trips,
+            ..
+        } = memory_store::select_search_with(&f.ledger, &project, "deploy", false, now).unwrap();
         assert_eq!((ids.len(), partial, trips), (3, false, 1));
         assert!(rows <= 3, "{rows}");
-        let (ids, partial, rows, trips) =
-            memory_store::select_search_with(&f.ledger, &project, "alpha beta gamma", false, now)
-                .unwrap();
+        let memory_store::Selection {
+            ids,
+            partial,
+            rows,
+            trips,
+            ..
+        } = memory_store::select_search_with(&f.ledger, &project, "alpha beta gamma", false, now)
+            .unwrap();
         assert!(partial);
         assert_eq!(trips, 1);
         // Rows holding two or more of the three terms: n0000003..5 and n0000006.
@@ -1977,6 +2119,7 @@ mod search {
         assert_eq!(
             (ids, partial),
             memory_store::select_whole_with(&f.ledger, &project, "alpha beta gamma", false, now)
+                .map(|s| (s.ids, s.partial))
                 .unwrap()
         );
     }

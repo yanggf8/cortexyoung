@@ -4,7 +4,7 @@ use crate::memory::{self, Haystack, MemoryEntry, MemoryLedger, MemoryRecall, Sco
 use crate::memory_search::{self, query_terms, QueryTerms, Stage2, StageQuery};
 use crate::question::QuestionEvent;
 use crate::remind::{EventKind, ReminderEvent};
-use crate::remote::{Cell, ErrorKind, RemoteDb, Stmt, Transport, UreqTransport};
+use crate::remote::{Cell, ErrorKind, RemoteDb, Stmt, StmtResult, Transport, UreqTransport};
 use crate::{notes, notes_upload, usage};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -162,6 +162,8 @@ impl Ledger {
         if results.len() != stmts.len() {
             return Err(LedgerError::Message("missing remote memory result".into()));
         }
+        let server_rows_read = server_rows_read(&results);
+        let memory_rows = results[bodies_at].rows.len();
         let lifecycle = lifecycle_at.map(|at| std::mem::take(&mut results[at].rows));
         let bodies: Vec<String> = results[bodies_at]
             .rows
@@ -174,6 +176,8 @@ impl Ledger {
         Ok(BodiesRead {
             bodies: merge_bodies(bodies).map_err(LedgerError::Message)?,
             lifecycle,
+            memory_rows,
+            server_rows_read,
         })
     }
 
@@ -207,10 +211,38 @@ impl Ledger {
         &self,
         project: &str,
     ) -> Result<(MemoryLedger, LifecycleRows), LedgerError> {
-        let read = self.read_bodies_with(project, true)?;
-        let ledger = ledger_for_read(read.bodies)?;
-        Ok((ledger, lifecycle_rows(read.lifecycle.unwrap_or_default())))
+        self.read_with_lifecycle_counted(project)
+            .map(|read| (read.ledger, read.rows))
     }
+
+    /// `read_with_lifecycle`, and what the read cost.
+    fn read_with_lifecycle_counted(&self, project: &str) -> Result<WholeRead, LedgerError> {
+        let read = self.read_bodies_with(project, true)?;
+        let (memory_rows, server_rows_read) = (read.memory_rows, read.server_rows_read);
+        Ok(WholeRead {
+            ledger: ledger_for_read(read.bodies)?,
+            rows: lifecycle_rows(read.lifecycle.unwrap_or_default()),
+            memory_rows,
+            server_rows_read,
+        })
+    }
+}
+
+/// `read_with_lifecycle`'s answer, and what the read cost: the `project_memory` rows returned
+/// (before merging) and the server's `rows_read` over every statement (`server_rows_read`'s rule).
+struct WholeRead {
+    ledger: MemoryLedger,
+    rows: LifecycleRows,
+    memory_rows: usize,
+    server_rows_read: Option<u64>,
+}
+
+/// The server's `rows_read` summed over `results`, or `None` when any result lacks it: a sum
+/// missing a statement would understate the read, and "not reported" must not read as zero.
+fn server_rows_read(results: &[StmtResult]) -> Option<u64> {
+    results
+        .iter()
+        .try_fold(0u64, |sum, r| r.rows_read.map(|n| sum.saturating_add(n)))
 }
 
 /// Lifecycle rows (first cell = body) to events: a non-text cell is unreadable, then the rest
@@ -235,6 +267,9 @@ pub(crate) fn lifecycle_rows(rows: Vec<Vec<Cell>>) -> LifecycleRows {
 struct BodiesRead {
     bodies: Vec<String>,
     lifecycle: Option<Vec<Vec<Cell>>>,
+    /// Rows the `project_memory` statement returned, before merging.
+    memory_rows: usize,
+    server_rows_read: Option<u64>,
 }
 
 /// The lifecycle events one read found, and how many rows it could not use.
@@ -2319,6 +2354,9 @@ pub struct Searched {
     pub view: crate::memory_lifecycle::LifecycleView,
     pub unreadable: usize,
     pub trips: usize,
+    /// The server's `rows_read` over every statement of every trip, the first included when a
+    /// second replaced its answer; `None` when any statement's result did not report it.
+    pub server_rows_read: Option<u64>,
 }
 
 /// One snapshot read, decoded; `resend` says the narrow form's answer cannot be trusted.
@@ -2360,6 +2398,11 @@ fn search_counted(
     let second = ledger.search_trip(project, req, &terms, false, now_ns)?;
     let mut searched = second.searched;
     searched.trips = 2;
+    searched.server_rows_read = first
+        .searched
+        .server_rows_read
+        .zip(searched.server_rows_read)
+        .map(|(a, b)| a.saturating_add(b));
     Ok((searched, first.rows + second.rows))
 }
 
@@ -2419,6 +2462,7 @@ impl Ledger {
         if results.len() != stmts.len() {
             return Err(LedgerError::Message("missing remote memory result".into()));
         }
+        let server_rows_read = server_rows_read(&results);
 
         let screen = results[screen_at]
             .rows
@@ -2525,6 +2569,7 @@ impl Ledger {
                 unreadable: lifecycle.unreadable,
                 view,
                 trips: 0,
+                server_rows_read,
             },
             rows,
             resend,
@@ -2558,29 +2603,58 @@ fn select_visible(
     memory::recall_selection_in(query, &visible, Haystack::KeyClaim)
 }
 
-/// Recall's selection over the whole ledger, read as `recall_whole_with` reads it: ids in output
-/// order and the partial flag, with no root and no source checks. The eval's baseline.
+/// One query's selection as recall would print it, with no root and no source checks, and what
+/// reading it cost. The eval's unit of comparison.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Selection {
+    /// Ids in output order.
+    pub ids: Vec<String>,
+    /// Recall's partial flag: no entry matched every term.
+    pub partial: bool,
+    /// Memory rows the read returned, summed over trips, before deduplication: the search's stage
+    /// rows, or the whole read's `project_memory` rows.
+    pub rows: usize,
+    /// Logical round trips; a Busy retry inside one is not counted. The whole read takes one.
+    pub trips: usize,
+    /// The server's `rows_read` over every statement of every trip; `None` when any statement's
+    /// result did not report it.
+    pub server_rows_read: Option<u64>,
+}
+
+/// Recall's selection over the whole ledger, read as `recall_whole_with` reads it. The eval's
+/// baseline.
 pub fn select_whole_with(
     ledger: &Ledger,
     project: &str,
     query: &str,
     include_hidden: bool,
     now_ns: i128,
-) -> Result<(Vec<String>, bool), LedgerError> {
-    let (entries, rows) = ledger.read_with_lifecycle(project)?;
+) -> Result<Selection, LedgerError> {
+    let WholeRead {
+        ledger: entries,
+        rows,
+        memory_rows,
+        server_rows_read,
+    } = ledger.read_with_lifecycle_counted(project)?;
     let view = crate::memory_lifecycle::fold(&entries, rows.events, rows.unreadable, now_ns, None);
-    Ok(select_visible(query, &entries, &view, include_hidden))
+    let (ids, partial) = select_visible(query, &entries, &view, include_hidden);
+    Ok(Selection {
+        ids,
+        partial,
+        rows: memory_rows,
+        trips: 1,
+        server_rows_read,
+    })
 }
 
-/// `select_whole_with` through `search_with`, plus the stage rows returned (every trip's, before
-/// deduplication) and the round trips spent.
+/// `select_whole_with` through `search_with`.
 pub fn select_search_with(
     ledger: &Ledger,
     project: &str,
     query: &str,
     include_hidden: bool,
     now_ns: i128,
-) -> Result<(Vec<String>, bool, usize, usize), LedgerError> {
+) -> Result<Selection, LedgerError> {
     let queries = [query.to_string()];
     let req = SearchRequest {
         queries: &queries,
@@ -2589,7 +2663,13 @@ pub fn select_search_with(
     };
     let (searched, rows) = search_counted(ledger, project, &req, now_ns)?;
     let (ids, partial) = select_visible(query, &searched.ledger, &searched.view, include_hidden);
-    Ok((ids, partial, rows, searched.trips))
+    Ok(Selection {
+        ids,
+        partial,
+        rows,
+        trips: searched.trips,
+        server_rows_read: searched.server_rows_read,
+    })
 }
 
 /// `cort memory list`: every active entry, hidden ones included and labelled. A disabled project

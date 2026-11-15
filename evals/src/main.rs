@@ -10,7 +10,9 @@
 //!                            [--show] [--out FILE]
 //!   cort-evals capture-gap   [--claude-dir DIR] [--project NAME] [--since RFC3339] [--until RFC3339] [--out FILE] [--show]
 //!   cort-evals recall-hits   [--dir DIR] [--project NAME] [--days N] [--ledger FILE]
-//!   cort-evals recall-sql    --project NAME --ledger FILE --url URL --token-file FILE --projects ID[,ID...] [--dir DIR] [--days N]
+//!   cort-evals recall-sql    --project NAME --memory-project ID --url URL --token-file FILE [--dir DIR] [--days N]
+//!                            (creates any of the five memory tables that are missing (CREATE TABLE
+//!                            IF NOT EXISTS) and writes nothing else)
 //!   cort-evals memory-uptake [--claude-dir DIR] [--since RFC3339] [--out FILE] [--private DIR [--sample N] [--seed S]] [--judged FILE [--audit-seed S]]
 //!   cort-evals cost-audit    --since UTC --until UTC [--claude-dir DIR] [--out FILE]
 //!   cort-evals cost-collect  [--day YYYY-MM-DD] [--claude-dir DIR]
@@ -964,12 +966,11 @@ const RECALL_SQL_FLAGS: &[&str] = &[
     "--dir",
     "--project",
     "--days",
-    "--ledger",
+    "--memory-project",
     "--url",
     "--token-file",
-    "--projects",
 ];
-const USAGE_RECALL_SQL: &str = "usage: cort-evals recall-sql --project NAME --ledger FILE --url URL --token-file FILE --projects ID[,ID...] [--dir DIR] [--days N]  (replays the real `cort memory recall` queries of a Claude Code project against SQL-side matching over the remote `project_memory` table, once with LIKE and once with instr, and reports per query group whether the client's exact decision over the rows SQL returned equals today's recall over every active remote row; the --ledger snapshot (the JSON of `cort memory list`) only cross-checks the SQL active filter; read-only: SELECTs only)";
+const USAGE_RECALL_SQL: &str = "usage: cort-evals recall-sql --project NAME --memory-project ID --url URL --token-file FILE [--dir DIR] [--days N]  (replays the real `cort memory recall` queries of a Claude Code project (--project, the transcript directory name) against memory project ID (its aliases come from `project_aliases` in the database) through the product twice: `select_whole_with` over the whole ledger as the baseline and `select_search_with`, the search recall ships, as the replay, hidden entries left out on both. It compares the selection (ids in order and the partial flag), not the rendered recall output. Reports `queries`, `equal` and `now_ns`, every mismatch, and per query group: `queries`, `equal`, `baseline_hits` (baseline non-empty), `partial` (baseline partial); `rows` {sum,max}, the memory rows the replay's statements returned, summed over its trips, before deduplication; `trips` {sum,max}, logical round trips (Busy retries inside a trip are not counted); `server_rows_read` and `baseline_server_rows_read` {sum,max}, the server's own `rows_read` counter over every statement of every trip (rows it scanned, not rows returned), null when the server did not report it; `ms` and `baseline_ms` {p50,max}. No queries, or an empty baseline for every query, is an error. Both reads create any of the five memory tables that are missing (CREATE TABLE IF NOT EXISTS) and write nothing else)";
 
 fn recall_sql_main(argv: &[String]) -> Result<(), String> {
     guard_options(argv, RECALL_SQL_FLAGS, USAGE_RECALL_SQL)?;
@@ -982,13 +983,7 @@ fn recall_sql_main(argv: &[String]) -> Result<(), String> {
             return Err(format!("{arg} needs a value"));
         }
     }
-    for required in [
-        "--project",
-        "--ledger",
-        "--url",
-        "--token-file",
-        "--projects",
-    ] {
+    for required in ["--project", "--memory-project", "--url", "--token-file"] {
         if !has(argv, required) {
             return Err(format!("{required} is required\n{USAGE_RECALL_SQL}"));
         }
@@ -1011,40 +1006,35 @@ fn recall_sql_main(argv: &[String]) -> Result<(), String> {
     } else {
         None
     };
-    let now_ms = std::time::SystemTime::now()
+    let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| e.to_string())
-        .and_then(|d| i64::try_from(d.as_millis()).map_err(|e| e.to_string()))?;
-    let projects: Vec<String> = at(argv, "--projects", "")
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .collect();
-    if projects.is_empty() {
-        return Err("--projects needs at least one id".into());
+        .map_err(|e| e.to_string())?;
+    let now_ms = i64::try_from(now.as_millis()).map_err(|e| e.to_string())?;
+    let now_ns = i128::try_from(now.as_nanos()).map_err(|e| e.to_string())?;
+    let memory_project = at(argv, "--memory-project", "").trim().to_string();
+    if memory_project.is_empty() {
+        return Err("--memory-project needs a value".into());
     }
-    let ledger = cort_evals::recall_hits::load_ledger(Path::new(&at(argv, "--ledger", "")))?;
     let token_path = at(argv, "--token-file", "");
     let token = std::fs::read_to_string(&token_path)
         .map_err(|e| format!("{token_path}: {e}"))?
         .trim()
         .to_string();
-    let db = cort::remote::RemoteDb::new(
+    let ledger = cort::memory_store::Ledger::with_transport(
         at(argv, "--url", "").trim().trim_end_matches('/'),
-        token,
+        &token,
         Box::new(cort::remote::UreqTransport {
             timeout: std::time::Duration::from_secs(30),
         }),
     )
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| format!("{e:?}"))?;
     let queries = cort_evals::recall_sql::transcript_queries(
         Path::new(&dir),
         &at(argv, "--project", ""),
         days,
         now_ms,
     )?;
-    let mut report = cort_evals::recall_sql::report(&db, &projects, &ledger, &queries)?;
+    let mut report = cort_evals::recall_sql::report(&ledger, &memory_project, &queries, now_ns)?;
     stamp_machine(&mut report);
     println!(
         "{}",
