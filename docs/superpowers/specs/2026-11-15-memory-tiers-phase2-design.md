@@ -94,7 +94,8 @@ eval's own SQL goes away. Terms are bound as parameters, never interpolated.
   - `parse_recorded_ns` accepts a leading `+` or `-` and rejects digits out of the date range.
   - A digit string beyond i64 saturates SQLite's `CAST`.
   - serde rejects a wrong field type such as `"note": 5`.
-  - A duplicated JSON key is read first-wins by SQLite and last-wins by serde.
+  - A duplicated JSON key is read first-wins by SQLite, while serde rejects the row, so the fold
+    never applies it.
 
   So the SQL's decision is checked, not trusted. One more statement in the same pipeline returns
   the ids and bodies of the entries the archived condition excluded; archived entries are few. The
@@ -163,7 +164,10 @@ The replay gate below would show it.
 ### Whole-ledger facts recall still needs
 
 Today recall reads every row, so these come for free. In 2a each is one more statement in the same
-pipeline. Each returns counts or ids, except the integrity screen and the archived-exclusion check, which return the few bodies the client must decode itself.
+pipeline. All statements of one round trip run inside one read transaction (`BEGIN` … `COMMIT` in the same
+request), so they see a single state; a pipeline would run each on its own, and a write landing
+between two of them could produce an answer no state ever had. A second round trip's answer
+replaces the first's entirely. Each returns counts or ids, except the integrity screen and the archived-exclusion check, which return the few bodies the client must decode itself.
 
 | Fact | Statement | Behaviour |
 |---|---|---|
