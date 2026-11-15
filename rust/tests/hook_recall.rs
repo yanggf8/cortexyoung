@@ -174,6 +174,7 @@ fn seed_old_entry(db: &RemoteDb, id: &str) {
     )
     .unwrap();
 }
+
 #[test]
 fn pipeline_reads_ledger_and_other_machine_notes_without_writes() {
     let (db, read_only, requests) = database();
@@ -205,6 +206,7 @@ fn pipeline_reads_ledger_and_other_machine_notes_without_writes() {
     assert_eq!(requests.lock().unwrap().len(), 1);
     assert_eq!(requests.lock().unwrap()[0].len(), 6);
 }
+
 #[test]
 fn missing_notes_schema_retries_ledger_and_creates_nothing() {
     let (db, read_only, requests) = database();
@@ -410,7 +412,7 @@ fn duplicate_aliased_entry_is_returned_once() {
 }
 
 #[test]
-fn conflicting_aliased_entry_returns_sql_error() {
+fn conflicting_aliased_entry_is_ledger_invalid() {
     let (db, read_only, requests) = database();
     seed_ledger(&db);
     seed_alias(&db);
@@ -436,7 +438,14 @@ fn conflicting_aliased_entry_returns_sql_error() {
         Instant::now(),
         now_ns(),
     );
-    assert!(matches!(result, Err(cort::remote::ErrorKind::Sql)));
+    assert!(
+        matches!(
+            result,
+            Err(cort::memory_store::SessionRecallError::LedgerInvalid(_))
+        ),
+        "{:?}",
+        result.map(|_| ())
+    );
     assert_eq!(requests.lock().unwrap().len(), 1);
 }
 
@@ -455,7 +464,12 @@ fn alias_failure_without_budget_for_retry_is_timeout() {
         Instant::now() - (cort::remote::RECALL_DEADLINE - Duration::from_millis(1150)),
         now_ns(),
     );
-    assert!(matches!(result, Err(cort::remote::ErrorKind::Timeout)));
+    assert!(matches!(
+        result,
+        Err(cort::memory_store::SessionRecallError::Remote(
+            cort::remote::ErrorKind::Timeout
+        ))
+    ));
     let requests = requests.lock().unwrap();
     assert_eq!(requests.len(), 1);
     assert!(requests[0][0].contains("project IN (WITH RECURSIVE"));
@@ -474,7 +488,12 @@ fn expired_dispatch_budget_sends_no_request() {
         Instant::now() - (cort::remote::RECALL_DEADLINE - Duration::from_millis(100)),
         now_ns(),
     );
-    assert!(matches!(result, Err(cort::remote::ErrorKind::Timeout)));
+    assert!(matches!(
+        result,
+        Err(cort::memory_store::SessionRecallError::Remote(
+            cort::remote::ErrorKind::Timeout
+        ))
+    ));
     assert!(requests.lock().unwrap().is_empty());
 }
 
@@ -496,7 +515,12 @@ fn notes_failure_without_budget_for_retry_is_timeout() {
         Instant::now() - (cort::remote::RECALL_DEADLINE - Duration::from_millis(1150)),
         now_ns(),
     );
-    assert!(matches!(result, Err(cort::remote::ErrorKind::Timeout)));
+    assert!(matches!(
+        result,
+        Err(cort::memory_store::SessionRecallError::Remote(
+            cort::remote::ErrorKind::Timeout
+        ))
+    ));
     assert_eq!(
         requests
             .lock()
@@ -591,6 +615,7 @@ fn notice(out: &std::process::Output, kind: &str) {
     let value: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(value["hookSpecificOutput"]["additionalContext"], format!("cort memory: the shared database could not be read at session start ({kind}); run `cort memory recall \"<topic>\"` when you need it"));
 }
+
 #[test]
 fn cli_unconfigured_and_invalid_input_are_silent() {
     let temp = tempfile::tempdir().unwrap();
@@ -608,6 +633,7 @@ fn cli_unconfigured_and_invalid_input_are_silent() {
     assert!(out.stdout.is_empty());
     assert_eq!(outcome(root)["hook"], "failed");
 }
+
 #[test]
 fn cli_configured_without_project_is_silent() {
     let temp = tempfile::tempdir().unwrap();
@@ -638,6 +664,7 @@ fn cli_configured_without_project_is_silent() {
         .unwrap();
     assert_eq!(count, 1);
 }
+
 #[test]
 fn cli_configured_outside_git_is_silent() {
     let temp = tempfile::tempdir().unwrap();
@@ -651,6 +678,7 @@ fn cli_configured_outside_git_is_silent() {
     assert!(row.get("stall").is_none());
     assert!(row.get("net").is_none());
 }
+
 #[test]
 fn cli_configured_without_git_is_failed() {
     let temp = tempfile::tempdir().unwrap();
@@ -669,6 +697,7 @@ fn cli_configured_without_git_is_failed() {
     assert!(row.get("stall").is_none());
     assert!(row.get("net").is_none());
 }
+
 #[test]
 fn cli_project_override_survives_missing_git() {
     for name in ["CORT_MEMORY_PROJECT", "CLAUDECAT_MEMORY_PROJECT"] {
@@ -750,6 +779,7 @@ impl Drop for SilentServer {
         }
     }
 }
+
 #[test]
 fn cli_silent_server_times_out_and_clamps() {
     let Some(server) = SilentServer::new() else {
@@ -782,6 +812,7 @@ fn cli_silent_server_times_out_and_clamps() {
         assert!(row.get("net").is_none());
     }
 }
+
 #[test]
 fn cli_unbound_port_and_payload_cwd() {
     let temp = tempfile::tempdir().unwrap();
@@ -960,6 +991,7 @@ fn recall_network_row_shapes() {
         "watchdog",
         "injected",
         "none",
+        "ledger_invalid",
         "not_configured",
         "no_project",
     ] {
@@ -975,7 +1007,7 @@ fn recall_network_row_shapes() {
                 assert_eq!(row["stall"], stalled);
                 assert!(row.get("net").is_none());
             }
-            "injected" | "none" => {
+            "injected" | "none" | "ledger_invalid" => {
                 assert_eq!(
                     row["net"],
                     json!({"dns_ms":120, "connect_ms":40, "tls_ms":80, "response_ms":60})
@@ -1033,6 +1065,7 @@ fn kimi_unwritable_marker_is_silent() {
     assert!(out.status.success() && out.stdout.is_empty());
     assert_eq!(outcome(root)["hook"], "marker_unavailable");
 }
+
 #[test]
 fn render_orders_and_caps_entries() {
     use cort::memory::{MemoryEntry, MemoryHit, MemoryRecall};
@@ -1676,7 +1709,12 @@ fn non_sql_error_after_optional_sql_error_fails_the_recall() {
         now_ns(),
     );
     assert!(
-        matches!(result, Err(cort::remote::ErrorKind::Busy)),
+        matches!(
+            result,
+            Err(cort::memory_store::SessionRecallError::Remote(
+                cort::remote::ErrorKind::Busy
+            ))
+        ),
         "{result:?}"
     );
     assert_eq!(requests.lock().unwrap().len(), 1);
@@ -3359,7 +3397,12 @@ fn non_sql_error_at_the_lifecycle_step_fails_the_recall() {
         SAT_NOON,
     );
     assert!(
-        matches!(result, Err(cort::remote::ErrorKind::Busy)),
+        matches!(
+            result,
+            Err(cort::memory_store::SessionRecallError::Remote(
+                cort::remote::ErrorKind::Busy
+            ))
+        ),
         "{result:?}"
     );
     assert_eq!(requests.lock().unwrap().len(), 1);
@@ -3415,4 +3458,204 @@ fn every_block_full_with_weekend_line_stays_within_9500_bytes() {
         .unwrap();
     assert!(ledger_block.len() <= 6000, "{}", ledger_block.len());
     assert!(rendered.text.len() <= 9500, "{}", rendered.text.len());
+}
+
+fn seed_two_rows(db: &RemoteDb, rows: &[(&str, Value)]) {
+    db.execute(
+        "CREATE TABLE project_memory (project TEXT, id TEXT, body TEXT)",
+        vec![],
+    )
+    .unwrap();
+    for (id, body) in rows {
+        db.execute(
+            "INSERT INTO project_memory VALUES (?, ?, ?)",
+            vec![
+                cort::remote::Cell::Text("ledger".into()),
+                cort::remote::Cell::Text((*id).into()),
+                cort::remote::Cell::Text(body.to_string()),
+            ],
+        )
+        .unwrap();
+    }
+}
+
+fn ledger_row(id: &str, key: &str, supersedes: &str) -> Value {
+    json!({"id":id,"key":key,"claim":id,"source":"missing.md","source_line":1,
+        "source_sha256":"missing","recorded_at":"2026-10-01","supersedes":(!supersedes.is_empty()).then_some(supersedes)})
+}
+
+fn try_session(
+    db: &RemoteDb,
+) -> Result<cort::memory_store::SessionRecall, cort::memory_store::SessionRecallError> {
+    let temp = tempfile::tempdir().unwrap();
+    cort::memory_store::session_recall_with(
+        temp.path(),
+        db,
+        "self",
+        ("ledger", "origin"),
+        Instant::now(),
+        now_ns(),
+    )
+}
+
+#[test]
+fn ledger_with_invalid_supersession_is_ledger_invalid() {
+    let (db, _, _) = database();
+    seed_two_rows(
+        &db,
+        &[
+            ("a", ledger_row("a", "key-a", "")),
+            ("b", ledger_row("b", "key-b", "a")),
+        ],
+    );
+    let result = try_session(&db);
+    assert!(
+        matches!(&result, Err(cort::memory_store::SessionRecallError::LedgerInvalid(m)) if m == "memory b has invalid supersession"),
+        "{:?}",
+        result.map(|_| ())
+    );
+}
+
+#[test]
+fn ledger_with_missing_predecessor_keeps_alias_hint() {
+    let (db, _, _) = database();
+    seed_two_rows(&db, &[("b", ledger_row("b", "key-b", "gone"))]);
+    match try_session(&db) {
+        Err(cort::memory_store::SessionRecallError::LedgerInvalid(m)) => {
+            assert!(
+                m.ends_with("; re-add the alias with cort memory alias add"),
+                "{m}"
+            );
+            assert!(m.contains("memory b supersedes missing id gone"), "{m}");
+        }
+        other => panic!("{:?}", other.map(|_| ())),
+    }
+}
+
+#[test]
+fn sql_error_on_ledger_statement_is_still_remote() {
+    let (db, _, _) = database_with_step_failure("FROM project_memory WHERE", "SQLITE_ERROR");
+    seed_two_rows(&db, &[("a", ledger_row("a", "key-a", ""))]);
+    let result = try_session(&db);
+    assert!(
+        matches!(
+            result,
+            Err(cort::memory_store::SessionRecallError::Remote(
+                cort::remote::ErrorKind::Sql
+            ))
+        ),
+        "{:?}",
+        result.map(|_| ())
+    );
+}
+
+/// The CLI cannot be pointed at a fake server (the transport is TLS), so the line the hook prints
+/// for this outcome is a function of its own, asserted here byte for byte.
+#[test]
+fn ledger_invalid_line_is_exact() {
+    assert_eq!(
+        cort::hook_recall::ledger_invalid_line("memory b has invalid supersession"),
+        "cort memory: the shared ledger has an integrity problem (memory b has invalid supersession); run `cort memory status` to see it, and do not trust recall's silence until it is fixed"
+    );
+}
+
+#[test]
+fn failure_outcomes_and_lines() {
+    use cort::hook_recall::{failure_line, session_error_outcome};
+    use cort::memory_store::SessionRecallError as E;
+    use cort::remote::ErrorKind as K;
+    assert_eq!(
+        session_error_outcome(&E::LedgerInvalid("m".into())),
+        ("ledger_invalid", Some("m".to_string()))
+    );
+    assert_eq!(
+        session_error_outcome(&E::Remote(K::Blocked)),
+        ("remote_blocked", None)
+    );
+    assert_eq!(
+        session_error_outcome(&E::Remote(K::Timeout)),
+        ("remote_timeout", None)
+    );
+    for kind in [K::Sql, K::Busy, K::Unreachable] {
+        assert_eq!(
+            session_error_outcome(&E::Remote(kind)),
+            ("remote_unreachable", None)
+        );
+    }
+    assert_eq!(
+        failure_line("ledger_invalid", Some("memory b has invalid supersession")),
+        Some(cort::hook_recall::ledger_invalid_line(
+            "memory b has invalid supersession"
+        ))
+    );
+    assert_eq!(
+        failure_line("remote_timeout", None).as_deref(),
+        Some("cort memory: the shared database could not be read at session start (remote_timeout); run `cort memory recall \"<topic>\"` when you need it")
+    );
+    for silent in ["failed", "not_configured", "no_project", "none"] {
+        assert_eq!(failure_line(silent, None), None, "{silent}");
+    }
+}
+
+#[test]
+fn ledger_invalid_line_flattens_and_cuts_the_message() {
+    let long = format!(
+        "invalid remote memory row: line one\nline two {}",
+        "é".repeat(400)
+    );
+    let line = cort::hook_recall::ledger_invalid_line(&long);
+    assert!(!line.contains('\n'), "{line}");
+    let message = line
+        .strip_prefix(cort::hook_recall::LEDGER_INVALID_PREFIX)
+        .and_then(|rest| rest.split_once("); run `cort memory status`"))
+        .map(|(message, _)| message)
+        .unwrap();
+    assert!(message.ends_with(" ..."), "{message}");
+    assert!(message.len() <= 300 + " ...".len(), "{}", message.len());
+    assert!(message.starts_with("invalid remote memory row: line one line two"));
+}
+
+#[test]
+fn non_text_body_is_ledger_invalid() {
+    let (db, _, _) = database();
+    // No declared type, so the integer stays an integer cell rather than being cast to text.
+    db.execute(
+        "CREATE TABLE project_memory (project TEXT, id TEXT, body)",
+        vec![],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO project_memory VALUES ('ledger', 'a', 5)",
+        vec![],
+    )
+    .unwrap();
+    let result = try_session(&db);
+    assert!(
+        matches!(&result, Err(cort::memory_store::SessionRecallError::LedgerInvalid(m)) if m == "invalid remote memory row"),
+        "{:?}",
+        result.map(|_| ())
+    );
+}
+
+#[test]
+fn invalid_json_on_the_aliased_read_is_ledger_invalid_in_one_request() {
+    let (db, read_only, requests) = database();
+    seed_two_rows(&db, &[]);
+    seed_alias(&db);
+    db.execute(
+        "INSERT INTO project_memory VALUES ('ledger', 'a', '{bad')",
+        vec![],
+    )
+    .unwrap();
+    // Notes and questions present, so no optional read fails and forces a second request.
+    seed_notes(&db);
+    seed_questions(&db, "ledger", &[]);
+    read_only.store(true, Ordering::SeqCst);
+    let result = try_session(&db);
+    assert!(
+        matches!(&result, Err(cort::memory_store::SessionRecallError::LedgerInvalid(m)) if m.starts_with("invalid remote memory row: ")),
+        "{:?}",
+        result.map(|_| ())
+    );
+    assert_eq!(requests.lock().unwrap().len(), 1);
 }

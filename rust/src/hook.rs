@@ -97,8 +97,9 @@ pub const REFRESH_OUTCOMES: [&str; 8] = [
 /// no session id, and a marker directory that could not be written. `watchdog` means the process
 /// deadline won the claim and attempted its own bounded usage write. `no_project` means the cwd
 /// is outside a Git repository or has no origin, without a project override; `failed` covers
-/// payload, configuration and other Git errors.
-pub const RECALL_OUTCOMES: [&str; 12] = [
+/// payload, configuration and other Git errors. `ledger_invalid` means the shared ledger was read
+/// but does not decode (an integrity error, not an outage); the hook prints a line naming it.
+pub const RECALL_OUTCOMES: [&str; 13] = [
     "injected",
     "none",
     "not_configured",
@@ -107,6 +108,7 @@ pub const RECALL_OUTCOMES: [&str; 12] = [
     "remote_unreachable",
     "remote_blocked",
     "remote_timeout",
+    "ledger_invalid",
     "watchdog",
     "already_injected",
     "missing_session_id",

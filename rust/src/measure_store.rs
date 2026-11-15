@@ -68,7 +68,7 @@ pub struct RecallRow {
     pub hook: Option<String>,
     /// `stall.phase` of a timed-out, unreachable or watchdog row.
     pub stall_phase: Option<String>,
-    /// `net.<phase>_ms` of a successful read, in [`RECALL_PHASES`] order.
+    /// `net.<phase>_ms` of a successful read (`ledger_invalid` included), in [`RECALL_PHASES`] order.
     pub net_ms: [Option<i64>; 4],
 }
 
@@ -268,7 +268,7 @@ SELECT machine_id,
   CAST(json_extract(args_summary, '$.hook') AS TEXT)
 FROM valid_args";
 /// `hook-recall` rows: outcome, the phase a failed read stalled in, and per-phase timings of a
-/// successful read. Timings are cast to TEXT and parsed in Rust, as `gate_ms` is, so a
+/// successful read (including `ledger_invalid`: the read succeeded, the ledger did not decode). Timings are cast to TEXT and parsed in Rust, as `gate_ms` is, so a
 /// non-numeric value is dropped rather than failing the whole report.
 const SELECT_RECALL_ROWS: &str = "WITH candidates AS (
     SELECT machine_id, json_extract(payload, '$.args_summary') AS args_summary

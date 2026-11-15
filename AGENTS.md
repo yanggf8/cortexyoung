@@ -218,7 +218,7 @@ With under 200 ms left, it sends no request. A watchdog exits the process 900 ms
 (socket timeouts overshoot it) and 300 ms more once the answer is being written, so the whole run
 stays inside 5 s. On
 `remote_unreachable`, `remote_blocked`, or `remote_timeout`, it injects a one-line notice to retry
-`cort memory recall "<topic>"` when needed. It records one `usage.db` row on every normal return.
+`cort memory recall "<topic>"` when needed. A ledger that was read but does not decode (an integrity error such as an invalid supersession) is not an outage: the outcome is `ledger_invalid` and the line names the error and `cort memory status`. It records one `usage.db` row on every normal return.
 Kimi discards `SessionStart` output, so its `UserPromptSubmit` entry prints the same text as a `message` on
 the first prompt of each session only (a local marker per session id under the memory data directory).
 `settings::events_for` is the one place that says which harness gets which event.

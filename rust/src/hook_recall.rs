@@ -10,15 +10,16 @@ use crate::remind_snapshot::{shown_key, ShownKey};
 use serde_json::Value;
 
 /// Add transport diagnostics when a request reached DNS, or a `budget` stall when the deadline
-/// left too little time to send a request. A successful empty ledger (`none`) is a remote read
-/// too; configuration/dispatch failures have no network baseline.
+/// left too little time to send a request. A successful empty ledger (`none`), and one that was
+/// read but does not decode (`ledger_invalid`), are remote reads too; configuration/dispatch
+/// failures have no network baseline.
 pub fn add_network_timings(row: &mut Value, outcome: &str, snapshot: Option<Value>) {
     let Some(mut timing) = snapshot else {
         return;
     };
     match outcome {
         "remote_timeout" | "remote_unreachable" | "watchdog" => row["stall"] = timing,
-        "injected" | "none" => {
+        "injected" | "none" | "ledger_invalid" => {
             if let Some(object) = timing.as_object_mut() {
                 object.remove("phase");
             }
@@ -168,6 +169,66 @@ pub struct SessionRender {
     pub reminders: usize,
     /// Keys of the reminder lines printed, for the session's shown set.
     pub reminder_keys: Vec<ShownKey>,
+}
+
+/// Start of the SessionStart line for a remote read that failed (`remote_*` outcomes).
+pub const REMOTE_NOTICE_PREFIX: &str =
+    "cort memory: the shared database could not be read at session start (";
+/// Start of the SessionStart line for a ledger that was read but does not decode.
+pub const LEDGER_INVALID_PREFIX: &str = "cort memory: the shared ledger has an integrity problem (";
+/// The error text comes from remote JSON (serde quotes the offending value), so it is bounded.
+const LEDGER_INVALID_MESSAGE_MAX: usize = 300;
+
+/// The SessionStart line for a ledger that was read but does not decode: names the error and the
+/// command that shows it, because an agent takes recall's silence as an answer. Control
+/// characters become spaces and the message is cut at 300 bytes.
+pub fn ledger_invalid_line(message: &str) -> String {
+    let mut text: String = message
+        .chars()
+        .map(|c| {
+            if c.is_control() || c == '\u{2028}' || c == '\u{2029}' {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect();
+    if text.len() > LEDGER_INVALID_MESSAGE_MAX {
+        let mut end = LEDGER_INVALID_MESSAGE_MAX;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+        text.push_str(" ...");
+    }
+    format!("{LEDGER_INVALID_PREFIX}{text}); run `cort memory status` to see it, and do not trust recall's silence until it is fixed")
+}
+
+/// The outcome a failed SessionStart read records, and the error text its line names (only for
+/// `ledger_invalid`).
+pub fn session_error_outcome(
+    error: &crate::memory_store::SessionRecallError,
+) -> (&'static str, Option<String>) {
+    use crate::memory_store::SessionRecallError;
+    use crate::remote::ErrorKind;
+    match error {
+        SessionRecallError::LedgerInvalid(message) => ("ledger_invalid", Some(message.clone())),
+        SessionRecallError::Remote(ErrorKind::Blocked) => ("remote_blocked", None),
+        SessionRecallError::Remote(ErrorKind::Timeout) => ("remote_timeout", None),
+        SessionRecallError::Remote(_) => ("remote_unreachable", None),
+    }
+}
+
+/// The line a SessionStart read that did not inject injects instead, if any: the retry notice
+/// for a `remote_*` outcome, the integrity line for `ledger_invalid`, nothing otherwise.
+pub fn failure_line(outcome: &str, detail: Option<&str>) -> Option<String> {
+    match (outcome, detail) {
+        ("ledger_invalid", Some(message)) => Some(ledger_invalid_line(message)),
+        (outcome, _) if outcome.starts_with("remote_") => Some(format!(
+            "{REMOTE_NOTICE_PREFIX}{outcome}); run `cort memory recall \"<topic>\"` when you need it"
+        )),
+        _ => None,
+    }
 }
 
 /// What a dropped reminders read leaves at the reminders position: one line, never counted as

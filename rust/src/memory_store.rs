@@ -245,15 +245,30 @@ pub struct LifecycleRows {
 
 /// `read`'s mapping from merged bodies to a ledger, shared with `read_with_lifecycle`.
 fn ledger_for_read(bodies: Vec<String>) -> Result<MemoryLedger, LedgerError> {
-    ledger_from_bodies(bodies).map_err(|message| {
-        if message.contains("supersedes missing id") {
-            LedgerError::Message(format!(
-                "{message}; re-add the alias with cort memory alias add"
-            ))
-        } else {
-            LedgerError::Message(message)
-        }
-    })
+    ledger_from_bodies(bodies).map_err(|message| LedgerError::Message(with_alias_hint(message)))
+}
+
+/// A "supersedes missing id" message usually means an alias is missing: say how to add it.
+fn with_alias_hint(message: String) -> String {
+    if message.contains("supersedes missing id") {
+        format!("{message}; re-add the alias with cort memory alias add")
+    } else {
+        message
+    }
+}
+
+/// Why a SessionStart read failed: the remote could not be read, or it was read and the ledger
+/// it returned does not decode (an integrity problem, not an outage).
+#[derive(Debug, PartialEq, Eq)]
+pub enum SessionRecallError {
+    Remote(ErrorKind),
+    LedgerInvalid(String),
+}
+
+impl From<ErrorKind> for SessionRecallError {
+    fn from(kind: ErrorKind) -> Self {
+        SessionRecallError::Remote(kind)
+    }
 }
 
 #[derive(Deserialize, Serialize)]
@@ -737,7 +752,7 @@ pub fn session_recall_with(
     projects: (&str, &str),
     started: Instant,
     now_ns: i128,
-) -> Result<SessionRecall, ErrorKind> {
+) -> Result<SessionRecall, SessionRecallError> {
     // Before the network wait: nothing after it may spend the watchdog's margin on a subprocess.
     let top = memory::source_root(root);
     let ledger_args = || vec![Cell::Text(projects.0.into())];
@@ -752,7 +767,7 @@ pub fn session_recall_with(
             < Duration::from_millis(200)
         {
             crate::remote::network_budget_exhausted();
-            return Err(ErrorKind::Timeout);
+            return Err(ErrorKind::Timeout.into());
         }
         let scope = if retried_alias {
             "= ?".to_string()
@@ -809,7 +824,7 @@ pub fn session_recall_with(
                 .filter(|error| error.kind != ErrorKind::Sql)
                 .map(|error| error.kind)
         }) {
-            return Err(kind);
+            return Err(kind.into());
         }
         let sql_failed = |step: Option<usize>| {
             step.and_then(|at| results.get(at))
@@ -863,7 +878,7 @@ pub fn session_recall_with(
                     lifecycle_step,
                 );
             }
-            _ => return Err(ErrorKind::Sql),
+            _ => return Err(ErrorKind::Sql.into()),
         }
     };
     let (results, notes_steps, questions_step, reminders_step, lifecycle_step) = result;
@@ -871,16 +886,16 @@ pub fn session_recall_with(
     // here it is the result every other read rests on.
     let rows = match results.first() {
         Some(Ok(stmt)) => &stmt.rows,
-        _ => return Err(ErrorKind::Sql),
+        _ => return Err(ErrorKind::Sql.into()),
     };
     let (note_rows, total) = match notes_steps {
         Some((at, count_at)) => {
             let (Some(Ok(list)), Some(Ok(count))) = (results.get(at), results.get(count_at)) else {
-                return Err(ErrorKind::Sql);
+                return Err(ErrorKind::Sql.into());
             };
             let total = match count.rows.first().and_then(|r| r.first()) {
                 Some(Cell::Int(n)) if *n >= 0 => *n as usize,
-                _ => return Err(ErrorKind::Sql),
+                _ => return Err(ErrorKind::Sql.into()),
             };
             (list.rows.clone(), total)
         }
@@ -904,11 +919,17 @@ pub fn session_recall_with(
         .iter()
         .map(|row| match row.first() {
             Some(Cell::Text(s)) => Ok(s.clone()),
-            _ => Err(ErrorKind::Sql),
+            // The statement succeeded: a body that is not text is a ledger that does not decode, as
+            // `read` reports it, not an outage.
+            _ => Err(SessionRecallError::LedgerInvalid(
+                "invalid remote memory row".into(),
+            )),
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let bodies = merge_bodies(bodies).map_err(|_| ErrorKind::Sql)?;
-    let ledger = ledger_from_bodies(bodies).map_err(|_| ErrorKind::Sql)?;
+    let bodies = merge_bodies(bodies)
+        .map_err(|message| SessionRecallError::LedgerInvalid(with_alias_hint(message)))?;
+    let ledger = ledger_from_bodies(bodies)
+        .map_err(|message| SessionRecallError::LedgerInvalid(with_alias_hint(message)))?;
     // The fold runs on the caller's `now_ns`, like the questions and reminders folds. A row the
     // build cannot decode is counted by `lifecycle_rows`, never a reason to drop the read.
     let lifecycle = lifecycle_rows_read.map(|rows| {

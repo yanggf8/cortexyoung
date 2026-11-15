@@ -72,7 +72,7 @@ fn memory_note(root: &Path) -> String {
 }
 
 #[test]
-fn both_memory_headers_count_but_remote_notice_does_not() {
+fn both_memory_headers_count_but_notices_do_not() {
     let tmp = tempdir().unwrap();
     let transcript = tmp.path().join("transcripts");
     let project = tmp.path().join("project");
@@ -81,6 +81,7 @@ fn both_memory_headers_count_but_remote_notice_does_not() {
         ("old", format!("{HEADER}\n- [old] claim (src/a.rs:1, source_unchanged)")),
         ("current", format!("{CURRENT_HEADER}\n- [current] claim (src/a.rs:1, source_unchanged)")),
         ("notice", "cort memory: the shared database could not be read at session start (remote_timeout); run `cort memory recall \"<topic>\"` when you need it".to_string()),
+        ("integrity", cort::hook_recall::ledger_invalid_line("memory b has invalid supersession")),
     ] {
         write(
             &[hook(0, "startup", &text), attach(1, &text, "other hook", &project)],
@@ -92,7 +93,7 @@ fn both_memory_headers_count_but_remote_notice_does_not() {
     assert_eq!(report["total"]["windows"], 2);
     assert_eq!(report["total"]["distinct_sessions"], 2);
     assert_eq!(report["unconfirmed_hook_runs"], 0);
-    assert_eq!(report["files"]["scanned"], 3);
+    assert_eq!(report["files"]["scanned"], 4);
 }
 #[test]
 fn attachment_windows_and_private_detail() {

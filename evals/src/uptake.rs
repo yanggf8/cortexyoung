@@ -13,7 +13,16 @@ pub const UPTAKE_METHOD: &str = "uptake-v1";
 const OLD_HEADER: &str = "cort memory: local replica (may be behind the shared database; `cort memory recall \"<topic>\"` refreshes)";
 const HEADER: &str = cort::hook_recall::HEADER;
 const NOTES_HEADER: &str = "unreviewed harness notes from other machines (not checked against source; read one with `cort memory notes show <id>`):";
-const NOTICE_PREFIX: &str = "cort memory: the shared database could not be read at session start (";
+/// The SessionStart lines injected instead of the ledger: a failed read, or a ledger that does not
+/// decode. Either one proves the hook ran.
+const NOTICE_PREFIXES: [&str; 2] = [
+    cort::hook_recall::REMOTE_NOTICE_PREFIX,
+    cort::hook_recall::LEDGER_INVALID_PREFIX,
+];
+
+fn is_notice(text: &str) -> bool {
+    NOTICE_PREFIXES.iter().any(|p| text.starts_with(p))
+}
 
 fn is_memory_context(text: &str) -> bool {
     text.starts_with(HEADER) || text.starts_with(OLD_HEADER)
@@ -501,7 +510,7 @@ fn visible_text(e: &Value) -> String {
                 .map(|v| {
                     v.iter()
                         .filter_map(Value::as_str)
-                        .filter(|s| !is_memory_context(s) && !s.starts_with(NOTICE_PREFIX))
+                        .filter(|s| !is_memory_context(s) && !is_notice(s))
                         .collect::<Vec<_>>()
                         .join("\n")
                 })
@@ -1131,7 +1140,7 @@ pub fn scan_sample(
                 .map(|v| v.iter().filter_map(Value::as_str).collect())
                 .unwrap_or_default();
             let event = closes.get(&i).copied();
-            if contents.iter().any(|s| s.starts_with(NOTICE_PREFIX)) {
+            if contents.iter().any(|s| is_notice(s)) {
                 if let Some(j) = event {
                     events[j].confirmed = true;
                 }

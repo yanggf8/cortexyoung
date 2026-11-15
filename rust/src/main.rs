@@ -1962,6 +1962,7 @@ fn cmd_hook_recall(
     } else if parsed.is_none() {
         ("failed", None, 0, 0)
     } else {
+        let mut integrity: Option<String> = None;
         let read = (|| {
             let Some((url, token)) = cort::memory_store::session_config().map_err(|_| "failed")?
             else {
@@ -2005,34 +2006,37 @@ fn cmd_hook_recall(
                 now_ns,
             )
             .map(|session| (session, projects.0.clone()))
-            .map_err(|kind| match kind {
-                cort::remote::ErrorKind::Blocked => "remote_blocked",
-                cort::remote::ErrorKind::Timeout => "remote_timeout",
-                _ => "remote_unreachable",
+            .map_err(|error| {
+                let (outcome, detail) = cort::hook_recall::session_error_outcome(&error);
+                integrity = detail;
+                outcome
             })
         })();
         match read {
             Ok((session, project)) => {
                 let rendered = cort::hook_recall::render_session(&session, now_ns);
-                session_fields = cort::hook_recall::session_usage_fields(&session, rendered.as_ref());
+                session_fields =
+                    cort::hook_recall::session_usage_fields(&session, rendered.as_ref());
                 if let Some(rendered) = &rendered {
                     printed_keys = rendered.reminder_keys.clone();
                 }
                 recalled = Some((session, project));
                 match rendered {
-                    Some(rendered) => {
-                        (
-                            "injected",
-                            Some(rendered.text),
-                            rendered.entries,
-                            rendered.notes,
-                        )
-                    }
+                    Some(rendered) => (
+                        "injected",
+                        Some(rendered.text),
+                        rendered.entries,
+                        rendered.notes,
+                    ),
                     None => ("none", None, 0, 0),
                 }
             }
-            Err(outcome) if outcome.starts_with("remote_") => (outcome, Some(format!("cort memory: the shared database could not be read at session start ({outcome}); run `cort memory recall \"<topic>\"` when you need it")), 0, 0),
-            Err(outcome) => (outcome, None, 0, 0),
+            Err(outcome) => (
+                outcome,
+                cort::hook_recall::failure_line(outcome, integrity.as_deref()),
+                0,
+                0,
+            ),
         }
     };
     let mut row = hook_row(outcome, &harness, differs.as_deref(), model);
