@@ -374,3 +374,40 @@ fn pipeline_each_keeps_every_statement_result() {
         .unwrap_err();
     assert_eq!(err.kind, ErrorKind::Timeout);
 }
+#[test]
+fn read_snapshot_returns_one_result_per_statement() {
+    let (db, _) = client();
+    let results = db
+        .read_snapshot(&[
+            Stmt::new("SELECT 1", vec![]),
+            Stmt::new("SELECT 2 UNION SELECT 3", vec![]),
+            Stmt::new("SELECT ?", vec![Cell::Text("x".into())]),
+        ])
+        .unwrap();
+    assert_eq!(results.len(), 3);
+    assert_eq!(results[0].rows, vec![vec![Cell::Int(1)]]);
+    assert_eq!(
+        results[1].rows,
+        vec![vec![Cell::Int(2)], vec![Cell::Int(3)]]
+    );
+    assert_eq!(results[2].rows, vec![vec![Cell::Text("x".into())]]);
+}
+#[test]
+fn read_snapshot_failing_statement_returns_its_step() {
+    let (db, _) = client();
+    let err = db
+        .read_snapshot(&[
+            Stmt::new("SELECT 1", vec![]),
+            Stmt::new("bad sql", vec![]),
+            Stmt::new("also bad", vec![]),
+        ])
+        .unwrap_err();
+    // BEGIN is step 0, so the second statement is step 2.
+    assert_eq!((err.kind, err.step), (ErrorKind::Sql, Some(2)));
+    let (db, transport) = client();
+    transport.fail_next_step(1, "SQLITE_ERROR");
+    let err = db
+        .read_snapshot(&[Stmt::new("SELECT 1", vec![])])
+        .unwrap_err();
+    assert_eq!(err.step, Some(1));
+}

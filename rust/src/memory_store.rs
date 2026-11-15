@@ -1,6 +1,6 @@
 //! Cortexyoung-owned cross-machine project memory backed by a shared Turso database.
 
-use crate::memory::{self, MemoryEntry, MemoryLedger, MemoryRecall};
+use crate::memory::{self, MemoryEntry, MemoryLedger, MemoryRecall, Scope};
 use crate::question::QuestionEvent;
 use crate::remind::{EventKind, ReminderEvent};
 use crate::remote::{Cell, ErrorKind, RemoteDb, Stmt, Transport, UreqTransport};
@@ -245,7 +245,8 @@ pub struct LifecycleRows {
 
 /// `read`'s mapping from merged bodies to a ledger, shared with `read_with_lifecycle`.
 fn ledger_for_read(bodies: Vec<String>) -> Result<MemoryLedger, LedgerError> {
-    ledger_from_bodies(bodies).map_err(|message| LedgerError::Message(with_alias_hint(message)))
+    ledger_from_bodies(bodies, Scope::Whole)
+        .map_err(|message| LedgerError::Message(with_alias_hint(message)))
 }
 
 /// A "supersedes missing id" message usually means an alias is missing: say how to add it.
@@ -547,7 +548,39 @@ fn merge_bodies(bodies: Vec<String>) -> Result<Vec<String>, String> {
         .collect())
 }
 
-fn ledger_from_bodies(bodies: Vec<String>) -> Result<MemoryLedger, String> {
+/// Checks the rows of `memory_search::integrity_screen` (`(body, suspect)`, already in `$.id`,
+/// `project` order) and reports the error today's whole read would, in its phase order: decode,
+/// id collision, a suspect row's predecessor missing from the returned ids, then the subset
+/// topological order and `validate`. `suspect` is a screen, not a verdict: a suspect row that passes
+/// these checks is not an error.
+pub fn screen_check(rows: Vec<(String, bool)>) -> Result<(), String> {
+    screen_check_inner(rows).map_err(with_alias_hint)
+}
+
+fn screen_check_inner(rows: Vec<(String, bool)>) -> Result<(), String> {
+    let mut entries = Vec::with_capacity(rows.len());
+    for (body, suspect) in &rows {
+        let entry: MemoryEntry =
+            serde_json::from_str(body).map_err(|e| format!("invalid remote memory row: {e}"))?;
+        entries.push((entry, *suspect));
+    }
+    let bodies: Vec<String> = rows.iter().map(|(body, _)| body.clone()).collect();
+    merge_bodies(bodies.clone())?;
+    let ids: BTreeSet<&str> = entries.iter().map(|(e, _)| e.id.as_str()).collect();
+    for (entry, suspect) in &entries {
+        if !suspect {
+            continue;
+        }
+        for old in entry.supersedes.iter().chain(entry.resolves.iter()) {
+            if !ids.contains(old.as_str()) {
+                return Err(format!("memory {} supersedes missing id {old}", entry.id));
+            }
+        }
+    }
+    ledger_from_bodies(merge_bodies(bodies)?, Scope::Subset).map(|_| ())
+}
+
+fn ledger_from_bodies(bodies: Vec<String>, scope: Scope) -> Result<MemoryLedger, String> {
     let mut ledger = MemoryLedger::default();
     for body in bodies {
         ledger.entries.push(
@@ -561,7 +594,7 @@ fn ledger_from_bodies(bodies: Vec<String>) -> Result<MemoryLedger, String> {
     let all_ids: BTreeSet<_> = pending.iter().map(|entry| entry.id.clone()).collect();
     for entry in &pending {
         for old in entry.supersedes.iter().chain(entry.resolves.iter()) {
-            if !all_ids.contains(old) {
+            if scope == Scope::Whole && !all_ids.contains(old) {
                 return Err(format!("memory {} supersedes missing id {old}", entry.id));
             }
         }
@@ -573,7 +606,7 @@ fn ledger_from_bodies(bodies: Vec<String>) -> Result<MemoryLedger, String> {
                 .supersedes
                 .iter()
                 .chain(entry.resolves.iter())
-                .all(|old| seen.contains(old))
+                .all(|old| seen.contains(old) || (scope == Scope::Subset && !all_ids.contains(old)))
         }) else {
             return Err("memory supersession has a missing id or cycle".into());
         };
@@ -581,7 +614,7 @@ fn ledger_from_bodies(bodies: Vec<String>) -> Result<MemoryLedger, String> {
         seen.insert(entry.id.clone());
         ledger.entries.push(entry);
     }
-    memory::validate(&ledger)?;
+    memory::validate(&ledger, scope)?;
     Ok(ledger)
 }
 
@@ -928,7 +961,7 @@ pub fn session_recall_with(
         .collect::<Result<Vec<_>, _>>()?;
     let bodies = merge_bodies(bodies)
         .map_err(|message| SessionRecallError::LedgerInvalid(with_alias_hint(message)))?;
-    let ledger = ledger_from_bodies(bodies)
+    let ledger = ledger_from_bodies(bodies, Scope::Whole)
         .map_err(|message| SessionRecallError::LedgerInvalid(with_alias_hint(message)))?;
     // The fold runs on the caller's `now_ns`, like the questions and reminders folds. A row the
     // build cannot decode is counted by `lifecycle_rows`, never a reason to drop the read.

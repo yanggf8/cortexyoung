@@ -671,3 +671,321 @@ fn gated_stage2_opens_when_the_only_stage1_hit_is_archived() {
     let got = s2(&fx, "quokka wombat", Haystack::KeyClaim, Stage2::Gated).unwrap();
     assert_eq!(got, vec!["q2"]);
 }
+
+// ---------------------------------------------------------------------------------------------
+// The integrity screen, the whole-ledger count statements and subset decoding (Task 4a).
+// ---------------------------------------------------------------------------------------------
+
+use cort::memory_search::{conflict_keys, integrity_screen, ledger_count, lifecycle_rows};
+use cort::memory_store::{screen_check, Ledger, LedgerError};
+use cort::remote::Transport;
+use std::sync::Arc;
+
+struct SharedTransport(Arc<SqliteTransport>);
+
+impl Transport for SharedTransport {
+    fn post(
+        &self,
+        url: &str,
+        body: &[u8],
+        headers: &[(&str, &str)],
+    ) -> Result<Vec<u8>, cort::remote::RemoteError> {
+        self.0.post(url, body, headers)
+    }
+}
+
+/// One in-memory database seen both through a `Ledger` (today's whole read) and a `RemoteDb`
+/// (the screen's statements).
+struct Env {
+    ledger: Ledger,
+    db: RemoteDb,
+}
+
+impl Env {
+    fn new() -> Env {
+        let inner = Arc::new(SqliteTransport::new().unwrap());
+        let ledger = Ledger::with_transport(
+            "https://example.test",
+            "test",
+            Box::new(SharedTransport(inner.clone())),
+        )
+        .unwrap();
+        // A read provisions the tables, exactly as `recall` does.
+        ledger.read(PROJECT).unwrap();
+        let db = RemoteDb::new(
+            "https://example.test",
+            "test",
+            Box::new(SharedTransport(inner)),
+        )
+        .unwrap();
+        Env { ledger, db }
+    }
+    fn insert_in(&self, project: &str, id: &str, body: &str) {
+        self.db
+            .execute(
+                "INSERT INTO project_memory VALUES (?, ?, ?)",
+                vec![
+                    Cell::Text(project.into()),
+                    Cell::Text(id.into()),
+                    Cell::Text(body.into()),
+                ],
+            )
+            .unwrap();
+    }
+    fn insert(&self, id: &str, body: &str) {
+        self.insert_in(PROJECT, id, body);
+    }
+    fn entry(&self, id: &str, key: &str, claim: &str, extra: Value) {
+        self.entry_in(PROJECT, id, key, claim, extra);
+    }
+    fn entry_in(&self, project: &str, id: &str, key: &str, claim: &str, extra: Value) {
+        let mut body = json!({"id":id,"key":key,"claim":claim,"source":"s","source_line":1,
+            "source_sha256":"","unsourced":true,"recorded_at":"100"});
+        for (k, v) in extra.as_object().unwrap() {
+            body[k] = v.clone();
+        }
+        self.insert_in(project, id, &body.to_string());
+    }
+    fn alias(&self, old: &str, new: &str) {
+        self.db
+            .execute(
+                "INSERT INTO project_aliases VALUES (?, ?, '1', 'm')",
+                vec![Cell::Text(old.into()), Cell::Text(new.into())],
+            )
+            .unwrap();
+    }
+    fn screen_rows(&self) -> Vec<(String, bool)> {
+        let stmt = integrity_screen(PROJECT);
+        self.db
+            .execute(&stmt.sql, stmt.args)
+            .unwrap()
+            .rows
+            .iter()
+            .map(|row| match (&row[0], &row[1]) {
+                (Cell::Text(b), Cell::Int(s)) => (b.clone(), *s == 1),
+                other => panic!("{other:?}"),
+            })
+            .collect()
+    }
+    fn screened(&self) -> Result<(), String> {
+        screen_check(self.screen_rows())
+    }
+    /// What today's whole read says about the same database.
+    fn whole(&self) -> Result<(), String> {
+        match self.ledger.read(PROJECT) {
+            Ok(_) => Ok(()),
+            Err(LedgerError::Message(m)) => Err(m),
+            Err(other) => panic!("{other:?}"),
+        }
+    }
+    fn count(&self, stmt: Stmt) -> Vec<Cell> {
+        self.db
+            .execute(&stmt.sql, stmt.args)
+            .unwrap()
+            .rows
+            .into_iter()
+            .map(|mut r| r.remove(0))
+            .collect()
+    }
+}
+
+#[test]
+fn subset_decoding_accepts_an_absent_predecessor() {
+    let env = Env::new();
+    env.entry("b", "k", "second", json!({"supersedes":"a"}));
+    // Only `b` is given, not suspect: the subset rule accepts the absent `a`.
+    let body = env.screen_rows_for_test_b();
+    assert_eq!(screen_check(vec![(body, false)]), Ok(()));
+    // The whole read of the same ledger keeps today's message, and so does a suspect `b`.
+    let whole = env.whole().unwrap_err();
+    assert_eq!(
+        whole,
+        "memory b supersedes missing id a; re-add the alias with cort memory alias add"
+    );
+    assert_eq!(env.screened().unwrap_err(), whole);
+}
+
+impl Env {
+    fn screen_rows_for_test_b(&self) -> String {
+        let r = self
+            .db
+            .execute("SELECT body FROM project_memory WHERE id = 'b'", vec![])
+            .unwrap();
+        match &r.rows[0][0] {
+            Cell::Text(b) => b.clone(),
+            other => panic!("{other:?}"),
+        }
+    }
+}
+
+#[test]
+fn subset_decoding_still_checks_a_present_predecessor() {
+    let env = Env::new();
+    env.entry("a", "k1", "first", json!({}));
+    env.entry("b", "k2", "second", json!({"supersedes":"a"}));
+    let rows: Vec<(String, bool)> = env.screen_rows();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(
+        screen_check(rows.into_iter().map(|(b, _)| (b, false)).collect()).unwrap_err(),
+        "memory b has invalid supersession"
+    );
+}
+
+#[test]
+fn screen_check_messages_equal_whole_read() {
+    type Seed = Box<dyn Fn(&Env)>;
+    let cases: Vec<(&str, Seed)> = vec![
+        ("invalid json", Box::new(|e| e.insert("x", "{not json"))),
+        (
+            "missing key",
+            Box::new(|e| {
+                e.insert(
+                    "x",
+                    r#"{"id":"x","claim":"c","source":"s","source_line":1,"source_sha256":"","recorded_at":"1"}"#,
+                )
+            }),
+        ),
+        (
+            "blank key",
+            Box::new(|e| e.entry("x", "  ", "c", json!({}))),
+        ),
+        (
+            "supersedes missing id",
+            Box::new(|e| e.entry("x", "k", "c", json!({"supersedes":"gone"}))),
+        ),
+        (
+            "supersedes own id",
+            Box::new(|e| e.entry("x", "k", "c", json!({"supersedes":"x"}))),
+        ),
+        (
+            "supersedes a different key",
+            Box::new(|e| {
+                e.entry("a", "k1", "c", json!({}));
+                e.entry("b", "k2", "c", json!({"supersedes":"a"}));
+            }),
+        ),
+        (
+            "one id under two aliases",
+            Box::new(|e| {
+                e.alias(PROJECT, "p0");
+                e.entry("x", "k", "first claim", json!({}));
+                e.entry_in("p0", "x", "k", "second claim", json!({}));
+            }),
+        ),
+    ];
+    for (name, seed) in cases {
+        let env = Env::new();
+        seed(&env);
+        let whole = env.whole().expect_err(name);
+        let screened = env.screened().expect_err(name);
+        assert_eq!(screened, whole, "{name}");
+    }
+    // The alias hint really is part of the compared text.
+    let env = Env::new();
+    env.entry("x", "k", "c", json!({"supersedes":"gone"}));
+    assert!(env
+        .screened()
+        .unwrap_err()
+        .ends_with("; re-add the alias with cort memory alias add"));
+}
+
+#[test]
+fn two_errors_report_the_earlier_phase() {
+    let env = Env::new();
+    env.insert("a-bad", "{not json");
+    env.entry("b", "k1", "c", json!({}));
+    env.entry("c", "k2", "c", json!({"supersedes":"b"}));
+    let whole = env.whole().unwrap_err();
+    assert!(whole.starts_with("invalid remote memory row"), "{whole}");
+    assert_eq!(env.screened().unwrap_err(), whole);
+}
+
+#[test]
+fn screen_is_silent_on_a_valid_ledger() {
+    let env = Env::new();
+    env.alias(PROJECT, "p0");
+    env.entry("a", "k", "one", json!({}));
+    env.entry("b", "k", "two", json!({"supersedes":"a"}));
+    env.entry("c", "k", "three", json!({"supersedes":"b"}));
+    env.entry("d", "j", "d", json!({}));
+    env.entry("e", "j", "e", json!({}));
+    env.entry("f", "j", "f", json!({"resolves":["d","e"]}));
+    // An alias pair: the same id, the same bytes, under both projects.
+    env.entry("g", "m", "g", json!({}));
+    env.entry_in("p0", "g", "m", "g", json!({}));
+    let rows = env.screen_rows();
+    assert!(rows.iter().all(|(_, suspect)| !suspect), "{rows:?}");
+    assert_eq!(env.screened(), Ok(()));
+    assert_eq!(env.whole(), Ok(()));
+}
+
+#[test]
+fn screen_suspect_is_not_a_verdict() {
+    let env = Env::new();
+    env.entry("   ", "k", "claim", json!({}));
+    let rows = env.screen_rows();
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].1, "an id of spaces is suspect");
+    assert_eq!(env.screened(), Ok(()));
+    assert_eq!(env.whole(), Ok(()));
+}
+
+#[test]
+fn screen_returns_a_named_predecessor_as_not_suspect() {
+    let env = Env::new();
+    env.entry("a", "k1", "c", json!({}));
+    env.entry("b", "k2", "c", json!({"supersedes":"a"}));
+    env.entry("z", "other", "unrelated", json!({}));
+    let rows = env.screen_rows();
+    let flags: Vec<bool> = rows.iter().map(|(_, s)| *s).collect();
+    // a (named, not suspect), b (suspect); z is not returned.
+    assert_eq!(flags, vec![false, true]);
+}
+
+#[test]
+fn conflict_keys_counts_hidden_entries() {
+    let env = Env::new();
+    env.entry("a", "dup", "one", json!({}));
+    env.entry("b", "dup", "two", json!({}));
+    env.entry("c", "solo", "alone", json!({}));
+    env.entry("d", "chain", "old", json!({}));
+    env.entry("e", "chain", "new", json!({"supersedes":"d"}));
+    // `a` is archived: still a conflict, because the statement ignores the lifecycle.
+    env.db
+        .execute(
+            "INSERT INTO project_memory_lifecycle VALUES ('p1','l1','{\"id\":\"l1\",\"kind\":\"on\",\"recorded_at\":\"1\"}'), ('p1','l2','{\"id\":\"l2\",\"kind\":\"archive\",\"entry\":\"a\",\"recorded_at\":\"2\"}')",
+            vec![],
+        )
+        .unwrap();
+    assert_eq!(
+        env.count(conflict_keys(PROJECT)),
+        vec![Cell::Text("dup".into())]
+    );
+    assert_eq!(env.count(lifecycle_rows(PROJECT)).len(), 2);
+}
+
+#[test]
+fn ledger_count_counts_distinct_ids_across_aliases() {
+    let env = Env::new();
+    assert_eq!(env.count(ledger_count(PROJECT)), vec![Cell::Int(0)]);
+    env.alias(PROJECT, "p0");
+    env.entry("a", "k", "one", json!({}));
+    env.entry_in("p0", "a", "k", "one", json!({}));
+    env.entry("b", "k2", "two", json!({}));
+    env.insert("bad", "{not json");
+    assert_eq!(env.count(ledger_count(PROJECT)), vec![Cell::Int(2)]);
+}
+
+#[test]
+fn screen_survives_malformed_json_beside_a_supersedes_row() {
+    let env = Env::new();
+    env.insert("bad", "{not json");
+    env.entry("a", "k", "one", json!({}));
+    env.entry("b", "k", "two", json!({"supersedes":"a"}));
+    let rows = env.screen_rows();
+    assert!(rows.iter().any(|(b, s)| b == "{not json" && *s));
+    assert!(rows
+        .iter()
+        .filter(|(b, _)| b != "{not json")
+        .all(|(_, s)| !s));
+}

@@ -792,6 +792,13 @@ impl RemoteDb {
         }
         Err(RemoteError::sql("retry loop exhausted"))
     }
+    /// One request, the statements inside `BEGIN` ... `COMMIT`, so every statement reads the same
+    /// state (`pipeline` runs each on its own). One result per statement; the first failing step is
+    /// the error, numbered as `transaction` numbers it (`BEGIN` is step 0, so statement `i` is step
+    /// `i + 1`). Only Busy is retried.
+    pub fn read_snapshot(&self, stmts: &[Stmt]) -> Result<Vec<StmtResult>, RemoteError> {
+        self.transaction(stmts)
+    }
     fn transaction_once(&self, stmts: &[Stmt]) -> Result<Vec<StmtResult>, RemoteError> {
         let outcomes = self.transaction_steps(stmts)?;
         // First error in step order wins, even if rollback also fails.

@@ -238,3 +238,89 @@ pub fn archived_excluded(project: &str) -> Stmt {
     part.args.extend(a.args);
     select(part)
 }
+
+/// `count(DISTINCT $.id)` over the valid rows of the component: the entries the ledger holds,
+/// with one id under two aliases counted once.
+pub fn ledger_count(project: &str) -> Stmt {
+    let part = Part::project(
+        format!(
+            "SELECT count(DISTINCT {}) FROM project_memory m WHERE m.project IN ({COMPONENT}) AND json_valid(m.body)",
+            jx("m.body", "$.id")
+        ),
+        project,
+    );
+    Stmt::new(part.sql, part.args)
+}
+
+/// Keys with two or more distinct active ids, hidden entries included (`active_rows_sql` knows
+/// nothing of the lifecycle).
+pub fn conflict_keys(project: &str) -> Stmt {
+    let part = Part::project(
+        format!(
+            "SELECT {key} AS k FROM project_memory m WHERE {active} AND {key} IS NOT NULL \
+             GROUP BY k HAVING count(DISTINCT {id}) >= 2 ORDER BY k",
+            key = jx("m.body", "$.key"),
+            id = jx("m.body", "$.id"),
+            active = active_rows_sql(),
+        ),
+        project,
+    );
+    Stmt::new(part.sql, part.args)
+}
+
+/// Every lifecycle row of the component, for the client's fold.
+pub fn lifecycle_rows(project: &str) -> Stmt {
+    let part = Part::project(
+        format!(
+            "SELECT body FROM project_memory_lifecycle WHERE project IN ({COMPONENT}) ORDER BY project, id"
+        ),
+        project,
+    );
+    Stmt::new(part.sql, part.args)
+}
+
+/// The rows whole-ledger decoding could fail on, as `(body, suspect)` ordered by `$.id`, then
+/// project: every suspect row with `suspect = 1`, plus each existing row a suspect row names with
+/// `suspect = 0`. A row is suspect when it is not valid JSON; its `$.id`, `$.key` or `$.claim` is
+/// null or empty after trimming ASCII whitespace; a `supersedes` or `resolves` element names its
+/// own id, an absent id, or only rows of a different key; or its id is held by a row whose body
+/// is not byte-equal. A screen, not a verdict: the client's own checks decide.
+pub fn integrity_screen(project: &str) -> Stmt {
+    const WS: &str = "char(32,9,10,11,12,13)";
+    let blank = |c: &str| format!("({c} IS NULL OR trim({c}, {WS}) = '')");
+    let sql = format!(
+        "WITH comp AS (SELECT m.project AS project, m.id AS rid, m.body AS body, \
+           json_valid(m.body) AS valid, {id} AS id, {key} AS key, {claim} AS claim, {sup} AS sup \
+           FROM project_memory m WHERE m.project IN ({COMPONENT})), \
+         preds AS (SELECT c.project AS project, c.rid AS rid, c.id AS sid, c.key AS skey, \
+             c.sup AS old FROM comp c WHERE c.sup IS NOT NULL \
+           UNION ALL SELECT c.project, c.rid, c.id, c.key, j.value \
+             FROM comp c, json_each(CASE WHEN c.valid THEN c.body END, '$.resolves') j \
+             WHERE j.value IS NOT NULL), \
+         dup AS (SELECT id FROM comp WHERE id IS NOT NULL GROUP BY id HAVING count(DISTINCT body) > 1), \
+         keyed AS (SELECT DISTINCT id, key FROM comp WHERE valid), \
+         bad AS (SELECT p.project AS project, p.rid AS rid FROM preds p \
+           LEFT JOIN keyed k ON k.id = p.old AND k.key = p.skey WHERE p.old = p.sid OR k.id IS NULL), \
+         susp AS (SELECT c.project AS project, c.rid AS rid, c.body AS body, c.id AS id FROM comp c \
+           WHERE NOT c.valid OR {b_id} OR {b_key} OR {b_claim} \
+           OR (c.project, c.rid) IN (SELECT project, rid FROM bad) \
+           OR c.id IN (SELECT id FROM dup)), \
+         named AS (SELECT DISTINCT p.old AS id FROM preds p JOIN susp s ON s.project = p.project AND s.rid = p.rid) \
+         SELECT body, suspect FROM (\
+           SELECT s.project AS project, s.rid AS rid, s.body AS body, s.id AS id, 1 AS suspect FROM susp s \
+           UNION ALL \
+           SELECT t.project, t.rid, t.body, t.id, 0 FROM comp t \
+             WHERE t.valid AND t.id IN (SELECT id FROM named) \
+             AND (t.project, t.rid) NOT IN (SELECT project, rid FROM susp)) \
+         ORDER BY id, project, rid",
+        id = jx("m.body", "$.id"),
+        key = jx("m.body", "$.key"),
+        claim = jx("m.body", "$.claim"),
+        sup = jx("m.body", "$.supersedes"),
+        b_id = blank("c.id"),
+        b_key = blank("c.key"),
+        b_claim = blank("c.claim"),
+    );
+    let part = Part::project(sql, project);
+    Stmt::new(part.sql, part.args)
+}

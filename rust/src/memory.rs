@@ -158,7 +158,15 @@ pub struct MemoryRecall {
 
 pub(crate) const LIFECYCLE_UNREADABLE_HINT: &str = "some lifecycle rows could not be read; cort memory review --all lists what was applied, cort memory recall --all finds anything hidden";
 
-pub(crate) fn validate(ledger: &MemoryLedger) -> Result<(), String> {
+/// Whether a ledger holds every row of the component (`Whole`) or only a returned subset, in which
+/// a predecessor may legitimately be absent (`Subset`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Scope {
+    Whole,
+    Subset,
+}
+
+pub(crate) fn validate(ledger: &MemoryLedger, scope: Scope) -> Result<(), String> {
     if ledger.schema != SCHEMA {
         return Err(format!("unsupported memory schema {}", ledger.schema));
     }
@@ -186,6 +194,9 @@ pub(crate) fn validate(ledger: &MemoryLedger) -> Result<(), String> {
                 return Err(format!("memory {} repeats a superseded id", entry.id));
             }
             let Some(prior) = by_id.get(old.as_str()) else {
+                if scope == Scope::Subset {
+                    continue;
+                }
                 return Err(format!("memory {} supersedes missing id {old}", entry.id));
             };
             // Supersession is append-only: referring to a later record would allow cycles and
@@ -1037,10 +1048,13 @@ mod tests {
         );
         let dir = tempfile::tempdir().unwrap();
         assert!(source_bytes(dir.path(), Path::new(&old.source)).is_err());
-        validate(&MemoryLedger {
-            schema: SCHEMA,
-            entries: vec![entry],
-        })
+        validate(
+            &MemoryLedger {
+                schema: SCHEMA,
+                entries: vec![entry],
+            },
+            Scope::Whole,
+        )
         .unwrap();
     }
 
@@ -1123,7 +1137,7 @@ mod tests {
         )
         .unwrap();
         ledger.entries.push(second.clone());
-        validate(&ledger).unwrap();
+        validate(&ledger, Scope::Whole).unwrap();
         let hits = recall_ledger(dir.path(), "deployment", &ledger, true, None).hits;
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].entry.id, second.id);
