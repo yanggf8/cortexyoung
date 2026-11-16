@@ -106,8 +106,8 @@ eval's own SQL goes away. Terms are bound as parameters, never interpolated.
   `--all` drops the archived condition.
 - **Stage 1.** Active, not archived, every term matches. This is today's full-term match.
 - **Stage 2.** Sent in the same pipeline, so there is no second round trip. It returns rows only
-  when stage 1 matched nothing and there are two or more terms; the SQL repeats stage 1's
-  condition in a `NOT EXISTS` to know that. It uses the partial rule's own term list, taken from
+  when stage 1 matched nothing and there are two or more terms; the SQL computes, over the same
+  rows, whether any of them meets stage 1's condition (a window, `max(...) OVER ()`) to know that. It uses the partial rule's own term list, taken from
   one helper in `memory.rs` that `select_terms` also calls:
   - distinct terms only;
   - noise words dropped (`PARTIAL_IGNORED`);
@@ -132,7 +132,7 @@ eval's own SQL goes away. Terms are bound as parameters, never interpolated.
   - a term contributed no SQL condition (see case folding).
 
   Today's recall would then fall through to the partial rule. Two rules cover this:
-  - When any term contributed no condition, stage 2 is sent without its `NOT EXISTS` gate, in the
+  - When any term contributed no condition, stage 2 is sent without that gate, in the
     same pipeline.
   - The client sends a second round trip only when all of these hold:
     - stage 1 returned rows;
@@ -210,7 +210,8 @@ The checks that need serde's or `validate()`'s full reading of every row do not 
 A cycle's entries are all named as predecessors, so the active rule drops them from recall
 silently instead of failing. All of these are checked only on the rows recall returns. Over the
 whole ledger they move to `cort memory status` and `list`, which still read every row and fail as
-today.
+today. When the screen finds a suspect row, recall answers through the whole-ledger read, so these
+checks then fail recall as they do today.
 
 **SessionStart says so (agent review, 2026-11-15).** An entry missing silently from recall is worse
 for an agent than an error, because the agent takes the absence as an answer. SessionStart still
@@ -274,6 +275,8 @@ that do not match the query.
   copy that means 109 of 109 equal. The comparison is re-run on a fresh throwaway database before
   2a ships (it needs the user's approval, as this one did), and the result is recorded under
   `memory-tiers-phase2-search-replay`.
+  2026-11-16 replay: server `rows_read` per query averaged ~37,000 vs 324 for the whole read; the
+  active filter's `NOT IN` was re-evaluated per row; it is now an anti-join, and stage 2's gate a window over the same rows instead of a `NOT EXISTS`. After both: ~6,300 rows read per query (max 6,874), 114 of 114 equal.
 - **Unit tests, on `SqliteTransport`.** Each pins one behaviour:
   - the archived exclusion against the 1a fold:
     - archive, and archive after restore;

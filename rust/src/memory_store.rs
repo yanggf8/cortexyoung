@@ -21,7 +21,31 @@ pub(crate) const CREATE_ALIASES: &str = "CREATE TABLE IF NOT EXISTS project_alia
 pub(crate) const CREATE_QUESTIONS: &str = "CREATE TABLE IF NOT EXISTS project_questions (project TEXT NOT NULL, id TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY (project, id))";
 pub(crate) const CREATE_REMINDERS: &str = "CREATE TABLE IF NOT EXISTS project_reminders (project TEXT NOT NULL, id TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY (project, id))";
 pub(crate) const CREATE_LIFECYCLE: &str = "CREATE TABLE IF NOT EXISTS project_memory_lifecycle (project TEXT NOT NULL, id TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY (project, id))";
-pub(crate) const COMPONENT: &str = "WITH RECURSIVE g(p) AS (SELECT ? UNION SELECT CASE WHEN a.old_project = g.p THEN a.new_project ELSE a.old_project END FROM project_aliases a JOIN g ON a.old_project = g.p OR a.new_project = g.p) SELECT p FROM g";
+/// The alias component as a recursive CTE named `$g`, with one column `p`, seeded with its one `?`
+/// (the project). One text for both forms below, so they cannot drift.
+macro_rules! component_cte {
+    ($g:literal) => {
+        concat!(
+            $g,
+            "(p) AS (SELECT ? UNION SELECT CASE WHEN a.old_project = ",
+            $g,
+            ".p THEN a.new_project ELSE a.old_project END FROM project_aliases a JOIN ",
+            $g,
+            " ON a.old_project = ",
+            $g,
+            ".p OR a.new_project = ",
+            $g,
+            ".p)"
+        )
+    };
+}
+/// The component as a subquery: `project IN (COMPONENT)`.
+pub(crate) const COMPONENT: &str =
+    concat!("WITH RECURSIVE ", component_cte!("g"), " SELECT p FROM g");
+/// The component as a statement's own top-level CTE, `proj(p)`, read as `(SELECT p FROM proj)`.
+/// Named apart from `COMPONENT`'s `g` so a `COMPONENT` nested in the same statement never
+/// shadows it.
+pub(crate) const COMPONENT_CTE: &str = component_cte!("proj");
 #[derive(Debug, Serialize)]
 pub struct MemoryConflict {
     pub key: String,

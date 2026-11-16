@@ -704,6 +704,30 @@ fn gated_stage2_opens_when_the_only_stage1_hit_is_archived() {
     assert_eq!(got, vec!["q2"]);
 }
 
+/// The gate reads stage 1's own set: a superseded or resolved full match is no stage-1 hit, so it
+/// neither shuts the gate nor comes back through it.
+#[test]
+fn gated_stage2_ignores_superseded_and_resolved_full_matches() {
+    let fx = fixture();
+    fx.entry("q1", "k-one", "quokka wombat together");
+    fx.entry_with("q2", "k-one", "quokka now", json!({"supersedes":"q1"}));
+    fx.entry("q3", "k-two", "quokka wombat again");
+    fx.entry_with("q4", "k-two", "wombat only", json!({"resolves":["q3"]}));
+    assert!(s1(&fx, "quokka wombat", Haystack::KeyClaim, true).is_empty());
+    let got = s2(&fx, "quokka wombat", Haystack::KeyClaim, Stage2::Gated).unwrap();
+    assert_eq!(got, vec!["q2", "q4"]);
+    assert_eq!(
+        s2(&fx, "quokka wombat", Haystack::KeyClaim, Stage2::Ungated).unwrap(),
+        got
+    );
+    // One live full match shuts it again.
+    fx.entry("q5", "k-three", "quokka wombat live");
+    assert_eq!(
+        s2(&fx, "quokka wombat", Haystack::KeyClaim, Stage2::Gated).unwrap(),
+        Vec::<String>::new()
+    );
+}
+
 // ---------------------------------------------------------------------------------------------
 // The integrity screen and the whole-ledger count statements (Task 4a). Subset decoding is
 // tested through the search below (`predecessor_not_returned_is_not_an_error`).
@@ -2310,6 +2334,262 @@ mod search {
             searched,
             memory_store::SearchOutcome::Suspect { trips: 1, .. }
         ));
+    }
+
+    fn outcome(
+        f: &Fixture,
+        queries: &[String],
+        include_hidden: bool,
+    ) -> memory_store::SearchOutcome {
+        memory_store::search_with(
+            &f.ledger,
+            &f.project(),
+            &SearchRequest {
+                queries,
+                haystack: Haystack::KeyClaim,
+                include_hidden,
+            },
+            now_ns(),
+        )
+        .unwrap()
+    }
+
+    /// A row whose `$.id` is NULL -- absent, or JSON null -- beside a supersession, so the active
+    /// filter's `dead` set is not empty: there the old `NOT IN` dropped the row and the anti-join
+    /// keeps it. The screen names the row (`blank` covers a NULL id), so recall, `--also`,
+    /// `--keys` and the eval's replay all answer through the whole read, and nothing the stage
+    /// statements returned reaches an answer.
+    #[test]
+    fn a_null_id_row_never_reaches_an_answer() {
+        use cort::memory_search::{integrity_screen, query_terms, stage1, Stage2, StageQuery};
+        let at = now_ns() - DAY;
+        let tail = r#""key":"nul-key","claim":"deploy plan without an id","source":"s","source_line":1,"source_sha256":"","unsourced":true,"recorded_at":"1""#;
+        for (name, body) in [
+            ("absent", format!("{{{tail}}}")),
+            ("null", format!(r#"{{"id":null,{tail}}}"#)),
+        ] {
+            let f = fixture();
+            f.entry("a1000001", "deploy-plan", "deploy plan old", at);
+            f.entry_with(
+                "a1000002",
+                "deploy-plan",
+                "deploy plan new",
+                at,
+                json!({"supersedes":"a1000001"}),
+            );
+            f.raw("nul", &body);
+            let project = f.project();
+            let screen = integrity_screen(&project);
+            assert_eq!(
+                f.db.execute(&screen.sql, screen.args).unwrap().rows,
+                vec![vec![Cell::Text(body.clone()), Cell::Int(1)]],
+                "{name}"
+            );
+            // The stage statement does return the row now ...
+            let terms = query_terms("deploy plan");
+            let stage = stage1(
+                &project,
+                &StageQuery {
+                    terms: &terms,
+                    haystack: Haystack::KeyClaim,
+                    archived_in_sql: true,
+                    stage2: Stage2::Gated,
+                },
+            );
+            let rows = f.db.execute(&stage.sql, stage.args).unwrap().rows;
+            assert!(
+                rows.iter().any(|r| r[1] == Cell::Text(body.clone())),
+                "{name}: {rows:?}"
+            );
+            // ... and no search decodes it: the screen stops every one.
+            for queries in [strings(&["deploy plan"]), strings(&["deploy", "zzz"])] {
+                for include_hidden in [false, true] {
+                    assert!(
+                        matches!(
+                            outcome(&f, &queries, include_hidden),
+                            memory_store::SearchOutcome::Suspect { trips: 1, .. }
+                        ),
+                        "{name} {queries:?}"
+                    );
+                }
+            }
+            for query in ["deploy plan", "deploy", ""] {
+                for include_hidden in [false, true] {
+                    let old = f.old_recall(query, include_hidden);
+                    assert_eq!(f.new_recall(query, include_hidden), old, "{name} {query:?}");
+                    let old = old.expect_err(name);
+                    let also = strings(&[query, "zzz"]);
+                    let many =
+                        memory_store::recall_many_with(f.root(), &also, &f.ledger, include_hidden);
+                    assert_eq!(many.expect_err(name), old, "{name} {query:?} --also");
+                    let keys = memory_store::recall_keys_with(
+                        f.root(),
+                        &strings(&[query]),
+                        &f.ledger,
+                        include_hidden,
+                    );
+                    assert_eq!(keys.expect_err(name), old, "{name} {query:?} --keys");
+                    let now = now_ns();
+                    let replay = memory_store::select_search_with(
+                        &f.ledger,
+                        &project,
+                        query,
+                        include_hidden,
+                        now,
+                    );
+                    let base = memory_store::select_whole_with(
+                        &f.ledger,
+                        &project,
+                        query,
+                        include_hidden,
+                        now,
+                    );
+                    assert_eq!(replay.expect_err(name), base.expect_err(name), "{name}");
+                }
+            }
+        }
+    }
+
+    /// `--also`'s whole report as the whole read gives it: each query's ids, `matched_terms` and
+    /// match kind from `recall_whole_with` of that query alone; each top-level hit as the whole
+    /// read's hit for the first query that found it, `matched_queries` in place of
+    /// `matched_terms`; and the ledger status and lifecycle disclosure.
+    fn assert_also_is_whole(f: &Fixture, queries: &[String], report: &Value, include_hidden: bool) {
+        let wholes: Vec<Value> = queries
+            .iter()
+            .map(|q| f.old_recall(q, include_hidden).unwrap())
+            .collect();
+        let mut hits: Vec<Value> = Vec::new();
+        let mut at: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut per_query = Vec::new();
+        for (i, (query, whole)) in queries.iter().zip(&wholes).enumerate() {
+            let mut own = Vec::new();
+            for hit in whole["hits"].as_array().unwrap() {
+                let id = hit["id"].as_str().unwrap().to_string();
+                let mut row = json!({ "id": id });
+                if let Some(terms) = hit.get("matched_terms") {
+                    row["matched_terms"] = terms.clone();
+                }
+                own.push(row);
+                match at.get(&id) {
+                    Some(&n) => hits[n]["matched_queries"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(json!(i)),
+                    None => {
+                        let mut top = hit.clone();
+                        top.as_object_mut().unwrap().remove("matched_terms");
+                        top["matched_queries"] = json!([i]);
+                        at.insert(id, hits.len());
+                        hits.push(top);
+                    }
+                }
+            }
+            per_query.push(json!({
+                "query": query,
+                "match_kind": if whole.get("match").is_some() { "partial" } else { "all" },
+                "hits": own,
+            }));
+        }
+        let mut want = json!({
+            "ledger_status": wholes[0]["ledger_status"],
+            "queries": per_query,
+            "hits": hits,
+        });
+        for field in ["lifecycle_unreadable", "lifecycle_hint"] {
+            if let Some(v) = wholes[0].get(field) {
+                want[field] = v.clone();
+            }
+        }
+        assert_eq!(report, &want, "{queries:?} {include_hidden}");
+    }
+
+    /// The `--also` and `--keys` reports a suspect screen sends through the whole read, in full:
+    /// conflict flags, lifecycle states (hidden and due), superseded and resolved entries left
+    /// out, `ledger_status` and the lifecycle disclosure. `--also` is checked against the whole
+    /// read's recall of each query alone; both are then checked against the search's own answer
+    /// once the suspect (a row no query matches) is gone.
+    #[test]
+    fn a_suspect_row_answers_also_and_keys_as_the_whole_read() {
+        let f = rich();
+        f.entry("   ", "zz-suspect", "quiet suspect", now_ns() - DAY);
+        let also = [
+            strings(&["deploy", "alpha"]),
+            strings(&["deploy plan", "timeout 3800", "dup-key"]),
+        ];
+        let keys = [
+            strings(&["deploy"]),
+            strings(&[
+                "dup-key",
+                "shelf",
+                "stale-deploy",
+                "deploy-plan",
+                "recall-timeout",
+            ]),
+        ];
+        let reports = |f: &Fixture, include_hidden: bool| -> Vec<Value> {
+            let many = also.iter().map(|q| {
+                memory_store::recall_many_with(f.root(), q, &f.ledger, include_hidden).unwrap()
+            });
+            let by_key = keys.iter().map(|q| {
+                memory_store::recall_keys_with(f.root(), q, &f.ledger, include_hidden).unwrap()
+            });
+            many.chain(by_key).collect()
+        };
+        let mut through_whole = Vec::new();
+        for include_hidden in [false, true] {
+            assert!(matches!(
+                outcome(&f, &also[0], include_hidden),
+                memory_store::SearchOutcome::Suspect { .. }
+            ));
+            let got = reports(&f, include_hidden);
+            for (queries, report) in also.iter().zip(&got) {
+                assert_also_is_whole(&f, queries, report, include_hidden);
+                assert_eq!(report["lifecycle_unreadable"], 1);
+            }
+            // The fixture reaches every field the comparison is meant to cover.
+            let by_key = &got[also.len() + 1];
+            let row = |id: &str| {
+                by_key["hits"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|h| h["id"] == id)
+                    .cloned()
+            };
+            assert_eq!(by_key["lifecycle_unreadable"], 1);
+            assert_eq!(by_key["ledger_status"], "present");
+            for id in ["c1000001", "c1000002"] {
+                assert_eq!(row(id).unwrap()["conflict"], true, "{id}");
+            }
+            assert_eq!(row("v1000001").unwrap()["state"], "forgetting_candidate");
+            // Superseded and resolved entries are left out; their successors are not.
+            for gone in ["a1000001", "a1000002", "r1000001", "r1000002"] {
+                assert!(row(gone).is_none(), "{gone}");
+            }
+            for live in ["a1000003", "r1000003"] {
+                assert!(row(live).is_some(), "{live}");
+            }
+            // The archived entry is hidden unless asked for, then shown with its state.
+            match include_hidden {
+                false => assert!(row("x1000001").is_none()),
+                true => assert_eq!(row("x1000001").unwrap()["state"], "archived"),
+            }
+            through_whole.push(got);
+        }
+        // Without the suspect the search answers, and answers the same.
+        f.db.execute(
+            "DELETE FROM project_memory WHERE id = ?",
+            vec![Cell::Text("   ".into())],
+        )
+        .unwrap();
+        for (include_hidden, whole) in [false, true].into_iter().zip(&through_whole) {
+            assert!(matches!(
+                outcome(&f, &also[0], include_hidden),
+                memory_store::SearchOutcome::Searched(_)
+            ));
+            assert_eq!(&reports(&f, include_hidden), whole, "{include_hidden}");
+        }
     }
 
     /// Passes requests through and, once the first is answered, inserts one row.

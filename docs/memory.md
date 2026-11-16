@@ -182,7 +182,9 @@ key, and one id with two contents. Five checks need every row decoded, so over
 the whole ledger they moved to `cort memory status` and `cort memory list`, which still read every row and fail as before: a JSON body serde rejects (a wrong field type), a
 key or claim made only of non-ASCII whitespace, an invalid source or resolution, a superseded id
 repeated, and a supersession cycle (whose entries recall now leaves out silently, since each is
-named as a predecessor). Recall still applies them to the rows it returns. Session-start recall
+named as a predecessor). Recall still applies them to the rows it returns. When the screen finds a
+suspect row, recall answers through the whole-ledger read, so these checks then fail recall as they
+do today. Session-start recall
 still reads the whole ledger and names any integrity error (`ledger_invalid`); only its unaliased
 retry, which reads the project's own rows alone, accepts a predecessor it did not read (one under
 an alias it could not resolve) as absent.

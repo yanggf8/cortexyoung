@@ -2,7 +2,7 @@
 //! must leave to the client's Unicode-aware match.
 
 use crate::memory::{partial_terms, Haystack};
-use crate::memory_store::COMPONENT;
+use crate::memory_store::{COMPONENT, COMPONENT_CTE};
 use crate::remote::{Cell, Stmt};
 
 /// The most terms (after `split_whitespace`, repeats counted) a query may give the SQL search:
@@ -43,10 +43,11 @@ pub fn query_terms(query: &str) -> QueryTerms {
 }
 
 // ---------------------------------------------------------------------------------------------
-// SQL statements. Every fragment refers to the outer row as `m` (`project_memory m`); inner
-// scopes use their own aliases, and a nested `project_memory m` shadows the outer one on purpose
-// (the stage-2 gate's `NOT EXISTS` is independent of the outer row). Fragments contain no `?`
-// other than `COMPONENT`'s, so a fragment's project bindings are `fragment.matches('?').count()`.
+// SQL statements. Every fragment refers to the outer row as `m` (`project_memory m`) and its
+// anti-join partner as `d`; inner scopes use their own aliases. Fragments contain no `?` other
+// than the alias component's seed (`COMPONENT`'s, or `COMPONENT_CTE`'s in `active_with`), so a
+// fragment's project bindings are `fragment.matches('?').count()`; term bindings travel in their
+// own `Part`s.
 // ---------------------------------------------------------------------------------------------
 
 /// `json_extract(col, path)`, but NULL on invalid JSON instead of failing the statement. The
@@ -77,19 +78,46 @@ fn haystack_sql(h: Haystack) -> String {
     }
 }
 
-/// Rows of the alias component that are valid JSON and not named by any `supersedes` or any
-/// `resolves` element of any row of the component (`memory::active_entries`' rule).
-fn active_rows_sql() -> String {
+/// The head of every statement over active rows, with one `?` (the project): the alias component
+/// as the CTE `proj(p)`, and `dead(id)`, every id that a `supersedes` or a `resolves` element of a
+/// component row names (`memory::active_entries`' rule). The statement then reads
+/// `active_from()` filtered by `ACTIVE_WHERE`: the component's valid rows that `dead` does not
+/// name.
+///
+/// An anti-join, at the top level of the statement, because TursoDB re-evaluated the uncorrelated
+/// `{id} NOT IN (<this set>)` it replaces once per outer row (2026-11-16 replay: the conflict keys
+/// of a 312-row component read 16,074 rows that way, 1,133 as this anti-join; `NOT IN (SELECT id
+/// FROM dead)` read 16,134). `dead` is only ever joined in a top-level `FROM` (the statement's, or
+/// a sibling CTE's body), never from a nested subquery: TursoDB answered 502 to deep CTE reuse.
+///
+/// NULL ids: `NOT IN` dropped a row whose `$.id` is NULL when the set was non-empty and kept it
+/// when the set was empty; the anti-join keeps it always. Such a row never reaches an answer: a
+/// NULL `$.id` (absent or JSON null; an invalid body never passes `json_valid`) is
+/// `integrity_screen`'s blank id, any screen row sends recall to the whole-ledger read, and
+/// nothing these statements returned is decoded (`tests/memory_search.rs`:
+/// `a_null_id_row_never_reaches_an_answer`).
+fn active_with() -> String {
+    let sup = jx("s.body", "$.supersedes");
     format!(
-        "m.project IN ({c}) AND json_valid(m.body) AND {id} NOT IN (\
-         SELECT {sup} FROM project_memory s WHERE s.project IN ({c}) AND {sup} IS NOT NULL \
-         UNION SELECT j.value FROM project_memory p, json_each(CASE WHEN json_valid(p.body) THEN p.body END, '$.resolves') j \
-         WHERE p.project IN ({c}) AND j.value IS NOT NULL)",
-        c = COMPONENT,
-        id = jx("m.body", "$.id"),
-        sup = jx("s.body", "$.supersedes"),
+        "WITH RECURSIVE {COMPONENT_CTE}, dead(id) AS (\
+         SELECT {sup} FROM project_memory s WHERE s.project IN (SELECT p FROM proj) AND {sup} IS NOT NULL \
+         UNION SELECT j.value FROM project_memory r, json_each(CASE WHEN json_valid(r.body) THEN r.body END, '$.resolves') j \
+         WHERE r.project IN (SELECT p FROM proj) AND j.value IS NOT NULL)"
     )
 }
+
+/// The rows an active statement reads: each component row beside the `dead` id that names it, if
+/// any (`dead` is a `UNION`, so a row meets at most one).
+fn active_from() -> String {
+    format!(
+        "project_memory m LEFT JOIN dead d ON d.id = {}",
+        jx("m.body", "$.id")
+    )
+}
+
+/// The active filter over `active_from()`: in the component, valid JSON, named by no `dead` id.
+const ACTIVE_WHERE: &str =
+    "m.project IN (SELECT p FROM proj) AND json_valid(m.body) AND d.id IS NULL";
 
 /// The lifecycle rows the SQL is willing to read, as columns `(kind, entry, rec, lid)`. A row is
 /// kept only in the form `memory_lifecycle::classify` also accepts as an event: valid JSON, a
@@ -142,6 +170,42 @@ impl Part {
         let args = vec![Cell::Text(project.to_string()); sql.matches('?').count()];
         Part { sql, args }
     }
+
+    /// `self AND other`; an empty side contributes nothing.
+    fn and(mut self, other: Part) -> Part {
+        if other.sql.is_empty() {
+            return self;
+        }
+        if !self.sql.is_empty() {
+            self.sql.push_str(" AND ");
+        }
+        self.sql.push_str(&other.sql);
+        self.args.extend(other.args);
+        self
+    }
+}
+
+/// A statement over the component's active rows: `active_with()` (its one `?` binds first), then
+/// `body`, which reads them as `FROM {active_from()} WHERE {ACTIVE_WHERE}`. A `body` that opens
+/// with `,` adds its own CTEs after `dead` (`stage2`'s gated form).
+fn active_stmt(project: &str, body: Part) -> Stmt {
+    let head = Part::project(active_with(), project);
+    let mut args = head.args;
+    args.extend(body.args);
+    let sep = if body.sql.starts_with(',') { "" } else { " " };
+    Stmt::new(format!("{}{sep}{}", head.sql, body.sql), args)
+}
+
+/// Not archived, when `archived_in_sql`; otherwise nothing.
+fn not_archived(project: &str, q: &StageQuery) -> Part {
+    if q.archived_in_sql {
+        Part::project(format!("NOT ({})", archived_sql()), project)
+    } else {
+        Part {
+            sql: String::new(),
+            args: vec![],
+        }
+    }
 }
 
 fn terms_cond(terms: &QueryTerms, haystack: Haystack) -> Part {
@@ -157,38 +221,33 @@ fn terms_cond(terms: &QueryTerms, haystack: Haystack) -> Part {
     }
 }
 
-/// Active, (optionally) not archived, every non-exempt term present.
-fn stage1_cond(project: &str, q: &StageQuery) -> Part {
-    let mut part = Part::project(active_rows_sql(), project);
-    if q.archived_in_sql {
-        let a = Part::project(format!("NOT ({})", archived_sql()), project);
-        part.sql.push_str(&format!(" AND {}", a.sql));
-        part.args.extend(a.args);
+/// Active rows meeting `cond` (empty: every active row), as `(project, body)` ordered by `$.id`,
+/// then project.
+fn select(project: &str, cond: Part) -> Stmt {
+    let filter = Part {
+        sql: ACTIVE_WHERE.to_string(),
+        args: vec![],
     }
-    let t = terms_cond(q.terms, q.haystack);
-    if !t.sql.is_empty() {
-        part.sql.push_str(&format!(" AND {}", t.sql));
-        part.args.extend(t.args);
-    }
-    part
-}
-
-fn select(cond: Part) -> Stmt {
-    Stmt::new(
-        format!(
-            "SELECT m.project, m.body FROM project_memory m WHERE {} ORDER BY {}, m.project",
-            cond.sql,
-            jx("m.body", "$.id")
-        ),
-        cond.args,
+    .and(cond);
+    active_stmt(
+        project,
+        Part {
+            sql: format!(
+                "SELECT m.project, m.body FROM {} WHERE {} ORDER BY {}, m.project",
+                active_from(),
+                filter.sql,
+                jx("m.body", "$.id")
+            ),
+            args: filter.args,
+        },
     )
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Stage2 {
-    /// Only when stage 1 matches nothing (`NOT EXISTS` of its condition). `stage2` ignores this
-    /// and builds ungated whenever a query term is exempt (stage 1 then lacks that term's
-    /// condition, so its emptiness says nothing about the client's full match).
+    /// Only when stage 1 matches nothing (no row of stage 1's set meets its terms). `stage2`
+    /// ignores this and builds ungated whenever a query term is exempt (stage 1 then lacks that
+    /// term's condition, so its emptiness says nothing about the client's full match).
     Gated,
     /// Always (a term gave stage 1 no condition, so stage 1 cannot speak for the client).
     Ungated,
@@ -203,11 +262,20 @@ pub struct StageQuery<'a> {
 
 /// Active rows, not archived (when `archived_in_sql`), containing every non-exempt term.
 pub fn stage1(project: &str, q: &StageQuery) -> Stmt {
-    select(stage1_cond(project, q))
+    select(
+        project,
+        not_archived(project, q).and(terms_cond(q.terms, q.haystack)),
+    )
 }
 
 /// The partial fallback's superset: `None` with fewer than two terms or no partial term.
 /// With an exempt term in the query it is always ungated, whatever `q.stage2` says.
+///
+/// The gate is a window over the same rows, not a `NOT EXISTS` subquery: stage 1's set and stage
+/// 2's base are both "active and not archived", so `max(<stage 1's terms>) OVER ()` over that set
+/// is 0 exactly when stage 1 would return nothing. The window is computed in a third top-level
+/// CTE, `cand`, whose body is the anti-join, and the statement filters `cand`: a `NOT EXISTS`
+/// repeating stage 1 would read `dead` again from inside a subquery.
 pub fn stage2(project: &str, q: &StageQuery) -> Option<Stmt> {
     let partial = &q.terms.partial;
     if q.terms.terms.len() < 2 || partial.is_empty() {
@@ -225,33 +293,47 @@ pub fn stage2(project: &str, q: &StageQuery) -> Option<Stmt> {
         sql: format!("({}) >= {threshold}", terms.join(" + ")),
         args: plain.into_iter().map(|t| Cell::Text(t.clone())).collect(),
     };
-    let mut base = Part::project(active_rows_sql(), project);
-    if q.archived_in_sql {
-        let a = Part::project(format!("NOT ({})", archived_sql()), project);
-        base.sql.push_str(&format!(" AND {}", a.sql));
-        base.args.extend(a.args);
+    if q.stage2 == Stage2::Ungated || q.terms.exempt {
+        return Some(select(project, not_archived(project, q).and(sum)));
     }
-    base.sql.push_str(&format!(" AND {}", sum.sql));
-    base.args.extend(sum.args);
-    if q.stage2 == Stage2::Gated && !q.terms.exempt {
-        let gate = stage1_cond(project, q);
-        base.sql.push_str(&format!(
-            " AND NOT EXISTS (SELECT 1 FROM project_memory m WHERE {})",
-            gate.sql
-        ));
-        base.args.extend(gate.args);
+    // Gated, and no term is exempt: stage 1's condition is every term, which there are at least
+    // two of. A NULL haystack makes either side NULL: neither a stage-2 row nor a stage-1 hit.
+    let mut all = terms_cond(q.terms, q.haystack);
+    if all.sql.is_empty() {
+        // Unreachable as built, kept total: no condition means every row of the set is a hit.
+        all.sql = "1".into();
     }
-    Some(select(base))
+    let filter = Part {
+        sql: ACTIVE_WHERE.to_string(),
+        args: vec![],
+    }
+    .and(not_archived(project, q));
+    let mut args = sum.args;
+    args.extend(all.args);
+    args.extend(filter.args);
+    Some(active_stmt(
+        project,
+        Part {
+            sql: format!(
+                ", cand AS (SELECT m.project AS project, m.body AS body, {id} AS eid, \
+                 {sum} AS wide, max(CASE WHEN {all} THEN 1 ELSE 0 END) OVER () AS stage1_hits \
+                 FROM {from} WHERE {filter}) \
+                 SELECT project, body FROM cand WHERE wide AND stage1_hits = 0 ORDER BY eid, project",
+                id = jx("m.body", "$.id"),
+                sum = sum.sql,
+                all = all.sql,
+                from = active_from(),
+                filter = filter.sql,
+            ),
+            args,
+        },
+    ))
 }
 
 /// Active rows the archived condition excludes: the client folds these with the lifecycle rows it
 /// has, to check that the SQL's reading agrees with `memory_lifecycle::fold`.
 pub fn archived_excluded(project: &str) -> Stmt {
-    let mut part = Part::project(active_rows_sql(), project);
-    let a = Part::project(archived_sql(), project);
-    part.sql.push_str(&format!(" AND {}", a.sql));
-    part.args.extend(a.args);
-    select(part)
+    select(project, Part::project(archived_sql(), project))
 }
 
 /// `count(DISTINCT $.id)` over the valid rows of the component: the entries the ledger holds,
@@ -267,20 +349,22 @@ pub fn ledger_count(project: &str) -> Stmt {
     Stmt::new(part.sql, part.args)
 }
 
-/// Keys with two or more distinct active ids, hidden entries included (`active_rows_sql` knows
+/// Keys with two or more distinct active ids, hidden entries included (the active filter knows
 /// nothing of the lifecycle).
 pub fn conflict_keys(project: &str) -> Stmt {
-    let part = Part::project(
-        format!(
-            "SELECT {key} AS k FROM project_memory m WHERE {active} AND {key} IS NOT NULL \
-             GROUP BY k HAVING count(DISTINCT {id}) >= 2 ORDER BY k",
-            key = jx("m.body", "$.key"),
-            id = jx("m.body", "$.id"),
-            active = active_rows_sql(),
-        ),
+    active_stmt(
         project,
-    );
-    Stmt::new(part.sql, part.args)
+        Part {
+            sql: format!(
+                "SELECT {key} AS k FROM {from} WHERE {ACTIVE_WHERE} AND {key} IS NOT NULL \
+                 GROUP BY k HAVING count(DISTINCT {id}) >= 2 ORDER BY k",
+                key = jx("m.body", "$.key"),
+                id = jx("m.body", "$.id"),
+                from = active_from(),
+            ),
+            args: vec![],
+        },
+    )
 }
 
 /// Every lifecycle row of the component, for the client's fold.
@@ -332,4 +416,24 @@ pub fn integrity_screen(project: &str) -> Stmt {
     );
     let part = Part::project(sql, project);
     Stmt::new(part.sql, part.args)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `COMPONENT` is the text it was before `component_cte!` built it, and each statement head
+    /// holds exactly the one project binding `Part::project` counts.
+    #[test]
+    fn component_texts_and_bindings() {
+        assert_eq!(
+            COMPONENT,
+            "WITH RECURSIVE g(p) AS (SELECT ? UNION SELECT CASE WHEN a.old_project = g.p THEN a.new_project ELSE a.old_project END FROM project_aliases a JOIN g ON a.old_project = g.p OR a.new_project = g.p) SELECT p FROM g"
+        );
+        assert_eq!(COMPONENT_CTE.matches('?').count(), 1);
+        assert!(!COMPONENT_CTE.contains("g.p"), "{COMPONENT_CTE}");
+        assert_eq!(active_with().matches('?').count(), 1);
+        assert_eq!(active_from().matches('?').count(), 0);
+        assert_eq!(ACTIVE_WHERE.matches('?').count(), 0);
+    }
 }
