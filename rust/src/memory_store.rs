@@ -616,40 +616,6 @@ fn merge_bodies(bodies: Vec<String>) -> Result<Vec<String>, String> {
         .collect())
 }
 
-/// Checks the rows of `memory_search::integrity_screen` (`(body, suspect)`, already in `$.id`,
-/// `project` order) and reports an error today's whole read would. Its phases run in this order:
-/// decode every row, id collision, a suspect row's predecessor missing from the returned ids, then
-/// the subset topological order and `validate`. With one fault the message is today's; with two or
-/// more it is one today's read could give, not necessarily the same one, because today's read has
-/// no row order and checks collisions as it decodes each row. `suspect` is a screen, not a verdict:
-/// a suspect row that passes these checks is not an error.
-pub fn screen_check(rows: Vec<(String, bool)>) -> Result<(), String> {
-    screen_check_inner(rows).map_err(with_alias_hint)
-}
-
-fn screen_check_inner(rows: Vec<(String, bool)>) -> Result<(), String> {
-    let mut entries = Vec::with_capacity(rows.len());
-    for (body, suspect) in &rows {
-        let entry: MemoryEntry =
-            serde_json::from_str(body).map_err(|e| format!("invalid remote memory row: {e}"))?;
-        entries.push((entry, *suspect));
-    }
-    let bodies: Vec<String> = rows.iter().map(|(body, _)| body.clone()).collect();
-    merge_bodies(bodies.clone())?;
-    let ids: BTreeSet<&str> = entries.iter().map(|(e, _)| e.id.as_str()).collect();
-    for (entry, suspect) in &entries {
-        if !suspect {
-            continue;
-        }
-        for old in entry.supersedes.iter().chain(entry.resolves.iter()) {
-            if !ids.contains(old.as_str()) {
-                return Err(format!("memory {} supersedes missing id {old}", entry.id));
-            }
-        }
-    }
-    ledger_from_bodies(merge_bodies(bodies)?, Scope::Subset).map(|_| ())
-}
-
 fn ledger_from_bodies(bodies: Vec<String>, scope: Scope) -> Result<MemoryLedger, String> {
     let mut ledger = MemoryLedger::default();
     for body in bodies {
@@ -2013,7 +1979,8 @@ pub fn recall_with(root: &Path, query: &str, ledger: &Ledger) -> Result<MemoryRe
 /// are left out unless `include_hidden`; a project that never switched lifecycle on answers
 /// exactly as before the lifecycle table existed. Reads only the rows the query can match, plus
 /// the whole-ledger facts recall needs (`search_with`), and answers exactly as
-/// `recall_whole_with`.
+/// `recall_whole_with` -- through `recall_whole_with` itself when the integrity screen finds a
+/// suspect row.
 pub fn recall_all_with(
     root: &Path,
     query: &str,
@@ -2026,7 +1993,7 @@ pub fn recall_all_with(
     let project = project(root)?;
     let now_ns = crate::remind_store::now_ns()?;
     let queries = [query.to_string()];
-    let searched = search_with(
+    let searched = match search_with(
         ledger,
         &project,
         &SearchRequest {
@@ -2035,7 +2002,12 @@ pub fn recall_all_with(
             include_hidden,
         },
         now_ns,
-    )?;
+    )? {
+        SearchOutcome::Searched(searched) => *searched,
+        SearchOutcome::Suspect { .. } => {
+            return recall_whole_with(root, query, ledger, include_hidden)
+        }
+    };
     let mut recall = memory::recall_ledger_view(
         root,
         query,
@@ -2170,7 +2142,8 @@ fn keys_next(queries: &[String], include_hidden: bool) -> String {
 }
 
 /// Several queries over one search: each query's own recall over the merged rows, with the
-/// conflict keys the database computed over every row.
+/// conflict keys the database computed over every row; over the whole ledger (`whole_searched`)
+/// when the integrity screen finds a suspect row.
 fn recall_each(
     root: &Path,
     queries: &[String],
@@ -2193,7 +2166,7 @@ fn recall_each(
     }
     let project = project(root)?;
     let now_ns = crate::remind_store::now_ns()?;
-    let searched = search_with(
+    let searched = match search_with(
         ledger,
         &project,
         &SearchRequest {
@@ -2202,7 +2175,13 @@ fn recall_each(
             include_hidden,
         },
         now_ns,
-    )?;
+    )? {
+        SearchOutcome::Searched(searched) => *searched,
+        SearchOutcome::Suspect {
+            trips,
+            server_rows_read,
+        } => whole_searched(ledger, &project, now_ns, trips, server_rows_read)?,
+    };
     let recalls = queries
         .iter()
         .map(|query| {
@@ -2402,6 +2381,8 @@ pub struct SearchRequest<'a> {
 /// What a search read. `ledger` is the merged, subset-decoded union of every query's stage rows,
 /// all of them active; `present`, `conflicts` (keys with two or more active ids, hidden ones
 /// included) and `view`'s lifecycle rows were read over the whole ledger in the same snapshot.
+/// `whole_searched` builds the same shape from the whole-ledger read, whose `ledger` holds every
+/// entry, superseded ones included.
 pub struct Searched {
     pub ledger: MemoryLedger,
     pub present: bool,
@@ -2414,6 +2395,31 @@ pub struct Searched {
     pub server_rows_read: Option<u64>,
 }
 
+/// What a search answered: its reading, or that the integrity screen returned a row and the
+/// search cannot vouch for the ledger. A caller answers `Suspect` through the whole-ledger read,
+/// which fails with today's message or, for a suspect that passes today's checks, answers as
+/// today.
+pub enum SearchOutcome {
+    Searched(Box<Searched>),
+    Suspect {
+        /// Search trips spent before the screen spoke, the suspect one included.
+        trips: usize,
+        /// The server's `rows_read` over every statement of those trips; `None` when any
+        /// statement's result did not report it.
+        server_rows_read: Option<u64>,
+    },
+}
+
+/// One snapshot read: decoded, or stopped at a screen that returned a row.
+enum Trip {
+    Read(Box<TripRead>),
+    /// Nothing past the screen was decoded; `rows` counts the stage rows the trip returned.
+    Suspect {
+        rows: usize,
+        server_rows_read: Option<u64>,
+    },
+}
+
 /// One snapshot read, decoded; `resend` says the narrow form's answer cannot be trusted.
 struct TripRead {
     searched: Searched,
@@ -2422,18 +2428,24 @@ struct TripRead {
     resend: bool,
 }
 
+/// Two server counters summed, `None` when either is unknown (`server_rows_read`'s rule).
+fn add_known(a: Option<u64>, b: Option<u64>) -> Option<u64> {
+    a.zip(b).map(|(a, b)| a.saturating_add(b))
+}
+
 /// Reads only the rows the queries can match, in one read transaction, and at most one more when
 /// the first answer cannot be trusted: an entry the SQL's archived condition excluded is one the
 /// fold shows, or a gated stage 2 stayed shut while the client's full match over the visible
 /// stage-1 rows is empty. The second read has no archived condition and no gate, and replaces the
-/// first entirely. The integrity screen fails the search with today's whole-read message.
+/// first entirely. A row from the integrity screen in either read stops the search with
+/// `SearchOutcome::Suspect`.
 pub fn search_with(
     ledger: &Ledger,
     project: &str,
     req: &SearchRequest,
     now_ns: i128,
-) -> Result<Searched, LedgerError> {
-    search_counted(ledger, project, req, now_ns).map(|(searched, _)| searched)
+) -> Result<SearchOutcome, LedgerError> {
+    search_counted(ledger, project, req, now_ns).map(|(outcome, _)| outcome)
 }
 
 /// `search_with`, and the stage rows every trip returned.
@@ -2442,23 +2454,85 @@ fn search_counted(
     project: &str,
     req: &SearchRequest,
     now_ns: i128,
-) -> Result<(Searched, usize), LedgerError> {
+) -> Result<(SearchOutcome, usize), LedgerError> {
     let terms: Vec<QueryTerms> = req.queries.iter().map(|q| query_terms(q)).collect();
-    let first = ledger.search_trip(project, req, &terms, true, now_ns)?;
+    let first = match ledger.search_trip(project, req, &terms, true, now_ns)? {
+        Trip::Read(read) => *read,
+        Trip::Suspect {
+            rows,
+            server_rows_read,
+        } => {
+            let outcome = SearchOutcome::Suspect {
+                trips: 1,
+                server_rows_read,
+            };
+            return Ok((outcome, rows));
+        }
+    };
     if !first.resend {
         let mut searched = first.searched;
         searched.trips = 1;
-        return Ok((searched, first.rows));
+        return Ok((SearchOutcome::Searched(Box::new(searched)), first.rows));
     }
-    let second = ledger.search_trip(project, req, &terms, false, now_ns)?;
-    let mut searched = second.searched;
-    searched.trips = 2;
-    searched.server_rows_read = first
-        .searched
-        .server_rows_read
-        .zip(searched.server_rows_read)
-        .map(|(a, b)| a.saturating_add(b));
-    Ok((searched, first.rows + second.rows))
+    let first_server = first.searched.server_rows_read;
+    match ledger.search_trip(project, req, &terms, false, now_ns)? {
+        Trip::Read(second) => {
+            let mut searched = second.searched;
+            searched.trips = 2;
+            searched.server_rows_read = add_known(first_server, searched.server_rows_read);
+            Ok((
+                SearchOutcome::Searched(Box::new(searched)),
+                first.rows + second.rows,
+            ))
+        }
+        Trip::Suspect {
+            rows,
+            server_rows_read,
+        } => {
+            let outcome = SearchOutcome::Suspect {
+                trips: 2,
+                server_rows_read: add_known(first_server, server_rows_read),
+            };
+            Ok((outcome, first.rows + rows))
+        }
+    }
+}
+
+/// The whole-ledger read in `Searched`'s shape, for `--also` and `--keys` after a suspect screen:
+/// `read_with_lifecycle`'s ledger and errors, its lifecycle folded at `now_ns`, and the conflict
+/// keys counted over its active entries as `recall_whole_with` counts them. `trips` and
+/// `server_rows_read` are the search's before it, to which the whole read adds its own.
+fn whole_searched(
+    ledger: &Ledger,
+    project: &str,
+    now_ns: i128,
+    trips: usize,
+    server_rows_read: Option<u64>,
+) -> Result<Searched, LedgerError> {
+    let read = ledger.read_with_lifecycle_counted(project)?;
+    let entries = read.ledger;
+    let unreadable = read.rows.unreadable;
+    let view = crate::memory_lifecycle::fold(&entries, read.rows.events, unreadable, now_ns, None);
+    let conflicts: BTreeSet<String> = {
+        let mut counts: HashMap<&str, usize> = HashMap::new();
+        for entry in memory::active_entries(&entries) {
+            *counts.entry(entry.key.as_str()).or_default() += 1;
+        }
+        counts
+            .into_iter()
+            .filter(|(_, n)| *n > 1)
+            .map(|(key, _)| key.to_string())
+            .collect()
+    };
+    Ok(Searched {
+        present: !entries.entries.is_empty(),
+        ledger: entries,
+        conflicts,
+        view,
+        unreadable,
+        trips: trips + 1,
+        server_rows_read: add_known(server_rows_read, read.server_rows_read),
+    })
 }
 
 /// The longest server message a refused search statement carries, in bytes.
@@ -2509,7 +2583,8 @@ fn refused_statement(
 impl Ledger {
     /// One round trip. `narrow` is the first form: the archived condition in SQL (unless
     /// `include_hidden`), its exclusions returned for checking, and stage 2 gated unless a term is
-    /// exempt. The wide form drops all three.
+    /// exempt. The wide form drops all three. A screen row stops it before any stage row is
+    /// decoded (`Trip::Suspect`).
     fn search_trip(
         &self,
         project: &str,
@@ -2517,7 +2592,7 @@ impl Ledger {
         terms: &[QueryTerms],
         narrow: bool,
         now_ns: i128,
-    ) -> Result<TripRead, LedgerError> {
+    ) -> Result<Trip, LedgerError> {
         let archived_in_sql = narrow && !req.include_hidden;
         let mut stmts = vec![
             Stmt::new(CREATE_TABLE, vec![]),
@@ -2578,17 +2653,26 @@ impl Ledger {
         }
         let server_rows_read = server_rows_read(&results);
 
-        let screen = results[screen_at]
-            .rows
+        // Every screen row is `(body, 1)`; any row means this read cannot vouch for the ledger.
+        let screen = &results[screen_at].rows;
+        if screen
             .iter()
-            .map(|row| match (row.first(), row.get(1)) {
-                (Some(Cell::Text(body)), Some(Cell::Int(suspect))) => {
-                    Ok((body.clone(), *suspect == 1))
-                }
-                _ => Err(LedgerError::Message("invalid remote memory row".into())),
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        screen_check(screen).map_err(LedgerError::Message)?;
+            .any(|row| !matches!(row.as_slice(), [Cell::Text(_), Cell::Int(1)]))
+        {
+            return Err(LedgerError::Message("invalid remote memory row".into()));
+        }
+        if !screen.is_empty() {
+            let rows = stages
+                .iter()
+                .map(|(first, second, _)| {
+                    results[*first].rows.len() + second.map_or(0, |at| results[at].rows.len())
+                })
+                .sum();
+            return Ok(Trip::Suspect {
+                rows,
+                server_rows_read,
+            });
+        }
 
         let present = match results[count_at].rows.first().and_then(|row| row.first()) {
             Some(Cell::Int(n)) => *n > 0,
@@ -2675,7 +2759,7 @@ impl Ledger {
             resend |= partial || selected.is_empty();
         }
 
-        Ok(TripRead {
+        Ok(Trip::Read(Box::new(TripRead {
             searched: Searched {
                 ledger: answer,
                 present,
@@ -2687,7 +2771,7 @@ impl Ledger {
             },
             rows,
             resend,
-        })
+        })))
     }
 }
 
@@ -2726,7 +2810,8 @@ pub struct Selection {
     /// Recall's partial flag: no entry matched every term.
     pub partial: bool,
     /// Memory rows the read returned, summed over trips, before deduplication: the search's stage
-    /// rows, or the whole read's `project_memory` rows.
+    /// rows, the whole read's `project_memory` rows, or both when a suspect screen sent the search
+    /// to the whole read.
     pub rows: usize,
     /// Logical round trips; a Busy retry inside one is not counted. The whole read takes one.
     pub trips: usize,
@@ -2762,7 +2847,8 @@ pub fn select_whole_with(
 }
 
 /// `select_whole_with` through `search_with`, or through the whole read for a query past the
-/// term cap, as `recall_all_with` answers it.
+/// term cap or after a suspect screen (its trips, rows and counter added to the search's), as
+/// `recall_all_with` answers it.
 pub fn select_search_with(
     ledger: &Ledger,
     project: &str,
@@ -2779,7 +2865,22 @@ pub fn select_search_with(
         haystack: Haystack::KeyClaim,
         include_hidden,
     };
-    let (searched, rows) = search_counted(ledger, project, &req, now_ns)?;
+    let (outcome, rows) = search_counted(ledger, project, &req, now_ns)?;
+    let searched = match outcome {
+        SearchOutcome::Searched(searched) => *searched,
+        SearchOutcome::Suspect {
+            trips,
+            server_rows_read,
+        } => {
+            let whole = select_whole_with(ledger, project, query, include_hidden, now_ns)?;
+            return Ok(Selection {
+                rows: rows + whole.rows,
+                trips: trips + whole.trips,
+                server_rows_read: add_known(server_rows_read, whole.server_rows_read),
+                ..whole
+            });
+        }
+    };
     let (ids, partial) = select_visible(query, &searched.ledger, &searched.view, include_hidden);
     Ok(Selection {
         ids,

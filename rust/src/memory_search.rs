@@ -294,12 +294,13 @@ pub fn lifecycle_rows(project: &str) -> Stmt {
     Stmt::new(part.sql, part.args)
 }
 
-/// The rows whole-ledger decoding could fail on, as `(body, suspect)` ordered by `$.id`, then
-/// project: every suspect row with `suspect = 1`, plus each existing row a suspect row names with
-/// `suspect = 0`. A row is suspect when it is not valid JSON; its `$.id`, `$.key` or `$.claim` is
-/// null or empty after trimming ASCII whitespace; a `supersedes` or `resolves` element names its
-/// own id, an absent id, or only rows of a different key; or its id is held by a row whose body
-/// is not byte-equal. A screen, not a verdict: the client's own checks decide.
+/// The rows whole-ledger decoding could fail on, as `(body, suspect)` with `suspect` always 1,
+/// ordered by `$.id`, then project, then row id. A row is suspect when it is not valid JSON; its
+/// `$.id`, `$.key` or `$.claim` is null or empty after trimming ASCII whitespace; a `supersedes`
+/// or `resolves` element names its own id, an absent id, or only rows of a different key; or its
+/// id is held by a row whose body is not byte-equal. A screen, not a verdict: any row sends recall
+/// to the whole-ledger read, whose own checks decide. The rows a suspect names are not returned:
+/// TursoDB answered 502 to the arm that fetched them (deep CTE reuse, 2026-11-16 replay).
 pub fn integrity_screen(project: &str) -> Stmt {
     const WS: &str = "char(32,9,10,11,12,13)";
     let blank = |c: &str| format!("({c} IS NULL OR trim({c}, {WS}) = '')");
@@ -319,15 +320,8 @@ pub fn integrity_screen(project: &str) -> Stmt {
          susp AS (SELECT c.project AS project, c.rid AS rid, c.body AS body, c.id AS id FROM comp c \
            WHERE NOT c.valid OR {b_id} OR {b_key} OR {b_claim} \
            OR (c.project, c.rid) IN (SELECT project, rid FROM bad) \
-           OR c.id IN (SELECT id FROM dup)), \
-         named AS (SELECT DISTINCT p.old AS id FROM preds p JOIN susp s ON s.project = p.project AND s.rid = p.rid) \
-         SELECT body, suspect FROM (\
-           SELECT s.project AS project, s.rid AS rid, s.body AS body, s.id AS id, 1 AS suspect FROM susp s \
-           UNION ALL \
-           SELECT t.project, t.rid, t.body, t.id, 0 FROM comp t \
-             WHERE t.valid AND t.id IN (SELECT id FROM named) \
-             AND (t.project, t.rid) NOT IN (SELECT project, rid FROM susp)) \
-         ORDER BY id, project, rid",
+           OR c.id IN (SELECT id FROM dup)) \
+         SELECT body, 1 AS suspect FROM susp ORDER BY id, project, rid",
         id = jx("m.body", "$.id"),
         key = jx("m.body", "$.key"),
         claim = jx("m.body", "$.claim"),

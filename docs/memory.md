@@ -162,8 +162,8 @@ Since phase 2a of issue #11, the read `recall` makes returns only the rows its q
 plus a few whole-ledger facts (whether the ledger has any entry, which keys hold two or more active
 entries, the lifecycle rows, and an integrity screen), all inside one read transaction; the server
 still scans the project's alias component in each statement (`cort-evals recall-sql` records the
-server's rows-read counter). It makes at most two round trips (a Busy answer is retried inside a
-trip and is not a second trip), and its answer is the one a whole-ledger read gives. A term with a
+server's rows-read counter). It makes at most two search trips (a Busy answer is retried inside a
+trip and is not a second trip), plus the whole-ledger read when the screen finds a suspect row, and its answer is the one a whole-ledger read gives. A term with a
 cased non-ASCII letter or a combining accent cannot be case-folded in SQL, so it filters nothing
 there and a query made only of such terms returns every active row. A query of more than 100 terms
 (words after splitting on whitespace, repeats counted) would nest past SQLite's expression depth,
@@ -176,7 +176,7 @@ search, the `memory_remote_unavailable` error keeps `remote: sql` and adds `deta
 `conflicts`, `screen`, `lifecycle`, `excluded`, `stage1`, `stage2`, or `create`, `begin`,
 `commit`, `rollback`, `close`), `query` (for a stage) and the server's `message`, flattened to one
 line and cut at 300 bytes; every user term in those statements is a bound parameter. The screen
-fails recall with today's message for a body that is not JSON or lacks `id`, `key` or `claim`, an
+sends recall to the whole-ledger read, which fails with today's message, for a body that is not JSON or lacks `id`, `key` or `claim`, an
 empty `id`, a blank `key` or `claim`, a missing or own-id predecessor, a predecessor under another
 key, and one id with two contents. Five checks need every row decoded, so over
 the whole ledger they moved to `cort memory status` and `cort memory list`, which still read every row and fail as before: a JSON body serde rejects (a wrong field type), a

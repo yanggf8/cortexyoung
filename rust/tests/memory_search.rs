@@ -705,11 +705,12 @@ fn gated_stage2_opens_when_the_only_stage1_hit_is_archived() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// The integrity screen, the whole-ledger count statements and subset decoding (Task 4a).
+// The integrity screen and the whole-ledger count statements (Task 4a). Subset decoding is
+// tested through the search below (`predecessor_not_returned_is_not_an_error`).
 // ---------------------------------------------------------------------------------------------
 
 use cort::memory_search::{conflict_keys, integrity_screen, ledger_count, lifecycle_rows};
-use cort::memory_store::{screen_check, Ledger, LedgerError};
+use cort::memory_store::{Ledger, LedgerError};
 use cort::remote::Transport;
 use std::sync::Arc;
 
@@ -786,21 +787,33 @@ impl Env {
             )
             .unwrap();
     }
-    fn screen_rows(&self) -> Vec<(String, bool)> {
+    /// The screen's rows, each `(body, 1)`, as their bodies.
+    fn screen_rows(&self) -> Vec<String> {
         let stmt = integrity_screen(PROJECT);
         self.db
             .execute(&stmt.sql, stmt.args)
             .unwrap()
             .rows
             .iter()
-            .map(|row| match (&row[0], &row[1]) {
-                (Cell::Text(b), Cell::Int(s)) => (b.clone(), *s == 1),
+            .map(|row| match row.as_slice() {
+                [Cell::Text(b), Cell::Int(1)] => b.clone(),
                 other => panic!("{other:?}"),
             })
             .collect()
     }
-    fn screened(&self) -> Result<(), String> {
-        screen_check(self.screen_rows())
+    /// The body of the first row stored under `id`.
+    fn body_of(&self, id: &str) -> String {
+        let r = self
+            .db
+            .execute(
+                "SELECT body FROM project_memory WHERE id = ? ORDER BY project",
+                vec![Cell::Text(id.into())],
+            )
+            .unwrap();
+        match &r.rows[0][0] {
+            Cell::Text(b) => b.clone(),
+            other => panic!("{other:?}"),
+        }
     }
     /// What today's whole read says about the same database.
     fn whole(&self) -> Result<(), String> {
@@ -822,54 +835,30 @@ impl Env {
 }
 
 #[test]
-fn subset_decoding_accepts_an_absent_predecessor() {
+fn screen_returns_a_row_whose_predecessor_is_absent() {
     let env = Env::new();
     env.entry("b", "k", "second", json!({"supersedes":"a"}));
-    // Only `b` is given, not suspect: the subset rule accepts the absent `a`.
-    let body = env.screen_rows_for_test_b();
-    assert_eq!(screen_check(vec![(body, false)]), Ok(()));
-    // The whole read of the same ledger keeps today's message, and so does a suspect `b`.
-    let whole = env.whole().unwrap_err();
+    assert_eq!(env.screen_rows(), vec![env.body_of("b")]);
+    // The whole read recall then falls back to gives today's message.
     assert_eq!(
-        whole,
+        env.whole().unwrap_err(),
         "memory b supersedes missing id a; re-add the alias with cort memory alias add"
     );
-    assert_eq!(env.screened().unwrap_err(), whole);
-}
-
-impl Env {
-    fn screen_rows_for_test_b(&self) -> String {
-        let r = self
-            .db
-            .execute("SELECT body FROM project_memory WHERE id = 'b'", vec![])
-            .unwrap();
-        match &r.rows[0][0] {
-            Cell::Text(b) => b.clone(),
-            other => panic!("{other:?}"),
-        }
-    }
 }
 
 #[test]
-fn subset_decoding_still_checks_a_present_predecessor() {
-    let env = Env::new();
-    env.entry("a", "k1", "first", json!({}));
-    env.entry("b", "k2", "second", json!({"supersedes":"a"}));
-    let rows: Vec<(String, bool)> = env.screen_rows();
-    assert_eq!(rows.len(), 2);
-    assert_eq!(
-        screen_check(rows.into_iter().map(|(b, _)| (b, false)).collect()).unwrap_err(),
-        "memory b has invalid supersession"
-    );
-}
-
-#[test]
-fn screen_check_messages_equal_whole_read() {
+fn screen_returns_a_row_for_every_fault_the_whole_read_fails_on() {
     type Seed = Box<dyn Fn(&Env)>;
-    let cases: Vec<(&str, Seed)> = vec![
-        ("invalid json", Box::new(|e| e.insert("x", "{not json"))),
+    // Each fault, and the row id the screen must return for it.
+    let cases: Vec<(&str, &str, Seed)> = vec![
+        (
+            "invalid json",
+            "x",
+            Box::new(|e| e.insert("x", "{not json")),
+        ),
         (
             "missing key",
+            "x",
             Box::new(|e| {
                 e.insert(
                     "x",
@@ -879,18 +868,22 @@ fn screen_check_messages_equal_whole_read() {
         ),
         (
             "blank key",
+            "x",
             Box::new(|e| e.entry("x", "  ", "c", json!({}))),
         ),
         (
             "supersedes missing id",
+            "x",
             Box::new(|e| e.entry("x", "k", "c", json!({"supersedes":"gone"}))),
         ),
         (
             "supersedes own id",
+            "x",
             Box::new(|e| e.entry("x", "k", "c", json!({"supersedes":"x"}))),
         ),
         (
             "supersedes a different key",
+            "b",
             Box::new(|e| {
                 e.entry("a", "k1", "c", json!({}));
                 e.entry("b", "k2", "c", json!({"supersedes":"a"}));
@@ -898,6 +891,7 @@ fn screen_check_messages_equal_whole_read() {
         ),
         (
             "one id under two aliases",
+            "x",
             Box::new(|e| {
                 e.alias(PROJECT, "p0");
                 e.entry("x", "k", "first claim", json!({}));
@@ -908,6 +902,7 @@ fn screen_check_messages_equal_whole_read() {
         // `supersedes`; the bad element sits first in one case and second in the others.
         (
             "resolves a missing id",
+            "x",
             Box::new(|e| {
                 e.entry("a", "k", "c", json!({}));
                 e.entry("x", "k", "c", json!({"resolves":["gone","a"]}));
@@ -915,6 +910,7 @@ fn screen_check_messages_equal_whole_read() {
         ),
         (
             "resolves a different key",
+            "x",
             Box::new(|e| {
                 e.entry("a", "k", "c", json!({}));
                 e.entry("b", "k2", "c", json!({}));
@@ -923,56 +919,35 @@ fn screen_check_messages_equal_whole_read() {
         ),
         (
             "resolves its own id",
+            "x",
             Box::new(|e| {
                 e.entry("a", "k", "c", json!({}));
                 e.entry("x", "k", "c", json!({"resolves":["a","x"]}));
             }),
         ),
     ];
-    for (name, seed) in cases {
+    for (name, id, seed) in cases {
         let env = Env::new();
         seed(&env);
-        let whole = env.whole().expect_err(name);
-        let screened = env.screened().expect_err(name);
-        assert_eq!(screened, whole, "{name}");
+        env.whole().expect_err(name);
+        let rows = env.screen_rows();
+        assert!(rows.contains(&env.body_of(id)), "{name}: {rows:?}");
     }
-    // The `resolves` cases fail on the element they name, not on something incidental.
-    let env = Env::new();
-    env.entry("a", "k", "c", json!({}));
-    env.entry("x", "k", "c", json!({"resolves":["gone","a"]}));
-    assert!(env
-        .screened()
-        .unwrap_err()
-        .starts_with("memory x supersedes missing id gone"));
-    for (named, want) in [
-        ("b", "memory x has invalid supersession"),
-        // Naming itself never sorts: the topological order reports it before `validate` can.
-        ("x", "memory supersession has a missing id or cycle"),
-    ] {
-        let env = Env::new();
-        env.entry("a", "k", "c", json!({}));
-        env.entry("b", "k2", "c", json!({}));
-        env.entry("x", "k", "c", json!({"resolves":["a", named]}));
-        assert_eq!(env.screened().unwrap_err(), want, "{named}");
-    }
-    // The alias hint really is part of the compared text.
-    let env = Env::new();
-    env.entry("x", "k", "c", json!({"supersedes":"gone"}));
-    assert!(env
-        .screened()
-        .unwrap_err()
-        .ends_with("; re-add the alias with cort memory alias add"));
 }
 
 #[test]
-fn two_errors_report_the_earlier_phase() {
+fn screen_returns_every_suspect_row() {
     let env = Env::new();
     env.insert("a-bad", "{not json");
     env.entry("b", "k1", "c", json!({}));
     env.entry("c", "k2", "c", json!({"supersedes":"b"}));
     let whole = env.whole().unwrap_err();
     assert!(whole.starts_with("invalid remote memory row"), "{whole}");
-    assert_eq!(env.screened().unwrap_err(), whole);
+    // An invalid body has no `$.id`, and a null id sorts first; `b` is named, not suspect.
+    assert_eq!(
+        env.screen_rows(),
+        vec!["{not json".to_string(), env.body_of("c")]
+    );
 }
 
 #[test]
@@ -988,9 +963,7 @@ fn screen_is_silent_on_a_valid_ledger() {
     // An alias pair: the same id, the same bytes, under both projects.
     env.entry("g", "m", "g", json!({}));
     env.entry_in("p0", "g", "m", "g", json!({}));
-    let rows = env.screen_rows();
-    assert!(rows.iter().all(|(_, suspect)| !suspect), "{rows:?}");
-    assert_eq!(env.screened(), Ok(()));
+    assert_eq!(env.screen_rows(), Vec::<String>::new());
     assert_eq!(env.whole(), Ok(()));
 }
 
@@ -998,23 +971,20 @@ fn screen_is_silent_on_a_valid_ledger() {
 fn screen_suspect_is_not_a_verdict() {
     let env = Env::new();
     env.entry("   ", "k", "claim", json!({}));
-    let rows = env.screen_rows();
-    assert_eq!(rows.len(), 1);
-    assert!(rows[0].1, "an id of spaces is suspect");
-    assert_eq!(env.screened(), Ok(()));
+    // An id of spaces is suspect, and today's whole read accepts it.
+    assert_eq!(env.screen_rows(), vec![env.body_of("   ")]);
     assert_eq!(env.whole(), Ok(()));
 }
 
 #[test]
-fn screen_returns_a_named_predecessor_as_not_suspect() {
+fn screen_does_not_return_the_rows_a_suspect_names() {
     let env = Env::new();
     env.entry("a", "k1", "c", json!({}));
     env.entry("b", "k2", "c", json!({"supersedes":"a"}));
     env.entry("z", "other", "unrelated", json!({}));
-    let rows = env.screen_rows();
-    let flags: Vec<bool> = rows.iter().map(|(_, s)| *s).collect();
-    // a (named, not suspect), b (suspect); z is not returned.
-    assert_eq!(flags, vec![false, true]);
+    // b only: the named `a` is not fetched (the arm that did so drew a 502 from TursoDB, 2026-11-16),
+    // and z is not returned.
+    assert_eq!(env.screen_rows(), vec![env.body_of("b")]);
 }
 
 #[test]
@@ -1058,11 +1028,8 @@ fn screen_survives_malformed_json_beside_a_supersedes_row() {
     env.entry("a", "k", "one", json!({}));
     env.entry("b", "k", "two", json!({"supersedes":"a"}));
     let rows = env.screen_rows();
-    assert!(rows.iter().any(|(b, s)| b == "{not json" && *s));
-    assert!(rows
-        .iter()
-        .filter(|(b, _)| b != "{not json")
-        .all(|(_, s)| !s));
+    // The malformed row alone: the valid chain beside it is not suspect.
+    assert_eq!(rows, vec!["{not json".to_string()]);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1273,6 +1240,7 @@ mod search {
                 },
                 now,
             )
+            .map(answered)
             .unwrap()
         }
         fn search_trips(&self, query: &str, include_hidden: bool) -> usize {
@@ -1287,6 +1255,7 @@ mod search {
                 },
                 now_ns(),
             )
+            .map(answered)
             .unwrap()
             .trips
         }
@@ -1298,6 +1267,16 @@ mod search {
         let old = f.old_recall(query, include_hidden);
         assert_eq!(new, old, "query {query:?}, include_hidden {include_hidden}");
         new.unwrap()
+    }
+
+    /// The search's own reading; a screen row is a test failure here.
+    fn answered(outcome: memory_store::SearchOutcome) -> memory_store::Searched {
+        match outcome {
+            memory_store::SearchOutcome::Searched(searched) => *searched,
+            memory_store::SearchOutcome::Suspect { trips, .. } => {
+                panic!("the integrity screen returned a row (trip {trips})")
+            }
+        }
     }
 
     /// One query's selection over a (possibly multi-query) search's merged rows, as recall makes
@@ -1927,6 +1906,7 @@ mod search {
             },
             at,
         )
+        .map(answered)
         .unwrap();
         let (whole, rows) = f.ledger.read_with_lifecycle(&f.project()).unwrap();
         let view = fold(&whole, rows.events, rows.unreadable, at, None);
@@ -2207,10 +2187,23 @@ mod search {
             seed(&f);
             // Plus a healthy row, so the error does not depend on the query matching it.
             f.entry("ok000001", "fine", "unrelated row", at);
+            let project = f.project();
             for query in ["c", "unrelated", "zzz", ""] {
                 let new = f.new_recall(query, false).expect_err(name);
                 let old = f.old_recall(query, false).expect_err(name);
                 assert_eq!(new, old, "{name} {query:?}");
+                // `--also`, `--keys` and the eval's replay fall back to the same whole read.
+                let also = strings(&[query, "zzz"]);
+                let many = memory_store::recall_many_with(f.root(), &also, &f.ledger, false);
+                assert_eq!(many.expect_err(name), old, "{name} {query:?} --also");
+                let keys =
+                    memory_store::recall_keys_with(f.root(), &strings(&[query]), &f.ledger, false);
+                assert_eq!(keys.expect_err(name), old, "{name} {query:?} --keys");
+                let now = now_ns();
+                let replay =
+                    memory_store::select_search_with(&f.ledger, &project, query, false, now);
+                let base = memory_store::select_whole_with(&f.ledger, &project, query, false, now);
+                assert_eq!(replay.expect_err(name), base.expect_err(name), "{name}");
             }
         }
         // The alias hint is part of the compared text.
@@ -2218,6 +2211,170 @@ mod search {
         f.entry_with("x", "k", "c", at, json!({"supersedes":"gone"}));
         assert!(matches!(f.new_recall("c", false),
             Err(LedgerError::Message(m)) if m.ends_with("; re-add the alias with cort memory alias add")));
+        // The `resolves` cases fail on the element they name, not on something incidental.
+        let f = fixture();
+        f.entry("a", "k", "c", at);
+        f.entry_with("x", "k", "c", at, json!({"resolves":["gone","a"]}));
+        assert!(matches!(f.new_recall("c", false),
+            Err(LedgerError::Message(m)) if m.starts_with("memory x supersedes missing id gone")));
+        for (named, want) in [
+            ("b", "memory x has invalid supersession"),
+            // Naming itself never sorts: the topological order reports it before `validate` can.
+            ("x", "memory supersession has a missing id or cycle"),
+        ] {
+            let f = fixture();
+            f.entry("a", "k", "c", at);
+            f.entry("b", "k2", "c", at);
+            f.entry_with("x", "k", "c", at, json!({"resolves":["a", named]}));
+            assert_eq!(
+                f.new_recall("c", false).unwrap_err(),
+                LedgerError::Message(want.to_string()),
+                "{named}"
+            );
+        }
+    }
+
+    /// A blank-id fixture: an id of spaces is suspect to the screen and accepted by today's whole
+    /// read, beside an ordinary entry.
+    fn blank_id_fixture() -> Fixture {
+        let f = fixture();
+        let at = now_ns() - DAY;
+        f.entry("   ", "spaced", "deploy under a blank id", at);
+        f.entry("s1000001", "deploy-plan", "deploy plan on nuc", at);
+        f
+    }
+
+    /// A suspect that passes today's checks: recall makes one more request, the whole read, and
+    /// answers exactly as it does.
+    #[test]
+    fn a_suspect_row_sends_recall_to_the_whole_read() {
+        let f = blank_id_fixture();
+        let answer = assert_same(&f, "deploy", false);
+        let mut found = ids(&answer);
+        found.sort();
+        assert_eq!(found, ["   ", "s1000001"]);
+        assert_eq!(
+            f.trips("deploy", false),
+            2,
+            "the search, then the whole read"
+        );
+        let (ledger, sql) = f.logging();
+        memory_store::recall_all_with(f.root(), "deploy", &ledger, false).unwrap();
+        let sent: Vec<String> = sql.lock().unwrap().drain(..).collect();
+        memory_store::recall_whole_with(f.root(), "deploy", &ledger, false).unwrap();
+        let whole: Vec<String> = sql.lock().unwrap().drain(..).collect();
+        assert_eq!(sent.len(), 1 + whole.len(), "{sent:?}");
+        assert!(sent[0].contains("instr("), "the search first");
+        assert_eq!(sent[1..], whole[..], "then exactly the whole read");
+        // `--also` and `--keys` answer over the whole read too, in the same two requests.
+        let queries = strings(&["deploy", "nuc"]);
+        let before = f.posts.load(Ordering::SeqCst);
+        let v = memory_store::recall_many_with(f.root(), &queries, &f.ledger, false).unwrap();
+        assert_eq!(f.posts.load(Ordering::SeqCst) - before, 2);
+        for (i, query) in queries.iter().enumerate() {
+            let alone = f.old_recall(query, false).unwrap();
+            assert_eq!(query_ids(&v["queries"][i]), ids(&alone), "{query}");
+        }
+        let before = f.posts.load(Ordering::SeqCst);
+        let v = memory_store::recall_keys_with(f.root(), &strings(&["deploy"]), &f.ledger, false)
+            .unwrap();
+        assert_eq!(f.posts.load(Ordering::SeqCst) - before, 2);
+        assert_eq!(query_ids(&v), ["s1000001"]);
+        // The eval's replay selects as the whole read does and counts both reads.
+        let project = f.project();
+        let now = now_ns();
+        let replay =
+            memory_store::select_search_with(&f.ledger, &project, "deploy", false, now).unwrap();
+        let base =
+            memory_store::select_whole_with(&f.ledger, &project, "deploy", false, now).unwrap();
+        assert_eq!((&replay.ids, replay.partial), (&base.ids, base.partial));
+        assert_eq!(replay.trips, 2);
+        assert_eq!(
+            replay.rows,
+            2 + base.rows,
+            "two stage rows, then the whole read's"
+        );
+        // The search itself says why it stopped.
+        let searched = memory_store::search_with(
+            &f.ledger,
+            &project,
+            &SearchRequest {
+                queries: &strings(&["deploy"]),
+                haystack: Haystack::KeyClaim,
+                include_hidden: false,
+            },
+            now,
+        )
+        .unwrap();
+        assert!(matches!(
+            searched,
+            memory_store::SearchOutcome::Suspect { trips: 1, .. }
+        ));
+    }
+
+    /// Passes requests through and, once the first is answered, inserts one row.
+    struct InsertAfterFirst {
+        inner: Arc<SqliteTransport>,
+        posts: Arc<AtomicUsize>,
+        sql: String,
+    }
+
+    impl Transport for InsertAfterFirst {
+        fn post(
+            &self,
+            url: &str,
+            body: &[u8],
+            headers: &[(&str, &str)],
+        ) -> Result<Vec<u8>, cort::remote::RemoteError> {
+            let answer = self.inner.post(url, body, headers)?;
+            if self.posts.fetch_add(1, Ordering::SeqCst) == 0 {
+                let request = json!({"requests":[
+                    {"type":"execute","stmt":{"sql":self.sql,"args":[]}},{"type":"close"}]});
+                self.inner
+                    .post(url, request.to_string().as_bytes(), headers)
+                    .unwrap();
+            }
+            Ok(answer)
+        }
+    }
+
+    /// A suspect row that lands between the two search trips sends recall to the whole read too.
+    #[test]
+    fn a_suspect_row_in_the_second_trip_sends_recall_to_the_whole_read() {
+        let f = two_query_fixture();
+        assert_eq!(f.search_trips("deploy plan", false), 2);
+        let body = Fixture::body(
+            "   ",
+            "late",
+            "deploy plan landed late",
+            now_ns() - DAY,
+            json!({}),
+        );
+        let sql = format!(
+            "INSERT INTO project_memory VALUES ('{}', '   ', '{}')",
+            f.project(),
+            body.to_string().replace('\'', "''")
+        );
+        let posts = Arc::new(AtomicUsize::new(0));
+        let ledger = Ledger::with_transport(
+            "https://example.test",
+            "test",
+            Box::new(InsertAfterFirst {
+                inner: f.inner.clone(),
+                posts: posts.clone(),
+                sql,
+            }),
+        )
+        .unwrap();
+        let new = memory_store::recall_all_with(f.root(), "deploy plan", &ledger, false).unwrap();
+        assert_eq!(
+            posts.load(Ordering::SeqCst),
+            3,
+            "two search trips, then the whole read"
+        );
+        let old = f.old_recall("deploy plan", false).unwrap();
+        assert_eq!(serde_json::to_value(new).unwrap(), old);
+        assert!(ids(&old).contains(&"   ".to_string()), "{old}");
     }
 
     #[test]

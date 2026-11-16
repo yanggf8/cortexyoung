@@ -173,7 +173,7 @@ replaces the first's entirely. Each returns counts or ids, except the integrity 
 |---|---|---|
 | `ledger_status: present` | `count(DISTINCT $.id)` over the component | as today |
 | `evidence_status: conflict` | keys with two or more distinct active ids, hidden ones included (as 1a counts) | as today, for the returned hits |
-| Integrity screen | the bodies of suspect rows (below) | the client runs today's checks on them and fails with today's message |
+| Integrity screen | the bodies of suspect rows (below) | any row sends recall to today's whole-ledger read, which fails with today's message |
 | Lifecycle rows | every lifecycle row of the component (few now; 2c keeps use rows out of this table) | the 1a fold runs on the returned entries; unreadable rows are counted as in 1a |
 
 **The integrity screen.** Today `ledger_from_bodies` runs `validate()` on the whole ledger, and
@@ -184,16 +184,20 @@ recognise as suspect:
 - a predecessor that is not in the component: `supersedes`, or any element of `resolves` (via
   `json_each`), naming a missing id;
 - a predecessor under a different key, or naming the entry's own id;
-- one id appearing in two or more rows whose bodies are not byte-equal. The client runs today's
-  `merge_bodies` on those rows, so `same_claim`'s tolerance of missing machine stamps is applied by
+- one id appearing in two or more rows whose bodies are not byte-equal. The whole read the screen sends recall to
+  runs today's `merge_bodies` on those rows, so `same_claim`'s tolerance of missing machine stamps is applied by
   the same code.
 
-The client runs today's decoding and checks on those rows, plus the rows they name, and reports
-the first error with today's message. That includes serde's own text, because the screen returns
-the body. With one fault the message is the one today's read gives. With two or more, it is one of
-the messages today's read could give, not necessarily the same one: today's read has no row order
-(its `SELECT` has no `ORDER BY`) and checks collisions row by row as it decodes, while the screen
-decodes every row before it checks collisions (Task 4 external review, 2026-11-16).
+The client does not fetch the rows a suspect names. Any suspect row, in either search trip, sends
+recall to today's whole-ledger read, one more round trip, which decodes every row and reports the
+first error with today's message, serde's own text included; a suspect that passes today's checks
+(the screen is not a verdict) is answered as today. With one fault the message is the one today's
+read gives. With two or more, it is one of the messages today's read could give, not necessarily
+the same one: today's read has no row order (its `SELECT` has no `ORDER BY`) and checks collisions
+row by row as it decodes (Task 4 external review, 2026-11-16).
+
+2026-11-16 replay: TursoDB answered 502 to the screen's second arm (deep CTE reuse); the screen
+returns suspect rows only.
 
 The checks that need serde's or `validate()`'s full reading of every row do not stay on recall:
 - a well-formed JSON body that serde still rejects (a wrong field type, a negative
