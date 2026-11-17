@@ -23,6 +23,7 @@ enum Action {
 #[derive(Default)]
 struct Control {
     posts: usize,
+    bodies: Vec<String>,
     next: Vec<(usize, Action)>,
 }
 
@@ -41,6 +42,9 @@ impl Transport for Wrapped {
         let action = {
             let mut control = self.control.lock().unwrap();
             control.posts += 1;
+            control
+                .bodies
+                .push(String::from_utf8_lossy(body).into_owned());
             control
                 .next
                 .iter()
@@ -432,6 +436,8 @@ fn duplicate_requires_of() {
 #[test]
 fn lost_response_reports_outcome_unknown() {
     let f = Fixture::new();
+    // An empty database makes the first read three posts; provision so the numbers below hold.
+    f.list(ListFilter::All);
     // Post 1 reads the events, post 2 is the insert, post 3 the read-back: the insert is
     // forwarded (so it commits) and then both answers are lost.
     f.arm(2, Action::ForwardThenTimeout);
@@ -460,6 +466,7 @@ fn lost_response_reports_outcome_unknown() {
 #[test]
 fn lost_response_read_back_found_is_ok() {
     let f = Fixture::new();
+    f.list(ListFilter::All);
     // Post 1 reads the events, post 2 is the insert: forwarded (so it commits), then the
     // answer is lost; the read-back finds the id and the add reports success.
     f.arm(2, Action::ForwardThenTimeout);
@@ -475,6 +482,7 @@ fn lost_response_read_back_found_is_ok() {
 #[test]
 fn lost_response_read_back_absent_is_not_recorded() {
     let f = Fixture::new();
+    f.list(ListFilter::All);
     // Post 1 reads the events, post 2 is the insert: it times out without landing, and the
     // read-back finds nothing.
     f.arm(2, Action::TimeoutOnly);
@@ -827,4 +835,28 @@ fn outcome_unknown_leaves_snapshot() {
     assert!(matches!(err, LedgerError::OutcomeUnknown { .. }), "{err:?}");
     assert_eq!(f.rows(), 2);
     assert_eq!(std::fs::read(snapshot_file(&f)).unwrap(), before);
+}
+
+fn tables(f: &Fixture) -> usize {
+    f.query("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'project_%'")
+        .unwrap()
+        .len()
+}
+
+fn sent_a_create(f: &Fixture) -> bool {
+    let control = f.control.lock().unwrap();
+    control.bodies.iter().any(|body| body.contains("CREATE"))
+}
+
+#[test]
+fn a_new_database_answers_empty_and_later_reads_send_no_create() {
+    let f = Fixture::new();
+    assert_eq!(tables(&f), 0);
+    let listed = f.list(ListFilter::All);
+    assert_eq!(listed["reminders"], json!([]), "{listed}");
+    assert_eq!(tables(&f), 5);
+    f.control.lock().unwrap().bodies.clear();
+    f.list(ListFilter::All);
+    assert!(!f.control.lock().unwrap().bodies.is_empty());
+    assert!(!sent_a_create(&f));
 }

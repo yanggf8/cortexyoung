@@ -3145,20 +3145,20 @@ mod search {
         }
     }
 
-    /// The trip's statements: five CREATEs (steps 1-5), count 6, conflicts 7, screen 8,
-    /// lifecycle 9, excluded 10 (unless `--all`), then per query stage 1 and stage 2.
+    /// The trip's statements: count 1, conflicts 2, screen 3, lifecycle 4, excluded 5 (unless
+    /// `--all`), then per query stage 1 and stage 2 (a snapshot's `BEGIN` is step 0).
     #[test]
     fn a_refused_statement_is_named_with_the_server_message() {
         let f = fixture();
         f.entry("s3000001", "deploy-plan", "nuc runs it", now_ns() - DAY);
         let msg = "no such function: row_number";
         for (step, include_hidden, query, kind, q) in [
-            (9, false, "deploy", "lifecycle", None),
-            (10, false, "deploy", "excluded", None),
-            (11, false, "deploy", "stage1", Some(0)),
-            (12, false, "deploy plan", "stage2", Some(0)),
-            (10, true, "deploy", "stage1", Some(0)),
-            (8, false, "deploy", "screen", None),
+            (4, false, "deploy", "lifecycle", None),
+            (5, false, "deploy", "excluded", None),
+            (6, false, "deploy", "stage1", Some(0)),
+            (7, false, "deploy plan", "stage2", Some(0)),
+            (5, true, "deploy", "stage1", Some(0)),
+            (3, false, "deploy", "screen", None),
         ] {
             let ledger = f.failing_at(step, "SQLITE_ERROR", msg);
             let err = memory_store::recall_all_with(f.root(), query, &ledger, include_hidden)
@@ -3194,7 +3194,7 @@ mod search {
         let err = memory_store::recall_all_with(
             f.root(),
             "deploy",
-            &f.failing_at(11, "SQLITE_ERROR", &long),
+            &f.failing_at(6, "SQLITE_ERROR", &long),
             false,
         )
         .unwrap_err();
@@ -3207,11 +3207,80 @@ mod search {
         let err = memory_store::recall_all_with(
             f.root(),
             "deploy",
-            &f.failing_at(11, "BLOCKED", "blocked"),
+            &f.failing_at(6, "BLOCKED", "blocked"),
             false,
         )
         .unwrap_err();
         assert_eq!(err, LedgerError::Remote(cort::remote::ErrorKind::Blocked));
+    }
+
+    /// A database without tables: the snapshot read is refused with `no such table`, and the
+    /// schema pipeline is refused at its third statement.
+    struct CreateRefused {
+        inner: Arc<SqliteTransport>,
+    }
+
+    impl Transport for CreateRefused {
+        fn post(
+            &self,
+            url: &str,
+            body: &[u8],
+            headers: &[(&str, &str)],
+        ) -> Result<Vec<u8>, cort::remote::RemoteError> {
+            let request: Value = serde_json::from_slice(body).unwrap();
+            let bytes = self.inner.post(url, body, headers)?;
+            let mut value: Value = serde_json::from_slice(&bytes).unwrap();
+            if request["requests"][0]["type"] == "batch" {
+                let result = &mut value["results"][0]["response"]["result"];
+                result["step_results"][1] = Value::Null;
+                result["step_errors"][1] = json!({"code": "SQLITE_ERROR", "message": "Parse error: no such table: project_memory"});
+            } else {
+                value["results"][2] = json!({"type": "error", "error": {"code": "SQLITE_ERROR", "message": "disk I/O"}});
+            }
+            Ok(serde_json::to_vec(&value).unwrap())
+        }
+    }
+
+    #[test]
+    fn a_refused_schema_statement_is_reported_as_create() {
+        let f = fixture();
+        let ledger = Ledger::with_transport(
+            "https://example.test",
+            "test",
+            Box::new(CreateRefused {
+                inner: f.inner.clone(),
+            }),
+        )
+        .unwrap();
+        let err = memory_store::recall_all_with(f.root(), "deploy", &ledger, false).unwrap_err();
+        assert_eq!(
+            err,
+            LedgerError::RemoteStatement(memory_store::StatementFailure {
+                trip: 1,
+                statement: Some(2),
+                statement_kind: "create",
+                query: None,
+                message: "disk I/O".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn provisioning_is_not_a_search_trip_and_a_search_sends_no_create() {
+        let f = fixture();
+        // First read of an empty database: the refused read, the schema, the read again.
+        let before = f.posts.load(Ordering::SeqCst);
+        assert_eq!(f.search_trips("deploy", false), 1);
+        assert_eq!(f.posts.load(Ordering::SeqCst) - before, 3);
+        // Afterwards one round trip, as a provisioned database always spent.
+        assert_eq!(f.trips("deploy", false), 1);
+        let (ledger, sql) = f.logging();
+        memory_store::recall_all_with(f.root(), "deploy", &ledger, false).unwrap();
+        assert!(sql
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|body| !body.contains("CREATE")));
     }
 
     fn words(n: usize) -> String {

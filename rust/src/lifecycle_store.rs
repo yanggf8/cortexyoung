@@ -9,7 +9,9 @@ use crate::memory::{active_entries, MemoryEntry, MemoryLedger};
 use crate::memory_lifecycle::{
     allowed, fold, kind_name, stamp, Kind, LifecycleEvent, LifecycleView, State,
 };
-use crate::memory_store::{outcome_unknown, project, resolve_one, Ledger, LedgerError};
+use crate::memory_store::{
+    execute_provisioned, outcome_unknown, project, resolve_one, Ledger, LedgerError,
+};
 use crate::memory_tiers::mentions_user;
 use crate::remind_store::{lean_field, not_recorded, now_ns};
 use crate::remote::Cell;
@@ -169,7 +171,7 @@ fn write_event(ledger: &Ledger, project: &str, event: &LifecycleEvent) -> Result
         Cell::Text(event.id.clone()),
         Cell::Text(body),
     ];
-    match ledger.db().execute(INSERT, args) {
+    match execute_provisioned(ledger.db(), INSERT, args) {
         Ok(result) if result.affected_row_count == 1 => Ok(()),
         Ok(result) if result.affected_row_count == 0 => Err(refuse(
             "memory_event_exists",

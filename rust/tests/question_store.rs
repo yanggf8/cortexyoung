@@ -15,6 +15,7 @@ enum Action {
 #[derive(Default)]
 struct Control {
     posts: usize,
+    bodies: Vec<String>,
     next: Vec<(usize, Action)>,
 }
 
@@ -33,6 +34,9 @@ impl Transport for Wrapped {
         let action = {
             let mut control = self.control.lock().unwrap();
             control.posts += 1;
+            control
+                .bodies
+                .push(String::from_utf8_lossy(body).into_owned());
             control
                 .next
                 .iter()
@@ -453,6 +457,8 @@ fn close_records_machine() {
 #[test]
 fn add_after_lost_response_reports_the_landed_id() {
     let f = Fixture::new();
+    // An empty database makes the first read three posts; provision so the numbers below hold.
+    f.list(ListFilter::All);
     // Post 1 reads the events, post 2 is the insert.
     f.arm(2, Action::ForwardThenTimeout);
     let out = f.add("Keep the deadline?");
@@ -698,4 +704,28 @@ fn retry_command_keeps_the_quote_and_option() {
         )),
         "{err}"
     );
+}
+
+fn tables(f: &Fixture) -> usize {
+    f.query("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'project_%'")
+        .unwrap()
+        .len()
+}
+
+fn sent_a_create(f: &Fixture) -> bool {
+    let control = f.control.lock().unwrap();
+    control.bodies.iter().any(|body| body.contains("CREATE"))
+}
+
+#[test]
+fn a_new_database_answers_empty_and_later_reads_send_no_create() {
+    let f = Fixture::new();
+    assert_eq!(tables(&f), 0);
+    let listed = f.list(ListFilter::All);
+    assert_eq!(listed["questions"], json!([]), "{listed}");
+    assert_eq!(tables(&f), 5);
+    f.control.lock().unwrap().bodies.clear();
+    f.list(ListFilter::All);
+    assert!(!f.control.lock().unwrap().bodies.is_empty());
+    assert!(!sent_a_create(&f));
 }

@@ -1226,6 +1226,8 @@ fn pre_read_and_definite_write_failures_save_no_row() {
         f.record("one", "A", None),
         Err(LedgerError::NotRecorded { .. })
     ));
+    // The failed read above left the database empty; provision it so post 2 below is the INSERT.
+    f.ledger.read(&f.project()).unwrap();
     // 401 is a definite refusal, not an unknown outcome: no reread follows the failed write.
     let before = f.control.lock().unwrap().posts;
     f.arm(2, Action::Fail(401));
@@ -1242,6 +1244,8 @@ fn pre_read_and_definite_write_failures_save_no_row() {
 #[test]
 fn timeout_after_forward_is_reconciled() {
     let f = Fixture::new();
+    // Provision first: the first read of an empty database is three posts, not one.
+    f.ledger.read(&f.project()).unwrap();
     f.arm(2, Action::ForwardThenTimeout);
     assert!(f.record("choice", "A", None).is_ok());
     assert_eq!(f.ledger.read(&f.project()).unwrap().entries.len(), 1);
@@ -1250,6 +1254,7 @@ fn timeout_after_forward_is_reconciled() {
 #[test]
 fn timeout_after_forward_and_failed_reread_is_unknown() {
     let f = Fixture::new();
+    f.ledger.read(&f.project()).unwrap();
     f.arm(2, Action::ForwardThenTimeout);
     f.arm(3, Action::Fail(503));
     let result = f.record("choice", "A", None);
@@ -1275,6 +1280,7 @@ fn timeout_after_forward_and_failed_reread_is_unknown() {
 #[test]
 fn committed_write_with_failed_reread_keeps_row() {
     let f = Fixture::new();
+    f.ledger.read(&f.project()).unwrap();
     f.arm(3, Action::Fail(503));
     let result = f.record("choice", "A", None);
     let Err(LedgerError::CommittedUnverified { id, .. }) = result else {
@@ -1292,6 +1298,7 @@ fn committed_write_with_failed_reread_keeps_row() {
 #[test]
 fn unforwarded_timeout_with_good_reread_is_not_recorded() {
     let f = Fixture::new();
+    f.ledger.read(&f.project()).unwrap();
     f.arm(2, Action::Fail(504));
     assert!(matches!(
         f.record("choice", "A", None),
@@ -1493,6 +1500,7 @@ fn resolve_settles_two_active_entries() {
 #[test]
 fn sql_error_after_a_committed_write_is_settled_by_the_reread() {
     let f = Fixture::new();
+    f.ledger.read(&f.project()).unwrap();
     f.arm(2, Action::ForwardThenFail(400));
     assert!(f.record("choice", "A", None).is_ok());
     assert_eq!(f.ledger.read(&f.project()).unwrap().entries.len(), 1);
@@ -1619,26 +1627,30 @@ fn recording_ledger() -> (Ledger, Arc<Mutex<Vec<String>>>) {
 #[test]
 fn read_with_lifecycle_one_round_trip() {
     let (ledger, bodies) = recording_ledger();
+    // The tables are created when a read first finds one missing; that read is not the subject.
+    ledger.read("p").unwrap();
+    bodies.lock().unwrap().clear();
     let (read, rows) = ledger.read_with_lifecycle("p").unwrap();
     assert!(read.entries.is_empty());
     assert!(rows.events.is_empty());
     assert_eq!(rows.unreadable, 0);
-    let bodies = bodies.lock().unwrap();
-    assert_eq!(bodies.len(), 1, "one pipeline, got {bodies:?}");
-    let sent = &bodies[0];
-    for needle in [
-        "CREATE TABLE IF NOT EXISTS project_memory_lifecycle",
-        "SELECT body FROM project_memory WHERE project IN (WITH RECURSIVE",
-        "SELECT body FROM project_memory_lifecycle WHERE project IN (WITH RECURSIVE",
-    ] {
-        assert!(sent.contains(needle), "{needle} missing from {sent}");
+    {
+        let bodies = bodies.lock().unwrap();
+        assert_eq!(bodies.len(), 1, "one pipeline, got {bodies:?}");
+        let sent = &bodies[0];
+        assert!(!sent.contains("CREATE"), "{sent}");
+        for needle in [
+            "SELECT body FROM project_memory WHERE project IN (WITH RECURSIVE",
+            "SELECT body FROM project_memory_lifecycle WHERE project IN (WITH RECURSIVE",
+        ] {
+            assert!(sent.contains(needle), "{needle} missing from {sent}");
+        }
     }
-    // The plain read creates the table too, but does not select from it.
-    let (plain, plain_bodies) = recording_ledger();
-    plain.read("p").unwrap();
-    let plain_bodies = plain_bodies.lock().unwrap();
+    // The plain read does not select from the lifecycle table.
+    bodies.lock().unwrap().clear();
+    ledger.read("p").unwrap();
+    let plain_bodies = bodies.lock().unwrap();
     assert_eq!(plain_bodies.len(), 1);
-    assert!(plain_bodies[0].contains("CREATE TABLE IF NOT EXISTS project_memory_lifecycle"));
     assert!(!plain_bodies[0].contains("SELECT body FROM project_memory_lifecycle"));
 }
 
@@ -1838,4 +1850,270 @@ fn undecodable_lifecycle_row_blocks_neither_alias_add_nor_remove() {
     .unwrap();
     assert_eq!(linked.outcome, "linked");
     assert_eq!(remove_old(&f).unwrap().outcome, "removed");
+}
+
+/// A ledger whose every request body is kept, over a database the test can also reach raw.
+struct Recorded {
+    _temp: tempfile::TempDir,
+    ledger: Ledger,
+    inner: Arc<SqliteTransport>,
+    bodies: Arc<Mutex<Vec<String>>>,
+}
+
+impl Recorded {
+    fn new() -> Self {
+        let temp = tempfile::tempdir().unwrap();
+        for args in [
+            vec!["init"],
+            vec!["remote", "add", "origin", "https://example.test/lazy.git"],
+        ] {
+            assert!(Command::new("git")
+                .current_dir(temp.path())
+                .args(args)
+                .output()
+                .unwrap()
+                .status
+                .success());
+        }
+        let inner = Arc::new(SqliteTransport::new().unwrap());
+        let bodies = Arc::new(Mutex::new(Vec::new()));
+        let ledger = Ledger::with_transport(
+            "https://example.test",
+            "test",
+            Box::new(Recording {
+                inner: inner.clone(),
+                bodies: bodies.clone(),
+            }),
+        )
+        .unwrap();
+        Self {
+            _temp: temp,
+            ledger,
+            inner,
+            bodies,
+        }
+    }
+    fn root(&self) -> &Path {
+        self._temp.path()
+    }
+    fn raw(&self, sql: &str) -> Vec<serde_json::Value> {
+        let body =
+            json!({"requests":[{"type":"execute","stmt":{"sql":sql,"args":[]}},{"type":"close"}]})
+                .to_string();
+        let response = self
+            .inner
+            .post("https://example.test", body.as_bytes(), &[])
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&response).unwrap();
+        assert_eq!(value["results"][0]["type"], "ok", "{value}");
+        value["results"][0]["response"]["result"]["rows"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+    }
+    fn tables(&self) -> Vec<String> {
+        self.raw("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'project_%' ORDER BY name")
+            .iter()
+            .map(|row| row[0]["value"].as_str().unwrap().to_string())
+            .collect()
+    }
+}
+
+const ALL_TABLES: [&str; 5] = [
+    "project_aliases",
+    "project_memory",
+    "project_memory_lifecycle",
+    "project_questions",
+    "project_reminders",
+];
+
+/// Every read command that used to carry the `CREATE` prefix, by name.
+type ReadCommand = (&'static str, fn(&Recorded));
+
+fn read_commands() -> Vec<ReadCommand> {
+    fn question_list(f: &Recorded) {
+        cort::question_store::list_with(
+            f.root(),
+            cort::question_store::ListFilter::All,
+            None,
+            None,
+            &f.ledger,
+        )
+        .unwrap();
+    }
+    fn remind_list(f: &Recorded) {
+        cort::remind_store::list_with(
+            f.root(),
+            cort::remind_store::ListFilter::All,
+            None,
+            None,
+            &f.ledger,
+        )
+        .unwrap();
+    }
+    vec![
+        ("read", |f| {
+            let project = memory_store::project(f.root()).unwrap();
+            assert!(f.ledger.read(&project).unwrap().entries.is_empty());
+        }),
+        ("read_with_lifecycle", |f| {
+            let project = memory_store::project(f.root()).unwrap();
+            f.ledger.read_with_lifecycle(&project).unwrap();
+        }),
+        ("search recall", |f| {
+            memory_store::recall_all_with(f.root(), "anything", &f.ledger, false).unwrap();
+        }),
+        ("alias list", |f| {
+            assert!(memory_store::alias_list_with(f.root(), &f.ledger).is_ok());
+        }),
+        ("question list", question_list),
+        ("remind list", remind_list),
+    ]
+}
+
+fn assert_no_create(f: &Recorded, what: &str) {
+    for body in f.bodies.lock().unwrap().iter() {
+        assert!(!body.contains("CREATE"), "{what} sent a CREATE: {body}");
+    }
+}
+
+#[test]
+fn reads_on_provisioned_tables_send_no_create() {
+    let f = Recorded::new();
+    // One pass provisions everything; the passes after it must not send a CREATE.
+    for (_, run) in read_commands() {
+        run(&f);
+    }
+    assert_eq!(f.tables(), ALL_TABLES);
+    f.bodies.lock().unwrap().clear();
+    for (name, run) in read_commands() {
+        run(&f);
+        assert_no_create(&f, name);
+    }
+    assert!(!f.bodies.lock().unwrap().is_empty());
+}
+
+#[test]
+fn every_read_answers_empty_on_a_brand_new_database_and_leaves_all_tables() {
+    for (name, run) in read_commands() {
+        let f = Recorded::new();
+        assert!(f.tables().is_empty());
+        run(&f);
+        assert_eq!(f.tables(), ALL_TABLES, "{name} left the schema incomplete");
+    }
+}
+
+#[test]
+fn a_read_that_meets_one_missing_table_creates_the_rest_too() {
+    let f = Recorded::new();
+    f.ledger.read("p").unwrap();
+    // `read` never touches the aliases or reminders table by name beyond the component query;
+    // dropping reminders and aliases proves the whole schema is recreated, not just the miss.
+    f.raw("DROP TABLE project_aliases");
+    f.raw("DROP TABLE project_reminders");
+    assert!(!f.tables().contains(&"project_reminders".to_string()));
+    f.ledger.read("p").unwrap();
+    assert_eq!(f.tables(), ALL_TABLES);
+}
+
+/// Each write below drops its own table AFTER the command's read and BEFORE its INSERT (armed
+/// at post 2: post 1 is the read), so the INSERT is the statement that meets the missing table
+/// and only `execute_provisioned` can save it.
+fn provisioned_fixture() -> Fixture {
+    let f = Fixture::new();
+    f.ledger.read(&f.project()).unwrap();
+    f
+}
+
+#[test]
+fn record_insert_survives_its_table_dropped_after_the_read() {
+    let f = provisioned_fixture();
+    f.arm(2, Action::Sql("DROP TABLE project_memory".into()));
+    f.record("choice", "A", None).unwrap();
+    assert_eq!(f.ledger.read(&f.project()).unwrap().entries.len(), 1);
+}
+
+#[test]
+fn alias_insert_survives_its_table_dropped_after_the_read() {
+    let f = provisioned_fixture();
+    let row = f.record("one", "A", None).unwrap();
+    f.insert("old-project", &row);
+    f.arm(2, Action::Sql("DROP TABLE project_aliases".into()));
+    let out = memory_store::alias_add_with(
+        f.root(),
+        memory_store::AliasFrom::Project("old-project".into()),
+        &f.ledger,
+    )
+    .unwrap();
+    assert_eq!(out.outcome, "linked");
+    let aliases = memory_store::alias_list_with(f.root(), &f.ledger)
+        .unwrap()
+        .aliases;
+    assert_eq!(aliases.len(), 1);
+}
+
+#[test]
+fn lifecycle_insert_survives_its_table_dropped_after_the_read() {
+    let f = provisioned_fixture();
+    f.arm(2, Action::Sql("DROP TABLE project_memory_lifecycle".into()));
+    cort::lifecycle_store::switch_with(f.root(), &f.ledger, true, None).unwrap();
+    let (_, rows) = f.ledger.read_with_lifecycle(&f.project()).unwrap();
+    assert_eq!(rows.events.len(), 1);
+}
+
+#[test]
+fn question_insert_survives_its_table_dropped_after_the_read() {
+    let f = provisioned_fixture();
+    f.arm(2, Action::Sql("DROP TABLE project_questions".into()));
+    cort::question_store::add_with(
+        f.root(),
+        cort::question_store::AddArgs {
+            text: "which one".into(),
+            options: Vec::new(),
+            recommend: None,
+            blocks: None,
+            by: None,
+            harness: None,
+            force: false,
+        },
+        &f.ledger,
+    )
+    .unwrap();
+    let listed = cort::question_store::list_with(
+        f.root(),
+        cort::question_store::ListFilter::All,
+        None,
+        None,
+        &f.ledger,
+    )
+    .unwrap();
+    assert_eq!(listed["questions"].as_array().unwrap().len(), 1, "{listed}");
+}
+
+#[test]
+fn reminder_insert_survives_its_table_dropped_after_the_read() {
+    let f = provisioned_fixture();
+    f.arm(2, Action::Sql("DROP TABLE project_reminders".into()));
+    cort::remind_store::add_with(
+        f.root(),
+        cort::remind_store::AddArgs {
+            text: "later".into(),
+            on: "2099-01-01+08:00".into(),
+            lead: 1,
+            blocks: None,
+            harness: None,
+            force: false,
+        },
+        &f.ledger,
+    )
+    .unwrap();
+    let listed = cort::remind_store::list_with(
+        f.root(),
+        cort::remind_store::ListFilter::All,
+        None,
+        None,
+        &f.ledger,
+    )
+    .unwrap();
+    assert_eq!(listed["reminders"].as_array().unwrap().len(), 1, "{listed}");
 }

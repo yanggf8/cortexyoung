@@ -118,9 +118,9 @@ counts, forgetting-due entries per UTC week, evidence statuses); `--lean` prints
 one TSV row per entry. Both outputs name the epoch instant (`epoch_utc`). An entry whose
 `recorded_at` cannot be read gets tier `unknown`, is counted in neither tier, and is reported as
 `unparsed_recorded_at`. `--epoch` must name a day whose local midnight exists (a zone that enters
-DST at midnight has days that do not). It writes no rows; like every read, it may create missing
-tables (idempotent `CREATE TABLE IF NOT EXISTS`). It exists to size the proposal against the real
-ledger.
+DST at midnight has days that do not). It writes no rows; like every read, it creates the tables
+(idempotent `CREATE TABLE IF NOT EXISTS`) only when the server reports one missing. It exists to
+size the proposal against the real ledger.
 
 `record` accepts a claim without a source. When a natural source exists, pass `--source` and
 `--line` together; the file must be tracked and committed, and the cited line nonblank. For a correction,
@@ -174,7 +174,8 @@ query`, `i` counting from 0 for the positional query). When the server refuses a
 search, the `memory_remote_unavailable` error keeps `remote: sql` and adds `detail`: `trip`,
 `statement` (its index in the trip, absent outside the statements), `statement_kind` (`count`,
 `conflicts`, `screen`, `lifecycle`, `excluded`, `stage1`, `stage2`, or `create`, `begin`,
-`commit`, `rollback`, `close`), `query` (for a stage) and the server's `message`, flattened to one
+`commit`, `rollback`, `close`; `create` is a statement of the batch that creates the tables after
+the read found one missing, and `statement` is then its index in that batch), `query` (for a stage) and the server's `message`, flattened to one
 line and cut at 300 bytes; every user term in those statements is a bound parameter. The screen
 sends recall to the whole-ledger read, which fails with today's message, for a body that is not JSON or lacks `id`, `key` or `claim`, an
 empty `id`, a blank `key` or `claim`, a missing or own-id predecessor, a predecessor under another
@@ -348,10 +349,12 @@ result: if only the questions read fails with a SQL error it is dropped with no 
 ledger and notes from the same request are kept; the usage row records
 `questions: "dropped"`, plus `questions_open` (before the cap) and `questions_shown`.
 
-**Deploy.** The table is created by the same DDL batch as `project_memory`, when any `cort memory`
-or `cort question` command opens the ledger. After deploying, run `cort question list` once on any
-machine in each project: that provisions the shared database for the whole fleet, so session
-start never has to drop the questions read.
+**Deploy.** A command creates the tables when it finds one missing, but `recall`, `record` and
+`status` read only the ledger and alias tables (search adds lifecycle). On an older database
+that lacks `project_questions`, only a `cort question`, `cort remind` or `cort memory alias`
+command creates it, so after deploying run `cort question list` once on any machine in each
+project: that provisions the shared database for the whole fleet. Until then session start drops
+the questions read.
 
 ## Reminders
 
@@ -407,9 +410,12 @@ new reminder made on another machine reaches a running session at its next sessi
 next prompt. A snapshot older than 3 days is not replayed: one line says its date and to run
 `cort remind list`, which stays the authoritative answer. Codex is not wired yet.
 
-**Deploy.** The table is created by the same DDL batch as the ledger. After deploying, run
-`cort remind list` once on any machine: it provisions the table for the fleet. A machine on an
-older cort never shows reminders, so upgrade every machine that should see them.
+**Deploy.** A command creates the tables when it finds one missing, but `recall`, `record` and
+`status` read only the ledger and alias tables (search adds lifecycle). On an older database
+that lacks `project_reminders`, only a `cort question`, `cort remind` or `cort memory alias`
+command creates it, so after deploying run `cort remind list` once on any machine: it
+provisions the table for the fleet. Until then session start drops the reminders read. A
+machine on an older cort never shows reminders, so upgrade every machine that should see them.
 
 ## Deployment evidence and the next gate
 

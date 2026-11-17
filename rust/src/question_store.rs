@@ -3,7 +3,8 @@
 //! the ledger's checked-write rule (insert by id, read the id back when the response is lost).
 
 use crate::memory_store::{
-    outcome_unknown, project, Ledger, LedgerError, COMPONENT, CREATE_ALIASES, CREATE_QUESTIONS,
+    execute_provisioned, outcome_unknown, pipeline_provisioned, project, Ledger, LedgerError,
+    COMPONENT,
 };
 use crate::question::{
     self, classify, fold, resolve_prefix, validate_ask, Dedup, EventKind, Folded, Question,
@@ -96,20 +97,19 @@ struct Events {
     total: usize,
 }
 
-/// Every event of the component; provisions the table (and the alias table the component
-/// query reads) first, so a fresh database answers with no events rather than an error.
+/// Every event of the component. The read carries no `CREATE`: when the server reports a table
+/// missing (this one, or the alias table the component query reads) the tables are created and
+/// the read repeated, so a fresh database answers with no events rather than an error.
 fn read_events(ledger: &Ledger, project: &str) -> Result<Events, LedgerError> {
     let sql = format!("SELECT project, body FROM project_questions WHERE project IN ({COMPONENT})");
-    let results = ledger
-        .db()
-        .pipeline(&[
-            Stmt::new(CREATE_QUESTIONS, vec![]),
-            Stmt::new(CREATE_ALIASES, vec![]),
-            Stmt::new(sql, vec![Cell::Text(project.into())]),
-        ])
-        .map_err(|e| LedgerError::Remote(e.kind))?;
+    let events_at = 0;
+    let results = pipeline_provisioned(
+        ledger.db(),
+        &[Stmt::new(sql, vec![Cell::Text(project.into())])],
+    )
+    .map_err(|e| LedgerError::Remote(e.kind))?;
     let rows = &results
-        .get(2)
+        .get(events_at)
         .ok_or_else(|| LedgerError::Message("missing remote question result".into()))?
         .rows;
     let mut events = Vec::with_capacity(rows.len());
@@ -181,7 +181,7 @@ fn write_event(ledger: &Ledger, project: &str, event: &QuestionEvent) -> Result<
         Cell::Text(event.id.clone()),
         Cell::Text(body),
     ];
-    match ledger.db().execute(INSERT, args) {
+    match execute_provisioned(ledger.db(), INSERT, args) {
         Ok(result) if result.affected_row_count == 1 => Ok(()),
         Ok(result) if result.affected_row_count == 0 => Err(LedgerError::Message(format!(
             "question event {} already exists; nothing was written",

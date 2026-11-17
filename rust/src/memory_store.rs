@@ -4,7 +4,9 @@ use crate::memory::{self, Haystack, MemoryEntry, MemoryLedger, MemoryRecall, Sco
 use crate::memory_search::{self, query_terms, QueryTerms, Stage2, StageQuery};
 use crate::question::QuestionEvent;
 use crate::remind::{EventKind, ReminderEvent};
-use crate::remote::{Cell, ErrorKind, RemoteDb, Stmt, StmtResult, Transport, UreqTransport};
+use crate::remote::{
+    Cell, ErrorKind, RemoteDb, RemoteError, Stmt, StmtResult, Transport, UreqTransport,
+};
 use crate::{notes, notes_upload, usage};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -21,6 +23,63 @@ pub(crate) const CREATE_ALIASES: &str = "CREATE TABLE IF NOT EXISTS project_alia
 pub(crate) const CREATE_QUESTIONS: &str = "CREATE TABLE IF NOT EXISTS project_questions (project TEXT NOT NULL, id TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY (project, id))";
 pub(crate) const CREATE_REMINDERS: &str = "CREATE TABLE IF NOT EXISTS project_reminders (project TEXT NOT NULL, id TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY (project, id))";
 pub(crate) const CREATE_LIFECYCLE: &str = "CREATE TABLE IF NOT EXISTS project_memory_lifecycle (project TEXT NOT NULL, id TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY (project, id))";
+
+/// Every table the ledger, questions, reminders, lifecycle and aliases commands read or write.
+/// Sent only when a statement meets a missing table (`pipeline_provisioned`): a `CREATE TABLE IF
+/// NOT EXISTS` is a write to the server, and a read that carries one waits behind any open writer.
+pub(crate) const SCHEMA: [&str; 5] = [
+    CREATE_TABLE,
+    CREATE_ALIASES,
+    CREATE_QUESTIONS,
+    CREATE_REMINDERS,
+    CREATE_LIFECYCLE,
+];
+
+/// The error a statement gets from a table that does not exist. SQLite says `no such table: x`;
+/// TursoDB says `Parse error: no such table: x`. A statement refused this way never ran.
+pub(crate) fn missing_table(e: &RemoteError) -> bool {
+    e.kind == ErrorKind::Sql
+        && e.server_message()
+            .is_some_and(|m| m.contains("no such table"))
+}
+
+/// The `SCHEMA` statements, as one pipeline's statements.
+pub(crate) fn schema_stmts() -> Vec<Stmt> {
+    SCHEMA.iter().map(|sql| Stmt::new(*sql, vec![])).collect()
+}
+
+/// Run `send`; when it fails on a missing table, create every table (own pipeline, its error
+/// returned as is) and run `send` exactly once more.
+fn provisioned<T>(
+    db: &RemoteDb,
+    send: impl Fn() -> Result<T, RemoteError>,
+) -> Result<T, RemoteError> {
+    match send() {
+        Err(e) if missing_table(&e) => {
+            db.pipeline(&schema_stmts())?;
+            send()
+        }
+        other => other,
+    }
+}
+
+/// `db.pipeline(stmts)`, creating the tables first if the server reports one missing.
+pub(crate) fn pipeline_provisioned(
+    db: &RemoteDb,
+    stmts: &[Stmt],
+) -> Result<Vec<StmtResult>, RemoteError> {
+    provisioned(db, || db.pipeline(stmts))
+}
+
+/// `db.execute(sql, args)`, creating the tables first if the server reports one missing. The
+/// error means the statement never ran, so the second send cannot double-apply it.
+pub(crate) fn execute_provisioned(
+    db: &RemoteDb,
+    sql: &str,
+    args: Vec<Cell>,
+) -> Result<StmtResult, RemoteError> {
+    provisioned(db, || db.execute(sql, args.clone()))
+}
 /// The alias component as a recursive CTE named `$g`, with one column `p`, seeded with its one `?`
 /// (the project). One text for both forms below, so they cannot drift.
 macro_rules! component_cte {
@@ -183,9 +242,10 @@ impl Ledger {
         Ok(self.read_bodies_with(project, false)?.bodies)
     }
 
-    /// The ledger read, optionally with the lifecycle rows in the same pipeline. The lifecycle
-    /// table is created by every read, so a later lifecycle read never meets a missing one; its
-    /// rows are returned as raw cells, to be counted rather than failed on.
+    /// The ledger read, optionally with the lifecycle rows in the same pipeline. It carries no
+    /// `CREATE`: the tables are created when the server reports one missing
+    /// (`pipeline_provisioned`), so a fresh database answers empty. The lifecycle rows are
+    /// returned as raw cells, to be counted rather than failed on.
     fn read_bodies_with(
         &self,
         project: &str,
@@ -197,23 +257,15 @@ impl Ledger {
         let arg = || vec![Cell::Text(project.into())];
         // Each result is named where its statement is pushed, so appending a statement can
         // never silently shift another's index.
-        let mut stmts = vec![
-            Stmt::new(CREATE_TABLE, vec![]),
-            Stmt::new(CREATE_ALIASES, vec![]),
-            Stmt::new(CREATE_QUESTIONS, vec![]),
-            Stmt::new(CREATE_REMINDERS, vec![]),
-            Stmt::new(CREATE_LIFECYCLE, vec![]),
-        ];
+        let mut stmts = Vec::new();
         let bodies_at = stmts.len();
         stmts.push(Stmt::new(&sql, arg()));
         let lifecycle_at = with_lifecycle.then(|| {
             stmts.push(Stmt::new(&lifecycle_sql, arg()));
             stmts.len() - 1
         });
-        let mut results = self
-            .db
-            .pipeline(&stmts)
-            .map_err(|e| LedgerError::Remote(e.kind))?;
+        let mut results =
+            pipeline_provisioned(&self.db, &stmts).map_err(|e| LedgerError::Remote(e.kind))?;
         // Defensive: `pipeline()` already guarantees one result per statement.
         if results.len() != stmts.len() {
             return Err(LedgerError::Message("missing remote memory result".into()));
@@ -715,7 +767,7 @@ impl Ledger {
         superseded: &[String],
         resolution: bool,
     ) -> Result<(), LedgerError> {
-        match self.db.execute(sql, args) {
+        match execute_provisioned(&self.db, sql, args) {
             Ok(result) if result.affected_row_count == 1 => {}
             Ok(result) if result.affected_row_count == 0 => {
                 let body = serde_json::to_string(entry)
@@ -2618,13 +2670,7 @@ impl Ledger {
         now_ns: i128,
     ) -> Result<Trip, LedgerError> {
         let archived_in_sql = narrow && !req.include_hidden;
-        let mut stmts = vec![
-            Stmt::new(CREATE_TABLE, vec![]),
-            Stmt::new(CREATE_ALIASES, vec![]),
-            Stmt::new(CREATE_QUESTIONS, vec![]),
-            Stmt::new(CREATE_REMINDERS, vec![]),
-            Stmt::new(CREATE_LIFECYCLE, vec![]),
-        ];
+        let mut stmts: Vec<Stmt> = Vec::new();
         // Each result is named where its statement is pushed, so appending a statement can
         // never silently shift another's index.
         let mut push = |stmt: Stmt| {
@@ -2653,7 +2699,7 @@ impl Ledger {
             let gated = second.is_some() && q.stage2 == Stage2::Gated;
             stages.push((first, second, gated));
         }
-        let mut labels: Vec<(&'static str, Option<usize>)> = vec![("create", None); stmts.len()];
+        let mut labels: Vec<(&'static str, Option<usize>)> = vec![("", None); stmts.len()];
         labels[count_at].0 = "count";
         labels[conflicts_at].0 = "conflicts";
         labels[screen_at].0 = "screen";
@@ -2667,10 +2713,24 @@ impl Ledger {
                 labels[*at] = ("stage2", Some(query));
             }
         }
-        let mut results = self
-            .db
-            .read_snapshot(&stmts)
-            .map_err(|e| refused_statement(&e, &labels, if narrow { 1 } else { 2 }))?;
+        let trip = if narrow { 1 } else { 2 };
+        let mut results = match self.db.read_snapshot(&stmts) {
+            // A table is missing: create them all (not a search trip, so `trips` does not count
+            // it), then read once more. A refused CREATE is reported as `create`.
+            Err(e) if missing_table(&e) => {
+                self.db.pipeline(&schema_stmts()).map_err(|mut e| {
+                    // `pipeline` numbers statement `i` as step `i`; `refused_statement` reads
+                    // a snapshot's numbering, where `BEGIN` is step 0. This pipeline has no
+                    // COMMIT, so a step past the schema (the close) is not a statement.
+                    e.step = e.step.filter(|s| *s < SCHEMA.len()).map(|s| s + 1);
+                    refused_statement(&e, &[("create", None); SCHEMA.len()], trip)
+                })?;
+                self.db
+                    .read_snapshot(&stmts)
+                    .map_err(|e| refused_statement(&e, &labels, trip))?
+            }
+            other => other.map_err(|e| refused_statement(&e, &labels, trip))?,
+        };
         // Defensive: `read_snapshot()` already guarantees one result per statement.
         if results.len() != stmts.len() {
             return Err(LedgerError::Message("missing remote memory result".into()));
@@ -3053,13 +3113,7 @@ impl Ledger {
         let arg = || vec![Cell::Text(project.into())];
         // Each result is named where its statement is pushed, so appending a statement can
         // never silently shift another's index.
-        let mut stmts = vec![
-            Stmt::new(CREATE_TABLE, vec![]),
-            Stmt::new(CREATE_ALIASES, vec![]),
-            Stmt::new(CREATE_QUESTIONS, vec![]),
-            Stmt::new(CREATE_REMINDERS, vec![]),
-            Stmt::new(CREATE_LIFECYCLE, vec![]),
-        ];
+        let mut stmts = Vec::new();
         let ids_at = stmts.len();
         stmts.push(Stmt::new(COMPONENT, arg()));
         let aliases_at = stmts.len();
@@ -3072,10 +3126,8 @@ impl Ledger {
         stmts.push(Stmt::new(reminders_sql, arg()));
         let lifecycle_at = stmts.len();
         stmts.push(Stmt::new(lifecycle_sql, arg()));
-        let results = self
-            .db
-            .pipeline(&stmts)
-            .map_err(|e| LedgerError::Remote(e.kind))?;
+        let results =
+            pipeline_provisioned(&self.db, &stmts).map_err(|e| LedgerError::Remote(e.kind))?;
         let result = |at: usize| {
             results
                 .get(at)
@@ -3178,7 +3230,7 @@ impl Ledger {
             ]
         };
         let pair_sql = "SELECT 1 FROM project_aliases WHERE (old_project = ? AND new_project = ?) OR (old_project = ? AND new_project = ?)";
-        match self.db.execute(sql, args) {
+        match execute_provisioned(&self.db, sql, args) {
             Ok(result) if result.affected_row_count == expected_count => Ok(true),
             Ok(result) if present_after && result.affected_row_count == 0 => {
                 match self.db.execute(pair_sql, pair_args()) {
@@ -4232,5 +4284,149 @@ mod tests {
         assert_eq!(memory::active_entries(&a)[0].claim, "B");
         assert_eq!(b.entries.len(), 1);
         assert_eq!(b.entries[0].claim, "A");
+    }
+
+    /// A transport that keeps every request body and answers through a real SQLite.
+    struct Recording {
+        inner: std::sync::Arc<crate::remote::SqliteTransport>,
+        bodies: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl Transport for Recording {
+        fn post(
+            &self,
+            url: &str,
+            body: &[u8],
+            headers: &[(&str, &str)],
+        ) -> Result<Vec<u8>, crate::remote::RemoteError> {
+            self.bodies
+                .lock()
+                .unwrap()
+                .push(String::from_utf8_lossy(body).into_owned());
+            self.inner.post(url, body, headers)
+        }
+    }
+
+    fn recording_db() -> (
+        RemoteDb,
+        std::sync::Arc<crate::remote::SqliteTransport>,
+        std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    ) {
+        let inner = std::sync::Arc::new(crate::remote::SqliteTransport::new().unwrap());
+        let bodies = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let db = RemoteDb::new(
+            "https://example.test",
+            "test",
+            Box::new(Recording {
+                inner: inner.clone(),
+                bodies: bodies.clone(),
+            }),
+        )
+        .unwrap();
+        (db, inner, bodies)
+    }
+
+    fn sql_error(kind: ErrorKind, message: &str) -> RemoteError {
+        let body = json!({"results":[{"type":"error","error":{"code":"SQLITE_ERROR","message":message}},{"type":"ok"}]});
+        struct Canned(Vec<u8>);
+        impl Transport for Canned {
+            fn post(&self, _: &str, _: &[u8], _: &[(&str, &str)]) -> Result<Vec<u8>, RemoteError> {
+                Ok(self.0.clone())
+            }
+        }
+        let db = RemoteDb::new(
+            "https://example.test",
+            "test",
+            Box::new(Canned(body.to_string().into_bytes())),
+        )
+        .unwrap();
+        let mut error = db.execute("SELECT 1", vec![]).unwrap_err();
+        error.kind = kind;
+        error
+    }
+
+    #[test]
+    fn missing_table_reads_both_servers_phrasing() {
+        assert!(missing_table(&sql_error(
+            ErrorKind::Sql,
+            "no such table: project_memory"
+        )));
+        assert!(missing_table(&sql_error(
+            ErrorKind::Sql,
+            "Parse error: no such table: project_aliases"
+        )));
+        assert!(!missing_table(&sql_error(
+            ErrorKind::Sql,
+            "no such column: body"
+        )));
+        assert!(!missing_table(&sql_error(
+            ErrorKind::Busy,
+            "no such table: project_memory"
+        )));
+    }
+
+    #[test]
+    fn pipeline_provisioned_creates_tables_only_after_a_miss() {
+        let (db, _inner, bodies) = recording_db();
+        let stmts = [Stmt::new("SELECT body FROM project_memory", vec![])];
+        let results = pipeline_provisioned(&db, &stmts).unwrap();
+        assert!(results[0].rows.is_empty());
+        {
+            let sent = bodies.lock().unwrap();
+            // The read, the schema pipeline, the read again: nothing more.
+            assert_eq!(sent.len(), 3, "{sent:?}");
+            assert!(!sent[0].contains("CREATE"));
+            assert!(sent[1].contains("CREATE TABLE IF NOT EXISTS project_memory_lifecycle"));
+            assert!(!sent[2].contains("CREATE"));
+        }
+        bodies.lock().unwrap().clear();
+        pipeline_provisioned(&db, &stmts).unwrap();
+        let sent = bodies.lock().unwrap();
+        assert_eq!(sent.len(), 1, "{sent:?}");
+        assert!(!sent[0].contains("CREATE"));
+    }
+
+    #[test]
+    fn pipeline_provisioned_sends_the_statements_once_more_at_most() {
+        let (db, _inner, bodies) = recording_db();
+        // A table no schema statement creates: the second send fails too and is returned.
+        let stmts = [Stmt::new("SELECT body FROM not_in_schema", vec![])];
+        let error = pipeline_provisioned(&db, &stmts).unwrap_err();
+        assert!(missing_table(&error));
+        assert_eq!(bodies.lock().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn execute_provisioned_creates_a_missing_table_then_inserts_once() {
+        let (db, _inner, bodies) = recording_db();
+        let insert = "INSERT INTO project_reminders (project, id, body) VALUES (?, ?, ?)";
+        let args = vec![
+            Cell::Text("p".into()),
+            Cell::Text("e1".into()),
+            Cell::Text("{}".into()),
+        ];
+        let result = execute_provisioned(&db, insert, args).unwrap();
+        assert_eq!(result.affected_row_count, 1);
+        assert_eq!(bodies.lock().unwrap().len(), 3);
+        let rows = db
+            .execute("SELECT id FROM project_reminders", vec![])
+            .unwrap()
+            .rows;
+        assert_eq!(rows.len(), 1);
+    }
+
+    #[test]
+    fn execute_provisioned_does_not_provision_for_other_errors() {
+        let (db, _inner, bodies) = recording_db();
+        db.pipeline(&schema_stmts()).unwrap();
+        bodies.lock().unwrap().clear();
+        let error = execute_provisioned(
+            &db,
+            "INSERT INTO project_reminders (nope) VALUES (1)",
+            vec![],
+        )
+        .unwrap_err();
+        assert!(!missing_table(&error));
+        assert_eq!(bodies.lock().unwrap().len(), 1);
     }
 }

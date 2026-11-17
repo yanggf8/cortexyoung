@@ -590,14 +590,14 @@ mod tests {
     fn a_refused_search_statement_is_named_in_the_error() {
         let f = fixture();
         let queries = vec!["deploy".to_string()];
-        // Request 0 is the baseline; request 1 the replay's trip, whose step 11 is the first
-        // query's stage 1 (five CREATEs, count, conflicts, screen, lifecycle, excluded).
-        let ledger = f.tampered(1, Act::FailStep(11, "SQLITE_ERROR"));
+        // Request 0 is the baseline; request 1 the replay's trip, whose step 6 is the first
+        // query's stage 1 (BEGIN is step 0, then count, conflicts, screen, lifecycle, excluded).
+        let ledger = f.tampered(1, Act::FailStep(6, "SQLITE_ERROR"));
         let err = report(&ledger, PROJECT, &queries, 0, f.now).unwrap_err();
         assert_eq!(
             err,
             "query 1 of 1 \"deploy\": replay failed after 0 equal: remote sql: \
-             {\"message\":\"SQLITE_ERROR\",\"query\":0,\"statement\":10,\
+             {\"message\":\"SQLITE_ERROR\",\"query\":0,\"statement\":5,\
              \"statement_kind\":\"stage1\",\"trip\":1}"
         );
     }
