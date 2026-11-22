@@ -152,8 +152,26 @@ fn verbs_usage_value(command: clap::Command, prefix: &str, note: &str) -> Value 
         let mut parts = vec![format!("{prefix} {}", verb.get_name())];
         // A required one-of group prints as `(--a <A> | --b <B>)`; its members are not optional.
         let mut grouped = Vec::new();
+        // An optional group whose members must come together prints as one optional unit,
+        // `[--a <A> --b <B>]`, so the pairing is visible before the parser rejects half of it.
+        let mut paired = Vec::new();
         for group in verb.get_groups() {
             if !group.is_required_set() {
+                // clap's derive adds an implicit group holding every argument of the struct
+                // (named after the struct, not the verb); only an explicitly declared, narrower
+                // group describes a pairing. clap 4 `is_multiple` takes `&mut self`, hence the clone.
+                let members: Vec<&clap::Id> = group.get_args().collect();
+                let implicit = verb
+                    .get_arguments()
+                    .all(|arg| members.contains(&arg.get_id()));
+                if !implicit && group.clone().is_multiple() {
+                    let texts: Vec<String> = verb
+                        .get_arguments()
+                        .filter(|arg| members.contains(&arg.get_id()))
+                        .map(arg_text)
+                        .collect();
+                    paired.push((members, format!("[{}]", texts.join(" "))));
+                }
                 continue;
             }
             let members: Vec<&clap::Id> = group.get_args().collect();
@@ -167,6 +185,13 @@ fn verbs_usage_value(command: clap::Command, prefix: &str, note: &str) -> Value 
         }
         for arg in verb.get_arguments() {
             if grouped.contains(&arg.get_id()) {
+                continue;
+            }
+            if let Some((members, text)) = paired.iter().find(|(m, _)| m.contains(&arg.get_id())) {
+                // Print the unit once, at its first member's position.
+                if members.first() == Some(&arg.get_id()) {
+                    parts.push(text.clone());
+                }
                 continue;
             }
             let text = arg_text(arg);
@@ -755,6 +780,9 @@ enum MemoryAction {
         #[arg(long)]
         from: PathBuf,
     },
+    /// `--source` and `--line` anchor the claim together: the `anchor` group is usage-only (the pairing
+    /// itself is enforced by `requires`) so `--help` prints them as one optional unit.
+    #[command(group(clap::ArgGroup::new("anchor").args(["source", "line"]).multiple(true)))]
     Record {
         #[arg(long, default_value = ".")]
         root: PathBuf,
@@ -772,6 +800,10 @@ enum MemoryAction {
         replace: bool,
     },
     /// Alias for record with repeated --supersedes.
+    ///
+    /// `--source` and `--line` anchor the claim together: the `anchor` group is usage-only (the pairing
+    /// itself is enforced by `requires`) so `--help` prints them as one optional unit.
+    #[command(group(clap::ArgGroup::new("anchor").args(["source", "line"]).multiple(true)))]
     Resolve {
         #[arg(long, default_value = ".")]
         root: PathBuf,

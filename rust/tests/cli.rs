@@ -400,6 +400,16 @@ fn memory_help_lists_each_memory_verb_with_its_options() {
             .as_str()
             .unwrap()
             .contains("--dry-run"));
+        for verb in ["record", "resolve"] {
+            assert!(
+                commands[verb]
+                    .as_str()
+                    .unwrap()
+                    .contains("[--source <SOURCE> --line <LINE>]"),
+                "{verb}: --source and --line must print as one unit: {}",
+                commands[verb]
+            );
+        }
         assert!(commands["alias add"]
             .as_str()
             .unwrap()
