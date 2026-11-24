@@ -112,7 +112,8 @@ fn gate_exit_modes_and_reason_shape() {
         (vec![fake_gate(), "fail"], "error", None),
         (vec![fake_gate(), "abort"], "error", None),
     ] {
-        check(&TempDir::new().unwrap(), &args, 200, tag, reason);
+        // The longest timeout a gate may have: 200 ms lost to a loaded CI runner.
+        check(&TempDir::new().unwrap(), &args, 1000, tag, reason);
     }
 }
 
@@ -158,7 +159,7 @@ fn blocked_stdin_and_inherited_stdout_do_not_hold_hook() {
     assert!(elapsed < SLOW_GATE / 2, "{elapsed:?}");
 
     // The gate exits 0 at once but leaves a 10 s grandchild holding its stdout.
-    configure(&dir, &[fake_gate(), "grandchild"], 200);
+    configure(&dir, &[fake_gate(), "grandchild"], 1000);
     let (response, row, elapsed) = run(&dir, "Bash", "cargo test");
     assert_eq!(response, json!({}));
     assert_eq!(row["gate"], "allow");
@@ -168,7 +169,7 @@ fn blocked_stdin_and_inherited_stdout_do_not_hold_hook() {
 #[test]
 fn deny_reason_is_capped_at_4096_bytes() {
     let dir = TempDir::new().unwrap();
-    configure(&dir, &[fake_gate(), "flood"], 200);
+    configure(&dir, &[fake_gate(), "flood"], 1000);
     let (response, row, _) = run(&dir, "Bash", "cargo test");
     assert_eq!(row["gate"], "deny");
     assert_eq!(

@@ -588,7 +588,6 @@ impl UreqTransport {
         use std::io::Read;
         NETWORK.reset();
         let _recording = NetworkRequest;
-        let (sent, timeout) = (Instant::now(), self.timeout);
         let began = Arc::new(AtomicU64::new(NetworkRecorder::tick()));
         let tls = AwsLcTls {
             config: tls_config()?,
@@ -597,6 +596,9 @@ impl UreqTransport {
                 began: Arc::clone(&began),
             }),
         };
+        // After the TLS config, whose first use loads the platform roots (237 ms went before the
+        // lookup on macOS, CI run 45433539919): ureq's request timeout starts at the send, too.
+        let (sent, timeout) = (Instant::now(), self.timeout);
         // ureq 2.12's per-request timeout does not bound the TCP connect: that waits for the
         // agent's `timeout_connect` (30 s by default), which a blackholed address reaches in
         // full (strace on 2026-10-28: `poll(..., 29999)` under a 1 s request timeout).

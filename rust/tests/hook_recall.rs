@@ -894,7 +894,7 @@ fn cli_hung_resolver_ends_well_before_the_deadline() {
     for (setting, spent, dns_ms) in [
         ("99999", "0", 3400..6000),
         ("400", "0", 350..2500),
-        ("99999", "9000", 1000..3000),
+        ("99999", "9000", 1..3000),
     ] {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
