@@ -33,7 +33,7 @@
 
 use crate::settings::{events_for, is_ours_for, HookEvent, EDIT_MATCHER};
 use crate::settings::{Change, Outcome};
-use crate::settings_toml::SettingsError;
+use crate::settings_toml::{replace_entry, SettingsError};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -59,9 +59,11 @@ fn event_name(event: HookEvent) -> &'static str {
         event.name()
     }
 }
-/// Seconds. Kimi's schema allows 1..=600; the other two modules use 5 and there is no reason for
-/// this one to differ, since the work is the same subprocess writing the same row and kick.
-const TIMEOUT_SECS: i64 = 5;
+/// Seconds, from the one table in `settings`: the work is the same subprocess on every harness.
+/// Kimi's schema allows 1..=600.
+fn timeout_secs(event: HookEvent) -> i64 {
+    i64::from(event.timeout_secs())
+}
 
 /// `${KIMI_CODE_HOME:-~/.kimi-code}/config.toml`, the same override `resolveKimiHome` reads.
 pub fn default_settings_path() -> Option<PathBuf> {
@@ -78,7 +80,7 @@ fn hook_table(command: &str, event: HookEvent) -> Table {
         t.insert("matcher", value(matcher));
     }
     t.insert("command", value(command));
-    t.insert("timeout", value(TIMEOUT_SECS));
+    t.insert("timeout", value(timeout_secs(event)));
     t
 }
 
@@ -91,7 +93,7 @@ fn is_canonical(h: &Table, command: &str, event: HookEvent) -> bool {
             None => h.get("matcher").is_none(),
         }
         && h.get("command").and_then(Item::as_str) == Some(command)
-        && h.get("timeout").and_then(Item::as_integer) == Some(TIMEOUT_SECS)
+        && h.get("timeout").and_then(Item::as_integer) == Some(timeout_secs(event))
 }
 
 fn read_doc(path: &Path) -> Result<DocumentMut, SettingsError> {
@@ -214,7 +216,7 @@ pub fn install_hook(
         if is_canonical(entry, command, event) {
             found_same = true;
         } else {
-            *entry = hook_table(command, event);
+            replace_entry(entry, hook_table(command, event));
             changed = true;
         }
     }

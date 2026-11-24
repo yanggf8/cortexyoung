@@ -209,15 +209,50 @@ pub trait Transport {
     ) -> Result<Vec<u8>, RemoteError>;
 }
 
-/// When the recall hook's network waits must end, from `main()`. Every harness kills a hook at 5 s
-/// (`settings::TIMEOUT_SECS` and its two TOML twins); the watchdog fires 900 ms after this, which
-/// covers what the deadline cannot bound: a blocking socket read outlasted its 4.175 s timeout by
-/// 30-210 ms on this machine (strace, 2026-10-29), a debug build spent ~35 ms between setting the
-/// socket timeout and its first read, and rendering plus the usage row follow. With 500 ms of
-/// headroom a slow CI runner still lost the race and printed nothing. It was 2500 ms until
-/// 2026-10-29, when the first read after an idle spell timed out on three session starts in one
-/// afternoon while warm reads took about 300 ms.
-pub const RECALL_DEADLINE: Duration = Duration::from_millis(3800);
+/// When the recall hook's network waits must end, from `main()`. It is long because the shared
+/// database cold-starts after about ten idle minutes, and the harness's limit on this one hook
+/// (`HookEvent::Recall.timeout_secs()`) is set to hold it.
+///
+/// The reading, taken on i5940R3070 on 2026-11-24 from cort-measure: 1,324 hook-recall rows of
+/// 2026-11-06..11-24 from NUC11i5, Thinkpade15, i51149R3050 and i514400RTX4060Ti. Every timeout
+/// stalled in the response phase. Since 2026-11-11 a read 1-10 min after the previous one was slow
+/// or timed out 1 time in 384; over 10 min, about half. Successful cold reads lengthened from
+/// ~2.0 s (11-06) to ~3.3 s (11-10), then hit the 3.5 s cap of the time. Of 27 timeout episodes,
+/// those a later read bounded were done 4.0, 4.1, 4.1, 4.5 and 4.8 s after the first read began;
+/// three were still not answering after 5 s (longest 10.2 s across two reads, possibly two cold
+/// starts). 42 of 42 reads that completed 10 s to 5 min after a timeout succeeded. Probing
+/// 20:48-22:34 caught no cold start, so no direct cold timing exists: 12 s is longer than every
+/// episode above, not a measured cold start.
+///
+/// It was 2500 ms until 2026-10-29 and 3800 ms until 2026-11-24, both under a 5 s hook limit.
+pub const RECALL_DEADLINE: Duration = Duration::from_millis(12_000);
+
+/// The watchdog fires this long after the deadline, which covers what the deadline cannot bound: a
+/// blocking socket read outlasted its 4.175 s timeout by 30-210 ms (strace, 2026-10-29, on the
+/// machine that set this margin), a debug build spent ~35 ms between setting the socket timeout and its first read,
+/// and rendering plus the usage row follow. With 500 ms a slow CI runner still lost the race and
+/// printed nothing.
+pub const RECALL_WATCHDOG_MARGIN: Duration = Duration::from_millis(900);
+
+/// What either writer gets after the watchdog fires: the watchdog's own row, or the main path's
+/// stdout and row.
+pub const RECALL_WRITE_GRACE: Duration = Duration::from_millis(300);
+
+/// The recall request's timeout from `CORT_RECALL_TIMEOUT_MS`: by default the deadline less 300 ms,
+/// at most the deadline less 100 ms. [`RecallTransport`] lowers it to what is left of the deadline.
+pub fn recall_timeout(configured: Option<&str>) -> Duration {
+    configured
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|n| *n > 0)
+        .map(Duration::from_millis)
+        .unwrap_or(RECALL_DEADLINE - Duration::from_millis(300))
+        .min(RECALL_DEADLINE - Duration::from_millis(100))
+}
+
+/// How long one recall connection may take to resolve, connect and finish TLS. Only the response
+/// phase is slow on a cold database, so a network that answers nothing must not spend the whole
+/// budget. The limit itself is the 3500 ms the whole request had until 2026-11-24.
+pub const RECALL_CONNECT_TIMEOUT: Duration = Duration::from_millis(3500);
 
 /// The hook makes sequential requests (including its ledger-only retry). Keep the latest
 /// connection attempt visible to other threads without a mutex a stalled worker could hold.
@@ -345,18 +380,52 @@ impl Transport for RecallTransport {
         let timeout = self
             .max_timeout
             .min(remaining.saturating_sub(Duration::from_millis(100)));
-        // ureq bounds connect, TLS and body reads; synchronous DNS resolution is outside it.
-        UreqTransport { timeout }.post(url, body, headers)
+        // ureq bounds connect, TLS and body reads; synchronous DNS resolution is outside it, and
+        // only the watchdog ends a resolver that hangs.
+        UreqTransport { timeout }.post_within(url, body, headers, Some(RECALL_CONNECT_TIMEOUT))
     }
 }
 
 /// TLS for [`UreqTransport`], pinned to aws-lc-rs with `builder_with_provider`, so nothing here
 /// depends on a process-wide provider and nothing compiles in a second one (see `Cargo.toml`).
-struct AwsLcTls(Arc<rustls::ClientConfig>);
+struct AwsLcTls {
+    config: Arc<rustls::ClientConfig>,
+    /// `None` leaves the handshake to the request's own timeout.
+    setup: Option<SetupClock>,
+}
 
-fn tls() -> Result<Arc<AwsLcTls>, RemoteError> {
+/// The time one connection may take to be ready for a request. ureq has no TLS timeout, but the
+/// handshake runs in our connector, over a socket whose timeouts we may set.
+struct SetupClock {
+    limit: Duration,
+    /// `NetworkRecorder::tick` when this connection began resolving its host, which is also when
+    /// ureq starts counting `timeout_connect`.
+    began: Arc<AtomicU64>,
+}
+
+impl SetupClock {
+    /// Shorten the socket's timeouts to what is left, and return what they were. Each wait of the
+    /// handshake is bounded, not their sum, as with the request timeout ureq set.
+    fn arm(&self, socket: &std::net::TcpStream) -> std::io::Result<[Option<Duration>; 2]> {
+        let prior = [socket.read_timeout()?, socket.write_timeout()?];
+        let spent = NetworkRecorder::tick().saturating_sub(self.began.load(Ordering::Acquire));
+        let left = self.limit.saturating_sub(Duration::from_nanos(spent));
+        if left.is_zero() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "connection setup timed out",
+            ));
+        }
+        let shorter = |prior: Option<Duration>| Some(prior.map_or(left, |p| p.min(left)));
+        socket.set_read_timeout(shorter(prior[0]))?;
+        socket.set_write_timeout(shorter(prior[1]))?;
+        Ok(prior)
+    }
+}
+
+fn tls_config() -> Result<Arc<rustls::ClientConfig>, RemoteError> {
     // Only a built config is cached, so a failure is retried on the next request.
-    static TLS: OnceLock<Arc<AwsLcTls>> = OnceLock::new();
+    static TLS: OnceLock<Arc<rustls::ClientConfig>> = OnceLock::new();
     if let Some(tls) = TLS.get() {
         return Ok(tls.clone());
     }
@@ -380,9 +449,7 @@ fn tls() -> Result<Arc<AwsLcTls>, RemoteError> {
         let _ = roots.add(cert);
     }
     let config = builder.with_root_certificates(roots).with_no_client_auth();
-    Ok(TLS
-        .get_or_init(|| Arc::new(AwsLcTls(Arc::new(config))))
-        .clone())
+    Ok(TLS.get_or_init(|| Arc::new(config)).clone())
 }
 
 struct TlsStream(rustls::StreamOwned<rustls::ClientConnection, Box<dyn ureq::ReadWrite>>);
@@ -427,9 +494,17 @@ impl ureq::TlsConnector for AwsLcTls {
         let name = rustls::pki_types::ServerName::try_from(host.to_owned()).map_err(|_| {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid TLS server name")
         })?;
-        let mut session = rustls::ClientConnection::new(self.0.clone(), name)
+        let mut session = rustls::ClientConnection::new(self.config.clone(), name)
             .map_err(|_| std::io::Error::other("TLS session setup failed"))?;
+        let prior = match (&self.setup, io.socket()) {
+            (Some(setup), Some(socket)) => Some(setup.arm(socket)?),
+            _ => None,
+        };
         session.complete_io(&mut io)?;
+        if let (Some([read, write]), Some(socket)) = (prior, io.socket()) {
+            socket.set_read_timeout(read)?;
+            socket.set_write_timeout(write)?;
+        }
         NETWORK.enter(3);
         Ok(Box::new(TlsStream(rustls::StreamOwned::new(session, io))))
     }
@@ -446,15 +521,37 @@ impl Transport for UreqTransport {
         body: &[u8],
         headers: &[(&str, &str)],
     ) -> Result<Vec<u8>, RemoteError> {
+        self.post_within(url, body, headers, None)
+    }
+}
+impl UreqTransport {
+    /// One POST. `setup` bounds each connection's connect and TLS apart from `timeout`, which
+    /// bounds the whole request; without it they share `timeout`.
+    fn post_within(
+        &self,
+        url: &str,
+        body: &[u8],
+        headers: &[(&str, &str)],
+        setup: Option<Duration>,
+    ) -> Result<Vec<u8>, RemoteError> {
         use std::io::Read;
         NETWORK.reset();
         let _recording = NetworkRequest;
+        let began = Arc::new(AtomicU64::new(NetworkRecorder::tick()));
+        let tls = AwsLcTls {
+            config: tls_config()?,
+            setup: setup.map(|limit| SetupClock {
+                limit,
+                began: Arc::clone(&began),
+            }),
+        };
         // ureq 2.12's per-request timeout does not bound the TCP connect: that waits for the
         // agent's `timeout_connect` (30 s by default), which a blackholed address reaches in
         // full (strace on 2026-10-28: `poll(..., 29999)` under a 1 s request timeout).
         let agent = ureq::AgentBuilder::new()
-            .tls_connector(tls()?)
-            .resolver(|netloc: &str| {
+            .tls_connector(Arc::new(tls))
+            .resolver(move |netloc: &str| {
+                began.store(NetworkRecorder::tick(), Ordering::Release);
                 // A redirect may open another connection within this POST. Do not let the
                 // preceding connection's TLS/response boundary hide a stall in its DNS.
                 NETWORK.reset();
@@ -467,7 +564,7 @@ impl Transport for UreqTransport {
                 }
                 result
             })
-            .timeout_connect(self.timeout)
+            .timeout_connect(setup.map_or(self.timeout, |limit| limit.min(self.timeout)))
             .build();
         let mut request = agent.post(url).timeout(self.timeout);
         for (key, value) in headers {
@@ -1223,13 +1320,16 @@ mod tests {
             }
         }
 
+        let connector = AwsLcTls {
+            config: tls_config().unwrap(),
+            setup: None,
+        };
         NETWORK.reset();
         let recording = NetworkRequest;
         NETWORK.enter(0);
         NETWORK.enter(1);
         let error =
-            ureq::TlsConnector::connect(tls().unwrap().as_ref(), "localhost", Box::new(SilentPeer))
-                .unwrap_err();
+            ureq::TlsConnector::connect(&connector, "localhost", Box::new(SilentPeer)).unwrap_err();
         drop(recording);
         let snapshot = network_snapshot().unwrap();
         assert_eq!(snapshot["phase"], "tls");
@@ -1245,6 +1345,36 @@ mod tests {
                 .kind(),
             std::io::ErrorKind::TimedOut
         );
+    }
+
+    #[test]
+    fn setup_clock_shortens_never_lengthens_and_ends() {
+        let listener = match std::net::TcpListener::bind("127.0.0.1:0") {
+            Ok(listener) => listener,
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                eprintln!("SKIP: sandbox prohibits local listener: {e}");
+                return;
+            }
+            Err(e) => panic!("listener: {e}"),
+        };
+        let socket = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let clock = |limit| SetupClock {
+            limit,
+            began: Arc::new(AtomicU64::new(NetworkRecorder::tick())),
+        };
+        let (short, long) = (Duration::from_secs(5), Duration::from_secs(500));
+        socket.set_read_timeout(Some(long)).unwrap();
+        socket.set_write_timeout(None).unwrap();
+        assert_eq!(clock(short).arm(&socket).unwrap(), [Some(long), None]);
+        assert!(socket.read_timeout().unwrap().unwrap() <= short);
+        assert!(socket.write_timeout().unwrap().unwrap() <= short);
+        // A request with less left than the bound keeps its own, shorter limit.
+        socket.set_read_timeout(Some(short)).unwrap();
+        clock(long).arm(&socket).unwrap();
+        assert_eq!(socket.read_timeout().unwrap(), Some(short));
+        // Nothing left is a timeout, not the `Duration::ZERO` a socket refuses as invalid.
+        let error = clock(Duration::ZERO).arm(&socket).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
     }
 
     #[test]

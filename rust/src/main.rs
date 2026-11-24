@@ -2035,18 +2035,13 @@ fn cmd_hook_recall(
                 cort::remote::network_budget_exhausted();
                 return Err("remote_timeout");
             }
-            let configured_ms = std::env::var("CORT_RECALL_TIMEOUT_MS")
-                .ok()
-                .and_then(|s| s.parse::<u64>().ok())
-                .filter(|n| *n > 0)
-                .unwrap_or(3500)
-                .min(3700);
+            let configured = std::env::var("CORT_RECALL_TIMEOUT_MS").ok();
             let db = cort::remote::RemoteDb::new(
                 &url,
                 token,
                 Box::new(cort::remote::RecallTransport {
                     started,
-                    max_timeout: Duration::from_millis(configured_ms),
+                    max_timeout: cort::remote::recall_timeout(configured.as_deref()),
                 }),
             )
             .map_err(|e| match e.kind {
@@ -4399,18 +4394,28 @@ fn main() {
     let started = Instant::now();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let recall_hook = args.first().is_some_and(|a| a == "hook-recall");
+    // Tests reach the end of the recall budget without waiting for it: the run counts as already
+    // this old, so the deadline and the watchdog move together. Release builds never read it.
+    #[cfg(debug_assertions)]
+    let started = std::env::var("CORT_TEST_RECALL_SPENT_MS")
+        .ok()
+        .filter(|_| recall_hook)
+        .and_then(|v| v.parse::<u64>().ok())
+        .and_then(|ms| started.checked_sub(Duration::from_millis(ms)))
+        .unwrap_or(started);
     let claim = Arc::new(AtomicBool::new(false));
     if recall_hook {
         // The process must never hold up a session start, even if stdin or storage stalls.
-        // It fires 900 ms after the recall deadline, so a read the deadline allows still gets to
+        // It fires a margin after the recall deadline, so a read the deadline allows still gets to
         // print its notice and row. Winning the claim starts a best-effort watchdog row writer
         // on another thread; losing means the main path is writing stdout and its row. Either
-        // writer gets at most 300 ms more before exit, including a stuck pipe or usage.db;
-        // the watchdog row writer's completion ends the wait early.
-        // The total envelope stays deadline + 900 + 300 = the harnesses' 5 s hook limit.
+        // writer gets at most the write grace more before exit, including a stuck pipe or
+        // usage.db; the watchdog row writer's completion ends the wait early.
+        // Deadline + margin + grace = 13.2 s, inside the 15 s recall hook limit. A harness entry
+        // still holding the old 5 s limit kills the process before any of this fires.
         let watchdog_claim = Arc::clone(&claim);
         let watchdog_args = args.clone();
-        let delay = cort::remote::RECALL_DEADLINE + Duration::from_millis(900);
+        let delay = cort::remote::RECALL_DEADLINE + cort::remote::RECALL_WATCHDOG_MARGIN;
         // Integration tests need a watchdog that beats a bounded local TLS blackhole.
         // Release builds never read this override; debug builds can only shorten the wait.
         #[cfg(debug_assertions)]
@@ -4420,7 +4425,7 @@ fn main() {
             .filter(|ms| *ms > 0)
             .map(|ms| Duration::from_millis(ms).min(delay))
             .unwrap_or(delay);
-        let write_grace = Duration::from_millis(300);
+        let write_grace = cort::remote::RECALL_WRITE_GRACE;
         // Slow debug writes may use a longer grace in tests. Release builds never read it.
         // Capped so `Instant + grace` cannot overflow and kill the watchdog thread.
         #[cfg(debug_assertions)]

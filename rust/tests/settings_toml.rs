@@ -1042,3 +1042,181 @@ fn codex_session_start_round_trip_and_shape() {
     assert_eq!(remove_hook(&codex).unwrap().change, Change::Removed);
     assert_eq!(fs::read_to_string(&codex).unwrap(), original);
 }
+
+fn timeout_of(entry: &toml_edit::Table) -> Option<i64> {
+    entry.get("timeout").and_then(|v| v.as_integer())
+}
+
+/// Only recall reads a database that cold-starts; every other hook keeps the short limit.
+#[test]
+fn codex_gives_only_the_recall_entry_the_longer_timeout() {
+    let (_d, p) = tmp();
+    for &event in cort::settings::events_for("codex") {
+        let command = format!("/bin/cort {} --harness codex", event.subcommand());
+        install_hook(&p, &command, event).unwrap();
+        let doc = read(&p);
+        let entry = doc["hooks"][event.name()][0]["hooks"]
+            .as_array_of_tables()
+            .unwrap()
+            .get(0)
+            .unwrap();
+        let want = if event == HookEvent::Recall { 15 } else { 5 };
+        assert_eq!(timeout_of(entry), Some(want), "{event:?}");
+    }
+}
+
+/// On Kimi recall is the `UserPromptSubmit` entry.
+#[test]
+fn kimi_gives_only_the_recall_entry_the_longer_timeout() {
+    let (_d, p) = kimi_tmp();
+    for &event in cort::settings::events_for("kimi-code") {
+        let command = format!("/bin/cort {} --harness kimi-code", event.subcommand());
+        cort::settings_kimi::install_hook(&p, &command, event).unwrap();
+        let doc = read(&p);
+        let entry = doc["hooks"]
+            .as_array_of_tables()
+            .unwrap()
+            .iter()
+            .find(|e| e.get("command").and_then(|v| v.as_str()) == Some(command.as_str()))
+            .unwrap();
+        let want = if event == HookEvent::Recall { 15 } else { 5 };
+        assert_eq!(timeout_of(entry), Some(want), "{event:?}");
+    }
+}
+
+/// Every machine installed before 2026-11-24 carries a recall entry with the 5 s limit. It is ours,
+/// so it is rewritten where it stands: not duplicated, and every other byte -- the entries around
+/// it and the comments above it, which belong to somebody else -- stays where it was.
+#[test]
+fn an_old_five_second_codex_recall_entry_is_rewritten_in_place() {
+    let (_d, p) = tmp();
+    let file = |timeout: u64| {
+        format!(
+            "model = \"m\"\n\n\
+             # foreign, before\n\
+             [[hooks.SessionStart]]\n\
+             [[hooks.SessionStart.hooks]]\n\
+             type = \"command\"\n\
+             command = \"first hook\"\n\
+             timeout = 5\n\n\
+             # above our group\n\
+             [[hooks.SessionStart]]\n\n\
+             # above our entry\n\
+             [[hooks.SessionStart.hooks]]\n\
+             type = \"command\"\n\
+             command = \"/bin/cort hook-recall --harness codex\"\n\
+             timeout = {timeout}\n\n\
+             # foreign, after\n\
+             [[hooks.SessionStart]]\n\
+             [[hooks.SessionStart.hooks]]\n\
+             type = \"command\"\n\
+             command = \"last hook\"\n\
+             timeout = 5\n\n\
+             [other]\n\
+             x = 1 # keep\n"
+        )
+    };
+    let command = "/bin/cort hook-recall --harness codex";
+    fs::write(&p, file(5)).unwrap();
+    let in_shape = || cort::settings_toml::entry_shape_ok(&p, HookEvent::Recall, command);
+    assert!(!in_shape());
+    assert_eq!(
+        install_hook(&p, command, HookEvent::Recall).unwrap().change,
+        Change::Updated
+    );
+    assert_eq!(fs::read_to_string(&p).unwrap(), file(15));
+    assert!(in_shape());
+    assert_eq!(
+        install_hook(&p, command, HookEvent::Recall).unwrap().change,
+        Change::AlreadyPresent
+    );
+}
+
+/// The install-then-uninstall promise across the upgrade: installed by a binary that wrote 5,
+/// updated by one that writes 15, then removed.
+#[test]
+fn a_codex_install_upgrade_and_remove_returns_the_file_exactly_as_it_was() {
+    let (_d, p) = tmp();
+    let original = "model = \"m\"\n\n# foreign session hook\n[[hooks.SessionStart]]\n[[hooks.SessionStart.hooks]]\ntype = \"command\"\ncommand = \"foreign hook\" # keep\ntimeout = 30\n\n[other]\nx = 1 # keep\n# the end\n";
+    fs::write(&p, original).unwrap();
+    let command = "/bin/cort hook-recall --harness codex";
+    install_hook(&p, command, HookEvent::Recall).unwrap();
+    let installed = fs::read_to_string(&p).unwrap();
+    fs::write(&p, installed.replace("timeout = 15", "timeout = 5")).unwrap();
+    assert_eq!(
+        install_hook(&p, command, HookEvent::Recall).unwrap().change,
+        Change::Updated
+    );
+    assert_eq!(fs::read_to_string(&p).unwrap(), installed);
+    remove_hook(&p).unwrap();
+    assert_eq!(fs::read_to_string(&p).unwrap(), original);
+}
+
+/// Kimi's twin, with the trap that file adds: `push_after_trailing` puts the plugin's END fence
+/// directly above our entry, so a rewrite that takes the entry's own decoration with it takes
+/// somebody else's marker too.
+#[test]
+fn an_old_five_second_kimi_recall_entry_is_rewritten_in_place() {
+    let (_d, p) = kimi_tmp();
+    let original = "model = \"k3\"\n\n\
+                    # === BEGIN kimi-plugin-cc-managed:claude-code (v1.9.13) ===\n\
+                    [[hooks]]\n\
+                    event = \"PreToolUse\"\n\
+                    command = \"node /plugin/approval-hook.js\"\n\
+                    timeout = 30\n\
+                    # === END kimi-plugin-cc-managed:claude-code ===\n";
+    fs::write(&p, original).unwrap();
+    let command = "/bin/cort hook-recall --harness kimi-code";
+    cort::settings_kimi::install_hook(&p, command, HookEvent::Recall).unwrap();
+    let after = "\n# somebody else's, after ours\n\
+                 [[hooks]]\n\
+                 event = \"PostToolUse\"\n\
+                 command = \"their hook\"\n\
+                 timeout = 30\n";
+    let installed = format!("{}{after}", fs::read_to_string(&p).unwrap());
+    fs::write(&p, installed.replace("timeout = 15", "timeout = 5")).unwrap();
+    let in_shape = || cort::settings_kimi::entry_shape_ok(&p, HookEvent::Recall, command);
+    assert!(!in_shape());
+    assert_eq!(
+        cort::settings_kimi::install_hook(&p, command, HookEvent::Recall)
+            .unwrap()
+            .change,
+        Change::Updated
+    );
+    assert_eq!(fs::read_to_string(&p).unwrap(), installed);
+    assert!(in_shape());
+    assert_eq!(
+        kimi_entries(&p)
+            .iter()
+            .filter(|(_, c)| c.contains("hook-recall"))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn a_kimi_install_upgrade_and_remove_returns_the_file_exactly_as_it_was() {
+    let (_d, p) = kimi_tmp();
+    let original = "model = \"k3\"\n\n\
+                    # === BEGIN kimi-plugin-cc-managed:claude-code (v1.9.13) ===\n\
+                    [[hooks]]\n\
+                    event = \"PreToolUse\"\n\
+                    command = \"node /plugin/approval-hook.js\"\n\
+                    timeout = 30\n\
+                    # === END kimi-plugin-cc-managed:claude-code ===\n";
+    fs::write(&p, original).unwrap();
+    for &event in cort::settings::events_for("kimi-code") {
+        let command = format!("/bin/cort {} --harness kimi-code", event.subcommand());
+        cort::settings_kimi::install_hook(&p, &command, event).unwrap();
+    }
+    let installed = fs::read_to_string(&p).unwrap();
+    assert_eq!(installed.matches("timeout = 15").count(), 1);
+    fs::write(&p, installed.replace("timeout = 15", "timeout = 5")).unwrap();
+    for &event in cort::settings::events_for("kimi-code") {
+        let command = format!("/bin/cort {} --harness kimi-code", event.subcommand());
+        cort::settings_kimi::install_hook(&p, &command, event).unwrap();
+    }
+    assert_eq!(fs::read_to_string(&p).unwrap(), installed);
+    cort::settings_kimi::remove_hook(&p).unwrap();
+    assert_eq!(fs::read_to_string(&p).unwrap(), original);
+}

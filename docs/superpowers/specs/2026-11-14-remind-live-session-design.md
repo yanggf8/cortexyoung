@@ -109,7 +109,7 @@ shown-set writes happen **after** stdout has been written and the usage row reco
 path only; if the watchdog has claimed the exit they are skipped. Cost of being cut: the next prompt
 may repeat a reminder once -- or, after a compaction whose recall ran past the watchdog, the shown
 set from before the compaction stays, so a reminder already shown is not re-shown until its state
-changes (only when recall takes longer than ~4.7 s).
+changes (only when recall takes longer than 12.9 s; ~4.7 s until 2026-11-24).
 
 A confirmed `cort remind` write stamps its snapshot with the clock after the confirmation, so a
 recall that started before the write landed cannot drop it. A `read_at` more than 5 minutes in the

@@ -153,6 +153,15 @@ from a measurement: strace showed a 4.175 s socket timeout blocking for 4.205-4.
 number sits against a hard limit (a harness's hook timeout, a test bound), measure each part that
 spends it -- the wait as the kernel actually ends it, the work after it -- where it runs slowest (a
 debug build, CI's runner), and put the reading and its machine in the spec or commit that sets it.
+The limit itself moved on 2026-11-24, for recall alone: 15 s in the harness entry, a 12 s deadline.
+The reading was 1,324 `hook-recall` rows of 2026-11-06..11-24 from NUC11i5, Thinkpade15,
+i51149R3050 and i514400RTX4060Ti (cort-measure, read on i5940R3070). Every timeout stalled in the
+response phase; since 11-11, reads 1-10 min after the previous one were slow or timed out 1 in 384,
+and over 10 min about half; successful cold reads lengthened from ~2.0 s (11-06) to ~3.3 s (11-10),
+then hit the 3.5 s cap. Of 27 timeout episodes, those a later read bounded were done 4.0, 4.1, 4.1,
+4.5 and 4.8 s after the first read began; three were still not answering after 5 s (longest 10.2 s
+across two reads, possibly two cold starts); 42 of 42 reads that completed 10 s to 5 min after a
+timeout succeeded. Probing 20:48-22:34 caught no cold start, so no direct cold timing exists.
 
 **Delivery was disabled by default, including Kimi's deny, and since 2026-10-25 there is nothing
 left to deliver.** The `CORT_SUGGEST` switch and Kimi's deny went out with the suggestion itself
@@ -210,13 +219,19 @@ read. The memory lifecycle table (#11) is one more such optional read, dropped s
 only with at least 200 ms remaining: under the unaliased project id when the ledger read fails with
 a SQL error, and without the notes -- and without any optional read that failed in the same answer --
 when a notes statement does) and never writes to it or takes a local lock. The
-network deadline is 3800 ms from process start (`remote::RECALL_DEADLINE`); the network timeout
-defaults to 3500 ms (`CORT_RECALL_TIMEOUT_MS`), is capped at 3700 ms, and is also limited to the
-remaining deadline minus 100 ms. It was 2500/1500 ms until 2026-10-29, when the first read after an idle
-spell timed out on three session starts in one afternoon while warm reads took about 300 ms.
+network deadline is 12000 ms from process start (`remote::RECALL_DEADLINE`); the network timeout
+defaults to 11700 ms (`CORT_RECALL_TIMEOUT_MS`), is capped at 11900 ms, and is also limited to the
+remaining deadline minus 100 ms. It was 2500/1500 ms until 2026-10-29 and 3800/3500 ms until
+2026-11-24, and the first read after an idle spell still timed out (the reading is in the
+time-budget paragraph above). Connect and TLS together get 3500 ms of it
+(`remote::RECALL_CONNECT_TIMEOUT`): only the response phase is slow on a cold database. Name
+resolution is synchronous and only the watchdog ends it.
 With under 200 ms left, it sends no request. A watchdog exits the process 900 ms after the deadline
-(socket timeouts overshoot it) and 300 ms more once the answer is being written, so the whole run
-stays inside 5 s. On
+(socket timeouts overshoot it) and 300 ms more once the answer is being written, 13.2 s in all, so
+the whole run stays inside the 15 s limit its harness entry carries. `HookEvent::timeout_secs` is the
+one table of those limits: 15 s for recall on all three harnesses, 5 s for every other hook. An entry
+still saying 5 s is drifted; `hook-install` rewrites it in place, and until then the harness kills a
+read longer than 5 s with no notice and no usage row. On
 `remote_unreachable`, `remote_blocked`, or `remote_timeout`, it injects a one-line notice to retry
 `cort memory recall "<topic>"` when needed. A ledger that was read but does not decode (an integrity error such as an invalid supersession) is not an outage: the outcome is `ledger_invalid` and the line names the error and `cort memory status`. It records one `usage.db` row on every normal return.
 Kimi discards `SessionStart` output, so its `UserPromptSubmit` entry prints the same text as a `message` on

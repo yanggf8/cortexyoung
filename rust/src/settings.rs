@@ -73,10 +73,6 @@ impl From<io::Error> for SettingsError {
 /// The tool whose fires `hook-suggest` records.
 const MATCHER: &str = "Bash";
 
-/// Seconds. The hook writes one row and kicks collection; the budget is here so a pathological
-/// case can never hold up the agent's tool call.
-const TIMEOUT_SECS: u64 = 5;
-
 /// The tools whose payload `hook-refresh` reacts to -- the ones that change the tree.
 ///
 /// A second event was added on 2026-09-03. The first one only ever *told* the agent the index was
@@ -165,6 +161,20 @@ impl HookEvent {
             HookEvent::Remind => "hook-remind",
         }
     }
+    /// Seconds the harness allows this hook before killing it: the one table all three dialects
+    /// write and check, since what it must agree with is the hook and not the file format.
+    ///
+    /// The others write a row, kick collection or repair an index; their limit is here so a
+    /// pathological case can never hold up a tool call. Recall waits for a shared database that
+    /// cold-starts, so its limit has to hold `remote::RECALL_DEADLINE` (where the reading is) plus
+    /// `RECALL_WATCHDOG_MARGIN` and `RECALL_WRITE_GRACE`; `recall_envelope_fits_its_hook_limit`
+    /// keeps them in order.
+    pub fn timeout_secs(self) -> u32 {
+        match self {
+            HookEvent::Recall => 15,
+            HookEvent::Suggest | HookEvent::Refresh | HookEvent::Remind => 5,
+        }
+    }
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "pre" | "suggest" | "PreToolUse" => Some(HookEvent::Suggest),
@@ -238,11 +248,11 @@ pub(crate) fn ours_subcommand(command: &str) -> Option<HookEvent> {
 
 /// The one shape an entry of ours is allowed to have. Factored out because `install_hook` has to
 /// be able to normalise an existing entry to it, not only to create one.
-fn hook_command_entry(command: &str) -> Value {
+fn hook_command_entry(command: &str, event: HookEvent) -> Value {
     json!({
         "type": "command",
         "command": command,
-        "timeout": TIMEOUT_SECS,
+        "timeout": event.timeout_secs(),
     })
 }
 
@@ -255,7 +265,7 @@ fn matcher_for(event: HookEvent) -> Option<&'static str> {
 }
 
 fn hook_entry(command: &str, event: HookEvent) -> Value {
-    let mut group = json!({ "hooks": [hook_command_entry(command)] });
+    let mut group = json!({ "hooks": [hook_command_entry(command, event)] });
     if let Some(matcher) = matcher_for(event) {
         group["matcher"] = json!(matcher);
     }
@@ -370,7 +380,7 @@ pub fn install_hook(
     let mut root = read_root(path)?;
     let list = event_list(&mut root, event)?;
 
-    let canonical = hook_command_entry(command);
+    let canonical = hook_command_entry(command, event);
     let mut seen_ours = false;
     let mut found_same = false;
     let mut changed = false;
@@ -600,7 +610,8 @@ fn entry_shape_ok_json(path: &Path, event: HookEvent, expected_command: &str) ->
                 return group.get("matcher").and_then(Value::as_str) == matcher_for(event)
                     && (event != HookEvent::Recall || group.get("matcher").is_none())
                     && h.get("type").and_then(Value::as_str) == Some("command")
-                    && h.get("timeout").and_then(Value::as_u64) == Some(TIMEOUT_SECS);
+                    && h.get("timeout").and_then(Value::as_u64)
+                        == Some(u64::from(event.timeout_secs()));
             }
         }
     }

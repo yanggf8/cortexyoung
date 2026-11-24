@@ -588,6 +588,7 @@ fn run_with(
         .env_remove("CLAUDECAT_MEMORY_PROJECT")
         .env("CORT_MACHINE_ID", "self")
         .env_remove("CORT_TEST_RECALL_WATCHDOG_MS")
+        .env_remove("CORT_TEST_RECALL_SPENT_MS")
         .current_dir(cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -790,10 +791,17 @@ fn cli_silent_server_times_out_and_clamps() {
     let repo = git_repo(root);
     config(&root.join("data"), &server.url);
     let payload = json!({"cwd":repo}).to_string();
-    // 99999 clamps to the 3700 ms cap. The notice and its row are the real check: they are missing
-    // when the watchdog (deadline + 900 ms) exits first. The bound is the harnesses' 5 s hook limit.
-    for (setting, bound) in [("400", 3000), ("99999", 4950)] {
-        let (out, elapsed) = run(root, root, &payload, Some(setting));
+    // 99999 is clamped, and the deadline is what ends the wait: the debug-only override starts the
+    // run with 9 s of its 12 s already spent, so the request gets what is left minus 100 ms. The
+    // notice and its row are the real check: they are missing when the watchdog (deadline + 900 ms)
+    // exits first. The bound is what remains of the 15 s hook limit. A release build ignores the
+    // override; there the 3500 ms connect+TLS bound ends the wait, inside the same bound.
+    for (setting, bound) in [("400", 3000), ("99999", 5950)] {
+        let (out, elapsed) = run_with(root, root, &payload, Some(setting), |cmd| {
+            if setting == "99999" {
+                cmd.env("CORT_TEST_RECALL_SPENT_MS", "9000");
+            }
+        });
         assert!(out.status.success());
         assert!(elapsed < Duration::from_millis(bound), "{elapsed:?}");
         assert!(
@@ -811,6 +819,136 @@ fn cli_silent_server_times_out_and_clamps() {
         assert!(row["stall"].get("response_ms").is_none());
         assert!(row.get("net").is_none());
     }
+}
+
+/// The recall budget is long because a cold database answers late; a network that never connects
+/// must not be allowed to spend it. 8 s is well short of the 12 s deadline and leaves a loaded
+/// machine room over the 3500 ms bound.
+fn assert_black_hole_ends_early(url: &str, phase: &str) {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let repo = git_repo(root);
+    config(&root.join("data"), url);
+    let payload = json!({"cwd":repo}).to_string();
+    let (out, elapsed) = run(root, root, &payload, Some("99999"));
+    assert!(out.status.success());
+    assert!(elapsed < Duration::from_millis(8000), "{elapsed:?}");
+    notice(&out, "remote_timeout");
+    let row = outcome(root);
+    assert_eq!(row["hook"], "remote_timeout");
+    assert_eq!(row["stall"]["phase"], phase, "{row}");
+    let connecting: u64 = ["connect_ms", "tls_ms"]
+        .iter()
+        .filter_map(|name| row["stall"][name].as_u64())
+        .sum();
+    // Not early either: the bound is 3500 ms from the start of name resolution.
+    assert!((3000..6000).contains(&connecting), "{row}");
+}
+
+#[test]
+fn cli_tls_black_hole_ends_well_before_the_deadline() {
+    let Some(server) = SilentServer::new() else {
+        return;
+    };
+    assert_black_hole_ends_early(&server.url, "tls");
+}
+
+/// A listener whose accept queue is full drops further SYNs on Linux, so a connect to it hangs the
+/// way one to a black-holed address does, without leaving the machine.
+#[test]
+fn cli_connect_black_hole_ends_well_before_the_deadline() {
+    let listener = match TcpListener::bind("127.0.0.1:0") {
+        Ok(l) => l,
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            eprintln!("SKIP: sandbox prohibits local listener: {e}");
+            return;
+        }
+        Err(e) => panic!("listener: {e}"),
+    };
+    let address = listener.local_addr().unwrap();
+    let mut queued = Vec::new();
+    let full = (0..600).any(|_| {
+        match std::net::TcpStream::connect_timeout(&address, Duration::from_millis(300)) {
+            Ok(stream) => {
+                queued.push(stream);
+                false
+            }
+            Err(e) => e.kind() == std::io::ErrorKind::TimedOut,
+        }
+    });
+    if !full {
+        eprintln!("SKIP: this platform's full accept queue does not drop connections");
+        return;
+    }
+    assert_black_hole_ends_early(&format!("https://{address}"), "connect");
+}
+
+/// The network deadline still ends a read that stalls in the response phase -- the one that gets
+/// the whole budget -- before the watchdog does. Plain HTTP so the request reaches that phase.
+#[test]
+fn a_silent_response_ends_at_the_deadline_and_not_at_the_connect_bound() {
+    let Some(server) = SilentServer::new() else {
+        return;
+    };
+    let url = server.url.replace("https://", "http://");
+    let post = |remaining: u64, max: u64| {
+        let start = Instant::now();
+        let transport = cort::remote::RecallTransport {
+            started: start - (cort::remote::RECALL_DEADLINE - Duration::from_millis(remaining)),
+            max_timeout: Duration::from_millis(max),
+        };
+        let error = transport.post(&url, b"{}", &[]).unwrap_err();
+        assert_eq!(error.kind, cort::remote::ErrorKind::Timeout);
+        start.elapsed()
+    };
+    // 1500 ms left, so 1400 ms for the request; the watchdog would fire at 2400 ms.
+    let elapsed = post(1500, 11_900);
+    assert!(
+        (Duration::from_millis(1300)..Duration::from_millis(2400)).contains(&elapsed),
+        "{elapsed:?}"
+    );
+    // More than the connect bound left, and the response gets it.
+    let elapsed = post(5000, 11_900);
+    assert!(elapsed > Duration::from_millis(4500), "{elapsed:?}");
+    // The configured timeout still ends it first.
+    let elapsed = post(5000, 400);
+    assert!(elapsed < Duration::from_millis(2000), "{elapsed:?}");
+}
+
+#[test]
+fn recall_timeout_defaults_and_clamps() {
+    use cort::remote::recall_timeout;
+    let ms = Duration::from_millis;
+    assert_eq!(recall_timeout(None), ms(11_700));
+    assert_eq!(recall_timeout(Some("not a number")), ms(11_700));
+    assert_eq!(recall_timeout(Some("0")), ms(11_700));
+    assert_eq!(recall_timeout(Some("400")), ms(400));
+    assert_eq!(recall_timeout(Some("11900")), ms(11_900));
+    assert_eq!(recall_timeout(Some("99999")), ms(11_900));
+}
+
+/// Everything the run may spend fits inside the limit the harness enforces, and each inner limit
+/// ends before the one around it.
+#[test]
+fn recall_envelope_fits_its_hook_limit() {
+    use cort::remote::{
+        recall_timeout, RECALL_CONNECT_TIMEOUT, RECALL_DEADLINE, RECALL_WATCHDOG_MARGIN,
+        RECALL_WRITE_GRACE,
+    };
+    use cort::settings::HookEvent;
+    let limit = Duration::from_secs(HookEvent::Recall.timeout_secs().into());
+    assert_eq!(RECALL_DEADLINE, Duration::from_millis(12_000));
+    assert_eq!(RECALL_CONNECT_TIMEOUT, Duration::from_millis(3500));
+    assert!(RECALL_CONNECT_TIMEOUT < recall_timeout(None));
+    assert!(recall_timeout(None) < recall_timeout(Some("99999")));
+    assert!(recall_timeout(Some("99999")) < RECALL_DEADLINE);
+    let envelope = RECALL_DEADLINE + RECALL_WATCHDOG_MARGIN + RECALL_WRITE_GRACE;
+    // A process start and an exit happen outside what the run can time; the rest of the limit is
+    // theirs.
+    assert!(
+        envelope + Duration::from_secs(1) <= limit,
+        "{envelope:?} in {limit:?}"
+    );
 }
 
 #[test]

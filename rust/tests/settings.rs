@@ -97,7 +97,7 @@ fn session_start_preserves_foreign_hook_and_round_trips() {
     assert_eq!(groups.len(), 2);
     assert_eq!(groups[0]["hooks"][0]["command"], "mos hook");
     assert!(groups[1].get("matcher").is_none());
-    assert_eq!(groups[1]["hooks"][0]["timeout"], 5);
+    assert_eq!(groups[1]["hooks"][0]["timeout"], 15);
     assert!(cort::settings::entry_shape_ok(
         "claude-code",
         &p,
@@ -757,4 +757,56 @@ fn prompt_parses_to_the_remind_event_and_only_prompt_and_remind_do() {
     assert_eq!(HookEvent::Remind.flag_name(), "prompt");
     assert_eq!(HookEvent::Remind.name(), "UserPromptSubmit");
     assert_eq!(HookEvent::Remind.subcommand(), "hook-remind");
+}
+
+/// Only recall reads a database that cold-starts; every other hook keeps the short limit.
+#[test]
+fn only_the_recall_entry_gets_the_longer_timeout() {
+    let (_d, p) = tmp();
+    for &event in cort::settings::events_for("claude-code") {
+        let command = format!("/bin/cort {} --harness claude-code", event.subcommand());
+        install_hook(&p, &command, event).unwrap();
+        let want = if event == HookEvent::Recall { 15 } else { 5 };
+        assert_eq!(
+            read(&p)["hooks"][event.name()][0]["hooks"][0]["timeout"],
+            want,
+            "{event:?}"
+        );
+    }
+}
+
+/// Every machine installed before 2026-11-24 carries a recall entry with the 5 s limit. It is ours,
+/// so it is rewritten where it stands: not duplicated, and nothing around it moves.
+#[test]
+fn an_old_five_second_recall_entry_is_rewritten_in_place() {
+    let (_d, p) = tmp();
+    let command = "/bin/cort hook-recall --harness claude-code";
+    let foreign = |c: &str| json!({"hooks": [{"type": "command", "command": c, "timeout": 5}]});
+    let file = |timeout: u64| {
+        let root = json!({"hooks": {"SessionStart": [
+            foreign("first hook"),
+            {"hooks": [{"type": "command", "command": command, "timeout": timeout}]},
+            foreign("last hook"),
+        ]}});
+        format!("{}\n", serde_json::to_string_pretty(&root).unwrap())
+    };
+    fs::write(&p, file(5)).unwrap();
+    let in_shape = || cort::settings::entry_shape_ok("claude-code", &p, HookEvent::Recall, command);
+    assert!(!in_shape());
+    assert_eq!(
+        install_hook(&p, command, HookEvent::Recall).unwrap().change,
+        Change::Updated
+    );
+    assert_eq!(fs::read_to_string(&p).unwrap(), file(15));
+    assert!(in_shape());
+    assert_eq!(
+        install_hook(&p, command, HookEvent::Recall).unwrap().change,
+        Change::AlreadyPresent
+    );
+    remove_hook(&p).unwrap();
+    let left = read(&p);
+    assert_eq!(
+        left["hooks"]["SessionStart"],
+        json!([foreign("first hook"), foreign("last hook")])
+    );
 }

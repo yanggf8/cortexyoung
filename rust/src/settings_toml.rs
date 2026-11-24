@@ -82,11 +82,13 @@ fn matcher_matches(group: &Table, event: HookEvent) -> bool {
     }
 }
 
-/// Seconds, matching `settings::TIMEOUT_SECS`. Kept as a separate constant rather than a shared one:
-/// the two modules do not share a value type (`i64` here, `u64` there), and coupling them on a
-/// number that happens to agree today is a future drift bug waiting for whichever module changes
-/// it first.
-const TIMEOUT_SECS: i64 = 5;
+/// Seconds, from the one table in `settings`. Until 2026-11-24 each module held its own constant,
+/// on the reasoning that coupling them on a number that happened to agree was a drift bug waiting
+/// to happen. That held while the limit was one round number; a per-event limit that has to cover
+/// the recall deadline is a fact about the hook, so three copies would be the drift.
+fn timeout_secs(event: HookEvent) -> i64 {
+    i64::from(event.timeout_secs())
+}
 
 #[derive(Debug)]
 pub enum SettingsError {
@@ -136,21 +138,32 @@ pub fn default_settings_path() -> Option<PathBuf> {
     Some(home.join("config.toml"))
 }
 
-fn hook_command_table(command: &str) -> Table {
+fn hook_command_table(command: &str, event: HookEvent) -> Table {
     let mut t = Table::new();
     t.insert("type", value("command"));
     t.insert("command", value(command));
-    t.insert("timeout", value(TIMEOUT_SECS));
+    t.insert("timeout", value(timeout_secs(event)));
     t
+}
+
+/// Normalise an entry of ours without moving it. What sits above a table's header belongs to the
+/// table in `toml_edit`'s model and to somebody else in the file's: a comment, or the Kimi plugin's
+/// END fence, which `settings_kimi::push_after_trailing` itself puts there. A plain assignment
+/// dropped both, found on 2026-11-24 when the recall limit changed and every install was about to
+/// take this path once.
+pub(crate) fn replace_entry(old: &mut Table, mut new: Table) {
+    *new.decor_mut() = old.decor().clone();
+    new.set_position(old.position());
+    *old = new;
 }
 
 /// Is this hook entry exactly the one `install_hook` would write for `command` right now? Used to
 /// tell "nothing to do" apart from "ours, but stale" without string-comparing serialized TOML, which
 /// would trip on formatting toml_edit itself introduces.
-fn is_canonical(h: &Table, command: &str, _event: HookEvent) -> bool {
+fn is_canonical(h: &Table, command: &str, event: HookEvent) -> bool {
     h.get("command").and_then(Item::as_str) == Some(command)
         && h.get("type").and_then(Item::as_str) == Some("command")
-        && h.get("timeout").and_then(Item::as_integer) == Some(TIMEOUT_SECS)
+        && h.get("timeout").and_then(Item::as_integer) == Some(timeout_secs(event))
 }
 
 fn read_doc(path: &Path) -> Result<DocumentMut, SettingsError> {
@@ -273,7 +286,7 @@ pub fn install_hook(
                         if is_canonical(h, command, event) {
                             found_same = true;
                         } else {
-                            *h = hook_command_table(command);
+                            replace_entry(h, hook_command_table(command, event));
                             changed = true;
                         }
                     }
@@ -329,7 +342,7 @@ pub fn install_hook(
             group.insert("matcher", value(matcher));
         }
         let mut hooks = ArrayOfTables::new();
-        hooks.push(hook_command_table(command));
+        hooks.push(hook_command_table(command, event));
         group.insert("hooks", Item::ArrayOfTables(hooks));
         list.push(group);
         Change::Installed
@@ -555,7 +568,7 @@ pub fn entry_shape_ok(path: &Path, event: HookEvent, expected_command: &str) -> 
             if h.get("command").and_then(Item::as_str) == Some(expected_command) {
                 return matcher_matches(group, event)
                     && h.get("type").and_then(Item::as_str) == Some("command")
-                    && h.get("timeout").and_then(Item::as_integer) == Some(TIMEOUT_SECS);
+                    && h.get("timeout").and_then(Item::as_integer) == Some(timeout_secs(event));
             }
         }
     }
