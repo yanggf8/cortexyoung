@@ -256,3 +256,82 @@ fn stale_in_both_directions() {
     assert!(!is_stale(now + FUTURE_SLACK_NS, now));
     assert!(is_stale(now + FUTURE_SLACK_NS + 1, now));
 }
+
+const MINUTE: i128 = 60_000_000_000;
+
+/// `DUE` is 2027-01-15T08:00Z, so 16:00 at +08:00.
+fn timed_add(id: &str, text: &str, lead: u32) -> ReminderEvent {
+    let mut event = add(id, DUE, text, lead);
+    event.at = Some("16:00".to_string());
+    event.utc_offset = Some("+08:00".to_string());
+    event
+}
+
+#[test]
+fn timed_reminder_with_lead_shows_as_upcoming_and_again_when_due() {
+    let s = snap(0, vec![timed_add(&id(1), "power off", 1)]);
+    let mut shown: HashSet<ShownKey> = HashSet::new();
+    let mut seen = Vec::new();
+    for now in [
+        DUE - DAY - 1,
+        DUE - DAY,
+        DUE - MINUTE,
+        DUE,
+        DUE + MINUTE,
+        DUE + DAY - 1,
+    ] {
+        let picked = select_unshown(&s, &shown, now);
+        shown.extend(picked.iter().filter_map(shown_key));
+        seen.extend(picked.iter().map(|r| (now - DUE, r.state)));
+    }
+    assert_eq!(seen, vec![(-DAY, State::Upcoming), (0, State::Due)]);
+}
+
+#[test]
+fn timed_lead_zero_is_selected_at_its_instant_from_the_same_snapshot() {
+    let dir = temp();
+    let s = snap(DUE - DAY, vec![timed_add(&id(1), "power off", 0)]);
+    assert!(write_snapshot(dir.path(), &s).unwrap());
+    // One session, one snapshot file, nothing rewritten in between.
+    let pick = |now| {
+        let snapshot = read_snapshot(dir.path(), "proj").unwrap();
+        select_unshown(&snapshot, &read_shown(dir.path(), "sess"), now)
+    };
+    assert!(pick(DUE - DAY).is_empty());
+    assert!(pick(DUE - MINUTE).is_empty());
+    assert!(pick(DUE - 1).is_empty());
+    let due = pick(DUE);
+    assert_eq!(due.len(), 1);
+    assert_eq!((due[0].state, due[0].label.as_str()), (State::Due, "due"));
+    let (text, keys) = render_prompt_reminders(&due, DUE - DAY, DUE).unwrap();
+    assert!(
+        text.ends_with("\n- 00000001  2027-01-15T16:00+08:00 due  power off"),
+        "{text}"
+    );
+    append_shown(dir.path(), "sess", &keys).unwrap();
+    assert!(pick(DUE + MINUTE).is_empty());
+}
+
+#[test]
+fn snapshot_stays_version_1_both_ways() {
+    let dir = temp();
+    let s = snap(100, vec![timed_add(&id(1), "power off", 0)]);
+    assert!(write_snapshot(dir.path(), &s).unwrap());
+    assert_eq!(read_snapshot(dir.path(), "proj"), Some(s));
+    let path = dir.path().join("remind-snapshot/proj.json");
+    let mut raw: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(raw["version"], 1);
+    assert_eq!(raw["events"][0]["on"], "2027-01-15");
+    assert_eq!(raw["events"][0]["at"], "16:00");
+    assert_eq!(raw["events"][0]["due_at"], DUE.to_string());
+    // A snapshot an older cort wrote from the same rows has no `at`, and still reads.
+    raw["events"][0].as_object_mut().unwrap().remove("at");
+    std::fs::write(&path, raw.to_string()).unwrap();
+    let old = read_snapshot(dir.path(), "proj").unwrap();
+    assert!(select_unshown(&old, &HashSet::new(), DUE - 1).is_empty());
+    let picked = select_unshown(&old, &HashSet::new(), DUE);
+    assert_eq!(picked.len(), 1);
+    assert_eq!(picked[0].effective.due_at, DUE);
+    assert_eq!(picked[0].label, "today");
+}

@@ -11,7 +11,13 @@ const MAX_TEXT: usize = 600;
 const MAX_BLOCKS: usize = 64;
 const MAX_NOTE: usize = 300;
 const MAX_LEAD: u32 = 30;
-const DEFAULT_LEAD: u32 = 1;
+const NS_PER_HOUR: i128 = 3_600_000_000_000;
+const NS_PER_MINUTE: i128 = 60_000_000_000;
+/// Days early a date surfaces when no lead was given; a timed reminder surfaces at its instant.
+const DEFAULT_DATE_LEAD: u32 = 1;
+const DEFAULT_TIMED_LEAD: u32 = 0;
+/// What `--on` accepts, for the refusal text.
+const ON_FORMS: &str = "YYYY-MM-DD, YYYY-MM-DD±HH:MM, YYYY-MM-DDTHH:MM or YYYY-MM-DDTHH:MM±HH:MM";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -40,6 +46,14 @@ pub struct ReminderEvent {
     pub lead: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on: Option<String>,
+    /// The time of day (`21:30`) of a timed reminder; absent on a date. A cort that does not
+    /// know the field ignores it and still acts on `due_at`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "string_or_none"
+    )]
+    pub at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub utc_offset: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -57,6 +71,15 @@ pub struct ReminderEvent {
     pub recorded_machine_source: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness: Option<String>,
+}
+
+/// A remote `at` of another type reads as absent, so one such row stays a date reminder instead
+/// of failing the whole read.
+fn string_or_none<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+    Ok(match serde_json::Value::deserialize(d)? {
+        serde_json::Value::String(s) => Some(s),
+        _ => None,
+    })
 }
 
 /// The kind as it is spelled in a stored body.
@@ -111,6 +134,7 @@ pub fn parse_event(body: &str) -> Result<ReminderEvent, String> {
         blocks: None,
         lead: None,
         on: None,
+        at: None,
         utc_offset: None,
         due_at: None,
         reason: None,
@@ -123,16 +147,43 @@ pub fn parse_event(body: &str) -> Result<ReminderEvent, String> {
     })
 }
 
-/// The date (always the first ten characters, `YYYY-MM-DD`), the offset used and the
-/// instant of midnight at that offset (ns since the epoch). An explicit offset lives only
-/// in `utc_offset`, never in `on`, so the two spellings of one day compare equal
+/// The date (always the first ten characters, `YYYY-MM-DD`), the time of day of a timed
+/// reminder (`HH:MM`), the offset used and the instant (ns since the epoch) of that time, or of
+/// midnight for a date, at that offset. An explicit offset lives only in `utc_offset` and a
+/// time only in `at`, never in `on`, so the two spellings of one day compare equal
 /// downstream. Every reader compares `now` against `due_at`, so all machines flip at the
 /// same instant; the day shown is always `on`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Due {
     pub on: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub at: Option<String>,
     pub utc_offset: String,
     pub due_at: i128,
+}
+
+impl Due {
+    /// What a human or agent reads: [`on_text`].
+    pub fn shown(&self) -> String {
+        on_text(&self.on, self.at.as_deref(), &self.utc_offset)
+    }
+
+    /// The lead of a reminder of this kind when none was given.
+    pub fn default_lead(&self) -> u32 {
+        match self.at {
+            Some(_) => DEFAULT_TIMED_LEAD,
+            None => DEFAULT_DATE_LEAD,
+        }
+    }
+}
+
+/// The one way a reminder's date is printed: a date as it is, a timed one as
+/// `YYYY-MM-DDTHH:MM±HH:MM`, which `--on` accepts back.
+pub fn on_text(on: &str, at: Option<&str>, utc_offset: &str) -> String {
+    match at {
+        Some(at) => format!("{on}T{at}{utc_offset}"),
+        None => on.to_string(),
+    }
 }
 
 #[cfg(unix)]
@@ -171,17 +222,20 @@ extern "C" {
 /// offset. Refused (`remind_offset_unknown`) off unix or when `mktime` cannot answer; the
 /// explicit-offset form of `parse_on` works everywhere.
 pub fn local_midnight(y: i32, m: u32, d: u32) -> Result<i128, String> {
-    midnight_secs(y, m, d).map(|secs| i128::from(secs) * NS_PER_SEC)
+    local_secs(y, m, d, 0, 0).map(|(secs, _)| i128::from(secs) * NS_PER_SEC)
 }
 
+/// Seconds since the epoch of a local wall-clock time, and whether that time exists: in the hour
+/// a clock change skips, `mktime` answers another wall clock.
+///
 /// `time_t` is `c_long` on every target this crate builds for (64-bit Linux and macOS),
 /// so the `mktime` result needs no conversion here.
 #[cfg(unix)]
-fn midnight_secs(y: i32, m: u32, d: u32) -> Result<i64, String> {
+fn local_secs(y: i32, m: u32, d: u32, hour: u32, min: u32) -> Result<(i64, bool), String> {
     let mut tm = Tm {
         tm_sec: 0,
-        tm_min: 0,
-        tm_hour: 0,
+        tm_min: min as c_int,
+        tm_hour: hour as c_int,
         tm_mday: d as c_int,
         tm_mon: m as c_int - 1,
         tm_year: y - 1900,
@@ -197,11 +251,19 @@ fn midnight_secs(y: i32, m: u32, d: u32) -> Result<i64, String> {
     if secs == -1 {
         return Err("remind_offset_unknown".to_string());
     }
-    Ok(secs)
+    let exists = (tm.tm_year, tm.tm_mon, tm.tm_mday, tm.tm_hour, tm.tm_min)
+        == (
+            y - 1900,
+            m as c_int - 1,
+            d as c_int,
+            hour as c_int,
+            min as c_int,
+        );
+    Ok((secs, exists))
 }
 
 #[cfg(not(unix))]
-fn midnight_secs(_y: i32, _m: u32, _d: u32) -> Result<i64, String> {
+fn local_secs(_y: i32, _m: u32, _d: u32, _hour: u32, _min: u32) -> Result<(i64, bool), String> {
     Err("remind_offset_unknown".to_string())
 }
 
@@ -251,14 +313,44 @@ fn two(b: &[u8], at: usize) -> Option<u32> {
     }
 }
 
-/// Parse `--on`: `YYYY-MM-DD` (midnight in this machine's local zone, offset reported) or
-/// `YYYY-MM-DD±HH:MM` (offsets up to ±14:00, `due_at` is pure arithmetic). In both forms
-/// `Due.on` is the ten-character date; the offset lives only in `utc_offset`. The date
-/// must be a real calendar date; anything else is `remind_date_invalid`.
+/// `±HH:MM` at the start of `b` as seconds, up to ±14:00, the whole zone range: +14:01..+14:59
+/// is refused, and so is any minute past 59.
+fn parse_offset(b: &[u8]) -> Option<i64> {
+    let sign: i64 = match b.first()? {
+        b'+' => 1,
+        b'-' => -1,
+        _ => return None,
+    };
+    let (hours, minutes) = match (two(b, 1), two(b, 4), b.get(3)) {
+        (Some(h), Some(m), Some(b':')) => (h, m),
+        _ => return None,
+    };
+    if minutes > 59 || hours * 60 + minutes > 14 * 60 {
+        return None;
+    }
+    Some(sign * (i64::from(hours) * 3600 + i64::from(minutes) * 60))
+}
+
+/// `HH:MM` at the start of `b`, 00:00 to 23:59.
+fn parse_time(b: &[u8]) -> Option<(u32, u32)> {
+    match (two(b, 0), two(b, 3), b.get(2)) {
+        (Some(h), Some(m), Some(b':')) if h < 24 && m < 60 => Some((h, m)),
+        _ => None,
+    }
+}
+
+/// Parse `--on`: `YYYY-MM-DD` (midnight in this machine's local zone, offset reported),
+/// `YYYY-MM-DD±HH:MM` (offsets up to ±14:00, `due_at` is pure arithmetic), or either with a
+/// time of day, `YYYY-MM-DDTHH:MM` and `YYYY-MM-DDTHH:MM±HH:MM`. In every form `Due.on` is the
+/// ten-character date; the offset lives only in `utc_offset` and the time only in `at`. The date
+/// must be a real calendar date; anything else is `remind_date_invalid`. A local time a clock
+/// change skips is `remind_time_skipped`.
 pub fn parse_on(raw: &str) -> Result<Due, String> {
-    let invalid = || format!("remind_date_invalid: {raw}");
+    let invalid = || format!("remind_date_invalid: {raw} (accepted: {ON_FORMS})");
     let b = raw.as_bytes();
-    if b.len() != 10 && b.len() != 16 {
+    // Length 16 is a date with an offset or a date with a time; byte 10 says which.
+    let timed = b.get(10) == Some(&b'T');
+    if !matches!((b.len(), timed), (10, false) | (16, _) | (22, true)) {
         return Err(invalid());
     }
     let year = two(b, 0)
@@ -272,36 +364,46 @@ pub fn parse_on(raw: &str) -> Result<Due, String> {
     if day == 0 || day > month_days {
         return Err(invalid());
     }
-    if b.len() == 10 {
-        let due_at = local_midnight(year, month, day)?;
-        // The offset is the difference between that instant and the same wall clock read
-        // as UTC.
-        let offset = (naive_utc_seconds(year, month, day) * NS_PER_SEC - due_at) / NS_PER_SEC;
+    let (hour, minute) = if timed {
+        parse_time(&b[11..16]).ok_or_else(invalid)?
+    } else {
+        (0, 0)
+    };
+    let naive =
+        naive_utc_seconds(year, month, day) + i128::from(hour) * 3600 + i128::from(minute) * 60;
+    let on = raw[..10].to_string();
+    let at = timed.then(|| raw[11..16].to_string());
+    // What follows the date and time: an offset, or nothing for the local zone.
+    let rest = &b[if timed { 16 } else { 10 }..];
+    if !rest.is_empty() {
+        let offset = parse_offset(rest).ok_or_else(invalid)?;
         return Ok(Due {
-            on: raw.to_string(),
-            utc_offset: format_offset(i64::try_from(offset).unwrap_or(0)),
-            due_at,
+            on,
+            at,
+            utc_offset: format_offset(offset),
+            due_at: (naive - i128::from(offset)) * NS_PER_SEC,
         });
     }
-    let sign: i64 = match b[10] {
-        b'+' => 1,
-        b'-' => -1,
-        _ => return Err(invalid()),
-    };
-    let (hours, minutes) = match (two(b, 11), two(b, 14), b.get(13)) {
-        (Some(h), Some(m), Some(b':')) => (h, m),
-        _ => return Err(invalid()),
-    };
-    // ±14:00 is the whole zone range: +14:01..+14:59 is refused, and so is any minute past 59.
-    if minutes > 59 || hours * 60 + minutes > 14 * 60 {
-        return Err(invalid());
+    let (secs, exists) = local_secs(year, month, day, hour, minute)?;
+    // The offset is the difference between that instant and the same wall clock read as UTC.
+    let offset = i64::try_from(naive - i128::from(secs)).unwrap_or(0);
+    if timed {
+        if !exists {
+            return Err(format!(
+                "remind_time_skipped: {raw} does not exist in this machine's time zone (a clock change skips it)"
+            ));
+        }
+        // `shown` must give `due_at` back, so a zone whose offset has seconds or lies outside
+        // ±14:00 needs an explicit offset.
+        if parse_offset(format_offset(offset).as_bytes()) != Some(offset) {
+            return Err("remind_offset_unknown".to_string());
+        }
     }
-    let offset = sign * (i64::from(hours) * 3600 + i64::from(minutes) * 60);
-    let due_at = (naive_utc_seconds(year, month, day) - i128::from(offset)) * NS_PER_SEC;
     Ok(Due {
-        on: raw[..10].to_string(),
+        on,
+        at,
         utc_offset: format_offset(offset),
-        due_at,
+        due_at: i128::from(secs) * NS_PER_SEC,
     })
 }
 
@@ -342,9 +444,25 @@ fn order(a: &ReminderEvent, b: &ReminderEvent) -> std::cmp::Ordering {
     ns(a).cmp(&ns(b)).then_with(|| a.id.cmp(&b.id))
 }
 
+/// The due of a stored add or defer. `at` is kept only when date, time and offset are spelled
+/// exactly as `parse_on` writes them and name the instant in `due_at`; a row from another
+/// machine where they do not (malformed or contradictory) is a date reminder at its instant, so
+/// neither field is ever printed unchecked.
 fn due_from(event: &ReminderEvent) -> Due {
+    let due = Due {
+        at: event.at.clone(),
+        ..date_from(event)
+    };
+    match &due.at {
+        Some(_) if parse_on(&due.shown()).as_ref() != Ok(&due) => date_from(event),
+        _ => due,
+    }
+}
+
+fn date_from(event: &ReminderEvent) -> Due {
     Due {
         on: event.on.clone().unwrap_or_default(),
+        at: None,
         utc_offset: event.utc_offset.clone().unwrap_or_default(),
         due_at: event
             .due_at
@@ -366,6 +484,20 @@ fn state_at(now_ns: i128, effective: &Due, lead: u32) -> State {
         State::Due
     } else {
         State::Overdue
+    }
+}
+
+/// How far away a due instant is: whole days for a date (`tomorrow` for one); for a timed
+/// reminder hours under a day and minutes under an hour, all rounded up, and never `tomorrow`.
+fn remaining_label(effective: &Due, now_ns: i128) -> String {
+    let remaining = effective.due_at.saturating_sub(now_ns);
+    let ceil = |unit: i128| remaining.saturating_add(unit - 1) / unit;
+    let days = ceil(NS_PER_DAY);
+    match effective.at {
+        Some(_) if remaining < NS_PER_HOUR => format!("in {}m", ceil(NS_PER_MINUTE)),
+        Some(_) if remaining < NS_PER_DAY => format!("in {}h", ceil(NS_PER_HOUR)),
+        None if days == 1 => "tomorrow".to_string(),
+        _ => format!("in {days}d"),
     }
 }
 
@@ -404,13 +536,17 @@ pub fn fold(events: Vec<ReminderEvent>, now_ns: i128) -> Folded {
             // kept in the history and changes nothing.
             let close_index = events.iter().position(|e| e.kind == EventKind::Close);
             let close = close_index.map(|i| events[i].clone());
-            let effective = events[..close_index.unwrap_or(events.len())]
+            let newest = events[..close_index.unwrap_or(events.len())]
                 .iter()
                 .rev()
                 .find(|e| e.kind == EventKind::Defer)
-                .map(due_from)
-                .unwrap_or_else(|| due_from(&add));
-            let lead = add.lead.unwrap_or(DEFAULT_LEAD);
+                .unwrap_or(&add);
+            let effective = due_from(newest);
+            // A defer written before defers carried a lead leaves the add's.
+            let lead = newest
+                .lead
+                .or(add.lead)
+                .unwrap_or_else(|| effective.default_lead());
             let state = if close.is_some() {
                 State::Closed
             } else {
@@ -424,21 +560,15 @@ pub fn fold(events: Vec<ReminderEvent>, now_ns: i128) -> Folded {
                         .unwrap_or_else(|| "closed".to_string()),
                     None,
                 ),
+                // A timed reminder is due for 24 hours from its instant, into the next day.
+                State::Due if effective.at.is_some() => ("due".to_string(), None),
                 State::Due => ("today".to_string(), None),
                 State::Overdue => {
                     let days = i64::try_from(now_ns.saturating_sub(effective.due_at) / NS_PER_DAY)
                         .unwrap_or(i64::MAX);
                     (format!("overdue {days}d"), Some(days))
                 }
-                State::Scheduled | State::Upcoming => {
-                    let remaining = effective.due_at.saturating_sub(now_ns);
-                    let days = (remaining + NS_PER_DAY - 1) / NS_PER_DAY;
-                    if days == 1 {
-                        ("tomorrow".to_string(), None)
-                    } else {
-                        (format!("in {days}d"), None)
-                    }
-                }
+                State::Scheduled | State::Upcoming => (remaining_label(&effective, now_ns), None),
             };
             let last = events
                 .iter()
@@ -523,8 +653,8 @@ fn check(what: &str, value: &str, max: usize) -> Result<(), String> {
 }
 
 /// Bounds for `add`: text 600 characters, `blocks` 64, control characters refused, lead
-/// 0-30.
-pub fn validate_add(text: &str, blocks: Option<&str>, lead: u32) -> Result<(), String> {
+/// 0-30 when given.
+pub fn validate_add(text: &str, blocks: Option<&str>, lead: Option<u32>) -> Result<(), String> {
     if text.trim().is_empty() {
         return Err("remind_text_empty".to_string());
     }
@@ -532,7 +662,7 @@ pub fn validate_add(text: &str, blocks: Option<&str>, lead: u32) -> Result<(), S
     if let Some(b) = blocks {
         check("blocks", b, MAX_BLOCKS)?;
     }
-    if lead > MAX_LEAD {
+    if let Some(lead) = lead.filter(|lead| *lead > MAX_LEAD) {
         return Err(format!("remind_lead_invalid: {lead} exceeds {MAX_LEAD}"));
     }
     Ok(())
@@ -544,9 +674,13 @@ pub fn validate_note(note: &str) -> Result<(), String> {
 }
 
 /// Refuse the past by instant, not by date: a day whose day has not ended at its own
-/// offset is still accepted, anywhere in the world.
+/// offset is still accepted, anywhere in the world. A timed due is past at its instant.
 pub fn check_not_past(due: &Due, now_ns: i128) -> Result<(), String> {
-    if due.due_at.saturating_add(NS_PER_DAY) <= now_ns {
+    let ends_at = match due.at {
+        Some(_) => due.due_at,
+        None => due.due_at.saturating_add(NS_PER_DAY),
+    };
+    if ends_at <= now_ns {
         return Err("remind_date_past".to_string());
     }
     Ok(())

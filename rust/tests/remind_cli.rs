@@ -347,3 +347,27 @@ fn duplicate_without_of_refused_before_network() {
     let message = value["detail"]["message"].as_str().unwrap();
     assert!(message.contains("not configured"), "{value}");
 }
+
+#[test]
+fn timed_on_and_optional_lead_at_the_command_line() {
+    let f = Fixture::new();
+    for on in ["2099-12-01T21:30", "2099-12-01T21:30+08:00"] {
+        f.assert_unconfigured(&["remind", "add", "--on", on, "--text", "task"]);
+        f.assert_unconfigured(&["remind", "add", "--on", on, "--text", "task", "--lead", "2"]);
+        f.assert_unconfigured(&["remind", "defer", "0011223344556677", "--on", on]);
+    }
+    for bad in ["2099-12-01T24:00", "2099-12-01T21:30Z"] {
+        let (_, value) = f.run(&["remind", "add", "--on", bad, "--text", "task"]);
+        let message = value["detail"]["message"].as_str().unwrap();
+        assert!(
+            message.starts_with(&format!("remind_date_invalid: {bad}")),
+            "{value}"
+        );
+        assert!(message.contains("YYYY-MM-DDTHH:MM"), "{value}");
+    }
+    let (_, value) = f.run(&["remind", "--help"]);
+    let add = value["commands"]["add"].as_str().unwrap();
+    assert!(add.contains("[--lead <LEAD>]"), "{add}");
+    let note = value["note"].as_str().unwrap();
+    assert!(note.contains("YYYY-MM-DDTHH:MM"), "{note}");
+}

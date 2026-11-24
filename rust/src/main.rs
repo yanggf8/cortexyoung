@@ -67,7 +67,7 @@ fn usage_value() -> Value {
             "usage": "cort usage [days] [-f json|lean]",
             "memory": "cort memory <configure|import-config|record|resolve|recall|status|list|check|promote|archive|drop|restore|lifecycle|review|notes|alias> [options]",
             "question": "cort question <add|list|answer|close> [options]  (questions for the human, kept per repo in the memory database; cort question --help lists each verb)",
-            "remind": "cort remind <add|list|defer|close> [options]  (dated tasks that surface at session start from the day before, kept per repo in the memory database; cort remind --help lists each verb)",
+            "remind": "cort remind <add|list|defer|close> [options]  (dated tasks that surface at session start from the day before, or from a time of day, kept per repo in the memory database; cort remind --help lists each verb)",
             "measure": "cort measure <configure|show|record|collect|health|status|cron|report> [options]  (uploads start at 2026-10-28 00:00 Taiwan time; collect: scan and upload the batch; --background appends at most one result to measure.log (none when skipped_busy) without stdout; health: observe recently used indexes and write local index_health_log, reading indexes only, with no network; --background appends the result to measure.log without stdout; status: read local collection state, -f json|lean; cron: manual install or removal of the legacy entry, no longer installed automatically; hook kick is the only automatic collection trigger; command_log and index_health_log keep uploaded rows 90 days and rows not yet uploaded 180 days, pruned when a new command is recorded; rows still not uploaded after 180 days are deleted and counted in measure status (pruned_unuploaded_rows) and measure.log)",
             "hook-suggest": "cort hook-suggest  (PreToolUse hook: records one fire row, kicks collection, and relays a configured gate's deny; not a verb to type)",
             "hook-refresh": "cort hook-refresh  (PostToolUse hook: refreshes an existing index and may prompt on a private-memory save; not a verb to type)",
@@ -113,7 +113,7 @@ fn remind_usage_value() -> Value {
     verbs_usage_value(
         RemindArgs::command(),
         "cort remind",
-        "Commands read the project at --root (default: the cwd). Ids accept a unique lowercase hex prefix of at least 8 characters. --on is YYYY-MM-DD or YYYY-MM-DD±HH:MM; a bare date means this machine's local zone, and add and defer always print the offset used (utc_offset).",
+        "Commands read the project at --root (default: the cwd). Ids accept a unique lowercase hex prefix of at least 8 characters. --on is YYYY-MM-DD, YYYY-MM-DD±HH:MM, YYYY-MM-DDTHH:MM or YYYY-MM-DDTHH:MM±HH:MM; without an offset it means this machine's local zone, --lead defaults to 1 for a date and 0 for a time, and add and defer always print the offset used (utc_offset).",
     )
 }
 
@@ -1047,16 +1047,16 @@ struct RemindArgs {
 
 #[derive(Subcommand, Debug)]
 enum RemindAction {
-    /// File a dated task; it surfaces at session start from the day before its date.
+    /// File a dated task; it surfaces from the day before its date, or from its time of day.
     Add {
         #[arg(long)]
         text: String,
-        /// `YYYY-MM-DD` (this machine's local zone) or `YYYY-MM-DD±HH:MM`.
+        /// `YYYY-MM-DD` or `YYYY-MM-DDTHH:MM` (this machine's local zone), each also with `±HH:MM`.
         #[arg(long)]
         on: String,
-        /// Days early it surfaces, 0-30.
-        #[arg(long, default_value_t = 1)]
-        lead: u32,
+        /// Days early it surfaces, 0-30; 1 for a date and 0 for a time when omitted.
+        #[arg(long)]
+        lead: Option<u32>,
         #[arg(long)]
         blocks: Option<String>,
         #[arg(long)]
@@ -1084,10 +1084,11 @@ enum RemindAction {
         #[arg(short = 'f', long = "format", value_parser = ["json", "lean"])]
         format: Option<String>,
     },
-    /// Move the effective date to a new `--on`; refused on a closed reminder.
+    /// Move the effective date to a new `--on`; refused on a closed reminder. The lead stays, unless
+    /// a date becomes a time of day or the other way round.
     Defer {
         id: String,
-        /// `YYYY-MM-DD` (this machine's local zone) or `YYYY-MM-DD±HH:MM`.
+        /// `YYYY-MM-DD` or `YYYY-MM-DDTHH:MM` (this machine's local zone), each also with `±HH:MM`.
         #[arg(long)]
         on: String,
         #[arg(long)]

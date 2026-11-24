@@ -2099,7 +2099,7 @@ fn reminder_insert_survives_its_table_dropped_after_the_read() {
         cort::remind_store::AddArgs {
             text: "later".into(),
             on: "2099-01-01+08:00".into(),
-            lead: 1,
+            lead: Some(1),
             blocks: None,
             harness: None,
             force: false,

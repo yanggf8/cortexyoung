@@ -24,7 +24,8 @@ const EVENTS_REPORTED_ABOVE: usize = 2000;
 pub struct AddArgs {
     pub text: String,
     pub on: String,
-    pub lead: u32,
+    /// `None`: the default of the kind of `on` (1 for a date, 0 for a timed one).
+    pub lead: Option<u32>,
     pub blocks: Option<String>,
     pub harness: Option<String>,
     pub force: bool,
@@ -178,6 +179,7 @@ fn new_event(
         blocks: None,
         lead: None,
         on: None,
+        at: None,
         utc_offset: None,
         due_at: None,
         reason: None,
@@ -233,7 +235,7 @@ fn event_json(event: &ReminderEvent) -> Value {
 }
 
 /// One reminder as it stands: the effective date (the newest defer before the close, else the
-/// add), the state and label at `now`, and the add's text and lead.
+/// add) with its lead, the state and label at `now`, and the add's text.
 fn reminder_json(r: &Reminder, with_events: bool) -> Value {
     let mut value = json!({
         "id": r.add.id,
@@ -246,6 +248,9 @@ fn reminder_json(r: &Reminder, with_events: bool) -> Value {
         "lead": r.lead,
         "last_activity": r.last_activity,
     });
+    if let Some(at) = &r.effective.at {
+        value["at"] = json!(at);
+    }
     if let Some(blocks) = &r.add.blocks {
         value["blocks"] = json!(blocks);
     }
@@ -323,8 +328,9 @@ pub fn add_with(root: &Path, args: AddArgs, ledger: &Ledger) -> Result<Value, Le
     let mut event = new_event(EventKind::Add, &args.text, args.harness)?;
     event.text = Some(args.text);
     event.blocks = args.blocks;
-    event.lead = Some(args.lead);
+    event.lead = Some(args.lead.unwrap_or_else(|| due.default_lead()));
     event.on = Some(due.on.clone());
+    event.at = due.at.clone();
     event.utc_offset = Some(due.utc_offset.clone());
     event.due_at = Some(due.due_at.to_string());
     snap.write(ledger, &event)?;
@@ -472,7 +478,14 @@ pub fn defer_with(
     }
     let mut event = new_event(EventKind::Defer, &format!("{rid}\0{on}"), harness)?;
     event.reminder = Some(rid);
+    // The current lead, unless a date became a time or the other way round.
+    event.lead = Some(if r.effective.at.is_some() == due.at.is_some() {
+        r.lead
+    } else {
+        due.default_lead()
+    });
     event.on = Some(due.on.clone());
+    event.at = due.at.clone();
     event.utc_offset = Some(due.utc_offset.clone());
     event.due_at = Some(due.due_at.to_string());
     event.note = note;
@@ -581,12 +594,21 @@ fn lean_id8(value: &Value) -> String {
     lean_field(&id)
 }
 
+/// [`remind::on_text`] of a reminder's JSON, as one lean field.
+fn lean_on(r: &Value) -> String {
+    lean_field(&remind::on_text(
+        r["on"].as_str().unwrap_or(""),
+        r["at"].as_str(),
+        r["utc_offset"].as_str().unwrap_or(""),
+    ))
+}
+
 /// `-f lean` for `cort remind <verb>`: `add` prints `added <id> <on> <utc_offset>` (plus
 /// ` similar=<id8>,...` when similar reminders exist) or `exists <id> <on> <state>`; `defer`
 /// prints `deferred <id> <on> <utc_offset>` (the offset is always shown so the agent can check
 /// it against the user's zone); `close` prints `closed <id> <reason>`; `list` one TSV row per
 /// reminder (`<id8> <on> <state> <label> <text> <blocks|->`, labels with `_` for spaces). No
-/// field is ever empty.
+/// field is ever empty. `<on>` is the date, or `YYYY-MM-DDTHH:MM±HH:MM` for a timed reminder.
 pub fn render_lean(verb: &str, payload: &Value) -> String {
     let mut out = String::new();
     match verb {
@@ -595,7 +617,7 @@ pub fn render_lean(verb: &str, payload: &Value) -> String {
             out.push_str(&format!(
                 "exists {} {} {}\n",
                 lean_field(r["id"].as_str().unwrap_or("")),
-                lean_field(r["on"].as_str().unwrap_or("")),
+                lean_on(r),
                 lean_field(r["state"].as_str().unwrap_or(""))
             ));
         }
@@ -605,7 +627,7 @@ pub fn render_lean(verb: &str, payload: &Value) -> String {
                 "{} {} {} {}",
                 lean_field(payload["outcome"].as_str().unwrap_or("")),
                 lean_field(r["id"].as_str().unwrap_or("")),
-                lean_field(r["on"].as_str().unwrap_or("")),
+                lean_on(r),
                 lean_field(r["utc_offset"].as_str().unwrap_or(""))
             ));
             let similar: Vec<String> = payload["similar"]
@@ -640,7 +662,7 @@ pub fn render_lean(verb: &str, payload: &Value) -> String {
                 out.push_str(&format!(
                     "{}\t{}\t{}\t{}\t{}\t{}\n",
                     lean_id8(r),
-                    lean_field(r["on"].as_str().unwrap_or("")),
+                    lean_on(r),
                     lean_field(r["state"].as_str().unwrap_or("")),
                     label,
                     lean_field(r["text"].as_str().unwrap_or("")),

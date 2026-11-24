@@ -40,7 +40,7 @@ pub const MAX_REMINDERS: usize = 4;
 pub const MAX_REMINDER_BYTES: usize = 800;
 /// The shortest cut reminder line worth showing: its own prefix plus this many bytes of text.
 const MIN_REMINDER_TEXT_BYTES: usize = 24;
-/// Room for the tail line, including large counts.
+/// Room for the tail line, including large counts and a timed next date.
 const REMINDER_TAIL_RESERVE: usize = 96;
 /// Open questions listed at session start, on their own budget between the ledger and the notes.
 const MAX_QUESTIONS: usize = 8;
@@ -406,12 +406,11 @@ pub fn render_reminders(reminders: &[Reminder]) -> Option<(String, Vec<ShownKey>
         return None;
     }
     if due_ish.is_empty() {
-        let next = &scheduled[0].effective.on;
         return Some((
             format!(
                 "\n{} reminders scheduled (next {}): cort remind list",
                 scheduled.len(),
-                crate::notes::sanitize(next, Some(10))
+                shown_on(scheduled[0])
             ),
             Vec::new(),
         ));
@@ -493,12 +492,12 @@ fn reminder_block(
         (0, Some(next)) => format!(
             "\n… {} scheduled (next {}): cort remind list",
             scheduled.len(),
-            crate::notes::sanitize(&next.effective.on, Some(10))
+            shown_on(next)
         ),
         (n, Some(next)) => format!(
             "\n… {n} more due, {} scheduled (next {}): cort remind list",
             scheduled.len(),
-            crate::notes::sanitize(&next.effective.on, Some(10))
+            shown_on(next)
         ),
     };
     section.push_str(&tail);
@@ -548,11 +547,19 @@ pub(crate) fn cut_line(line: &str, prefix_len: usize, budget: usize) -> Option<S
     (end >= prefix_len + MIN_REMINDER_TEXT_BYTES).then(|| format!("{}…", &line[..end]))
 }
 
+/// [`Due::shown`](crate::remind::Due::shown) of the effective date, bounded to what it can be:
+/// ten characters, or the 22 of `YYYY-MM-DDTHH:MM±HH:MM`.
+fn shown_on(r: &Reminder) -> String {
+    let cap = if r.effective.at.is_some() { 22 } else { 10 };
+    crate::notes::sanitize(&r.effective.shown(), Some(cap))
+}
+
 /// One reminder line and the byte length of its prefix, so the renderer knows where the text
-/// begins: `\n- <id8>  <on> <label>  <text>` plus `  (blocks: <b>)` when set.
+/// begins: `\n- <id8>  <on> <label>  <text>` plus `  (blocks: <b>)` when set; `<on>` is
+/// [`shown_on`].
 fn reminder_line(r: &Reminder) -> (String, usize) {
     let id = crate::notes::sanitize(r.add.id.get(..8).unwrap_or(&r.add.id), Some(8));
-    let on = crate::notes::sanitize(&r.effective.on, Some(10));
+    let on = shown_on(r);
     let label = crate::notes::sanitize(&r.label, None);
     let prefix = format!("\n- {id}  {on} {label}  ");
     let text = capped(r.add.text.as_deref().unwrap_or(""), 300);

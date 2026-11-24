@@ -364,6 +364,7 @@ verbs; it is never a claim and `cort memory recall` does not return it.
 
 ```sh
 cort remind add --on 2026-11-21 --text "NUC boot auto-recovery" [--lead 1] [--blocks nuc-boot]
+cort remind add --on 2026-11-24T21:27 --text "restart the NUC tonight"   # waits for a time of day
 cort remind list                        # not closed, soonest first; <id> shows one history
 cort remind list --closed | --all | --match nuc
 cort remind defer <id> --on 2026-11-28 [--note "..."]
@@ -379,9 +380,24 @@ written through the same checked-write path as questions (`outcome_unknown` on a
   zone. `add` and `defer` always print `utc_offset`: on a machine set to UTC a bare date is 08:00 in
   Taiwan, so check it and, when it is wrong, `defer <id> --on YYYY-MM-DD±HH:MM` to the same day with
   the right offset. A date whose day has already ended is refused (`remind_date_past`).
-- **States.** `scheduled` until `--lead` days before (default 1), then `upcoming` (`tomorrow`, or
+- **Times of day** (2026-11-24). `YYYY-MM-DDTHH:MM` is that time in the writing machine's zone and
+  `YYYY-MM-DDTHH:MM±HH:MM` fixes the offset; 00:00 to 23:59. The event keeps the date in `on` and
+  adds the time as `at` (`"21:27"`); `due_at` is the exact instant. A local time that a clock change
+  skips is refused (`remind_time_skipped`), one whose zone offset cannot be written as `±HH:MM` within
+  ±14:00 is refused (`remind_offset_unknown`), and a time that has passed is `remind_date_past`.
+  Wherever the date is printed (session start, later prompts, lean) a timed reminder prints
+  `YYYY-MM-DDTHH:MM±HH:MM`, which `--on` accepts back. A row whose `at`, date and offset are malformed
+  or do not name its `due_at` is read as a date reminder at that instant. A cort from before
+  2026-11-24 ignores `at`: it shows the date and is right about the instant, but takes the lead from
+  the add, so after a date was deferred to a time it can list it early.
+- **Lead.** `--lead` is days early, 0-30; omitted it is 1 for a date and 0 for a time, and the
+  resolved value is stored. `defer` writes a lead too: the current one, or the default of the new kind
+  when a date becomes a time or a time a date.
+- **States.** `scheduled` until `--lead` days before, then `upcoming` (`tomorrow`, or
   `in Nd` with a longer lead),
-  `due` on the day (`today`), `overdue Nd` after it, `closed` once closed. Reminders never go stale:
+  `due` on the day (`today`), `overdue Nd` after it, `closed` once closed. A timed reminder is `in Nd`,
+  under 24 hours away `in Nh`, under one hour `in Nm`, then `due` for 24 hours from its instant, then
+  `overdue Nd`. Reminders never go stale:
   one may never have been shown (no session in that project), so the block is bounded by its caps.
 - **add** returns the earlier record as `exists` only when a non-closed reminder has the same terms
   and the same instant (`due_at`; the same day written with and without its offset is one instant);
@@ -393,7 +409,8 @@ written through the same checked-write path as questions (`outcome_unknown` on a
 questions and rendered right after the ledger entries. Listed: overdue, due and upcoming, oldest
 first, at most 4 lines and 800 bytes, cut with `…` like the questions block; the tail line counts
 unlisted due ones first (`N more due`) and then the scheduled ones with the next date. Only
-scheduled ones → the single line `N reminders scheduled (next YYYY-MM-DD): cort remind list`.
+scheduled ones → the single line `N reminders scheduled (next YYYY-MM-DD): cort remind list`
+(with the time and offset when the next one is timed).
 Each of notes, questions and reminders is dropped alone on its own SQL error (a non-SQL error in any
 statement fails the whole read); a dropped reminders read prints the single line `reminders could not
 be read: cort remind list`, so a due reminder is never silently missing. The usage row records
@@ -405,7 +422,8 @@ a local snapshot of the project's reminders (`remind-snapshot/<project>.json` un
 directory). On Claude Code a `UserPromptSubmit` hook (`cort hook-remind`) reads only that snapshot
 and the session's shown set (`remind-sessions/`), with no network and no memory config, and prints
 each `upcoming`, `due` or `overdue` reminder once per session when it enters its window or is
-deferred to a new date; Kimi's later prompts do the same through `hook-recall`. A close, defer or
+deferred to a new date; a timed one therefore appears at the first prompt after its time, and nothing
+rings by itself. Kimi's later prompts do the same through `hook-recall`. A close, defer or
 new reminder made on another machine reaches a running session at its next session start, not its
 next prompt. A snapshot older than 3 days is not replayed: one line says its date and to run
 `cort remind list`, which stays the authoritative answer. Codex is not wired yet.

@@ -207,7 +207,7 @@ fn args(text: &str, on: &str) -> AddArgs {
     AddArgs {
         text: text.into(),
         on: on.into(),
-        lead: 1,
+        lead: Some(1),
         blocks: None,
         harness: None,
         force: false,
@@ -859,4 +859,163 @@ fn a_new_database_answers_empty_and_later_reads_send_no_create() {
     f.list(ListFilter::All);
     assert!(!f.control.lock().unwrap().bodies.is_empty());
     assert!(!sent_a_create(&f));
+}
+
+/// `YYYY-MM-DDTHH:MM+00:00` for the minute `minutes` from now.
+fn on_in_minutes(minutes: i64) -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let at = now + minutes * 60;
+    let date = on_in_days(at.div_euclid(86_400) - now.div_euclid(86_400));
+    let secs = at.rem_euclid(86_400);
+    format!(
+        "{}T{:02}:{:02}+00:00",
+        &date[..10],
+        secs / 3600,
+        secs % 3600 / 60
+    )
+}
+
+fn add_no_lead(f: &Fixture, text: &str, on: &str) -> Value {
+    let mut a = args(text, on);
+    a.lead = None;
+    f.add_args(a).unwrap()
+}
+
+fn stored(f: &Fixture, id: &str) -> Value {
+    let rows = f
+        .query(&format!(
+            "SELECT body FROM project_reminders WHERE id = '{id}'"
+        ))
+        .unwrap();
+    serde_json::from_str(rows[0][0]["value"].as_str().unwrap()).unwrap()
+}
+
+#[test]
+fn omitted_lead_is_resolved_and_stored() {
+    let f = Fixture::new();
+    let date = added_id(&add_no_lead(&f, "dated task", &on_in_days(9)));
+    let timed = added_id(&add_no_lead(&f, "evening chore", &on_in_minutes(600)));
+    let mut a = args("explicit early warning", &on_in_minutes(700));
+    a.lead = Some(2);
+    let explicit = added_id(&f.add_args(a).unwrap());
+    let mut a = args("zero for holiday", &on_in_days(9));
+    a.lead = Some(0);
+    let zero = added_id(&f.add_args(a).unwrap());
+    for (id, lead) in [(date, 1), (timed, 0), (explicit, 2), (zero, 0)] {
+        assert_eq!(stored(&f, &id)["lead"], lead, "{id}");
+    }
+}
+
+#[test]
+fn timed_add_stores_at_and_replies_with_it() {
+    let f = Fixture::new();
+    let on = on_in_minutes(600);
+    let out = add_no_lead(&f, "power off the NUC", &on);
+    let id = added_id(&out);
+    let r = &out["reminder"];
+    assert_eq!(r["on"], json!(&on[..10]), "{out}");
+    assert_eq!(r["at"], json!(&on[11..16]), "{out}");
+    assert_eq!(r["utc_offset"], "+00:00");
+    assert_eq!(r["state"], "scheduled");
+    assert_eq!(r["label"], "in 10h");
+    let due_at = cort::remind::parse_on(&on).unwrap().due_at.to_string();
+    assert_eq!(r["due_at"], json!(due_at));
+    let body = stored(&f, &id);
+    assert_eq!(body["on"], json!(&on[..10]), "{body}");
+    assert_eq!(body["at"], json!(&on[11..16]), "{body}");
+    assert_eq!(body["due_at"], json!(due_at));
+    // A date reminder has no `at`, stored or shown.
+    let date = add_no_lead(&f, "dated task", &on_in_days(9));
+    assert!(date["reminder"].get("at").is_none(), "{date}");
+    assert!(stored(&f, &added_id(&date)).get("at").is_none());
+    // The fold reads both back from the database.
+    let listed = f.list(ListFilter::Open);
+    assert_eq!(listed["reminders"][0]["at"], json!(&on[11..16]), "{listed}");
+    assert!(listed["reminders"][1].get("at").is_none(), "{listed}");
+}
+
+#[test]
+fn timed_past_refused_before_network() {
+    let f = Fixture::new();
+    // Two hours ago: a date would still be accepted today.
+    let on = on_in_minutes(-120);
+    let err = message(f.add_args(args("Too late", &on)).unwrap_err());
+    assert_eq!(err, "remind_date_past");
+    let err = message(f.defer("0011223344556677", &on, None, None).unwrap_err());
+    assert_eq!(err, "remind_date_past");
+    assert_eq!((f.rows(), f.posts()), (0, 0));
+}
+
+#[test]
+fn defer_writes_the_lead_of_its_kind() {
+    let f = Fixture::new();
+    let defer = |id: &str, on: &str| {
+        let out = f.defer(id, on, None, None).unwrap();
+        let one =
+            remind_store::list_with(f.root(), ListFilter::Open, Some(id), None, &f.ledger).unwrap();
+        let r = &one["reminders"][0];
+        assert_eq!(out["reminder"]["lead"], r["lead"], "{out} {one}");
+        assert_eq!(out["reminder"]["at"], r["at"], "{out} {one}");
+        let event = r["events"].as_array().unwrap().last().unwrap().clone();
+        assert_eq!(event["kind"], "defer");
+        assert_eq!(event["lead"], r["lead"], "{event}");
+        (event["lead"].as_u64().unwrap(), event["at"].clone())
+    };
+    let mut a = args("dated task", &on_in_days(9));
+    a.lead = Some(5);
+    let id = added_id(&f.add_args(a).unwrap());
+    // Same kind keeps the current lead, through any number of defers.
+    assert_eq!(defer(&id, &on_in_days(10)), (5, Value::Null));
+    assert_eq!(defer(&id, &on_in_days(11)), (5, Value::Null));
+    // A changed kind takes the new kind's default, and that is then the current lead.
+    let timed = on_in_minutes(3 * 1440);
+    assert_eq!(defer(&id, &timed), (0, json!(&timed[11..16])));
+    let timed = on_in_minutes(4 * 1440);
+    assert_eq!(defer(&id, &timed), (0, json!(&timed[11..16])));
+    assert_eq!(defer(&id, &on_in_days(12)), (1, Value::Null));
+    // A timed reminder with an explicit lead keeps it when deferred to another time.
+    let mut a = args("evening chore", &on_in_minutes(600));
+    a.lead = Some(3);
+    let id = added_id(&f.add_args(a).unwrap());
+    let timed = on_in_minutes(2 * 1440);
+    assert_eq!(defer(&id, &timed), (3, json!(&timed[11..16])));
+}
+
+#[test]
+fn lean_timed_records_print_a_form_on_accepts() {
+    let f = Fixture::new();
+    let on = on_in_minutes(600);
+    let out = add_no_lead(&f, "power off the NUC", &on);
+    let id = added_id(&out);
+    // Same four fields as a date; the second one now carries the time and offset.
+    let line = remind_store::render_lean("add", &out);
+    assert_eq!(line, format!("added {id} {on} +00:00\n"));
+    let exists = add_no_lead(&f, "power off the NUC", &on);
+    assert_eq!(
+        remind_store::render_lean("add", &exists),
+        format!("exists {id} {on} scheduled\n")
+    );
+    let moved = on_in_minutes(660);
+    let out = f.defer(&id, &moved, None, None).unwrap();
+    assert_eq!(
+        remind_store::render_lean("defer", &out),
+        format!("deferred {id} {moved} +00:00\n")
+    );
+    let date = on_in_days(9);
+    f.add_on("dated task", &date);
+    let lean = remind_store::render_lean("list", &f.list(ListFilter::Open));
+    let rows: Vec<Vec<&str>> = lean.lines().map(|l| l.split('\t').collect()).collect();
+    assert_eq!(rows.len(), 2, "{lean}");
+    assert!(
+        rows.iter()
+            .all(|r| r.len() == 6 && r.iter().all(|field| !field.is_empty())),
+        "{lean}"
+    );
+    assert_eq!(rows[0][1], moved);
+    assert_eq!(rows[0][3], "in_11h");
+    assert_eq!(rows[1][1], &date[..10]);
+    cort::remind::parse_on(rows[0][1]).unwrap();
 }

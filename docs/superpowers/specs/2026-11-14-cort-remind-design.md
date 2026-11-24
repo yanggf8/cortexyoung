@@ -34,7 +34,7 @@ per-statement recall), not its meaning.
 
 ## Non-goals
 
-- Recurrence, times of day, notifications outside a session (phone push, mail, cron). A reminder
+- Recurrence, times of day (amended 2026-11-24, see the end), notifications outside a session (phone push, mail, cron). A reminder
   is seen when a session starts (or resumes, clears, compacts) in its project, never otherwise:
   a session that stays open across the day does not re-read. The default one-day lead is the
   mitigation.
@@ -285,3 +285,29 @@ machine's upgrade is that machine's session's job; this repo records the to-do i
   helpers -- prefix resolution, checked write, bounded line rendering -- only where it removes a
   copy rather than adding a layer).
 - Exact lean column order within the TSV rule.
+
+## Amendment, 2026-11-24: times of day
+
+The user asked for a time of day on 2026-11-24, which overrides the "times of day" non-goal: a task
+for "tonight after 21:27" filed as a date was due at 00:00 and shown about 11 hours early. Recurrence
+and notifications outside a session stay non-goals; a timed reminder appears at the first prompt
+(or session start) after its instant.
+
+- **`--on`** also takes `YYYY-MM-DDTHH:MM` (local zone, `mktime` for that date and time) and
+  `YYYY-MM-DDTHH:MM±HH:MM` (arithmetic). A local time a clock change skips is `remind_time_skipped`; a
+  local zone whose offset is not a whole `±HH:MM` within ±14:00 is `remind_offset_unknown`.
+  `remind_date_invalid` names the accepted forms after the raw value.
+- **Storage.** `on` stays the ten-character date. A new optional `at` (`"21:27"`) on add and defer
+  holds the time; `due_at` is the exact instant. The snapshot stays version 1. An older cort ignores
+  `at` and acts on `due_at`; a row without `at` is a date.
+- **Remote rows.** `at` is kept only when `on`, `at` and `utc_offset` are spelled as this parser
+  writes them and name `due_at`; otherwise the row is a date reminder at that instant. It is not
+  refused in `parse_event`, because one refused row drops the whole block.
+- **Lead.** `--lead` is optional: 1 for a date, 0 for a time, and the resolved value is stored.
+  `defer` stores one as well (the current lead; the new kind's default when the kind changes), and
+  the fold takes the effective defer's, else the add's, else the default.
+- **States** are unchanged. Labels of timed reminders: `in Nd`, under 24 hours `in Nh`, under one
+  hour `in Nm` (all rounded up, never `tomorrow`), `due` instead of `today`, `overdue Nd`.
+- **Past.** A timed `--on` is refused when `due_at <= now`.
+- **Display.** JSON gains `at`; every printed date of a timed reminder is
+  `YYYY-MM-DDTHH:MM±HH:MM`. The longest tail grows by 12 bytes and still fits the 96-byte reserve.
