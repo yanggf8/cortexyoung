@@ -13,7 +13,7 @@ is read and written directly in the shared database. Each machine must configure
 `remote: ok` says this invocation read the shared database. `CORT_MEMORY_PROJECT` can override
 Git origin for a project without one; the earlier `CLAUDECAT_MEMORY_PROJECT` spelling is accepted during migration.
 Manual memory commands and notes upload use `CORT_COLLECT_NET_TIMEOUT_SECS` (default 120 seconds)
-as their network deadline; `hook-recall` has its own 12-second deadline (3.5 seconds of it for connect and TLS) inside the 15-second limit its harness entry carries.
+as their network deadline; `hook-recall` has its own 12-second deadline (3.5 seconds of it for name resolution, connect and TLS) inside the 15-second limit its harness entry carries.
 `notes upload` waits up to `CORT_MEMORY_LOCK_WAIT_SECS` (default 30 seconds, fractions allowed) for `memory.lock`; `list` and `show` read the shared database without that lock.
 
 The shared ledger database is `harnessuse` (`turso://harnessuse-yanggf8.aws-ap-northeast-1.turso.io`,

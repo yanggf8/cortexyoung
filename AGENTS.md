@@ -223,9 +223,10 @@ network deadline is 12000 ms from process start (`remote::RECALL_DEADLINE`); the
 defaults to 11700 ms (`CORT_RECALL_TIMEOUT_MS`), is capped at 11900 ms, and is also limited to the
 remaining deadline minus 100 ms. It was 2500/1500 ms until 2026-10-29 and 3800/3500 ms until
 2026-11-24, and the first read after an idle spell still timed out (the reading is in the
-time-budget paragraph above). Connect and TLS together get 3500 ms of it
-(`remote::RECALL_CONNECT_TIMEOUT`): only the response phase is slow on a cold database. Name
-resolution is synchronous and only the watchdog ends it.
+time-budget paragraph above). Name resolution, connect and TLS together get 3500 ms of it
+(`remote::RECALL_CONNECT_TIMEOUT`): only the response phase is slow on a cold database. The system
+resolver cannot be interrupted, so recall resolves on a thread and stops waiting at that bound (or
+the request's, if less); no other network user bounds resolution.
 With under 200 ms left, it sends no request. A watchdog exits the process 900 ms after the deadline
 (socket timeouts overshoot it) and 300 ms more once the answer is being written, 13.2 s in all, so
 the whole run stays inside the 15 s limit its harness entry carries. `HookEvent::timeout_secs` is the

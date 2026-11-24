@@ -589,6 +589,7 @@ fn run_with(
         .env("CORT_MACHINE_ID", "self")
         .env_remove("CORT_TEST_RECALL_WATCHDOG_MS")
         .env_remove("CORT_TEST_RECALL_SPENT_MS")
+        .env_remove("CORT_TEST_RECALL_DNS_MS")
         .current_dir(cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -881,6 +882,78 @@ fn cli_connect_black_hole_ends_well_before_the_deadline() {
         return;
     }
     assert_black_hole_ends_early(&format!("https://{address}"), "connect");
+}
+
+/// A resolver that never answers is bounded like the rest of the connection setup, and ends like any other stalled phase: the notice, one row, phase
+/// `dns` -- not the watchdog's silent exit 12.9 s in. The debug-only delay outlasts the watchdog.
+#[cfg(debug_assertions)]
+#[test]
+fn cli_hung_resolver_ends_well_before_the_deadline() {
+    // The connect bound, then the configured timeout, then what is left of the deadline: at most
+    // 3000 ms, minus 100 ms.
+    for (setting, spent, dns_ms) in [
+        ("99999", "0", 3400..6000),
+        ("400", "0", 350..2500),
+        ("99999", "9000", 1000..3000),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let repo = git_repo(root);
+        config(&root.join("data"), "https://127.0.0.1:9");
+        let payload = json!({"cwd":repo}).to_string();
+        let (out, elapsed) = run_with(root, root, &payload, Some(setting), |cmd| {
+            cmd.env("CORT_TEST_RECALL_DNS_MS", "60000")
+                .env("CORT_TEST_RECALL_SPENT_MS", spent);
+        });
+        eprintln!("timeout {setting}, spent {spent}: ended after {elapsed:?}");
+        assert!(out.status.success());
+        assert!(
+            !out.stdout.is_empty(),
+            "no output after {elapsed:?}; the row says {}",
+            outcome(root)
+        );
+        notice(&out, "remote_timeout");
+        assert!(elapsed < Duration::from_millis(8000), "{elapsed:?}");
+        let row = outcome(root);
+        assert_eq!(row["hook"], "remote_timeout");
+        assert_eq!(row["stall"]["phase"], "dns", "{row}");
+        let spent_in_dns = row["stall"]["dns_ms"].as_u64().unwrap();
+        assert!(dns_ms.contains(&spent_in_dns), "{row}");
+        assert!(row["stall"].get("connect_ms").is_none(), "{row}");
+        let db = rusqlite::Connection::open(root.join("cache/usage.db")).unwrap();
+        let rows: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM command_log WHERE command='hook-recall'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 1);
+    }
+}
+
+/// Resolving, connecting and TLS share one bound: a slow resolver leaves the handshake less of it.
+#[cfg(debug_assertions)]
+#[test]
+fn cli_slow_resolver_spends_the_connect_bound() {
+    let Some(server) = SilentServer::new() else {
+        return;
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let repo = git_repo(root);
+    config(&root.join("data"), &server.url);
+    let payload = json!({"cwd":repo}).to_string();
+    let (out, _) = run_with(root, root, &payload, Some("99999"), |cmd| {
+        cmd.env("CORT_TEST_RECALL_DNS_MS", "2000");
+    });
+    notice(&out, "remote_timeout");
+    let row = outcome(root);
+    assert_eq!(row["stall"]["phase"], "tls", "{row}");
+    let ms = |name: &str| row["stall"][name].as_u64().unwrap();
+    assert!(ms("dns_ms") >= 1990, "{row}");
+    let setup = ms("dns_ms") + ms("connect_ms") + ms("tls_ms");
+    assert!((3400..6000).contains(&setup), "{row}");
 }
 
 /// The network deadline still ends a read that stalls in the response phase -- the one that gets

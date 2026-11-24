@@ -8,7 +8,7 @@
 use cort::settings::{Change, HookEvent};
 use cort::settings_toml::{install_hook, installed_command, installed_entry, remove_hook};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use toml_edit::DocumentMut;
 
 fn tmp() -> (tempfile::TempDir, PathBuf) {
@@ -1219,4 +1219,147 @@ fn a_kimi_install_upgrade_and_remove_returns_the_file_exactly_as_it_was() {
     assert_eq!(fs::read_to_string(&p).unwrap(), installed);
     cort::settings_kimi::remove_hook(&p).unwrap();
     assert_eq!(fs::read_to_string(&p).unwrap(), original);
+}
+
+// --- What surrounds our Kimi entries ------------------------------------------------------------
+//
+// cort writes no fence of its own: every comment in this file is somebody else's, and the plugin's
+// END line is parked in front of our first entry by `push_after_trailing`. Whatever ends up around
+// our entries later, removing them must leave exactly the bytes that are not ours, in order.
+
+const KIMI_FENCED: &str = "model = \"k3\"\n\n\
+     # === BEGIN kimi-plugin-cc-managed:claude-code (v1.9.13) ===\n\
+     # DO NOT EDIT — managed by /kimi:setup.\n\
+     [[hooks]]\n\
+     event = \"PreToolUse\"\n\
+     command = \"node /plugin/approval-hook.js\"\n\
+     timeout = 15\n\
+     # === END kimi-plugin-cc-managed:claude-code ===\n";
+const KIMI_FOREIGN: &str = "\n\
+     # === BEGIN kimi-plugin-cc-managed:codex (v1.9.13) ===\n\
+     [[hooks]]\n\
+     event = \"PreToolUse\"\n\
+     command = \"node /plugin/other-hook.js\" # keep\n\
+     timeout = 15\n\
+     # === END kimi-plugin-cc-managed:codex ===\n";
+
+fn kimi_install(p: &Path, events: &[HookEvent]) {
+    for &event in events {
+        let command = format!("/bin/cort {} --harness kimi-code", event.subcommand());
+        cort::settings_kimi::install_hook(p, &command, event).unwrap();
+    }
+}
+
+fn append_text(p: &Path, text: &str) {
+    let have = fs::read_to_string(p).unwrap();
+    fs::write(p, format!("{have}{text}")).unwrap();
+}
+
+fn assert_kimi_removed(p: &Path, expected: &str, label: &str) {
+    assert_eq!(
+        cort::settings_kimi::remove_hook(p).unwrap().change,
+        Change::Removed,
+        "{label}"
+    );
+    assert_eq!(fs::read_to_string(p).unwrap(), expected, "{label}");
+}
+
+#[test]
+fn a_kimi_remove_leaves_what_follows_our_entries_in_its_place() {
+    let befores = [
+        ("nothing before", ""),
+        ("a root key before", "model = \"k3\"\n"),
+        ("a foreign entry before", KIMI_FENCED),
+        ("only comments before", "# a note\n# and another\n"),
+        (
+            "a comment with blank lines around it",
+            "model = \"k3\"\n\n\n# a note\n\n\n",
+        ),
+        ("blank lines before", "model = \"k3\"\n\n\n"),
+    ];
+    let afters = [
+        ("nothing after", ""),
+        ("a foreign entry after", KIMI_FOREIGN),
+        ("a bare foreign entry after", "[[hooks]]\nevent = \"Stop\"\ncommand = \"theirs\"\n"),
+        ("a comment after", "\n# their last line\n"),
+        (
+            "another table after",
+            "\n# about thinking\n[thinking]\nmode = \"auto\"\n\n[a.b]\nx = 1\n# the end\n",
+        ),
+        (
+            "a foreign entry and a table after",
+            "\n# theirs\n[[hooks]]\nevent = \"Stop\"\ncommand = \"theirs\"\n\n[thinking]\nmode = \"auto\"\n",
+        ),
+    ];
+    let all = cort::settings::events_for("kimi-code");
+    for (before_label, before) in befores {
+        for (after_label, after) in afters {
+            // All of our events, and one of them alone.
+            for events in [all, &all[..1]] {
+                let label = format!("{before_label}; {after_label}; {} of ours", events.len());
+                let (_d, p) = kimi_tmp();
+                fs::write(&p, before).unwrap();
+                kimi_install(&p, events);
+                append_text(&p, after);
+                assert_kimi_removed(&p, &format!("{before}{after}"), &label);
+            }
+        }
+    }
+}
+
+/// Ours, theirs, ours: each of our entries gives back what it stood behind, where it stood.
+#[test]
+fn a_kimi_remove_between_foreign_entries_keeps_every_fence_in_order() {
+    let (_d, p) = kimi_tmp();
+    let last = "\n# === BEGIN third ===\n[[hooks]]\nevent = \"Stop\"\ncommand = \"third\"\n# === END third ===\n";
+    fs::write(&p, KIMI_FENCED).unwrap();
+    let all = cort::settings::events_for("kimi-code");
+    kimi_install(&p, &all[..1]);
+    append_text(&p, KIMI_FOREIGN);
+    kimi_install(&p, &all[1..]);
+    append_text(&p, last);
+    assert_kimi_removed(&p, &format!("{KIMI_FENCED}{KIMI_FOREIGN}{last}"), "mixed");
+}
+
+/// A file whose hooks stand above other tables: our entry goes after all of it, so neither the
+/// plugin's fence nor the comment that ends the file is moved by the install or the remove.
+#[test]
+fn a_kimi_cycle_with_tables_after_the_hooks_returns_the_file_exactly_as_it_was() {
+    let (_d, p) = kimi_tmp();
+    let original = format!("{KIMI_FENCED}\n[thinking]\nmode = \"auto\"\n# the end\n");
+    fs::write(&p, &original).unwrap();
+    kimi_install(&p, cort::settings::events_for("kimi-code"));
+    let installed = fs::read_to_string(&p).unwrap();
+    assert!(
+        installed.starts_with(&original),
+        "the install moved somebody else's lines:\n{installed}"
+    );
+    assert_kimi_removed(&p, &original, "tables after the hooks");
+}
+
+/// Comments somebody wrote above, inside and beside our entries are not ours to delete either.
+#[test]
+fn a_kimi_remove_never_loses_a_comment() {
+    let (_d, p) = kimi_tmp();
+    let original = "model = \"k3\"\n\
+         \n# above ours\n\
+         [[hooks]] # on the header\n\
+         event = \"PreToolUse\"\n\
+         # inside ours\n\
+         command = \"/bin/cort hook-suggest --harness kimi-code\" # beside ours\n\
+         timeout = 5\n\
+         # below ours\n\
+         [[hooks]]\nevent = \"Stop\"\ncommand = \"theirs\"\n";
+    fs::write(&p, original).unwrap();
+    assert_kimi_removed(
+        &p,
+        "model = \"k3\"\n\
+         \n# above ours\n\
+         # on the header\n\
+         # inside ours\n\
+         # beside ours\n\
+         # below ours\n\
+         [[hooks]]\nevent = \"Stop\"\ncommand = \"theirs\"\n",
+        "comments",
+    );
 }

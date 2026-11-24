@@ -2,7 +2,7 @@
 
 use serde_json::{json, Value};
 use std::fmt;
-use std::net::ToSocketAddrs;
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
@@ -380,8 +380,8 @@ impl Transport for RecallTransport {
         let timeout = self
             .max_timeout
             .min(remaining.saturating_sub(Duration::from_millis(100)));
-        // ureq bounds connect, TLS and body reads; synchronous DNS resolution is outside it, and
-        // only the watchdog ends a resolver that hangs.
+        // ureq bounds connect, TLS and body reads; the bound on connection setup also ends a
+        // resolver that hangs, which ureq itself would wait for.
         UreqTransport { timeout }.post_within(url, body, headers, Some(RECALL_CONNECT_TIMEOUT))
     }
 }
@@ -395,7 +395,8 @@ struct AwsLcTls {
 }
 
 /// The time one connection may take to be ready for a request. ureq has no TLS timeout, but the
-/// handshake runs in our connector, over a socket whose timeouts we may set.
+/// handshake runs in our connector, over a socket whose timeouts we may set. Name resolution has
+/// the same limit from the same start ([`resolve_within`]), and ureq counts it in its connect one.
 struct SetupClock {
     limit: Duration,
     /// `NetworkRecorder::tick` when this connection began resolving its host, which is also when
@@ -510,7 +511,56 @@ impl ureq::TlsConnector for AwsLcTls {
     }
 }
 
-/// HTTP transport. ureq 2 resolves DNS synchronously, outside its overall timeout.
+fn system_lookup(netloc: &str) -> std::io::Result<Vec<SocketAddr>> {
+    Ok(netloc.to_socket_addrs()?.collect())
+}
+
+/// [`system_lookup`], after the delay an integration test asks for: a resolver that hangs, or is
+/// merely slow. Release builds never read it.
+fn recall_lookup(netloc: &str) -> std::io::Result<Vec<SocketAddr>> {
+    #[cfg(debug_assertions)]
+    if let Some(ms) = std::env::var("CORT_TEST_RECALL_DNS_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+    {
+        std::thread::sleep(Duration::from_millis(ms));
+    }
+    system_lookup(netloc)
+}
+
+/// [`system_lookup`]'s answer, or a timeout after `limit`. The system resolver cannot be
+/// interrupted, so a lookup that never answers keeps its thread until the process exits; it holds
+/// nothing but its own copy of the name, and the exit does not wait for it.
+fn resolve_within(
+    thread: std::thread::Builder,
+    netloc: &str,
+    limit: Duration,
+    lookup: fn(&str) -> std::io::Result<Vec<SocketAddr>>,
+) -> std::io::Result<Vec<SocketAddr>> {
+    use std::sync::mpsc::{channel, RecvTimeoutError};
+    let (answer, answered) = channel();
+    let name = netloc.to_owned();
+    thread
+        .name("recall-resolver".into())
+        .spawn(move || {
+            let _ = answer.send(lookup(&name));
+        })
+        // A refused spawn is EAGAIN, whose kind is `WouldBlock`: not a timeout here.
+        .map_err(|e| std::io::Error::other(format!("cannot start the resolver thread: {e}")))?;
+    answered.recv_timeout(limit).unwrap_or_else(|e| {
+        Err(match e {
+            RecvTimeoutError::Timeout => {
+                std::io::Error::new(std::io::ErrorKind::TimedOut, "name resolution timed out")
+            }
+            RecvTimeoutError::Disconnected => {
+                std::io::Error::other("the resolver thread ended without an answer")
+            }
+        })
+    })
+}
+
+/// HTTP transport. ureq 2 resolves DNS synchronously, outside its overall timeout; only
+/// [`RecallTransport`] bounds it ([`resolve_within`]).
 pub struct UreqTransport {
     pub timeout: Duration,
 }
@@ -525,8 +575,9 @@ impl Transport for UreqTransport {
     }
 }
 impl UreqTransport {
-    /// One POST. `setup` bounds each connection's connect and TLS apart from `timeout`, which
-    /// bounds the whole request; without it they share `timeout`.
+    /// One POST. `setup` bounds each connection's name resolution, connect and TLS together, apart
+    /// from `timeout`, which bounds the whole request. Without it connect and TLS share `timeout`
+    /// and nothing bounds the resolution.
     fn post_within(
         &self,
         url: &str,
@@ -537,6 +588,7 @@ impl UreqTransport {
         use std::io::Read;
         NETWORK.reset();
         let _recording = NetworkRequest;
+        let (sent, timeout) = (Instant::now(), self.timeout);
         let began = Arc::new(AtomicU64::new(NetworkRecorder::tick()));
         let tls = AwsLcTls {
             config: tls_config()?,
@@ -556,9 +608,15 @@ impl UreqTransport {
                 // preceding connection's TLS/response boundary hide a stall in its DNS.
                 NETWORK.reset();
                 NETWORK.enter(0);
-                let result = netloc
-                    .to_socket_addrs()
-                    .map(|addrs| addrs.collect::<Vec<_>>());
+                let result = match setup {
+                    Some(limit) => resolve_within(
+                        std::thread::Builder::new(),
+                        netloc,
+                        limit.min(timeout.saturating_sub(sent.elapsed())),
+                        recall_lookup,
+                    ),
+                    None => system_lookup(netloc),
+                };
                 if result.as_ref().is_ok_and(|addrs| !addrs.is_empty()) {
                     NETWORK.enter(1);
                 }
@@ -1345,6 +1403,55 @@ mod tests {
                 .kind(),
             std::io::ErrorKind::TimedOut
         );
+    }
+
+    #[test]
+    fn resolution_is_bounded_and_its_errors_pass_through() {
+        use std::io::ErrorKind as Io;
+        let plain = std::thread::Builder::new;
+        let long = Duration::from_secs(60);
+        let begun = Instant::now();
+        let hung = |_: &str| loop {
+            std::thread::park()
+        };
+        let error = resolve_within(plain(), "h:1", Duration::from_millis(100), hung).unwrap_err();
+        assert_eq!(error.kind(), Io::TimedOut);
+        let waited = begun.elapsed();
+        assert!(
+            (Duration::from_millis(100)..Duration::from_secs(5)).contains(&waited),
+            "{waited:?}"
+        );
+        // Nothing left to wait is a timeout too.
+        let error = resolve_within(plain(), "h:1", Duration::ZERO, hung).unwrap_err();
+        assert_eq!(error.kind(), Io::TimedOut);
+
+        // What answers in time is the lookup's own answer, errors included.
+        let found = resolve_within(plain(), "127.0.0.1:9", long, system_lookup).unwrap();
+        assert_eq!(found, ["127.0.0.1:9".parse().unwrap()]);
+        assert!(resolve_within(plain(), "h:1", long, |_| Ok(Vec::new()))
+            .unwrap()
+            .is_empty());
+        let refused = |_: &str| Err(std::io::Error::new(Io::NotFound, "no such name"));
+        let error = resolve_within(plain(), "h:1", long, refused).unwrap_err();
+        assert_eq!(
+            (error.kind(), error.to_string().as_str()),
+            (Io::NotFound, "no such name")
+        );
+
+        // A thread that dies, or cannot start, is an error at once -- and neither reads as a
+        // timeout, which a refused spawn's own EAGAIN (`WouldBlock`) would.
+        let begun = Instant::now();
+        for (thread, lookup) in [
+            (
+                plain(),
+                (|_: &str| panic!("expected: the resolver dies")) as fn(&str) -> _,
+            ),
+            (plain().stack_size(1 << 60), system_lookup),
+        ] {
+            let error = resolve_within(thread, "h:1", long, lookup).unwrap_err();
+            assert_eq!(error.kind(), Io::Other, "{error}");
+        }
+        assert!(begun.elapsed() < long / 2);
     }
 
     #[test]

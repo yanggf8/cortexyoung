@@ -37,7 +37,7 @@ use crate::settings_toml::{replace_entry, SettingsError};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use toml_edit::{value, ArrayOfTables, DocumentMut, Item, Table};
+use toml_edit::{value, ArrayOfTables, DocumentMut, Item, RawString, Table};
 
 /// The tool surfaces whose fires the thin trigger records. Compiled as a regex against the tool
 /// name, so one entry covers both.
@@ -160,9 +160,18 @@ fn hooks_array(doc: &mut DocumentMut) -> Result<&mut ArrayOfTables, SettingsErro
 ///
 /// So the trailer is moved to the front of what we add, which puts it back immediately after the
 /// entries it was closing. Their bytes are preserved exactly; only our entry moves.
+///
+/// That holds only for an entry that is last in the file, and `toml_edit` places one without a
+/// position after the last `[[hooks]]`, above any table that follows: the trailer then moved up
+/// with it, and our entry stood in front of a fence that a following table carried as its prefix.
 fn push_after_trailing(doc: &mut DocumentMut, entry: Table) -> Result<(), SettingsError> {
     let trailing = doc.trailing().as_str().unwrap_or_default().to_string();
     let mut entry = entry;
+    let mut last = 0;
+    each_table(doc.as_table(), &mut |t| {
+        last = last.max(t.position().unwrap_or(0));
+    });
+    entry.set_position(Some(last + 1));
     if !trailing.trim().is_empty() {
         let mut prefix = trailing.clone();
         if !prefix.ends_with('\n') {
@@ -244,6 +253,83 @@ pub fn install_hook(
     })
 }
 
+/// Everything around and inside one of our entries that we did not write: the text above its header
+/// and any comment somebody put in it, each on a line of its own.
+fn left_behind(entry: &Table) -> String {
+    let above = entry.decor().prefix().and_then(RawString::as_str);
+    let above = above.unwrap_or_default().trim_end_matches([' ', '\t']);
+    // The blank line directly above the header is the one the install added. Only that one goes:
+    // keeping it would grow the file on every cycle, and the rest were there before.
+    let mut text = match above.strip_suffix('\n') {
+        Some(rest) if rest.is_empty() || rest.ends_with('\n') => rest,
+        _ => above,
+    }
+    .to_string();
+    let mut keep_comments = |raw: Option<&RawString>| {
+        for line in raw.and_then(RawString::as_str).unwrap_or_default().lines() {
+            if line.trim_start().starts_with('#') {
+                text.push_str(line.trim());
+                text.push('\n');
+            }
+        }
+    };
+    keep_comments(entry.decor().suffix());
+    for (name, item) in entry.iter() {
+        keep_comments(entry.key(name).and_then(|k| k.leaf_decor().prefix()));
+        keep_comments(item.as_value().and_then(|v| v.decor().suffix()));
+    }
+    text
+}
+
+/// Every table printed below `table`, in no particular order.
+fn each_table<'t>(table: &'t Table, visit: &mut dyn FnMut(&'t Table)) {
+    for (_, item) in table.iter() {
+        if let Some(t) = item.as_table() {
+            visit(t);
+            each_table(t, visit);
+        }
+        for t in item.as_array_of_tables().into_iter().flatten() {
+            visit(t);
+            each_table(t, visit);
+        }
+    }
+}
+
+/// The position of the first header after `position` in the file, whichever table it opens.
+fn position_after(root: &Table, position: isize) -> Option<isize> {
+    let mut next: Option<isize> = None;
+    each_table(root, &mut |t| {
+        if let Some(p) = t.position().filter(|&p| p > position) {
+            next = Some(next.map_or(p, |n| n.min(p)));
+        }
+    });
+    next
+}
+
+/// Put `text` above the header at `position`. True once it is done.
+fn prepend_to_prefix(table: &mut Table, position: isize, text: &str) -> bool {
+    let mut on = |t: &mut Table| {
+        if t.position() != Some(position) {
+            return prepend_to_prefix(t, position, text);
+        }
+        let prefix = t.decor().prefix().and_then(RawString::as_str);
+        let prefix = format!("{text}{}", prefix.unwrap_or_default());
+        t.decor_mut().set_prefix(prefix);
+        true
+    };
+    for (_, item) in table.iter_mut() {
+        let done = match item {
+            Item::Table(t) => on(t),
+            Item::ArrayOfTables(list) => list.iter_mut().any(&mut on),
+            _ => false,
+        };
+        if done {
+            return true;
+        }
+    }
+    false
+}
+
 /// Take our entry out, leaving every other `[[hooks]]` entry -- notably the Kimi plugin's own
 /// managed block, which gates that plugin's whole safety contract -- untouched.
 pub fn remove_hook(path: &Path) -> Result<Outcome, SettingsError> {
@@ -272,33 +358,32 @@ pub fn remove_hook(path: &Path) -> Result<Outcome, SettingsError> {
             backup: None,
         });
     }
-    // Salvage anything decorating an entry before it goes. `push_after_trailing` parks the text
-    // that trailed the file -- here, the Kimi plugin's own `# === END … ===` line -- in front of
-    // our entry, so removing the entry naively removes a comment that belongs to somebody else and
-    // that their own uninstaller looks for. Reproduced on 2026-09-03: install kept both markers,
-    // remove left one. It goes back to the trailer, which is where it came from.
-    let mut salvaged = String::new();
+    // What decorates one of our entries is somebody else's: cort writes no comment here, and
+    // `push_after_trailing` parks the Kimi plugin's own `# === END … ===` line in front of our
+    // entry. Their uninstaller looks for that line, so it stays where it stands -- in front of
+    // whatever follows, or at the end of the file when nothing does. It went to the end
+    // unconditionally until 2026-11-25, which carried the fence past every entry added after ours.
+    let mut left: Vec<(isize, String)> = Vec::new();
     for i in drop_idx.into_iter().rev() {
-        if let Some(prefix) = list
-            .get(i)
-            .and_then(|e| e.decor().prefix())
-            .and_then(|p| p.as_str())
-        {
-            if !prefix.trim().is_empty() {
-                salvaged.insert_str(0, prefix);
-            }
-        }
+        let entry = list.get(i).expect("i in range");
+        // A parsed table always has a position; without one, it was the last.
+        left.push((entry.position().unwrap_or(isize::MAX), left_behind(entry)));
         list.remove(i);
     }
     let now_empty = list.is_empty();
-    if !salvaged.trim().is_empty() {
-        let existing = doc.trailing().as_str().unwrap_or_default().to_string();
-        // Trimmed at both ends and given exactly one newline: the blank lines around our entry were
-        // ours, and carrying them back would make every install-remove cycle grow the file.
-        let mut restored = salvaged.trim().to_string();
-        restored.push('\n');
-        restored.push_str(&existing);
-        doc.set_trailing(restored);
+    // Last entry first, so that neighbours of ours end up in front of the same table in order.
+    left.sort_by_key(|&(position, _)| std::cmp::Reverse(position));
+    for (position, text) in left {
+        match position_after(doc.as_table(), position) {
+            Some(next) => {
+                prepend_to_prefix(doc.as_table_mut(), next, &text);
+            }
+            None => {
+                let trailing = doc.trailing().as_str().unwrap_or_default();
+                let trailing = format!("{text}{trailing}");
+                doc.set_trailing(trailing);
+            }
+        }
     }
     // Leave no empty scaffolding: a `hooks` array we created and then emptied should not outlive
     // the entry it was created for.
