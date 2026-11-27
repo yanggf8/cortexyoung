@@ -102,10 +102,7 @@ pub fn insert_health_row_at(path: &Path, row: &HealthRow) -> Result<i64, String>
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
     }
-    let conn = Connection::open(path).map_err(|e| e.to_string())?;
-    conn.busy_timeout(Duration::from_millis(RECORD_BUSY_MS))
-        .map_err(|e| e.to_string())?;
-    chmod_600(path);
+    let conn = open_rw(path).map_err(|e| e.to_string())?;
     ensure_schema(&conn, path).map_err(|e| e.to_string())?;
     conn.execute(
         "INSERT INTO index_health_log
@@ -477,15 +474,36 @@ pub fn record_command_at(path: &Path, rec: &CommandRecord) {
     let _ = record_inner(path, rec);
 }
 
+/// Every write connection on usage.db. `synchronous = OFF`: a commit hands its pages to the OS and
+/// returns without an fsync. Under heavy disk load (a full cargo build on WSL, 2026-11-27) one
+/// fsync of usage.db, its journal or the cache directory took 3-21 s, so a hook that records
+/// its run (`hook-remind`, the load gate) blew Claude Code's 5 s hook limit on about one run in
+/// a hundred; strace put every stalled run inside those fsyncs. With OFF the same load gave
+/// 0 runs over 1 s in 1275 (p99 17 ms), against 11 for the old binary.
+///
+/// The cost is durability across an OS crash or power loss, not a process crash: the last
+/// commits can be lost, and the file can be left corrupt, which every reader reports as
+/// `usage_corrupt` and recording then silently skips. That is the right trade for a local
+/// usage log that no command depends on; it would not be for the project index.
+///
+/// WAL with `synchronous = NORMAL` was tried first and did not fix it: the checkpoint still
+/// fsyncs, and with the hook's own read handles open it rarely completes, so most commits paid
+/// for one anyway (2026-11-27, 9 slow runs in 802).
+fn open_rw(path: &Path) -> rusqlite::Result<Connection> {
+    let conn = Connection::open(path)?;
+    chmod_600(path);
+    conn.busy_timeout(Duration::from_millis(RECORD_BUSY_MS))?;
+    conn.pragma_update(None, "synchronous", "OFF")?;
+    Ok(conn)
+}
+
 fn record_inner(path: &Path, rec: &CommandRecord) -> Result<(), ()> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent).map_err(|_| ())?;
         }
     }
-    let conn = Connection::open(path).map_err(|_| ())?;
-    let _ = conn.busy_timeout(Duration::from_millis(RECORD_BUSY_MS));
-    chmod_600(path);
+    let conn = open_rw(path).map_err(|_| ())?;
     ensure_schema(&conn, path).map_err(|_| ())?;
     let hit = rec.receipt_hit.map(i64::from);
     let stale = rec.index_stale.map(i64::from);
@@ -1291,9 +1309,7 @@ pub fn uploaded_floor_at(path: &Path, source: &str, rowid: i64) -> Result<(), St
         crate::telemetry::SOURCE_HEALTH => "uploaded_health_rowid",
         _ => return Err("unknown upload source".into()),
     };
-    let conn = Connection::open(path).map_err(|e| e.to_string())?;
-    conn.busy_timeout(Duration::from_millis(RECORD_BUSY_MS))
-        .map_err(|e| e.to_string())?;
+    let conn = open_rw(path).map_err(|e| e.to_string())?;
     conn.execute(
         "INSERT INTO _usage_meta (key, value) VALUES (?1, ?2)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -1328,9 +1344,7 @@ pub fn unlogged_pruned_rows_at(path: &Path) -> Option<(i64, i64)> {
 }
 
 pub fn mark_pruned_rows_logged_at(path: &Path, total: i64) -> Result<(), String> {
-    let conn = Connection::open(path).map_err(|e| e.to_string())?;
-    conn.busy_timeout(Duration::from_millis(RECORD_BUSY_MS))
-        .map_err(|e| e.to_string())?;
+    let conn = open_rw(path).map_err(|e| e.to_string())?;
     conn.execute(
         "INSERT INTO _usage_meta (key, value) VALUES (?1, ?2)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -1500,6 +1514,17 @@ pub(crate) fn civil_from_unix_days(days: i64) -> (i32, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn write_connections_skip_fsync() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("usage.db");
+        let conn = open_rw(&path).unwrap();
+        let sync: i64 = conn
+            .query_row("PRAGMA synchronous", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(sync, 0, "usage.db writes must not fsync (see open_rw)");
+    }
 
     #[test]
     fn ioreg_uuid_parse() {
